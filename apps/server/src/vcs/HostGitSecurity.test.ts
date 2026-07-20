@@ -333,11 +333,13 @@ describe.runIf(NodeProcess.platform === "linux")("Git-spawning CLI child policy"
     NodeFS.chmodSync(trustedBin, 0o755);
     const markerPaths = new Map<string, string>();
     const rejectedChildGitMarker = NodePath.join(root, "rejected-child-git-ran");
+    const rejectedChildGit = NodePath.join(rejectedBin, "git");
     NodeFS.writeFileSync(
-      NodePath.join(rejectedBin, "git"),
+      rejectedChildGit,
       `#!/bin/sh\nprintf ran > '${rejectedChildGitMarker}'\nexit 98\n`,
       { mode: 0o722 },
     );
+    NodeFS.chmodSync(rejectedChildGit, 0o722);
     markerPaths.set("rejected-child-git", rejectedChildGitMarker);
     for (const command of ["git", "gh", "glab", "az"] as const) {
       const marker = NodePath.join(root, `${command}-shadow-ran`);
@@ -407,11 +409,11 @@ describe.runIf(NodeProcess.platform === "linux")("Git-spawning CLI child policy"
     NodeFS.mkdirSync(workspace);
     NodeFS.mkdirSync(rejectedBin);
     NodeFS.chmodSync(rejectedBin, 0o755);
-    NodeFS.writeFileSync(
-      NodePath.join(rejectedBin, "git"),
-      `#!/bin/sh\nprintf ran > '${marker}'\nexit 98\n`,
-      { mode: 0o722 },
-    );
+    const rejectedChildGit = NodePath.join(rejectedBin, "git");
+    NodeFS.writeFileSync(rejectedChildGit, `#!/bin/sh\nprintf ran > '${marker}'\nexit 98\n`, {
+      mode: 0o722,
+    });
+    NodeFS.chmodSync(rejectedChildGit, 0o722);
     const options = {
       sourceEnvironment: { PATH: rejectedBin },
       writableRoots: [workspace],
