@@ -181,6 +181,49 @@ function resolveHttpRequestBaseUrl(primaryTarget: PrimaryEnvironmentTarget): str
   return currentUrl.origin;
 }
 
+export function resolvePrimaryEnvironmentWebSocketBaseUrl(
+  primaryTarget: PrimaryEnvironmentTarget,
+): string {
+  const wsBaseUrl = primaryTarget.target.wsBaseUrl;
+  const configuredDevServerUrl = import.meta.env.VITE_DEV_SERVER_URL?.trim();
+  if (!configuredDevServerUrl) {
+    return wsBaseUrl;
+  }
+
+  const currentUrl = parseTargetUrl({
+    rawValue: window.location.href,
+    source: "window-origin",
+    urlKind: "window-location-url",
+  });
+  const targetUrl = parseTargetUrl({
+    rawValue: wsBaseUrl,
+    source: primaryTarget.source,
+    urlKind: "websocket-base-url",
+  });
+  const devServerUrl = parseTargetUrl({
+    rawValue: configuredDevServerUrl,
+    baseUrl: currentUrl.origin,
+    source: "configured",
+    urlKind: "development-server-url",
+  });
+
+  const isCurrentOriginDevServer =
+    (currentUrl.protocol === "http:" || currentUrl.protocol === "https:") &&
+    currentUrl.origin === devServerUrl.origin;
+
+  if (
+    !isCurrentOriginDevServer ||
+    !isLoopbackHostname(currentUrl.hostname) ||
+    !isLoopbackHostname(targetUrl.hostname)
+  ) {
+    return wsBaseUrl;
+  }
+
+  const proxyUrl = new URL(currentUrl.origin);
+  proxyUrl.protocol = currentUrl.protocol === "https:" ? "wss:" : "ws:";
+  return proxyUrl.toString();
+}
+
 function resolveConfiguredPrimaryTarget(): PrimaryEnvironmentTarget | null {
   const configuredHttpBaseUrl = import.meta.env.VITE_HTTP_URL?.trim() || undefined;
   const configuredWsBaseUrl = import.meta.env.VITE_WS_URL?.trim() || undefined;
@@ -286,9 +329,23 @@ export function resolvePrimaryEnvironmentHttpUrl(
 }
 
 export function readPrimaryEnvironmentTarget(): PrimaryEnvironmentTarget {
-  return (
+  const primaryTarget =
     resolveDesktopPrimaryTarget() ??
     resolveConfiguredPrimaryTarget() ??
-    resolveWindowOriginPrimaryTarget()
-  );
+    resolveWindowOriginPrimaryTarget();
+
+  return {
+    ...primaryTarget,
+    target: {
+      ...primaryTarget.target,
+      // In dev, route HTTP through the same (vite) origin so requests that read
+      // the target directly — notably environment discovery
+      // (`/.well-known/t3/environment`) — go through the vite proxy instead of
+      // hitting the backend origin cross-origin (which the browser blocks,
+      // surfacing as ConnectionTransientError "network"). Kept symmetric with
+      // the wsBaseUrl rewrite below; both are no-ops outside the dev server.
+      httpBaseUrl: resolveHttpRequestBaseUrl(primaryTarget),
+      wsBaseUrl: resolvePrimaryEnvironmentWebSocketBaseUrl(primaryTarget),
+    },
+  };
 }
