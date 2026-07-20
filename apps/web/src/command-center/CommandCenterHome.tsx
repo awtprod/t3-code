@@ -30,6 +30,7 @@ import {
   waitForRouteReceiptPaint,
 } from "./CommandCenterHome.logic";
 import type {
+  CommandCenterConfigNotice,
   CommandCenterMessage,
   CommandCenterRouteControl,
   CommandCenterRouteReceipt,
@@ -487,15 +488,33 @@ export function CommandCenterHome() {
     environmentId === null ||
     bootstrap?.configHealth.status !== "loaded";
 
+  // Surface a missing/invalid configuration as an explicit setup notice so the
+  // composer can explain why sending is disabled instead of freezing silently.
+  // The input itself stays enabled (gated on `isSubmitting`, not this).
+  const configHealth = bootstrap?.configHealth;
+  const configNotice: CommandCenterConfigNotice | null =
+    configHealth && configHealth.status !== "loaded"
+      ? {
+          status: configHealth.status,
+          message:
+            configHealth.message ??
+            (configHealth.status === "missing"
+              ? "No configuration was found in the Command Center config directory."
+              : "The configuration file could not be parsed."),
+        }
+      : null;
+
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <CommandCenterShell
         activeConversationId={activeConversationId}
         context={projection.context}
         conversationTitle="Command"
+        commandUnavailable={commandUnavailable}
+        configNotice={configNotice}
         conversations={projection.conversations}
         draft={draft}
-        isSubmitting={commandUnavailable}
+        isSubmitting={isSubmitting}
         messages={messages}
         onDraftChange={setDraft}
         onNewConversation={newConversation}

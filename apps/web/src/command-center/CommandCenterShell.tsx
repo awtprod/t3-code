@@ -1,26 +1,20 @@
 "use client";
 
 import {
-  ActivityIcon,
   AlertCircleIcon,
   ArrowUpIcon,
   ArrowUpRightIcon,
   BotIcon,
   CalendarDaysIcon,
   CheckCircle2Icon,
+  ChevronDownIcon,
   ChevronRightIcon,
   CircleIcon,
   Clock3Icon,
-  CommandIcon,
-  FolderGit2Icon,
-  InboxIcon,
-  Layers3Icon,
-  MenuIcon,
-  MessageSquareIcon,
   PanelRightIcon,
-  PlusIcon,
-  ShieldCheckIcon,
+  SlidersHorizontalIcon,
   SparklesIcon,
+  TriangleAlertIcon,
   UserRoundIcon,
   WifiIcon,
   WifiOffIcon,
@@ -46,19 +40,17 @@ import type {
   CommandCenterActiveRun,
   CommandCenterConnection,
   CommandCenterContext,
-  CommandCenterConversation,
   CommandCenterMessage,
   CommandCenterNeedsYouItem,
-  CommandCenterProject,
   CommandCenterRisk,
   CommandCenterRouteControl,
   CommandCenterRouteOption,
   CommandCenterRouteReceipt,
   CommandCenterRouteSource,
   CommandCenterShellProps,
-  CommandCenterSpace,
   CommandCenterTodayItem,
 } from "./types";
+import { CommandCenterHistoryMenu } from "./CommandCenterHistoryMenu";
 
 const STATUS_DOT_CLASS = {
   failed: "bg-destructive",
@@ -94,228 +86,6 @@ const ROUTE_SOURCE_LABEL: Record<CommandCenterRouteSource, string> = {
   unresolved: "Unresolved",
 };
 
-function SectionLabel({ children }: { readonly children: ReactNode }) {
-  return (
-    <div className="px-3 pb-2 pt-4 text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-      {children}
-    </div>
-  );
-}
-
-function SpaceMark({ space }: { readonly space: CommandCenterSpace }) {
-  return (
-    <span
-      aria-hidden="true"
-      className={cn(
-        "flex size-7 shrink-0 items-center justify-center rounded-lg border text-xs font-semibold shadow-xs/5",
-        space.kind === "system" && "border-primary/20 bg-primary/8 text-primary",
-        space.kind === "business" && "border-info/20 bg-info/8 text-info-foreground",
-        space.kind === "personal" && "border-warning/20 bg-warning/8 text-warning-foreground",
-      )}
-    >
-      {space.name.slice(0, 1).toLocaleUpperCase()}
-    </span>
-  );
-}
-
-function ConversationStatus({ status }: { readonly status: CommandCenterConversation["status"] }) {
-  if (!status || status === "idle") return null;
-
-  return (
-    <span
-      aria-label={`Conversation ${status}`}
-      className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[status])}
-      role="img"
-    />
-  );
-}
-
-interface NavigationRailProps {
-  readonly spaces: readonly CommandCenterSpace[];
-  readonly projects: readonly CommandCenterProject[];
-  readonly conversations: readonly CommandCenterConversation[];
-  readonly activeConversationId?: string | undefined;
-  readonly selectedSpaceId?: string | undefined;
-  readonly selectedProjectId?: string | undefined;
-  readonly onNewConversation?: (() => void) | undefined;
-  readonly onSelectSpace?: ((spaceId: string) => void) | undefined;
-  readonly onSelectProject?: ((projectId: string) => void) | undefined;
-  readonly onSelectConversation?: ((conversationId: string) => void) | undefined;
-  readonly onNavigate?: (() => void) | undefined;
-}
-
-function NavigationRail({
-  spaces,
-  projects,
-  conversations,
-  activeConversationId,
-  selectedSpaceId,
-  selectedProjectId,
-  onNewConversation,
-  onSelectSpace,
-  onSelectProject,
-  onSelectConversation,
-  onNavigate,
-}: NavigationRailProps) {
-  return (
-    <div className="flex h-full min-h-0 flex-col bg-card text-card-foreground">
-      <div className="flex h-14 shrink-0 items-center gap-2.5 border-b px-4">
-        <span className="flex size-8 items-center justify-center rounded-xl bg-foreground text-background shadow-sm">
-          <CommandIcon className="size-4" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="truncate font-heading text-sm font-semibold">Command Center</div>
-          <div className="truncate text-[0.6875rem] text-muted-foreground">One place to start</div>
-        </div>
-        <Button
-          aria-label="New conversation"
-          onClick={onNewConversation}
-          size="icon-sm"
-          variant="ghost"
-        >
-          <PlusIcon />
-        </Button>
-      </div>
-
-      <ScrollArea className="min-h-0 flex-1" scrollFade>
-        <nav aria-label="Command Center navigation" className="p-2">
-          <button
-            className="flex w-full items-center gap-2.5 rounded-xl bg-accent px-3 py-2 text-left text-sm font-medium text-accent-foreground"
-            type="button"
-          >
-            <SparklesIcon className="size-4 text-primary" />
-            Command
-            <span className="ml-auto size-1.5 rounded-full bg-success" />
-          </button>
-
-          <a
-            className="mt-0.5 flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-accent/70 hover:text-foreground"
-            href="/automations"
-            onClick={onNavigate}
-          >
-            <WorkflowIcon className="size-4" />
-            Automations
-          </a>
-
-          <SectionLabel>Spaces</SectionLabel>
-          <div className="space-y-0.5">
-            {spaces.map((space) => {
-              const selected = space.id === selectedSpaceId;
-              return (
-                <button
-                  aria-current={selected ? "page" : undefined}
-                  className={cn(
-                    "flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-accent/70",
-                    selected && "bg-accent text-accent-foreground",
-                  )}
-                  key={space.id}
-                  onClick={() => {
-                    onSelectSpace?.(space.id);
-                    onNavigate?.();
-                  }}
-                  type="button"
-                >
-                  <SpaceMark space={space} />
-                  <span className="min-w-0 flex-1 truncate text-sm font-medium">{space.name}</span>
-                  {!!space.unreadCount && (
-                    <span className="flex min-w-5 items-center justify-center rounded-full bg-secondary px-1.5 text-[0.625rem] font-semibold text-secondary-foreground">
-                      {space.unreadCount}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          <SectionLabel>Projects</SectionLabel>
-          <div className="space-y-0.5">
-            {projects.length === 0 ? (
-              <p className="px-3 py-3 text-xs leading-relaxed text-muted-foreground">
-                Linked projects will appear here.
-              </p>
-            ) : (
-              projects.map((project) => {
-                const selected = project.id === selectedProjectId;
-                return (
-                  <button
-                    aria-current={selected ? "page" : undefined}
-                    className={cn(
-                      "flex w-full items-start gap-2.5 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-accent/70",
-                      selected && "bg-accent text-accent-foreground",
-                    )}
-                    key={project.id}
-                    onClick={() => {
-                      onSelectProject?.(project.id);
-                      onNavigate?.();
-                    }}
-                    type="button"
-                  >
-                    <FolderGit2Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-medium">{project.name}</span>
-                      <span className="mt-0.5 block truncate text-[0.6875rem] text-muted-foreground">
-                        {project.repositoryName ?? "Local project"}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
-
-          <SectionLabel>Recent conversations</SectionLabel>
-          <div className="space-y-0.5">
-            {conversations.length === 0 ? (
-              <p className="px-3 py-4 text-xs leading-relaxed text-muted-foreground">
-                Your conversations will appear here.
-              </p>
-            ) : (
-              conversations.map((conversation) => {
-                const active = conversation.id === activeConversationId;
-                return (
-                  <button
-                    aria-current={active ? "page" : undefined}
-                    className={cn(
-                      "group flex w-full items-start gap-2.5 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-accent/70",
-                      active && "bg-accent text-accent-foreground",
-                    )}
-                    key={conversation.id}
-                    onClick={() => {
-                      onSelectConversation?.(conversation.id);
-                      onNavigate?.();
-                    }}
-                    type="button"
-                  >
-                    <MessageSquareIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-2">
-                        <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                          {conversation.title}
-                        </span>
-                        <ConversationStatus status={conversation.status} />
-                      </span>
-                      <span className="mt-0.5 block truncate text-[0.6875rem] text-muted-foreground">
-                        {conversation.preview ?? conversation.updatedAtLabel}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        </nav>
-      </ScrollArea>
-
-      <div className="shrink-0 border-t p-3">
-        <div className="flex items-center gap-2 rounded-xl bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-          <ShieldCheckIcon className="size-3.5 text-success-foreground" />
-          Scoped access is active
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function RouteFact({
   label,
   source,
@@ -346,81 +116,85 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
   const isActive = receipt.status === "ready" || receipt.status === "running";
 
   return (
-    <section
+    <details
       aria-label="Current command route"
-      className="relative mx-auto w-full max-w-3xl overflow-hidden rounded-2xl border bg-card/80 p-3 shadow-xs/5 before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-primary"
+      className="group mx-auto w-full min-w-0 max-w-3xl overflow-hidden border-b border-border/60"
     >
-      <div className="flex items-start gap-3">
-        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <WorkflowIcon className="size-3.5" />
+      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 px-1 py-2.5 text-xs [&::-webkit-details-marker]:hidden">
+        <WorkflowIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="shrink-0 font-medium">Route</span>
+        <span className="min-w-0 flex-1 truncate text-muted-foreground">
+          {receipt.spaceName}
+          {receipt.repositoryName ? ` / ${receipt.repositoryName}` : ""} · {receipt.providerName} ·{" "}
+          {receipt.modelName}
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold">Route receipt</span>
-            <Badge size="sm" variant={RISK_VARIANT[receipt.risk]}>
-              {RISK_LABEL[receipt.risk]}
-            </Badge>
-            <span className="inline-flex items-center gap-1 text-[0.6875rem] text-muted-foreground">
-              <span
-                className={cn(
-                  "size-1.5 rounded-full",
-                  isActive ? "animate-pulse bg-info" : "bg-success",
-                  receipt.status === "waiting-approval" && "bg-warning",
-                  receipt.status === "blocked" && "bg-destructive",
-                )}
-              />
-              {receipt.status === "blocked"
-                ? "Blocked"
-                : receipt.status === "waiting-approval"
-                  ? "Waiting for approval"
-                  : receipt.status === "complete"
-                    ? "Complete"
-                    : receipt.status === "running"
-                      ? "Running"
-                      : "Ready"}
-            </span>
-          </div>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{receipt.summary}</p>
-          <div className="mt-3 grid min-w-0 grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
-            <RouteFact label="Space" source={receipt.sources.space} value={receipt.spaceName} />
-            {receipt.repositoryName !== undefined && (
-              <RouteFact
-                label="Repository"
-                source={receipt.sources.repository}
-                value={receipt.repositoryName}
-              />
+        <span className="hidden shrink-0 items-center gap-1 text-[0.6875rem] text-muted-foreground min-[26rem]:inline-flex">
+          <span
+            className={cn(
+              "size-1.5 rounded-full",
+              isActive ? "animate-pulse bg-info" : "bg-success",
+              receipt.status === "waiting-approval" && "bg-warning",
+              receipt.status === "blocked" && "bg-destructive",
             )}
-            {receipt.projectName !== undefined && (
-              <RouteFact
-                label="Project"
-                source={receipt.sources.project}
-                value={receipt.projectName}
-              />
-            )}
+          />
+          {receipt.status === "blocked"
+            ? "Blocked"
+            : receipt.status === "waiting-approval"
+              ? "Approval"
+              : receipt.status === "complete"
+                ? "Complete"
+                : receipt.status === "running"
+                  ? "Running"
+                  : "Ready"}
+        </span>
+        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="pb-3 pl-6 pr-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">{receipt.summary}</span>
+          <Badge size="sm" variant={RISK_VARIANT[receipt.risk]}>
+            {RISK_LABEL[receipt.risk]}
+          </Badge>
+        </div>
+        <div className="mt-2 grid min-w-0 grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
+          <RouteFact label="Space" source={receipt.sources.space} value={receipt.spaceName} />
+          {receipt.repositoryName !== undefined && (
             <RouteFact
-              label="Provider"
-              source={receipt.sources.provider}
-              value={receipt.providerName}
+              label="Repository"
+              source={receipt.sources.repository}
+              value={receipt.repositoryName}
             />
-            <RouteFact label="Model" source={receipt.sources.model} value={receipt.modelName} />
-          </div>
-          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-            <span className="mr-0.5 text-[0.625rem] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
-              Capabilities
-            </span>
-            {receipt.capabilities.length === 0 ? (
-              <span className="text-[0.6875rem] text-muted-foreground">None selected</span>
-            ) : (
-              receipt.capabilities.map((capability) => (
-                <Badge key={capability} size="sm" variant="secondary">
-                  {capability}
-                </Badge>
-              ))
-            )}
-          </div>
+          )}
+          {receipt.projectName !== undefined && (
+            <RouteFact
+              label="Project"
+              source={receipt.sources.project}
+              value={receipt.projectName}
+            />
+          )}
+          <RouteFact
+            label="Provider"
+            source={receipt.sources.provider}
+            value={receipt.providerName}
+          />
+          <RouteFact label="Model" source={receipt.sources.model} value={receipt.modelName} />
+        </div>
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+          <span className="mr-0.5 text-[0.625rem] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+            Capabilities
+          </span>
+          {receipt.capabilities.length === 0 ? (
+            <span className="text-[0.6875rem] text-muted-foreground">None selected</span>
+          ) : (
+            receipt.capabilities.map((capability) => (
+              <Badge key={capability} size="sm" variant="secondary">
+                {capability}
+              </Badge>
+            ))
+          )}
         </div>
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -454,11 +228,13 @@ function Messages({
 }) {
   if (messages.length === 0) {
     return (
-      <div className="mx-auto flex h-full max-w-lg flex-col items-center justify-center px-6 text-center">
+      <div className="mx-auto flex h-full w-full min-w-0 max-w-lg flex-col items-center justify-center overflow-hidden px-6 text-center">
         <span className="mb-4 flex size-12 items-center justify-center rounded-2xl border bg-card shadow-sm">
           <SparklesIcon className="size-5 text-primary" />
         </span>
-        <h2 className="font-heading text-lg font-semibold">What do you want to move forward?</h2>
+        <h2 className="max-w-full text-pretty font-heading text-lg font-semibold">
+          What do you want to move forward?
+        </h2>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           Start with a question, a task, or an idea. Command Center will show where it plans to
           route the work before it begins.
@@ -575,6 +351,8 @@ function RouteSelector({
 function Composer({
   draft,
   isSubmitting,
+  commandUnavailable,
+  configNotice,
   routeOptions,
   routeSelection,
   receipt,
@@ -586,6 +364,8 @@ function Composer({
   CommandCenterShellProps,
   | "draft"
   | "isSubmitting"
+  | "commandUnavailable"
+  | "configNotice"
   | "onDraftChange"
   | "onSubmit"
   | "onRouteSelectionChange"
@@ -593,23 +373,44 @@ function Composer({
   | "routeSelection"
   | "spaces"
 > & { readonly receipt: CommandCenterRouteReceipt }) {
+  const selectedSpace = spaces.find((space) => space.id === routeSelection.spaceId);
+  const selectedProvider = routeOptions.providers.find(
+    (provider) => provider.id === routeSelection.providerId,
+  );
+  const selectedModel = routeOptions.models.find((model) => model.id === routeSelection.modelId);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const command = draft.trim();
-    if (!command || isSubmitting) return;
+    if (!command || isSubmitting || commandUnavailable) return;
     onSubmit(command);
   };
 
   return (
-    <div className="shrink-0 bg-gradient-to-t from-background via-background to-transparent px-3 pb-3 pt-5 sm:px-5 sm:pb-5">
+    <div className="min-w-0 shrink-0 bg-gradient-to-t from-background via-background to-transparent px-3 pb-3 pt-5 sm:px-5 sm:pb-5">
+      {configNotice ? (
+        <div
+          className="mx-auto mb-2 flex w-full min-w-0 max-w-3xl items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+          data-slot="command-center-config-notice"
+          role="status"
+        >
+          <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0">
+            {configNotice.status === "missing"
+              ? "Command Center configuration hasn't been loaded yet. "
+              : "Command Center configuration is invalid. "}
+            {configNotice.message} You can still draft a command, but sending is disabled until the
+            configuration loads.
+          </span>
+        </div>
+      ) : null}
       <form
         aria-label="Command composer"
-        className="mx-auto max-w-3xl rounded-2xl border bg-card p-2 shadow-lg/5 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/16"
+        className="chat-composer-glass mx-auto w-full min-w-0 max-w-3xl rounded-[20px] border border-border p-2 focus-within:border-ring/45"
         onSubmit={submit}
       >
         <Textarea
           aria-label="Ask Command Center"
-          className="border-0 bg-transparent shadow-none before:hidden focus-within:ring-0 dark:bg-transparent"
+          className="w-full min-w-0 border-0 bg-transparent shadow-none before:hidden focus-within:ring-0 dark:bg-transparent"
           disabled={isSubmitting}
           onChange={(event) => onDraftChange(event.target.value)}
           placeholder="Ask, plan, build, or automate anything…"
@@ -618,49 +419,65 @@ function Composer({
           value={draft}
         />
         <div className="flex items-end justify-between gap-2 px-1 pb-1">
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-            <RouteSelector
-              control="space"
-              label="Space"
-              onChange={onRouteSelectionChange}
-              options={spaces.map((space) => ({ id: space.id, label: space.name }))}
-              value={routeSelection.spaceId}
-            />
-            <RouteSelector
-              control="repository"
-              label="Repo"
-              onChange={onRouteSelectionChange}
-              options={routeOptions.repositories}
-              value={routeSelection.repositoryId}
-            />
-            <RouteSelector
-              control="project"
-              label="Project"
-              onChange={onRouteSelectionChange}
-              options={routeOptions.projects}
-              value={routeSelection.projectId}
-            />
-            <RouteSelector
-              control="provider"
-              label="Provider"
-              onChange={onRouteSelectionChange}
-              options={routeOptions.providers}
-              value={routeSelection.providerId}
-            />
-            <RouteSelector
-              control="model"
-              label="Model"
-              onChange={onRouteSelectionChange}
-              options={routeOptions.models}
-              value={routeSelection.modelId}
-            />
-            <Badge className="hidden sm:inline-flex" size="sm" variant={RISK_VARIANT[receipt.risk]}>
+          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-visible">
+            <details className="group/route relative">
+              <summary className="flex h-7 cursor-pointer list-none items-center gap-1.5 rounded-md px-2 text-[0.6875rem] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground [&::-webkit-details-marker]:hidden">
+                <SlidersHorizontalIcon className="size-3.5" />
+                <span>{selectedSpace?.name ?? "Auto route"}</span>
+                <ChevronDownIcon className="size-3 transition-transform group-open/route:rotate-180" />
+              </summary>
+              <div className="absolute bottom-9 left-0 z-30 w-[min(30rem,calc(100vw-3rem))] rounded-xl border bg-popover p-2 text-popover-foreground shadow-lg">
+                <div className="px-1 pb-2 text-xs font-medium">Route this command</div>
+                <div className="flex flex-wrap gap-1">
+                  <RouteSelector
+                    control="space"
+                    label="Space"
+                    onChange={onRouteSelectionChange}
+                    options={spaces.map((space) => ({ id: space.id, label: space.name }))}
+                    value={routeSelection.spaceId}
+                  />
+                  <RouteSelector
+                    control="repository"
+                    label="Repo"
+                    onChange={onRouteSelectionChange}
+                    options={routeOptions.repositories}
+                    value={routeSelection.repositoryId}
+                  />
+                  <RouteSelector
+                    control="project"
+                    label="Project"
+                    onChange={onRouteSelectionChange}
+                    options={routeOptions.projects}
+                    value={routeSelection.projectId}
+                  />
+                  <RouteSelector
+                    control="provider"
+                    label="Provider"
+                    onChange={onRouteSelectionChange}
+                    options={routeOptions.providers}
+                    value={routeSelection.providerId}
+                  />
+                  <RouteSelector
+                    control="model"
+                    label="Model"
+                    onChange={onRouteSelectionChange}
+                    options={routeOptions.models}
+                    value={routeSelection.modelId}
+                  />
+                </div>
+              </div>
+            </details>
+            <span className="hidden min-w-0 truncate text-[0.6875rem] text-muted-foreground sm:block">
+              {selectedProvider?.label ?? receipt.providerName} ·{" "}
+              {selectedModel?.label ?? receipt.modelName}
+            </span>
+            <Badge className="hidden md:inline-flex" size="sm" variant={RISK_VARIANT[receipt.risk]}>
               {RISK_LABEL[receipt.risk]}
             </Badge>
           </div>
           <Button
             aria-label={isSubmitting ? "Sending command" : "Send command"}
-            disabled={!draft.trim() || isSubmitting}
+            disabled={!draft.trim() || isSubmitting || commandUnavailable}
             size="icon"
             type="submit"
           >
@@ -668,8 +485,8 @@ function Composer({
           </Button>
         </div>
       </form>
-      <p className="mx-auto mt-2 max-w-3xl text-center text-[0.625rem] text-muted-foreground">
-        Routes are visible. High-impact actions pause for approval.
+      <p className="mx-auto mt-2 max-w-3xl text-center text-[0.625rem] text-muted-foreground/70">
+        High-impact actions pause for approval
       </p>
     </div>
   );
@@ -950,18 +767,50 @@ function ContextRail({
   onReviewMemory,
   resolvingNeedsYouId,
 }: ContextRailProps) {
+  const [activeView, setActiveView] = useState<"needs-you" | "runs" | "context">("needs-you");
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-card-foreground">
-      <div className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
-        <Layers3Icon className="size-4 text-muted-foreground" />
-        <span className="text-sm font-semibold">Live context</span>
+      <div className="flex h-[var(--workspace-topbar-height)] shrink-0 items-end border-b px-2">
+        <div
+          aria-label="Context views"
+          className="flex min-w-0 items-center gap-0.5"
+          role="tablist"
+        >
+          {(
+            [
+              ["needs-you", "Needs You", context.needsYou.length],
+              ["runs", "Runs", context.activeRuns.length],
+              ["context", "Context", 0],
+            ] as const
+          ).map(([id, label, count]) => (
+            <button
+              aria-selected={activeView === id}
+              aria-controls={`command-center-context-${id}`}
+              className={cn(
+                "relative flex h-9 items-center gap-1.5 px-2 text-xs text-muted-foreground transition-colors hover:text-foreground",
+                activeView === id &&
+                  "text-foreground after:absolute after:inset-x-2 after:bottom-0 after:h-px after:bg-foreground",
+              )}
+              key={id}
+              onClick={() => setActiveView(id)}
+              role="tab"
+              type="button"
+            >
+              {label}
+              {count > 0 ? (
+                <span className="rounded-full bg-muted px-1.5 text-[0.625rem]">{count}</span>
+              ) : null}
+            </button>
+          ))}
+        </div>
       </div>
       <ScrollArea className="min-h-0 flex-1" scrollFade>
         <div className="p-2">
-          <ContextSection
-            count={context.needsYou.length}
-            icon={<InboxIcon className="size-3.5" />}
-            title="Needs You"
+          <div
+            aria-label="Needs You"
+            hidden={activeView !== "needs-you"}
+            id="command-center-context-needs-you"
+            role="tabpanel"
           >
             <NeedsYouRows
               items={context.needsYou}
@@ -970,20 +819,30 @@ function ContextRail({
               onReviewMemory={onReviewMemory}
               resolvingId={resolvingNeedsYouId}
             />
-          </ContextSection>
-          <ContextSection
-            count={context.activeRuns.length}
-            icon={<ActivityIcon className="size-3.5" />}
-            title="Active runs"
+          </div>
+          <div
+            aria-label="Active runs"
+            hidden={activeView !== "runs"}
+            id="command-center-context-runs"
+            role="tabpanel"
           >
             <ActiveRunRows onOpen={onOpenRun} runs={context.activeRuns} />
-          </ContextSection>
-          <ContextSection icon={<Clock3Icon className="size-3.5" />} title="Today">
-            <TodayRows items={context.today} onOpen={onOpenTodayItem} />
-          </ContextSection>
-          <ContextSection icon={<WifiIcon className="size-3.5" />} title="Connections">
-            <ConnectionRows connections={context.connections} onOpen={onOpenConnection} />
-          </ContextSection>
+          </div>
+          <div
+            aria-label="Today and connections"
+            hidden={activeView !== "context"}
+            id="command-center-context-context"
+            role="tabpanel"
+          >
+            <>
+              <ContextSection icon={<Clock3Icon className="size-3.5" />} title="Today">
+                <TodayRows items={context.today} onOpen={onOpenTodayItem} />
+              </ContextSection>
+              <ContextSection icon={<WifiIcon className="size-3.5" />} title="Connections">
+                <ConnectionRows connections={context.connections} onOpen={onOpenConnection} />
+              </ContextSection>
+            </>
+          </div>
         </div>
       </ScrollArea>
     </div>
@@ -991,41 +850,22 @@ function ContextRail({
 }
 
 export function CommandCenterShell(props: CommandCenterShellProps) {
-  const [navigationOpen, setNavigationOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const hasExplicitRoute = Object.values(props.routeSelection).some((value) => value !== undefined);
 
   return (
     <div
-      className="grid h-dvh min-h-0 w-full grid-cols-1 overflow-hidden bg-background text-foreground lg:grid-cols-[16rem_minmax(0,1fr)] 2xl:grid-cols-[16rem_minmax(0,1fr)_20rem]"
+      className="grid h-full min-h-0 w-full grid-cols-1 overflow-hidden bg-background text-foreground 2xl:grid-cols-[minmax(0,1fr)_19rem]"
       data-slot="command-center-shell"
     >
-      <aside className="hidden min-h-0 border-r lg:block" data-slot="command-center-navigation">
-        <NavigationRail
-          activeConversationId={props.activeConversationId}
-          conversations={props.conversations}
-          onNewConversation={props.onNewConversation}
-          onSelectConversation={props.onSelectConversation}
-          onSelectProject={props.onSelectProject}
-          onSelectSpace={props.onSelectSpace}
-          projects={props.projects}
-          selectedProjectId={props.selectedProjectId}
-          selectedSpaceId={props.selectedSpaceId}
-          spaces={props.spaces}
-        />
-      </aside>
-
       <main className="flex min-h-0 min-w-0 flex-col" data-slot="command-center-conversation">
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b bg-background/90 px-3 backdrop-blur-sm sm:px-4">
-          <Button
-            aria-label="Open Spaces and conversations"
-            className="lg:hidden"
-            onClick={() => setNavigationOpen(true)}
-            size="icon-sm"
-            variant="ghost"
-          >
-            <MenuIcon />
-          </Button>
+        <header className="flex h-[var(--workspace-topbar-height)] shrink-0 items-center gap-3 border-b bg-background/90 px-3 backdrop-blur-sm sm:px-4">
+          <CommandCenterHistoryMenu
+            activeConversationId={props.activeConversationId}
+            conversations={props.conversations}
+            onNewConversation={props.onNewConversation}
+            onSelectConversation={props.onSelectConversation}
+          />
           <div className="min-w-0 flex-1">
             <h1 className="truncate font-heading text-sm font-semibold">
               {props.conversationTitle}
@@ -1035,9 +875,9 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
               Command is ready
             </div>
           </div>
-          <Badge className="hidden sm:inline-flex" variant="outline">
+          <span className="hidden text-[0.6875rem] text-muted-foreground sm:inline">
             {hasExplicitRoute ? "Explicit route" : "Auto route"}
-          </Badge>
+          </span>
           <Button
             aria-label="Open live context"
             className="2xl:hidden"
@@ -1052,7 +892,7 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
           </Button>
         </header>
 
-        <div className="shrink-0 border-b bg-muted/24 px-3 py-3 sm:px-5">
+        <div className="shrink-0 px-3 sm:px-5">
           <RouteReceipt receipt={props.routeReceipt} />
         </div>
 
@@ -1061,6 +901,8 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
         </ScrollArea>
 
         <Composer
+          commandUnavailable={props.commandUnavailable}
+          configNotice={props.configNotice}
           draft={props.draft}
           isSubmitting={props.isSubmitting}
           onDraftChange={props.onDraftChange}
@@ -1085,31 +927,6 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
           resolvingNeedsYouId={props.resolvingNeedsYouId}
         />
       </aside>
-
-      <Sheet onOpenChange={setNavigationOpen} open={navigationOpen}>
-        <SheetPopup className="max-w-xs p-0" showCloseButton={false} side="left">
-          <SheetHeader className="sr-only">
-            <SheetTitle>Spaces and conversations</SheetTitle>
-            <SheetDescription>Choose a Space or recent conversation.</SheetDescription>
-          </SheetHeader>
-          <NavigationRail
-            activeConversationId={props.activeConversationId}
-            conversations={props.conversations}
-            onNavigate={() => setNavigationOpen(false)}
-            onNewConversation={() => {
-              props.onNewConversation?.();
-              setNavigationOpen(false);
-            }}
-            onSelectConversation={props.onSelectConversation}
-            onSelectProject={props.onSelectProject}
-            onSelectSpace={props.onSelectSpace}
-            projects={props.projects}
-            selectedProjectId={props.selectedProjectId}
-            selectedSpaceId={props.selectedSpaceId}
-            spaces={props.spaces}
-          />
-        </SheetPopup>
-      </Sheet>
 
       <Sheet onOpenChange={setContextOpen} open={contextOpen}>
         <SheetPopup className="max-w-sm p-0" showCloseButton={false} side="right">

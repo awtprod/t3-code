@@ -139,11 +139,11 @@ const FIXTURE: CommandCenterShellProps = {
 };
 
 describe("CommandCenterShell", () => {
-  it("renders the three-pane command surface and visible route receipt", () => {
+  it("renders the T3 command surface and visible route receipt", () => {
     const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} />);
 
     expect(html).toContain('data-slot="command-center-shell"');
-    expect(html).toContain('data-slot="command-center-navigation"');
+    expect(html).not.toContain('data-slot="command-center-navigation"');
     expect(html).toContain('data-slot="command-center-conversation"');
     expect(html).toContain('data-slot="command-center-context"');
     expect(html).toContain('aria-label="Current command route"');
@@ -160,8 +160,10 @@ describe("CommandCenterShell", () => {
   it("renders responsive controls and context summaries", () => {
     const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} />);
 
-    expect(html).toContain('aria-label="Open Spaces and conversations"');
+    expect(html).toContain('aria-label="Open recent Command Center conversations"');
     expect(html).toContain('aria-label="Open live context"');
+    expect(html).toContain('aria-label="Context views"');
+    expect(html).toContain('role="tabpanel"');
     expect(html).toContain("Needs You");
     expect(html).toContain("Approve");
     expect(html).toContain("Decline");
@@ -174,6 +176,8 @@ describe("CommandCenterShell", () => {
     expect(html).toContain('aria-label="Project route selection"');
     expect(html).toContain('aria-label="Provider route selection"');
     expect(html).toContain('aria-label="Model route selection"');
+    expect(html).toContain("Route this command");
+    expect(html).toContain("chat-composer-glass");
     expect(html).toContain("Explicit route");
   });
 
@@ -182,5 +186,37 @@ describe("CommandCenterShell", () => {
 
     expect(html).toContain('aria-label="Send command"');
     expect(html).toMatch(/aria-label="Send command"[^>]*disabled=""/);
+  });
+
+  it("keeps the composer input typeable but disables sending when config is missing", () => {
+    const html = renderToStaticMarkup(
+      <CommandCenterShell
+        {...FIXTURE}
+        commandUnavailable
+        configNotice={{
+          status: "missing",
+          message: "No configuration was found in the Command Center config directory.",
+        }}
+        draft="ship the release"
+      />,
+    );
+
+    // The setup notice explains why sending is disabled.
+    expect(html).toContain('data-slot="command-center-config-notice"');
+    expect(html).toContain("No configuration was found");
+
+    // The textarea is NOT disabled — the user can always draft a command.
+    expect(html).toMatch(/aria-label="Ask Command Center"(?![^>]*disabled)/);
+
+    // Sending is disabled despite a non-empty draft, because the command is unavailable.
+    expect(html).toMatch(/aria-label="Send command"[^>]*disabled=""/);
+  });
+
+  it("omits the config notice when the configuration is loaded", () => {
+    const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} draft="ready" />);
+
+    expect(html).not.toContain('data-slot="command-center-config-notice"');
+    // With config loaded and a draft present, sending is enabled.
+    expect(html).not.toMatch(/aria-label="Send command"[^>]*disabled=""/);
   });
 });

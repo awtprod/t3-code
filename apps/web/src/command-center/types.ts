@@ -160,6 +160,11 @@ export interface CommandCenterRouteOptions {
   readonly models: readonly CommandCenterRouteOption[];
 }
 
+export interface CommandCenterConfigNotice {
+  readonly status: "missing" | "invalid";
+  readonly message: string;
+}
+
 export interface CommandCenterShellProps {
   readonly spaces: readonly CommandCenterSpace[];
   readonly projects: readonly CommandCenterProject[];
@@ -175,6 +180,17 @@ export interface CommandCenterShellProps {
   readonly conversationTitle: string;
   readonly draft: string;
   readonly isSubmitting?: boolean | undefined;
+  /**
+   * True when a command cannot be dispatched right now (config not loaded,
+   * bootstrap/timeline still pending, or no environment). Gates the send button
+   * only — it must NOT disable the composer input, so the user can always type.
+   */
+  readonly commandUnavailable?: boolean | undefined;
+  /**
+   * Present when the Command Center configuration is missing or invalid, so the
+   * shell can explain why sending is disabled instead of freezing silently.
+   */
+  readonly configNotice?: CommandCenterConfigNotice | null | undefined;
   readonly onDraftChange: (draft: string) => void;
   readonly onSubmit: (draft: string) => void;
   readonly onNewConversation?: (() => void) | undefined;
