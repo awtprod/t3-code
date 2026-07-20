@@ -46,10 +46,15 @@ const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V
 const decodeV2CommandExecResponse = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2CommandExecResponse,
 );
+// The generated response schemas omit `activePermissionProfile`, so it is
+// reassigned here. The Codex App Server sends `null` when no permission profile
+// is active (older CLIs, or a thread without an isolation profile), so the
+// override must accept `null` as well as the object — matching how every other
+// nullable field in these responses (serviceTier, reasoningEffort, …) is modeled.
 const CodexThreadStartResponseWithPermissionProfile = EffectCodexSchema.V2ThreadStartResponse.pipe(
   Schema.fieldsAssign({
     activePermissionProfile: Schema.optionalKey(
-      EffectCodexSchema.V2ThreadStartResponse__ActivePermissionProfile,
+      Schema.Union([EffectCodexSchema.V2ThreadStartResponse__ActivePermissionProfile, Schema.Null]),
     ),
   }),
 );
@@ -57,7 +62,10 @@ const CodexThreadResumeResponseWithPermissionProfile =
   EffectCodexSchema.V2ThreadResumeResponse.pipe(
     Schema.fieldsAssign({
       activePermissionProfile: Schema.optionalKey(
-        EffectCodexSchema.V2ThreadResumeResponse__ActivePermissionProfile,
+        Schema.Union([
+          EffectCodexSchema.V2ThreadResumeResponse__ActivePermissionProfile,
+          Schema.Null,
+        ]),
       ),
     }),
   );
@@ -658,16 +666,24 @@ export const openCodexThread = (input: {
         ),
       ),
       Effect.flatMap((response) => {
+        // Fail only on a POSITIVE mismatch: Codex reports a *different* active
+        // profile than the one requested. A null/absent `activePermissionProfile`
+        // is not a failure here — Codex 0.144.x does not echo the field on
+        // `thread/start` even when the profile is active, and isolation has
+        // already been proven empirically by `verifyCommandCenterCodexIsolation`
+        // (a live `command/exec` probe) before this thread is ever opened.
+        // Treating a null echo as a mismatch would block a correctly isolated
+        // session on the supported Codex version.
+        const activeProfileId = response.activePermissionProfile?.id;
         if (
           input.permissionProfile !== undefined &&
-          response.activePermissionProfile?.id !== input.permissionProfile
+          activeProfileId !== undefined &&
+          activeProfileId !== input.permissionProfile
         ) {
           return Effect.fail(
             new CodexSessionRuntimePermissionProfileMismatchError({
               expected: input.permissionProfile,
-              ...(response.activePermissionProfile?.id
-                ? { actual: response.activePermissionProfile.id }
-                : {}),
+              actual: activeProfileId,
             }),
           );
         }

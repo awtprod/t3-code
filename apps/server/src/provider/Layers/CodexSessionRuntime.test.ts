@@ -593,11 +593,39 @@ describe("openCodexThread", () => {
     }),
   );
 
-  it.effect("fails closed when Codex does not acknowledge the required permission profile", () =>
+  it.effect(
+    "admits the thread when Codex enforces isolation but omits the active-profile echo (Codex 0.144.x)",
+    () =>
+      // Codex 0.144.x does not populate `activePermissionProfile` on thread/start
+      // even when the requested profile is active. Isolation is proven empirically
+      // by verifyCommandCenterCodexIsolation() (a live command/exec probe) before a
+      // thread is ever opened, so a null/absent echo must NOT block the session.
+      Effect.gen(function* () {
+        const opened = yield* openCodexThread({
+          client: {
+            request: () => Effect.succeed(makeThreadOpenResponse("fresh-thread")),
+          },
+          threadId: ThreadId.make("cc:thread-1"),
+          runtimeMode: "approval-required",
+          cwd: "/runtime/project",
+          requestedModel: undefined,
+          serviceTier: undefined,
+          resumeThreadId: undefined,
+          permissionProfile: "command-center-isolated-read-v1",
+        });
+
+        NodeAssert.equal(opened.thread.id, "fresh-thread");
+      }),
+  );
+
+  it.effect("fails closed when Codex activates a different permission profile than requested", () =>
     Effect.gen(function* () {
       const error = yield* openCodexThread({
         client: {
-          request: () => Effect.succeed(makeThreadOpenResponse("fresh-thread")),
+          request: () =>
+            Effect.succeed(
+              makeThreadOpenResponse("fresh-thread", "command-center-isolated-write-v1"),
+            ),
         },
         threadId: ThreadId.make("cc:thread-1"),
         runtimeMode: "approval-required",
@@ -609,7 +637,7 @@ describe("openCodexThread", () => {
       }).pipe(Effect.flip);
 
       NodeAssert.equal(error._tag, "CodexSessionRuntimePermissionProfileMismatchError");
-      NodeAssert.match(error.message, /did not activate required permission profile/u);
+      NodeAssert.match(error.message, /instead of required profile/u);
     }),
   );
 });
