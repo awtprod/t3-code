@@ -14,10 +14,13 @@ import {
   CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
 } from "../CodexDeveloperInstructions.ts";
 import {
+  buildCommandCenterIsolationProbeScript,
+  buildThreadStartParams,
   buildTurnStartParams,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   openCodexThread,
+  verifyCommandCenterCodexIsolation,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
@@ -40,6 +43,7 @@ describe("CodexSessionRuntimeIdentifierGenerationError", () => {
 
 function makeThreadOpenResponse(
   threadId: string,
+  permissionProfile?: string,
 ): CodexRpc.ClientRequestResponsesByMethod["thread/start"] {
   return {
     cwd: "/tmp/project",
@@ -47,16 +51,23 @@ function makeThreadOpenResponse(
     modelProvider: "openai",
     approvalPolicy: "never",
     approvalsReviewer: "user",
-    sandbox: { type: "danger-full-access" },
+    sandbox: { type: "dangerFullAccess" },
+    ...(permissionProfile
+      ? { activePermissionProfile: { id: permissionProfile, extends: null } }
+      : {}),
     thread: {
+      cliVersion: "0.144.6",
+      createdAt: 1_766_000_000,
+      cwd: "/tmp/project",
+      ephemeral: false,
       id: threadId,
-      createdAt: "2026-04-18T00:00:00.000Z",
-      source: { session: "cli" },
+      modelProvider: "openai",
+      preview: "",
+      sessionId: "session-1",
+      source: "appServer",
       turns: [],
-      status: {
-        state: "idle",
-        activeFlags: [],
-      },
+      status: { type: "idle" },
+      updatedAt: 1_766_000_000,
     },
   } as unknown as CodexRpc.ClientRequestResponsesByMethod["thread/start"];
 }
@@ -215,6 +226,35 @@ describe("buildTurnStartParams", () => {
       ],
     });
   });
+
+  it.effect("selects a non-escalatable permission profile without a legacy sandbox policy", () =>
+    Effect.gen(function* () {
+      const permissionProfile = "command-center-isolated-write-v1";
+      const thread = buildThreadStartParams({
+        cwd: "/runtime/project",
+        runtimeMode: "auto-accept-edits",
+        model: undefined,
+        serviceTier: undefined,
+        permissionProfile,
+      });
+      const turn = yield* buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "auto-accept-edits",
+        prompt: "Implement it",
+        permissionProfile,
+      });
+
+      NodeAssert.deepStrictEqual(thread, {
+        cwd: "/runtime/project",
+        approvalPolicy: "never",
+        permissions: permissionProfile,
+      });
+      NodeAssert.equal("sandbox" in thread, false);
+      NodeAssert.equal(turn.approvalPolicy, "never");
+      NodeAssert.equal(turn.permissions, permissionProfile);
+      NodeAssert.equal("sandboxPolicy" in turn, false);
+    }),
+  );
 });
 
 describe("buildCodexDeveloperInstructions", () => {
@@ -225,7 +265,7 @@ describe("buildCodexDeveloperInstructions", () => {
     });
 
     NodeAssert.ok(instructions.startsWith(CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS));
-    NodeAssert.match(instructions, /T3 Code/);
+    NodeAssert.match(instructions, /Command Center/);
     NodeAssert.match(instructions, /Codex harness/);
     NodeAssert.match(instructions, /as gpt-5\.3-codex with high reasoning effort/);
   });
@@ -289,6 +329,114 @@ describe("hasConfiguredMcpServer", () => {
   });
 });
 
+describe("verifyCommandCenterCodexIsolation", () => {
+  it.effect("executes a fail-closed app-server probe before a Command Center turn", () =>
+    Effect.gen(function* () {
+      const calls: Array<{
+        method: string;
+        payload: CodexRpc.ClientRequestParamsByMethod["command/exec"];
+      }> = [];
+      yield* verifyCommandCenterCodexIsolation({
+        client: {
+          request: (method, payload) => {
+            calls.push({ method, payload });
+            return Effect.succeed({
+              exitCode: 0,
+              stdout: "command-center-isolation-ok\n",
+              stderr: "",
+            });
+          },
+        },
+        cwd: "/runtime/worktree",
+        permissionProfile: "command-center-isolated-write-v1",
+      });
+
+      NodeAssert.equal(calls.length, 1);
+      NodeAssert.equal(calls[0]?.method, "command/exec");
+      NodeAssert.equal(calls[0]?.payload.cwd, "/runtime/worktree");
+      const command = calls[0]?.payload.command;
+      NodeAssert.deepStrictEqual(command?.slice(0, 2), ["/usr/bin/bash", "-c"]);
+      const script = command?.[2] ?? "";
+      NodeAssert.match(script, /\/proc\/\[0-9\]\*\/environ/u);
+      NodeAssert.match(script, /T3_MCP_BEARER_TOKEN/u);
+      NodeAssert.match(script, /test ! -r "\$HOME\/auth\.json"/u);
+      NodeAssert.match(script, /test ! -r "\/proc\/1\/root\$HOME\/auth\.json"/u);
+      NodeAssert.match(script, /: > "\$probe_path"/u);
+      NodeAssert.match(script, /git status --porcelain=v1/u);
+    }),
+  );
+
+  it.effect("rejects a failed or forged app-server probe result", () =>
+    Effect.gen(function* () {
+      const error = yield* verifyCommandCenterCodexIsolation({
+        client: {
+          request: () =>
+            Effect.succeed({
+              exitCode: 70,
+              stdout: "",
+              stderr: "",
+            }),
+        },
+        cwd: "/runtime/worktree",
+        permissionProfile: "command-center-isolated-read-v1",
+      }).pipe(Effect.flip);
+
+      NodeAssert.equal(error._tag, "CodexSessionRuntimeIsolationProbeError");
+      NodeAssert.equal(error.exitCode, 70);
+      NodeAssert.match(error.message, /live filesystem, process, or environment isolation/u);
+      NodeAssert.doesNotMatch(error.message, /T3_MCP_BEARER_TOKEN/u);
+    }),
+  );
+
+  it.effect("accepts only an actual sandbox-denied write for the read profile", () =>
+    verifyCommandCenterCodexIsolation({
+      client: {
+        request: () =>
+          Effect.succeed({
+            exitCode: 73,
+            stdout: "command-center-isolation-read-denial-ready\n",
+            stderr: "",
+          }),
+      },
+      cwd: "/runtime/worktree",
+      permissionProfile: "command-center-isolated-read-v1",
+    }),
+  );
+
+  it.effect("rejects the read profile when its workspace write succeeds", () =>
+    Effect.gen(function* () {
+      const error = yield* verifyCommandCenterCodexIsolation({
+        client: {
+          request: () =>
+            Effect.succeed({
+              exitCode: 74,
+              stdout: "",
+              stderr: "",
+            }),
+        },
+        cwd: "/runtime/worktree",
+        permissionProfile: "command-center-isolated-read-v1",
+      }).pipe(Effect.flip);
+
+      NodeAssert.equal(error._tag, "CodexSessionRuntimeIsolationProbeError");
+      NodeAssert.equal(error.exitCode, 74);
+    }),
+  );
+
+  it("makes the read probe's final operation an actual write that must be denied", () => {
+    const script = buildCommandCenterIsolationProbeScript(false);
+    NodeAssert.match(script, /command-center-isolation-read-denial-ready/u);
+    NodeAssert.match(script, /: > "\$probe_path"/u);
+    NodeAssert.ok(
+      script.indexOf("git status --porcelain=v1") < script.indexOf(': > "$probe_path"'),
+    );
+    NodeAssert.ok(
+      script.indexOf(': > "$probe_path"') <
+        script.indexOf("command-center-isolation-read-denial-ready"),
+    );
+  });
+});
+
 describe("isRecoverableThreadResumeError", () => {
   it("matches missing thread errors", () => {
     NodeAssert.equal(
@@ -342,10 +490,7 @@ describe("openCodexThread", () => {
       const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
       const started = makeThreadOpenResponse("fresh-thread");
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
-          method: M,
-          payload: CodexRpc.ClientRequestParamsByMethod[M],
-        ) => {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
           calls.push({ method, payload });
           if (method === "thread/resume") {
             return Effect.fail(
@@ -355,7 +500,7 @@ describe("openCodexThread", () => {
               }),
             );
           }
-          return Effect.succeed(started as CodexRpc.ClientRequestResponsesByMethod[M]);
+          return Effect.succeed(started);
         },
       };
 
@@ -380,10 +525,7 @@ describe("openCodexThread", () => {
   it.effect("propagates non-recoverable resume failures", () =>
     Effect.gen(function* () {
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
-          method: M,
-          _payload: CodexRpc.ClientRequestParamsByMethod[M],
-        ) => {
+        request: (method: "thread/start" | "thread/resume", _payload: unknown) => {
           if (method === "thread/resume") {
             return Effect.fail(
               new CodexErrors.CodexAppServerRequestError({
@@ -392,9 +534,7 @@ describe("openCodexThread", () => {
               }),
             );
           }
-          return Effect.succeed(
-            makeThreadOpenResponse("fresh-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
-          );
+          return Effect.succeed(makeThreadOpenResponse("fresh-thread"));
         },
       };
 
@@ -410,6 +550,66 @@ describe("openCodexThread", () => {
 
       NodeAssert.ok(isCodexAppServerRequestError(error));
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
+    }),
+  );
+
+  it.effect("sends the permission profile on both resume and fallback start", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const client = {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
+          calls.push({ method, payload });
+          if (method === "thread/resume") {
+            return Effect.fail(
+              new CodexErrors.CodexAppServerRequestError({
+                code: -32603,
+                errorMessage: "thread not found",
+              }),
+            );
+          }
+          return Effect.succeed(
+            makeThreadOpenResponse("fresh-thread", "command-center-isolated-read-v1"),
+          );
+        },
+      };
+
+      yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("cc:thread-1"),
+        runtimeMode: "approval-required",
+        cwd: "/runtime/project",
+        requestedModel: undefined,
+        serviceTier: undefined,
+        resumeThreadId: "stale-thread",
+        permissionProfile: "command-center-isolated-read-v1",
+      });
+
+      for (const call of calls) {
+        const payload = call.payload as Record<string, unknown>;
+        NodeAssert.equal(payload.permissions, "command-center-isolated-read-v1");
+        NodeAssert.equal("sandbox" in payload, false);
+        NodeAssert.equal("sandboxPolicy" in payload, false);
+      }
+    }),
+  );
+
+  it.effect("fails closed when Codex does not acknowledge the required permission profile", () =>
+    Effect.gen(function* () {
+      const error = yield* openCodexThread({
+        client: {
+          request: () => Effect.succeed(makeThreadOpenResponse("fresh-thread")),
+        },
+        threadId: ThreadId.make("cc:thread-1"),
+        runtimeMode: "approval-required",
+        cwd: "/runtime/project",
+        requestedModel: undefined,
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        permissionProfile: "command-center-isolated-read-v1",
+      }).pipe(Effect.flip);
+
+      NodeAssert.equal(error._tag, "CodexSessionRuntimePermissionProfileMismatchError");
+      NodeAssert.match(error.message, /did not activate required permission profile/u);
     }),
   );
 });

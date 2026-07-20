@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import { Approval, Item, Memory } from "@command-center/core";
 
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
@@ -143,6 +144,63 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  COMMAND_CENTER_WS_METHODS,
+  CommandCenterApprovalDecisionInput,
+  CommandCenterApprovalsQueryInput,
+  CommandCenterApprovalsQueryResult,
+  CommandCenterArtifactsQueryInput,
+  CommandCenterArtifactsQueryResult,
+  CommandCenterAutomationExecution,
+  CommandCenterAutomationDefinitionCreateInput,
+  CommandCenterAutomationDefinitionGetInput,
+  CommandCenterAutomationDefinitionSaveInput,
+  CommandCenterAutomationDefinitionSnapshot,
+  CommandCenterAutomationRunGetInput,
+  CommandCenterAutomationRunStartInput,
+  CommandCenterAutomationWebhookAdmitInput,
+  CommandCenterAutomationsQueryInput,
+  CommandCenterAutomationsQueryResult,
+  CommandCenterBootstrap,
+  CommandCenterCommandSubmitInput,
+  CommandCenterCommandSubmitResult,
+  CommandCenterConnectionRefreshInput,
+  CommandCenterConnectionRefreshResult,
+  CommandCenterConnectionsQueryInput,
+  CommandCenterConnectionsQueryResult,
+  CommandCenterError,
+  CommandCenterItemCreateInput,
+  CommandCenterItemUpdateInput,
+  CommandCenterItemUpdateResult,
+  CommandCenterItemsQueryInput,
+  CommandCenterItemsQueryResult,
+  CommandCenterMemoryQueryInput,
+  CommandCenterMemoryQueryResult,
+  CommandCenterMemoryProposeInput,
+  CommandCenterMemoryRememberInput,
+  CommandCenterMemoryReviewInput,
+  CommandCenterMemorySearchInput,
+  CommandCenterMemorySearchResults,
+  CommandCenterRunsQueryInput,
+  CommandCenterRunsQueryResult,
+  CommandCenterRunStartInput,
+  CommandCenterRunStartResult,
+  CommandCenterSpacesQueryInput,
+  CommandCenterSpacesQueryResult,
+  CommandCenterSpacesSyncInput,
+  CommandCenterSpacesSyncResult,
+  GoogleReadRequest,
+  GoogleReadResult,
+} from "./commandCenter.ts";
+import {
+  CommandCenterEventEnvelope,
+  CommandCenterEventPage,
+  CommandCenterEventReplayInput,
+  CommandCenterEventStreamError,
+  CommandCenterEventSubscribeInput,
+  CommandCenterTimelinePage,
+  CommandCenterTimelineQuery,
+} from "./commandCenterEvents.ts";
 
 export const WS_METHODS = {
   // Project registry methods
@@ -233,6 +291,217 @@ export const WS_METHODS = {
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
 } as const;
+
+export const WsCommandCenterBootstrapRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.bootstrap, {
+  payload: Schema.Struct({}),
+  success: CommandCenterBootstrap,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterCommandSubmitRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.commandSubmit, {
+  payload: CommandCenterCommandSubmitInput,
+  success: CommandCenterCommandSubmitResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterRunStartRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.runStart, {
+  payload: CommandCenterRunStartInput,
+  success: CommandCenterRunStartResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterEventsReplayRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.eventsReplay, {
+  payload: CommandCenterEventReplayInput,
+  success: CommandCenterEventPage,
+  error: Schema.Union([CommandCenterEventStreamError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterEventsSubscribeRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.eventsSubscribe,
+  {
+    payload: CommandCenterEventSubscribeInput,
+    success: CommandCenterEventEnvelope,
+    error: Schema.Union([CommandCenterEventStreamError, EnvironmentAuthorizationError]),
+    stream: true,
+  },
+);
+
+export const WsCommandCenterTimelineQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.timelineQuery, {
+  payload: CommandCenterTimelineQuery,
+  success: CommandCenterTimelinePage,
+  error: Schema.Union([CommandCenterEventStreamError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterSpacesQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.spacesQuery, {
+  payload: CommandCenterSpacesQueryInput,
+  success: CommandCenterSpacesQueryResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterSpacesSyncRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.spacesSync, {
+  payload: CommandCenterSpacesSyncInput,
+  success: CommandCenterSpacesSyncResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterItemsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.itemsQuery, {
+  payload: CommandCenterItemsQueryInput,
+  success: CommandCenterItemsQueryResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterRunsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.runsQuery, {
+  payload: CommandCenterRunsQueryInput,
+  success: CommandCenterRunsQueryResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterAutomationsQueryRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.automationsQuery,
+  {
+    payload: CommandCenterAutomationsQueryInput,
+    success: CommandCenterAutomationsQueryResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterAutomationDefinitionGetRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.automationDefinitionGet,
+  {
+    payload: CommandCenterAutomationDefinitionGetInput,
+    success: CommandCenterAutomationDefinitionSnapshot,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterAutomationDefinitionCreateRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.automationDefinitionCreate,
+  {
+    payload: CommandCenterAutomationDefinitionCreateInput,
+    success: CommandCenterAutomationDefinitionSnapshot,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterAutomationDefinitionSaveRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.automationDefinitionSave,
+  {
+    payload: CommandCenterAutomationDefinitionSaveInput,
+    success: CommandCenterAutomationDefinitionSnapshot,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterApprovalsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.approvalsQuery, {
+  payload: CommandCenterApprovalsQueryInput,
+  success: CommandCenterApprovalsQueryResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterArtifactsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.artifactsQuery, {
+  payload: CommandCenterArtifactsQueryInput,
+  success: CommandCenterArtifactsQueryResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterConnectionsQueryRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.connectionsQuery,
+  {
+    payload: CommandCenterConnectionsQueryInput,
+    success: CommandCenterConnectionsQueryResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterConnectionRefreshRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.connectionsRefresh,
+  {
+    payload: CommandCenterConnectionRefreshInput,
+    success: CommandCenterConnectionRefreshResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterMemoryQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.memoryQuery, {
+  payload: CommandCenterMemoryQueryInput,
+  success: CommandCenterMemoryQueryResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterMemorySearchRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.memorySearch, {
+  payload: CommandCenterMemorySearchInput,
+  success: CommandCenterMemorySearchResults,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterItemCreateRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.itemCreate, {
+  payload: CommandCenterItemCreateInput,
+  success: Item,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterItemUpdateRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.itemUpdate, {
+  payload: CommandCenterItemUpdateInput,
+  success: CommandCenterItemUpdateResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterMemoryRememberRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.memoryRemember, {
+  payload: CommandCenterMemoryRememberInput,
+  success: Memory,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterMemoryProposeRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.memoryPropose, {
+  payload: CommandCenterMemoryProposeInput,
+  success: Memory,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterMemoryReviewRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.memoryReview, {
+  payload: CommandCenterMemoryReviewInput,
+  success: Memory,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterApprovalDecideRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.approvalDecide, {
+  payload: CommandCenterApprovalDecisionInput,
+  success: Approval,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterAutomationRunStartRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.automationRunStart,
+  {
+    payload: CommandCenterAutomationRunStartInput,
+    success: CommandCenterAutomationExecution,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterAutomationRunGetRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.automationRunGet,
+  {
+    payload: CommandCenterAutomationRunGetInput,
+    success: CommandCenterAutomationExecution,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterAutomationWebhookAdmitRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.automationWebhookAdmit,
+  {
+    payload: CommandCenterAutomationWebhookAdmitInput,
+    success: CommandCenterAutomationExecution,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterGoogleReadRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.googleRead, {
+  payload: GoogleReadRequest,
+  success: GoogleReadResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
@@ -682,6 +951,36 @@ export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess,
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  WsCommandCenterBootstrapRpc,
+  WsCommandCenterCommandSubmitRpc,
+  WsCommandCenterRunStartRpc,
+  WsCommandCenterEventsReplayRpc,
+  WsCommandCenterEventsSubscribeRpc,
+  WsCommandCenterTimelineQueryRpc,
+  WsCommandCenterSpacesQueryRpc,
+  WsCommandCenterSpacesSyncRpc,
+  WsCommandCenterItemsQueryRpc,
+  WsCommandCenterRunsQueryRpc,
+  WsCommandCenterAutomationsQueryRpc,
+  WsCommandCenterAutomationDefinitionGetRpc,
+  WsCommandCenterAutomationDefinitionCreateRpc,
+  WsCommandCenterAutomationDefinitionSaveRpc,
+  WsCommandCenterApprovalsQueryRpc,
+  WsCommandCenterArtifactsQueryRpc,
+  WsCommandCenterConnectionsQueryRpc,
+  WsCommandCenterConnectionRefreshRpc,
+  WsCommandCenterMemoryQueryRpc,
+  WsCommandCenterMemorySearchRpc,
+  WsCommandCenterItemCreateRpc,
+  WsCommandCenterItemUpdateRpc,
+  WsCommandCenterMemoryRememberRpc,
+  WsCommandCenterMemoryProposeRpc,
+  WsCommandCenterMemoryReviewRpc,
+  WsCommandCenterApprovalDecideRpc,
+  WsCommandCenterAutomationRunStartRpc,
+  WsCommandCenterAutomationRunGetRpc,
+  WsCommandCenterAutomationWebhookAdmitRpc,
+  WsCommandCenterGoogleReadRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,

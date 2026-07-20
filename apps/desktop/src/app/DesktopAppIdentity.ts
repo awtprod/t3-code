@@ -91,22 +91,20 @@ export const make = Effect.gen(function* () {
   });
 
   const resolveUserDataPath = Effect.gen(function* () {
-    const legacyPath = environment.path.join(
-      environment.appDataDirectory,
-      environment.legacyUserDataDirName,
-    );
-    const legacyPathExists = yield* fileSystem.exists(legacyPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new DesktopUserDataPathResolutionError({
-            legacyPath,
-            cause,
-          }),
-      ),
-    );
-    return legacyPathExists
-      ? legacyPath
-      : environment.path.join(environment.appDataDirectory, environment.userDataDirName);
+    for (const legacyUserDataDirName of environment.legacyUserDataDirNames) {
+      const legacyPath = environment.path.join(environment.appDataDirectory, legacyUserDataDirName);
+      const legacyPathExists = yield* fileSystem.exists(legacyPath).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DesktopUserDataPathResolutionError({
+              legacyPath,
+              cause,
+            }),
+        ),
+      );
+      if (legacyPathExists) return legacyPath;
+    }
+    return environment.path.join(environment.appDataDirectory, environment.userDataDirName);
   }).pipe(Effect.withSpan("desktop.appIdentity.resolveUserDataPath"));
 
   const configure = Effect.gen(function* () {

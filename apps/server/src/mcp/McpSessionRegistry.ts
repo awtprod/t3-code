@@ -1,3 +1,4 @@
+import type { CapabilityName, RepositoryId, SpaceId } from "@command-center/core";
 import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -14,6 +15,16 @@ import * as McpProviderSession from "./McpProviderSession.ts";
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
+  readonly spaceId?: SpaceId;
+  readonly repositoryId?: RepositoryId;
+}
+
+export interface McpThreadScope {
+  readonly capabilities: ReadonlySet<CapabilityName>;
+  readonly spaceId: SpaceId;
+  readonly repositoryId?: RepositoryId;
+  readonly memoryWriteMode: McpInvocationContext.McpMemoryWriteMode;
 }
 
 export interface McpIssuedCredential {
@@ -28,6 +39,8 @@ export interface McpSessionRegistryShape {
   ) => Effect.Effect<McpInvocationContext.McpInvocationScope | undefined>;
   readonly revokeProviderSession: (providerSessionId: string) => Effect.Effect<void>;
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
+  readonly registerThreadScope: (threadId: ThreadId, scope: McpThreadScope) => Effect.Effect<void>;
+  readonly unregisterThreadScope: (threadId: ThreadId) => Effect.Effect<void>;
   readonly revokeAll: Effect.Effect<void>;
 }
 
@@ -44,6 +57,7 @@ interface CredentialRecord {
 
 interface RegistryState {
   readonly records: ReadonlyMap<string, CredentialRecord>;
+  readonly threadScopes: ReadonlyMap<ThreadId, McpThreadScope>;
 }
 
 export interface McpSessionRegistryOptions {
@@ -78,7 +92,10 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* environment.getEnvironmentId;
   const httpServer = yield* HttpServer.HttpServer;
-  const state = yield* SynchronizedRef.make<RegistryState>({ records: new Map() });
+  const state = yield* SynchronizedRef.make<RegistryState>({
+    records: new Map(),
+    threadScopes: new Map(),
+  });
   const currentTimeMillis = options.now ? Effect.sync(options.now) : Clock.currentTimeMillis;
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   const maximumLifetimeMs = options.maximumLifetimeMs ?? DEFAULT_MAXIMUM_LIFETIME_MS;
@@ -109,19 +126,27 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
       const expiresAt = issuedAt + maximumLifetimeMs;
+      const registeredScope = (yield* SynchronizedRef.get(state)).threadScopes.get(
+        request.threadId,
+      );
+      const spaceId = request.spaceId ?? registeredScope?.spaceId;
+      const repositoryId = request.repositoryId ?? registeredScope?.repositoryId;
       const scope: McpInvocationContext.McpInvocationScope = {
         environmentId,
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
-        capabilities: new Set(["preview"]),
+        capabilities: request.capabilities ?? registeredScope?.capabilities ?? new Set(["preview"]),
+        ...(spaceId === undefined ? {} : { spaceId }),
+        ...(repositoryId === undefined ? {} : { repositoryId }),
+        memoryWriteMode: registeredScope?.memoryWriteMode ?? "propose",
         issuedAt,
         expiresAt,
       };
-      yield* SynchronizedRef.update(state, ({ records }) => {
+      yield* SynchronizedRef.update(state, ({ records, threadScopes }) => {
         const next = new Map(pruneExpired(records, issuedAt));
         next.set(tokenHash, { tokenHash, scope, lastUsedAt: issuedAt });
-        return { records: next };
+        return { records: next, threadScopes };
       });
       return {
         config: {
@@ -142,20 +167,21 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       if (rawToken.length === 0) return undefined;
       const tokenHash = yield* hashToken(rawToken);
       const timestamp = yield* currentTimeMillis;
-      return yield* SynchronizedRef.modify(state, ({ records }) => {
+      return yield* SynchronizedRef.modify(state, ({ records, threadScopes }) => {
         const current = pruneExpired(records, timestamp);
         const record = current.get(tokenHash);
-        if (!record) return [undefined, { records: current }] as const;
+        if (!record) return [undefined, { records: current, threadScopes }] as const;
         const next = new Map(current);
         next.set(tokenHash, { ...record, lastUsedAt: timestamp });
-        return [record.scope, { records: next }] as const;
+        return [record.scope, { records: next, threadScopes }] as const;
       });
     },
   );
 
   const revokeWhere = (predicate: (record: CredentialRecord) => boolean) =>
-    SynchronizedRef.update(state, ({ records }) => ({
+    SynchronizedRef.update(state, ({ records, threadScopes }) => ({
       records: new Map(Array.from(records).filter(([, record]) => !predicate(record))),
+      threadScopes,
     }));
 
   return McpSessionRegistry.of({
@@ -169,7 +195,24 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
       yield* revokeWhere((record) => record.scope.threadId === threadId);
     }),
-    revokeAll: SynchronizedRef.set(state, { records: new Map() }),
+    registerThreadScope: Effect.fn("McpSessionRegistry.registerThreadScope")(
+      function* (threadId, scope) {
+        yield* SynchronizedRef.update(state, (current) => ({
+          ...current,
+          threadScopes: new Map(current.threadScopes).set(threadId, scope),
+        }));
+      },
+    ),
+    unregisterThreadScope: Effect.fn("McpSessionRegistry.unregisterThreadScope")(
+      function* (threadId) {
+        yield* SynchronizedRef.update(state, (current) => {
+          const threadScopes = new Map(current.threadScopes);
+          threadScopes.delete(threadId);
+          return { ...current, threadScopes };
+        });
+      },
+    ),
+    revokeAll: SynchronizedRef.set(state, { records: new Map(), threadScopes: new Map() }),
   });
 });
 
@@ -203,7 +246,19 @@ export const issueActiveMcpCredential = (
     : Effect.sync((): McpIssuedCredential | undefined => undefined);
 
 export const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
-  activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeThread(threadId) : Effect.void;
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry
+        .revokeThread(threadId)
+        .pipe(Effect.andThen(activeMcpSessionRegistry.unregisterThreadScope(threadId)))
+    : Effect.void;
+
+export const registerActiveMcpThreadScope = (
+  threadId: ThreadId,
+  scope: McpThreadScope,
+): Effect.Effect<boolean> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry.registerThreadScope(threadId, scope).pipe(Effect.as(true))
+    : Effect.succeed(false);
 
 export const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeAll : Effect.void;

@@ -37,6 +37,13 @@
     "dist:desktop:win:arm64": "node scripts/build-desktop-artifact.ts --platform win --target nsis --arch arm64",
     "dist:desktop:win:x64": "node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64",
     "release:smoke": "node scripts/release-smoke.ts",
+    "public:check": "node scripts/public-leak-scan.ts",
+    "migration:stage": "node scripts/command-center/migrate.ts",
+    "migration:import": "node scripts/command-center/import.ts",
+    "upstream:plan": "node scripts/command-center/upstream-sync.ts plan",
+    "operations:rollback-manifest": "node scripts/command-center/rollback-manifest.ts",
+    "operations:preflight": "node scripts/command-center/deployment-preflight.ts",
+    "credentials:webhooks:provision": "node apps/server/src/command-center/provisionWebhookCredentials.ts",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist .vite-plus apps/*/.vite-plus packages/*/.vite-plus",
     "sync:repos": "node scripts/sync-reference-repos.ts"
   },

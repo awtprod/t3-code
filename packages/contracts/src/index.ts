@@ -1,4 +1,6 @@
 export * from "./baseSchemas.ts";
+export * from "./commandCenter.ts";
+export * from "./commandCenterEvents.ts";
 export * from "./auth.ts";
 export * from "./environment.ts";
 export * from "./environmentHttp.ts";

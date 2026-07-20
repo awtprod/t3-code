@@ -19,6 +19,8 @@ type ChildProcessCommand = {
   readonly args: ReadonlyArray<string>;
   readonly options: {
     readonly shell?: boolean | string;
+    readonly env?: NodeJS.ProcessEnv;
+    readonly extendEnv?: boolean;
   };
 };
 
@@ -122,6 +124,28 @@ describe("runProcess", () => {
 
       expect(result.stdout).toBe("service ok");
     }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("can spawn with an exact scrubbed environment", () => {
+    const env = { HOME: "/isolated", PATH: "/usr/bin:/bin" };
+    const spawner = makeSpawner((command) =>
+      Effect.sync(() => {
+        expect(command.options.env).toEqual(env);
+        expect(command.options.extendEnv).toBe(false);
+        return makeHandle({ stdout: "isolated" });
+      }),
+    );
+
+    return runWith(spawner)({
+      command: "/usr/bin/example",
+      args: [],
+      env,
+      extendEnv: false,
+    }).pipe(
+      Effect.map((result) => {
+        expect(result.stdout).toBe("isolated");
+      }),
+    );
   });
 
   it.effect("resolves and escapes Windows command shims before spawning", () => {

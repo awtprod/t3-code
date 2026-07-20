@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -35,6 +36,7 @@ import * as Stream from "effect/Stream";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
+import { clearMcpProviderSession, setMcpProviderSession } from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -228,10 +230,14 @@ const validationLayer = it.layer(
       const codexConfig = decodeCodexSettings({});
       return yield* makeCodexAdapter(codexConfig, {
         makeRuntime: validationRuntimeFactory.factory,
+        commandCenterSourceHomePath: NodePath.join(process.cwd(), ".missing-command-center-auth"),
+        commandCenterRuntimeExecutablePath: process.execPath,
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "codex-adapter-validation-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -260,6 +266,86 @@ validationLayer("CodexAdapterLive validation", (it) => {
         }),
       );
       NodeAssert.equal(validationRuntimeFactory.factory.mock.calls.length, 0);
+    }),
+  );
+  it.effect("rejects full-access Command Center sessions before spawning Codex", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+      const result = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("cc:thread-full-access"),
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.equal(result.failure._tag, "ProviderAdapterValidationError");
+      NodeAssert.match(result.failure.issue, /cannot use full-access/u);
+      NodeAssert.equal(validationRuntimeFactory.factory.mock.calls.length, 0);
+    }),
+  );
+  it.effect("injects the admitted profile and scrubbed helper into Command Center Codex", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("cc:thread-isolated"),
+        runtimeMode: "auto-accept-edits",
+      });
+
+      const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      NodeAssert.equal(runtimeOptions?.permissionProfile, "command-center-isolated-write-v1");
+      NodeAssert.ok(runtimeOptions?.appServerArgs?.includes("--strict-config"));
+      NodeAssert.match(runtimeOptions?.appServerArgs?.join(" ") ?? "", /":root"="deny"/u);
+      NodeAssert.match(
+        runtimeOptions?.appServerArgs?.join(" ") ?? "",
+        /":workspace_roots"=\{"\."="write"\}/u,
+      );
+      NodeAssert.match(
+        runtimeOptions?.appServerArgs?.join(" ") ?? "",
+        /network=\{enabled=false\}/u,
+      );
+      NodeAssert.ok(runtimeOptions?.homePath?.includes("provider-homes/codex-command-center"));
+      NodeAssert.match(runtimeOptions?.environment?.PATH ?? "", /provider-bin/u);
+      NodeAssert.equal("OPENAI_API_KEY" in (runtimeOptions?.environment ?? {}), false);
+    }),
+  );
+  it.effect("delivers scoped MCP auth only to the parent behind the scrubbed helper", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("cc:thread-scoped-mcp");
+      setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-test"),
+        threadId,
+        providerSessionId: "provider-session-test",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:3773/api/mcp/session-test",
+        authorizationHeader: "Bearer scoped-test-token",
+      });
+
+      yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "approval-required",
+        })
+        .pipe(Effect.ensuring(Effect.sync(() => clearMcpProviderSession(threadId))));
+
+      const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      const args = runtimeOptions?.appServerArgs ?? [];
+      const resetIndex = args.indexOf("mcp_servers={}");
+      const scopedIndex = args.findIndex((argument) =>
+        argument.startsWith("mcp_servers.t3-code.url="),
+      );
+      NodeAssert.ok(resetIndex >= 0);
+      NodeAssert.ok(scopedIndex > resetIndex);
+      NodeAssert.equal(runtimeOptions?.environment?.T3_MCP_BEARER_TOKEN, "scoped-test-token");
+      NodeAssert.equal("OPENAI_API_KEY" in (runtimeOptions?.environment ?? {}), false);
     }),
   );
   it.effect("maps codex model options before starting a session", () =>

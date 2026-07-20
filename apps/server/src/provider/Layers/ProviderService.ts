@@ -55,6 +55,7 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import { commandCenterProviderIsolationIssue } from "../security/CommandCenterProviderIsolation.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
 /**
@@ -365,6 +366,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
     return yield* Effect.gen(function* () {
       const adapter = yield* registry.getByInstance(bindingInstanceId);
+      const runtimeMode = input.binding.runtimeMode ?? "full-access";
+      const isolationIssue = commandCenterProviderIsolationIssue({
+        threadId: input.binding.threadId,
+        provider: adapter.provider,
+        runtimeMode,
+      });
+      if (isolationIssue !== undefined) {
+        return yield* toValidationError(input.operation, isolationIssue);
+      }
       const hasResumeCursor =
         input.binding.resumeCursor !== null && input.binding.resumeCursor !== undefined;
       const hasActiveSession = yield* adapter.hasSession(input.binding.threadId);
@@ -406,7 +416,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...(persistedCwd ? { cwd: persistedCwd } : {}),
           ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
-          runtimeMode: input.binding.runtimeMode ?? "full-access",
+          runtimeMode,
         })
         .pipe(Effect.onError(() => clearMcpSession(input.binding.threadId)));
       if (resumed.provider !== adapter.provider) {
@@ -553,10 +563,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId,
           provider: resolvedProvider,
         };
+        const isolationIssue = commandCenterProviderIsolationIssue({
+          threadId,
+          provider: resolvedProvider,
+          runtimeMode: parsed.runtimeMode,
+        });
+        if (isolationIssue !== undefined) {
+          return yield* toValidationError("ProviderService.startSession", isolationIssue);
+        }
         if (!instanceInfo.enabled) {
           return yield* toValidationError(
             "ProviderService.startSession",
-            `Provider instance '${resolvedInstanceId}' is disabled in T3 Code settings.`,
+            `Provider instance '${resolvedInstanceId}' is disabled in Command Center settings.`,
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));

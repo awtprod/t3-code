@@ -51,6 +51,10 @@
       "types": "./src/state/connections.ts",
       "default": "./src/state/connections.ts"
     },
+    "./state/command-center": {
+      "types": "./src/state/commandCenter.ts",
+      "default": "./src/state/commandCenter.ts"
+    },
     "./state/entities": {
       "types": "./src/state/entities.ts",
       "default": "./src/state/entities.ts"

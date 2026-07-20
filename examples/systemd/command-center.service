@@ -1,0 +1,39 @@
+[Unit]
+Description=Command Center (loopback-only)
+Documentation=https://github.com/pingdotgg/t3code
+After=network-online.target
+Wants=network-online.target
+ConditionPathIsDirectory=%h/.command-center
+
+[Service]
+Type=simple
+UMask=0077
+WorkingDirectory=%h/.command-center
+EnvironmentFile=-%h/.command-center/config/server.env
+ExecStart=/usr/local/bin/t3 serve --base-dir %h/.command-center --host 127.0.0.1 --port 4530 --no-browser
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Runtime state stays in the non-Git runtime directory. The service may write
+# only its adjacent private config checkout so validated automation edits can
+# create local commits; repository push remains approval-gated and unavailable
+# to this unit's provider sandbox.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.command-center %h/.command-center-config
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

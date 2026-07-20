@@ -1,5 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import {
+  CommandCenterMcpCapabilityUnavailableError,
   EnvironmentId,
   PreviewAutomationUnavailableError,
   ProviderInstanceId,
@@ -21,7 +22,7 @@ it.effect("reports the scoped credential context when preview capability is unav
   };
 
   return Effect.gen(function* () {
-    const error = yield* McpInvocationContext.requireMcpCapability("preview").pipe(
+    const error = yield* McpInvocationContext.requirePreviewCapability().pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
       Effect.flip,
     );
@@ -35,5 +36,32 @@ it.effect("reports the scoped credential context when preview capability is unav
       providerInstanceId: invocation.providerInstanceId,
     });
     expect(error.message).toBe("MCP credential does not grant the preview capability.");
+  });
+});
+
+it.effect("denies automation runs without the exact scoped capability", () => {
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: ThreadId.make("thread-automation"),
+    providerSessionId: "provider-session-automation",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    capabilities: new Set(["cc.automations.read"]),
+    issuedAt: 1,
+    expiresAt: 2,
+  };
+
+  return Effect.gen(function* () {
+    const error = yield* McpInvocationContext.requireCommandCenterCapability(
+      "cc.automations.run",
+    ).pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.flip,
+    );
+    expect(error).toBeInstanceOf(CommandCenterMcpCapabilityUnavailableError);
+    expect(error).toMatchObject({
+      capability: "cc.automations.run",
+      threadId: invocation.threadId,
+      providerSessionId: invocation.providerSessionId,
+    });
   });
 });

@@ -32,7 +32,7 @@ export const hostFlag = Flag.string("host").pipe(
 );
 export const baseDirFlag = Flag.string("base-dir").pipe(
   Flag.withDescription(
-    "Explicit T3 Code data directory; runtime state is stored under userdata (equivalent to T3CODE_HOME).",
+    "Explicit Command Center runtime directory; state is stored under userdata (equivalent to COMMAND_CENTER_HOME).",
   ),
   Flag.optional,
 );
@@ -105,6 +105,10 @@ const EnvServerConfig = Config.all({
   port: Config.port("T3CODE_PORT").pipe(Config.option, Config.map(Option.getOrUndefined)),
   host: Config.string("T3CODE_HOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
   t3Home: Config.string("T3CODE_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  commandCenterHome: Config.string("COMMAND_CENTER_HOME").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
   devUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   noBrowser: Config.boolean("T3CODE_NO_BROWSER").pipe(
     Config.option,
@@ -263,6 +267,7 @@ export const resolveServerConfig = (
     );
     const explicitBaseDir = resolveOptionPrecedence(
       normalizedFlags.baseDir,
+      Option.fromUndefinedOr(env.commandCenterHome),
       Option.fromUndefinedOr(env.t3Home),
     ).pipe(Option.filter((value) => value.trim().length > 0));
     const baseDir = yield* resolveBaseDir(

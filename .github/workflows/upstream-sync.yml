@@ -1,0 +1,150 @@
+name: Upstream sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Exact fetched ref (refs/tags/... or refs/remotes/upstream/...)
+        required: true
+        type: string
+      expected_commit:
+        description: Full 40-character commit expected at that ref
+        required: true
+        type: string
+
+concurrency:
+  group: command-center-upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Validate, verify, and draft sync PR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout the public fork
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Fetch the canonical T3 Code repository
+        run: |
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/pingdotgg/t3code.git
+          else
+            git remote add upstream https://github.com/pingdotgg/t3code.git
+          fi
+          git fetch --prune --force upstream \
+            '+refs/heads/*:refs/remotes/upstream/*' \
+            '+refs/tags/*:refs/tags/*'
+
+      - name: Validate the exact target and ancestry
+        id: plan
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          node scripts/command-center/upstream-sync.ts plan \
+            --upstream-ref "$UPSTREAM_REF" \
+            --expected-commit "$EXPECTED_COMMIT" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Refuse to replace an existing sync branch
+        if: steps.plan.outputs.status == 'needs-sync'
+        env:
+          BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
+        run: |
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME"; then
+            echo "A sync branch already exists; review or remove it before dispatching again." >&2
+            exit 1
+          fi
+
+      - name: Merge upstream into an isolated branch
+        if: steps.plan.outputs.status == 'needs-sync'
+        env:
+          BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
+          TARGET_COMMIT: ${{ steps.plan.outputs.target_commit }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email command-center-sync@example.test
+          git switch --create "$BRANCH_NAME"
+          git merge --no-ff --no-edit "$TARGET_COMMIT"
+
+      - name: Setup Vite+
+        if: steps.plan.outputs.status == 'needs-sync'
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Require the private identifier denylist
+        if: steps.plan.outputs.status == 'needs-sync'
+        env:
+          COMMAND_CENTER_PUBLIC_DENYLIST: ${{ secrets.COMMAND_CENTER_PUBLIC_DENYLIST }}
+        run: |
+          if [ -z "$COMMAND_CENTER_PUBLIC_DENYLIST" ]; then
+            echo "Configure the COMMAND_CENTER_PUBLIC_DENYLIST Actions secret before syncing." >&2
+            exit 1
+          fi
+
+      - name: Verify the complete upstream delta against the old baseline
+        if: steps.plan.outputs.status == 'needs-sync'
+        run: vp run public:check
+        env:
+          COMMAND_CENTER_PUBLIC_DENYLIST: ${{ secrets.COMMAND_CENTER_PUBLIC_DENYLIST }}
+
+      - name: Scan the complete candidate history for secrets
+        if: steps.plan.outputs.status == 'needs-sync'
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+
+      - name: Verify upstream and Command Center behavior
+        if: steps.plan.outputs.status == 'needs-sync'
+        run: |
+          vp check
+          vpr typecheck
+          vp run test
+          vp run build:desktop
+
+      - name: Advance the baseline only after the upstream delta passes
+        if: steps.plan.outputs.status == 'needs-sync'
+        env:
+          TARGET_COMMIT: ${{ steps.plan.outputs.target_commit }}
+        run: |
+          node scripts/command-center/upstream-sync.ts advance-baseline \
+            --expected-commit "$TARGET_COMMIT"
+          git add .command-center-public-baseline
+          git commit -m "chore: advance public upstream baseline"
+
+      - name: Push the reviewed sync candidate
+        if: steps.plan.outputs.status == 'needs-sync'
+        env:
+          BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
+        run: git push --set-upstream origin "$BRANCH_NAME"
+
+      - name: Open a draft sync pull request
+        if: steps.plan.outputs.status == 'needs-sync'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+          TARGET_COMMIT: ${{ steps.plan.outputs.target_commit }}
+        run: |
+          gh pr create \
+            --base main \
+            --head "$BRANCH_NAME" \
+            --draft \
+            --title "chore: sync T3 Code upstream ${TARGET_COMMIT:0:12}" \
+            --body "Manual upstream sync from \`$UPSTREAM_REF\` at \`$TARGET_COMMIT\`. The workflow validated ancestry from the pinned public baseline and completed the public-boundary, check, type, test, and desktop-build gates. Preserve the upstream MIT license and attribution during review."
+
+      - name: Record a no-op
+        if: steps.plan.outputs.status == 'already-contained'
+        run: echo "The exact requested upstream commit is already contained in main; no branch or PR was created."

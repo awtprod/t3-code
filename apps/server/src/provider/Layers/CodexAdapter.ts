@@ -29,6 +29,7 @@ import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -38,8 +39,11 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { resolveCommandPath } from "@t3tools/shared/shell";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { expandHomePath } from "../../pathExpansion.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -61,6 +65,15 @@ import {
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  commandCenterCodexIsolation,
+  commandCenterProviderEnvironment,
+  commandCenterProviderIsolationIssue,
+  commandCenterProviderPlatformIssue,
+  isCommandCenterThreadId,
+  prepareCommandCenterCodexHome,
+  resolveCommandCenterManagedGitMetadata,
+} from "../security/CommandCenterProviderIsolation.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
@@ -82,6 +95,12 @@ export interface CodexAdapterLiveOptions {
   >;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /** Trusted source containing the auth.json copied into isolated Command Center homes. */
+  readonly commandCenterSourceHomePath?: string;
+  /** Test/embedding override for the exact executable admitted to the isolated runtime. */
+  readonly commandCenterRuntimeExecutablePath?: string;
+  /** Trusted test override; production Command Center isolation is Linux-only. */
+  readonly commandCenterPlatform?: NodeJS.Platform;
 }
 
 interface CodexAdapterSessionContext {
@@ -1351,8 +1370,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
+  const hostPlatform = options?.commandCenterPlatform ?? (yield* HostProcessPlatform);
   const serverConfig = yield* Effect.service(ServerConfig);
   const nativeEventLogger =
     options?.nativeEventLogger ??
@@ -1386,14 +1407,174 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
+        const commandCenterThread = isCommandCenterThreadId(input.threadId);
+        const sourceEnvironment = options?.environment ?? process.env;
+        const commandCenterIsolationIssue = commandCenterProviderIsolationIssue({
+          threadId: input.threadId,
+          provider: PROVIDER,
+          runtimeMode: input.runtimeMode,
+        });
+        if (commandCenterIsolationIssue !== undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: commandCenterIsolationIssue,
+          });
+        }
+        const platformIssue = commandCenterThread
+          ? commandCenterProviderPlatformIssue(hostPlatform)
+          : undefined;
+        if (platformIssue !== undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: platformIssue,
+          });
+        }
+        const cwd = input.cwd ?? process.cwd();
+        const managedGitMetadata = commandCenterThread
+          ? yield* resolveCommandCenterManagedGitMetadata({
+              baseDir: serverConfig.baseDir,
+              worktreesDir: serverConfig.worktreesDir,
+              cwd,
+              fileSystem,
+              path,
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: cause.issue,
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
+        const commandCenterRuntimeExecutable = commandCenterThread
+          ? yield* (
+              options?.commandCenterRuntimeExecutablePath
+                ? Effect.succeed(options.commandCenterRuntimeExecutablePath)
+                : resolveCommandPath(codexConfig.binaryPath, {
+                    env: sourceEnvironment,
+                    extendEnv: false,
+                  }).pipe(
+                    Effect.provideService(FileSystem.FileSystem, fileSystem),
+                    Effect.provideService(Path.Path, path),
+                  )
+            ).pipe(
+              Effect.flatMap((executablePath) => fileSystem.realPath(executablePath)),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue:
+                      "Command Center could not resolve the Codex runtime executable for its isolated permission profile.",
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
+        if (commandCenterThread && commandCenterRuntimeExecutable === undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "Command Center could not establish its canonical Codex runtime boundary.",
+          });
+        }
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const sourceCodexHome = (() => {
+          if (options?.commandCenterSourceHomePath) {
+            return path.resolve(expandHomePath(options.commandCenterSourceHomePath));
+          }
+          const configured = codexConfig.homePath.trim();
+          if (configured.length > 0) return path.resolve(expandHomePath(configured));
+          const environmentHome = sourceEnvironment.CODEX_HOME?.trim();
+          if (environmentHome) return path.resolve(expandHomePath(environmentHome));
+          const userHome = sourceEnvironment.HOME?.trim() || sourceEnvironment.USERPROFILE?.trim();
+          return userHome
+            ? path.join(path.resolve(userHome), ".codex")
+            : path.resolve(expandHomePath("~/.codex"));
+        })();
+        const commandCenterHome = commandCenterThread
+          ? yield* prepareCommandCenterCodexHome({
+              stateDir: serverConfig.stateDir,
+              sourceHomePath: sourceCodexHome,
+              threadId: input.threadId,
+              fileSystem,
+              path,
+              crypto,
+              runtimeExecutablePath: commandCenterRuntimeExecutable ?? codexConfig.binaryPath,
+              writableRoots: [cwd, serverConfig.worktreesDir],
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: cause.issue,
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
+        const commandCenterIsolation =
+          commandCenterThread && commandCenterRuntimeExecutable && commandCenterHome
+            ? commandCenterCodexIsolation(
+                input.runtimeMode,
+                managedGitMetadata,
+                commandCenterRuntimeExecutable,
+                commandCenterHome,
+              )
+            : undefined;
+        if (commandCenterThread && commandCenterIsolation === undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "Command Center could not establish its isolated Codex permission profile.",
+          });
+        }
+        const runtimeEnvironment = commandCenterHome
+          ? commandCenterProviderEnvironment({
+              source: sourceEnvironment,
+              ...commandCenterHome,
+              writableRoots: [cwd, serverConfig.worktreesDir],
+              ...(mcpSession
+                ? {
+                    mcpBearerToken: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
+                  }
+                : {}),
+            })
+          : mcpSession
+            ? {
+                ...sourceEnvironment,
+                T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
+              }
+            : options?.environment;
+        const mcpAppServerArgs = mcpSession
+          ? [
+              "-c",
+              `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
+              "-c",
+              'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+            ]
+          : [];
+        const appServerArgs = [
+          ...(commandCenterIsolation?.appServerArgs ?? []),
+          ...mcpAppServerArgs,
+        ];
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
-          cwd: input.cwd ?? process.cwd(),
-          binaryPath: codexConfig.binaryPath,
-          ...(options?.environment ? { environment: options.environment } : {}),
-          ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
+          cwd,
+          binaryPath: commandCenterRuntimeExecutable ?? codexConfig.binaryPath,
+          ...(runtimeEnvironment ? { environment: runtimeEnvironment } : {}),
+          ...(commandCenterHome
+            ? { homePath: commandCenterHome.homePath }
+            : codexConfig.homePath
+              ? { homePath: codexConfig.homePath }
+              : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
             : {}),
@@ -1402,20 +1583,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { model: input.modelSelection.model }
             : {}),
           ...(serviceTier ? { serviceTier } : {}),
-          ...(mcpSession
-            ? {
-                environment: {
-                  ...(options?.environment ?? process.env),
-                  T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
-                },
-                appServerArgs: [
-                  "-c",
-                  `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
-                  "-c",
-                  'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
-                ],
-              }
+          ...(commandCenterIsolation
+            ? { permissionProfile: commandCenterIsolation.permissionProfile }
             : {}),
+          ...(appServerArgs.length > 0 ? { appServerArgs } : {}),
         };
         const sessionScope = yield* Scope.make("sequential");
         let sessionScopeTransferred = false;

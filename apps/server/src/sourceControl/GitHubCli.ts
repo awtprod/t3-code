@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { hardenedGitSpawningCliEnvironment } from "../vcs/HostGitSecurity.ts";
 import {
   decodeGitHubPullRequestJson,
   decodeGitHubPullRequestListJson,
@@ -306,16 +307,26 @@ function deriveRepositoryCloneUrlsFromCreateOutput(
 export const make = Effect.gen(function* () {
   const process = yield* VcsProcess.VcsProcess;
 
-  const execute: GitHubCli["Service"]["execute"] = (input) =>
-    process
+  const execute: GitHubCli["Service"]["execute"] = (input) => {
+    const launchesGit = input.args[0] === "pr" && input.args[1] === "checkout";
+    return process
       .run({
         operation: "GitHubCli.execute",
         command: "gh",
         args: input.args,
         cwd: input.cwd,
+        ...(launchesGit
+          ? {
+              env: hardenedGitSpawningCliEnvironment("github", [globalThis.process.env], {
+                writableRoots: [input.cwd],
+              }),
+              extendEnv: false,
+            }
+          : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       })
       .pipe(Effect.mapError((error) => fromVcsError({ command: "gh", cwd: input.cwd }, error)));
+  };
 
   return GitHubCli.of({
     execute,

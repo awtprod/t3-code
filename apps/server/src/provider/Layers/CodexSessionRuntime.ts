@@ -38,7 +38,35 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import {
+  COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE,
+  COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE,
+} from "../security/CommandCenterProviderIsolation.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const decodeV2CommandExecResponse = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2CommandExecResponse,
+);
+const CodexThreadStartResponseWithPermissionProfile = EffectCodexSchema.V2ThreadStartResponse.pipe(
+  Schema.fieldsAssign({
+    activePermissionProfile: Schema.optionalKey(
+      EffectCodexSchema.V2ThreadStartResponse__ActivePermissionProfile,
+    ),
+  }),
+);
+const CodexThreadResumeResponseWithPermissionProfile =
+  EffectCodexSchema.V2ThreadResumeResponse.pipe(
+    Schema.fieldsAssign({
+      activePermissionProfile: Schema.optionalKey(
+        EffectCodexSchema.V2ThreadResumeResponse__ActivePermissionProfile,
+      ),
+    }),
+  );
+const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(
+  CodexThreadStartResponseWithPermissionProfile,
+);
+const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
+  CodexThreadResumeResponseWithPermissionProfile,
+);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -73,10 +101,17 @@ const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 const isCodexUserInputAnswerObject = Schema.is(CodexUserInputAnswerObject);
 
 // TODO: Verify `packages/effect-codex-app-server/scripts/generate.ts` so the generated
-// `V2TurnStartParams` schema includes `collaborationMode` directly.
+// request schemas include `collaborationMode` and `permissions` directly. Codex 0.144
+// advertises both fields, but the checked-in generator currently omits them.
+const CodexThreadStartParamsWithPermissionProfile = EffectCodexSchema.V2ThreadStartParams.pipe(
+  Schema.fieldsAssign({
+    permissions: Schema.optionalKey(Schema.String),
+  }),
+);
 const CodexTurnStartParamsWithCollaborationMode = EffectCodexSchema.V2TurnStartParams.pipe(
   Schema.fieldsAssign({
     collaborationMode: Schema.optionalKey(EffectCodexSchema.V2TurnStartParams__CollaborationMode),
+    permissions: Schema.optionalKey(Schema.String),
   }),
 );
 const decodeCodexTurnStartParamsWithCollaborationMode = Schema.decodeUnknownEffect(
@@ -85,6 +120,8 @@ const decodeCodexTurnStartParamsWithCollaborationMode = Schema.decodeUnknownEffe
 
 export type CodexTurnStartParamsWithCollaborationMode =
   typeof CodexTurnStartParamsWithCollaborationMode.Type;
+export type CodexThreadStartParamsWithPermissionProfile =
+  typeof CodexThreadStartParamsWithPermissionProfile.Type;
 
 export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
 type CodexServiceTier = NonNullable<EffectCodexSchema.V2ThreadStartParams["serviceTier"]>;
@@ -104,6 +141,7 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  readonly permissionProfile?: string;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -153,10 +191,38 @@ export interface CodexSessionRuntimeShape {
 
 export type CodexSessionRuntimeError =
   | CodexErrors.CodexAppServerError
+  | CodexSessionRuntimeIsolationProbeError
+  | CodexSessionRuntimePermissionProfileMismatchError
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
   | CodexSessionRuntimeThreadIdMissingError;
+
+export class CodexSessionRuntimeIsolationProbeError extends Schema.TaggedErrorClass<CodexSessionRuntimeIsolationProbeError>()(
+  "CodexSessionRuntimeIsolationProbeError",
+  {
+    issue: Schema.String,
+    exitCode: Schema.optional(Schema.Number),
+  },
+) {
+  override get message(): string {
+    return this.issue;
+  }
+}
+
+export class CodexSessionRuntimePermissionProfileMismatchError extends Schema.TaggedErrorClass<CodexSessionRuntimePermissionProfileMismatchError>()(
+  "CodexSessionRuntimePermissionProfileMismatchError",
+  {
+    expected: Schema.String,
+    actual: Schema.optional(Schema.String),
+  },
+) {
+  override get message(): string {
+    return this.actual === undefined
+      ? `Codex did not activate required permission profile '${this.expected}'.`
+      : `Codex activated permission profile '${this.actual}' instead of required profile '${this.expected}'.`;
+  }
+}
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -283,17 +349,20 @@ function runtimeModeToThreadConfig(input: RuntimeMode): {
   }
 }
 
-function buildThreadStartParams(input: {
+export function buildThreadStartParams(input: {
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
-}): EffectCodexSchema.V2ThreadStartParams {
+  readonly permissionProfile?: string;
+}): CodexThreadStartParamsWithPermissionProfile {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   return {
     cwd: input.cwd,
-    approvalPolicy: config.approvalPolicy,
-    sandbox: config.sandbox,
+    approvalPolicy: input.permissionProfile ? "never" : config.approvalPolicy,
+    ...(input.permissionProfile
+      ? { permissions: input.permissionProfile }
+      : { sandbox: config.sandbox }),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
   };
@@ -354,6 +423,7 @@ export function buildTurnStartParams(input: {
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly permissionProfile?: string;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -379,8 +449,10 @@ export function buildTurnStartParams(input: {
   return decodeCodexTurnStartParamsWithCollaborationMode({
     threadId: input.threadId,
     input: turnInput,
-    approvalPolicy: config.approvalPolicy,
-    sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
+    approvalPolicy: input.permissionProfile ? "never" : config.approvalPolicy,
+    ...(input.permissionProfile
+      ? { permissions: input.permissionProfile }
+      : { sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode) }),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
@@ -425,17 +497,127 @@ export function isRecoverableThreadResumeError(error: unknown): boolean {
 }
 
 type CodexThreadOpenResponse =
-  | CodexRpc.ClientRequestResponsesByMethod["thread/start"]
-  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
+  | typeof CodexThreadStartResponseWithPermissionProfile.Type
+  | typeof CodexThreadResumeResponseWithPermissionProfile.Type;
 
 type CodexThreadOpenMethod = "thread/start" | "thread/resume";
 
 interface CodexThreadOpenClient {
-  readonly request: <M extends CodexThreadOpenMethod>(
-    method: M,
-    payload: CodexRpc.ClientRequestParamsByMethod[M],
-  ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
+  readonly request: (
+    method: CodexThreadOpenMethod,
+    payload: unknown,
+  ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
 }
+
+interface CodexIsolationProbeClient {
+  readonly request: (
+    method: "command/exec",
+    payload: CodexRpc.ClientRequestParamsByMethod["command/exec"],
+  ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+}
+
+const COMMAND_CENTER_ISOLATION_PROBE_SUCCESS = "command-center-isolation-ok";
+const COMMAND_CENTER_ISOLATION_READ_DENIAL_READY = "command-center-isolation-read-denial-ready";
+
+function isCommandCenterPermissionProfile(
+  permissionProfile: string | undefined,
+): permissionProfile is
+  | typeof COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE
+  | typeof COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE {
+  return (
+    permissionProfile === COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE ||
+    permissionProfile === COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE
+  );
+}
+
+export function buildCommandCenterIsolationProbeScript(writable: boolean): string {
+  const workspaceCheck = writable
+    ? [
+        'probe_path=".cc-provider-isolation-probe.$$"',
+        "trap 'rm -f \"$probe_path\"' EXIT",
+        ': > "$probe_path" || exit 73',
+        'rm -f "$probe_path"',
+        "trap - EXIT",
+      ]
+    : [
+        'probe_path=".cc-provider-isolation-probe.$$"',
+        "trap 'rm -f \"$probe_path\"' EXIT",
+        'if : > "$probe_path" 2>/dev/null; then',
+        '  rm -f "$probe_path"',
+        "  trap - EXIT",
+        "  exit 74",
+        "fi",
+        `printf '${COMMAND_CENTER_ISOLATION_READ_DENIAL_READY}\\n'`,
+        "exit 73",
+      ];
+  return [
+    "set -eu",
+    "for environment_file in /proc/[0-9]*/environ; do",
+    '  if /usr/bin/tr "\\0" "\\n" < "$environment_file" 2>/dev/null | /usr/bin/grep -Eq "^(CC_PROVIDER_ISOLATION_SENTINEL|T3_MCP_BEARER_TOKEN|OPENAI_API_KEY)="; then',
+    "    exit 70",
+    "  fi",
+    "done",
+    'test ! -r "$HOME/auth.json" || exit 71',
+    'test ! -r "/proc/1/root$HOME/auth.json" || exit 72',
+    "if test -e .git; then",
+    "  test ! -w .git || exit 75",
+    "  /usr/bin/git status --porcelain=v1 >/dev/null",
+    "  git_dir=$(/usr/bin/git rev-parse --git-dir 2>/dev/null || true)",
+    '  test -z "$git_dir" || test ! -w "$git_dir" || exit 76',
+    "  common_git_dir=$(/usr/bin/git rev-parse --git-common-dir 2>/dev/null || true)",
+    '  test -z "$common_git_dir" || test ! -w "$common_git_dir" || exit 77',
+    "fi",
+    ...workspaceCheck,
+    `printf '${COMMAND_CENTER_ISOLATION_PROBE_SUCCESS}\\n'`,
+  ].join("\n");
+}
+
+/**
+ * Exercise the admitted profile through the same app-server command path used
+ * by Codex tools before any untrusted model turn can run.
+ */
+export const verifyCommandCenterCodexIsolation = Effect.fn(
+  "CodexSessionRuntime.verifyCommandCenterIsolation",
+)(function* (input: {
+  readonly client: CodexIsolationProbeClient;
+  readonly cwd: string;
+  readonly permissionProfile: string;
+}) {
+  const writable = input.permissionProfile === COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE;
+  if (!writable && input.permissionProfile !== COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE) {
+    return yield* new CodexSessionRuntimeIsolationProbeError({
+      issue: "Command Center received an unknown Codex isolation profile.",
+    });
+  }
+  const result = yield* input.client
+    .request("command/exec", {
+      command: ["/usr/bin/bash", "-c", buildCommandCenterIsolationProbeScript(writable)],
+      cwd: input.cwd,
+      timeoutMs: 10_000,
+    })
+    .pipe(
+      Effect.flatMap(decodeV2CommandExecResponse),
+      Effect.mapError((cause) =>
+        Schema.isSchemaError(cause)
+          ? CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+              "decode-response-payload",
+              cause,
+              { method: "command/exec" },
+            )
+          : cause,
+      ),
+    );
+  const accepted = writable
+    ? result.exitCode === 0 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_PROBE_SUCCESS
+    : result.exitCode === 73 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_READ_DENIAL_READY;
+  if (!accepted) {
+    return yield* new CodexSessionRuntimeIsolationProbeError({
+      issue:
+        "Command Center blocked the Codex session because its live filesystem, process, or environment isolation probe failed.",
+      exitCode: result.exitCode,
+    });
+  }
+});
 
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
@@ -445,35 +627,72 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
-}): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
+  readonly permissionProfile?: string;
+}): Effect.Effect<
+  CodexThreadOpenResponse,
+  CodexErrors.CodexAppServerError | CodexSessionRuntimePermissionProfileMismatchError
+> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
     cwd: input.cwd,
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
     serviceTier: input.serviceTier,
+    ...(input.permissionProfile ? { permissionProfile: input.permissionProfile } : {}),
   });
 
+  const request = (method: CodexThreadOpenMethod, payload: unknown) =>
+    input.client.request(method, payload).pipe(
+      Effect.flatMap((rawResponse) =>
+        (method === "thread/start"
+          ? decodeV2ThreadStartResponse(rawResponse)
+          : decodeV2ThreadResumeResponse(rawResponse)
+        ).pipe(
+          Effect.mapError((cause) =>
+            CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+              "decode-response-payload",
+              cause,
+              { method },
+            ),
+          ),
+        ),
+      ),
+      Effect.flatMap((response) => {
+        if (
+          input.permissionProfile !== undefined &&
+          response.activePermissionProfile?.id !== input.permissionProfile
+        ) {
+          return Effect.fail(
+            new CodexSessionRuntimePermissionProfileMismatchError({
+              expected: input.permissionProfile,
+              ...(response.activePermissionProfile?.id
+                ? { actual: response.activePermissionProfile.id }
+                : {}),
+            }),
+          );
+        }
+        return Effect.succeed(response);
+      }),
+    );
+
   if (resumeThreadId === undefined) {
-    return input.client.request("thread/start", startParams);
+    return request("thread/start", startParams);
   }
 
-  return input.client
-    .request("thread/resume", {
-      threadId: resumeThreadId,
-      ...startParams,
-    })
-    .pipe(
-      Effect.catchIf(isRecoverableThreadResumeError, (error) =>
-        Effect.logWarning("codex app-server thread resume fell back to fresh start", {
-          threadId: input.threadId,
-          requestedRuntimeMode: input.runtimeMode,
-          resumeThreadId,
-          recoverable: true,
-          cause: error,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
-      ),
-    );
+  return request("thread/resume", {
+    threadId: resumeThreadId,
+    ...startParams,
+  }).pipe(
+    Effect.catchIf(isRecoverableThreadResumeError, (error) =>
+      Effect.logWarning("codex app-server thread resume fell back to fresh start", {
+        threadId: input.threadId,
+        requestedRuntimeMode: input.runtimeMode,
+        resumeThreadId,
+        recoverable: true,
+        cause: error,
+      }).pipe(Effect.andThen(request("thread/start", startParams))),
+    ),
+  );
 };
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
@@ -712,9 +931,21 @@ export const makeCodexSessionRuntime = (
     // `child_process.spawn`; `expandHomePath` lets a configured
     // `CODEX_HOME=~/.codex_work` reach codex as an absolute path.
     const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
+    const isolationSentinel = isCommandCenterPermissionProfile(options.permissionProfile)
+      ? yield* crypto.randomUUIDv4.pipe(
+          Effect.mapError(
+            (cause) =>
+              new CodexErrors.CodexAppServerIdentifierGenerationError({
+                purpose: "provider-event",
+                cause,
+              }),
+          ),
+        )
+      : undefined;
     const env = {
       ...options.environment,
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+      ...(isolationSentinel ? { CC_PROVIDER_ISOLATION_SENTINEL: isolationSentinel } : {}),
     };
     const extendEnv = options.environment === undefined;
     const spawnCommand = yield* resolveSpawnCommand(
@@ -1200,16 +1431,25 @@ export const makeCodexSessionRuntime = (
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
 
+      if (isCommandCenterPermissionProfile(options.permissionProfile)) {
+        yield* verifyCommandCenterCodexIsolation({
+          client: client.raw,
+          cwd: options.cwd,
+          permissionProfile: options.permissionProfile,
+        });
+      }
+
       const requestedModel = normalizeCodexModelSlug(options.model);
 
       const opened = yield* openCodexThread({
-        client,
+        client: client.raw,
         threadId: options.threadId,
         runtimeMode: options.runtimeMode,
         cwd: options.cwd,
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
       });
 
       const providerThreadId = opened.thread.id;
@@ -1284,6 +1524,7 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+            ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(

@@ -7,9 +7,50 @@ on:
       - main
 
 jobs:
+  public_safety:
+    name: Public repository safety
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Scan Git history for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Enforce the public/private boundary
+        run: vp run public:check
+        env:
+          COMMAND_CENTER_PUBLIC_DENYLIST: ${{ secrets.COMMAND_CENTER_PUBLIC_DENYLIST }}
+
+      - name: Require the private identifier denylist on trusted changes
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          COMMAND_CENTER_PUBLIC_DENYLIST: ${{ secrets.COMMAND_CENTER_PUBLIC_DENYLIST }}
+        run: |
+          if [ -z "$COMMAND_CENTER_PUBLIC_DENYLIST" ]; then
+            echo "Configure the COMMAND_CENTER_PUBLIC_DENYLIST Actions secret before publishing." >&2
+            exit 1
+          fi
+
   check:
     name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -42,7 +83,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -63,7 +104,7 @@ jobs:
 
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis
-    runs-on: blacksmith-12vcpu-macos-26
+    runs-on: macos-26
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -84,7 +125,7 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout

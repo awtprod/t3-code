@@ -83,6 +83,8 @@ import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
+import { OrchestrationProjectionSnapshotQueryLive } from "./orchestration/Layers/ProjectionSnapshotQuery.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -92,6 +94,24 @@ import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
+import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
+import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
+import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
+import * as AutomationScopedShell from "./command-center/automation/AutomationScopedShell.ts";
+import * as VerifiedScopedShell from "./command-center/automation/VerifiedScopedShell.ts";
+import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as CommandCenterConfig from "./command-center/Config.ts";
+import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
+import * as RunDispatcher from "./command-center/RunDispatcher.ts";
+import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator.ts";
+import * as RunLifecycle from "./command-center/RunLifecycle.ts";
+import * as ReadinessGate from "./command-center/ReadinessGate.ts";
+import { webhookHttpRouteLayer } from "./command-center/WebhookHttp.ts";
 
 // Effect's default preemptive shutdown waits 20s before finalizing request scopes.
 // T3's primary transport is long-lived WebSocket RPC, whose Effect scope finalizer
@@ -217,6 +237,75 @@ const SourceControlRepositoryServiceLayerLive = SourceControlRepositoryService.l
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
 );
 
+const RunDispatcherLayerLive = RunDispatcher.layer.pipe(
+  Layer.provide(GitWorkflowLayerLive),
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(PersistenceLayerLive),
+  Layer.provide(SourceControlRepositoryServiceLayerLive),
+);
+
+const ConnectionHealthLayerLive = ConnectionHealth.layer.pipe(Layer.provide(PersistenceLayerLive));
+
+const CommandCenterConfigLayerLive = CommandCenterConfig.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+);
+
+const GoogleReadConnectorLayerLive = GoogleReadConnector.layer.pipe(
+  Layer.provideMerge(CommandCenterConfigLayerLive),
+  Layer.provide(ConnectionHealthLayerLive),
+  Layer.provide(ProcessRunner.layer),
+);
+
+const AutomationDefinitionConfigLayerLive = AutomationDefinitionConfig.layer.pipe(
+  Layer.provideMerge(CommandCenterConfigLayerLive),
+  Layer.provide(ProcessRunner.layer),
+);
+
+const AutomationScopedShellLayerLive = AutomationScopedShell.AutomationScopedShellLayer.pipe(
+  Layer.provide(VerifiedScopedShell.VerifiedLinuxScopedShellLayer),
+  Layer.provide(CommandCenterConfigLayerLive),
+  Layer.provide(RepositoryIdentityResolver.layer),
+  Layer.provide(PersistenceLayerLive),
+);
+
+const CommandCenterBaseLayerLive = Layer.mergeAll(
+  CommandCenterService.runtimeLayer,
+  CommandCenterEventStream.layer,
+  MemorySearchIndex.layer,
+  GoogleReadConnectorLayerLive,
+  AutomationDefinitionConfigLayerLive,
+  AutomationScopedShellLayerLive,
+);
+
+const CommandCenterCoreLayerLive = Layer.mergeAll(
+  CommandCenterBaseLayerLive,
+  AutomationRuns.safeRuntimeLayer.pipe(Layer.provide(CommandCenterBaseLayerLive)),
+);
+
+const AutomationRunsLayerLive = AutomationRuns.layer.pipe(
+  Layer.provideMerge(CommandCenterCoreLayerLive),
+);
+
+const AutomationTriggerCoordinatorLayerLive = AutomationTriggerCoordinator.layer.pipe(
+  Layer.provide(AutomationRunsLayerLive),
+);
+
+const AutomationScheduleRunnerLayerLive = AutomationScheduleRunner.layer.pipe(
+  Layer.provide(AutomationTriggerCoordinatorLayerLive),
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
+const AutomationRecoveryCoordinatorLayerLive = AutomationRecoveryCoordinator.layer.pipe(
+  Layer.provide(AutomationRunsLayerLive),
+);
+
+const RunLifecycleLayerLive = RunLifecycle.layer.pipe(
+  Layer.provide(ProviderLayerLive),
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
 const ReviewLayerLive = ReviewService.layer.pipe(
   Layer.provideMerge(GitVcsDriver.layer),
   Layer.provideMerge(VcsDriverRegistryLayerLive),
@@ -243,6 +332,41 @@ const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(PtyAdapterLive),
   Layer.provide(PortScannerLayerLive),
 );
+
+const ProjectSetupScriptRunnerLayerLive = ProjectSetupScriptRunner.layer.pipe(
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(TerminalLayerLive),
+);
+
+const OrchestrationCommandDispatcherLayerLive = OrchestrationCommandDispatcher.layer.pipe(
+  Layer.provide(GitWorkflowLayerLive),
+  Layer.provide(OrchestrationLayerLive),
+  Layer.provide(ProjectSetupScriptRunnerLayerLive),
+  Layer.provide(VcsStatusBroadcaster.layer.pipe(Layer.provide(GitWorkflowLayerLive))),
+  Layer.provide(WorkspacePaths.layer),
+);
+
+const CommandCenterRunDispatchLayerLive = Layer.mergeAll(
+  RunDispatcherLayerLive,
+  OrchestrationCommandDispatcherLayerLive,
+);
+
+const RunRecoveryCoordinatorLayerLive = RunRecoveryCoordinator.layer.pipe(
+  Layer.provide(CommandCenterRunDispatchLayerLive),
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(ProviderRegistryLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
+const CommandCenterLayerLive = Layer.mergeAll(
+  AutomationRunsLayerLive,
+  AutomationTriggerCoordinatorLayerLive,
+  AutomationScheduleRunnerLayerLive,
+  AutomationRecoveryCoordinatorLayerLive,
+  CommandCenterRunDispatchLayerLive,
+  RunRecoveryCoordinatorLayerLive,
+  RunLifecycleLayerLive,
+).pipe(Layer.provide(OrchestrationProjectionSnapshotQueryLive));
 
 const PreviewLayerLive = Layer.empty.pipe(
   Layer.provideMerge(PreviewManager.layer),
@@ -291,7 +415,11 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
+  Layer.provideMerge(
+    Layer.mergeAll(PreviewLayerLive, CommandCenterLayerLive).pipe(
+      Layer.provideMerge(TerminalLayerLive),
+    ),
+  ),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(Keybindings.layer),
   Layer.provideMerge(ProviderRegistryLive),
@@ -333,6 +461,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
+  Layer.provideMerge(ReadinessGate.layer),
   Layer.provideMerge(ProcessDiagnostics.layer),
   Layer.provideMerge(ProcessResourceMonitor.layer),
   Layer.provideMerge(TraceDiagnostics.layer),
@@ -358,6 +487,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     otlpTracesProxyRouteLayer,
     assetRouteLayer,
     staticAndDevRouteLayer,
+    webhookHttpRouteLayer,
     websocketRpcRouteLayer,
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),

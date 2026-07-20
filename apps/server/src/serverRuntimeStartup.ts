@@ -34,6 +34,16 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
+import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
+import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
+import {
+  type CommandCenterAuditChainVerification,
+  makeCommandCenterAuditLog,
+} from "./command-center/AuditLog.ts";
+import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator.ts";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -288,15 +298,83 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
     Effect.withSpan(`server.startup.${phase}`),
   );
 
+export class CommandCenterAuditIntegrityError extends Schema.TaggedErrorClass<CommandCenterAuditIntegrityError>()(
+  "CommandCenterAuditIntegrityError",
+  {
+    eventCount: Schema.Number,
+    headSequence: Schema.NullOr(Schema.Number),
+    invalidSequence: Schema.NullOr(Schema.Number),
+    reason: Schema.Literals(["previous-hash", "event-hash", "chain-head"]),
+  },
+) {
+  override get message(): string {
+    return "Command Center audit history failed integrity verification.";
+  }
+}
+
+/** Fail closed before starting any worker that can recover or dispatch work. */
+export const startCommandCenterWorkersAfterAuditVerification = <EV, RV, EW, RW>(
+  verification: Effect.Effect<CommandCenterAuditChainVerification, EV, RV>,
+  startWorkers: Effect.Effect<void, EW, RW>,
+) =>
+  Effect.gen(function* () {
+    const result = yield* runStartupPhase("command-center.audit.verify", verification);
+    if (!result.valid) {
+      return yield* new CommandCenterAuditIntegrityError({
+        eventCount: result.eventCount,
+        headSequence: result.headSequence,
+        invalidSequence: result.invalidSequence ?? null,
+        reason: result.reason ?? "chain-head",
+      });
+    }
+    yield* startWorkers;
+  });
+
+export const verifyConfiguredGoogleConnections = (
+  commandCenter: Pick<CommandCenterService.CommandCenterService["Service"], "queryConnections">,
+  googleReadConnector: Pick<GoogleReadConnector.GoogleReadConnector["Service"], "verify">,
+): Effect.Effect<void> =>
+  commandCenter.queryConnections({}).pipe(
+    Effect.flatMap(({ connections }) =>
+      Effect.forEach(
+        connections.filter((connection) => connection.kind === "google"),
+        (connection) =>
+          googleReadConnector
+            .verify({ spaceId: connection.spaceId, connectionId: connection.id })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Google read connection is unavailable.", {
+                  spaceId: connection.spaceId,
+                  connectionId: connection.id,
+                  reason: cause.reason,
+                }),
+              ),
+            ),
+        { concurrency: 4, discard: true },
+      ),
+    ),
+    Effect.catch((cause) =>
+      Effect.logWarning("Could not initialize Google read connection health.", { cause }),
+    ),
+  );
+
 export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const keybindings = yield* Keybindings.Keybindings;
   const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
   const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
+  const automationScheduleRunner = yield* AutomationScheduleRunner.AutomationScheduleRunner;
+  const automationRecoveryCoordinator =
+    yield* AutomationRecoveryCoordinator.AutomationRecoveryCoordinator;
+  const runRecoveryCoordinator = yield* RunRecoveryCoordinator.RunRecoveryCoordinator;
+  const commandCenter = yield* CommandCenterService.CommandCenterService;
+  const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
+  const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const crypto = yield* Crypto.Crypto;
+  const commandCenterAuditLog = yield* makeCommandCenterAuditLog;
 
   const commandGate = yield* makeCommandGate;
   const httpListening = yield* Deferred.make<void>();
@@ -337,12 +415,28 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-    yield* Effect.logDebug("startup phase: starting orchestration reactors");
-    yield* runStartupPhase(
-      "reactors.start",
+    yield* Effect.logDebug("startup phase: verifying audit history before workers");
+    yield* startCommandCenterWorkersAfterAuditVerification(
+      commandCenterAuditLog.verify,
       Effect.gen(function* () {
-        yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
-        yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
+        // Config reconciliation initially projects enabled connections as
+        // disconnected, and verification writes connection-health state. The
+        // audit chain must therefore be verified before either operation.
+        // Google remains optional: an unavailable account degrades only that
+        // connection after the integrity boundary has opened internally.
+        yield* runStartupPhase(
+          "command-center.google.verify",
+          verifyConfiguredGoogleConnections(commandCenter, googleReadConnector),
+        );
+        yield* runStartupPhase(
+          "reactors.start",
+          Effect.gen(function* () {
+            yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
+            yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
+            yield* automationScheduleRunner.start().pipe(Scope.provide(reactorScope));
+            yield* automationRecoveryCoordinator.start().pipe(Scope.provide(reactorScope));
+          }),
+        );
       }),
     );
 
@@ -404,6 +498,8 @@ export const make = Effect.gen(function* () {
         ),
       );
     }
+
+    yield* commandCenterReadiness.markReady;
   }).pipe(
     Effect.annotateSpans({
       "server.mode": serverConfig.mode,
@@ -424,12 +520,17 @@ export const make = Effect.gen(function* () {
           cause: startupExit.cause,
         });
         yield* Effect.logError("server runtime startup failed", { cause: startupExit.cause });
+        yield* commandCenterReadiness.markFailed;
         yield* commandGate.failCommandReady(error);
         return;
       }
 
       yield* Effect.logDebug("Accepting commands");
       yield* commandGate.signalCommandReady;
+      // Durable command Runs are recovered only after provider/config hydration
+      // and after the orchestration command gate opens. Starting earlier could
+      // turn a temporary boot dependency into a terminal dispatch failure.
+      yield* runRecoveryCoordinator.start().pipe(Scope.provide(reactorScope));
       yield* Effect.logDebug("startup phase: waiting for http listener");
       yield* runStartupPhase("http.wait", Deferred.await(httpListening));
       yield* Effect.logDebug("startup phase: publishing ready event");
@@ -459,7 +560,7 @@ export const make = Effect.gen(function* () {
         const startupBrowserTarget = yield* resolveStartupBrowserTarget;
         if (serverConfig.mode !== "desktop") {
           yield* Effect.logInfo(
-            "Authentication required. Open T3 Code using the pairing URL.",
+            "Authentication required. Open Command Center using the pairing URL.",
           ).pipe(Effect.annotateLogs({ pairingUrl: startupBrowserTarget }));
         }
         yield* runStartupPhase("browser.open", maybeOpenBrowser(startupBrowserTarget));

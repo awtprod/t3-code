@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
+  AuthAdministrativeScopes,
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
@@ -85,6 +86,7 @@ import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as CommandCenterReadiness from "./command-center/ReadinessGate.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -112,6 +114,13 @@ import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
+import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
+import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as Data from "effect/Data";
 
 const defaultProjectId = ProjectId.make("project-default");
@@ -519,6 +528,25 @@ const buildAppUnderTest = (options?: {
           ...options.layers.vcsStatusBroadcaster,
         })
       : VcsStatusBroadcaster.layer.pipe(Layer.provide(gitWorkflowLayer));
+    const projectSetupScriptRunnerLayer = Layer.mock(
+      ProjectSetupScriptRunner.ProjectSetupScriptRunner,
+    )({
+      runForThread: () => Effect.succeed({ status: "no-script" as const }),
+      ...options?.layers?.projectSetupScriptRunner,
+    });
+    const orchestrationEngineLayer = Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
+      readEvents: () => Stream.empty,
+      dispatch: () => Effect.succeed({ sequence: 0 }),
+      streamDomainEvents: Stream.empty,
+      ...options?.layers?.orchestrationEngine,
+    });
+    const orchestrationCommandDispatcherLayer = OrchestrationCommandDispatcher.layer.pipe(
+      Layer.provide(gitWorkflowLayer),
+      Layer.provide(projectSetupScriptRunnerLayer),
+      Layer.provide(vcsStatusBroadcasterLayer),
+      Layer.provide(orchestrationEngineLayer),
+      Layer.provide(WorkspacePaths.layer),
+    );
 
     const servedRoutesLayer = HttpRouter.serve(makeRoutesLayer, {
       disableListenLog: true,
@@ -637,12 +665,7 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
-      Layer.provide(
-        Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
-          runForThread: () => Effect.succeed({ status: "no-script" as const }),
-          ...options?.layers?.projectSetupScriptRunner,
-        }),
-      ),
+      Layer.provide(projectSetupScriptRunnerLayer),
       Layer.provide(
         Layer.mock(TerminalManager.TerminalManager)({
           ...options?.layers?.terminalManager,
@@ -670,16 +693,29 @@ const buildAppUnderTest = (options?: {
             registerTerminalProcesses: () => Effect.void,
             unregisterTerminal: () => Effect.void,
           }),
+          Layer.mock(CommandCenterService.CommandCenterService)({}),
+          Layer.mock(CommandCenterEventStream.CommandCenterEventStream)({
+            replay: () => Effect.succeed({ events: [], nextSequence: 0 }),
+            changes: () => Stream.empty,
+            timeline: () => Effect.succeed({ entries: [], nextSequence: 0 }),
+          }),
+          Layer.mock(AutomationRuns.AutomationRuns)({}),
+          Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+          Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+          Layer.mock(AutomationDefinitionConfig.AutomationDefinitionConfig)({}),
+          Layer.succeed(
+            CommandCenterReadiness.CommandCenterReadinessGate,
+            CommandCenterReadiness.CommandCenterReadinessGate.of({
+              state: Effect.succeed("ready"),
+              requireReady: Effect.void,
+              markReady: Effect.void,
+              markFailed: Effect.void,
+            }),
+          ),
+          orchestrationCommandDispatcherLayer,
         ),
       ),
-      Layer.provide(
-        Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
-          readEvents: () => Stream.empty,
-          dispatch: () => Effect.succeed({ sequence: 0 }),
-          streamDomainEvents: Stream.empty,
-          ...options?.layers?.orchestrationEngine,
-        }),
-      ),
+      Layer.provide(orchestrationEngineLayer),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
           getCommandReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
@@ -920,9 +956,7 @@ const exchangeAccessToken = (
         subject_token: credential,
         subject_token_type: AuthEnvironmentBootstrapTokenType,
         requested_token_type: AuthAccessTokenType,
-        scope:
-          options?.scope ??
-          "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
+        scope: options?.scope ?? AuthAdministrativeScopes.join(" "),
         ...(options?.clientMetadata?.label ? { client_label: options.clientMetadata.label } : {}),
         ...(options?.clientMetadata?.deviceType
           ? { client_device_type: options.clientMetadata.deviceType }
@@ -1364,10 +1398,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(tokenResponse.status, 200);
       assert.equal(tokenBody.issued_token_type, AuthAccessTokenType);
       assert.equal(tokenBody.token_type, "Bearer");
-      assert.equal(
-        tokenBody.scope,
-        "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
-      );
+      assert.equal(tokenBody.scope, AuthAdministrativeScopes.join(" "));
       assert.equal(typeof tokenBody.access_token, "string");
 
       const sessionUrl = yield* getHttpServerUrl("/api/auth/session");
@@ -1385,16 +1416,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(sessionResponse.status, 200);
       assert.equal(sessionBody.authenticated, true);
       assert.equal(sessionBody.sessionMethod, "bearer-access-token");
-      assert.deepEqual(sessionBody.scopes, [
-        "orchestration:read",
-        "orchestration:operate",
-        "terminal:operate",
-        "review:write",
-        "relay:read",
-        "access:read",
-        "access:write",
-        "relay:write",
-      ]);
+      assert.deepEqual(sessionBody.scopes, AuthAdministrativeScopes);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -1423,7 +1445,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         },
         scope: "orchestration:read orchestration:operate terminal:operate review:write",
         clientMetadata: {
-          label: "T3 Code Mobile",
+          label: "Command Center Mobile",
           deviceType: "mobile",
           os: "iOS",
         },
@@ -1450,7 +1472,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 200);
       assert.equal(clientsResponse.status, 200);
       assert.deepInclude(mobileClient?.client, {
-        label: "T3 Code Mobile",
+        label: "Command Center Mobile",
         deviceType: "mobile",
         os: "iOS",
         ipAddress: "127.0.0.1",
