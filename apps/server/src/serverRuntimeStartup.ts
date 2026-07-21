@@ -36,6 +36,7 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
+import * as StalledTurnWatchdog from "./orchestration/Services/StalledTurnWatchdog.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import {
@@ -365,6 +366,7 @@ export const make = Effect.gen(function* () {
   const keybindings = yield* Keybindings.Keybindings;
   const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
   const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
+  const stalledTurnWatchdog = yield* StalledTurnWatchdog.StalledTurnWatchdog;
   const automationScheduleRunner = yield* AutomationScheduleRunner.AutomationScheduleRunner;
   const automationRecoveryCoordinator =
     yield* AutomationRecoveryCoordinator.AutomationRecoveryCoordinator;
@@ -443,6 +445,7 @@ export const make = Effect.gen(function* () {
           Effect.gen(function* () {
             yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
             yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
+            yield* stalledTurnWatchdog.start().pipe(Scope.provide(reactorScope));
             yield* automationScheduleRunner.start().pipe(Scope.provide(reactorScope));
             yield* automationRecoveryCoordinator.start().pipe(Scope.provide(reactorScope));
           }),
