@@ -49,13 +49,20 @@ import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as ProcessRunner from "../processRunner.ts";
 import { makeCommandCenterAuditLog } from "./AuditLog.ts";
-import { CommandCenterConfig, layer as commandCenterConfigLayer } from "./Config.ts";
+import {
+  CommandCenterConfig,
+  type LoadedCommandCenterConfig,
+  layer as commandCenterConfigLayer,
+} from "./Config.ts";
 import { ConnectionHealth, layer as connectionHealthLayer } from "./ConnectionHealth.ts";
+import { configProjectionFingerprint, type ConfigSyncState } from "./ConfigProjection.ts";
 import { CommandApprovalPayload, makeCommandApprovalPayload } from "./CommandApproval.ts";
 
 const decodeSpace = Schema.decodeUnknownEffect(Space);
@@ -474,6 +481,9 @@ const decodeMemoryRow = Effect.fn("CommandCenter.decodeMemoryRow")(function* (ro
 
 export interface CommandCenterServiceShape {
   readonly bootstrap: Effect.Effect<CommandCenterBootstrap, CommandCenterError>;
+  readonly syncConfiguration: (input?: {
+    readonly force?: boolean;
+  }) => Effect.Effect<LoadedCommandCenterConfig, CommandCenterError>;
   readonly querySpaces: (
     input: CommandCenterSpacesQueryInput,
   ) => Effect.Effect<{ readonly spaces: ReadonlyArray<SpaceType> }, CommandCenterError>;
@@ -662,11 +672,35 @@ function inferClassifier(text: string, spaceId: SpaceType["id"] | undefined) {
       spaceId,
     };
   }
-  if (/\b(calendar|schedule|email|gmail|drive)\b/u.test(normalized)) {
+  if (/\b(email|gmail)\b/u.test(normalized)) {
     return {
       intent: "google" as const,
       actionKind: "read" as const,
-      capabilities: ["cc.connections.google.read" as const],
+      capabilities: ["cc.connections.google.gmail.read" as const],
+      spaceId,
+    };
+  }
+  if (/\b(calendar|schedule)\b/u.test(normalized)) {
+    return {
+      intent: "google" as const,
+      actionKind: "read" as const,
+      capabilities: ["cc.connections.google.calendar.read" as const],
+      spaceId,
+    };
+  }
+  if (/\b(drive|google docs?|google sheets?|google slides?)\b/u.test(normalized)) {
+    return {
+      intent: "google" as const,
+      actionKind: "read" as const,
+      capabilities: ["cc.connections.google.drive.read" as const],
+      spaceId,
+    };
+  }
+  if (/\bgoogle\b/u.test(normalized)) {
+    return {
+      intent: "google" as const,
+      actionKind: "unsupported" as const,
+      capabilities: [] as const,
       spaceId,
     };
   }
@@ -789,10 +823,12 @@ export const layer = Layer.effect(
       return Encoding.encodeHex(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
     });
     const auditLog = yield* makeCommandCenterAuditLog;
+    const configSyncState = yield* Ref.make<ConfigSyncState | null>(null);
+    const configSyncLock = yield* Semaphore.make(1);
 
-    const syncConfig = Effect.fn("CommandCenter.syncConfig")(
-      function* () {
-        const loaded = yield* config.load;
+    const reconcileConfig = Effect.fn("CommandCenter.reconcileConfig")(
+      function* (loaded: LoadedCommandCenterConfig) {
+        if (loaded.health.status !== "loaded") return loaded;
         const reconciledAt = DateTime.formatIso(yield* DateTime.now);
 
         // The private configuration is authoritative. Archive the current
@@ -806,7 +842,6 @@ export const layer = Layer.effect(
               SET lifecycle = 'archived', updated_at = ${reconciledAt}
               WHERE lifecycle = 'active'
             `;
-            if (loaded.health.status !== "loaded") return;
             for (const space of loaded.spaces) {
               yield* sql`
                 INSERT INTO command_center_spaces (
@@ -836,14 +871,6 @@ export const layer = Layer.effect(
             }
           }),
         );
-        if (loaded.health.status !== "loaded") {
-          yield* sql`
-            UPDATE command_center_connections
-            SET health = 'disconnected', checked_at = ${reconciledAt}
-          `;
-          yield* sql`UPDATE command_center_automations SET enabled = 0`;
-          return loaded;
-        }
         yield* connectionHealth.syncConfigured(loaded.connections);
         const configLoadedAt = reconciledAt;
         for (const automation of loaded.automations) {
@@ -888,10 +915,70 @@ export const layer = Layer.effect(
       Effect.mapError((cause) => persistenceError("Could not synchronize private config.", cause)),
     );
 
+    const syncConfig = Effect.fn("CommandCenter.syncConfig")(
+      function* (force: boolean) {
+        const cached = yield* Ref.get(configSyncState);
+        if (!force && cached !== null) return cached.observed;
+
+        return yield* configSyncLock.withPermits(1)(
+          Effect.gen(function* () {
+            const lockedCached = yield* Ref.get(configSyncState);
+            if (!force && lockedCached !== null) return lockedCached.observed;
+
+            const loaded = yield* config.load;
+            const fingerprint = configProjectionFingerprint(loaded);
+            if (lockedCached?.fingerprint === fingerprint) return lockedCached.observed;
+
+            if (loaded.health.status !== "loaded") {
+              yield* Ref.set(configSyncState, {
+                fingerprint,
+                observed: loaded,
+                projection: lockedCached?.projection ?? null,
+              });
+              return loaded;
+            }
+
+            yield* reconcileConfig(loaded);
+            yield* Ref.set(configSyncState, {
+              fingerprint,
+              observed: loaded,
+              projection: loaded,
+            });
+
+            if (lockedCached !== null) {
+              const fingerprintDigest = yield* digest(fingerprint);
+              const occurredAt = DateTime.formatIso(yield* DateTime.now);
+              yield* Effect.forEach(
+                loaded.spaces,
+                (space) =>
+                  auditLog.append({
+                    actorKind: "system",
+                    action: "cc.config.changed",
+                    spaceId: space.id,
+                    payload: {
+                      configHealth: loaded.health.status,
+                      fingerprint: fingerprintDigest,
+                    },
+                    occurredAt,
+                  }),
+                { discard: true },
+              );
+            }
+            return loaded;
+          }),
+        );
+      },
+      Effect.mapError((cause) =>
+        isCommandCenterError(cause)
+          ? cause
+          : persistenceError("Could not synchronize private config.", cause),
+      ),
+    );
+
     const requireConfiguredSpace = Effect.fn("CommandCenter.requireConfiguredSpace")(function* (
       spaceId: string,
     ) {
-      const loaded = yield* syncConfig();
+      const loaded = yield* syncConfig(false);
       if (loaded.health.status !== "loaded") {
         return yield* new CommandCenterError({
           reason: "config",
@@ -1246,7 +1333,7 @@ export const layer = Layer.effect(
     });
 
     const bootstrap = Effect.gen(function* () {
-      const loaded = yield* syncConfig();
+      const loaded = yield* syncConfig(false);
       yield* expireApprovals();
       const [spaces, items, runs, approvals, automations, connections, memories] =
         yield* Effect.all(
@@ -1368,7 +1455,7 @@ export const layer = Layer.effect(
 
     const queryArtifacts = Effect.fn("CommandCenter.queryArtifacts")(
       function* (input: CommandCenterArtifactsQueryInput) {
-        yield* syncConfig();
+        yield* syncConfig(false);
         const rows = yield* sql<ArtifactRow>`
           SELECT a.id, a.space_id AS "spaceId", a.run_id AS "runId", a.kind, a.title, a.uri,
             a.content_digest AS "contentDigest", a.provenance_json AS "provenanceJson",
@@ -1435,7 +1522,7 @@ export const layer = Layer.effect(
 
     const getAutomationApprovalBinding = Effect.fn("CommandCenter.getAutomationApprovalBinding")(
       function* (approvalId: string) {
-        yield* syncConfig();
+        yield* syncConfig(false);
         yield* expireApprovals();
         const rows = yield* sql<{
           readonly id: string;
@@ -1695,7 +1782,7 @@ export const layer = Layer.effect(
         input: CommandCenterCommandSubmitInput,
         providers: ReadonlyArray<ProviderAvailability>,
       ) {
-        const loaded = yield* syncConfig();
+        const loaded = yield* syncConfig(false);
         if (loaded.health.status !== "loaded") {
           return yield* new CommandCenterError({
             reason: "config",
@@ -1779,8 +1866,12 @@ export const layer = Layer.effect(
           classifier,
           providers,
         });
+        const requiredGoogleCapability =
+          classifier.intent === "google" && classifier.capabilities.length === 1
+            ? classifier.capabilities[0]
+            : undefined;
         const googleConnectionUnavailableReason =
-          classifier.intent === "google"
+          requiredGoogleCapability !== undefined
             ? yield* Effect.gen(function* () {
                 const assignedConnectionIds = new Set(selectedSpace.connectionIds);
                 const enabledConnections = loaded.connections.filter(
@@ -1788,7 +1879,7 @@ export const layer = Layer.effect(
                     connection.spaceId === selectedSpace.id &&
                     connection.kind === "google" &&
                     assignedConnectionIds.has(connection.id) &&
-                    connection.capabilities.includes("cc.connections.google.read"),
+                    connection.capabilities.includes(requiredGoogleCapability),
                 );
                 if (enabledConnections.length === 0) {
                   return selectedSpace.connectionIds.length === 0
@@ -1804,7 +1895,7 @@ export const layer = Layer.effect(
                     connection.kind === "google" &&
                     enabledIds.has(connection.id) &&
                     connection.health === "connected" &&
-                    connection.capabilities.includes("cc.connections.google.read"),
+                    connection.capabilities.includes(requiredGoogleCapability),
                 );
                 return healthy
                   ? undefined
@@ -1820,49 +1911,62 @@ export const layer = Layer.effect(
         const protectedExecutorUnavailable =
           resolvedRoute.risk === "approval-required" && resolvedRoute.status !== "blocked";
         const route: RouteDecisionType =
-          googleConnectionUnavailableReason !== undefined
+          classifier.intent === "google" && requiredGoogleCapability === undefined
             ? {
                 ...resolvedRoute,
                 status: "blocked",
                 approvalRequired: false,
-                // A configured assignment is routing metadata, not a grant.
-                // No connector capability enters the Run while its Connection
-                // is disabled or unhealthy.
                 capabilities: [],
-                reasons: [...resolvedRoute.reasons, googleConnectionUnavailableReason],
+                reasons: [
+                  ...resolvedRoute.reasons.filter(
+                    (reason) => reason !== "The requested action is blocked by policy",
+                  ),
+                  "Specify Gmail, Calendar, or Drive before using a Google connection",
+                ],
               }
-            : protectedExecutorUnavailable
+            : googleConnectionUnavailableReason !== undefined
               ? {
                   ...resolvedRoute,
                   status: "blocked",
                   approvalRequired: false,
+                  // A configured assignment is routing metadata, not a grant.
+                  // No connector capability enters the Run while its Connection
+                  // is disabled or unhealthy.
                   capabilities: [],
-                  reasons: [
-                    ...resolvedRoute.reasons,
-                    "No narrow server-mediated executor is available for this protected action in v1",
-                  ],
+                  reasons: [...resolvedRoute.reasons, googleConnectionUnavailableReason],
                 }
-              : disallowedCapabilities.length > 0
+              : protectedExecutorUnavailable
                 ? {
                     ...resolvedRoute,
                     status: "blocked",
                     approvalRequired: false,
+                    capabilities: [],
                     reasons: [
                       ...resolvedRoute.reasons,
-                      "A required capability is not allowed by the selected Space policy",
+                      "No narrow server-mediated executor is available for this protected action in v1",
                     ],
                   }
-                : policyRequiresApproval && resolvedRoute.status !== "blocked"
+                : disallowedCapabilities.length > 0
                   ? {
                       ...resolvedRoute,
-                      status: "approval-required",
-                      approvalRequired: true,
+                      status: "blocked",
+                      approvalRequired: false,
                       reasons: [
                         ...resolvedRoute.reasons,
-                        "The selected Space policy requires approval for this risk level",
+                        "A required capability is not allowed by the selected Space policy",
                       ],
                     }
-                  : resolvedRoute;
+                  : policyRequiresApproval && resolvedRoute.status !== "blocked"
+                    ? {
+                        ...resolvedRoute,
+                        status: "approval-required",
+                        approvalRequired: true,
+                        reasons: [
+                          ...resolvedRoute.reasons,
+                          "The selected Space policy requires approval for this risk level",
+                        ],
+                      }
+                    : resolvedRoute;
         const nowDateTime = yield* DateTime.now;
         const now = DateTime.formatIso(nowDateTime);
         const approvalExpiresAt = DateTime.formatIso(
@@ -2939,7 +3043,7 @@ export const layer = Layer.effect(
 
     const decideApproval = Effect.fn("CommandCenter.decideApproval")(
       function* (input: CommandCenterApprovalDecisionInput) {
-        const loaded = yield* syncConfig();
+        const loaded = yield* syncConfig(false);
         if (loaded.health.status !== "loaded") {
           return yield* new CommandCenterError({
             reason: "config",
@@ -3144,6 +3248,7 @@ export const layer = Layer.effect(
 
     return CommandCenterService.of({
       bootstrap,
+      syncConfiguration: (input) => syncConfig(input?.force ?? true),
       querySpaces,
       queryItems,
       queryRuns,

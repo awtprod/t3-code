@@ -170,6 +170,7 @@ it.effect("retains disabled connection assignments without projecting an active 
     expect(loaded.health.status).toBe("loaded");
     expect(loaded.spaces[0]?.connectionIds).toEqual(["google-enabled", "google-disabled"]);
     expect(loaded.connections.map((candidate) => candidate.id)).toEqual(["google-enabled"]);
+    expect(loaded.connections[0]?.capabilities).toEqual(["cc.connections.google.gmail.read"]);
   }).pipe(Effect.provide(configTestLayer)),
 );
 

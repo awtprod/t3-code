@@ -13,6 +13,7 @@ import {
   SquarePenIcon,
   TerminalIcon,
   TriangleAlertIcon,
+  WorkflowIcon,
 } from "lucide-react";
 import {
   ChangeRequestStatusIcon,
@@ -2865,6 +2866,11 @@ interface SidebarProjectsContentProps {
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
   props: SidebarProjectsContentProps,
 ) {
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const { isMobile, setOpenMobile } = useSidebar();
+  const closeMobileSidebar = useCallback(() => {
+    if (isMobile) setOpenMobile(false);
+  }, [isMobile, setOpenMobile]);
   const {
     showArm64IntelBuildWarning,
     arm64IntelBuildWarningDescription,
@@ -2930,6 +2936,32 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 
   return (
     <SidebarContent className="gap-0">
+      <SidebarGroup className="px-2 pb-1 pt-2">
+        <SidebarMenu>
+          {[
+            { to: "/" as const, label: "Command Center", icon: CommandIcon },
+            { to: "/new" as const, label: "New thread", icon: SquarePenIcon },
+            { to: "/automations" as const, label: "Automations", icon: WorkflowIcon },
+          ].map((item) => {
+            const active = pathname === item.to;
+            const Icon = item.icon;
+            return (
+              <SidebarMenuItem key={item.to}>
+                <SidebarMenuButton
+                  className="gap-2 px-2 py-1.5 text-muted-foreground/80 hover:bg-accent hover:text-foreground"
+                  isActive={active}
+                  render={<Link to={item.to} onClick={closeMobileSidebar} />}
+                  size="sm"
+                >
+                  <Icon className="size-3.5" />
+                  <span className="text-xs">{item.label}</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            );
+          })}
+        </SidebarMenu>
+      </SidebarGroup>
+      <SidebarSeparator className="mx-2 w-auto" />
       <SidebarGroup className="px-2 pt-2 pb-1">
         <SidebarMenu>
           <SidebarMenuItem>

@@ -6,7 +6,7 @@ import {
 } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AutomationsScreen } from "../command-center/automation/AutomationsScreen";
 import { resolveAutomationsScreenStatus } from "../command-center/automation/AutomationsScreen.logic";
@@ -56,6 +56,21 @@ function AutomationsRouteView() {
       ? null
       : commandCenterEnvironment.bootstrap({ environmentId, input: {} }),
   );
+  const eventQuery = useEnvironmentQuery(
+    environmentId === null
+      ? null
+      : commandCenterEnvironment.events({
+          environmentId,
+          input: { afterSequence: 0, batchSize: 200 },
+        }),
+  );
+  const lastRefreshSequence = useRef(0);
+  useEffect(() => {
+    const sequence = eventQuery.data?.sequence;
+    if (sequence === undefined || sequence <= lastRefreshSequence.current) return;
+    lastRefreshSequence.current = sequence;
+    bootstrapQuery.refresh();
+  }, [bootstrapQuery.refresh, eventQuery.data?.sequence]);
   const bootstrap = bootstrapQuery.data;
   const selectedAutomation = useMemo(
     () =>

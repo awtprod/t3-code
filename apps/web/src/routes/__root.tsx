@@ -115,10 +115,7 @@ function RootRouteView() {
     );
   }
 
-  const commandCenterRoute = pathname === "/" || pathname === "/automations";
-  const routedContent = commandCenterRoute ? (
-    <Outlet />
-  ) : (
+  const routedContent = (
     <AppSidebarLayout>
       <Outlet />
     </AppSidebarLayout>

@@ -46,7 +46,8 @@ const resetFixtures = Effect.fn("MemorySearchIndexTest.resetFixtures")(function*
   yield* sql`
     UPDATE command_center_memory_search_state
     SET generation = 0, rebuilt_at = NULL, document_count = 0,
-      trusted_count = 0, archive_count = 0
+      trusted_count = 0, archive_count = 0, source_generation = 0,
+      indexed_source_generation = 0
     WHERE singleton = 1
   `;
 });
@@ -188,6 +189,10 @@ layer("MemorySearchIndex", (it) => {
         `;
         assert.deepStrictEqual(candidate, [{ status: "candidate" }]);
         assert.strictEqual(indexedCandidate.length, 0);
+        const stateAfterReads = yield* sql<{ readonly generation: number }>`
+          SELECT generation FROM command_center_memory_search_state WHERE singleton = 1
+        `;
+        assert.deepStrictEqual(stateAfterReads, [{ generation: 1 }]);
       }),
   );
 
@@ -228,17 +233,15 @@ layer("MemorySearchIndex", (it) => {
         WHERE id = 'changing-memory'
       `;
 
-      assert.strictEqual(
-        (yield* index.search({ query: "cedar", spaceId: "sample-space" })).length,
-        0,
+      const concurrent = yield* Effect.all(
+        Array.from({ length: 4 }, () => index.search({ query: "maple", spaceId: "sample-space" })),
+        { concurrency: "unbounded" },
       );
-      assert.strictEqual(
-        (yield* index.search({ query: "maple", spaceId: "sample-space" })).length,
-        0,
-      );
-
-      const second = yield* index.rebuild();
-      assert.strictEqual(second.generation, 2);
+      assert.ok(concurrent.every((results) => results.length === 1));
+      const stateAfterMutation = yield* sql<{ readonly generation: number }>`
+        SELECT generation FROM command_center_memory_search_state WHERE singleton = 1
+      `;
+      assert.deepStrictEqual(stateAfterMutation, [{ generation: 2 }]);
       assert.strictEqual(
         (yield* index.search({ query: "cedar", spaceId: "sample-space" })).length,
         0,
@@ -260,13 +263,14 @@ layer("MemorySearchIndex", (it) => {
       assert.deepStrictEqual(projectionCounts, [{ documents: 1, embeddings: 0, ftsRows: 1 }]);
 
       yield* sql`DELETE FROM command_center_memories WHERE id = 'changing-memory'`;
-      const third = yield* index.rebuild();
-      assert.strictEqual(third.generation, 3);
-      assert.strictEqual(third.documentCount, 0);
       assert.strictEqual(
         (yield* index.search({ query: "maple", spaceId: "sample-space" })).length,
         0,
       );
+      const finalState = yield* sql<{ readonly generation: number }>`
+        SELECT generation FROM command_center_memory_search_state WHERE singleton = 1
+      `;
+      assert.deepStrictEqual(finalState, [{ generation: 3 }]);
     }),
   );
 

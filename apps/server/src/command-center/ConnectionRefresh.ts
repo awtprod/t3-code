@@ -8,6 +8,7 @@ import {
 import * as Effect from "effect/Effect";
 
 import type { GoogleReadConnectorError } from "./GoogleReadConnector.ts";
+import { hasAnyGoogleReadCapability } from "./GoogleCapabilities.ts";
 
 const publicVerificationMessage = (cause: GoogleReadConnectorError): string => {
   switch (cause.reason) {
@@ -60,10 +61,7 @@ export const refreshCommandCenterConnection = Effect.fn(
   input: CommandCenterConnectionRefreshInput,
 ): Effect.fn.Return<CommandCenterConnectionRefreshResult, CommandCenterError> {
   const configured = yield* findExactConnection(deps, input);
-  if (
-    configured.kind !== "google" ||
-    !configured.capabilities.includes("cc.connections.google.read")
-  ) {
+  if (configured.kind !== "google" || !hasAnyGoogleReadCapability(configured.capabilities)) {
     return yield* new CommandCenterError({
       reason: "validation",
       message: "This connection does not support read-only Google verification.",

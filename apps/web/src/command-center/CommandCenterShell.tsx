@@ -4,21 +4,19 @@ import {
   AlertCircleIcon,
   ArrowUpIcon,
   ArrowUpRightIcon,
-  BotIcon,
   CalendarDaysIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
   ChevronRightIcon,
-  CircleIcon,
   Clock3Icon,
   PanelRightIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
   TriangleAlertIcon,
-  UserRoundIcon,
   WifiIcon,
   WifiOffIcon,
   WorkflowIcon,
+  XIcon,
 } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 
@@ -26,13 +24,6 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger } from "~/components/ui/select";
-import {
-  Sheet,
-  SheetDescription,
-  SheetHeader,
-  SheetPopup,
-  SheetTitle,
-} from "~/components/ui/sheet";
 import { Textarea } from "~/components/ui/textarea";
 import { cn } from "~/lib/utils";
 
@@ -76,6 +67,14 @@ const RISK_VARIANT: Record<CommandCenterRisk, "error" | "success" | "warning"> =
 
 const AUTO_ROUTE_VALUE = "__command_center_auto__";
 
+export function shouldSubmitCommandComposerOnKeyDown(input: {
+  readonly key: string;
+  readonly shiftKey: boolean;
+  readonly isComposing: boolean;
+}): boolean {
+  return input.key === "Enter" && !input.shiftKey && !input.isComposing;
+}
+
 const ROUTE_SOURCE_LABEL: Record<CommandCenterRouteSource, string> = {
   auto: "Auto",
   classifier: "Inferred",
@@ -118,11 +117,21 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
   return (
     <details
       aria-label="Current command route"
-      className="group mx-auto w-full min-w-0 max-w-3xl overflow-hidden border-b border-border/60"
+      className="group w-full min-w-0 overflow-hidden border-b border-border/55"
     >
-      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 px-1 py-2.5 text-xs [&::-webkit-details-marker]:hidden">
+      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-2 py-3 text-sm text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
         <WorkflowIcon className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="shrink-0 font-medium">Route</span>
+        <span className="shrink-0 font-medium">
+          {receipt.status === "blocked"
+            ? "Routing blocked"
+            : receipt.status === "waiting-approval"
+              ? "Waiting for approval"
+              : receipt.status === "complete"
+                ? "Work complete"
+                : receipt.status === "running"
+                  ? "Working"
+                  : "Route ready"}
+        </span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground">
           {receipt.spaceName}
           {receipt.repositoryName ? ` / ${receipt.repositoryName}` : ""} · {receipt.providerName} ·{" "}
@@ -198,32 +207,13 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
   );
 }
 
-function MessageAvatar({ author }: Pick<CommandCenterMessage, "author">) {
-  return (
-    <span
-      className={cn(
-        "flex size-7 shrink-0 items-center justify-center rounded-lg border",
-        author === "assistant" && "border-primary/20 bg-primary/8 text-primary",
-        author === "user" && "border-border bg-muted text-muted-foreground",
-        author === "system" && "border-info/20 bg-info/8 text-info-foreground",
-      )}
-    >
-      {author === "assistant" ? (
-        <BotIcon className="size-3.5" />
-      ) : author === "user" ? (
-        <UserRoundIcon className="size-3.5" />
-      ) : (
-        <SparklesIcon className="size-3.5" />
-      )}
-    </span>
-  );
-}
-
 function Messages({
   messages,
+  receipt,
   onOpenLinkedThread,
 }: {
   readonly messages: readonly CommandCenterMessage[];
+  readonly receipt: CommandCenterRouteReceipt;
   readonly onOpenLinkedThread?: ((threadId: string) => void) | undefined;
 }) {
   if (messages.length === 0) {
@@ -244,46 +234,65 @@ function Messages({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6 sm:px-6">
-      {messages.map((message) => (
-        <article className="flex items-start gap-3" key={message.id}>
-          <MessageAvatar author={message.author} />
-          <div className="min-w-0 flex-1 pt-0.5">
-            <div className="flex items-baseline gap-2">
-              <span className="text-xs font-semibold">
-                {message.authorLabel ??
-                  (message.author === "assistant"
-                    ? "Command Center"
-                    : message.author === "user"
-                      ? "You"
-                      : "System")}
-              </span>
-              <span className="text-[0.6875rem] text-muted-foreground">
-                {message.createdAtLabel}
-              </span>
-            </div>
-            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-foreground/90">
+    <div className="mx-auto flex w-full max-w-5xl flex-col px-5 pb-10 pt-7 sm:px-8">
+      {messages.map((message) => {
+        if (message.author === "user") {
+          return (
+            <article className="mb-8 flex justify-end" key={message.id}>
+              <div className="max-w-[min(42rem,82%)] rounded-3xl border border-border/70 bg-muted/65 px-5 py-3 text-[0.9375rem] leading-6 shadow-xs sm:px-6 sm:py-3.5 sm:text-base">
+                <p className="whitespace-pre-wrap">{message.body}</p>
+              </div>
+            </article>
+          );
+        }
+
+        if (message.author === "system") {
+          if (message.authorLabel === "Route receipt") {
+            return (
+              <div className="mb-8" key={message.id}>
+                <RouteReceipt receipt={receipt} />
+              </div>
+            );
+          }
+          return (
+            <details className="group mb-8 border-b border-border/55" key={message.id}>
+              <summary className="flex cursor-pointer list-none items-center gap-2 py-3 text-sm text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+                <SparklesIcon className="size-3.5" />
+                <span>{message.authorLabel ?? "Command Center"}</span>
+                <span className="text-muted-foreground/65">{message.createdAtLabel}</span>
+                <ChevronRightIcon className="size-3.5 transition-transform group-open:rotate-90" />
+              </summary>
+              <p className="pb-4 text-sm leading-6 text-foreground/80">{message.body}</p>
+            </details>
+          );
+        }
+
+        return (
+          <article className="group/assistant mb-10 min-w-0" key={message.id}>
+            <p className="whitespace-pre-wrap text-[0.9375rem] leading-7 text-foreground/90 sm:text-base">
               {message.body}
             </p>
-            {message.linkedThreadId !== undefined && (
-              <Button
-                className="mt-2"
-                onClick={() => {
-                  if (message.linkedThreadId !== undefined) {
-                    onOpenLinkedThread?.(message.linkedThreadId);
-                  }
-                }}
-                size="xs"
-                type="button"
-                variant="outline"
-              >
-                Open linked work
-                <ArrowUpRightIcon />
-              </Button>
-            )}
-          </div>
-        </article>
-      ))}
+            <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground/70 opacity-0 transition-opacity focus-within:opacity-100 group-hover/assistant:opacity-100">
+              <span>{message.createdAtLabel}</span>
+              {message.linkedThreadId !== undefined && (
+                <Button
+                  onClick={() => {
+                    if (message.linkedThreadId !== undefined) {
+                      onOpenLinkedThread?.(message.linkedThreadId);
+                    }
+                  }}
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  Open linked work
+                  <ArrowUpRightIcon />
+                </Button>
+              )}
+            </div>
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -386,10 +395,10 @@ function Composer({
   };
 
   return (
-    <div className="min-w-0 shrink-0 bg-gradient-to-t from-background via-background to-transparent px-3 pb-3 pt-5 sm:px-5 sm:pb-5">
+    <div className="min-w-0 shrink-0 bg-gradient-to-t from-background via-background via-80% to-transparent px-5 pb-5 pt-6 sm:px-8 sm:pb-6">
       {configNotice ? (
         <div
-          className="mx-auto mb-2 flex w-full min-w-0 max-w-3xl items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+          className="mx-auto mb-3 flex w-full min-w-0 max-w-5xl items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
           data-slot="command-center-config-notice"
           role="status"
         >
@@ -405,23 +414,36 @@ function Composer({
       ) : null}
       <form
         aria-label="Command composer"
-        className="chat-composer-glass mx-auto w-full min-w-0 max-w-3xl rounded-[20px] border border-border p-2 focus-within:border-ring/45"
+        className="chat-composer-glass mx-auto w-full min-w-0 max-w-5xl rounded-3xl border border-border/80 p-2 shadow-[0_18px_52px_-28px_rgba(0,0,0,0.34)] transition-[border-color,box-shadow] focus-within:border-ring/65 focus-within:shadow-[0_18px_58px_-26px_rgba(37,99,235,0.2)]"
         onSubmit={submit}
       >
         <Textarea
           aria-label="Ask Command Center"
-          className="w-full min-w-0 border-0 bg-transparent shadow-none before:hidden focus-within:ring-0 dark:bg-transparent"
+          className="w-full min-w-0 border-0 bg-transparent px-3 pt-2 text-base shadow-none before:hidden focus-within:ring-0 sm:min-h-20 sm:px-4 sm:pt-2.5 dark:bg-transparent"
           disabled={isSubmitting}
           onChange={(event) => onDraftChange(event.target.value)}
-          placeholder="Ask, plan, build, or automate anything…"
+          onKeyDown={(event) => {
+            if (
+              !shouldSubmitCommandComposerOnKeyDown({
+                key: event.key,
+                shiftKey: event.shiftKey,
+                isComposing: event.nativeEvent.isComposing,
+              })
+            ) {
+              return;
+            }
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }}
+          placeholder="Ask anything, @tag files/folders, $use skills, or / for commands"
           rows={2}
           unstyled
           value={draft}
         />
-        <div className="flex items-end justify-between gap-2 px-1 pb-1">
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-visible">
+        <div className="flex items-end justify-between gap-3 px-2 pb-2 sm:px-3 sm:pb-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-visible">
             <details className="group/route relative">
-              <summary className="flex h-7 cursor-pointer list-none items-center gap-1.5 rounded-md px-2 text-[0.6875rem] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground [&::-webkit-details-marker]:hidden">
+              <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground [&::-webkit-details-marker]:hidden">
                 <SlidersHorizontalIcon className="size-3.5" />
                 <span>{selectedSpace?.name ?? "Auto route"}</span>
                 <ChevronDownIcon className="size-3 transition-transform group-open/route:rotate-180" />
@@ -467,7 +489,8 @@ function Composer({
                 </div>
               </div>
             </details>
-            <span className="hidden min-w-0 truncate text-[0.6875rem] text-muted-foreground sm:block">
+            <span aria-hidden="true" className="hidden h-5 w-px shrink-0 bg-border sm:block" />
+            <span className="hidden min-w-0 truncate px-1 text-xs text-muted-foreground sm:block">
               {selectedProvider?.label ?? receipt.providerName} ·{" "}
               {selectedModel?.label ?? receipt.modelName}
             </span>
@@ -478,16 +501,14 @@ function Composer({
           <Button
             aria-label={isSubmitting ? "Sending command" : "Send command"}
             disabled={!draft.trim() || isSubmitting || commandUnavailable}
-            size="icon"
+            className="rounded-full"
+            size="icon-lg"
             type="submit"
           >
             <ArrowUpIcon />
           </Button>
         </div>
       </form>
-      <p className="mx-auto mt-2 max-w-3xl text-center text-[0.625rem] text-muted-foreground/70">
-        High-impact actions pause for approval
-      </p>
     </div>
   );
 }
@@ -748,6 +769,7 @@ function ContextSection({
 
 interface ContextRailProps {
   readonly context: CommandCenterContext;
+  readonly onClose?: (() => void) | undefined;
   readonly onDecideApproval?: CommandCenterShellProps["onDecideApproval"];
   readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
   readonly onOpenRun?: ((runId: string) => void) | undefined;
@@ -759,6 +781,7 @@ interface ContextRailProps {
 
 function ContextRail({
   context,
+  onClose,
   onDecideApproval,
   onOpenNeedsYouItem,
   onOpenRun,
@@ -803,6 +826,17 @@ function ContextRail({
             </button>
           ))}
         </div>
+        {onClose ? (
+          <Button
+            aria-label="Close live context"
+            className="mb-1 ml-auto"
+            onClick={onClose}
+            size="icon-sm"
+            variant="ghost"
+          >
+            <XIcon />
+          </Button>
+        ) : null}
       </div>
       <ScrollArea className="min-h-0 flex-1" scrollFade>
         <div className="p-2">
@@ -855,33 +889,31 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
 
   return (
     <div
-      className="grid h-full min-h-0 w-full grid-cols-1 overflow-hidden bg-background text-foreground 2xl:grid-cols-[minmax(0,1fr)_19rem]"
+      className="relative flex h-full min-h-0 w-full overflow-hidden bg-background text-foreground"
       data-slot="command-center-shell"
     >
-      <main className="flex min-h-0 min-w-0 flex-col" data-slot="command-center-conversation">
-        <header className="flex h-[var(--workspace-topbar-height)] shrink-0 items-center gap-3 border-b bg-background/90 px-3 backdrop-blur-sm sm:px-4">
-          <CommandCenterHistoryMenu
-            activeConversationId={props.activeConversationId}
-            conversations={props.conversations}
-            onNewConversation={props.onNewConversation}
-            onSelectConversation={props.onSelectConversation}
-          />
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate font-heading text-sm font-semibold">
-              {props.conversationTitle}
-            </h1>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[0.6875rem] text-muted-foreground">
-              <CircleIcon className="size-1.5 fill-success text-success" />
-              Command is ready
-            </div>
+      <main
+        className="flex h-full min-h-0 min-w-0 flex-1 flex-col"
+        data-slot="command-center-conversation"
+      >
+        <header className="pointer-events-none absolute inset-x-0 top-0 z-30 flex h-14 items-center justify-between px-3 sm:px-5">
+          <div className="pointer-events-auto rounded-xl bg-background/70 backdrop-blur-md [&_[data-slot=popover-trigger]>span]:hidden [&_[data-slot=popover-trigger]]:size-8 [&_[data-slot=popover-trigger]]:px-0">
+            <CommandCenterHistoryMenu
+              activeConversationId={props.activeConversationId}
+              conversations={props.conversations}
+              onNewConversation={props.onNewConversation}
+              onSelectConversation={props.onSelectConversation}
+            />
           </div>
-          <span className="hidden text-[0.6875rem] text-muted-foreground sm:inline">
+          <span className="sr-only">
+            {props.conversationTitle}. Command is ready.{" "}
             {hasExplicitRoute ? "Explicit route" : "Auto route"}
           </span>
           <Button
-            aria-label="Open live context"
-            className="2xl:hidden"
-            onClick={() => setContextOpen(true)}
+            aria-expanded={contextOpen}
+            aria-label={contextOpen ? "Close live context" : "Open live context"}
+            className="pointer-events-auto rounded-full bg-background/70 backdrop-blur-md"
+            onClick={() => setContextOpen((open) => !open)}
             size="icon-sm"
             variant="ghost"
           >
@@ -892,12 +924,12 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
           </Button>
         </header>
 
-        <div className="shrink-0 px-3 sm:px-5">
-          <RouteReceipt receipt={props.routeReceipt} />
-        </div>
-
         <ScrollArea className="min-h-0 flex-1" scrollFade>
-          <Messages messages={props.messages} onOpenLinkedThread={props.onOpenLinkedThread} />
+          <Messages
+            messages={props.messages}
+            onOpenLinkedThread={props.onOpenLinkedThread}
+            receipt={props.routeReceipt}
+          />
         </ScrollArea>
 
         <Composer
@@ -915,29 +947,15 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
         />
       </main>
 
-      <aside className="hidden min-h-0 border-l 2xl:block" data-slot="command-center-context">
-        <ContextRail
-          context={props.context}
-          onDecideApproval={props.onDecideApproval}
-          onOpenConnection={props.onOpenConnection}
-          onOpenNeedsYouItem={props.onOpenNeedsYouItem}
-          onOpenRun={props.onOpenRun}
-          onOpenTodayItem={props.onOpenTodayItem}
-          onReviewMemory={props.onReviewMemory}
-          resolvingNeedsYouId={props.resolvingNeedsYouId}
-        />
-      </aside>
-
-      <Sheet onOpenChange={setContextOpen} open={contextOpen}>
-        <SheetPopup className="max-w-sm p-0" showCloseButton={false} side="right">
-          <SheetHeader className="sr-only">
-            <SheetTitle>Live context</SheetTitle>
-            <SheetDescription>
-              Review decisions, active work, today, and connections.
-            </SheetDescription>
-          </SheetHeader>
+      {contextOpen ? (
+        <aside
+          aria-label="Live context"
+          className="absolute inset-y-0 right-0 z-40 h-full w-[min(24rem,100%)] shrink-0 border-l bg-card shadow-xl md:static md:z-auto md:w-96 md:shadow-none"
+          data-slot="command-center-context"
+        >
           <ContextRail
             context={props.context}
+            onClose={() => setContextOpen(false)}
             onDecideApproval={props.onDecideApproval}
             onOpenConnection={props.onOpenConnection}
             onOpenNeedsYouItem={props.onOpenNeedsYouItem}
@@ -946,8 +964,8 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
             onReviewMemory={props.onReviewMemory}
             resolvingNeedsYouId={props.resolvingNeedsYouId}
           />
-        </SheetPopup>
-      </Sheet>
+        </aside>
+      ) : null}
     </div>
   );
 }

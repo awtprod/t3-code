@@ -1,5 +1,5 @@
 import {
-  CAPABILITY_NAMES,
+  ACTIVE_CAPABILITY_NAMES,
   type Automation as AutomationType,
   CapabilityName,
   Connection,
@@ -19,6 +19,10 @@ import * as Schema from "effect/Schema";
 import { ServerConfig } from "../config.ts";
 import { ProcessRunner } from "../processRunner.ts";
 import { loadCommittedAutomations } from "./automation/index.ts";
+import {
+  expandLegacyGoogleCapabilities,
+  googleCapabilitiesFromConfig,
+} from "./GoogleCapabilities.ts";
 
 const NonEmpty = Schema.String.check(Schema.isNonEmpty());
 
@@ -43,7 +47,9 @@ const RootConfigFile = Schema.Struct({
       kind: Schema.Literal("google"),
       accountLabel: NonEmpty,
       credentialRef: NonEmpty,
-      capabilities: Schema.Array(NonEmpty),
+      capabilities: Schema.Array(
+        Schema.Literals(["gmail.read", "calendar.read", "drive.read"]),
+      ).check(Schema.isNonEmpty()),
       enabled: Schema.Boolean,
     }),
   ),
@@ -258,7 +264,9 @@ export const layer = Layer.effect(
         kind: raw.kind,
         instructions,
         policy: {
-          allowedCapabilities: raw.policy?.allowedCapabilities ?? CAPABILITY_NAMES,
+          allowedCapabilities: expandLegacyGoogleCapabilities(
+            raw.policy?.allowedCapabilities ?? ACTIVE_CAPABILITY_NAMES,
+          ),
           autoRunRiskLevels: raw.policy?.autoRunRiskLevels ?? ["low", "reversible"],
         },
         modelDefaults:
@@ -336,7 +344,7 @@ export const layer = Layer.effect(
               spaceId: space.id,
               kind: connection.kind,
               label: connection.accountLabel,
-              capabilities: ["cc.connections.google.read"],
+              capabilities: googleCapabilitiesFromConfig(connection.capabilities),
               health: "disconnected",
             }).pipe(
               Effect.mapError((cause) =>

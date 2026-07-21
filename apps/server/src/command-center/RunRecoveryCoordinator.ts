@@ -267,7 +267,7 @@ export const make = Effect.gen(function* () {
     );
 
   return yield* makeWithDependencies({
-    syncConfiguration: commandCenter.querySpaces({}).pipe(Effect.asVoid),
+    syncConfiguration: commandCenter.syncConfiguration({ force: true }).pipe(Effect.asVoid),
     listCandidates,
     providerAvailability: providerRegistry.getProviders.pipe(
       Effect.map(commandCenterProviderAvailability),

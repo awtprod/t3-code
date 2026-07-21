@@ -12,6 +12,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -20,6 +21,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 
 import * as ServerConfig from "./config.ts";
@@ -428,6 +430,14 @@ export const make = Effect.gen(function* () {
           "command-center.google.verify",
           verifyConfiguredGoogleConnections(commandCenter, googleReadConnector),
         );
+        yield* Effect.forkScoped(
+          commandCenter.syncConfiguration({ force: true }).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Could not refresh Command Center configuration.", { cause }),
+            ),
+            Effect.repeat(Schedule.spaced(Duration.seconds(10))),
+          ),
+        ).pipe(Scope.provide(reactorScope));
         yield* runStartupPhase(
           "reactors.start",
           Effect.gen(function* () {

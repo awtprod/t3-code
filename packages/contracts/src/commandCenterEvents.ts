@@ -35,6 +35,7 @@ export const COMMAND_CENTER_EVENT_ACTIONS = {
   artifactChanged: "cc.artifacts.changed",
   itemChanged: "cc.items.changed",
   memoryChanged: "cc.memory.changed",
+  configChanged: "cc.config.changed",
   failureRecorded: "cc.failures.recorded",
   automationRunChanged: "cc.automations.run.changed",
 } as const;

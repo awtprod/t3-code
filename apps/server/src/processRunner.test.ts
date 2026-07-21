@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -82,6 +83,24 @@ const runWith =
     );
 
 describe("runProcess", () => {
+  it.effect("collects live stdout, stderr, and exit status together", () =>
+    Effect.gen(function* () {
+      const runner = yield* ProcessRunner.ProcessRunner;
+      const result = yield* runner.run({
+        command: "node",
+        args: ["-e", "process.stdout.write('out'); process.stderr.write('err')"],
+      });
+
+      expect(result).toMatchObject({
+        stdout: "out",
+        stderr: "err",
+        code: 0,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      });
+    }).pipe(Effect.provide(ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer)))),
+  );
+
   it.effect("collects stdout through an injected ChildProcessSpawner", () =>
     Effect.gen(function* () {
       const spawner = makeSpawner((command) =>

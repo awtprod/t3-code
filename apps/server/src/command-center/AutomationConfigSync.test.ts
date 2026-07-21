@@ -71,13 +71,17 @@ const validConfig = {
   health: { status: "loaded", configDirectory: "sample-config" },
 } satisfies LoadedCommandCenterConfig;
 
-it.effect("upserts committed automations and hides them when config becomes invalid", () => {
+it.effect("caches reads and keeps the last valid projection when config becomes invalid", () => {
   let current: LoadedCommandCenterConfig = validConfig;
+  let loadCount = 0;
   const configLayer = Layer.succeed(
     CommandCenterConfig,
     CommandCenterConfig.of({
       configDirectory: "sample-config",
-      load: Effect.sync(() => current),
+      load: Effect.sync(() => {
+        loadCount += 1;
+        return current;
+      }),
       resolveGoogleAccount: () => Effect.die("Google account resolution is not used here."),
     }),
   );
@@ -94,6 +98,8 @@ it.effect("upserts committed automations and hides them when config becomes inva
 
     const loaded = yield* service.bootstrap;
     expect(loaded.automations).toEqual([automation]);
+    yield* Effect.all([service.bootstrap, service.bootstrap, service.querySpaces({})]);
+    expect(loadCount).toBe(1);
     expect(
       yield* sql<{
         readonly enabled: number;
@@ -118,13 +124,15 @@ it.effect("upserts committed automations and hides them when config becomes inva
         message: "A committed graph is invalid.",
       },
     };
+    yield* service.syncConfiguration({ force: true });
     const invalid = yield* service.bootstrap;
     expect(invalid.configHealth.status).toBe("invalid");
-    expect(invalid.automations).toEqual([]);
+    expect(invalid.automations).toEqual([automation]);
+    expect(loadCount).toBe(2);
     expect(
       yield* sql<{ readonly enabled: number }>`
         SELECT enabled FROM command_center_automations WHERE id = ${automation.id}
       `,
-    ).toEqual([{ enabled: 0 }]);
+    ).toEqual([{ enabled: 1 }]);
   }).pipe(Effect.provide(testLayer));
 });

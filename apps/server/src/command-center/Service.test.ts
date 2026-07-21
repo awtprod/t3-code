@@ -155,7 +155,11 @@ const enabledGoogleConnection = decodeConnection({
   spaceId: personalSpace.id,
   kind: "google",
   label: "Example Google account",
-  capabilities: ["cc.connections.google.read"],
+  capabilities: [
+    "cc.connections.google.gmail.read",
+    "cc.connections.google.calendar.read",
+    "cc.connections.google.drive.read",
+  ],
   health: "disconnected",
 });
 
@@ -827,7 +831,7 @@ it.effect("grants a Google read capability only after the exact Connection is he
 
     expect(result.route.spaceId).toBe(personalSpace.id);
     expect(result.route.status).toBe("ready");
-    expect(result.route.capabilities).toEqual(["cc.connections.google.read"]);
+    expect(result.route.capabilities).toEqual(["cc.connections.google.calendar.read"]);
   }).pipe(
     Effect.provide(
       makeTestLayer({
@@ -1681,7 +1685,11 @@ it.effect("archives removed Spaces, hides their projections, and denies scoped r
       spaces: approvalGatedConfig.spaces.filter((space) => space.id !== studioSpace.id),
     };
 
+    yield* service.syncConfiguration({ force: true });
     const archived = yield* service.bootstrap;
+    const auditAfterSync = yield* sql<{ readonly count: number }>`
+      SELECT count(*) AS count FROM command_center_audit_events
+    `;
     expect(archived.spaces.some((space) => space.id === studioSpace.id)).toBe(false);
     expect(archived.items.some((candidate) => candidate.spaceId === studioSpace.id)).toBe(false);
     expect(archived.runs.some((candidate) => candidate.spaceId === studioSpace.id)).toBe(false);
@@ -1759,9 +1767,11 @@ it.effect("archives removed Spaces, hides their projections, and denies scoped r
       (yield* sql<{ readonly count: number }>`
         SELECT count(*) AS count FROM command_center_audit_events
       `)[0]?.count,
-    ).toBe(auditBefore[0]?.count);
+    ).toBe(auditAfterSync[0]?.count);
+    expect(auditAfterSync[0]?.count).toBeGreaterThan(auditBefore[0]?.count ?? 0);
 
     currentConfig = loadedConfig;
+    yield* service.syncConfiguration({ force: true });
     const recovered = yield* service.bootstrap;
     expect(recovered.spaces).toContainEqual(expect.objectContaining({ id: studioSpace.id }));
     expect(recovered.items).toContainEqual(expect.objectContaining({ id: item.id }));
@@ -1775,7 +1785,7 @@ it.effect("archives removed Spaces, hides their projections, and denies scoped r
 
 for (const unavailableStatus of ["missing", "invalid"] as const) {
   it.effect(
-    `${unavailableStatus} private config archives projections and denies scoped writes without data loss`,
+    `${unavailableStatus} private config keeps the last projection and denies scoped writes without data loss`,
     () => {
       const availableConfig: LoadedCommandCenterConfig = {
         ...loadedConfig,
@@ -1799,18 +1809,23 @@ for (const unavailableStatus of ["missing", "invalid"] as const) {
         `;
 
         currentConfig = unavailableConfig(unavailableStatus);
+        yield* service.syncConfiguration({ force: true });
         const unavailable = yield* service.bootstrap;
         expect(unavailable.configHealth.status).toBe(unavailableStatus);
-        expect(unavailable.spaces).toEqual([]);
-        expect(unavailable.items).toEqual([]);
+        expect(unavailable.spaces).toContainEqual(expect.objectContaining({ id: systemSpace.id }));
+        expect(unavailable.items).toContainEqual(expect.objectContaining({ id: existing.id }));
         expect(unavailable.runs).toEqual([]);
         expect(unavailable.approvals).toEqual([]);
         expect(unavailable.automations).toEqual([]);
-        expect(unavailable.connections).toEqual([]);
+        expect(unavailable.connections).toContainEqual(
+          expect.objectContaining({ id: enabledGoogleConnection.id }),
+        );
         expect(unavailable.memories).toEqual([]);
-        expect(yield* service.querySpaces({ spaceId: systemSpace.id })).toEqual({ spaces: [] });
+        expect(yield* service.querySpaces({ spaceId: systemSpace.id })).toEqual({
+          spaces: [expect.objectContaining({ id: systemSpace.id })],
+        });
         expect(yield* service.queryItems({ spaceId: systemSpace.id })).toEqual({
-          items: [],
+          items: [expect.objectContaining({ id: existing.id })],
         });
 
         const writeError = yield* service
@@ -1841,7 +1856,7 @@ for (const unavailableStatus of ["missing", "invalid"] as const) {
         `;
         expect(preserved).toEqual([
           {
-            lifecycle: "archived",
+            lifecycle: "active",
             existingItems: 1,
             deniedItems: 0,
             connections: 1,
@@ -1854,6 +1869,7 @@ for (const unavailableStatus of ["missing", "invalid"] as const) {
         ).toBe(auditBefore[0]?.count);
 
         currentConfig = availableConfig;
+        yield* service.syncConfiguration({ force: true });
         const recovered = yield* service.bootstrap;
         expect(recovered.spaces).toContainEqual(expect.objectContaining({ id: systemSpace.id }));
         expect(recovered.items).toContainEqual(expect.objectContaining({ id: existing.id }));

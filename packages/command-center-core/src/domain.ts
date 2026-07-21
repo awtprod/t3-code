@@ -62,6 +62,9 @@ export const CapabilityName = Schema.Literals([
   "cc.automations.write",
   "cc.automations.run",
   "cc.connections.google.read",
+  "cc.connections.google.gmail.read",
+  "cc.connections.google.calendar.read",
+  "cc.connections.google.drive.read",
   "cc.runs.start",
 ]);
 export type CapabilityName = typeof CapabilityName.Type;
@@ -75,8 +78,16 @@ export const CAPABILITY_NAMES: ReadonlyArray<CapabilityName> = [
   "cc.automations.write",
   "cc.automations.run",
   "cc.connections.google.read",
+  "cc.connections.google.gmail.read",
+  "cc.connections.google.calendar.read",
+  "cc.connections.google.drive.read",
   "cc.runs.start",
 ];
+
+/** Capabilities that may be issued for new routes and credentials. */
+export const ACTIVE_CAPABILITY_NAMES: ReadonlyArray<CapabilityName> = CAPABILITY_NAMES.filter(
+  (capability) => capability !== "cc.connections.google.read",
+);
 
 export const RiskLevel = Schema.Literals(["low", "reversible", "approval-required", "blocked"]);
 export type RiskLevel = typeof RiskLevel.Type;

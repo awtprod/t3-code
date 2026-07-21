@@ -15,6 +15,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as CommandCenterService from "./Service.ts";
 import * as GoogleReadConnector from "./GoogleReadConnector.ts";
+import { googleCapabilityForOperation } from "./GoogleCapabilities.ts";
 import {
   automationAgentCommandId,
   automationAgentRunResumeKey,
@@ -565,7 +566,25 @@ export const safeRuntimeLayer = Layer.unwrap(
           Effect.mapError((cause) => cause.message),
         ),
       googleRead: (input) =>
-        google.read(input).pipe(
+        Effect.gen(function* () {
+          const requiredCapability = googleCapabilityForOperation(input.operation);
+          const connections = (yield* commandCenter.queryConnections({
+            spaceId: input.spaceId,
+          })).connections;
+          const connection = connections.find(
+            (candidate) =>
+              candidate.id === input.connectionId &&
+              candidate.spaceId === input.spaceId &&
+              candidate.kind === "google" &&
+              candidate.capabilities.includes(requiredCapability),
+          );
+          if (connection === undefined) {
+            return yield* Effect.fail(
+              `The requested Google connection does not grant ${requiredCapability}.`,
+            );
+          }
+          return yield* google.read(input);
+        }).pipe(
           Effect.flatMap((result) =>
             result.operation === "drive.export"
               ? Effect.fail("Drive export is unavailable to generic automation connector nodes.")

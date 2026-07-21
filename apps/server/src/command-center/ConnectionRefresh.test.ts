@@ -20,7 +20,7 @@ const configured = decodeConnection({
   spaceId: input.spaceId,
   kind: "google",
   label: "Example account",
-  capabilities: ["cc.connections.google.read"],
+  capabilities: ["cc.connections.google.gmail.read"],
   health: "disconnected",
 });
 

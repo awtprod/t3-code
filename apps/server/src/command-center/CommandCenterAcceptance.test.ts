@@ -153,7 +153,11 @@ const googleConnection = decodeConnection({
   spaceId: personalSpace.id,
   kind: "google",
   label: "Example read-only account",
-  capabilities: ["cc.connections.google.read"],
+  capabilities: [
+    "cc.connections.google.gmail.read",
+    "cc.connections.google.calendar.read",
+    "cc.connections.google.drive.read",
+  ],
   health: "disconnected",
 });
 
@@ -501,6 +505,7 @@ const unusedAutomationRuns = AutomationRuns.AutomationRuns.of({
 });
 const unusedMemorySearch = MemorySearchIndex.MemorySearchIndex.of({
   rebuild: () => Effect.die("Memory indexing is not used by this acceptance path."),
+  ensureCurrent: () => Effect.die("Memory indexing is not used by this acceptance path."),
   search: () => Effect.die("Memory search is not used by this acceptance path."),
 });
 const unusedProviderRegistry = ProviderRegistry.ProviderRegistry.of({
@@ -944,6 +949,7 @@ describe("Command Center acceptance prompts", () => {
         {
           commandId: "acceptance-calendar-read",
           text: "Check tomorrow's calendar.",
+          capability: "cc.connections.google.calendar.read",
           request: decodeGoogleRead({
             spaceId: personalSpace.id,
             connectionId: googleConnection.id,
@@ -955,6 +961,7 @@ describe("Command Center acceptance prompts", () => {
         {
           commandId: "acceptance-email-read",
           text: "Find the email about the sample launch.",
+          capability: "cc.connections.google.gmail.read",
           request: decodeGoogleRead({
             spaceId: personalSpace.id,
             connectionId: googleConnection.id,
@@ -986,7 +993,7 @@ describe("Command Center acceptance prompts", () => {
           actionKind: "read",
           risk: "low",
           status: "ready",
-          capabilities: ["cc.connections.google.read"],
+          capabilities: [entry.capability],
         });
         expect(connector.calls).toHaveLength(index);
         expect(
@@ -1009,7 +1016,7 @@ describe("Command Center acceptance prompts", () => {
           memoryWriteMode: "propose",
         });
         expect(scope.repositoryId).toBeUndefined();
-        expect([...scope.capabilities]).toEqual(["cc.connections.google.read"]);
+        expect([...scope.capabilities]).toEqual([entry.capability]);
         expect(result).toMatchObject({
           operation: entry.request.operation,
           contentTrust: "untrusted-external",

@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { CommandCenterShell } from "./CommandCenterShell";
+import { CommandCenterShell, shouldSubmitCommandComposerOnKeyDown } from "./CommandCenterShell";
 import type { CommandCenterShellProps } from "./types";
 
 const FIXTURE: CommandCenterShellProps = {
@@ -68,6 +68,13 @@ const FIXTURE: CommandCenterShellProps = {
       body: "Prepare a concise release plan.",
       createdAtLabel: "10:30 AM",
       id: "message-1",
+    },
+    {
+      author: "system",
+      authorLabel: "Route receipt",
+      body: "The route is active.",
+      createdAtLabel: "10:30 AM",
+      id: "message-route-1",
     },
     {
       author: "assistant",
@@ -139,13 +146,43 @@ const FIXTURE: CommandCenterShellProps = {
 };
 
 describe("CommandCenterShell", () => {
+  it("submits on Enter but preserves Shift+Enter for a newline", () => {
+    expect(
+      shouldSubmitCommandComposerOnKeyDown({
+        key: "Enter",
+        shiftKey: false,
+        isComposing: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldSubmitCommandComposerOnKeyDown({
+        key: "Enter",
+        shiftKey: true,
+        isComposing: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldSubmitCommandComposerOnKeyDown({
+        key: "Enter",
+        shiftKey: false,
+        isComposing: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldSubmitCommandComposerOnKeyDown({
+        key: "a",
+        shiftKey: false,
+        isComposing: false,
+      }),
+    ).toBe(false);
+  });
+
   it("renders the T3 command surface and visible route receipt", () => {
     const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} />);
 
     expect(html).toContain('data-slot="command-center-shell"');
     expect(html).not.toContain('data-slot="command-center-navigation"');
     expect(html).toContain('data-slot="command-center-conversation"');
-    expect(html).toContain('data-slot="command-center-context"');
     expect(html).toContain('aria-label="Current command route"');
     expect(html).toContain("Low risk");
     expect(html).toContain("Studio");
@@ -155,22 +192,15 @@ describe("CommandCenterShell", () => {
     expect(html).toContain("cc.runs.start");
     expect(html).toContain("Open linked work");
     expect(html).toContain("Selected");
+    expect(html).toContain("max-w-5xl");
+    expect(html).toContain("justify-end");
   });
 
-  it("renders responsive controls and context summaries", () => {
+  it("renders lightweight conversation controls and route summaries", () => {
     const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} />);
 
     expect(html).toContain('aria-label="Open recent Command Center conversations"');
     expect(html).toContain('aria-label="Open live context"');
-    expect(html).toContain('aria-label="Context views"');
-    expect(html).toContain('role="tabpanel"');
-    expect(html).toContain("Needs You");
-    expect(html).toContain("Approve");
-    expect(html).toContain("Decline");
-    expect(html).toContain("Digest aaaaaaaaaaaa…");
-    expect(html).toContain("Active runs");
-    expect(html).toContain("Planning session");
-    expect(html).toContain("Calendar");
     expect(html).toContain('aria-label="Space route selection"');
     expect(html).toContain('aria-label="Repo route selection"');
     expect(html).toContain('aria-label="Project route selection"');
@@ -179,6 +209,7 @@ describe("CommandCenterShell", () => {
     expect(html).toContain("Route this command");
     expect(html).toContain("chat-composer-glass");
     expect(html).toContain("Explicit route");
+    expect(html).toContain("Ask anything, @tag files/folders, $use skills, or / for commands");
   });
 
   it("disables submission while the composer is empty", () => {

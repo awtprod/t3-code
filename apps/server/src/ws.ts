@@ -130,6 +130,7 @@ import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import { commandCenterProviderAvailability } from "./command-center/ProviderAvailability.ts";
@@ -801,7 +802,8 @@ const makeWsRpcLayer = (
         [COMMAND_CENTER_WS_METHODS.spacesSync]: (_input) =>
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.spacesSync,
-            commandCenter.bootstrap.pipe(
+            commandCenter.syncConfiguration({ force: true }).pipe(
+              Effect.andThen(commandCenter.bootstrap),
               Effect.map((snapshot) => ({
                 timezone: snapshot.timezone,
                 spaces: snapshot.spaces,
@@ -904,7 +906,6 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.memorySearch,
             commandCenter.querySpaces({ spaceId: input.spaceId }).pipe(
-              Effect.andThen(commandCenterMemorySearch.rebuild()),
               Effect.andThen(
                 commandCenterMemorySearch.search({
                   query: input.query,
@@ -1030,13 +1031,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.googleRead,
             Effect.gen(function* () {
+              const requiredCapability = googleCapabilityForOperation(input.operation);
               const connections = (yield* commandCenter.queryConnections({})).connections;
               const accountIsConfigured = connections.some(
                 (connection) =>
                   connection.kind === "google" &&
                   connection.id === input.connectionId &&
                   connection.spaceId === input.spaceId &&
-                  connection.capabilities.includes("cc.connections.google.read"),
+                  connection.capabilities.includes(requiredCapability),
               );
               if (!accountIsConfigured) {
                 return yield* new CommandCenterError({

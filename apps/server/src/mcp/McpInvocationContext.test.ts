@@ -65,3 +65,29 @@ it.effect("denies automation runs without the exact scoped capability", () => {
     });
   });
 });
+
+it.effect("does not let a Gmail-only credential cross into Calendar or Drive", () => {
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: ThreadId.make("thread-google"),
+    providerSessionId: "provider-session-google",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    capabilities: new Set(["cc.connections.google.gmail.read"]),
+    issuedAt: 1,
+    expiresAt: 2,
+  };
+
+  return Effect.gen(function* () {
+    yield* McpInvocationContext.requireCommandCenterCapability("cc.connections.google.gmail.read");
+    for (const capability of [
+      "cc.connections.google.calendar.read",
+      "cc.connections.google.drive.read",
+    ] as const) {
+      const error = yield* McpInvocationContext.requireCommandCenterCapability(capability).pipe(
+        Effect.flip,
+      );
+      expect(error).toBeInstanceOf(CommandCenterMcpCapabilityUnavailableError);
+      expect(error).toMatchObject({ capability });
+    }
+  }).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, invocation));
+});

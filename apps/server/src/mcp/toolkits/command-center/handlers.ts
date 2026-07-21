@@ -8,6 +8,7 @@ import { automationConfigIsSafeForGit } from "../../../command-center/automation
 import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
 import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
+import { googleCapabilityForOperation } from "../../../command-center/GoogleCapabilities.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import { commandCenterProviderAvailability } from "../../../command-center/ProviderAvailability.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
@@ -331,16 +332,6 @@ const handlers = {
       const index = yield* MemorySearchIndex.MemorySearchIndex;
       const service = yield* CommandCenterService.CommandCenterService;
       yield* service.querySpaces({ spaceId: SpaceId.make(scope.spaceId) });
-      yield* index.rebuild().pipe(
-        Effect.mapError(
-          (cause) =>
-            new CommandCenterError({
-              reason: cause.reason === "invalid-query" ? "validation" : "persistence",
-              message: cause.message,
-              cause,
-            }),
-        ),
-      );
       const results = yield* index
         .search({
           query: input.query,
@@ -572,7 +563,8 @@ const handlers = {
     }),
   cc_google_read: (input) =>
     Effect.gen(function* () {
-      const scope = yield* requireScopedSpace("cc.connections.google.read", input.spaceId);
+      const requiredCapability = googleCapabilityForOperation(input.operation);
+      const scope = yield* requireScopedSpace(requiredCapability, input.spaceId);
       const connector = yield* GoogleReadConnector.GoogleReadConnector;
       const service = yield* CommandCenterService.CommandCenterService;
       const snapshot = yield* service.bootstrap;
@@ -581,7 +573,7 @@ const handlers = {
           connection.spaceId === scope.spaceId &&
           connection.id === input.connectionId &&
           connection.kind === "google" &&
-          connection.capabilities.includes("cc.connections.google.read"),
+          connection.capabilities.includes(requiredCapability),
       );
       if (!accountIsScoped) {
         return yield* new CommandCenterError({

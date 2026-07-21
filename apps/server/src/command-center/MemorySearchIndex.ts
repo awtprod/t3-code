@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 export class MemorySearchIndexError extends Schema.TaggedErrorClass<MemorySearchIndexError>()(
@@ -53,6 +54,10 @@ export interface MemorySearchRebuildResult {
 
 export interface MemorySearchIndexShape {
   readonly rebuild: () => Effect.Effect<MemorySearchRebuildResult, MemorySearchIndexError>;
+  readonly ensureCurrent: () => Effect.Effect<
+    MemorySearchRebuildResult | null,
+    MemorySearchIndexError
+  >;
   readonly search: (
     input: MemorySearchInput,
   ) => Effect.Effect<ReadonlyArray<MemorySearchResult>, MemorySearchIndexError>;
@@ -96,6 +101,8 @@ interface SearchRow {
 
 interface SearchStateRow {
   readonly generation: number;
+  readonly sourceGeneration: number;
+  readonly indexedSourceGeneration: number;
 }
 
 const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
@@ -130,6 +137,7 @@ export const layer = Layer.effect(
     const sql = yield* SqlClient.SqlClient;
     const crypto = yield* Crypto.Crypto;
     const textEncoder = new TextEncoder();
+    const rebuildLock = yield* Semaphore.make(1);
 
     const digest = Effect.fn("MemorySearchIndex.digest")(function* (content: string) {
       const value = yield* crypto.digest("SHA-256", textEncoder.encode(content));
@@ -191,16 +199,18 @@ export const layer = Layer.effect(
 
           yield* sql`
               INSERT INTO command_center_memory_search_state (
-                singleton, generation, rebuilt_at, document_count, trusted_count, archive_count
+                singleton, generation, rebuilt_at, document_count, trusted_count, archive_count,
+                source_generation, indexed_source_generation
               ) VALUES (
-                1, 1, ${rebuiltAt}, ${sourceRows.length}, ${trustedCount}, ${archiveCount}
+                1, 1, ${rebuiltAt}, ${sourceRows.length}, ${trustedCount}, ${archiveCount}, 0, 0
               )
               ON CONFLICT(singleton) DO UPDATE SET
                 generation = generation + 1,
                 rebuilt_at = excluded.rebuilt_at,
                 document_count = excluded.document_count,
                 trusted_count = excluded.trusted_count,
-                archive_count = excluded.archive_count
+                archive_count = excluded.archive_count,
+                indexed_source_generation = source_generation
             `;
         }),
       );
@@ -226,6 +236,35 @@ export const layer = Layer.effect(
       } satisfies MemorySearchRebuildResult;
     }, Effect.mapError(persistenceError));
 
+    const readState = Effect.fn("MemorySearchIndex.readState")(function* () {
+      const rows = yield* sql<SearchStateRow>`
+        SELECT generation, source_generation AS "sourceGeneration",
+          indexed_source_generation AS "indexedSourceGeneration"
+        FROM command_center_memory_search_state
+        WHERE singleton = 1
+      `;
+      const state = rows[0];
+      if (state === undefined) {
+        return yield* new MemorySearchIndexError({
+          reason: "persistence",
+          message: "The memory search index state is missing.",
+        });
+      }
+      return state;
+    }, Effect.mapError(persistenceError));
+
+    const ensureCurrent = Effect.fn("MemorySearchIndex.ensureCurrent")(function* () {
+      const state = yield* readState();
+      if (state.sourceGeneration === state.indexedSourceGeneration) return null;
+      return yield* rebuildLock.withPermits(1)(
+        Effect.gen(function* () {
+          const lockedState = yield* readState();
+          if (lockedState.sourceGeneration === lockedState.indexedSourceGeneration) return null;
+          return yield* rebuild();
+        }),
+      );
+    }, Effect.mapError(persistenceError));
+
     const search = Effect.fn("MemorySearchIndex.search")(function* (input: MemorySearchInput) {
       const ftsQuery = compileFtsQuery(input.query);
       if (ftsQuery === undefined) {
@@ -234,6 +273,8 @@ export const layer = Layer.effect(
           message: "Memory search needs at least one letter or number.",
         });
       }
+
+      yield* ensureCurrent();
 
       const now = DateTime.formatIso(yield* DateTime.now);
       const repositoryRef = input.repositoryRef ?? null;
@@ -302,6 +343,6 @@ export const layer = Layer.effect(
       );
     }, Effect.mapError(persistenceError));
 
-    return MemorySearchIndex.of({ rebuild, search });
+    return MemorySearchIndex.of({ rebuild, ensureCurrent, search });
   }),
 );

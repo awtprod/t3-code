@@ -19,7 +19,6 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       label: "environment-data:command-center:bootstrap",
       tag: COMMAND_CENTER_WS_METHODS.bootstrap,
       staleTimeMs: 2_000,
-      refreshIntervalMs: 10_000,
     }),
     submit: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:submit",

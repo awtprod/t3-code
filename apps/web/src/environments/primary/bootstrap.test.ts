@@ -156,6 +156,7 @@ describe("environmentBootstrap", () => {
   });
 
   it("uses the current origin as the descriptor base for local dev environments", async () => {
+    vi.stubEnv("VITE_DEV_SERVER_URL", "http://localhost:5735");
     installTestBrowser("http://localhost:5735/");
     await installDescriptorApi();
 
@@ -163,6 +164,7 @@ describe("environmentBootstrap", () => {
     expect(resolvePrimaryEnvironmentHttpUrl("/.well-known/t3/environment")).toBe(
       "http://localhost:5735/.well-known/t3/environment",
     );
+    expect(getPrimaryKnownEnvironment()?.target.wsBaseUrl).toBe("ws://localhost:5735/");
   });
 
   it("uses the vite proxy for desktop-managed loopback descriptor requests during local dev", async () => {
@@ -190,6 +192,7 @@ describe("environmentBootstrap", () => {
     expect(resolvePrimaryEnvironmentHttpUrl("/.well-known/t3/environment")).toBe(
       "http://127.0.0.1:5733/.well-known/t3/environment",
     );
+    expect(getPrimaryKnownEnvironment()?.target.wsBaseUrl).toBe("ws://127.0.0.1:5733/");
   });
 
   it("retains the URL parser cause without exposing the configured URL in its message", () => {

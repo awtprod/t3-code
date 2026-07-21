@@ -91,7 +91,7 @@ const devProxyTarget = resolveDevProxyTarget(configuredWsUrl);
 export default defineConfig(() => {
   return {
     plugins: [
-      tanstackRouter(),
+      tanstackRouter({ target: "react", autoCodeSplitting: true }),
       react(),
       babel({
         // We need to be explicit about the parser options after moving to @vitejs/plugin-react v6.0.0
@@ -159,6 +159,11 @@ export default defineConfig(() => {
               "/attachments": {
                 target: devProxyTarget,
                 changeOrigin: true,
+              },
+              "/ws": {
+                target: devProxyTarget,
+                changeOrigin: true,
+                ws: true,
               },
             },
           }

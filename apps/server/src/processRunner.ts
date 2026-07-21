@@ -350,7 +350,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
           ),
         );
 
-  const [stdout, stderr] = yield* Effect.all(
+  const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectText({
         command: input.command,
@@ -375,23 +375,22 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
         truncatedMarker,
       }),
       writeStdin,
+      child.exitCode.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProcessReadError({
+              command: input.command,
+              argumentCount: input.args.length,
+              cwd: input.cwd,
+              spawnCwd: input.spawnCwd,
+              stream: "exitCode",
+              cause,
+            }),
+        ),
+      ),
     ],
     { concurrency: "unbounded" },
-  );
-
-  const exitCode = yield* child.exitCode.pipe(
-    Effect.mapError(
-      (cause) =>
-        new ProcessReadError({
-          command: input.command,
-          argumentCount: input.args.length,
-          cwd: input.cwd,
-          spawnCwd: input.spawnCwd,
-          stream: "exitCode",
-          cause,
-        }),
-    ),
-  );
+  ).pipe(Effect.map(([stdout, stderr, _stdin, exitCode]) => [stdout, stderr, exitCode] as const));
 
   return {
     stdout: stdout.text,

@@ -37,7 +37,7 @@ const connection = decodeConnection({
   spaceId: space.id,
   kind: "google",
   label: "Primary account",
-  capabilities: ["cc.connections.google.read"],
+  capabilities: ["cc.connections.google.gmail.read"],
   health: "disconnected",
 });
 
@@ -89,6 +89,7 @@ it.effect(
         spaces: [{ ...space, connectionIds: [] }],
         connections: [],
       };
+      yield* service.syncConfiguration({ force: true });
       expect((yield* service.bootstrap).connections).toEqual([]);
 
       current = {
@@ -103,6 +104,7 @@ it.effect(
           message: "Invalid private configuration.",
         },
       };
+      yield* service.syncConfiguration({ force: true });
       expect((yield* service.bootstrap).connections).toEqual([]);
     }).pipe(Effect.provide(testLayer));
   },
