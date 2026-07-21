@@ -18,6 +18,7 @@ import * as Schema from "effect/Schema";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { ChildProcess } from "effect/unstable/process";
 
+import * as DevProcessGuard from "./lib/dev-process-guard.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 
 Object.assign(process.env, loadRepoEnv());
@@ -533,56 +534,90 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       return;
     }
 
-    const spawnCommand = yield* resolveSpawnCommand(
-      "vp",
-      [...MODE_ARGS[input.mode], ...input.runArgs],
-      { env },
-    );
-    const processContext = {
-      mode: input.mode,
-      executable: "vp" as const,
-      argumentCount: spawnCommand.args.length,
-      shell: spawnCommand.shell,
-    } as const;
-    const child = yield* ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-      env,
-      extendEnv: false,
-      shell: spawnCommand.shell,
-      // Keep Vite+ in the same process group so terminal signals (Ctrl+C)
-      // reach it directly. Effect defaults to detached: true on non-Windows,
-      // which would put the runner in a new group and require manual forwarding.
-      detached: false,
-      forceKillAfter: "1500 millis",
-    }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new DevRunnerProcessError({
-            ...processContext,
-            operation: "spawn",
-            cause,
-          }),
-      ),
+    // Reap a stale dev tree for this same data directory before launching a new
+    // one. Without this, killing only the previous dev-runner pid leaves its
+    // `node --watch` watcher orphaned, respawning a server against this DB — the
+    // source of duplicate/leaked dev servers. Same-home only: a runner on a
+    // different --home-dir is a different DB and is left alone (its lock lives
+    // under its own userdata). See scripts/lib/dev-process-guard.ts.
+    const lockPath = DevProcessGuard.devRunnerLockPath(baseDir);
+    const staleLock = yield* Effect.sync(() => {
+      const existing = DevProcessGuard.readLock(lockPath);
+      return existing === undefined ? undefined : DevProcessGuard.staleRunnerFromLock(existing);
+    });
+    if (staleLock !== undefined) {
+      yield* Effect.logInfo(
+        `[dev-runner] reaping stale dev tree pgid=${staleLock.pgid} pid=${staleLock.pid} for ${baseDir}`,
+      );
+      yield* Effect.promise(() => DevProcessGuard.reapProcessGroup(staleLock.pgid));
+    }
+    yield* Effect.sync(() =>
+      DevProcessGuard.writeLock(lockPath, {
+        pid: process.pid,
+        pgid: DevProcessGuard.currentProcessGroupId(),
+        homeDir: baseDir,
+        startedAt: DevProcessGuard.nowIso(),
+      }),
     );
 
-    const exitCode = yield* child.exitCode.pipe(
-      Effect.mapError(
-        (cause) =>
-          new DevRunnerProcessError({
-            ...processContext,
-            operation: "wait-for-exit",
-            cause,
-          }),
-      ),
+    const spawnAndWait = Effect.gen(function* () {
+      const spawnCommand = yield* resolveSpawnCommand(
+        "vp",
+        [...MODE_ARGS[input.mode], ...input.runArgs],
+        { env },
+      );
+      const processContext = {
+        mode: input.mode,
+        executable: "vp" as const,
+        argumentCount: spawnCommand.args.length,
+        shell: spawnCommand.shell,
+      } as const;
+      const child = yield* ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+        env,
+        extendEnv: false,
+        shell: spawnCommand.shell,
+        // Keep Vite+ in the same process group so terminal signals (Ctrl+C)
+        // reach it directly. Effect defaults to detached: true on non-Windows,
+        // which would put the runner in a new group and require manual forwarding.
+        detached: false,
+        forceKillAfter: "1500 millis",
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DevRunnerProcessError({
+              ...processContext,
+              operation: "spawn",
+              cause,
+            }),
+        ),
+      );
+
+      const exitCode = yield* child.exitCode.pipe(
+        Effect.mapError(
+          (cause) =>
+            new DevRunnerProcessError({
+              ...processContext,
+              operation: "wait-for-exit",
+              cause,
+            }),
+        ),
+      );
+      if (exitCode !== 0) {
+        return yield* new DevRunnerProcessExitError({
+          ...processContext,
+          exitCode,
+        });
+      }
+    });
+
+    // Drop our lock whenever this launch ends — clean exit, error, or interrupt —
+    // so a stale record never points a future launch at a pid we no longer own.
+    yield* spawnAndWait.pipe(
+      Effect.ensuring(Effect.sync(() => DevProcessGuard.removeLock(lockPath))),
     );
-    if (exitCode !== 0) {
-      return yield* new DevRunnerProcessExitError({
-        ...processContext,
-        exitCode,
-      });
-    }
   });
 }
 
