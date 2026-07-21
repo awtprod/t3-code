@@ -18,7 +18,6 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -43,6 +42,32 @@ import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
+
+// Structural (by value) comparison of two model selections. `ModelSelection`
+// is a plain decoded struct, so `Equal.equals` degrades to reference equality
+// and reports two structurally-identical selections as different — which would
+// restart (and full-replay) the provider session on every turn. Compare the
+// fields directly instead; `options` is an order-insensitive set keyed by id.
+const modelSelectionOptionsKey = (options: ModelSelection["options"]): string =>
+  options === undefined
+    ? ""
+    : [...options]
+        .map((option) => `${option.id}=${String(option.value)}`)
+        .sort()
+        .join(" ");
+
+const modelSelectionsEqual = (
+  a: ModelSelection | undefined,
+  b: ModelSelection | undefined,
+): boolean => {
+  if (a === b) return true;
+  if (a === undefined || b === undefined) return false;
+  return (
+    a.instanceId === b.instanceId &&
+    a.model === b.model &&
+    modelSelectionOptionsKey(a.options) === modelSelectionOptionsKey(b.options)
+  );
+};
 
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
@@ -529,7 +554,7 @@ const make = Effect.gen(function* () {
       const shouldRestartForModelSelectionChange =
         preferredProvider === "claudeAgent" &&
         requestedModelSelection !== undefined &&
-        !Equal.equals(previousModelSelection, requestedModelSelection);
+        !modelSelectionsEqual(previousModelSelection, requestedModelSelection);
 
       if (
         !runtimeModeChanged &&
