@@ -439,7 +439,17 @@ export const prepareCommandCenterCodexHome = Effect.fn(
               ),
       }),
     );
-  for (const forbiddenEntry of ["config.toml", "plugins", "marketplaces"] as const) {
+  // Fail closed only on `config.toml`: Codex never writes one itself, so its
+  // presence in a reused isolated home is a genuine ambient-config injection
+  // signal. `plugins`/`marketplaces` are NOT tripwires — Codex 0.144.x syncs a
+  // curated-plugin cache into CODEX_HOME on startup even with
+  // `features.remote_plugin=false` / `plugins={}` set, so a reused home always
+  // contains `plugins/` after its first session. Plugin/marketplace *loading* is
+  // already disabled by the isolation appServerArgs and constrained by the
+  // sandbox permission profile (verified live by verifyCommandCenterCodexIsolation
+  // before every turn), so the on-disk cache is inert. (`skills/`, also created
+  // by Codex, has always been tolerated here for the same reason.)
+  for (const forbiddenEntry of ["config.toml"] as const) {
     if (Option.isSome(yield* optionalStat(path.join(layout.homePath, forbiddenEntry)))) {
       return yield* codexHomeError(
         `Command Center refuses an isolated Codex home containing '${forbiddenEntry}'.`,

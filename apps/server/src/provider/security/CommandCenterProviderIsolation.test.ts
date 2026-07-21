@@ -313,6 +313,47 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
     }),
   );
 
+  it.effect("reuses an isolated Codex home that Codex repopulated with a plugin cache", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cc-codex-home-reuse-" });
+      const stateDir = path.join(root, "state");
+      const sourceHomePath = path.join(root, "source-home");
+      yield* fileSystem.makeDirectory(stateDir, { recursive: true });
+      yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+      const input = {
+        stateDir,
+        sourceHomePath,
+        threadId: "cc:thread-reused-home",
+        fileSystem,
+        path,
+        crypto,
+        runtimeExecutablePath: NodeProcess.execPath,
+        writableRoots: [root],
+      } as const;
+      const isolated = yield* prepareCommandCenterCodexHome(input);
+      // Codex 0.144.x syncs a curated-plugin cache (with MCP defs) into CODEX_HOME
+      // on startup, so a reused per-thread home always contains `plugins/` (and can
+      // contain `marketplaces/`) on the next session. These must be tolerated —
+      // loading is disabled by the isolation appServerArgs + sandbox.
+      yield* writeFile(
+        path.join(isolated.homePath, "plugins", "cache", "openai-curated-remote", "x", ".mcp.json"),
+        '{"mcpServers":{}}\n',
+      );
+      yield* writeFile(path.join(isolated.homePath, "marketplaces", "openai-curated.json"), "{}\n");
+
+      const reused = yield* prepareCommandCenterCodexHome(input);
+      NodeAssert.equal(reused.homePath, isolated.homePath);
+
+      // config.toml still fails closed even alongside the tolerated plugin cache.
+      yield* writeFile(path.join(isolated.homePath, "config.toml"), "[mcp_servers.ambient]\n");
+      const error = yield* prepareCommandCenterCodexHome(input).pipe(Effect.flip);
+      NodeAssert.match(error.issue, /refuses an isolated Codex home containing 'config\.toml'/u);
+    }),
+  );
+
   it.effect("rejects script launchers and runtimes under provider-writable roots", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
