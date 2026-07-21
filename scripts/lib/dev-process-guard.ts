@@ -45,6 +45,29 @@ export function readProcessCwd(pid: number): string | undefined {
 }
 
 /**
+ * True when a process command line looks like a dev server belonging to this
+ * repo's stack: the dev-runner launcher, the `node --watch src/bin.ts` server
+ * watcher (or the server it spawns), or a Vite web dev server. The match is
+ * repo-agnostic — always pair it with a cwd-under-repo check before acting so a
+ * dev server from a *different* checkout is left alone.
+ */
+export function isDevServerCmdline(cmdline: string): boolean {
+  if (cmdline.includes("dev-runner")) {
+    return true;
+  }
+  if (cmdline.includes("--watch") && cmdline.includes("src/bin.ts")) {
+    return true;
+  }
+  // Vite web dev server: the vite-plus toolchain entrypoint (`.../vite-plus-core/
+  // .../vite/node/cli.js dev`) or a plain `node_modules/.bin/vite` invocation.
+  return (
+    cmdline.includes("vite-plus-core") ||
+    cmdline.includes("/vite/node/cli.js") ||
+    /[\\/]\.bin[\\/]vite\b/.test(cmdline)
+  );
+}
+
+/**
  * Our own process group id. On Linux this is `/proc/self/stat` field 5 (pgrp),
  * parsed after the final `)` of `comm` so a program name containing spaces or
  * parentheses cannot shift the field offsets. Falls back to our pid.

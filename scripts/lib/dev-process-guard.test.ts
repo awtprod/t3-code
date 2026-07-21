@@ -9,6 +9,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   currentProcessGroupId,
   devRunnerLockPath,
+  isDevServerCmdline,
   isProcessAlive,
   readLock,
   reapProcessGroup,
@@ -57,6 +58,29 @@ describe("dev-process-guard lock file", () => {
     } finally {
       NodeFS.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("dev-process-guard dev-server signature", () => {
+  it("matches dev-runner, the server watcher, and vite web servers", () => {
+    assert.ok(isDevServerCmdline("node scripts/dev-runner.ts dev --home-dir .t3"));
+    assert.ok(isDevServerCmdline("/usr/local/bin/node --watch src/bin.ts"));
+    // vite-plus toolchain web dev server (the orphan class that squats a port).
+    assert.ok(
+      isDevServerCmdline(
+        "/usr/local/bin/node /repo/node_modules/.pnpm/@voidzero-dev+vite-plus-core@0.2.2/node_modules/@voidzero-dev/vite-plus-core/dist/vite/node/cli.js dev",
+      ),
+    );
+    // plain vite bin (as used by other web packages).
+    assert.ok(isDevServerCmdline("node /repo/node_modules/.bin/vite --host 127.0.0.1 --port 5733"));
+  });
+
+  it("rejects unrelated processes", () => {
+    assert.ok(!isDevServerCmdline("node scripts/dev-stop.ts --dry-run"));
+    assert.ok(!isDevServerCmdline("node --test pwa/src/automations.test.mjs"));
+    assert.ok(!isDevServerCmdline("bash -c 'echo hello'"));
+    // Has src/bin.ts but no --watch — an editor, not the server watcher.
+    assert.ok(!isDevServerCmdline("vim src/bin.ts"));
   });
 });
 

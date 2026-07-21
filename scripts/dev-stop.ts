@@ -7,6 +7,7 @@ import * as NodeUtil from "node:util";
 
 import {
   devRunnerLockPath,
+  isDevServerCmdline,
   readLock,
   readProcessCmdline,
   readProcessCwd,
@@ -29,9 +30,10 @@ function resolveHomeDir(explicit: string | undefined): string {
 
 /**
  * Sweep the process table (Linux `/proc`) for dev trees rooted in this repo that
- * are not covered by a lock — pre-lock launches, or watchers whose lock was
- * removed but that outlived their parent. Matches `dev-runner` and the
- * `node --watch src/bin.ts` server watcher whose cwd is under this repo.
+ * are not covered by a lock — pre-lock launches, or servers whose lock was
+ * removed but that outlived their parent. Matches the dev-runner launcher, the
+ * `node --watch src/bin.ts` server watcher, and Vite web dev servers (see
+ * isDevServerCmdline) whose cwd is under this repo.
  */
 function sweepRepoDevGroups(): number[] {
   const pgids = new Set<number>();
@@ -50,10 +52,7 @@ function sweepRepoDevGroups(): number[] {
     if (cmdline === undefined) {
       continue;
     }
-    const isDevProcess =
-      cmdline.includes("dev-runner") ||
-      (cmdline.includes("--watch") && cmdline.includes("src/bin.ts"));
-    if (!isDevProcess) {
+    if (!isDevServerCmdline(cmdline)) {
       continue;
     }
     const cwd = readProcessCwd(pid);
@@ -79,11 +78,14 @@ async function main(): Promise<void> {
     options: {
       "home-dir": { type: "string" },
       "no-sweep": { type: "boolean", default: false },
+      "dry-run": { type: "boolean", default: false },
     },
     allowPositionals: false,
   });
 
   const homeDir = resolveHomeDir(values["home-dir"] as string | undefined);
+  const dryRun = values["dry-run"] as boolean;
+  const verb = dryRun ? "would reap" : "reaping";
   let reaped = 0;
 
   const lockPath = devRunnerLockPath(homeDir);
@@ -92,33 +94,45 @@ async function main(): Promise<void> {
     const stale = staleRunnerFromLock(lock);
     if (stale !== undefined) {
       process.stdout.write(
-        `[dev-stop] reaping dev tree pgid=${stale.pgid} pid=${stale.pid} for ${homeDir}\n`,
+        `[dev-stop] ${verb} dev tree pgid=${stale.pgid} pid=${stale.pid} for ${homeDir}\n`,
       );
-      if (await reapProcessGroup(stale.pgid)) {
+      if (dryRun) {
+        reaped += 1;
+      } else if (await reapProcessGroup(stale.pgid)) {
         reaped += 1;
       }
     }
-    try {
-      NodeFS.rmSync(lockPath);
-    } catch {
-      // Lock already gone.
+    if (!dryRun) {
+      try {
+        NodeFS.rmSync(lockPath);
+      } catch {
+        // Lock already gone.
+      }
     }
   }
 
   if (!(values["no-sweep"] as boolean)) {
     for (const pgid of sweepRepoDevGroups()) {
-      process.stdout.write(`[dev-stop] sweeping stray dev group pgid=${pgid} under ${REPO_ROOT}\n`);
-      if (await reapProcessGroup(pgid)) {
+      process.stdout.write(
+        `[dev-stop] ${dryRun ? "would sweep" : "sweeping"} stray dev group pgid=${pgid} under ${REPO_ROOT}\n`,
+      );
+      if (dryRun) {
+        reaped += 1;
+      } else if (await reapProcessGroup(pgid)) {
         reaped += 1;
       }
     }
   }
 
-  process.stdout.write(
-    reaped === 0
-      ? `[dev-stop] no running dev trees found for ${homeDir}\n`
-      : `[dev-stop] reaped ${reaped} dev group(s)\n`,
-  );
+  if (reaped === 0) {
+    process.stdout.write(`[dev-stop] no running dev trees found for ${homeDir}\n`);
+  } else if (dryRun) {
+    process.stdout.write(
+      `[dev-stop] would reap ${reaped} dev group(s) (dry run — nothing killed)\n`,
+    );
+  } else {
+    process.stdout.write(`[dev-stop] reaped ${reaped} dev group(s)\n`);
+  }
 }
 
 void main();
