@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
+  type OrchestrationEvent,
   OrchestrationReadModel,
   ProviderDriverKind,
   ProviderRuntimeEvent,
@@ -40,6 +41,9 @@ import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
+import { ProviderSessionDirectoryLive } from "../../provider/Layers/ProviderSessionDirectory.ts";
+import * as ProviderSessionRuntime from "../../persistence/ProviderSessionRuntime.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
@@ -200,7 +204,10 @@ async function waitForThread(
 
 describe("ProviderRuntimeIngestion", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderRuntimeIngestionService
+    | ProjectionSnapshotQuery
+    | ProviderSessionDirectory,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -242,9 +249,13 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(SqlitePersistenceMemory),
     );
+    const providerSessionDirectoryLayer = ProviderSessionDirectoryLive.pipe(
+      Layer.provide(ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceMemory))),
+    );
     const layer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
+      Layer.provideMerge(providerSessionDirectoryLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
@@ -256,9 +267,21 @@ describe("ProviderRuntimeIngestion", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
+    const directory = await runtime.runPromise(Effect.service(ProviderSessionDirectory));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(ingestion.drain);
+
+    // Collect domain events so tests can assert on synthesized intents (e.g. the
+    // thread.turn-start-requested a resume produces, and its modelSelection).
+    const collectedDomainEvents: OrchestrationEvent[] = [];
+    await Effect.runPromise(
+      Stream.runForEach(engine.streamDomainEvents, (evt) =>
+        Effect.sync(() => {
+          collectedDomainEvents.push(evt);
+        }),
+      ).pipe(Effect.forkScoped, Effect.asVoid, Scope.provide(scope)),
+    );
 
     const createdAt = "2026-01-01T00:00:00.000Z";
     await Effect.runPromise(
@@ -335,6 +358,14 @@ describe("ProviderRuntimeIngestion", () => {
       removeProviderSession: provider.removeSession,
       drain,
       reconcile: () => run(ingestion.reconcileOrphanedTurns),
+      directory,
+      seedBinding: (binding: Parameters<typeof directory.upsert>[0]) =>
+        run(directory.upsert(binding)),
+      turnStartRequests: () =>
+        collectedDomainEvents.filter(
+          (evt): evt is Extract<OrchestrationEvent, { type: "thread.turn-start-requested" }> =>
+            evt.type === "thread.turn-start-requested",
+        ),
     };
   }
 
@@ -2381,7 +2412,7 @@ describe("ProviderRuntimeIngestion", () => {
         ),
     );
 
-    const events = await Effect.runPromise(
+    const events = await harness.run(
       Stream.runCollect(harness.engine.readEvents(0)).pipe(
         Effect.map((chunk) => Array.from(chunk)),
       ),
@@ -3338,7 +3369,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(exhaustedActivities(thread)).toHaveLength(0);
   });
 
-  it("does not auto-resume while a turn-start is already pending (steer then crash)", async () => {
+  it("auto-resumes an orphaned steer when a turn-start is still pending (steer then crash)", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");
     await startTurn(harness, "turn-a"); // turn.started consumes msg-1's pending start
@@ -3349,11 +3380,70 @@ describe("ProviderRuntimeIngestion", () => {
     await seedUserMessage(harness, "msg-2");
     await crashSession(harness, "steer-crash");
 
-    // The pending turn-start already drives the steered turn; auto-resuming on
-    // top would re-request msg-2 and double-execute it. So: no resume marker.
+    // A pending turn-start row alone cannot prove another worker will drive the
+    // turn — the reactor may already have consumed the steer's request and
+    // issued sendTurn before the crash, leaving the row orphaned. So auto-resume
+    // now PROCEEDS (re-issuing the newest user message, msg-2). The double-drive
+    // this could otherwise reintroduce is prevented by the reactor's scoped
+    // supersession guard (covered in the reactor test), not by skipping here.
     const thread = await readThread(harness);
-    expect(autoResumedActivities(thread)).toHaveLength(0);
+    const markers = autoResumedActivities(thread);
+    expect(markers).toHaveLength(1);
+    expect(markers[0]?.summary).toContain("attempt 1/2");
+    expect(markers[0]?.turnId).toBe("turn-a");
     expect(exhaustedActivities(thread)).toHaveLength(0);
+    // No duplicate user message: the resume re-issues the existing msg-2.
+    expect(userMessages(thread)).toHaveLength(2);
+  });
+
+  it("carries the interrupted turn's model selection (from the session binding) into the resume", async () => {
+    const harness = await createHarness();
+    // The interrupted turn ran under a non-default model, durably captured on
+    // the persisted session binding's runtimePayload. (Thread default is
+    // codex/gpt-5-codex; the binding pins gpt-5-codex-high.)
+    await harness.seedBinding({
+      threadId: asThreadId("thread-1"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimePayload: {
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex-high",
+        },
+      },
+    });
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    await crashSession(harness, "crash-model");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+
+    // The resume's synthesized turn-start-requested carries the binding's model,
+    // so the restarted session resolves to the same provider instance and the
+    // ProviderService same-instance cursor fallback recovers the conversation.
+    const requestsWithModel = harness
+      .turnStartRequests()
+      .filter((evt) => evt.payload.modelSelection !== undefined);
+    expect(requestsWithModel).toHaveLength(1);
+    expect(requestsWithModel[0]?.payload.modelSelection?.model).toBe("gpt-5-codex-high");
+    expect(requestsWithModel[0]?.payload.modelSelection?.instanceId).toBe("codex");
+  });
+
+  it("omits model selection from the resume when no binding model is recorded", async () => {
+    const harness = await createHarness();
+    // No binding seeded ⇒ getBinding is None ⇒ the resume omits modelSelection,
+    // and the reactor falls back to thread.modelSelection (the default path).
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    await crashSession(harness, "crash-nomodel");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+    const requestsWithModel = harness
+      .turnStartRequests()
+      .filter((evt) => evt.payload.modelSelection !== undefined);
+    expect(requestsWithModel).toHaveLength(0);
   });
 
   it("does not reset the crash-loop budget on a stale completion for a superseded turn", async () => {

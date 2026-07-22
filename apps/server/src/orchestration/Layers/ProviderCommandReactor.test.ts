@@ -346,6 +346,9 @@ describe("ProviderCommandReactor", () => {
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
+      // Shared in-memory DB (memoized) so the reactor's ProjectionTurnRepository
+      // reads the same pending-turn-start rows the engine's projection writes.
+      Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
       Layer.provideMerge(makeProviderRegistryLayer(providerSnapshots as never)),
       Layer.provideMerge(
@@ -410,6 +413,8 @@ describe("ProviderCommandReactor", () => {
 
     return {
       engine,
+      dispatch: (command: Parameters<typeof engine.dispatch>[0]) =>
+        Effect.runPromise(engine.dispatch(command)),
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       startSession,
       sendTurn,
@@ -2154,5 +2159,172 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+  });
+
+  it("skips a turn-start-requested superseded by a newer re-request for the same message", async () => {
+    const harness = await createHarness();
+    const staleCreatedAt = "2026-01-01T00:00:00.000Z"; // original interrupted turn-start
+    const blockerCreatedAt = "2026-01-01T00:00:01.000Z";
+    const resumeCreatedAt = "2026-01-01T00:00:02.000Z"; // newer re-request (auto-resume) wins
+    const sentinelCreatedAt = "2026-01-01T00:00:03.000Z";
+
+    // Park the worker on a blocker turn's session start so BOTH the stale
+    // original turn-start-requested and the newer resume for the SAME message
+    // commit (and project) before the worker processes either. This
+    // deterministically reproduces the post-crash timing the guard targets: the
+    // pending turn-start row already reflects the resume by the time the reactor
+    // reaches the stale original.
+    let releaseWorker: () => void = () => {};
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    const originalStartSession = harness.startSession.getMockImplementation();
+    if (!originalStartSession) {
+      throw new Error("startSession mock implementation missing");
+    }
+    harness.startSession.mockImplementationOnce((threadId, sessionInput) =>
+      Effect.promise(() => workerGate).pipe(
+        Effect.flatMap(() => originalStartSession(threadId, sessionInput)),
+      ),
+    );
+
+    // A second thread lets the sentinel turn (dispatched last) act as a "prior
+    // events fully drained" marker via the single FIFO worker queue — WITHOUT
+    // clobbering thread-1's pending turn-start row (one row per thread).
+    await harness.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-2"),
+      threadId: ThreadId.make("thread-2"),
+      projectId: asProjectId("project-1"),
+      title: "Sentinel Thread",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt: staleCreatedAt,
+    });
+
+    // Blocker turn on a DISTINCT message parks the worker inside startSession.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-blocker"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-blocker"),
+        role: "user",
+        text: "blocker turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: blockerCreatedAt,
+    });
+    // Confirm the worker is parked (startSession invoked but not yet resolved).
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+
+    // Stale original turn-start for msg-1 (older createdAt), then the newer
+    // resume for the SAME message. Both project synchronously in dispatch, so
+    // thread-1's pending row reflects the resume before the still-parked worker
+    // reaches the stale event.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-stale"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "resume me",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: staleCreatedAt,
+    });
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-resume"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-1"),
+      createdAt: resumeCreatedAt,
+    });
+    // Sentinel turn on thread-2, dispatched last — its drive proves the stale
+    // and resume events ahead of it in the FIFO queue have been processed.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-sentinel"),
+      threadId: ThreadId.make("thread-2"),
+      message: {
+        messageId: asMessageId("user-sentinel"),
+        role: "user",
+        text: "sentinel turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: sentinelCreatedAt,
+    });
+
+    releaseWorker();
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "sentinel turn",
+      ),
+    );
+
+    const msg1Drives = harness.sendTurn.mock.calls.filter(
+      (call) => (call[0] as { input?: string }).input === "resume me",
+    );
+    // The stale original was superseded and skipped: msg-1 drove exactly once
+    // (the resume). Total = blocker + resume + sentinel = 3; without the guard
+    // the stale original would also drive, giving 4.
+    expect(msg1Drives.length).toBe(1);
+    expect(harness.sendTurn.mock.calls.length).toBe(3);
+  });
+
+  it("drives every turn-start-requested for DISTINCT messages (no over-suppression)", async () => {
+    const harness = await createHarness();
+    const olderCreatedAt = "2026-01-01T00:00:00.000Z";
+    const newerCreatedAt = "2026-01-01T00:00:02.000Z";
+
+    // Rapid multi-send of two DIFFERENT messages: the newer one's pending row
+    // must NOT suppress the older one (the guard is scoped to same-messageId).
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-msg-a"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-a"),
+        role: "user",
+        text: "message a",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: olderCreatedAt,
+    });
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-msg-b"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-b"),
+        role: "user",
+        text: "message b",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: newerCreatedAt,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length >= 2);
+    const inputs = harness.sendTurn.mock.calls.map((call) => (call[0] as { input?: string }).input);
+    expect(harness.sendTurn.mock.calls.length).toBe(2);
+    expect(inputs).toContain("message a");
+    expect(inputs).toContain("message b");
   });
 });

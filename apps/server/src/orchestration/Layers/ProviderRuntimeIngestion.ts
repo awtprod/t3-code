@@ -17,6 +17,7 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
+  ModelSelection,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -27,10 +28,12 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -43,6 +46,11 @@ import {
 import { ServerSettingsService } from "../../serverSettings.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
+
+// Decode a persisted session binding's stored model selection. The binding's
+// `runtimePayload` is opaque (`unknown | null`); the interrupted turn's
+// modelSelection lives under `runtimePayload.modelSelection` when set.
+const decodeModelSelectionExit = Schema.decodeUnknownExit(ModelSelection);
 
 interface AssistantSegmentState {
   baseKey: string;
@@ -640,6 +648,7 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const providerSessionDirectory = yield* ProviderSessionDirectory;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
@@ -1628,20 +1637,16 @@ const make = Effect.gen(function* () {
         const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
         const archived = thread.archivedAt !== null;
         const baseEligible = activeTurnId !== null && !gracefulExit && !parkedOnHuman && !archived;
-        // A turn-start already pending for this thread (e.g. the user steered
-        // the running turn just before the subprocess crashed, so the steer's
-        // turn-start-requested has not been consumed by a turn.started yet) will
-        // drive the turn on its own. Auto-resuming on top would re-request the
-        // same user message with a fresh commandId that bypasses turn-start
-        // dedup, double-executing the prompt — so skip when one is pending.
-        const hasPendingTurnStart =
-          baseEligible &&
-          Option.isSome(
-            yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-              threadId: thread.id,
-            }),
-          );
-        if (baseEligible && !hasPendingTurnStart) {
+        // Always auto-resume an eligible crash, even when a turn-start is still
+        // pending for this thread. A pending row alone cannot prove another
+        // worker will drive the turn: the reactor may already have consumed the
+        // steer's turn-start-requested and issued `sendTurn` before the
+        // subprocess died, leaving the row "pending" yet orphaned. The
+        // double-drive that a not-yet-consumed pending start would otherwise
+        // cause is prevented downstream by the reactor's scoped supersession
+        // guard (skips a turn-start-requested that a newer same-message
+        // re-request has superseded), so resuming here is safe.
+        if (baseEligible) {
           const detail = yield* getLoadedThreadDetail();
           const targetUserMessage = detail
             ? detail.messages.toReversed().find((message) => message.role === "user")
@@ -1686,6 +1691,32 @@ const make = Effect.gen(function* () {
             } else {
               const attempt = priorAttempts + 1;
 
+              // Carry the interrupted turn's effective model selection into the
+              // resume so the restarted session resolves to the same provider
+              // instance/model and recovers the persisted resume cursor (the
+              // same-instance binding fallback in ProviderService.startSession).
+              // The interrupted turn's modelSelection is durably captured only
+              // on the persisted session binding's runtimePayload; when absent
+              // we omit it so the reactor falls back to thread.modelSelection
+              // (correct for the no-override case, and the binding's instance
+              // still matches so the cursor is recovered either way). A directory
+              // read failure is non-fatal — fall back to the default path.
+              const binding = yield* providerSessionDirectory
+                .getBinding(thread.id)
+                .pipe(Effect.orElseSucceed(() => Option.none()));
+              let resumeModelSelection: ModelSelection | undefined;
+              if (Option.isSome(binding)) {
+                const rawModelSelection = (
+                  binding.value.runtimePayload as { modelSelection?: unknown } | null | undefined
+                )?.modelSelection;
+                if (rawModelSelection !== undefined && rawModelSelection !== null) {
+                  const decoded = decodeModelSelectionExit(rawModelSelection);
+                  if (decoded._tag === "Success") {
+                    resumeModelSelection = decoded.value;
+                  }
+                }
+              }
+
               // 1. Re-issue the turn for the existing user message first (no
               //    duplicate message-sent; fresh commandId avoids turn-start
               //    dedup collision). If the message was concurrently reverted
@@ -1698,6 +1729,9 @@ const make = Effect.gen(function* () {
                   commandId: yield* providerCommandId(event, "auto-resume"),
                   threadId: thread.id,
                   messageId: targetMessageId,
+                  ...(resumeModelSelection !== undefined
+                    ? { modelSelection: resumeModelSelection }
+                    : {}),
                   reason: `auto-resume after provider session exit: ${exitReason}`,
                   createdAt: now,
                 })

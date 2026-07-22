@@ -130,11 +130,15 @@ const seedReadModel = Effect.gen(function* () {
   });
 });
 
-const resumeCommand = (messageId: MessageId): OrchestrationCommand => ({
+const resumeCommand = (
+  messageId: MessageId,
+  modelSelection?: { instanceId: ProviderInstanceId; model: string },
+): OrchestrationCommand => ({
   type: "thread.turn.resume",
   commandId: asCommandId("cmd-resume"),
   threadId: THREAD_ID,
   messageId,
+  ...(modelSelection !== undefined ? { modelSelection } : {}),
   reason: "auto-resume after provider session exit: crashed",
   createdAt: NOW,
 });
@@ -163,6 +167,35 @@ it.layer(NodeServices.layer)("decider thread.turn.resume", (it) => {
       expect(event.type === "thread.turn-start-requested" ? event.payload.runtimeMode : null).toBe(
         "full-access",
       );
+      // Without a command modelSelection the payload omits it (the reactor falls
+      // back to the thread default), so the field is absent, not null.
+      expect(
+        event.type === "thread.turn-start-requested" ? event.payload.modelSelection : "unexpected",
+      ).toBeUndefined();
+    }),
+  );
+
+  it.effect("carries the interrupted turn's modelSelection into the re-issued turn", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel;
+      const modelSelection = {
+        instanceId: ProviderInstanceId.make("codex_high"),
+        model: "gpt-5-codex-high",
+      };
+      const result = yield* decideOrchestrationCommand({
+        command: resumeCommand(USER_MESSAGE_ID, modelSelection),
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events).toHaveLength(1);
+      const [event] = events;
+      expect(event.type).toBe("thread.turn-start-requested");
+      // The interrupted turn's model selection is carried through so the
+      // restarted session resolves to the same instance/model (findings 1 + 3).
+      expect(
+        event.type === "thread.turn-start-requested" ? event.payload.modelSelection : null,
+      ).toEqual(modelSelection);
     }),
   );
 

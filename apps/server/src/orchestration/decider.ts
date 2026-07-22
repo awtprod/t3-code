@@ -508,6 +508,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.messageId,
+          // Carry the interrupted turn's model selection so the restarted session
+          // resolves to the same provider instance/model and recovers its cursor.
+          ...(command.modelSelection !== undefined
+            ? { modelSelection: command.modelSelection }
+            : {}),
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           createdAt: command.createdAt,

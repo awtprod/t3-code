@@ -33,6 +33,8 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
@@ -215,6 +217,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
@@ -795,6 +798,30 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    // Scoped supersession guard. Session-exit auto-resume re-issues the *same*
+    // user message with a fresh commandId (which bypasses turn-start dedup), so
+    // a crash that lands after this reactor already consumed the original
+    // turn-start-requested would otherwise double-drive the same prompt. Skip
+    // this request when the live pending turn-start row is for the SAME message
+    // but was requested STRICTLY LATER — i.e. a newer re-request has superseded
+    // it. Scoping to same-messageId + strictly-newer requestedAt is deliberate:
+    // a normal single turn-start has `requestedAt == createdAt` (not superseded,
+    // so it drives), and rapid multi-send of DISTINCT messages is never
+    // suppressed (no regression to normal turn driving). The projection is
+    // committed synchronously inside dispatch, ahead of this lagging reactor, so
+    // the pending row reflects the latest committed re-request in the common
+    // post-crash timing.
+    const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+      threadId: event.payload.threadId,
+    });
+    if (
+      Option.isSome(pendingTurnStart) &&
+      pendingTurnStart.value.messageId === event.payload.messageId &&
+      Date.parse(pendingTurnStart.value.requestedAt) > Date.parse(event.payload.createdAt)
+    ) {
+      return;
+    }
+
     const isFirstUserMessageTurn =
       thread.messages.filter((entry) => entry.role === "user").length === 1;
     if (isFirstUserMessageTurn) {
@@ -1110,4 +1137,6 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
+  Layer.provide(ProjectionTurnRepositoryLive),
+);

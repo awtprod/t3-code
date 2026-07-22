@@ -653,6 +653,11 @@ export const ThreadTurnResumeCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   messageId: MessageId,
+  // The interrupted turn's effective model selection, carried so the restarted
+  // session resolves to the same provider instance/model (and thus recovers the
+  // persisted resume cursor). Omitted when the interrupted turn used the thread
+  // default, in which case the reactor falls back to `thread.modelSelection`.
+  modelSelection: Schema.optional(ModelSelection),
   reason: Schema.optional(Schema.String),
   createdAt: IsoDateTime,
 });
