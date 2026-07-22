@@ -533,15 +533,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      // Resolve an omitted turnId to the thread's active turn. The contract
-      // permits an id-less interrupt ("interrupt whatever is running"); left
-      // unresolved, the emitted event carries no turnId, ProjectionPipeline
-      // ignores it (its `thread.turn-interrupt-requested` case returns early on
-      // `turnId === undefined`), and the active turn's row stays `running`. The
-      // session-exit auto-resume path keys off that row state to tell a
-      // deliberate interrupt from a crash, so without resolution it would
-      // resume a turn the user explicitly interrupted.
-      const resolvedTurnId = command.turnId ?? thread.session?.activeTurnId ?? undefined;
+      // Resolve the turn to mark interrupted to the thread's active turn,
+      // preferring it over any client-supplied turnId. The provider reactor
+      // interrupts strictly by session ("orchestration turn ids are not provider
+      // turn ids, so interrupt by session"), i.e. whichever turn is currently
+      // running — never the id in the command. A web/mobile client sends the
+      // activeTurnId from its latest snapshot, which can be stale if a steer
+      // started a newer turn before this command was processed; honoring that
+      // stale id would mark the wrong (already-finished) turn interrupted while
+      // the running turn's row stays `running`, so the ensuing session exit would
+      // auto-resume a turn the user actually interrupted. Falling back to the
+      // command's turnId only when the session has no active turn keeps the
+      // contract's id-less interrupt ("interrupt whatever is running") working;
+      // left unresolved the event carries no turnId and ProjectionPipeline
+      // ignores it (its handler returns early on `turnId === undefined`).
+      const resolvedTurnId = thread.session?.activeTurnId ?? command.turnId ?? undefined;
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",

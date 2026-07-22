@@ -32,10 +32,9 @@ layer("044_ProjectionPendingTurnStartModelSelection", (it) => {
 
       // A pending steer carrying its own model selection round-trips the JSON
       // text verbatim, so the resume can prefer it over the stale binding model.
-      const modelSelectionJson = JSON.stringify({
-        instanceId: "codex_max",
-        model: "gpt-5-codex-max",
-      });
+      // (Literal JSON, not JSON.stringify — the column stores opaque text and the
+      // repository layer owns encode/decode via Schema.fromJsonString.)
+      const modelSelectionJson = '{"instanceId":"codex_max","model":"gpt-5-codex-max"}';
       yield* sql`
         INSERT INTO projection_turns (
           thread_id, turn_id, pending_message_id, state, requested_at,

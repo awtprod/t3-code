@@ -1649,6 +1649,11 @@ const make = Effect.gen(function* () {
         // Runs after the interrupted-settlement dispatch above, on the same
         // sequential worker, so it cannot race or double-fire.
         const gracefulExit = event.payload.exitKind === "graceful";
+        // A provider that declares the exit explicitly non-recoverable (e.g.
+        // OpenCode's unexpected-exit path emits `recoverable: false`) must not be
+        // auto-resumed: reissuing the prompt could duplicate work or side effects
+        // the provider is telling us are unsafe to retry. Absent/true ⇒ eligible.
+        const declaredNonRecoverable = event.payload.recoverable === false;
         const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
         const archived = thread.archivedAt !== null;
         // `userInterruptedActiveTurn` was captured before this event's own
@@ -1658,6 +1663,7 @@ const make = Effect.gen(function* () {
         const baseEligible =
           activeTurnId !== null &&
           !gracefulExit &&
+          !declaredNonRecoverable &&
           !parkedOnHuman &&
           !archived &&
           !userInterruptedActiveTurn;
@@ -1874,7 +1880,14 @@ const make = Effect.gen(function* () {
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
-              activeTurnId: eventTurnId ?? null,
+              // Preserve the currently-active turn for an unscoped runtime error
+              // (no turnId on the event). A crash often surfaces as a turn-less
+              // runtime.error immediately followed by session.exited — e.g. Codex
+              // fatal stderr maps to exactly such a turn-less error. Nulling the
+              // active turn here would make the ensuing exit see no running turn
+              // and skip session-exit auto-resume entirely. A scoped error keeps
+              // its own turn id.
+              activeTurnId: eventTurnId ?? thread.session?.activeTurnId ?? null,
               lastError: runtimeErrorMessage,
               updatedAt: now,
             },

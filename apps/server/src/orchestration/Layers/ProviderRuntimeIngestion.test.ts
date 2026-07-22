@@ -3583,6 +3583,104 @@ describe("ProviderRuntimeIngestion", () => {
     expect(userMessages(thread)).toHaveLength(1);
   });
 
+  it("prefers the active turn over a stale client-supplied interrupt turnId", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a"); // turn-a is the running/active turn
+
+    // The client interrupts using an activeTurnId from a STALE snapshot (an
+    // older turn that is no longer running). The provider reactor interrupts by
+    // session — i.e. the currently-running turn-a — regardless of this id, so the
+    // decider must mark turn-a interrupted, not the stale id. Honoring the stale
+    // id would leave turn-a's row `running`, and the crash below would wrongly
+    // auto-resume the turn the user actually interrupted.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-interrupt-stale"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-stale-snapshot"),
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    // Precondition: the session still tracks turn-a active (the stale id did not
+    // match, so it neither cleared nor moved the active turn).
+    const shell = await harness.readShell();
+    expect(shell?.session?.activeTurnId).toBe("turn-a");
+
+    await crashSession(harness, "stale-interrupt-then-crash");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+    expect(userMessages(thread)).toHaveLength(1);
+  });
+
+  it("does not auto-resume a session exit the provider declared non-recoverable", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+
+    // The provider reports the exit as explicitly non-recoverable (e.g. OpenCode's
+    // unexpected-exit path emits recoverable: false). Reissuing the prompt could
+    // duplicate work/side effects the provider says are unsafe to retry, so
+    // auto-resume must be skipped despite the turn being active and the exit
+    // non-graceful.
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-nonrecoverable"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: {
+        reason: "Transport failure: connection lost.",
+        recoverable: false,
+      },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+    expect(userMessages(thread)).toHaveLength(1);
+  });
+
+  it("auto-resumes after a turn-less runtime error immediately precedes the exit", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+
+    // A crash often surfaces as a turn-less runtime.error (no turnId) followed by
+    // session.exited — Codex fatal stderr maps to exactly such an error. The
+    // error must NOT clear the active turn, or the ensuing exit would see no
+    // running turn and skip auto-resume. So the runtime.error preserves turn-a,
+    // and the exit then auto-resumes it.
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-runtime-error-preexit"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { message: "failed to connect to websocket" },
+    });
+    await harness.drain();
+
+    // The active turn survives the turn-less error.
+    const shell = await harness.readShell();
+    expect(shell?.session?.activeTurnId).toBe("turn-a");
+
+    await crashSession(harness, "runtime-error-then-crash");
+
+    const thread = await readThread(harness);
+    const markers = autoResumedActivities(thread);
+    expect(markers).toHaveLength(1);
+    expect(markers[0]?.turnId).toBe("turn-a");
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+    expect(userMessages(thread)).toHaveLength(1);
+  });
+
   it("does not reset the crash-loop budget on a stale completion for a superseded turn", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");
