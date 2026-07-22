@@ -10,6 +10,7 @@ import {
   CheckpointRef,
   IsoDateTime,
   MessageId,
+  ModelSelection,
   NonNegativeInt,
   OrchestrationProposedPlanId,
   OrchestrationCheckpointFile,
@@ -81,6 +82,13 @@ export const ProjectionPendingTurnStart = Schema.Struct({
    * without the ties that `requestedAt` alone suffers.
    */
   requestSequence: NonNegativeInt,
+  /**
+   * Model selection of the originating turn-start-requested event, or null when
+   * the start used the thread default. A session-exit auto-resume prefers this
+   * over the provider session binding (which describes the older, last-sent
+   * turn) so a pending steer resumes on the model the user chose for it.
+   */
+  modelSelection: Schema.NullOr(ModelSelection),
 });
 export type ProjectionPendingTurnStart = typeof ProjectionPendingTurnStart.Type;
 

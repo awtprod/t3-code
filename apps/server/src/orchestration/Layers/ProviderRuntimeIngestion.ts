@@ -1741,6 +1741,39 @@ const make = Effect.gen(function* () {
                 }
               }
 
+              // When the message being resumed is a still-pending steer (a newer
+              // turn-start queued behind the older, already-sent turn), the
+              // session binding above describes the OLDER turn, not this steer.
+              // The pending row carries the steer's own model and source-plan, so
+              // prefer them: run the resume on the model the user chose for the
+              // steer, and carry its source proposed-plan so a resumed
+              // plan-implementation turn re-associates with (and can mark
+              // implemented) its plan. A read failure is non-fatal.
+              const pendingForResume = yield* projectionTurnRepository
+                .getPendingTurnStartByThreadId({ threadId: thread.id })
+                .pipe(Effect.orElseSucceed(() => Option.none()));
+              let resumeSourceProposedPlan:
+                | { threadId: ThreadId; planId: OrchestrationProposedPlanId }
+                | undefined;
+              if (
+                Option.isSome(pendingForResume) &&
+                pendingForResume.value.messageId === targetMessageId
+              ) {
+                const pending = pendingForResume.value;
+                if (pending.modelSelection !== null) {
+                  resumeModelSelection = pending.modelSelection;
+                }
+                if (
+                  pending.sourceProposedPlanThreadId !== null &&
+                  pending.sourceProposedPlanId !== null
+                ) {
+                  resumeSourceProposedPlan = {
+                    threadId: pending.sourceProposedPlanThreadId,
+                    planId: pending.sourceProposedPlanId,
+                  };
+                }
+              }
+
               // 1. Re-issue the turn for the existing user message first (no
               //    duplicate message-sent; fresh commandId avoids turn-start
               //    dedup collision). If the message was concurrently reverted
@@ -1755,6 +1788,9 @@ const make = Effect.gen(function* () {
                   messageId: targetMessageId,
                   ...(resumeModelSelection !== undefined
                     ? { modelSelection: resumeModelSelection }
+                    : {}),
+                  ...(resumeSourceProposedPlan !== undefined
+                    ? { sourceProposedPlan: resumeSourceProposedPlan }
                     : {}),
                   reason: `auto-resume after provider session exit: ${exitReason}`,
                   createdAt: now,

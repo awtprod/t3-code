@@ -3,6 +3,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
   MessageId,
+  OrchestrationProposedPlanId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -132,13 +133,19 @@ const seedReadModel = Effect.gen(function* () {
 
 const resumeCommand = (
   messageId: MessageId,
-  modelSelection?: { instanceId: ProviderInstanceId; model: string },
+  options?: {
+    readonly modelSelection?: { instanceId: ProviderInstanceId; model: string };
+    readonly sourceProposedPlan?: { threadId: ThreadId; planId: OrchestrationProposedPlanId };
+  },
 ): OrchestrationCommand => ({
   type: "thread.turn.resume",
   commandId: asCommandId("cmd-resume"),
   threadId: THREAD_ID,
   messageId,
-  ...(modelSelection !== undefined ? { modelSelection } : {}),
+  ...(options?.modelSelection !== undefined ? { modelSelection: options.modelSelection } : {}),
+  ...(options?.sourceProposedPlan !== undefined
+    ? { sourceProposedPlan: options.sourceProposedPlan }
+    : {}),
   reason: "auto-resume after provider session exit: crashed",
   createdAt: NOW,
 });
@@ -183,7 +190,7 @@ it.layer(NodeServices.layer)("decider thread.turn.resume", (it) => {
         model: "gpt-5-codex-high",
       };
       const result = yield* decideOrchestrationCommand({
-        command: resumeCommand(USER_MESSAGE_ID, modelSelection),
+        command: resumeCommand(USER_MESSAGE_ID, { modelSelection }),
         readModel,
       });
       const events = Array.isArray(result) ? result : [result];
@@ -196,6 +203,61 @@ it.layer(NodeServices.layer)("decider thread.turn.resume", (it) => {
       expect(
         event.type === "thread.turn-start-requested" ? event.payload.modelSelection : null,
       ).toEqual(modelSelection);
+    }),
+  );
+
+  it.effect("carries the interrupted turn's source proposed-plan into the re-issued turn", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel;
+      const sourceProposedPlan = {
+        threadId: THREAD_ID,
+        planId: OrchestrationProposedPlanId.make("plan-source-1"),
+      };
+      const result = yield* decideOrchestrationCommand({
+        command: resumeCommand(USER_MESSAGE_ID, { sourceProposedPlan }),
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events).toHaveLength(1);
+      const [event] = events;
+      expect(event.type).toBe("thread.turn-start-requested");
+      // The interrupted turn's source proposed-plan reference is carried through
+      // so a resumed plan-implementation turn re-associates with (and can mark
+      // implemented) its originating plan (R4-2). The resume decider does not
+      // re-validate plan existence — the original turn-start already did.
+      expect(
+        event.type === "thread.turn-start-requested" ? event.payload.sourceProposedPlan : null,
+      ).toEqual(sourceProposedPlan);
+    }),
+  );
+
+  it.effect("carries both modelSelection and source proposed-plan together", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel;
+      const modelSelection = {
+        instanceId: ProviderInstanceId.make("codex_max"),
+        model: "gpt-5-codex-max",
+      };
+      const sourceProposedPlan = {
+        threadId: THREAD_ID,
+        planId: OrchestrationProposedPlanId.make("plan-source-2"),
+      };
+      const result = yield* decideOrchestrationCommand({
+        command: resumeCommand(USER_MESSAGE_ID, { modelSelection, sourceProposedPlan }),
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events).toHaveLength(1);
+      const [event] = events;
+      expect(event.type).toBe("thread.turn-start-requested");
+      expect(
+        event.type === "thread.turn-start-requested" ? event.payload.modelSelection : null,
+      ).toEqual(modelSelection);
+      expect(
+        event.type === "thread.turn-start-requested" ? event.payload.sourceProposedPlan : null,
+      ).toEqual(sourceProposedPlan);
     }),
   );
 

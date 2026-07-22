@@ -1,4 +1,4 @@
-import { OrchestrationCheckpointFile } from "@t3tools/contracts";
+import { ModelSelection, OrchestrationCheckpointFile } from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
@@ -30,6 +30,13 @@ const ProjectionTurnDbRowSchema = ProjectionTurn.mapFields(
 const ProjectionTurnByIdDbRowSchema = ProjectionTurnById.mapFields(
   Struct.assign({
     checkpointFiles: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
+  }),
+);
+
+// Persists `modelSelection` as a nullable JSON text column (`model_selection`).
+const ProjectionPendingTurnStartDbRowSchema = ProjectionPendingTurnStart.mapFields(
+  Struct.assign({
+    modelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
   }),
 );
 
@@ -109,7 +116,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
   });
 
   const insertPendingProjectionTurn = SqlSchema.void({
-    Request: ProjectionPendingTurnStart,
+    Request: ProjectionPendingTurnStartDbRowSchema,
     execute: (row) =>
       sql`
         INSERT INTO projection_turns (
@@ -122,6 +129,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           state,
           requested_at,
           request_sequence,
+          model_selection,
           started_at,
           completed_at,
           checkpoint_turn_count,
@@ -139,6 +147,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           'pending',
           ${row.requestedAt},
           ${row.requestSequence},
+          ${row.modelSelection},
           NULL,
           NULL,
           NULL,
@@ -151,7 +160,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
 
   const getPendingProjectionTurn = SqlSchema.findOneOption({
     Request: GetProjectionPendingTurnStartInput,
-    Result: ProjectionPendingTurnStart,
+    Result: ProjectionPendingTurnStartDbRowSchema,
     execute: ({ threadId }) =>
       sql`
         SELECT
@@ -160,7 +169,8 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
           source_proposed_plan_id AS "sourceProposedPlanId",
           requested_at AS "requestedAt",
-          request_sequence AS "requestSequence"
+          request_sequence AS "requestSequence",
+          model_selection AS "modelSelection"
         FROM projection_turns
         WHERE thread_id = ${threadId}
           AND turn_id IS NULL

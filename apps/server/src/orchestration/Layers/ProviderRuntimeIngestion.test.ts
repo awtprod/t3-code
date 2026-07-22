@@ -3480,6 +3480,109 @@ describe("ProviderRuntimeIngestion", () => {
     expect(requestsWithModel).toHaveLength(0);
   });
 
+  it("resumes a pending steer on the steer's own model, not the older turn's binding model", async () => {
+    const harness = await createHarness();
+    // The older, already-sent turn-a ran under the binding's model
+    // (gpt-5-codex-high). A resume that sourced the model from the binding alone
+    // would run the queued steer on this stale model.
+    await harness.seedBinding({
+      threadId: asThreadId("thread-1"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimePayload: {
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex-high",
+        },
+      },
+    });
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a"); // consumes msg-1's pending start; binding = high
+
+    // The user steers the running turn with a DIFFERENT model. This second
+    // turn.start enqueues a pending turn-start (for msg-2) carrying the steer's
+    // own model selection (codex_max), not yet consumed by a turn.started —
+    // turn-a is still active.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-msg-2-max"),
+        threadId: asThreadId("thread-1"),
+        message: {
+          messageId: asMessageId("msg-2"),
+          role: "user",
+          text: "actually, switch models and keep going",
+          attachments: [],
+        },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex_max"),
+          model: "gpt-5-codex-max",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    await crashSession(harness, "steer-model-crash");
+
+    const thread = await readThread(harness);
+    // The orphaned steer (newest user message, msg-2) is auto-resumed.
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+
+    // The resume runs on the steer's OWN model (codex_max), read from its
+    // pending-start row — never the older turn-a's stale binding model (high).
+    // (msg-1's start carried no model override, so it is not in this set; the
+    // set is the steer's original start plus the resume, both on codex_max.)
+    const requestsWithModel = harness
+      .turnStartRequests()
+      .filter((evt) => evt.payload.modelSelection !== undefined);
+    expect(requestsWithModel.length).toBeGreaterThanOrEqual(1);
+    expect(
+      requestsWithModel.every((evt) => evt.payload.modelSelection?.model === "gpt-5-codex-max"),
+    ).toBe(true);
+    // The stale binding model is never re-issued by the resume.
+    expect(
+      requestsWithModel.some((evt) => evt.payload.modelSelection?.model === "gpt-5-codex-high"),
+    ).toBe(false);
+  });
+
+  it("does not auto-resume a turn the user interrupted without a turnId before the crash", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+
+    // The user clicks interrupt WITHOUT naming a turn ("interrupt whatever is
+    // running"). The decider must resolve the omitted turnId to the session's
+    // active turn (turn-a); otherwise the emitted event carries no turnId,
+    // ProjectionPipeline ignores it, turn-a's row stays running, and the crash
+    // below would be wrongly auto-resumed.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-interrupt-idless"),
+        threadId: asThreadId("thread-1"),
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    // Precondition: the session still tracks turn-a active, so the exclusion is
+    // driven by the resolved user-interrupt guard, not the no-active-turn check.
+    const shell = await harness.readShell();
+    expect(shell?.session?.activeTurnId).toBe("turn-a");
+
+    // The subprocess exits before turn.completed. A deliberate id-less user
+    // interrupt must NOT be auto-resumed, exactly like the id-ful case.
+    await crashSession(harness, "idless-interrupt-then-crash");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+    expect(userMessages(thread)).toHaveLength(1);
+  });
+
   it("does not reset the crash-loop budget on a stale completion for a superseded turn", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");

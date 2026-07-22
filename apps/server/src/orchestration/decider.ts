@@ -513,6 +513,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
+          // Carry the interrupted turn's source proposed-plan reference so a
+          // resumed plan-implementation turn re-associates with its plan (the
+          // reactor's turn.started marks the plan implemented from this field).
+          ...(command.sourceProposedPlan !== undefined
+            ? { sourceProposedPlan: command.sourceProposedPlan }
+            : {}),
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           createdAt: command.createdAt,
@@ -522,11 +528,20 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.interrupt": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      // Resolve an omitted turnId to the thread's active turn. The contract
+      // permits an id-less interrupt ("interrupt whatever is running"); left
+      // unresolved, the emitted event carries no turnId, ProjectionPipeline
+      // ignores it (its `thread.turn-interrupt-requested` case returns early on
+      // `turnId === undefined`), and the active turn's row stays `running`. The
+      // session-exit auto-resume path keys off that row state to tell a
+      // deliberate interrupt from a crash, so without resolution it would
+      // resume a turn the user explicitly interrupted.
+      const resolvedTurnId = command.turnId ?? thread.session?.activeTurnId ?? undefined;
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -537,7 +552,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.turn-interrupt-requested",
         payload: {
           threadId: command.threadId,
-          ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
+          ...(resolvedTurnId !== undefined ? { turnId: resolvedTurnId } : {}),
           createdAt: command.createdAt,
         },
       };

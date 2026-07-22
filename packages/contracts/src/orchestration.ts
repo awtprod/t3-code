@@ -658,6 +658,13 @@ export const ThreadTurnResumeCommand = Schema.Struct({
   // persisted resume cursor). Omitted when the interrupted turn used the thread
   // default, in which case the reactor falls back to `thread.modelSelection`.
   modelSelection: Schema.optional(ModelSelection),
+  // The interrupted turn's source proposed-plan reference, carried so a resumed
+  // plan-implementation turn re-associates with (and can mark implemented) its
+  // originating plan. When the superseded pending start belonged to a plan
+  // implementation, dropping this here leaves the plan permanently unmarked
+  // because the resume replaces the pending row and the reactor skips the
+  // original `thread.turn-start-requested`.
+  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   reason: Schema.optional(Schema.String),
   createdAt: IsoDateTime,
 });

@@ -1019,6 +1019,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             sourceProposedPlanId: event.payload.sourceProposedPlan?.planId ?? null,
             requestedAt: event.payload.createdAt,
             requestSequence: event.sequence,
+            modelSelection: event.payload.modelSelection ?? null,
           });
           return;
         }
