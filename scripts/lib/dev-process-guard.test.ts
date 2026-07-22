@@ -100,6 +100,7 @@ describe("dev-process-guard staleness", () => {
       startedAt: "",
     };
     const result = staleRunnerFromLock(selfLock);
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- Launcher-boundary guard test branches on the real host platform (Linux cmdline readability); it deliberately has no Effect runtime to inject HostProcessPlatform through.
     if (process.platform === "linux") {
       assert.strictEqual(result, undefined);
     } else {

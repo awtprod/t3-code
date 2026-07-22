@@ -167,7 +167,6 @@ describe("StalledTurnWatchdog", () => {
       respondToRequest: () => unsupported(),
       respondToUserInput: () => unsupported(),
       stopSession: () => unsupported(),
-      stopAll: () => Effect.void,
       listSessions: () => Effect.succeed([]),
       getCapabilities: () => unsupported(),
       getInstanceInfo: () => unsupported(),
