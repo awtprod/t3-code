@@ -1627,8 +1627,7 @@ const make = Effect.gen(function* () {
         const gracefulExit = event.payload.exitKind === "graceful";
         const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
         const archived = thread.archivedAt !== null;
-        const baseEligible =
-          activeTurnId !== null && !gracefulExit && !parkedOnHuman && !archived;
+        const baseEligible = activeTurnId !== null && !gracefulExit && !parkedOnHuman && !archived;
         // A turn-start already pending for this thread (e.g. the user steered
         // the running turn just before the subprocess crashed, so the steer's
         // turn-start-requested has not been consumed by a turn.started yet) will
