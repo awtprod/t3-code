@@ -30,6 +30,12 @@ export interface ProviderRuntimeIngestionShape {
    * Intended for test use to replace timing-sensitive sleeps.
    */
   readonly drain: Effect.Effect<void>;
+
+  /**
+   * Settle projected active turns that no longer have a matching live provider
+   * turn. Used after provider shutdown and during startup recovery.
+   */
+  readonly reconcileOrphanedTurns: Effect.Effect<void>;
 }
 
 /**

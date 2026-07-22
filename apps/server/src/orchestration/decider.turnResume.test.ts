@@ -1,0 +1,193 @@
+import {
+  CommandId,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
+  EventId,
+  MessageId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  type OrchestrationCommand,
+  type OrchestrationEvent,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { expect, it } from "@effect/vitest";
+
+import { decideOrchestrationCommand } from "./decider.ts";
+import { createEmptyReadModel, projectEvent } from "./projector.ts";
+
+const asCommandId = (value: string): CommandId => CommandId.make(value);
+const asEventId = (value: string): EventId => EventId.make(value);
+const asProjectId = (value: string): ProjectId => ProjectId.make(value);
+const asThreadId = (value: string): ThreadId => ThreadId.make(value);
+const asMessageId = (value: string): MessageId => MessageId.make(value);
+
+const NOW = "2026-01-01T00:00:00.000Z";
+const PROJECT_ID = asProjectId("project-resume");
+const THREAD_ID = asThreadId("thread-resume");
+const USER_MESSAGE_ID = asMessageId("msg-user-1");
+const ASSISTANT_MESSAGE_ID = asMessageId("msg-assistant-1");
+
+// Seed a project + thread + one user message (and one assistant message) so the
+// resume decider has a real user message to re-issue.
+const seedReadModel = Effect.gen(function* () {
+  const initial = createEmptyReadModel(NOW);
+  const withProject = yield* projectEvent(initial, {
+    sequence: 1,
+    eventId: asEventId("evt-project-create"),
+    aggregateKind: "project",
+    aggregateId: PROJECT_ID,
+    type: "project.created",
+    occurredAt: NOW,
+    commandId: asCommandId("cmd-project-create"),
+    causationEventId: null,
+    correlationId: asCommandId("cmd-project-create"),
+    metadata: {},
+    payload: {
+      projectId: PROJECT_ID,
+      title: "Project Resume",
+      workspaceRoot: "/tmp/project-resume",
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+  });
+
+  const withThread = yield* projectEvent(withProject, {
+    sequence: 2,
+    eventId: asEventId("evt-thread-create"),
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.created",
+    occurredAt: NOW,
+    commandId: asCommandId("cmd-thread-create"),
+    causationEventId: null,
+    correlationId: asCommandId("cmd-thread-create"),
+    metadata: {},
+    payload: {
+      threadId: THREAD_ID,
+      projectId: PROJECT_ID,
+      title: "Thread Resume",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "full-access",
+      branch: null,
+      worktreePath: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+  });
+
+  const withUserMessage = yield* projectEvent(withThread, {
+    sequence: 3,
+    eventId: asEventId("evt-user-message"),
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.message-sent",
+    occurredAt: NOW,
+    commandId: asCommandId("cmd-user-message"),
+    causationEventId: null,
+    correlationId: asCommandId("cmd-user-message"),
+    metadata: {},
+    payload: {
+      threadId: THREAD_ID,
+      messageId: USER_MESSAGE_ID,
+      role: "user",
+      text: "do the multi-step thing",
+      attachments: [],
+      turnId: null,
+      streaming: false,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+  });
+
+  return yield* projectEvent(withUserMessage, {
+    sequence: 4,
+    eventId: asEventId("evt-assistant-message"),
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.message-sent",
+    occurredAt: NOW,
+    commandId: asCommandId("cmd-assistant-message"),
+    causationEventId: null,
+    correlationId: asCommandId("cmd-assistant-message"),
+    metadata: {},
+    payload: {
+      threadId: THREAD_ID,
+      messageId: ASSISTANT_MESSAGE_ID,
+      role: "assistant",
+      text: "working on it",
+      attachments: [],
+      turnId: null,
+      streaming: false,
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+  });
+});
+
+const resumeCommand = (messageId: MessageId): OrchestrationCommand => ({
+  type: "thread.turn.resume",
+  commandId: asCommandId("cmd-resume"),
+  threadId: THREAD_ID,
+  messageId,
+  reason: "auto-resume after provider session exit: crashed",
+  createdAt: NOW,
+});
+
+it.layer(NodeServices.layer)("decider thread.turn.resume", (it) => {
+  it.effect("emits exactly one turn-start-requested and no message-sent", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel;
+      const result = yield* decideOrchestrationCommand({
+        command: resumeCommand(USER_MESSAGE_ID),
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events).toHaveLength(1);
+      const [event] = events;
+      expect(event.type).toBe("thread.turn-start-requested");
+      // No duplicate user message: this is what keeps the transcript clean.
+      expect(events.some((entry) => entry.type === "thread.message-sent")).toBe(false);
+
+      // The re-issued turn targets the existing user message and carries the
+      // thread's runtime/interaction modes (no modelSelection — resolved later).
+      expect(event.type === "thread.turn-start-requested" ? event.payload.messageId : null).toBe(
+        USER_MESSAGE_ID,
+      );
+      expect(event.type === "thread.turn-start-requested" ? event.payload.runtimeMode : null).toBe(
+        "full-access",
+      );
+    }),
+  );
+
+  it.effect("is a no-op when the referenced message does not exist", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel;
+      const result = yield* decideOrchestrationCommand({
+        command: resumeCommand(asMessageId("msg-does-not-exist")),
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events).toHaveLength(0);
+    }),
+  );
+
+  it.effect("is a no-op when the referenced message is not a user message", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel;
+      const result = yield* decideOrchestrationCommand({
+        command: resumeCommand(ASSISTANT_MESSAGE_ID),
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events).toHaveLength(0);
+    }),
+  );
+});

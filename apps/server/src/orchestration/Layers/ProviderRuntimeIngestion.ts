@@ -2,6 +2,7 @@ import {
   ApprovalRequestId,
   type AssistantDeliveryMode,
   CommandId,
+  EventId,
   MessageId,
   type OrchestrationEvent,
   type OrchestrationMessage,
@@ -20,10 +21,12 @@ import {
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
@@ -55,6 +58,11 @@ const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
+
+// At most this many consecutive auto-resumes per user message after a provider
+// session exits mid-turn. On the next crash beyond this, give up and leave the
+// turn interrupted with an "auto-resume exhausted" activity.
+const AUTO_RESUME_MAX_ATTEMPTS = 2;
 
 type TurnStartRequestedDomainEvent = Extract<
   OrchestrationEvent,
@@ -638,6 +646,16 @@ const make = Effect.gen(function* () {
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
     );
+
+  // In-memory crash-loop guard for session-exit auto-resume. Deliberately NOT
+  // durable: auto-resume should only fire for live crashes within a server's
+  // lifetime — after a restart, reconcileOrphanedTurns settles orphaned turns to
+  // interrupted (no resume), and a fresh budget is fine. Keyed by thread; each
+  // entry tracks the user message being resumed and how many consecutive
+  // auto-resumes have fired for it.
+  const autoResumeAttemptsByThreadId = yield* Ref.make(
+    new Map<ThreadId, { readonly messageId: MessageId; readonly attempts: number }>(),
+  );
 
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -1575,8 +1593,131 @@ const make = Effect.gen(function* () {
         }
       }
 
+      // A turn that completes without failing clears the crash-loop budget for
+      // this thread, so a later unrelated crash gets a fresh set of auto-resumes.
+      if (
+        event.type === "turn.completed" &&
+        normalizeRuntimeTurnState(event.payload.state) !== "failed"
+      ) {
+        yield* Ref.update(autoResumeAttemptsByThreadId, (map) => {
+          if (!map.has(thread.id)) {
+            return map;
+          }
+          const next = new Map(map);
+          next.delete(thread.id);
+          return next;
+        });
+      }
+
       if (event.type === "session.exited") {
         yield* clearTurnStateForSession(thread.id);
+
+        // Session-exit auto-resume: when the provider subprocess exits *while a
+        // turn was running* (not a graceful shutdown, not parked on a human
+        // decision), re-issue that turn for the existing user message so the work
+        // continues with provider context — bounded by AUTO_RESUME_MAX_ATTEMPTS.
+        // Runs after the interrupted-settlement dispatch above, on the same
+        // sequential worker, so it cannot race or double-fire.
+        const gracefulExit = event.payload.exitKind === "graceful";
+        const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
+        const archived = thread.archivedAt !== null;
+        if (activeTurnId !== null && !gracefulExit && !parkedOnHuman && !archived) {
+          const detail = yield* getLoadedThreadDetail();
+          const targetUserMessage = detail
+            ? [...detail.messages].reverse().find((message) => message.role === "user")
+            : undefined;
+          if (targetUserMessage) {
+            const targetMessageId = targetUserMessage.id;
+            const existing = (yield* Ref.get(autoResumeAttemptsByThreadId)).get(thread.id);
+            // A different (newer) user message resets the budget to zero.
+            const priorAttempts =
+              existing && existing.messageId === targetMessageId ? existing.attempts : 0;
+            const exitReason = event.payload.reason ?? "provider session exited";
+
+            if (priorAttempts >= AUTO_RESUME_MAX_ATTEMPTS) {
+              // Budget exhausted: give up, leave the turn interrupted, surface why.
+              const exhaustedActivityId = yield* crypto.randomUUIDv4.pipe(
+                Effect.map((uuid) =>
+                  EventId.make(`auto-resume-exhausted:${event.eventId}:${uuid}`),
+                ),
+              );
+              yield* orchestrationEngine.dispatch({
+                type: "thread.activity.append",
+                commandId: yield* providerCommandId(event, "auto-resume-exhausted-activity"),
+                threadId: thread.id,
+                activity: {
+                  id: exhaustedActivityId,
+                  tone: "error",
+                  kind: "provider.turn.auto-resume-exhausted",
+                  summary: `Auto-resume exhausted after ${AUTO_RESUME_MAX_ATTEMPTS} attempts; turn left interrupted`,
+                  payload: {
+                    detail:
+                      `The provider session exited mid-turn and was auto-resumed ` +
+                      `${AUTO_RESUME_MAX_ATTEMPTS} times without completing. Auto-resume gave ` +
+                      `up to avoid a crash loop; re-send the message to try again.`,
+                    exitReason,
+                    attempts: priorAttempts,
+                  },
+                  turnId: activeTurnId,
+                  createdAt: now,
+                },
+                createdAt: now,
+              });
+            } else {
+              const attempt = priorAttempts + 1;
+              yield* Ref.update(autoResumeAttemptsByThreadId, (map) => {
+                const next = new Map(map);
+                next.set(thread.id, { messageId: targetMessageId, attempts: attempt });
+                return next;
+              });
+
+              // 1. Visible marker so the transcript explains the re-issued turn.
+              const markerActivityId = yield* crypto.randomUUIDv4.pipe(
+                Effect.map((uuid) => EventId.make(`auto-resumed:${event.eventId}:${uuid}`)),
+              );
+              yield* orchestrationEngine.dispatch({
+                type: "thread.activity.append",
+                commandId: yield* providerCommandId(event, "auto-resumed-activity"),
+                threadId: thread.id,
+                activity: {
+                  id: markerActivityId,
+                  tone: "info",
+                  kind: "provider.turn.auto-resumed",
+                  summary: `Auto-resumed after provider session exit (attempt ${attempt}/${AUTO_RESUME_MAX_ATTEMPTS})`,
+                  payload: {
+                    detail:
+                      `The provider session exited while the turn was running. ` +
+                      `Re-issuing the turn to continue with provider context.`,
+                    exitReason,
+                    attempt,
+                  },
+                  turnId: activeTurnId,
+                  createdAt: now,
+                },
+                createdAt: now,
+              });
+
+              // 2. Re-issue the turn for the existing user message (no duplicate
+              //    message-sent). Fresh commandId avoids turn-start dedup collision.
+              yield* orchestrationEngine.dispatch({
+                type: "thread.turn.resume",
+                commandId: yield* providerCommandId(event, "auto-resume"),
+                threadId: thread.id,
+                messageId: targetMessageId,
+                reason: `auto-resume after provider session exit: ${exitReason}`,
+                createdAt: now,
+              });
+
+              yield* Effect.logInfo("provider-runtime.auto-resume.reissued-turn", {
+                threadId: thread.id,
+                messageId: targetMessageId,
+                interruptedTurnId: activeTurnId,
+                attempt,
+                exitReason,
+              });
+            }
+          }
+        }
       }
 
       if (event.type === "runtime.error") {
@@ -1692,6 +1833,71 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker(processInputSafely);
 
+  const reconcileOrphanedTurns: ProviderRuntimeIngestionShape["reconcileOrphanedTurns"] =
+    Effect.gen(function* () {
+      const [snapshot, providerSessions] = yield* Effect.all([
+        projectionSnapshotQuery.getShellSnapshot(),
+        providerService.listSessions(),
+      ]);
+      const liveTurnsByThreadId = new Map(
+        providerSessions
+          .filter((session) => session.status === "running" && session.activeTurnId !== undefined)
+          .map((session) => [session.threadId, session.activeTurnId] as const),
+      );
+      const orphanedThreads = snapshot.threads.filter((thread) => {
+        const projectedTurnId =
+          thread.session?.activeTurnId ??
+          (thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null);
+        if (projectedTurnId === null) {
+          return false;
+        }
+        return !sameId(liveTurnsByThreadId.get(thread.id), projectedTurnId);
+      });
+
+      if (orphanedThreads.length === 0) {
+        return;
+      }
+
+      const reconciledAt = DateTime.formatIso(yield* DateTime.now);
+      yield* Effect.forEach(
+        orphanedThreads,
+        (thread) =>
+          Effect.gen(function* () {
+            const commandUuid = yield* crypto.randomUUIDv4;
+            yield* orchestrationEngine.dispatch({
+              type: "thread.session.set",
+              commandId: CommandId.make(
+                `server:reconcile-orphaned-turn:${thread.id}:${commandUuid}`,
+              ),
+              threadId: thread.id,
+              session: {
+                threadId: thread.id,
+                status: "stopped",
+                providerName: thread.session?.providerName ?? null,
+                ...(thread.session?.providerInstanceId !== undefined
+                  ? { providerInstanceId: thread.session.providerInstanceId }
+                  : {}),
+                runtimeMode: thread.session?.runtimeMode ?? thread.runtimeMode,
+                activeTurnId: null,
+                lastError: thread.session?.lastError ?? null,
+                updatedAt: reconciledAt,
+              },
+              createdAt: reconciledAt,
+            });
+          }),
+        { concurrency: 1 },
+      );
+      yield* Effect.logInfo("reconciled orphaned provider turns", {
+        threadCount: orphanedThreads.length,
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to reconcile orphaned provider turns", {
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
       yield* Effect.forkScoped(
@@ -1712,6 +1918,7 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: worker.drain,
+    reconcileOrphanedTurns,
   } satisfies ProviderRuntimeIngestionShape;
 });
 

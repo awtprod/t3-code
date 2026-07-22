@@ -1415,30 +1415,46 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
+    // Settle the session when the app-server process goes away mid-session.
+    // `child.exitCode` reports the departure on two distinct channels:
+    //   - success with a numeric code (the process called exit(code)); and
+    //   - FAILURE with a PlatformError when the process is terminated by a
+    //     signal (SIGKILL / SIGSEGV / OOM-kill / SIGABRT), where Node surfaces
+    //     `code === null`. A real Codex crash usually lands here.
+    // Both mean "the session is gone", so both must emit `session/exited`;
+    // handling only the success channel (the previous behaviour) left a
+    // signal-killed session stuck `running` until the stall watchdog and never
+    // fired the mid-turn auto-resume. The `closedRef` guard keeps a graceful
+    // `close()` (which signals the child during scope teardown) from
+    // double-emitting on top of its own `session/closed`.
+    const settleProcessExit = (nextStatus: "closed" | "error", message: string) =>
+      Ref.get(closedRef).pipe(
+        Effect.flatMap((closed) => {
+          if (closed) {
+            return Effect.void;
+          }
+          return updateSession(sessionRef, {
+            status: nextStatus,
+            activeTurnId: undefined,
+          }).pipe(Effect.andThen(emitSessionEvent("session/exited", message)));
+        }),
+      );
+
     yield* child.exitCode.pipe(
-      Effect.flatMap((exitCode) =>
-        Ref.get(closedRef).pipe(
-          Effect.flatMap((closed) => {
-            if (closed) {
-              return Effect.void;
-            }
-            const nextStatus = exitCode === 0 ? "closed" : "error";
-            return updateSession(sessionRef, {
-              status: nextStatus,
-              activeTurnId: undefined,
-            }).pipe(
-              Effect.andThen(
-                emitSessionEvent(
-                  "session/exited",
-                  exitCode === 0
-                    ? "Codex App Server exited."
-                    : `Codex App Server exited with code ${exitCode}.`,
-                ),
-              ),
-            );
-          }),
-        ),
-      ),
+      Effect.matchEffect({
+        onSuccess: (exitCode) =>
+          settleProcessExit(
+            exitCode === 0 ? "closed" : "error",
+            exitCode === 0
+              ? "Codex App Server exited."
+              : `Codex App Server exited with code ${exitCode}.`,
+          ),
+        onFailure: (cause) =>
+          settleProcessExit(
+            "error",
+            `Codex App Server terminated: ${cause instanceof Error ? cause.message : String(cause)}`,
+          ),
+      }),
       Effect.forkIn(runtimeScope),
     );
 

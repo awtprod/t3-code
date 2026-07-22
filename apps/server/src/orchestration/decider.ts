@@ -482,6 +482,40 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       return [userMessageEvent, turnStartRequestedEvent];
     }
 
+    case "thread.turn.resume": {
+      const targetThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      // Re-issue an interrupted turn for the existing user message (no duplicate
+      // `thread.message-sent`). No-op if the referenced message is gone or is not a
+      // user message — auto-resume should only continue a genuine user turn.
+      const userMessage = targetThread.messages.find(
+        (message) => message.id === command.messageId && message.role === "user",
+      );
+      if (!userMessage) {
+        return [];
+      }
+      const resumeTurnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-start-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          runtimeMode: targetThread.runtimeMode,
+          interactionMode: targetThread.interactionMode,
+          createdAt: command.createdAt,
+        },
+      };
+      return [resumeTurnStartRequestedEvent];
+    }
+
     case "thread.turn.interrupt": {
       yield* requireThread({
         readModel,

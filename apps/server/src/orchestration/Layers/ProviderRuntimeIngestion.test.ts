@@ -27,6 +27,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -134,6 +135,13 @@ function createProviderServiceHarness() {
     runtimeSessions.push(session);
   };
 
+  const removeSession = (threadId: ThreadId): void => {
+    const existingIndex = runtimeSessions.findIndex((entry) => entry.threadId === threadId);
+    if (existingIndex >= 0) {
+      runtimeSessions.splice(existingIndex, 1);
+    }
+  };
+
   const normalizeLegacyEvent = (event: LegacyProviderRuntimeEvent): ProviderRuntimeEvent => {
     if (isLegacyTurnCompletedEvent(event)) {
       const normalized: Extract<ProviderRuntimeEvent, { type: "turn.completed" }> = {
@@ -157,6 +165,7 @@ function createProviderServiceHarness() {
     service,
     emit,
     setSession,
+    removeSession,
   };
 }
 
@@ -312,9 +321,15 @@ describe("ProviderRuntimeIngestion", () => {
     return {
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      readShell: (threadId: ThreadId = ThreadId.make("thread-1")) =>
+        Effect.runPromise(
+          snapshotQuery.getThreadShellById(threadId).pipe(Effect.map(Option.getOrNull)),
+        ),
       emit: provider.emit,
       setProviderSession: provider.setSession,
+      removeProviderSession: provider.removeSession,
       drain,
+      reconcile: () => Effect.runPromise(ingestion.reconcileOrphanedTurns),
     };
   }
 
@@ -358,6 +373,73 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
+  });
+
+  it("settles a projected active turn when no matching provider turn remains", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-orphaned");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-orphaned-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.latestTurn?.state === "running",
+    );
+
+    harness.removeProviderSession(asThreadId("thread-1"));
+    await harness.reconcile();
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.session?.status === "stopped" && entry.session.activeTurnId === null,
+    );
+    expect(thread.latestTurn?.turnId).toBe(turnId);
+    expect(thread.latestTurn?.completedAt).not.toBeNull();
+  });
+
+  it("keeps a projected active turn running while the provider still owns it", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("turn-live");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      activeTurnId: turnId,
+      createdAt,
+      updatedAt: createdAt,
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-live-started"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt,
+      turnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "running" && thread.latestTurn?.state === "running",
+    );
+
+    await harness.reconcile();
+
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === asThreadId("thread-1"),
+    );
+    expect(thread?.session?.status).toBe("running");
+    expect(thread?.session?.activeTurnId).toBe(turnId);
+    expect(thread?.latestTurn?.state).toBe("running");
   });
 
   it("applies provider session.state.changed transitions directly", async () => {
@@ -3059,5 +3141,195 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+
+  // --- Session-exit auto-resume -------------------------------------------
+
+  const AR_NOW = "2026-01-01T00:00:00.000Z";
+
+  type AutoResumeHarness = Awaited<ReturnType<typeof createHarness>>;
+
+  async function seedUserMessage(harness: AutoResumeHarness, messageId: string) {
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`cmd-turn-start-${messageId}`),
+        threadId: asThreadId("thread-1"),
+        message: {
+          messageId: asMessageId(messageId),
+          role: "user",
+          text: "do the multi-step thing",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+  }
+
+  async function startTurn(harness: AutoResumeHarness, turnId: string) {
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId(`evt-turn-started-${turnId}`),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId(turnId),
+    });
+    await harness.drain();
+  }
+
+  async function crashSession(harness: AutoResumeHarness, tag: string, exitKind?: "graceful") {
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId(`evt-session-exited-${tag}`),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: {
+        reason: exitKind === "graceful" ? "session closed" : "Codex App Server exited with code 1.",
+        ...(exitKind ? { exitKind } : {}),
+      },
+    });
+    await harness.drain();
+  }
+
+  const autoResumedActivities = (thread: ProviderRuntimeTestThread) =>
+    thread.activities.filter((activity) => activity.kind === "provider.turn.auto-resumed");
+  const exhaustedActivities = (thread: ProviderRuntimeTestThread) =>
+    thread.activities.filter((activity) => activity.kind === "provider.turn.auto-resume-exhausted");
+  const userMessages = (thread: ProviderRuntimeTestThread) =>
+    thread.messages.filter((message) => message.role === "user");
+
+  async function readThread(harness: AutoResumeHarness) {
+    const snapshot = await harness.readModel();
+    const thread = snapshot.threads.find((entry) => entry.id === "thread-1");
+    if (!thread) {
+      throw new Error("thread-1 not found in snapshot");
+    }
+    return thread;
+  }
+
+  it("auto-resumes a running turn when the provider session exits mid-turn", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    await crashSession(harness, "crash-1");
+
+    const thread = await readThread(harness);
+    // One resume marker, targeting the interrupted turn, at attempt 1/2.
+    const markers = autoResumedActivities(thread);
+    expect(markers).toHaveLength(1);
+    expect(markers[0]?.summary).toContain("attempt 1/2");
+    expect(markers[0]?.turnId).toBe("turn-a");
+    // No exhaustion, and crucially NO duplicate user message.
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+    expect(userMessages(thread)).toHaveLength(1);
+  });
+
+  it("does not auto-resume on a graceful session exit", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    await crashSession(harness, "graceful-1", "graceful");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+    expect(thread.session?.status).toBe("stopped");
+  });
+
+  it("does not auto-resume when the session exits with no active turn", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    // No turn.started: session.activeTurnId stays null (idle exit).
+    await crashSession(harness, "idle-exit");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+  });
+
+  it("does not auto-resume when the turn is parked on a pending approval", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // Provider opens a command approval: the turn is parked on a human decision,
+    // so a subsequent session exit is not treated as a crash to auto-resume.
+    harness.emit({
+      type: "request.opened",
+      eventId: asEventId("evt-approval-open"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      requestId: ApprovalRequestId.make("req-approval-1"),
+      payload: { requestType: "command_execution_approval", detail: "rm -rf /tmp/x" },
+    });
+    await harness.drain();
+
+    // Assert on the shell — the exact projection the production predicate reads.
+    const parkedShell = await harness.readShell();
+    expect(parkedShell?.hasPendingApprovals).toBe(true);
+    expect(parkedShell?.session?.activeTurnId).toBe("turn-a");
+
+    await crashSession(harness, "parked-crash");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+  });
+
+  it("gives up after the attempt budget, leaving the turn interrupted", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    await startTurn(harness, "turn-a");
+    await crashSession(harness, "crash-1"); // attempt 1/2
+    await startTurn(harness, "turn-b");
+    await crashSession(harness, "crash-2"); // attempt 2/2
+    await startTurn(harness, "turn-c");
+    await crashSession(harness, "crash-3"); // exhausted — no resume
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(2);
+    const exhausted = exhaustedActivities(thread);
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0]?.summary).toContain("exhausted");
+    // Still only the original user message — no resume ever duplicates it.
+    expect(userMessages(thread)).toHaveLength(1);
+  });
+
+  it("resets the attempt budget after a turn completes successfully", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    await startTurn(harness, "turn-a");
+    await crashSession(harness, "crash-1"); // attempt 1/2
+
+    // A clean completion clears the budget for this thread.
+    await startTurn(harness, "turn-b");
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-reset"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-b"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+
+    await startTurn(harness, "turn-c");
+    await crashSession(harness, "crash-2"); // fresh budget → attempt 1/2 again
+
+    const thread = await readThread(harness);
+    const markers = autoResumedActivities(thread);
+    expect(markers).toHaveLength(2);
+    // Both are attempt 1/2 — the second proves the budget reset (not attempt 2/2).
+    expect(markers.every((activity) => activity.summary.includes("attempt 1/2"))).toBe(true);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
   });
 });
