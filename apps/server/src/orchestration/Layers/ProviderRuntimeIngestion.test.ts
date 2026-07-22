@@ -3318,6 +3318,40 @@ describe("ProviderRuntimeIngestion", () => {
     expect(exhaustedActivities(thread)).toHaveLength(0);
   });
 
+  it("does not auto-resume a turn the user interrupted before the crash", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+
+    // The user clicks interrupt on the running turn. thread.turn.interrupt marks
+    // turn-a's projection row `interrupted` while the session still owns turn-a
+    // as its active turn (the provider has not reported turn.completed yet).
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-interrupt-turn-a"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-a"),
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    // Precondition: the session still tracks turn-a active (so the exclusion is
+    // driven by the user-interrupt guard, not by the no-active-turn check).
+    const shell = await harness.readShell();
+    expect(shell?.session?.activeTurnId).toBe("turn-a");
+
+    // The subprocess exits before turn.completed. A deliberate user interrupt
+    // must NOT be auto-resumed.
+    await crashSession(harness, "interrupt-then-crash");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+    expect(userMessages(thread)).toHaveLength(1);
+  });
+
   it("gives up after the attempt budget, leaving the turn interrupted", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");

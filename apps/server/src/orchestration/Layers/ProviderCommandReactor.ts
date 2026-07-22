@@ -803,13 +803,17 @@ const make = Effect.gen(function* () {
     // a crash that lands after this reactor already consumed the original
     // turn-start-requested would otherwise double-drive the same prompt. Skip
     // this request when the live pending turn-start row is for the SAME message
-    // but was requested STRICTLY LATER — i.e. a newer re-request has superseded
-    // it. Scoping to same-messageId + strictly-newer requestedAt is deliberate:
-    // a normal single turn-start has `requestedAt == createdAt` (not superseded,
-    // so it drives), and rapid multi-send of DISTINCT messages is never
-    // suppressed (no regression to normal turn driving). The projection is
-    // committed synchronously inside dispatch, ahead of this lagging reactor, so
-    // the pending row reflects the latest committed re-request in the common
+    // but carries a STRICTLY HIGHER event sequence — i.e. a newer re-request has
+    // superseded it. Ordering by the globally-monotonic event `sequence` (never
+    // ties, unlike a millisecond `requestedAt` which can collide when the
+    // original and the crash-generated resume land in the same instant) makes
+    // this deterministic: the stale original (lower sequence) is skipped while
+    // the resume (its own row's sequence) still drives. A normal single
+    // turn-start reads its own row (equal sequence, not superseded, so it
+    // drives), and rapid multi-send of DISTINCT messages is never suppressed (no
+    // regression to normal turn driving). The projection is committed
+    // synchronously inside dispatch, ahead of this lagging reactor, so the
+    // pending row reflects the latest committed re-request in the common
     // post-crash timing.
     const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
       threadId: event.payload.threadId,
@@ -817,7 +821,7 @@ const make = Effect.gen(function* () {
     if (
       Option.isSome(pendingTurnStart) &&
       pendingTurnStart.value.messageId === event.payload.messageId &&
-      Date.parse(pendingTurnStart.value.requestedAt) > Date.parse(event.payload.createdAt)
+      pendingTurnStart.value.requestSequence > event.sequence
     ) {
       return;
     }

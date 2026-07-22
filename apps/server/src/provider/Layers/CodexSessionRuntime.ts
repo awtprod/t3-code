@@ -18,6 +18,7 @@ import {
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { normalizeModelSlug } from "@t3tools/shared/model";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -936,12 +937,18 @@ export const makeCodexSessionRuntime = (
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const crypto = yield* Crypto.Crypto;
-    const events = yield* Queue.unbounded<ProviderEvent>();
+    const events = yield* Queue.unbounded<ProviderEvent, Cause.Done>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const closedRef = yield* Ref.make(false);
+    // Claims the single terminal lifecycle emit (`session/exited` from a process
+    // exit XOR `session/closed` from a graceful close). Distinct from
+    // `closedRef`, which guards the one-time close() *cleanup* (scope + queues):
+    // a crash-exit that fires first must claim the emit here WITHOUT short-
+    // circuiting a later close()'s cleanup, so the two concerns need two refs.
+    const terminalEmittedRef = yield* Ref.make(false);
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -1424,13 +1431,18 @@ export const makeCodexSessionRuntime = (
     // Both mean "the session is gone", so both must emit `session/exited`;
     // handling only the success channel (the previous behaviour) left a
     // signal-killed session stuck `running` until the stall watchdog and never
-    // fired the mid-turn auto-resume. The `closedRef` guard keeps a graceful
-    // `close()` (which signals the child during scope teardown) from
-    // double-emitting on top of its own `session/closed`.
+    // fired the mid-turn auto-resume. Atomically claim the terminal transition
+    // via `terminalEmittedRef`: whichever of {process exit, graceful close}
+    // fires first emits exactly one terminal event and the other becomes a
+    // no-op emit. This prevents a graceful `close()` (which signals the child
+    // during scope teardown) from double-emitting `session/closed` on top of a
+    // crash's `session/exited` — a stale second terminal event that, arriving
+    // after the replacement turn has started, would mark the healthy resumed
+    // session stopped and settle the live turn.
     const settleProcessExit = (nextStatus: "closed" | "error", message: string) =>
-      Ref.get(closedRef).pipe(
-        Effect.flatMap((closed) => {
-          if (closed) {
+      Ref.getAndSet(terminalEmittedRef, true).pipe(
+        Effect.flatMap((terminalAlreadyEmitted) => {
+          if (terminalAlreadyEmitted) {
             return Effect.void;
           }
           return updateSession(sessionRef, {
@@ -1519,14 +1531,23 @@ export const makeCodexSessionRuntime = (
         status: "closed",
         activeTurnId: undefined,
       });
-      yield* emitSessionEvent("session/closed", "Session stopped").pipe(
-        Effect.catch((cause) =>
-          Effect.logError("Failed to emit Codex session closed event.", { cause }),
-        ),
-      );
+      // Emit the terminal lifecycle event only if a crash-exit hasn't already
+      // claimed it; the cleanup below still runs unconditionally so the scope
+      // and queues are always torn down exactly once.
+      const terminalAlreadyEmitted = yield* Ref.getAndSet(terminalEmittedRef, true);
+      if (!terminalAlreadyEmitted) {
+        yield* emitSessionEvent("session/closed", "Session stopped").pipe(
+          Effect.catch((cause) =>
+            Effect.logError("Failed to emit Codex session closed event.", { cause }),
+          ),
+        );
+      }
       yield* Scope.close(runtimeScope, Exit.void);
       yield* Queue.shutdown(serverNotifications);
-      yield* Queue.shutdown(events);
+      // Gracefully end (rather than hard-shutdown) the outward event queue so a
+      // just-emitted terminal event (session/closed or session/exited) is drained
+      // by the consumer before the stream completes, instead of being discarded.
+      yield* Queue.end(events);
     });
 
     return {

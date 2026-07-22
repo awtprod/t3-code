@@ -121,6 +121,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           assistant_message_id,
           state,
           requested_at,
+          request_sequence,
           started_at,
           completed_at,
           checkpoint_turn_count,
@@ -137,6 +138,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           NULL,
           'pending',
           ${row.requestedAt},
+          ${row.requestSequence},
           NULL,
           NULL,
           NULL,
@@ -157,14 +159,15 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           pending_message_id AS "messageId",
           source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
           source_proposed_plan_id AS "sourceProposedPlanId",
-          requested_at AS "requestedAt"
+          requested_at AS "requestedAt",
+          request_sequence AS "requestSequence"
         FROM projection_turns
         WHERE thread_id = ${threadId}
           AND turn_id IS NULL
           AND state = 'pending'
           AND pending_message_id IS NOT NULL
           AND checkpoint_turn_count IS NULL
-        ORDER BY requested_at DESC
+        ORDER BY request_sequence DESC, requested_at DESC
         LIMIT 1
       `,
   });

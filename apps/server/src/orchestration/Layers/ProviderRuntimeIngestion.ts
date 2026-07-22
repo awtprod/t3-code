@@ -1253,6 +1253,21 @@ const make = Effect.gen(function* () {
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
       const missingTurnForActiveTurn = activeTurnId !== null && eventTurnId === undefined;
 
+      // A user-requested `thread.turn.interrupt` settles the active turn's
+      // projection row to `interrupted` (ProjectionPipeline's
+      // `thread.turn-interrupt-requested` case) via a prior, already-committed
+      // event. Capture that here for a session exit, because this event's own
+      // `thread.session-set` (status: stopped, dispatched below) also settles a
+      // still-running turn to `interrupted` — so a read taken after that dispatch
+      // could not tell a deliberate user interrupt apart from the crash itself.
+      // A plain crash's active-turn row is still `running` at this point.
+      const userInterruptedActiveTurn =
+        event.type === "session.exited" && activeTurnId !== null
+          ? yield* projectionTurnRepository
+              .getByTurnId({ threadId: thread.id, turnId: activeTurnId })
+              .pipe(Effect.map((row) => Option.isSome(row) && row.value.state === "interrupted"))
+          : false;
+
       // A turn.started that conflicts with the active turn is legitimate when
       // the server itself has a turn start pending for this thread AND the
       // provider session already tracks the event's turn as its active turn:
@@ -1636,7 +1651,16 @@ const make = Effect.gen(function* () {
         const gracefulExit = event.payload.exitKind === "graceful";
         const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
         const archived = thread.archivedAt !== null;
-        const baseEligible = activeTurnId !== null && !gracefulExit && !parkedOnHuman && !archived;
+        // `userInterruptedActiveTurn` was captured before this event's own
+        // session-set (status: stopped) settled the running turn — see its
+        // definition above. A user who deliberately interrupted the turn must not
+        // have it auto-resumed by the ensuing crash.
+        const baseEligible =
+          activeTurnId !== null &&
+          !gracefulExit &&
+          !parkedOnHuman &&
+          !archived &&
+          !userInterruptedActiveTurn;
         // Always auto-resume an eligible crash, even when a turn-start is still
         // pending for this thread. A pending row alone cannot prove another
         // worker will drive the turn: the reactor may already have consumed the

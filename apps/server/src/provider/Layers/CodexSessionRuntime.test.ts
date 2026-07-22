@@ -1,8 +1,17 @@
 import * as NodeAssert from "node:assert/strict";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
@@ -19,9 +28,145 @@ import {
   buildTurnStartParams,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
+  makeCodexSessionRuntime,
   openCodexThread,
   verifyCommandCenterCodexIsolation,
 } from "./CodexSessionRuntime.ts";
+
+const makeFakeChildHandle = (input: {
+  readonly pid: number;
+  readonly exitCode: Effect.Effect<ChildProcessSpawner.ExitCode>;
+}) =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(input.pid),
+    exitCode: input.exitCode,
+    isRunning: Effect.succeed(true),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.empty,
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
+describe("CodexSessionRuntime terminal lifecycle", () => {
+  it.effect(
+    "emits exactly one terminal event when a process exit races a later graceful close",
+    () =>
+      Effect.gen(function* () {
+        // The child process exits first (claiming the terminal `session/exited`),
+        // then a graceful close() runs afterwards. Regression guard for the
+        // double-terminal-emit race: without the atomic terminal claim, close()
+        // would emit a second `session/closed` that — arriving after a
+        // replacement turn started — marks the healthy resumed session stopped.
+        const exitGate = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+        const spawner = ChildProcessSpawner.make(() =>
+          Effect.succeed(makeFakeChildHandle({ pid: 4242, exitCode: Deferred.await(exitGate) })),
+        );
+
+        // Dedicated scope so close()'s Scope.close tears down the runtime's own
+        // scope, not the ambient test scope.
+        const runtimeScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+        const runtime = yield* makeCodexSessionRuntime({
+          threadId: ThreadId.make("thread-exit-race"),
+          binaryPath: "/usr/bin/codex",
+          cwd: "/tmp/exit-race",
+          runtimeMode: "approval-required",
+        }).pipe(
+          Effect.provideService(Scope.Scope, runtimeScope),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+
+        const methodsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+        const exitedSeen = yield* Deferred.make<void>();
+        const collector = yield* Effect.forkScoped(
+          Stream.runForEach(runtime.events, (event) =>
+            event.kind === "session"
+              ? Ref.update(methodsRef, (methods) => [...methods, event.method]).pipe(
+                  Effect.andThen(
+                    event.method === "session/exited"
+                      ? Deferred.succeed(exitedSeen, undefined).pipe(Effect.asVoid)
+                      : Effect.void,
+                  ),
+                )
+              : Effect.void,
+          ),
+        );
+
+        // Process exits cleanly -> settleProcessExit claims the terminal emit.
+        yield* Deferred.succeed(exitGate, ChildProcessSpawner.ExitCode(0));
+        yield* Deferred.await(exitedSeen);
+
+        // Graceful close must NOT emit a second terminal event. It ends the
+        // events queue with Queue.end (Cause.Done) after the exit already
+        // claimed the terminal, so the collector drains any remaining buffered
+        // events and then completes gracefully; Fiber.await returns the
+        // successful Exit and methodsRef holds every recorded event.
+        yield* runtime.close;
+        yield* Fiber.await(collector);
+
+        const methods = yield* Ref.get(methodsRef);
+        const terminals = methods.filter(
+          (method) => method === "session/exited" || method === "session/closed",
+        );
+        NodeAssert.deepEqual(terminals, ["session/exited"]);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("emits a single terminal event when only a graceful close occurs", () =>
+    Effect.gen(function* () {
+      // Control: with no process exit, close() is the sole terminal emitter and
+      // must still produce exactly one `session/closed`.
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed(makeFakeChildHandle({ pid: 4343, exitCode: Effect.never })),
+      );
+      const runtimeScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-close-only"),
+        binaryPath: "/usr/bin/codex",
+        cwd: "/tmp/close-only",
+        runtimeMode: "approval-required",
+      }).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+
+      const methodsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+      // The collector records session-lifecycle methods and self-terminates once
+      // it consumes a terminal event (takeUntil is inclusive, so the terminal is
+      // recorded before the stream ends).
+      const isTerminal = (method: string) =>
+        method === "session/closed" || method === "session/exited";
+      const collector = yield* Effect.forkScoped(
+        Stream.runForEach(
+          runtime.events.pipe(
+            Stream.takeUntil((event) => event.kind === "session" && isTerminal(event.method)),
+          ),
+          (event) =>
+            event.kind === "session"
+              ? Ref.update(methodsRef, (methods) => [...methods, event.method])
+              : Effect.void,
+        ),
+      );
+
+      // close() emits session/closed and then ends the events queue with
+      // Queue.end (Cause.Done). Because end drains buffered items before
+      // signalling Done — rather than discarding them like Queue.shutdown — the
+      // collector deterministically receives the just-emitted terminal even
+      // though it is joined only afterwards.
+      yield* runtime.close;
+      yield* Fiber.join(collector);
+
+      const methods = yield* Ref.get(methodsRef);
+      const terminals = methods.filter((method) => isTerminal(method));
+      NodeAssert.deepEqual(terminals, ["session/closed"]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {

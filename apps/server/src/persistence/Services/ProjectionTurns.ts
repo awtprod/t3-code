@@ -75,6 +75,12 @@ export const ProjectionPendingTurnStart = Schema.Struct({
   sourceProposedPlanThreadId: Schema.NullOr(ThreadId),
   sourceProposedPlanId: Schema.NullOr(OrchestrationProposedPlanId),
   requestedAt: IsoDateTime,
+  /**
+   * Globally-monotonic sequence of the originating turn-start-requested event.
+   * Lets the reactor's supersession guard order same-millisecond re-requests
+   * without the ties that `requestedAt` alone suffers.
+   */
+  requestSequence: NonNegativeInt,
 });
 export type ProjectionPendingTurnStart = typeof ProjectionPendingTurnStart.Type;
 
