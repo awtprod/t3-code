@@ -1595,9 +1595,15 @@ const make = Effect.gen(function* () {
 
       // A turn that completes without failing clears the crash-loop budget for
       // this thread, so a later unrelated crash gets a fresh set of auto-resumes.
+      // Only a completion accepted for the active/matching turn may clear it:
+      // a stale completion for a superseded turn (rejected by the lifecycle
+      // guard) must not hand back budget, or the crash-loop cap could be
+      // exceeded. `shouldApplyThreadLifecycle` is the same acceptance gate the
+      // settlement path uses for turn.completed above.
       if (
         event.type === "turn.completed" &&
-        normalizeRuntimeTurnState(event.payload.state) !== "failed"
+        normalizeRuntimeTurnState(event.payload.state) !== "failed" &&
+        shouldApplyThreadLifecycle
       ) {
         yield* Ref.update(autoResumeAttemptsByThreadId, (map) => {
           if (!map.has(thread.id)) {
@@ -1621,7 +1627,22 @@ const make = Effect.gen(function* () {
         const gracefulExit = event.payload.exitKind === "graceful";
         const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
         const archived = thread.archivedAt !== null;
-        if (activeTurnId !== null && !gracefulExit && !parkedOnHuman && !archived) {
+        const baseEligible =
+          activeTurnId !== null && !gracefulExit && !parkedOnHuman && !archived;
+        // A turn-start already pending for this thread (e.g. the user steered
+        // the running turn just before the subprocess crashed, so the steer's
+        // turn-start-requested has not been consumed by a turn.started yet) will
+        // drive the turn on its own. Auto-resuming on top would re-request the
+        // same user message with a fresh commandId that bypasses turn-start
+        // dedup, double-executing the prompt — so skip when one is pending.
+        const hasPendingTurnStart =
+          baseEligible &&
+          Option.isSome(
+            yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+              threadId: thread.id,
+            }),
+          );
+        if (baseEligible && !hasPendingTurnStart) {
           const detail = yield* getLoadedThreadDetail();
           const targetUserMessage = detail
             ? detail.messages.toReversed().find((message) => message.role === "user")
@@ -1665,56 +1686,76 @@ const make = Effect.gen(function* () {
               });
             } else {
               const attempt = priorAttempts + 1;
-              yield* Ref.update(autoResumeAttemptsByThreadId, (map) => {
-                const next = new Map(map);
-                next.set(thread.id, { messageId: targetMessageId, attempts: attempt });
-                return next;
-              });
 
-              // 1. Visible marker so the transcript explains the re-issued turn.
-              const markerActivityId = yield* crypto.randomUUIDv4.pipe(
-                Effect.map((uuid) => EventId.make(`auto-resumed:${event.eventId}:${uuid}`)),
-              );
-              yield* orchestrationEngine.dispatch({
-                type: "thread.activity.append",
-                commandId: yield* providerCommandId(event, "auto-resumed-activity"),
-                threadId: thread.id,
-                activity: {
-                  id: markerActivityId,
-                  tone: "info",
-                  kind: "provider.turn.auto-resumed",
-                  summary: `Auto-resumed after provider session exit (attempt ${attempt}/${AUTO_RESUME_MAX_ATTEMPTS})`,
-                  payload: {
-                    detail:
-                      `The provider session exited while the turn was running. ` +
-                      `Re-issuing the turn to continue with provider context.`,
-                    exitReason,
-                    attempt,
-                  },
-                  turnId: activeTurnId,
+              // 1. Re-issue the turn for the existing user message first (no
+              //    duplicate message-sent; fresh commandId avoids turn-start
+              //    dedup collision). If the message was concurrently reverted
+              //    the resume decider emits no events and the engine rejects the
+              //    command — treat that as a benign no-op so we do NOT append the
+              //    marker or consume budget for a resume that never happened.
+              const resumeOutcome = yield* orchestrationEngine
+                .dispatch({
+                  type: "thread.turn.resume",
+                  commandId: yield* providerCommandId(event, "auto-resume"),
+                  threadId: thread.id,
+                  messageId: targetMessageId,
+                  reason: `auto-resume after provider session exit: ${exitReason}`,
                   createdAt: now,
-                },
-                createdAt: now,
-              });
+                })
+                .pipe(
+                  Effect.as("resumed" as const),
+                  Effect.catchTag("OrchestrationCommandInvariantError", (error) =>
+                    Effect.logDebug("provider-runtime.auto-resume.noop", {
+                      threadId: thread.id,
+                      messageId: targetMessageId,
+                      interruptedTurnId: activeTurnId,
+                      reason: error.message,
+                    }).pipe(Effect.as("noop" as const)),
+                  ),
+                );
 
-              // 2. Re-issue the turn for the existing user message (no duplicate
-              //    message-sent). Fresh commandId avoids turn-start dedup collision.
-              yield* orchestrationEngine.dispatch({
-                type: "thread.turn.resume",
-                commandId: yield* providerCommandId(event, "auto-resume"),
-                threadId: thread.id,
-                messageId: targetMessageId,
-                reason: `auto-resume after provider session exit: ${exitReason}`,
-                createdAt: now,
-              });
+              if (resumeOutcome === "resumed") {
+                yield* Ref.update(autoResumeAttemptsByThreadId, (map) => {
+                  const next = new Map(map);
+                  next.set(thread.id, { messageId: targetMessageId, attempts: attempt });
+                  return next;
+                });
 
-              yield* Effect.logInfo("provider-runtime.auto-resume.reissued-turn", {
-                threadId: thread.id,
-                messageId: targetMessageId,
-                interruptedTurnId: activeTurnId,
-                attempt,
-                exitReason,
-              });
+                // 2. Visible marker so the transcript explains the re-issued
+                //    turn — only now that we know a turn was actually re-issued.
+                const markerActivityId = yield* crypto.randomUUIDv4.pipe(
+                  Effect.map((uuid) => EventId.make(`auto-resumed:${event.eventId}:${uuid}`)),
+                );
+                yield* orchestrationEngine.dispatch({
+                  type: "thread.activity.append",
+                  commandId: yield* providerCommandId(event, "auto-resumed-activity"),
+                  threadId: thread.id,
+                  activity: {
+                    id: markerActivityId,
+                    tone: "info",
+                    kind: "provider.turn.auto-resumed",
+                    summary: `Auto-resumed after provider session exit (attempt ${attempt}/${AUTO_RESUME_MAX_ATTEMPTS})`,
+                    payload: {
+                      detail:
+                        `The provider session exited while the turn was running. ` +
+                        `Re-issuing the turn to continue with provider context.`,
+                      exitReason,
+                      attempt,
+                    },
+                    turnId: activeTurnId,
+                    createdAt: now,
+                  },
+                  createdAt: now,
+                });
+
+                yield* Effect.logInfo("provider-runtime.auto-resume.reissued-turn", {
+                  threadId: thread.id,
+                  messageId: targetMessageId,
+                  interruptedTurnId: activeTurnId,
+                  attempt,
+                  exitReason,
+                });
+              }
             }
           }
         }

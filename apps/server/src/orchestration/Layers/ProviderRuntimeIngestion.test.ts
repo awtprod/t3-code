@@ -3337,4 +3337,57 @@ describe("ProviderRuntimeIngestion", () => {
     expect(markers.every((activity) => activity.summary.includes("attempt 1/2"))).toBe(true);
     expect(exhaustedActivities(thread)).toHaveLength(0);
   });
+
+  it("does not auto-resume while a turn-start is already pending (steer then crash)", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a"); // turn.started consumes msg-1's pending start
+
+    // The user steers the running turn: a second turn.start enqueues a fresh
+    // pending turn-start (for msg-2) that has NOT yet been consumed by a
+    // turn.started. The active turn is still turn-a.
+    await seedUserMessage(harness, "msg-2");
+    await crashSession(harness, "steer-crash");
+
+    // The pending turn-start already drives the steered turn; auto-resuming on
+    // top would re-request msg-2 and double-execute it. So: no resume marker.
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+  });
+
+  it("does not reset the crash-loop budget on a stale completion for a superseded turn", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    await startTurn(harness, "turn-a");
+    await crashSession(harness, "crash-1"); // attempt 1/2, resume re-issues the turn
+    await startTurn(harness, "turn-b"); // the resumed turn becomes active
+
+    // A late/stale completion for the OLD superseded turn-a arrives while turn-b
+    // is active. It must NOT clear the crash-loop budget (it does not close the
+    // active turn), or the cap could be exceeded.
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-stale-completed-turn-a"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+
+    await crashSession(harness, "crash-2"); // budget preserved → attempt 2/2
+    await startTurn(harness, "turn-c");
+    await crashSession(harness, "crash-3"); // exhausted (would still resume if budget had reset)
+
+    const thread = await readThread(harness);
+    const markers = autoResumedActivities(thread);
+    expect(markers).toHaveLength(2);
+    // The second resume is attempt 2/2 — proving the stale completion did NOT
+    // hand back budget (otherwise it would read "attempt 1/2" and never exhaust).
+    expect(markers[1]?.summary).toContain("attempt 2/2");
+    expect(exhaustedActivities(thread)).toHaveLength(1);
+  });
 });
