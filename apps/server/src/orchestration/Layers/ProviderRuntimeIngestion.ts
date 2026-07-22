@@ -1624,7 +1624,7 @@ const make = Effect.gen(function* () {
         if (activeTurnId !== null && !gracefulExit && !parkedOnHuman && !archived) {
           const detail = yield* getLoadedThreadDetail();
           const targetUserMessage = detail
-            ? [...detail.messages].reverse().find((message) => message.role === "user")
+            ? detail.messages.toReversed().find((message) => message.role === "user")
             : undefined;
           if (targetUserMessage) {
             const targetMessageId = targetUserMessage.id;

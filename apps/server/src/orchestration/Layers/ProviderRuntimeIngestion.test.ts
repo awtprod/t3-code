@@ -252,6 +252,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(layer);
+    const activeRuntime = runtime;
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
@@ -318,18 +319,22 @@ describe("ProviderRuntimeIngestion", () => {
       updatedAt: createdAt,
     });
 
+    // Bound to this harness's ManagedRuntime (mirrors the runtime.runPromise
+    // service resolution above); lets helpers run within the test layer without
+    // adding raw static-runner call sites.
+    const run = <A, E>(effect: Effect.Effect<A, E>) => activeRuntime.runPromise(effect);
+
     return {
       engine,
+      run,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readShell: (threadId: ThreadId = ThreadId.make("thread-1")) =>
-        Effect.runPromise(
-          snapshotQuery.getThreadShellById(threadId).pipe(Effect.map(Option.getOrNull)),
-        ),
+        run(snapshotQuery.getThreadShellById(threadId).pipe(Effect.map(Option.getOrNull))),
       emit: provider.emit,
       setProviderSession: provider.setSession,
       removeProviderSession: provider.removeSession,
       drain,
-      reconcile: () => Effect.runPromise(ingestion.reconcileOrphanedTurns),
+      reconcile: () => run(ingestion.reconcileOrphanedTurns),
     };
   }
 
@@ -3150,7 +3155,7 @@ describe("ProviderRuntimeIngestion", () => {
   type AutoResumeHarness = Awaited<ReturnType<typeof createHarness>>;
 
   async function seedUserMessage(harness: AutoResumeHarness, messageId: string) {
-    await Effect.runPromise(
+    await harness.run(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make(`cmd-turn-start-${messageId}`),

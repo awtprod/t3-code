@@ -7,7 +7,6 @@ import {
   ProviderInstanceId,
   ThreadId,
   type OrchestrationCommand,
-  type OrchestrationEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as NodeServices from "@effect/platform-node/NodeServices";
