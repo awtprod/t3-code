@@ -1656,17 +1656,35 @@ const make = Effect.gen(function* () {
         const declaredNonRecoverable = event.payload.recoverable === false;
         const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
         const archived = thread.archivedAt !== null;
+        // A surviving pending turn-start row (turn_id NULL) means a turn was
+        // requested but never started — turn.started deletes the row, so one that
+        // outlives the crash was orphaned. This distinguishes a queued *new*
+        // message from the interrupted turn below: when the user interrupts turn
+        // A and then sends message B, B's turn-start-requested writes a fresh
+        // pending row that the crash orphans before it can start. A plain
+        // interrupt (no queued message) leaves no pending row.
+        const hasOrphanedPendingTurnStart = Option.isSome(
+          yield* projectionTurnRepository
+            .getPendingTurnStartByThreadId({ threadId: thread.id })
+            .pipe(Effect.orElseSucceed(() => Option.none())),
+        );
         // `userInterruptedActiveTurn` was captured before this event's own
         // session-set (status: stopped) settled the running turn — see its
         // definition above. A user who deliberately interrupted the turn must not
-        // have it auto-resumed by the ensuing crash.
+        // have it auto-resumed by the ensuing crash — UNLESS an orphaned pending
+        // turn-start exists, meaning a newer message was queued after the
+        // interrupt and orphaned by the crash. The interrupt suppresses the OLD
+        // turn (a started row); it must not also drop that newer message, whose
+        // pending row is necessarily for a different message than the started,
+        // interrupted turn. The resume targets the newest user message (that
+        // orphan), so it re-issues B, not the interrupted A.
         const baseEligible =
           activeTurnId !== null &&
           !gracefulExit &&
           !declaredNonRecoverable &&
           !parkedOnHuman &&
           !archived &&
-          !userInterruptedActiveTurn;
+          (!userInterruptedActiveTurn || hasOrphanedPendingTurnStart);
         // Always auto-resume an eligible crash, even when a turn-start is still
         // pending for this thread. A pending row alone cannot prove another
         // worker will drive the turn: the reactor may already have consumed the
@@ -1766,9 +1784,13 @@ const make = Effect.gen(function* () {
                 pendingForResume.value.messageId === targetMessageId
               ) {
                 const pending = pendingForResume.value;
-                if (pending.modelSelection !== null) {
-                  resumeModelSelection = pending.modelSelection;
-                }
+                // The pending steer's own selection is authoritative for the
+                // message being resumed — the binding above describes the OLDER
+                // turn. A null selection means "thread default": clear the
+                // binding-derived model so the resume omits modelSelection (the
+                // reactor then falls back to thread.modelSelection) instead of
+                // silently running the steer on the older turn's persisted model.
+                resumeModelSelection = pending.modelSelection ?? undefined;
                 if (
                   pending.sourceProposedPlanThreadId !== null &&
                   pending.sourceProposedPlanId !== null

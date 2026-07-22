@@ -3715,4 +3715,114 @@ describe("ProviderRuntimeIngestion", () => {
     expect(markers[1]?.summary).toContain("attempt 2/2");
     expect(exhaustedActivities(thread)).toHaveLength(1);
   });
+
+  it("resumes a default-model pending steer on the thread default, not the older turn's binding model", async () => {
+    const harness = await createHarness();
+    // The older, already-sent turn-a ran under the binding's model
+    // (gpt-5-codex-high). Carrying that binding model into a steer that chose no
+    // model of its own would silently run the steer on this stale model.
+    await harness.seedBinding({
+      threadId: asThreadId("thread-1"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimePayload: {
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex-high",
+        },
+      },
+    });
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a"); // consumes msg-1's pending start; binding = high
+
+    // The user steers the running turn WITHOUT choosing a model — the steer must
+    // run on the thread default, not turn-a's binding model. This enqueues a
+    // pending turn-start (msg-2) whose modelSelection is null, not yet consumed
+    // by a turn.started (turn-a is still active).
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-msg-2-default"),
+        threadId: asThreadId("thread-1"),
+        message: {
+          messageId: asMessageId("msg-2"),
+          role: "user",
+          text: "keep going",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    await crashSession(harness, "steer-default-model-crash");
+
+    const thread = await readThread(harness);
+    // The orphaned steer (newest user message, msg-2) is auto-resumed.
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+
+    // The steer chose no model, so the resume must OMIT modelSelection entirely
+    // (the reactor then falls back to the thread default). The stale binding
+    // model (gpt-5-codex-high) must never be re-issued: neither msg-1's start,
+    // msg-2's start, nor the resume carries any modelSelection.
+    const requestsWithModel = harness
+      .turnStartRequests()
+      .filter((evt) => evt.payload.modelSelection !== undefined);
+    expect(requestsWithModel).toHaveLength(0);
+  });
+
+  it("resumes a newer message queued after an interrupt, despite the older interrupted turn", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a"); // turn-a is the running/active turn
+
+    // The user interrupts turn-a (settles its row to interrupted; the session's
+    // active pointer stays turn-a — interrupt does not move it).
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-interrupt-turn-a"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-a"),
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    // ...then immediately sends a NEW message. Its turn-start-requested writes a
+    // fresh pending row (msg-2). The reactor consumes and sends it, but the
+    // subprocess dies before turn.started — so the pending row survives orphaned.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-msg-2-after-interrupt"),
+        threadId: asThreadId("thread-1"),
+        message: {
+          messageId: asMessageId("msg-2"),
+          role: "user",
+          text: "actually do this instead",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    // Precondition: turn-a is still the session's active turn and its row is
+    // interrupted — the exact state that (unscoped) would suppress the whole exit.
+    const shell = await harness.readShell();
+    expect(shell?.session?.activeTurnId).toBe("turn-a");
+
+    await crashSession(harness, "interrupt-then-newmsg-crash");
+
+    const thread = await readThread(harness);
+    // The newer orphaned message (msg-2) IS auto-resumed — the older interrupt of
+    // turn-a must not drop it. The resume reuses msg-2 (no duplicate message).
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+    expect(userMessages(thread)).toHaveLength(2);
+  });
 });
