@@ -3355,6 +3355,45 @@ describe("ProviderRuntimeIngestion", () => {
     expect(userMessages(thread)).toHaveLength(1);
   });
 
+  it("does not auto-resume a turn interrupted before the provider reported turn.started", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    // The user clicks interrupt while the turn-start is still pending: the
+    // provider has not reported turn.started, so the aggregate holds no active
+    // turn id and the decider emits an *id-less* interrupt ("interrupt whatever
+    // is running"). With no turn row to settle, the intent is recorded on the
+    // pending-start placeholder instead.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-interrupt-preturn"),
+        threadId: asThreadId("thread-1"),
+        // No turnId — this is the race the P1 covers.
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    // The provider now reports turn.started for the very turn the user stopped.
+    // The consumed pending-start flag births turn-a `interrupted`, not `running`.
+    await startTurn(harness, "turn-a");
+    const started = await readThread(harness);
+    expect(started.latestTurn?.state).toBe("interrupted");
+    const startedShell = await harness.readShell();
+    expect(startedShell?.session?.activeTurnId).toBe("turn-a");
+
+    // The subprocess then exits before turn.completed. A deliberate user
+    // interrupt must NOT be auto-resumed, even though its turn.started arrived
+    // only after the interrupt.
+    await crashSession(harness, "preturn-interrupt-crash");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+    expect(userMessages(thread)).toHaveLength(1);
+  });
+
   it("gives up after the attempt budget, leaving the turn interrupted", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");

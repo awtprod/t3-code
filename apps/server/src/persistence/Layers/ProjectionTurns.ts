@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Struct from "effect/Struct";
 
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
@@ -33,10 +34,23 @@ const ProjectionTurnByIdDbRowSchema = ProjectionTurnById.mapFields(
   }),
 );
 
-// Persists `modelSelection` as a nullable JSON text column (`model_selection`).
+// Decodes SQLite's 0/1 integer boolean column into a domain boolean and back.
+const BooleanFromSqliteInt = Schema.Number.pipe(
+  Schema.decodeTo(
+    Schema.Boolean,
+    SchemaTransformation.transformOrFail({
+      decode: (value: number) => Effect.succeed(value !== 0),
+      encode: (value: boolean) => Effect.succeed(value ? 1 : 0),
+    }),
+  ),
+);
+
+// Persists `modelSelection` as a nullable JSON text column (`model_selection`)
+// and `pendingInterruptRequested` as a 0/1 integer (`pending_interrupt_requested`).
 const ProjectionPendingTurnStartDbRowSchema = ProjectionPendingTurnStart.mapFields(
   Struct.assign({
     modelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+    pendingInterruptRequested: BooleanFromSqliteInt,
   }),
 );
 
@@ -130,6 +144,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           requested_at,
           request_sequence,
           model_selection,
+          pending_interrupt_requested,
           started_at,
           completed_at,
           checkpoint_turn_count,
@@ -148,6 +163,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           ${row.requestedAt},
           ${row.requestSequence},
           ${row.modelSelection},
+          0,
           NULL,
           NULL,
           NULL,
@@ -170,7 +186,8 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           source_proposed_plan_id AS "sourceProposedPlanId",
           requested_at AS "requestedAt",
           request_sequence AS "requestSequence",
-          model_selection AS "modelSelection"
+          model_selection AS "modelSelection",
+          pending_interrupt_requested AS "pendingInterruptRequested"
         FROM projection_turns
         WHERE thread_id = ${threadId}
           AND turn_id IS NULL
@@ -179,6 +196,20 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           AND checkpoint_turn_count IS NULL
         ORDER BY request_sequence DESC, requested_at DESC
         LIMIT 1
+      `,
+  });
+
+  const markPendingProjectionTurnInterrupted = SqlSchema.void({
+    Request: GetProjectionPendingTurnStartInput,
+    execute: ({ threadId }) =>
+      sql`
+        UPDATE projection_turns
+        SET pending_interrupt_requested = 1
+        WHERE thread_id = ${threadId}
+          AND turn_id IS NULL
+          AND state = 'pending'
+          AND pending_message_id IS NOT NULL
+          AND checkpoint_turn_count IS NULL
       `,
   });
 
@@ -309,6 +340,14 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
         ),
       );
 
+  const markPendingTurnStartInterrupted: ProjectionTurnRepositoryShape["markPendingTurnStartInterrupted"] =
+    (input) =>
+      markPendingProjectionTurnInterrupted(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionTurnRepository.markPendingTurnStartInterrupted:query"),
+        ),
+      );
+
   const listByThreadId: ProjectionTurnRepositoryShape["listByThreadId"] = (input) =>
     listProjectionTurnsByThread(input).pipe(
       Effect.mapError(
@@ -355,6 +394,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
     replacePendingTurnStart,
     getPendingTurnStartByThreadId,
     deletePendingTurnStartByThreadId,
+    markPendingTurnStartInterrupted,
     listByThreadId,
     getByTurnId,
     clearCheckpointTurnConflict,

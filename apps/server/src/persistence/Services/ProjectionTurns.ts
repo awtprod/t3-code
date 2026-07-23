@@ -89,6 +89,14 @@ export const ProjectionPendingTurnStart = Schema.Struct({
    * turn) so a pending steer resumes on the model the user chose for it.
    */
   modelSelection: Schema.NullOr(ModelSelection),
+  /**
+   * True when a user `thread.turn.interrupt` landed on this pending start before
+   * the provider reported `turn.started` (an id-less interrupt the projection
+   * could not otherwise attribute to a turn). The pending-start consumer births
+   * the resulting turn `interrupted` rather than `running`, so the ensuing
+   * session exit does not auto-resume work the user deliberately stopped.
+   */
+  pendingInterruptRequested: Schema.Boolean,
 });
 export type ProjectionPendingTurnStart = typeof ProjectionPendingTurnStart.Type;
 
@@ -146,6 +154,15 @@ export interface ProjectionTurnRepositoryShape {
    * Deletes only pending-start placeholder rows (`turnId = null`) for a thread and leaves concrete turn rows untouched.
    */
   readonly deletePendingTurnStartByThreadId: (
+    input: GetProjectionPendingTurnStartInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Flags the thread's pending-start placeholder row(s) as interrupted, recording that a
+   * user interrupt arrived before the provider reported `turn.started`. A no-op when no
+   * pending start exists (nothing is running to interrupt via this id-less path).
+   */
+  readonly markPendingTurnStartInterrupted: (
     input: GetProjectionPendingTurnStartInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 

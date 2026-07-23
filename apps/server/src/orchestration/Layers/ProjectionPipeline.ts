@@ -1020,6 +1020,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             requestedAt: event.payload.createdAt,
             requestSequence: event.sequence,
             modelSelection: event.payload.modelSelection ?? null,
+            pendingInterruptRequested: false,
           });
           return;
         }
@@ -1085,14 +1086,25 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
             threadId: event.payload.threadId,
           });
+          // A user interrupt that landed on the pending start before the provider
+          // reported `turn.started` (id-less interrupt) births this turn already
+          // `interrupted`, so the ensuing session exit does not auto-resume it.
+          const bornInterrupted =
+            Option.isSome(pendingTurnStart) && pendingTurnStart.value.pendingInterruptRequested;
           if (Option.isSome(existingTurn)) {
             const nextState =
               existingTurn.value.state === "completed" || existingTurn.value.state === "error"
                 ? existingTurn.value.state
-                : "running";
+                : bornInterrupted
+                  ? "interrupted"
+                  : "running";
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
               state: nextState,
+              completedAt:
+                nextState === "interrupted"
+                  ? (existingTurn.value.completedAt ?? event.occurredAt)
+                  : existingTurn.value.completedAt,
               pendingMessageId:
                 existingTurn.value.pendingMessageId ??
                 (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.messageId : null),
@@ -1131,14 +1143,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 ? pendingTurnStart.value.sourceProposedPlanId
                 : null,
               assistantMessageId: null,
-              state: "running",
+              state: bornInterrupted ? "interrupted" : "running",
               requestedAt: Option.isSome(pendingTurnStart)
                 ? pendingTurnStart.value.requestedAt
                 : event.occurredAt,
               startedAt: Option.isSome(pendingTurnStart)
                 ? pendingTurnStart.value.requestedAt
                 : event.occurredAt,
-              completedAt: null,
+              completedAt: bornInterrupted ? event.occurredAt : null,
               checkpointTurnCount: null,
               checkpointRef: null,
               checkpointStatus: null,
@@ -1213,6 +1225,16 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
         case "thread.turn-interrupt-requested": {
           if (event.payload.turnId === undefined) {
+            // An id-less interrupt means the decider could not resolve a turn:
+            // the user stopped a turn whose provider `turn.started` has not been
+            // projected yet, so no turn row exists to settle. Record the intent
+            // on the pending-start placeholder (the only row spanning the
+            // turn-start-requested -> session-set(running) window) so the turn
+            // is born `interrupted` when that placeholder is consumed. A no-op
+            // when there is no pending start (nothing is running to interrupt).
+            yield* projectionTurnRepository.markPendingTurnStartInterrupted({
+              threadId: event.payload.threadId,
+            });
             return;
           }
           const existingTurn = yield* projectionTurnRepository.getByTurnId({
