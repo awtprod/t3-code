@@ -106,6 +106,15 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   );
 }
 
+/* Electron can expose native Windows caption buttons without making the
+   Window Controls Overlay API available to the renderer. Keep app-owned
+   titlebar actions clear of the standard three-button caption area until
+   the WCO geometry above is available. */
+:root.electron-windows:not(.wco) {
+  --workspace-controls-right: 9.375rem;
+  --workspace-native-controls-inset: 9.375rem;
+}
+
 @theme inline {
   --animate-skeleton: skeleton 2s -1s infinite linear;
   /* Duty-cycled indicator animations: long opacity holds with short stepped
