@@ -1224,17 +1224,24 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.turn-interrupt-requested": {
+          // The user stopped the thread. The provider interrupts by session, so
+          // any turn-start still pending (a steer whose provider `turn.started`
+          // has not been projected yet) is canceled along with it. Flag its
+          // placeholder — the only row spanning the turn-start-requested ->
+          // session-set(running) window — so the turn is born `interrupted`
+          // rather than `running` when that placeholder is consumed. This runs
+          // unconditionally, regardless of whether the interrupt resolved a
+          // concrete turn id: an id-less interrupt has no turn row to settle,
+          // and an interrupt that resolved the *older* active turn (because the
+          // newer steer's `turn.started` had not landed, so the session still
+          // exposed the previous turn id) would otherwise settle the old turn
+          // yet leave the newer pending steer unmarked — a delayed `turn.started`
+          // would then birth it `running` and a later exit auto-resume work the
+          // user stopped. A no-op when nothing is pending.
+          yield* projectionTurnRepository.markPendingTurnStartInterrupted({
+            threadId: event.payload.threadId,
+          });
           if (event.payload.turnId === undefined) {
-            // An id-less interrupt means the decider could not resolve a turn:
-            // the user stopped a turn whose provider `turn.started` has not been
-            // projected yet, so no turn row exists to settle. Record the intent
-            // on the pending-start placeholder (the only row spanning the
-            // turn-start-requested -> session-set(running) window) so the turn
-            // is born `interrupted` when that placeholder is consumed. A no-op
-            // when there is no pending start (nothing is running to interrupt).
-            yield* projectionTurnRepository.markPendingTurnStartInterrupted({
-              threadId: event.payload.threadId,
-            });
             return;
           }
           const existingTurn = yield* projectionTurnRepository.getByTurnId({

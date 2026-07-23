@@ -3394,6 +3394,71 @@ describe("ProviderRuntimeIngestion", () => {
     expect(userMessages(thread)).toHaveLength(1);
   });
 
+  it("does not auto-resume a steer interrupted while an older turn was still active", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a"); // turn.started consumes msg-1's pending start
+
+    // The user steers the running turn: msg-2 enqueues a fresh pending turn-start
+    // that has NOT yet been consumed by a turn.started. The projection still
+    // exposes the OLDER turn-a as its active turn.
+    await seedUserMessage(harness, "msg-2");
+
+    // The user clicks interrupt. Because the newer steer's turn.started has not
+    // been projected, the aggregate's active turn is still turn-a, so the decider
+    // resolves the interrupt to turn-a's id — this is NOT an id-less interrupt.
+    // Settling turn-a alone would leave the newer pending steer (msg-2) unmarked;
+    // the interrupt handler must also flag the pending start so a delayed
+    // turn.started does not birth it `running`.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-interrupt-steer"),
+        threadId: asThreadId("thread-1"),
+        // No explicit turnId — the decider resolves it to the stale active turn-a.
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+    // Precondition: the interrupt resolved to the OLDER turn-a (not id-less), so
+    // this exercises the turnId-present branch of the interrupt handler.
+    const afterInterrupt = await harness.readShell();
+    expect(afterInterrupt?.session?.activeTurnId).toBe("turn-a");
+    expect(afterInterrupt?.latestTurn?.state).toBe("interrupted");
+
+    // The steer's turn.started finally arrives. The provider (opencode-style)
+    // opened turn-b as its active turn without completing turn-a, so surface that
+    // on the fake provider session — otherwise ingestion rejects the conflicting
+    // turn.started as stale.
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      activeTurnId: asTurnId("turn-b"),
+      createdAt: AR_NOW,
+      updatedAt: AR_NOW,
+    });
+    await startTurn(harness, "turn-b");
+    // The flagged pending-start births turn-b `interrupted`, not `running`, and
+    // the session advances to turn-b (the bug: a `running` turn-b would auto-resume).
+    const started = await readThread(harness);
+    expect(started.latestTurn?.state).toBe("interrupted");
+    const startedShell = await harness.readShell();
+    expect(startedShell?.session?.activeTurnId).toBe("turn-b");
+
+    // The subprocess then exits before turn.completed. The steer the user stopped
+    // must NOT be auto-resumed.
+    await crashSession(harness, "steer-interrupt-crash");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+    // Both original user messages survive — the resume never fired, so neither is
+    // duplicated.
+    expect(userMessages(thread)).toHaveLength(2);
+  });
+
   it("gives up after the attempt budget, leaving the turn interrupted", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");
