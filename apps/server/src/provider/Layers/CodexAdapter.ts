@@ -455,6 +455,7 @@ function runtimeEventBase(
     provider: event.provider,
     threadId: canonicalThreadId,
     createdAt: event.createdAt,
+    ...(event.sessionGeneration ? { sessionGeneration: event.sessionGeneration } : {}),
     ...(event.turnId ? { turnId: event.turnId } : {}),
     ...(event.itemId ? { itemId: asRuntimeItemId(event.itemId) } : {}),
     ...(event.requestId ? { requestId: asRuntimeRequestId(event.requestId) } : {}),
@@ -466,6 +467,18 @@ function runtimeEventBase(
     },
   };
 }
+
+// Await the outward event fiber draining the runtime's now-ended event queue
+// (runtime.close emits the terminal session/closed then calls Queue.end) into the
+// runtime-event queue, BEFORE any scope-driven interruption tears the fiber down.
+// The event fiber is forked into sessionScope, so closing that scope — or the
+// explicit Fiber.interrupt — would otherwise drop a still-buffered terminal event.
+// Bounded (1s) so a wedged consumer cannot hang teardown; on timeout we fall
+// through to the scope close + interrupt, which is no worse than the prior order.
+// Fiber.await (not join) so a fiber concurrently interrupted by scope teardown
+// yields its Exit as a value rather than re-raising the interruption here.
+const drainOutwardEventFiber = (eventFiber: Fiber.Fiber<void, never>) =>
+  Fiber.await(eventFiber).pipe(Effect.timeoutOption("1 seconds"), Effect.ignore);
 
 function mapItemLifecycle(
   event: ProviderEvent,
@@ -1638,6 +1651,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
           Effect.onError(() =>
             runtime.close.pipe(
+              Effect.andThen(drainOutwardEventFiber(eventFiber)),
               Effect.andThen(Effect.ignore(Scope.close(sessionScope, Exit.void))),
               Effect.andThen(Fiber.interrupt(eventFiber)),
               Effect.ignore,
@@ -1824,6 +1838,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     session.stopped = true;
     sessions.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
+    yield* drainOutwardEventFiber(session.eventFiber);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });

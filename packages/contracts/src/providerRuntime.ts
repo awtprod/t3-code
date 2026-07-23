@@ -252,6 +252,8 @@ const ProviderRuntimeEventBase = Schema.Struct({
   // for the routing-key-vs-driver-id distinction. Once every emitter
   // populates it (post-slice-4), routing flips to instance-id-only.
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  // Per-runtime-start nonce carried through from ProviderEvent. See provider.ts.
+  sessionGeneration: Schema.optional(Schema.String),
   threadId: ThreadId,
   createdAt: IsoDateTime,
   turnId: Schema.optional(TurnId),

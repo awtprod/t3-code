@@ -23,6 +23,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -61,8 +62,13 @@ const asEventId = (value: string): EventId => EventId.make(value);
 const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
 
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
-  private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
+  private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent, Cause.Done>());
   private readonly now = "2026-01-01T00:00:00.000Z";
+
+  // When set, close() emits this terminal event and ENDS the event queue before
+  // resolving, mirroring the real CodexSessionRuntime.close (emit session/closed
+  // → Queue.end). Used to exercise the adapter's stop-path drain-sync.
+  public closeEmits: ProviderEvent | undefined = undefined;
 
   public readonly startImpl = vi.fn(() =>
     Promise.resolve({
@@ -155,7 +161,21 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Stream.fromQueue(this.eventQueue);
   }
 
-  close = Effect.promise(() => this.closeImpl());
+  close = Effect.suspend(() => {
+    const queue = this.eventQueue;
+    const terminal = this.closeEmits;
+    const impl = this.closeImpl;
+    return Effect.gen(function* () {
+      if (terminal) {
+        yield* Queue.offer(queue, terminal);
+      }
+      // The real CodexSessionRuntime.close ALWAYS ends the outward event queue
+      // (Queue.end) after emitting any terminal, so the adapter's event fiber
+      // completes and the stop path's drain-join returns deterministically.
+      yield* Queue.end(queue);
+      yield* Effect.promise(() => impl());
+    });
+  });
 
   emit(event: ProviderEvent) {
     return Queue.offer(this.eventQueue, event).pipe(Effect.asVoid);
@@ -743,6 +763,46 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       NodeAssert.equal(firstEvent.value.threadId, "thread-1");
       NodeAssert.equal(firstEvent.value.payload.reason, "Session stopped");
     }),
+  );
+
+  it.effect(
+    "drains a terminal event emitted during close before stopSession tears down the event fiber",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+
+        // The runtime emits its terminal session/closed AS PART of close() and
+        // then ends its event queue — exactly the real ordering. The adapter's
+        // event fiber (forked into the session scope that stopSession tears down)
+        // must drain that final event into the outward stream BEFORE it is
+        // interrupted, or the canonical session.exited is silently dropped.
+        runtime.closeEmits = {
+          id: asEventId("evt-session-closed-drain"),
+          kind: "session",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "session/closed",
+          message: "Session stopped",
+        };
+
+        // Subscribe before stopping so a miss is due to drop, not late subscription.
+        const terminalFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+        yield* adapter.stopSession(asThreadId("thread-1"));
+
+        // With the drain-sync, stopSession awaits the event fiber draining the
+        // ended queue, so the terminal is delivered and runHead resolves. Without
+        // it, the fiber is interrupted mid-drain, the event is dropped, and this
+        // join never resolves (the negative control surfaces as a test timeout).
+        const terminal = yield* Fiber.join(terminalFiber);
+
+        NodeAssert.equal(terminal._tag, "Some");
+        if (terminal._tag !== "Some") {
+          return;
+        }
+        NodeAssert.equal(terminal.value.type, "session.exited");
+      }),
   );
 
   it.effect("maps retryable Codex error notifications to runtime.warning", () =>

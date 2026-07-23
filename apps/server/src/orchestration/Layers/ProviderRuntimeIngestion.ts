@@ -1297,11 +1297,22 @@ const make = Effect.gen(function* () {
       // the lifecycle session-set and the auto-resume for it. Correlate only
       // when BOTH ids are known — providerInstanceId is optional during the
       // driver/instance migration, so absent ids preserve apply-always behavior.
+      //
+      // A restarted runtime can also REUSE the same providerInstanceId (the
+      // instance id is a routing key, not a per-start identity), so an instance
+      // match alone cannot prove the terminal event belongs to the live runtime.
+      // The per-runtime sessionGeneration nonce (stamped by CodexSessionRuntime,
+      // recorded on the projection session at session.started) disambiguates: a
+      // terminal event whose generation differs from the projection's current
+      // generation is from a superseded runtime, even when the instance matches.
       const supersededTerminalEvent =
         event.type === "session.exited" &&
-        event.providerInstanceId !== undefined &&
-        thread.session?.providerInstanceId !== undefined &&
-        thread.session.providerInstanceId !== event.providerInstanceId;
+        ((event.providerInstanceId !== undefined &&
+          thread.session?.providerInstanceId !== undefined &&
+          thread.session.providerInstanceId !== event.providerInstanceId) ||
+          (event.sessionGeneration !== undefined &&
+            thread.session?.sessionGeneration !== undefined &&
+            thread.session.sessionGeneration !== event.sessionGeneration));
 
       const shouldApplyThreadLifecycle = (() => {
         if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
@@ -1408,6 +1419,11 @@ const make = Effect.gen(function* () {
               providerName: event.provider,
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
+                : {}),
+              ...((event.sessionGeneration ?? thread.session?.sessionGeneration) !== undefined
+                ? {
+                    sessionGeneration: event.sessionGeneration ?? thread.session?.sessionGeneration,
+                  }
                 : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               activeTurnId: nextActiveTurnId,
@@ -1961,6 +1977,11 @@ const make = Effect.gen(function* () {
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
+              ...((event.sessionGeneration ?? thread.session?.sessionGeneration) !== undefined
+                ? {
+                    sessionGeneration: event.sessionGeneration ?? thread.session?.sessionGeneration,
+                  }
+                : {}),
               runtimeMode: thread.session?.runtimeMode ?? "full-access",
               // Preserve the currently-active turn for an unscoped runtime error
               // (no turnId on the event). A crash often surfaces as a turn-less
@@ -2105,6 +2126,9 @@ const make = Effect.gen(function* () {
                 providerName: thread.session?.providerName ?? null,
                 ...(thread.session?.providerInstanceId !== undefined
                   ? { providerInstanceId: thread.session.providerInstanceId }
+                  : {}),
+                ...(thread.session?.sessionGeneration !== undefined
+                  ? { sessionGeneration: thread.session.sessionGeneration }
                   : {}),
                 runtimeMode: thread.session?.runtimeMode ?? thread.runtimeMode,
                 activeTurnId: null,

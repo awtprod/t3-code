@@ -117,6 +117,10 @@ export const ProviderEvent = Schema.Struct({
   provider: ProviderDriverKind,
   // See ProviderSession for the migration story.
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  // Per-runtime-start nonce. Distinguishes successive runtime generations that
+  // reuse the same providerInstanceId, so a terminal event from a superseded
+  // generation can be told apart from one for the live runtime.
+  sessionGeneration: Schema.optional(Schema.String),
   threadId: ThreadId,
   createdAt: IsoDateTime,
   method: TrimmedNonEmptyString,

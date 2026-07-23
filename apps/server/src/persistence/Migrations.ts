@@ -58,6 +58,7 @@ import Migration0042 from "./Migrations/042_CommandCenterMemorySearchGeneration.
 import Migration0043 from "./Migrations/043_ProjectionTurnRequestSequence.ts";
 import Migration0044 from "./Migrations/044_ProjectionPendingTurnStartModelSelection.ts";
 import Migration0045 from "./Migrations/045_ProjectionPendingTurnStartInterruptRequested.ts";
+import Migration0046 from "./Migrations/046_ProjectionThreadSessionGeneration.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -115,6 +116,7 @@ export const migrationEntries = [
   [43, "ProjectionTurnRequestSequence", Migration0043],
   [44, "ProjectionPendingTurnStartModelSelection", Migration0044],
   [45, "ProjectionPendingTurnStartInterruptRequested", Migration0045],
+  [46, "ProjectionThreadSessionGeneration", Migration0046],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -273,6 +273,9 @@ export const OrchestrationSession = Schema.Struct({
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  // Per-runtime-start nonce recorded on session.started. Lets ingestion reject a
+  // terminal event from a superseded runtime generation that reused this instance.
+  sessionGeneration: Schema.optional(Schema.String),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),

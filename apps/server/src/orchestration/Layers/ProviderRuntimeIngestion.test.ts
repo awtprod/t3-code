@@ -4165,4 +4165,84 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("stopped");
     expect(autoResumedActivities(thread)).toHaveLength(1);
   });
+
+  it("ignores a session.exited from a superseded runtime generation of the same instance", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    // The live turn runs under instance "codex" at runtime generation "gen-2". A
+    // restarted runtime REUSES the same providerInstanceId (the instance id is a
+    // routing key, not a per-start identity), so only the per-runtime
+    // sessionGeneration nonce distinguishes it from its predecessor.
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-gen2"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-2",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+    });
+    await harness.drain();
+
+    // A stale exit from the PRIOR generation ("gen-1") of the SAME instance
+    // drains in after the restart. Instance-id correlation alone cannot catch it
+    // (the ids match); the generation-nonce mismatch is what proves it superseded.
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-gen1"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-1",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { reason: "Codex App Server exited with code 1." },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    // The healthy replacement runtime is untouched: not marked stopped, its turn
+    // still active — the stale prior-generation exit did not clobber it.
+    expect(thread.session?.status).toBe("running");
+    expect(thread.session?.activeTurnId).toBe("turn-a");
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+  });
+
+  it("still applies a session.exited whose generation matches the live runtime", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-gen-live"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-live",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+    });
+    await harness.drain();
+
+    // A genuine crash of the CURRENT generation (matching nonce) must still
+    // settle and auto-resume — the generation guard suppresses only superseded
+    // runtimes, never the live one (no over-suppression / regression).
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-gen-live"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-live",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { reason: "Codex App Server exited with code 1." },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    expect(thread.session?.status).toBe("stopped");
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+  });
 });

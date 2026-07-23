@@ -1018,6 +1018,11 @@ export const makeCodexSessionRuntime = (
       );
 
     const sessionCreatedAt = yield* nowIso;
+    // Per-runtime-start nonce. Because a restarted runtime can reuse the same
+    // providerInstanceId, terminal events (session.exited) from a superseded
+    // runtime would otherwise be indistinguishable from the live one. Stamping a
+    // fresh generation on every event lets ingestion drop stale terminal events.
+    const sessionGeneration = yield* randomUUIDv4("session-generation");
     const initialSession = {
       provider: PROVIDER,
       ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
@@ -1040,6 +1045,7 @@ export const makeCodexSessionRuntime = (
           id: EventId.make(id),
           provider: PROVIDER,
           ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
+          sessionGeneration,
           createdAt: yield* nowIso,
           ...event,
         });
