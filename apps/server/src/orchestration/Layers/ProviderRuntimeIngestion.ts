@@ -1619,15 +1619,21 @@ const make = Effect.gen(function* () {
 
       // A turn that completes without failing clears the crash-loop budget for
       // this thread, so a later unrelated crash gets a fresh set of auto-resumes.
-      // Only a completion accepted for the active/matching turn may clear it:
-      // a stale completion for a superseded turn (rejected by the lifecycle
-      // guard) must not hand back budget, or the crash-loop cap could be
-      // exceeded. `shouldApplyThreadLifecycle` is the same acceptance gate the
-      // settlement path uses for turn.completed above.
+      // Only a completion attributable to the CURRENTLY tracked active turn may
+      // clear it. `shouldApplyThreadLifecycle` alone is too loose here: for a
+      // turn.completed it accepts any thread-scoped completion when no active
+      // turn is tracked (activeTurnId === null) — but that is exactly the
+      // crash→resume window (session.exited cleared the active turn; the
+      // replacement's turn.started has not yet arrived). A buffered stale
+      // completion for the crashed turn landing there would hand back budget on
+      // every crash and defeat the two-attempt cap. Require a matching active
+      // turn, so only the replacement (or a genuinely completed) turn resets it.
       if (
         event.type === "turn.completed" &&
         normalizeRuntimeTurnState(event.payload.state) !== "failed" &&
-        shouldApplyThreadLifecycle
+        activeTurnId !== null &&
+        eventTurnId !== undefined &&
+        sameId(activeTurnId, eventTurnId)
       ) {
         yield* Ref.update(autoResumeAttemptsByThreadId, (map) => {
           if (!map.has(thread.id)) {
@@ -1798,6 +1804,30 @@ const make = Effect.gen(function* () {
                   resumeSourceProposedPlan = {
                     threadId: pending.sourceProposedPlanThreadId,
                     planId: pending.sourceProposedPlanId,
+                  };
+                }
+              }
+
+              // A plan-implementation turn that already emitted turn.started has
+              // had its pending row consumed — turn.started deletes it and copies
+              // the source-plan onto the concrete turn row. A crash after that
+              // leaves no pending row, so the block above finds nothing; fall
+              // back to the interrupted active turn's persisted source-plan so
+              // the resumed turn keeps the linkage the UI uses to associate the
+              // turn with (and mark implemented) its plan. Read failure is
+              // non-fatal. Only fills a gap — a matching pending steer above wins.
+              if (resumeSourceProposedPlan === undefined && activeTurnId !== null) {
+                const activeTurnRow = yield* projectionTurnRepository
+                  .getByTurnId({ threadId: thread.id, turnId: activeTurnId })
+                  .pipe(Effect.orElseSucceed(() => Option.none()));
+                if (
+                  Option.isSome(activeTurnRow) &&
+                  activeTurnRow.value.sourceProposedPlanThreadId !== null &&
+                  activeTurnRow.value.sourceProposedPlanId !== null
+                ) {
+                  resumeSourceProposedPlan = {
+                    threadId: activeTurnRow.value.sourceProposedPlanThreadId,
+                    planId: activeTurnRow.value.sourceProposedPlanId,
                   };
                 }
               }

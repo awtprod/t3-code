@@ -17,6 +17,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
   MessageId,
+  OrchestrationProposedPlanId,
   ProjectId,
   ProviderItemId,
   type ServerSettings,
@@ -66,6 +67,8 @@ const asEventId = (value: string): EventId => EventId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+const asProposedPlanId = (value: string): OrchestrationProposedPlanId =>
+  OrchestrationProposedPlanId.make(value);
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
@@ -3824,5 +3827,105 @@ describe("ProviderRuntimeIngestion", () => {
     // turn-a must not drop it. The resume reuses msg-2 (no duplicate message).
     expect(autoResumedActivities(thread)).toHaveLength(1);
     expect(userMessages(thread)).toHaveLength(2);
+  });
+
+  it("does not reset the crash-loop budget on a stale completion arriving with no active turn", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    await startTurn(harness, "turn-a");
+    await crashSession(harness, "crash-1"); // attempt 1/2; session.exited clears the active turn
+
+    // A buffered/late turn.completed for the CRASHED turn-a arrives in the
+    // crash→resume window — after session.exited cleared the active turn, before
+    // the resume's turn.started. With no active turn tracked, a thread-scoped
+    // completion must NOT hand back the crash-loop budget, or repeating this
+    // ordering would reset the counter every crash and bypass the two-attempt cap.
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-stale-completed-no-active-turn"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+
+    await startTurn(harness, "turn-b"); // the resumed turn becomes active
+    await crashSession(harness, "crash-2"); // budget preserved → attempt 2/2
+    await startTurn(harness, "turn-c");
+    await crashSession(harness, "crash-3"); // exhausted (would still resume if budget had reset)
+
+    const thread = await readThread(harness);
+    const markers = autoResumedActivities(thread);
+    expect(markers).toHaveLength(2);
+    // The second resume is attempt 2/2 — proving the stale no-active-turn
+    // completion did NOT hand back budget (otherwise it would read "attempt 1/2"
+    // and the run would never exhaust).
+    expect(markers[1]?.summary).toContain("attempt 2/2");
+    expect(exhaustedActivities(thread)).toHaveLength(1);
+  });
+
+  it("carries a started plan-implementation turn's source plan into the resume after a crash", async () => {
+    const harness = await createHarness();
+    // Seed a proposed plan on thread-1 itself (same project ⇒ passes the
+    // turn.start source-plan invariant). The plan id is derived as
+    // plan:<threadId>:turn:<turnId>.
+    const planId = asProposedPlanId("plan:thread-1:turn:turn-plan-src");
+    harness.emit({
+      type: "turn.proposed.completed",
+      eventId: asEventId("evt-plan-proposed-src"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: AR_NOW,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-plan-src"),
+      payload: { planMarkdown: "# Source plan" },
+    });
+    await harness.drain();
+
+    // A plan-implementation turn: the turn.start carries the source proposed-plan
+    // reference. The pending row records it, and turn.started copies it onto the
+    // concrete turn row (then deletes the pending row).
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-plan-impl"),
+        threadId: asThreadId("thread-1"),
+        message: {
+          messageId: asMessageId("msg-1"),
+          role: "user",
+          text: "implement the plan",
+          attachments: [],
+        },
+        sourceProposedPlan: {
+          threadId: asThreadId("thread-1"),
+          planId,
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+    await startTurn(harness, "turn-a"); // copies source-plan onto turn-a row; deletes the pending row
+
+    // The subprocess dies AFTER turn.started — so no pending row survives; the
+    // source-plan now lives only on the started turn-a row.
+    await crashSession(harness, "plan-impl-crash");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+
+    // The resume must re-issue the turn WITH the started turn's source-plan, read
+    // from the concrete turn row (the pending row is gone), so the resumed turn
+    // re-associates with its plan. Both the original start and the resume carry
+    // it → two turn-start-requests with the plan; without the turn-row fallback
+    // only the original would, so the count discriminates the fix.
+    const withPlan = harness
+      .turnStartRequests()
+      .filter((evt) => evt.payload.sourceProposedPlan !== undefined);
+    expect(withPlan).toHaveLength(2);
+    expect(withPlan.every((evt) => evt.payload.sourceProposedPlan?.planId === planId)).toBe(true);
   });
 });
