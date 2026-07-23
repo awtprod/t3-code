@@ -578,31 +578,54 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        // The persisted binding's resume cursor (and cwd) belong to the instance
+        // the thread last ran on. They remain valid for the resolved instance
+        // when it is the same instance OR a continuation-compatible one (shared
+        // continuation key) — the exact rule the reactor uses to permit an
+        // instance switch mid-thread (ProviderCommandReactor's continuationKey
+        // check). Matching only on instance id would drop the cursor when a
+        // resumed steer resolves to a different-but-compatible instance, silently
+        // starting a fresh conversation and replaying the prompt without context.
+        // An instance-info lookup failure is non-fatal — treat as incompatible.
+        const persistedBindingCursorApplies = yield* Effect.gen(function* () {
+          if (persistedBinding?.providerInstanceId === undefined) {
+            return false;
+          }
+          if (persistedBinding.providerInstanceId === resolvedInstanceId) {
+            return true;
+          }
+          const bindingContinuationKey = yield* registry
+            .getInstanceInfo(persistedBinding.providerInstanceId)
+            .pipe(
+              Effect.map((info) => info.continuationIdentity.continuationKey),
+              Effect.orElseSucceed(() => undefined),
+            );
+          return (
+            bindingContinuationKey !== undefined &&
+            bindingContinuationKey === instanceInfo.continuationIdentity.continuationKey
+          );
+        });
         const effectiveResumeCursor =
           input.resumeCursor ??
-          (persistedBinding?.providerInstanceId === resolvedInstanceId
-            ? persistedBinding.resumeCursor
-            : undefined);
+          (persistedBindingCursorApplies ? persistedBinding?.resumeCursor : undefined);
         const effectiveCwd =
           input.cwd ??
-          (persistedBinding?.providerInstanceId === resolvedInstanceId
-            ? readPersistedCwd(persistedBinding.runtimePayload)
+          (persistedBindingCursorApplies
+            ? readPersistedCwd(persistedBinding?.runtimePayload)
             : undefined);
         yield* Effect.annotateCurrentSpan({
           "provider.kind": resolvedProvider,
           "provider.resume_cursor.source":
             input.resumeCursor !== undefined
               ? "request"
-              : effectiveResumeCursor !== undefined &&
-                  persistedBinding?.providerInstanceId === resolvedInstanceId
+              : effectiveResumeCursor !== undefined && persistedBindingCursorApplies
                 ? "persisted"
                 : "none",
           "provider.resume_cursor.present": effectiveResumeCursor !== undefined,
           "provider.cwd.source":
             input.cwd !== undefined
               ? "request"
-              : effectiveCwd !== undefined &&
-                  persistedBinding?.providerInstanceId === resolvedInstanceId
+              : effectiveCwd !== undefined && persistedBindingCursorApplies
                 ? "persisted"
                 : "none",
           "provider.cwd.effective": effectiveCwd ?? "",

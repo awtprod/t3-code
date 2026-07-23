@@ -4033,6 +4033,62 @@ describe("ProviderRuntimeIngestion", () => {
     expect(withPlan.every((evt) => evt.payload.sourceProposedPlan?.planId === planId)).toBe(true);
   });
 
+  it("does not copy the active turn's source plan onto a resumed steer that has none", async () => {
+    const harness = await createHarness();
+    // turn-a is a plan-implementation turn (carries a source proposed-plan);
+    // turn.started copies the plan onto the concrete turn-a row.
+    const planId = asProposedPlanId("plan:thread-1:turn:turn-plan-steer");
+    harness.emit({
+      type: "turn.proposed.completed",
+      eventId: asEventId("evt-plan-proposed-steer"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: AR_NOW,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-plan-steer"),
+      payload: { planMarkdown: "# Source plan" },
+    });
+    await harness.drain();
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-plan-steer"),
+        threadId: asThreadId("thread-1"),
+        message: {
+          messageId: asMessageId("msg-1"),
+          role: "user",
+          text: "implement the plan",
+          attachments: [],
+        },
+        sourceProposedPlan: { threadId: asThreadId("thread-1"), planId },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+    await startTurn(harness, "turn-a"); // copies source-plan onto turn-a row
+
+    // The user steers with a PLAIN message (no source plan): msg-2 enqueues a
+    // fresh pending turn-start with no plan of its own, orphaned by the crash.
+    await seedUserMessage(harness, "msg-2");
+    await crashSession(harness, "plan-steer-crash");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+
+    // The resume targets the newest message (msg-2), which is a matching pending
+    // steer with no plan. It must NOT inherit turn-a's plan: doing so would re-run
+    // the steer as an implementation of a plan the user never attached. Only the
+    // original plan-impl start (msg-1) carries the plan; the steer's resume must
+    // not. Without the guard the fallback would copy it, yielding 2 — so the count
+    // discriminates the fix.
+    const withPlan = harness
+      .turnStartRequests()
+      .filter((evt) => evt.payload.sourceProposedPlan !== undefined);
+    expect(withPlan).toHaveLength(1);
+    expect(withPlan[0]?.payload.sourceProposedPlan?.planId).toBe(planId);
+  });
+
   it("ignores a session.exited from a superseded provider instance", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");

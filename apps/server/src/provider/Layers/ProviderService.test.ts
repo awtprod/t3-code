@@ -583,6 +583,160 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+// Builds a two-codex-instance environment (A + B) over a shared in-memory
+// directory, letting a test seed a persisted binding on B and then start a
+// session that resolves to A. `keyA`/`keyB` set each instance's continuation
+// key: equal keys make the switch continuation-compatible (cursor inherited),
+// distinct keys make it incompatible (cursor dropped) — the exact rule
+// ProviderService.startSession uses to decide whether the persisted binding's
+// resume cursor/cwd still apply to the resolved instance.
+const makeContinuationCompatEnv = ({ keyA, keyB }: { keyA: string; keyB: string }) => {
+  const instanceA = ProviderInstanceId.make("codex_a");
+  const instanceB = ProviderInstanceId.make("codex_b");
+  const driverKind = CODEX_DRIVER;
+  const codexA = makeFakeCodexAdapter();
+  const codexB = makeFakeCodexAdapter();
+  const unsupported = () => new ProviderUnsupportedError({ provider: driverKind });
+  const infoFor = (id: ProviderInstanceId, key: string) =>
+    ({
+      instanceId: id,
+      driverKind,
+      displayName: `Codex ${String(id)}`,
+      enabled: true,
+      continuationIdentity: { driverKind, continuationKey: key },
+    }) as const;
+  const registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
+    getByInstance: (id) =>
+      id === instanceA
+        ? Effect.succeed(codexA.adapter)
+        : id === instanceB
+          ? Effect.succeed(codexB.adapter)
+          : Effect.fail(unsupported()),
+    getInstanceInfo: (id) =>
+      id === instanceA
+        ? Effect.succeed(infoFor(instanceA, keyA))
+        : id === instanceB
+          ? Effect.succeed(infoFor(instanceB, keyB))
+          : Effect.fail(unsupported()),
+    listInstances: () => Effect.succeed([instanceA, instanceB]),
+    listProviders: () => Effect.succeed([driverKind] as const),
+    streamChanges: Stream.empty,
+    subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+      PubSub.subscribe(pubsub),
+    ),
+  };
+  const providerAdapterLayer = Layer.succeed(
+    ProviderAdapterRegistry.ProviderAdapterRegistry,
+    registry,
+  );
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const providerLayer = makeProviderServiceLive().pipe(
+    Layer.provide(providerAdapterLayer),
+    Layer.provide(directoryLayer),
+    Layer.provide(defaultServerSettingsLayer),
+    Layer.provide(AnalyticsService.layerTest),
+    Layer.provide(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
+  );
+  // Merge the directory back in so the test can seed a binding on the SAME
+  // in-memory DB the provider reads (layers are memoized by reference).
+  return {
+    instanceA,
+    instanceB,
+    codexA,
+    codexB,
+    testLayer: Layer.merge(providerLayer, directoryLayer),
+  };
+};
+
+it.effect(
+  "ProviderServiceLive inherits the persisted cursor across a continuation-compatible instance switch",
+  () =>
+    Effect.gen(function* () {
+      const { instanceA, instanceB, codexA, testLayer } = makeContinuationCompatEnv({
+        keyA: "codex:/shared/home",
+        keyB: "codex:/shared/home",
+      });
+      const threadId = asThreadId("thread-continuation-compat");
+      const seededCursor = { opaque: "seeded-cursor-b" };
+
+      yield* Effect.gen(function* () {
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const provider = yield* ProviderService.ProviderService;
+        // A prior turn ran on instance B and left a resume cursor + cwd behind.
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: instanceB,
+          resumeCursor: seededCursor,
+          runtimePayload: { cwd: "/tmp/seeded-b" },
+          runtimeMode: "full-access",
+        });
+        // The resume resolves to instance A, which shares B's continuation key.
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: instanceA,
+          threadId,
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(testLayer));
+
+      assert.equal(codexA.startSession.mock.calls.length, 1);
+      const startInput = codexA.startSession.mock.calls[0]?.[0];
+      // Compatible switch: B's persisted cursor + cwd flow to the resolved
+      // instance A, so the resume continues the same conversation.
+      assert.deepEqual(startInput?.resumeCursor, seededCursor);
+      assert.equal(startInput?.cwd, "/tmp/seeded-b");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "ProviderServiceLive drops the persisted cursor when the instance switch is not continuation-compatible",
+  () =>
+    Effect.gen(function* () {
+      const { instanceA, instanceB, codexA, testLayer } = makeContinuationCompatEnv({
+        keyA: "codex:/home-a",
+        keyB: "codex:/home-b",
+      });
+      const threadId = asThreadId("thread-continuation-incompat");
+      const seededCursor = { opaque: "seeded-cursor-b" };
+
+      yield* Effect.gen(function* () {
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const provider = yield* ProviderService.ProviderService;
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: instanceB,
+          resumeCursor: seededCursor,
+          runtimePayload: { cwd: "/tmp/seeded-b" },
+          runtimeMode: "full-access",
+        });
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: instanceA,
+          threadId,
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(testLayer));
+
+      assert.equal(codexA.startSession.mock.calls.length, 1);
+      const startInput = codexA.startSession.mock.calls[0]?.[0];
+      // Incompatible switch: A does not share B's continuation key, so B's
+      // cursor/cwd must NOT leak — resuming would silently start a fresh
+      // conversation on A. The adapter receives no inherited cursor/cwd.
+      assert.notDeepEqual(startInput?.resumeCursor, seededCursor);
+      assert.equal(startInput?.cwd, undefined);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 const routing = makeProviderServiceLayer();
 
 it.effect("ProviderServiceLive writes canonical events to the emitting thread segment", () =>

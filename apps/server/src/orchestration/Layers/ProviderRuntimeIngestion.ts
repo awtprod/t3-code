@@ -1801,13 +1801,17 @@ const make = Effect.gen(function* () {
               const pendingForResume = yield* projectionTurnRepository
                 .getPendingTurnStartByThreadId({ threadId: thread.id })
                 .pipe(Effect.orElseSucceed(() => Option.none()));
+              // The resume targets the newest user message. When a pending
+              // turn-start row exists for THAT message, it is the authoritative
+              // source for the resume (its own model + source-plan), and the
+              // active-turn fallback below must not override it.
+              const resumingMatchingPendingSteer =
+                Option.isSome(pendingForResume) &&
+                pendingForResume.value.messageId === targetMessageId;
               let resumeSourceProposedPlan:
                 | { threadId: ThreadId; planId: OrchestrationProposedPlanId }
                 | undefined;
-              if (
-                Option.isSome(pendingForResume) &&
-                pendingForResume.value.messageId === targetMessageId
-              ) {
+              if (resumingMatchingPendingSteer && Option.isSome(pendingForResume)) {
                 const pending = pendingForResume.value;
                 // The pending steer's own selection is authoritative for the
                 // message being resumed — the binding above describes the OLDER
@@ -1834,8 +1838,15 @@ const make = Effect.gen(function* () {
               // back to the interrupted active turn's persisted source-plan so
               // the resumed turn keeps the linkage the UI uses to associate the
               // turn with (and mark implemented) its plan. Read failure is
-              // non-fatal. Only fills a gap — a matching pending steer above wins.
-              if (resumeSourceProposedPlan === undefined && activeTurnId !== null) {
+              // non-fatal. Skip this when resuming a matching pending steer: that
+              // newer message intentionally carries no plan of its own, so
+              // copying the OLDER active turn's plan onto it would wrongly re-run
+              // the steer as an implementation of a plan the user never attached.
+              if (
+                resumeSourceProposedPlan === undefined &&
+                !resumingMatchingPendingSteer &&
+                activeTurnId !== null
+              ) {
                 const activeTurnRow = yield* projectionTurnRepository
                   .getByTurnId({ threadId: thread.id, turnId: activeTurnId })
                   .pipe(Effect.orElseSucceed(() => Option.none()));
