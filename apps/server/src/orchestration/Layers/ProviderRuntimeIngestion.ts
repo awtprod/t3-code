@@ -1284,6 +1284,25 @@ const make = Effect.gen(function* () {
             )
           : false;
 
+      // A terminal event (session.exited) stamped with a provider instance that
+      // is NOT the one currently bound to this thread comes from a superseded
+      // instance. ProviderService.startSession starts the replacement — emitting
+      // session.started stamped with the new instance — BEFORE it stops the
+      // stale adapter, whose drained session/closed then arrives here stamped
+      // with the OLD instance (CodexSessionRuntime's Queue.end flushes that
+      // buffered terminal to the consumer rather than dropping it). By the time
+      // this stale exit is processed, the projection's session instance already
+      // reflects the replacement, so applying it would wrongly mark the healthy
+      // replacement session stopped and interrupt its live turn. Suppress both
+      // the lifecycle session-set and the auto-resume for it. Correlate only
+      // when BOTH ids are known — providerInstanceId is optional during the
+      // driver/instance migration, so absent ids preserve apply-always behavior.
+      const supersededTerminalEvent =
+        event.type === "session.exited" &&
+        event.providerInstanceId !== undefined &&
+        thread.session?.providerInstanceId !== undefined &&
+        thread.session.providerInstanceId !== event.providerInstanceId;
+
       const shouldApplyThreadLifecycle = (() => {
         if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
           return true;
@@ -1358,7 +1377,7 @@ const make = Effect.gen(function* () {
                 ? null
                 : (thread.session?.lastError ?? null);
 
-        if (shouldApplyThreadLifecycle) {
+        if (shouldApplyThreadLifecycle && !supersededTerminalEvent) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
             yield* markSourceProposedPlanImplemented(
               acceptedTurnStartedSourcePlan.sourceThreadId,
@@ -1645,7 +1664,7 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (event.type === "session.exited") {
+      if (event.type === "session.exited" && !supersededTerminalEvent) {
         yield* clearTurnStateForSession(thread.id);
 
         // Session-exit auto-resume: when the provider subprocess exits *while a

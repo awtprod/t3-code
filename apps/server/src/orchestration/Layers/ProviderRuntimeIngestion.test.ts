@@ -3928,4 +3928,81 @@ describe("ProviderRuntimeIngestion", () => {
     expect(withPlan).toHaveLength(2);
     expect(withPlan.every((evt) => evt.payload.sourceProposedPlan?.planId === planId)).toBe(true);
   });
+
+  it("ignores a session.exited from a superseded provider instance", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    // The turn runs under the replacement instance: turn.started stamped with
+    // "codex-next" binds the projection session to that instance.
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-superseding"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex-next"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+    });
+    await harness.drain();
+
+    // A stale session/closed from the OLD instance drains in AFTER the switch:
+    // ProviderService starts the replacement (emitting session.started/turn.started
+    // stamped with the new instance) before stopping the stale adapter, whose
+    // buffered terminal is flushed by CodexSessionRuntime's Queue.end and arrives
+    // stamped with the previous instance.
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-superseded"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex-prev"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { reason: "Codex App Server exited with code 1." },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    // The healthy replacement session is untouched: not marked stopped, its turn
+    // still active — the stale old-instance exit did not clobber it.
+    expect(thread.session?.status).toBe("running");
+    expect(thread.session?.activeTurnId).toBe("turn-a");
+    // And the stale exit did NOT trigger an auto-resume.
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+  });
+
+  it("still applies a session.exited whose instance matches the bound instance", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-same-instance"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex-live"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+    });
+    await harness.drain();
+
+    // A genuine crash of the CURRENTLY bound instance (same instance id) must
+    // still settle the session and auto-resume — the guard suppresses only
+    // superseded instances, never the live one (no over-suppression).
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-same-instance"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex-live"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { reason: "Codex App Server exited with code 1." },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    expect(thread.session?.status).toBe("stopped");
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+  });
 });
