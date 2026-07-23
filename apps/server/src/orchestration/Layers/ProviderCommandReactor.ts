@@ -815,13 +815,22 @@ const make = Effect.gen(function* () {
     // synchronously inside dispatch, ahead of this lagging reactor, so the
     // pending row reflects the latest committed re-request in the common
     // post-crash timing.
+    //
+    // The same read also honors a stop the user issued while this reactor was
+    // lagging: `thread.turn-interrupt-requested` marks the live pending row
+    // `pendingInterruptRequested` (it does not bump the sequence), so a plain
+    // supersession check would miss it and still `sendTurn` a prompt the user
+    // canceled before the provider ever registered the turn. Skip the request
+    // when the matching pending row is interrupted, as well as when a newer
+    // same-message re-request has superseded it.
     const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
       threadId: event.payload.threadId,
     });
     if (
       Option.isSome(pendingTurnStart) &&
       pendingTurnStart.value.messageId === event.payload.messageId &&
-      pendingTurnStart.value.requestSequence > event.sequence
+      (pendingTurnStart.value.requestSequence > event.sequence ||
+        pendingTurnStart.value.pendingInterruptRequested)
     ) {
       return;
     }

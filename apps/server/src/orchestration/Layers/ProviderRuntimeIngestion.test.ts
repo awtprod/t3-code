@@ -3933,6 +3933,62 @@ describe("ProviderRuntimeIngestion", () => {
     expect(userMessages(thread)).toHaveLength(2);
   });
 
+  it("does not resume a pending message the user interrupted before the crash", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a"); // turn-a is the running/active turn
+
+    // The user queues a NEW message while turn-a runs. Its turn-start-requested
+    // writes a fresh pending row (msg-2); the subprocess never reports msg-2's
+    // turn.started, so that row stays pending/orphaned across the crash.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-msg-2-before-interrupt"),
+        threadId: asThreadId("thread-1"),
+        message: {
+          messageId: asMessageId("msg-2"),
+          role: "user",
+          text: "queued then stopped",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    // ...then interrupts the thread. Unlike the case above (message queued AFTER
+    // the interrupt), the pending msg-2 row already exists, so the interrupt
+    // settles turn-a AND flags msg-2's row `pendingInterruptRequested`: the user
+    // stopped the queued message too.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-interrupt-with-pending"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-a"),
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+
+    // Precondition: turn-a is still the session's active turn (interrupt does not
+    // move the pointer) — the state that would, unguarded, let the orphaned
+    // pending row override the interrupt suppression.
+    const shell = await harness.readShell();
+    expect(shell?.session?.activeTurnId).toBe("turn-a");
+
+    await crashSession(harness, "interrupt-pending-crash");
+
+    const thread = await readThread(harness);
+    // The crash must NOT auto-resume: msg-2's orphaned pending row is itself
+    // interrupted, so re-issuing it would reissue work the user explicitly
+    // stopped. An interrupted orphan does not re-enable eligibility.
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+  });
+
   it("does not reset the crash-loop budget on a stale completion arriving with no active turn", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");

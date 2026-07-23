@@ -1704,11 +1704,20 @@ const make = Effect.gen(function* () {
         // A and then sends message B, B's turn-start-requested writes a fresh
         // pending row that the crash orphans before it can start. A plain
         // interrupt (no queued message) leaves no pending row.
-        const hasOrphanedPendingTurnStart = Option.isSome(
-          yield* projectionTurnRepository
-            .getPendingTurnStartByThreadId({ threadId: thread.id })
-            .pipe(Effect.orElseSucceed(() => Option.none())),
-        );
+        const orphanedPendingTurnStart = yield* projectionTurnRepository
+          .getPendingTurnStartByThreadId({ threadId: thread.id })
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        // The orphan overrides the interrupt suppression only when it is a
+        // genuinely live queued message. If the user also interrupted this
+        // pending start (its row carries `pendingInterruptRequested`, set by
+        // `thread.turn-interrupt-requested`), the queued message was stopped
+        // too — re-issuing it would auto-resume work the user explicitly
+        // canceled. An interrupted orphan therefore must NOT re-enable
+        // eligibility; this mirrors ProjectionPipeline's `bornInterrupted`,
+        // which births such a turn `interrupted` rather than `running`.
+        const hasOrphanedPendingTurnStart =
+          Option.isSome(orphanedPendingTurnStart) &&
+          !orphanedPendingTurnStart.value.pendingInterruptRequested;
         // `userInterruptedActiveTurn` was captured before this event's own
         // session-set (status: stopped) settled the running turn — see its
         // definition above. A user who deliberately interrupted the turn must not

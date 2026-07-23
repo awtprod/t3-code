@@ -2327,4 +2327,125 @@ describe("ProviderCommandReactor", () => {
     expect(inputs).toContain("message a");
     expect(inputs).toContain("message b");
   });
+
+  it("skips a turn-start-requested whose pending row the user interrupted", async () => {
+    const harness = await createHarness();
+    const blockerCreatedAt = "2026-01-01T00:00:00.000Z";
+    const pendingCreatedAt = "2026-01-01T00:00:01.000Z";
+    const interruptCreatedAt = "2026-01-01T00:00:02.000Z";
+    const sentinelCreatedAt = "2026-01-01T00:00:03.000Z";
+
+    // Park the worker on a blocker turn's session start so a user interrupt
+    // marks the queued message's pending turn-start row BEFORE the worker
+    // reaches that turn-start-requested. This reproduces the race the guard
+    // targets: the user stops the thread while the reactor is still lagging
+    // behind the queued start, so the interrupt only flags the pending row
+    // (without bumping its sequence) rather than a running turn.
+    let releaseWorker: () => void = () => {};
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    const originalStartSession = harness.startSession.getMockImplementation();
+    if (!originalStartSession) {
+      throw new Error("startSession mock implementation missing");
+    }
+    harness.startSession.mockImplementationOnce((threadId, sessionInput) =>
+      Effect.promise(() => workerGate).pipe(
+        Effect.flatMap(() => originalStartSession(threadId, sessionInput)),
+      ),
+    );
+
+    // Sentinel thread drains the FIFO worker queue without clobbering thread-1's
+    // single pending turn-start row.
+    await harness.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-2"),
+      threadId: ThreadId.make("thread-2"),
+      projectId: asProjectId("project-1"),
+      title: "Sentinel Thread",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt: blockerCreatedAt,
+    });
+
+    // Blocker turn on a DISTINCT message parks the worker inside startSession.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-blocker"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-blocker"),
+        role: "user",
+        text: "blocker turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: blockerCreatedAt,
+    });
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+
+    // Queue a second message, then interrupt the thread before the parked worker
+    // can drive it. The interrupt (id-less: no active turn yet) marks the
+    // still-pending turn-start row for this message `pendingInterruptRequested`
+    // without bumping its request sequence.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-interrupted"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "interrupt me",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: pendingCreatedAt,
+    });
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt"),
+      threadId: ThreadId.make("thread-1"),
+      createdAt: interruptCreatedAt,
+    });
+    // Sentinel proves the interrupted turn-start ahead of it in the FIFO queue
+    // has been processed by the time this drives.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-sentinel"),
+      threadId: ThreadId.make("thread-2"),
+      message: {
+        messageId: asMessageId("user-sentinel"),
+        role: "user",
+        text: "sentinel turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: sentinelCreatedAt,
+    });
+
+    releaseWorker();
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "sentinel turn",
+      ),
+    );
+
+    const interruptedDrives = harness.sendTurn.mock.calls.filter(
+      (call) => (call[0] as { input?: string }).input === "interrupt me",
+    );
+    // The interrupted pending start is skipped: it never reaches sendTurn. Total
+    // = blocker + sentinel = 2; without the interrupt guard the stopped message
+    // would also drive, giving 3.
+    expect(interruptedDrives.length).toBe(0);
+    expect(harness.sendTurn.mock.calls.length).toBe(2);
+  });
 });
