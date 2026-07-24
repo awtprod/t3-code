@@ -1,3 +1,5 @@
+import * as NodeFS from "node:fs";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -63,6 +65,19 @@ const devServerInput = {
 
 it.layer(NodeServices.layer)("dev-runner", (it) => {
   describe("getDevRunnerModeArgs", () => {
+    it.effect("keeps the server stable by default and makes watch mode explicit", () =>
+      Effect.sync(() => {
+        const serverPackage = JSON.parse(
+          NodeFS.readFileSync(new URL("../apps/server/package.json", import.meta.url), "utf8"),
+        ) as {
+          readonly scripts?: Readonly<Record<string, string>>;
+        };
+
+        assert.equal(serverPackage.scripts?.dev, "node src/bin.ts");
+        assert.equal(serverPackage.scripts?.["dev:watch"], "node --watch src/bin.ts");
+      }),
+    );
+
     it.effect("lets Vite+ honor the desktop dev task graph", () =>
       Effect.sync(() => {
         assert.deepStrictEqual(getDevRunnerModeArgs("dev:desktop"), [
