@@ -74,6 +74,28 @@ describe("decideWebSocketOrigin", () => {
       assert.deepEqual(decision, { allowed: true, reason: "same-origin" });
     });
 
+    // Pins an accepted residual rather than asserting a fix: because the scheme
+    // is not compared and `Host` elides a default port, an origin on one
+    // scheme's default port matches a portless Host addressed over the other.
+    // Exploiting it needs hostile content on the same *hostname* over the
+    // opposite scheme — strictly harder than the preview-gateway threat this
+    // module exists to stop, which lands on a different port and is refused.
+    // Closing it would mean trusting `x-forwarded-proto`, which is
+    // caller-supplied. If this test ever fails, the tradeoff changed: read the
+    // "Known residual" note in websocketOrigin.ts before editing it green.
+    it("accepts a default-port origin against a portless Host of the other scheme", () => {
+      assert.deepEqual(decide({ origin: "http://app.example.com", host: "app.example.com" }), {
+        allowed: true,
+        reason: "same-origin",
+      });
+      // The port *is* compared whenever either side states one, which is what
+      // keeps the same-host-different-port gateway attack refused.
+      assert.deepEqual(decide({ origin: "http://app.example.com:8080", host: "app.example.com" }), {
+        allowed: false,
+        origin: "http://app.example.com:8080",
+      });
+    });
+
     it("is case-insensitive about the hostname", () => {
       const decision = decide({
         origin: "http://LocalHost:13773",

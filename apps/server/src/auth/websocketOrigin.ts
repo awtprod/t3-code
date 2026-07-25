@@ -37,13 +37,35 @@
  *    origin while `Host` is the backend's — `config.devUrl` closes that gap. The
  *    Electron renderer loads a custom scheme (`t3code://app`), which matches no
  *    `Host` by construction; those two origins are already enumerated in
- *    `../http.ts` as `DESKTOP_RENDERER_ORIGINS` for the CORS layer.
+ *    `../http.ts` as `DESKTOP_RENDERER_ORIGINS` for the CORS layer. That entry
+ *    only works because the desktop app registers its scheme as *standard*
+ *    (`registerDesktopSchemesAsPrivileged` in `apps/desktop`) — a non-standard
+ *    custom scheme gets an opaque origin from Chromium and would arrive here as
+ *    `null`, which rule 4 refuses. Measured in a real renderer: without that
+ *    registration the upgrade carries `Origin: null`; with it, `t3code://app`.
+ * 4. **The literal `null` is refused.** It is what Chromium and Firefox send for
+ *    an opaque origin — a sandboxed iframe, a `data:` document — which is
+ *    exactly the shape hostile embedded content takes. It cannot be
+ *    allow-listed without allow-listing the attacker along with it.
  *
  * Scheme is deliberately *not* compared. A request arriving over plain HTTP on
  * loopback is routinely presented to the browser as `https://` by Tailscale
  * Serve, so requiring a scheme match would reject the primary remote path. Host
  * and port are what identify the origin here; the transport is the tunnel's
  * concern.
+ *
+ * **Known residual, accepted deliberately.** Because the scheme is not compared
+ * and `Host` omits the port when it is the default one, an origin on the default
+ * port of *one* scheme is accepted against a portless `Host` addressed over the
+ * *other* — `http://<host>` (port 80) is admitted to `wss://<host>` (port 443).
+ * Exploiting it needs hostile content on the same hostname over the opposite
+ * scheme, which is a strictly stronger position than the preview gateway grants
+ * (that content sits on a different *port*, which is compared and refused).
+ * Closing it would require knowing the scheme the browser used, and behind
+ * Tailscale Serve the only record of that is `x-forwarded-proto` — a header
+ * rule 2 refuses to trust precisely because it is caller-supplied on a directly
+ * reachable listener. Trading a real, reachable spoof for a narrower one is a
+ * bad deal, so the port ambiguity stays and is pinned by a test.
  */
 
 /** A WebSocket upgrade is refused only when the browser names a foreign origin. */

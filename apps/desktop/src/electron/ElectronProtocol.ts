@@ -16,6 +16,41 @@ export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
 }
 
+/**
+ * Declare the desktop schemes standard *before* Electron is ready.
+ *
+ * Custom schemes are non-standard by default, and Chromium gives a
+ * non-standard scheme an **opaque** origin — every request the renderer makes
+ * carries `Origin: null` rather than `t3code://app`. That matters beyond
+ * tidiness: the server rejects `null` on the control-plane WebSocket upgrade
+ * (`apps/server/src/auth/websocketOrigin.ts`), because `null` is also what a
+ * sandboxed hostile iframe sends, so it cannot be allow-listed. Without this
+ * call the renderer is indistinguishable from that attacker and is refused.
+ *
+ * Measured with a real Electron renderer on `t3code://app`: with
+ * `protocol.handle` alone the upgrade arrives as `Origin: null`; adding this
+ * registration makes it arrive as `Origin: t3code://app`.
+ *
+ * Must be called at module scope — Electron requires it before the `ready`
+ * event, and it throws if called afterwards.
+ */
+export function registerDesktopSchemesAsPrivileged(): void {
+  Electron.protocol.registerSchemesAsPrivileged(
+    [DESKTOP_PRODUCTION_SCHEME, DESKTOP_DEVELOPMENT_SCHEME].map((scheme) => ({
+      scheme,
+      privileges: {
+        // `standard` is the one that grants a real origin; the rest keep the
+        // renderer's capabilities equivalent to the https page it replaces.
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        allowServiceWorkers: true,
+        stream: true,
+      },
+    })),
+  );
+}
+
 export function getDesktopOrigin(isDevelopment: boolean): string {
   return `${getDesktopScheme(isDevelopment)}://${DESKTOP_HOST}`;
 }
