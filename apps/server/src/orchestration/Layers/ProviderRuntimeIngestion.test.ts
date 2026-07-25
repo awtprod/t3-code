@@ -37,6 +37,8 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import {
   ProviderService,
@@ -210,7 +212,8 @@ describe("ProviderRuntimeIngestion", () => {
     | OrchestrationEngineService
     | ProviderRuntimeIngestionService
     | ProjectionSnapshotQuery
-    | ProviderSessionDirectory,
+    | ProviderSessionDirectory
+    | ProjectionTurnRepository,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -259,6 +262,10 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(providerSessionDirectoryLayer),
+      // Merged (not merely provided) so tests can read the same pending-turn-start
+      // rows the ingestion layer writes — the reconciliation sweep's effect is
+      // invisible in the snapshot, since a pending row has no turn id to surface.
+      Layer.provideMerge(ProjectionTurnRepositoryLive),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
@@ -271,6 +278,7 @@ describe("ProviderRuntimeIngestion", () => {
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
     const directory = await runtime.runPromise(Effect.service(ProviderSessionDirectory));
+    const turnRepository = await runtime.runPromise(Effect.service(ProjectionTurnRepository));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(ingestion.drain);
@@ -361,6 +369,12 @@ describe("ProviderRuntimeIngestion", () => {
       removeProviderSession: provider.removeSession,
       drain,
       reconcile: () => run(ingestion.reconcileOrphanedTurns),
+      readPendingTurnStart: (threadId: ThreadId = ThreadId.make("thread-1")) =>
+        run(
+          turnRepository
+            .getPendingTurnStartByThreadId({ threadId })
+            .pipe(Effect.map(Option.getOrNull)),
+        ),
       directory,
       seedBinding: (binding: Parameters<typeof directory.upsert>[0]) =>
         run(directory.upsert(binding)),
@@ -3266,6 +3280,19 @@ describe("ProviderRuntimeIngestion", () => {
     // No exhaustion, and crucially NO duplicate user message.
     expect(exhaustedActivities(thread)).toHaveLength(0);
     expect(userMessages(thread)).toHaveLength(1);
+
+    // The marker alone proves nothing: this layer does not send turns itself, so
+    // an "auto-resumed" activity would still be appended if the resume never
+    // reached a provider. Assert the actual hand-off — a turn-start-requested
+    // carrying the original message id, which is what ProviderCommandReactor
+    // consumes to call sendTurn. (The reactor is not installed here; its own
+    // suite covers the far side of this seam, and the test below asserts the
+    // dispatch that drives it.)
+    const resumeRequests = harness
+      .turnStartRequests()
+      .filter((evt) => evt.payload.messageId === "msg-1");
+    // Two: the original turn start, plus the resume re-issuing the same message.
+    expect(resumeRequests).toHaveLength(2);
   });
 
   it("does not auto-resume on a graceful session exit", async () => {
@@ -4300,5 +4327,194 @@ describe("ProviderRuntimeIngestion", () => {
     const thread = await readThread(harness);
     expect(thread.session?.status).toBe("stopped");
     expect(autoResumedActivities(thread)).toHaveLength(1);
+  });
+
+  it("ignores a superseded runtime's non-terminal events, so they cannot re-arm its stale exit", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    // Live replacement runtime: same instance id, generation "gen-2".
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-gen2-nonterminal"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-2",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+    });
+    await harness.drain();
+
+    // The dying gen-1 runtime's buffered NON-terminal lifecycle event drains in
+    // first. CodexSessionRuntime emits session/connecting and session/ready
+    // ahead of its terminal event, and both map to session.state.changed — so
+    // this is the ordinary shape of a supersession, not a contrived one.
+    //
+    // This is the event that matters: the lifecycle session-set writes
+    // `event.sessionGeneration ?? thread.session?.sessionGeneration`, so
+    // applying it would REWIND the projection's generation to "gen-1".
+    harness.emit({
+      type: "session.state.changed",
+      eventId: asEventId("evt-session-state-gen1-stale"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-1",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { state: "ready" },
+    });
+    await harness.drain();
+
+    // Precondition — and the crux. If the rewind happened, the projection now
+    // reads "gen-1" and the stale exit below would compare EQUAL to it, so the
+    // existing terminal-event guard would wave it through. Gating only the exit
+    // is therefore defeated by the events that precede it.
+    const afterStale = await harness.readShell();
+    expect(afterStale?.session?.sessionGeneration).toBe("gen-2");
+    expect(afterStale?.session?.activeTurnId).toBe("turn-a");
+
+    // Now the stale terminal event from the same superseded runtime.
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-gen1-after-nonterminal"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-1",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { reason: "Codex App Server exited with code 1." },
+    });
+    await harness.drain();
+
+    // The healthy replacement is untouched: still running its live turn, never
+    // marked stopped, and never auto-resumed on a dead runtime's behalf.
+    const thread = await readThread(harness);
+    expect(thread.session?.status).toBe("running");
+    expect(thread.session?.activeTurnId).toBe("turn-a");
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(exhaustedActivities(thread)).toHaveLength(0);
+  });
+
+  it("ignores a superseded runtime's runtime.error instead of parking the live session in error", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-gen2-runtime-error"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-2",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+    });
+    await harness.drain();
+
+    // A crashing runtime surfaces fatal stderr as a turn-less runtime.error just
+    // before its exit. From the SUPERSEDED generation it must not apply: it
+    // writes the same generation fallback (re-arming the stale exit) and would
+    // park the healthy replacement in `error` on a dead runtime's behalf.
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-runtime-error-gen1-stale"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-1",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { message: "stale runtime fatal error" },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    expect(thread.session?.status).toBe("running");
+    expect(thread.session?.lastError ?? null).toBeNull();
+    const shell = await harness.readShell();
+    expect(shell?.session?.sessionGeneration).toBe("gen-2");
+  });
+
+  it("still applies a runtime.error from the live runtime generation", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-gen-live-runtime-error"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-live",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+    });
+    await harness.drain();
+
+    // The matching-generation case must still apply — the identity guard
+    // suppresses superseded runtimes only, never the live one.
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-runtime-error-gen-live"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      sessionGeneration: "gen-live",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { message: "live runtime fatal error" },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    expect(thread.session?.status).toBe("error");
+    expect(thread.session?.lastError).toBe("live runtime fatal error");
+  });
+
+  it("clears a pending-only orphan on reconcile, which the activeTurnId sweep cannot see", async () => {
+    const harness = await createHarness();
+    // A turn-start that never reached `turn.started`: the provider session died
+    // before reporting its first turn. All that survives is the pending
+    // placeholder row (turn_id NULL).
+    await seedUserMessage(harness, "msg-1");
+
+    // Precondition, and the reason the existing sweep misses this thread: there
+    // is a durable pending row, but nothing the orphan filter keys on. No
+    // `session.activeTurnId`, and no running `latestTurn` — so `projectedTurnId`
+    // is null and the thread is filtered out before any reconciliation happens.
+    // Auto-resume cannot rescue it either; its eligibility requires activeTurnId.
+    expect(await harness.readPendingTurnStart()).not.toBeNull();
+    const beforeShell = await harness.readShell();
+    expect(beforeShell?.session?.activeTurnId ?? null).toBeNull();
+    expect(beforeShell?.latestTurn ?? null).toBeNull();
+
+    // The seeded harness session is `ready`, never `running`, so the provider
+    // reports no live turn for this thread — but make the absence explicit.
+    harness.removeProviderSession(asThreadId("thread-1"));
+    await harness.reconcile();
+
+    // Swept: the thread no longer presents as pending forever.
+    expect(await harness.readPendingTurnStart()).toBeNull();
+  });
+
+  it("keeps a pending turn start when the provider session is still running the thread", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    expect(await harness.readPendingTurnStart()).not.toBeNull();
+
+    // The control against blanket deletion: a live provider session means the
+    // turn-start is in flight, not orphaned. Sweeping it here would drop a
+    // prompt the provider is about to answer.
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      activeTurnId: asTurnId("turn-live"),
+      createdAt: AR_NOW,
+      updatedAt: AR_NOW,
+    });
+    await harness.reconcile();
+
+    expect(await harness.readPendingTurnStart()).not.toBeNull();
   });
 });

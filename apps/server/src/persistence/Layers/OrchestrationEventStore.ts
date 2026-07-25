@@ -26,7 +26,18 @@ import {
 import {
   OrchestrationEventStore,
   type OrchestrationEventStoreShape,
+  ThreadTurnStartClaimInput,
 } from "../Services/OrchestrationEventStore.ts";
+
+// `SUM(...)` is non-negative by construction (each CASE contributes 0 or 1).
+// The `MIN(...)` columns are NULL when no such event exists above the cursor —
+// the aggregate always yields exactly one row, so absence shows up as NULL
+// rather than as an empty result.
+const ThreadTurnStartClaimRowSchema = Schema.Struct({
+  sameMessageRestartCount: NonNegativeInt,
+  firstInterruptSequence: Schema.NullOr(NonNegativeInt),
+  firstTurnStartSequence: Schema.NullOr(NonNegativeInt),
+});
 
 const decodeEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const UnknownFromJsonString = Schema.fromJsonString(Schema.Unknown);
@@ -181,6 +192,65 @@ const makeEventStore = Effect.gen(function* () {
       `,
   });
 
+  // Reads, from one thread's stream above a given sequence: whether a later
+  // turn-start re-requested the same message, and the sequences of the first
+  // later interrupt and the first later turn-start of any message.
+  //
+  // All of it comes from the append-only event log rather than the single-slot
+  // pending projection row, which a turn-start for a different message evicts.
+  // `stream_id` + `sequence` is indexed (`idx_orch_events_stream_sequence`), so
+  // this reads only that thread's tail.
+  const readThreadTurnStartClaimRow = SqlSchema.findOne({
+    Request: ThreadTurnStartClaimInput,
+    Result: ThreadTurnStartClaimRowSchema,
+    execute: (request) =>
+      sql`
+        SELECT
+          COALESCE(SUM(
+            CASE
+              WHEN event_type = 'thread.turn-start-requested'
+                AND json_extract(payload_json, '$.messageId') = ${request.messageId}
+              THEN 1 ELSE 0
+            END
+          ), 0) AS "sameMessageRestartCount",
+          MIN(
+            CASE WHEN event_type = 'thread.turn-interrupt-requested' THEN sequence END
+          ) AS "firstInterruptSequence",
+          MIN(
+            CASE WHEN event_type = 'thread.turn-start-requested' THEN sequence END
+          ) AS "firstTurnStartSequence"
+        FROM orchestration_events
+        WHERE aggregate_kind = 'thread'
+          AND stream_id = ${request.threadId}
+          AND sequence > ${request.afterSequence}
+      `,
+  });
+
+  const getThreadTurnStartClaim: OrchestrationEventStoreShape["getThreadTurnStartClaim"] = (
+    input,
+  ) =>
+    readThreadTurnStartClaimRow(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "OrchestrationEventStore.getThreadTurnStartClaim:query",
+          "OrchestrationEventStore.getThreadTurnStartClaim:decodeRow",
+        ),
+      ),
+      Effect.map((row) => ({
+        supersededBySameMessage: row.sameMessageRestartCount > 0,
+        // An interrupt cancels the turn-start it landed on, which is the most
+        // recent one at the time it was issued — the same binding the pending
+        // projection row expresses by being a single slot. So the interrupt
+        // belongs to THIS request only when no other turn-start intervened
+        // between them; if one did, the interrupt is that later request's and
+        // suppressing this one would cancel a turn the user never stopped.
+        interruptedAfter:
+          row.firstInterruptSequence !== null &&
+          (row.firstTurnStartSequence === null ||
+            row.firstInterruptSequence < row.firstTurnStartSequence),
+      })),
+    );
+
   const append: OrchestrationEventStoreShape["append"] = (event) =>
     appendEventRow({
       eventId: event.eventId,
@@ -264,6 +334,7 @@ const makeEventStore = Effect.gen(function* () {
     append,
     readFromSequence,
     readAll: () => readFromSequence(0, Number.MAX_SAFE_INTEGER),
+    getThreadTurnStartClaim,
   } satisfies OrchestrationEventStoreShape;
 });
 

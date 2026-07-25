@@ -9,12 +9,40 @@
  *
  * @module OrchestrationEventStore
  */
-import { OrchestrationEvent } from "@t3tools/contracts";
+import { MessageId, NonNegativeInt, OrchestrationEvent, ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
 
 import type { OrchestrationEventStoreError } from "../Errors.ts";
+
+export const ThreadTurnStartClaimInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  /**
+   * Sequence of the turn-start-requested event being judged. Only events strictly
+   * above it count, so a request never supersedes itself.
+   */
+  afterSequence: NonNegativeInt,
+});
+export type ThreadTurnStartClaimInput = typeof ThreadTurnStartClaimInput.Type;
+
+export const ThreadTurnStartClaim = Schema.Struct({
+  /**
+   * True when a later `thread.turn-start-requested` for the SAME message exists
+   * on this thread. The request being judged has been superseded by a re-issue
+   * (e.g. a session-exit auto-resume) and must not drive the provider itself.
+   */
+  supersededBySameMessage: Schema.Boolean,
+  /**
+   * True when a `thread.turn-interrupt-requested` landed on this thread after the
+   * request being judged. The user stopped the thread while this reactor lagged,
+   * so the prompt must not be sent even though no pending row records it anymore.
+   */
+  interruptedAfter: Schema.Boolean,
+});
+export type ThreadTurnStartClaim = typeof ThreadTurnStartClaim.Type;
 
 /**
  * OrchestrationEventStoreShape - Service API for orchestration event persistence.
@@ -52,6 +80,27 @@ export interface OrchestrationEventStoreShape {
    * @returns Stream containing all stored events.
    */
   readonly readAll: () => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
+
+  /**
+   * Reports whether a turn-start for `messageId` was re-requested on this thread
+   * after `afterSequence`, and whether an interrupt landed after it.
+   *
+   * This exists because the provider-command reactor's supersession guard cannot
+   * rely on the pending turn-start projection row alone. That row is a single
+   * slot per thread (`replacePendingTurnStart` clears then inserts), so a newer
+   * request for a *different* message evicts it — and a stale event for the
+   * older message then finds no row to compare against and drives the provider a
+   * second time. The event log has no such slot: it is append-only, so a
+   * re-request for the same message is permanently observable at its own
+   * sequence regardless of what happened afterwards.
+   *
+   * Scoped to the thread stream and to sequences above the request being
+   * judged, so the cost is bounded by that thread's recent tail rather than the
+   * whole log, and so a request never supersedes itself.
+   */
+  readonly getThreadTurnStartClaim: (
+    input: ThreadTurnStartClaimInput,
+  ) => Effect.Effect<ThreadTurnStartClaim, OrchestrationEventStoreError>;
 }
 
 /**

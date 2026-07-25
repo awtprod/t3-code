@@ -1305,14 +1305,40 @@ const make = Effect.gen(function* () {
       // recorded on the projection session at session.started) disambiguates: a
       // terminal event whose generation differs from the projection's current
       // generation is from a superseded runtime, even when the instance matches.
-      const supersededTerminalEvent =
-        event.type === "session.exited" &&
-        ((event.providerInstanceId !== undefined &&
+      //
+      // The same correlation must gate NON-terminal events too, and for a
+      // subtler reason than "don't apply stale state". The session-set below
+      // writes `event.sessionGeneration ?? thread.session?.sessionGeneration`,
+      // so a stale non-terminal event (the dying runtime's buffered
+      // `session/connecting` / `session/ready`, both of which map to
+      // `session.state.changed`) would REWIND the projection's generation to the
+      // superseded runtime's nonce. The stale `session.exited` that follows it
+      // then compares equal to the projection and is no longer recognized as
+      // superseded — so it applies, marks the healthy replacement stopped and
+      // interrupts its live turn. The guard below is therefore what makes the
+      // terminal guard reliable, not merely a hygiene addition: gating the exit
+      // alone is defeated by the very events that precede it.
+      const supersededEventIdentity =
+        (event.providerInstanceId !== undefined &&
           thread.session?.providerInstanceId !== undefined &&
           thread.session.providerInstanceId !== event.providerInstanceId) ||
-          (event.sessionGeneration !== undefined &&
-            thread.session?.sessionGeneration !== undefined &&
-            thread.session.sessionGeneration !== event.sessionGeneration));
+        (event.sessionGeneration !== undefined &&
+          thread.session?.sessionGeneration !== undefined &&
+          thread.session.sessionGeneration !== event.sessionGeneration);
+      const supersededTerminalEvent =
+        event.type === "session.exited" && supersededEventIdentity;
+      // Lifecycle events from a superseded runtime must not touch the projection
+      // session at all. Only lifecycle-bearing types are gated: item/content
+      // events carry no session identity to clobber, and dropping them would
+      // lose transcript content that is still legitimately the thread's.
+      const supersededLifecycleEvent =
+        supersededEventIdentity &&
+        (event.type === "session.started" ||
+          event.type === "session.state.changed" ||
+          event.type === "session.exited" ||
+          event.type === "thread.started" ||
+          event.type === "turn.started" ||
+          event.type === "turn.completed");
 
       const shouldApplyThreadLifecycle = (() => {
         if (!STRICT_PROVIDER_LIFECYCLE_GUARD) {
@@ -1388,7 +1414,7 @@ const make = Effect.gen(function* () {
                 ? null
                 : (thread.session?.lastError ?? null);
 
-        if (shouldApplyThreadLifecycle && !supersededTerminalEvent) {
+        if (shouldApplyThreadLifecycle && !supersededLifecycleEvent) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
             yield* markSourceProposedPlanImplemented(
               acceptedTurnStartedSourcePlan.sourceThreadId,
@@ -1694,6 +1720,30 @@ const make = Effect.gen(function* () {
         // OpenCode's unexpected-exit path emits `recoverable: false`) must not be
         // auto-resumed: reissuing the prompt could duplicate work or side effects
         // the provider is telling us are unsafe to retry. Absent/true ⇒ eligible.
+        //
+        // This gate is what bounds the duplicate-side-effect risk, so it is worth
+        // stating precisely what auto-resume does and does not guarantee.
+        //
+        // Re-issuing the user's message is NOT idempotent by itself: if a tool
+        // call (a command, an API write) completed before the subprocess died,
+        // nothing in the resume cursor or the activity log prevents the provider
+        // from running it again. What makes a resume safe is the provider seeing
+        // its own prior transcript — `ProviderService.startSession` threads the
+        // persisted `resumeCursor` back in, so a resumed session knows which
+        // tools it already ran and continues rather than restarting.
+        //
+        // That holds only for adapters that implement resume. Verified against
+        // the adapters in this repo: Claude, Codex, Cursor and Grok all accept a
+        // `resumeCursor` on startSession; OpenCode does not implement one. The
+        // reason OpenCode is nonetheless safe today is this gate — both of its
+        // `session.exited` emissions declare `recoverable: false`, so it is never
+        // auto-resumed and never re-runs a completed tool cold.
+        //
+        // That coupling is load-bearing but implicit, so treat it as a contract:
+        // an adapter without resume-cursor support MUST declare its exits
+        // non-recoverable. An adapter that gains a recoverable exit path must
+        // gain a resume cursor in the same change, or it will re-execute
+        // completed tool work from a cold session.
         const declaredNonRecoverable = event.payload.recoverable === false;
         const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
         const archived = thread.archivedAt !== null;
@@ -1718,16 +1768,16 @@ const make = Effect.gen(function* () {
         const hasOrphanedPendingTurnStart =
           Option.isSome(orphanedPendingTurnStart) &&
           !orphanedPendingTurnStart.value.pendingInterruptRequested;
-        // `userInterruptedActiveTurn` was captured before this event's own
-        // session-set (status: stopped) settled the running turn — see its
-        // definition above. A user who deliberately interrupted the turn must not
-        // have it auto-resumed by the ensuing crash — UNLESS an orphaned pending
-        // turn-start exists, meaning a newer message was queued after the
-        // interrupt and orphaned by the crash. The interrupt suppresses the OLD
-        // turn (a started row); it must not also drop that newer message, whose
-        // pending row is necessarily for a different message than the started,
-        // interrupted turn. The resume targets the newest user message (that
-        // orphan), so it re-issues B, not the interrupted A.
+        // `userInterruptedActiveTurn` is the early projection snapshot, taken
+        // before this event's own session-set settled the running turn (see its
+        // definition). A user who deliberately interrupted the
+        // turn must not have it auto-resumed by the ensuing crash — UNLESS an
+        // orphaned pending turn-start exists, meaning a newer message was queued
+        // after the interrupt and orphaned by the crash. The interrupt suppresses
+        // the OLD turn (a started row); it must not also drop that newer message,
+        // whose pending row is necessarily for a different message than the
+        // started, interrupted turn. The resume targets the newest user message
+        // (that orphan), so it re-issues B, not the interrupted A.
         const baseEligible =
           activeTurnId !== null &&
           !gracefulExit &&
@@ -1970,9 +2020,18 @@ const make = Effect.gen(function* () {
       if (event.type === "runtime.error") {
         const runtimeErrorMessage = event.payload.message;
 
-        const shouldApplyRuntimeError = !STRICT_PROVIDER_LIFECYCLE_GUARD
-          ? true
-          : activeTurnId === null || eventTurnId === undefined || sameId(activeTurnId, eventTurnId);
+        // A superseded runtime's dying error rewinds the projection's identity
+        // exactly as a stale lifecycle event would (this dispatch writes the same
+        // `event.sessionGeneration ?? …` fallback), re-arming the stale-exit
+        // hazard described at `supersededEventIdentity`. It also parks the live
+        // replacement in `error` on a dead runtime's behalf. Drop it.
+        const shouldApplyRuntimeError = supersededEventIdentity
+          ? false
+          : !STRICT_PROVIDER_LIFECYCLE_GUARD
+            ? true
+            : activeTurnId === null ||
+              eventTurnId === undefined ||
+              sameId(activeTurnId, eventTurnId);
 
         if (shouldApplyRuntimeError) {
           yield* orchestrationEngine.dispatch({
@@ -2113,7 +2172,50 @@ const make = Effect.gen(function* () {
         return !sameId(liveTurnsByThreadId.get(thread.id), projectedTurnId);
       });
 
-      if (orphanedThreads.length === 0) {
+      // A thread can be orphaned with no concrete turn to point at. A turn-start
+      // that never reached `turn.started` leaves only a pending row (turn_id
+      // NULL): no `session.activeTurnId`, no running `latestTurn` — so the filter
+      // above cannot see it, and auto-resume cannot rescue it either (eligibility
+      // requires a non-null activeTurnId). That happens whenever a replacement
+      // session dies before reporting its first turn, and the thread would
+      // otherwise sit "pending" forever. Sweep those rows here, where a provider
+      // session is known not to be running for the thread.
+      const orphanedIds = new Set(orphanedThreads.map((thread) => thread.id));
+      const pendingOnlyOrphans = yield* Effect.forEach(
+        snapshot.threads.filter(
+          (thread) => !orphanedIds.has(thread.id) && !liveTurnsByThreadId.has(thread.id),
+        ),
+        (thread) =>
+          projectionTurnRepository
+            .getPendingTurnStartByThreadId({ threadId: thread.id })
+            .pipe(
+              Effect.map((pending) => (Option.isSome(pending) ? thread : null)),
+              Effect.orElseSucceed(() => null),
+            ),
+        { concurrency: 1 },
+      ).pipe(Effect.map((threads) => threads.filter((thread) => thread !== null)));
+
+      // Clear the stranded placeholders so the thread stops presenting as
+      // pending. The session-set dispatched below cannot do this: the pending row
+      // carries no turn id, so the turns projector's settle path (which only
+      // touches rows with a concrete turnId) leaves it untouched.
+      yield* Effect.forEach(
+        pendingOnlyOrphans,
+        (thread) =>
+          projectionTurnRepository
+            .deletePendingTurnStartByThreadId({ threadId: thread.id })
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("failed to clear orphaned pending turn start", {
+                  threadId: thread.id,
+                  cause: Cause.pretty(cause),
+                }),
+              ),
+            ),
+        { concurrency: 1 },
+      );
+
+      if (orphanedThreads.length === 0 && pendingOnlyOrphans.length === 0) {
         return;
       }
 
@@ -2151,6 +2253,7 @@ const make = Effect.gen(function* () {
       );
       yield* Effect.logInfo("reconciled orphaned provider turns", {
         threadCount: orphanedThreads.length,
+        pendingOnlyThreadCount: pendingOnlyOrphans.length,
       });
     }).pipe(
       Effect.catchCause((cause) =>

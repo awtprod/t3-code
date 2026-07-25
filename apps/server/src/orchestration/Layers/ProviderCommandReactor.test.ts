@@ -2448,4 +2448,142 @@ describe("ProviderCommandReactor", () => {
     expect(interruptedDrives.length).toBe(0);
     expect(harness.sendTurn.mock.calls.length).toBe(2);
   });
+
+  it("skips a superseded turn-start even after a DISTINCT message evicts the pending row", async () => {
+    const harness = await createHarness();
+    const staleCreatedAt = "2026-01-01T00:00:00.000Z"; // original turn-start for msg-1
+    const blockerCreatedAt = "2026-01-01T00:00:01.000Z";
+    const resumeCreatedAt = "2026-01-01T00:00:02.000Z"; // auto-resume re-request for msg-1
+    const evictCreatedAt = "2026-01-01T00:00:03.000Z"; // DIFFERENT message, evicts the row
+    const sentinelCreatedAt = "2026-01-01T00:00:04.000Z";
+
+    // The pending turn-start row is a SINGLE SLOT per thread
+    // (`replacePendingTurnStart` clears then inserts), so a turn-start for a
+    // different message destroys the row that recorded msg-1's re-issue. A guard
+    // reading that row then sees either nothing or a non-matching messageId,
+    // concludes "not superseded", and drives BOTH the stale original and its
+    // resume — the same prompt sent to the provider twice. Reading the
+    // append-only event log instead is what closes this: the re-request stays
+    // observable at its own sequence no matter what lands after it.
+    let releaseWorker: () => void = () => {};
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    const originalStartSession = harness.startSession.getMockImplementation();
+    if (!originalStartSession) {
+      throw new Error("startSession mock implementation missing");
+    }
+    harness.startSession.mockImplementationOnce((threadId, sessionInput) =>
+      Effect.promise(() => workerGate).pipe(
+        Effect.flatMap(() => originalStartSession(threadId, sessionInput)),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-2"),
+      threadId: ThreadId.make("thread-2"),
+      projectId: asProjectId("project-1"),
+      title: "Sentinel Thread",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt: blockerCreatedAt,
+    });
+
+    // Park the worker so every event below commits before any is processed.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-blocker"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-blocker"),
+        role: "user",
+        text: "blocker turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: blockerCreatedAt,
+    });
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+
+    // Stale original for msg-1, then its auto-resume (same message).
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-stale"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "resume me",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: staleCreatedAt,
+    });
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-resume"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-1"),
+      createdAt: resumeCreatedAt,
+    });
+
+    // The eviction: a turn-start for a DIFFERENT message on the SAME thread
+    // replaces the single pending row, erasing every trace of msg-1's re-issue
+    // from the projection.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-evict"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-2"),
+        role: "user",
+        text: "evicting message",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: evictCreatedAt,
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-sentinel"),
+      threadId: ThreadId.make("thread-2"),
+      message: {
+        messageId: asMessageId("user-sentinel"),
+        role: "user",
+        text: "sentinel turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: sentinelCreatedAt,
+    });
+
+    releaseWorker();
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "sentinel turn",
+      ),
+    );
+
+    const inputs = harness.sendTurn.mock.calls.map((call) => (call[0] as { input?: string }).input);
+    // msg-1 drives exactly once (the resume), despite its pending row being gone.
+    expect(inputs.filter((input) => input === "resume me").length).toBe(1);
+    // The evicting message is a genuinely distinct request and must still drive —
+    // this is what keeps the fix from degenerating into blanket suppression.
+    expect(inputs.filter((input) => input === "evicting message").length).toBe(1);
+    // blocker + resume + evicting + sentinel = 4. Reading the mutable pending row
+    // instead of the event log yields 5: the stale original drives as well.
+    expect(harness.sendTurn.mock.calls.length).toBe(4);
+  });
 });

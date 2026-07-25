@@ -33,8 +33,8 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
-import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
-import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
+import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
+import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
@@ -217,7 +217,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
-  const projectionTurnRepository = yield* ProjectionTurnRepository;
+  const orchestrationEventStore = yield* OrchestrationEventStore;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
@@ -798,39 +798,50 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    // Scoped supersession guard. Session-exit auto-resume re-issues the *same*
-    // user message with a fresh commandId (which bypasses turn-start dedup), so
-    // a crash that lands after this reactor already consumed the original
-    // turn-start-requested would otherwise double-drive the same prompt. Skip
-    // this request when the live pending turn-start row is for the SAME message
-    // but carries a STRICTLY HIGHER event sequence — i.e. a newer re-request has
-    // superseded it. Ordering by the globally-monotonic event `sequence` (never
-    // ties, unlike a millisecond `requestedAt` which can collide when the
-    // original and the crash-generated resume land in the same instant) makes
-    // this deterministic: the stale original (lower sequence) is skipped while
-    // the resume (its own row's sequence) still drives. A normal single
-    // turn-start reads its own row (equal sequence, not superseded, so it
-    // drives), and rapid multi-send of DISTINCT messages is never suppressed (no
-    // regression to normal turn driving). The projection is committed
-    // synchronously inside dispatch, ahead of this lagging reactor, so the
-    // pending row reflects the latest committed re-request in the common
-    // post-crash timing.
+    // Supersession guard, read from the append-only event log.
     //
-    // The same read also honors a stop the user issued while this reactor was
-    // lagging: `thread.turn-interrupt-requested` marks the live pending row
-    // `pendingInterruptRequested` (it does not bump the sequence), so a plain
-    // supersession check would miss it and still `sendTurn` a prompt the user
-    // canceled before the provider ever registered the turn. Skip the request
-    // when the matching pending row is interrupted, as well as when a newer
-    // same-message re-request has superseded it.
-    const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+    // Session-exit auto-resume re-issues the *same* user message with a fresh
+    // commandId (which bypasses turn-start dedup), so a crash landing after this
+    // reactor already consumed the original turn-start-requested would otherwise
+    // double-drive the same prompt. The guard skips a request once a LATER
+    // turn-start for the same message exists, or once the user interrupted the
+    // thread after it.
+    //
+    // Both facts come from `orchestration_events`, not from the pending
+    // turn-start projection row, and that distinction is the fix rather than a
+    // refactor. The pending row is a SINGLE SLOT per thread —
+    // `replacePendingTurnStart` clears then inserts — so a turn-start for a
+    // DIFFERENT message evicts the row that recorded the re-issue. A row-based
+    // guard then finds either no row or a non-matching `messageId`, concludes
+    // "not superseded", and sends the stale original AND its resume to the
+    // provider: the same prompt driven twice. The same eviction loses
+    // `pendingInterruptRequested`, so a stop the user issued while this reactor
+    // lagged is silently forgotten and the canceled prompt is sent anyway. The
+    // event log has no slot to evict: a re-request is permanently observable at
+    // its own sequence, whatever arrives afterwards.
+    //
+    // Scoping is by thread stream and by `sequence > event.sequence`, so a
+    // request never supersedes itself (a normal single turn-start sees no later
+    // events and drives), rapid multi-send of DISTINCT messages is untouched,
+    // and the scan is bounded by that thread's tail.
+    //
+    // Checked twice. This first read is an early-out that avoids the side effects
+    // below (title and worktree-branch generation) for a request already known to
+    // be dead. It is NOT sufficient on its own: those side effects and the
+    // session binding that follows are slow — they can spawn a model call and
+    // start a provider session — and a re-issue or an interrupt can land during
+    // that window. The read is therefore repeated immediately before `sendTurn`,
+    // which is the point the decision actually governs.
+    const readTurnStartClaim = orchestrationEventStore.getThreadTurnStartClaim({
       threadId: event.payload.threadId,
+      messageId: event.payload.messageId,
+      afterSequence: event.sequence,
     });
+
+    const initialTurnStartClaim = yield* readTurnStartClaim;
     if (
-      Option.isSome(pendingTurnStart) &&
-      pendingTurnStart.value.messageId === event.payload.messageId &&
-      (pendingTurnStart.value.requestSequence > event.sequence ||
-        pendingTurnStart.value.pendingInterruptRequested)
+      initialTurnStartClaim.supersededBySameMessage ||
+      initialTurnStartClaim.interruptedAfter
     ) {
       return;
     }
@@ -917,6 +928,19 @@ const make = Effect.gen(function* () {
     );
 
     if (Option.isNone(sendTurnRequest)) {
+      return;
+    }
+
+    // Revalidate at the point of no return. `buildSendTurnRequestForThread` binds
+    // (and may start or restart) the provider session, and the title/branch
+    // generation forked above runs concurrently — a re-issued turn-start or a
+    // user interrupt can land anywhere in that window. Re-reading the durable
+    // claim here is what keeps a superseded prompt from reaching the provider;
+    // the earlier read only saves work. The session binding is deliberately left
+    // in place: a resume will use it, and a stopped session is settled by the
+    // interrupt path, not here.
+    const finalTurnStartClaim = yield* readTurnStartClaim;
+    if (finalTurnStartClaim.supersededBySameMessage || finalTurnStartClaim.interruptedAfter) {
       return;
     }
 
@@ -1151,5 +1175,5 @@ const make = Effect.gen(function* () {
 });
 
 export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
-  Layer.provide(ProjectionTurnRepositoryLive),
+  Layer.provide(OrchestrationEventStoreLive),
 );

@@ -109,6 +109,8 @@ describe("OrchestrationEngine", () => {
             detail: "historical replay should not be used during bootstrap",
           }),
         ),
+      getThreadTurnStartClaim: () =>
+        Effect.succeed({ supersededBySameMessage: false, interruptedAfter: false }),
     };
 
     const projectionSnapshot = {
@@ -775,6 +777,8 @@ describe("OrchestrationEngine", () => {
       readAll() {
         return Stream.fromIterable(events);
       },
+      getThreadTurnStartClaim: () =>
+        Effect.succeed({ supersededBySameMessage: false, interruptedAfter: false }),
     };
 
     const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -1007,6 +1011,8 @@ describe("OrchestrationEngine", () => {
       readAll() {
         return Stream.fromIterable(events);
       },
+      getThreadTurnStartClaim: () =>
+        Effect.succeed({ supersededBySameMessage: false, interruptedAfter: false }),
     };
 
     let shouldFailProjection = true;
