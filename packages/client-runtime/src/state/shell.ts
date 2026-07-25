@@ -178,10 +178,19 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
         yield* applyItem({ kind: "snapshot", snapshot: base.value });
       }
 
-      const subscribeInput = Option.match(base, {
-        onNone: () => ({}),
-        onSome: (snapshot) => ({ afterSequence: snapshot.snapshotSequence }),
-      });
+      // Re-read the cursor on every subscribe attempt rather than capturing it
+      // once. `subscribe` re-issues this input after each reconnect, so a fixed
+      // `afterSequence` would replay from the *base* snapshot every time and the
+      // replay would grow for the whole life of the session. The live snapshot's
+      // `snapshotSequence` is advanced by `applyShellStreamEvent` for every event
+      // we apply, so reading it here means each reconnect asks only for what it
+      // missed. No snapshot yet means "nothing applied" — omit `afterSequence` so
+      // the server sends a full one, which is the cold-cache path.
+      const subscribeInput = () =>
+        Option.match(SubscriptionRef.getUnsafe(state).snapshot, {
+          onNone: () => ({}),
+          onSome: (snapshot) => ({ afterSequence: snapshot.snapshotSequence }),
+        });
 
       yield* subscribe(ORCHESTRATION_WS_METHODS.subscribeShell, subscribeInput, {
         onExpectedFailure: (cause) => setStreamError(Cause.squash(cause)),

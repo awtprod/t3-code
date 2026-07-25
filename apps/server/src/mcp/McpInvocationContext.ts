@@ -2,6 +2,7 @@ import {
   CommandCenterMcpCapabilityUnavailableError,
   type EnvironmentId,
   PreviewAutomationUnavailableError,
+  type ProjectId,
   type ProviderInstanceId,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -17,6 +18,10 @@ export interface McpInvocationScope {
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
+  /** Local project owning the thread, when issued through project orchestration. */
+  readonly projectId?: ProjectId;
+  /** Effective provider working directory used to resolve project-scoped tools. */
+  readonly cwd?: string;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly spaceId?: SpaceId;
   readonly repositoryId?: RepositoryId;

@@ -14,6 +14,18 @@ Object.assign(process.env, repoEnv);
 
 const port = Number(process.env.PORT ?? 5733);
 const host = process.env.HOST?.trim() || "localhost";
+const allowedHosts = (repoEnv.T3CODE_WEB_ALLOWED_HOSTS ?? "")
+  .split(",")
+  .map((allowedHost) => allowedHost.trim())
+  .filter((allowedHost) => allowedHost.length > 0);
+// When the dev server binds a loopback interface it is only reachable through a
+// local reverse proxy (e.g. `tailscale serve` → 127.0.0.1), so the DNS-rebinding
+// threat `server.allowedHosts` guards against is already handled at the network
+// layer. Disable the host check in that case so a mid-session vite config
+// re-import can't drop the env-derived allow-list and start returning 403s.
+// A non-loopback bind keeps the explicit list from T3CODE_WEB_ALLOWED_HOSTS.
+const isLoopbackHost = ["localhost", "127.0.0.1", "::1"].includes(host);
+const serverAllowedHosts: true | string[] = isLoopbackHost ? true : allowedHosts;
 const configuredWsUrl = process.env.VITE_WS_URL?.trim();
 const configuredRelayUrl = repoEnv.VITE_T3CODE_RELAY_URL?.trim() || "";
 const configuredClerkPublishableKey = repoEnv.VITE_CLERK_PUBLISHABLE_KEY?.trim() || "";
@@ -145,6 +157,7 @@ export default defineConfig(() => {
       host,
       port,
       strictPort: true,
+      allowedHosts: serverAllowedHosts,
       ...(devProxyTarget
         ? {
             proxy: {

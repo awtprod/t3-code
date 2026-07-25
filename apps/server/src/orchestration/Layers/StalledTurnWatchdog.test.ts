@@ -144,6 +144,9 @@ describe("StalledTurnWatchdog", () => {
     readonly snapshot: OrchestrationShellSnapshot;
     readonly stallThresholdMs?: number;
     readonly interruptTurnImplementation?: ProviderServiceShape["interruptTurn"];
+    // When true, build the layer with no options at all so the assertions
+    // exercise the production defaults rather than injected test values.
+    readonly useProductionDefaults?: boolean;
   }) {
     const dispatched: DispatchedCommand[] = [];
     const dispatch = vi.fn<OrchestrationEngineShape["dispatch"]>((command) =>
@@ -174,11 +177,15 @@ describe("StalledTurnWatchdog", () => {
       streamEvents: Stream.empty,
     };
 
-    const layer = makeStalledTurnWatchdogLive({
-      // Large sweep interval so exactly one sweep runs during the test window.
-      stallThresholdMs: input.stallThresholdMs ?? 1_000,
-      sweepIntervalMs: 60_000,
-    }).pipe(
+    const layer = makeStalledTurnWatchdogLive(
+      input.useProductionDefaults === true
+        ? undefined
+        : {
+            // Large sweep interval so exactly one sweep runs during the test window.
+            stallThresholdMs: input.stallThresholdMs ?? 1_000,
+            sweepIntervalMs: 60_000,
+          },
+    ).pipe(
       Layer.provideMerge(Layer.succeed(ProviderService, providerService)),
       Layer.provideMerge(
         Layer.succeed(OrchestrationEngineService, {
@@ -258,7 +265,7 @@ describe("StalledTurnWatchdog", () => {
   it("does not touch a running turn whose updatedAt is fresh", async () => {
     const threadId = ThreadId.make("thread-watchdog-fresh");
     const turnId = TurnId.make("turn-watchdog-fresh");
-    const freshNow = DateTime.formatIso(await Effect.runPromise(DateTime.now));
+    const freshNow = DateTime.formatIso(DateTime.nowUnsafe());
     const harness = createHarness({
       // 20-minute threshold; the turn was just active → healthy long turn.
       stallThresholdMs: 20 * 60 * 1000,
@@ -334,6 +341,63 @@ describe("StalledTurnWatchdog", () => {
 
     expect(harness.interruptTurn).not.toHaveBeenCalled();
     expect(harness.dispatched).toHaveLength(0);
+  });
+
+  // The suite above always injects a threshold, so it cannot catch a regression
+  // in the production defaults. These two pin them from both sides. The 10m value
+  // is derived from measured provider logs (see the comment on
+  // DEFAULT_STALL_THRESHOLD_MS): the worst legitimate intra-turn silence observed
+  // across 60 healthy turns was 7.2m, so 9m must survive and 11m must not.
+  it("leaves a turn alone at 9m of silence under production defaults", async () => {
+    const threadId = ThreadId.make("thread-watchdog-defaults-under");
+    const turnId = TurnId.make("turn-watchdog-defaults-under");
+    const silentFor9m = DateTime.formatIso(DateTime.subtract(DateTime.nowUnsafe(), { minutes: 9 }));
+    const harness = createHarness({
+      useProductionDefaults: true,
+      snapshot: makeShellSnapshot([
+        makeShell({
+          id: threadId,
+          session: makeRunningSession(threadId, turnId),
+          latestTurn: makeRunningTurn(turnId),
+          updatedAt: silentFor9m,
+        }),
+      ]),
+    });
+
+    await startWatchdog();
+    await Effect.runPromise(drainFibers);
+
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+    expect(harness.dispatched).toHaveLength(0);
+  });
+
+  it("auto-fails a turn at 11m of silence under production defaults", async () => {
+    const threadId = ThreadId.make("thread-watchdog-defaults-over");
+    const turnId = TurnId.make("turn-watchdog-defaults-over");
+    const silentFor11m = DateTime.formatIso(
+      DateTime.subtract(DateTime.nowUnsafe(), { minutes: 11 }),
+    );
+    const harness = createHarness({
+      useProductionDefaults: true,
+      snapshot: makeShellSnapshot([
+        makeShell({
+          id: threadId,
+          session: makeRunningSession(threadId, turnId),
+          latestTurn: makeRunningTurn(turnId),
+          updatedAt: silentFor11m,
+        }),
+      ]),
+    });
+
+    await startWatchdog();
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+
+    const activity = harness.dispatched.find((c) => c.type === "thread.activity.append");
+    expect(activity).toBeDefined();
+    if (activity?.type === "thread.activity.append") {
+      // Message is rendered from the threshold, so it also pins the 10m value.
+      expect(activity.activity.summary).toContain("10m");
+    }
   });
 
   it("does not auto-fail a turn parked on a pending approval", async () => {

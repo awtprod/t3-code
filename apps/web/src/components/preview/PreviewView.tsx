@@ -39,6 +39,7 @@ import { revealInFileExplorerLabel } from "./fileExplorerLabel";
 import { shouldShowPreviewEmptyState } from "./previewEmptyStateLogic";
 import { BrowserSurfaceSlot } from "~/browser/BrowserSurfaceSlot";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
+import { WebPreviewFrame } from "~/browser/WebPreviewFrame";
 import { useLoadingProgress } from "./useLoadingProgress";
 import { usePreviewSession } from "./usePreviewSession";
 import { ZoomIndicator } from "./ZoomIndicator";
@@ -65,6 +66,9 @@ const localApi = typeof window === "undefined" ? null : ensureLocalApi();
  */
 export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, visible }: Props) {
   const [focusUrlNonce, setFocusUrlNonce] = useState<number | undefined>(undefined);
+  // Reload for the web surface: a cross-origin iframe cannot be told to reload
+  // itself, so bumping this remounts it, which performs a fresh navigation.
+  const [frameReloadNonce, setFrameReloadNonce] = useState(0);
   const [pickActive, setPickActive] = useState(false);
   const activeRecordingTabId = useActiveBrowserRecordingTabId();
   const pickActiveRef = useRef(false);
@@ -75,6 +79,7 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
   const environment = useEnvironment(threadRef.environmentId);
   const environmentHttpBaseUrl = useEnvironmentHttpBaseUrl(threadRef.environmentId);
   const open = useAtomCommand(previewEnvironment.open);
+  const navigate = useAtomCommand(previewEnvironment.navigate, "preview navigation");
   const resize = useAtomCommand(previewEnvironment.resize, "preview viewport resize");
 
   usePreviewSession(threadRef);
@@ -121,6 +126,17 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
           // resolved URL back to the server so other clients stay in sync.
           await previewBridge.navigate(tabId, resolvedUrl);
           rememberPreviewUrl(threadRef, resolvedUrl);
+        } else if (tabId) {
+          // No bridge: the frame's src follows the server snapshot, so the
+          // navigate RPC *is* the navigation. Opening instead would leave a
+          // fresh tab behind on every URL the user typed.
+          const result = await navigate({
+            environmentId: threadRef.environmentId,
+            input: { threadId: threadRef.threadId, tabId, url: resolvedUrl },
+          });
+          if (result._tag === "Failure") return;
+          updatePreviewServerSnapshot(threadRef, result.value);
+          rememberPreviewUrl(threadRef, resolvedUrl);
         } else {
           await openPreviewSession({
             openPreview: open,
@@ -132,11 +148,16 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
         // Server-side `failed` event renders the unreachable view.
       }
     },
-    [open, tabId, threadRef],
+    [navigate, open, tabId, threadRef],
   );
 
   const handleRefresh = useCallback(() => {
-    if (previewBridge && tabId) void previewBridge.refresh(tabId);
+    if (!tabId) return;
+    if (previewBridge) {
+      void previewBridge.refresh(tabId);
+      return;
+    }
+    setFrameReloadNonce((value) => value + 1);
   }, [tabId]);
 
   const handleZoomIn = useCallback(() => {
@@ -601,12 +622,25 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
         {tabId && snapshot && !showEmptyState ? (
-          <BrowserSurfaceSlot
-            key={tabId}
-            tabId={tabId}
-            visible={visible && !isUnreachable}
-            className="absolute inset-0 h-full w-full"
-          />
+          previewBridge ? (
+            // Desktop: a measuring placeholder. The actual content is an
+            // out-of-process webview positioned over this rect.
+            <BrowserSurfaceSlot
+              key={tabId}
+              tabId={tabId}
+              visible={visible && !isUnreachable}
+              className="absolute inset-0 h-full w-full"
+            />
+          ) : (
+            <WebPreviewFrame
+              key={tabId}
+              threadRef={threadRef}
+              tabId={tabId}
+              navStatus={navStatus}
+              reloadNonce={frameReloadNonce}
+              className="absolute inset-0 h-full w-full border-0 bg-background"
+            />
+          )
         ) : null}
         {showEmptyState ? (
           <PreviewEmptyState

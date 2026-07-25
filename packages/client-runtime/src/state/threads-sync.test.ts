@@ -307,6 +307,55 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect("resubscribes from the latest applied sequence, not the original snapshot", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_THREAD });
+
+      // Apply an event well past the cached snapshot sequence, so the two
+      // cursors are distinguishable.
+      yield* Queue.offer(harness.inputs, titleUpdated("Live title", CACHED_SNAPSHOT_SEQUENCE + 5));
+      yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          value.status === "live" &&
+          Option.isSome(value.data) &&
+          value.data.value.title === "Live title",
+      );
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(CACHED_SNAPSHOT_SEQUENCE);
+
+      // A reconnect re-issues the subscription. It must ask for what it actually
+      // missed; resending the original cursor would replay every event since the
+      // cached snapshot on every reconnect, and that replay grows unboundedly for
+      // the life of the session.
+      yield* harness.replaceSession;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(harness.subscriptionCount)) >= 2) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+
+      expect(yield* Ref.get(harness.subscriptionCount)).toBe(2);
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(CACHED_SNAPSHOT_SEQUENCE + 5);
+    }),
+  );
+
+  it.effect("omits afterSequence when nothing has been applied yet", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(harness.subscriptionCount)) >= 1) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+
+      // A cold start has no cursor to resume from, so the server must send a full
+      // snapshot rather than an empty delta from sequence 0.
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBeUndefined();
+    }),
+  );
+
   it.effect("reduces live events and persists the latest thread", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ cached: BASE_THREAD });

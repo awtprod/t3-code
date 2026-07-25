@@ -214,6 +214,30 @@ export const ServerObservability = Schema.Struct({
 });
 export type ServerObservability = typeof ServerObservability.Type;
 
+/**
+ * How to reach this server's authenticated preview gateway, when it runs one.
+ *
+ * The gateway forwards to loopback-bound dev servers behind the same session
+ * auth as the rest of the server, so a client on another machine can open a
+ * preview without a new tunnel. Ports rather than a full URL: the gateway lives
+ * on the same host the client already reached the server on, and the client is
+ * the only party that knows which of the server's several addresses that was.
+ */
+export const ServerPreviewGateway = Schema.Struct({
+  /**
+   * Port the gateway listens on. Bound to loopback, so this only helps a client
+   * running on the server's own machine.
+   */
+  loopbackPort: PositiveInt,
+  /**
+   * Port the gateway is published on over HTTPS for other machines (Tailscale
+   * Serve). Absent when nothing publishes it, which leaves the gateway usable
+   * only from the server's own machine.
+   */
+  publicHttpsPort: Schema.optionalKey(PositiveInt),
+});
+export type ServerPreviewGateway = typeof ServerPreviewGateway.Type;
+
 export const ServerTraceDiagnosticsErrorKind = Schema.Literals([
   "trace-file-not-found",
   "trace-file-read-failed",
@@ -416,6 +440,9 @@ export const ServerConfig = Schema.Struct({
   providers: ServerProviders,
   availableEditors: Schema.Array(EditorId),
   observability: ServerObservability,
+  // Absent when the server runs no preview gateway; clients then fall back to
+  // dialling the dev server's port directly and fail if that is unreachable.
+  previewGateway: Schema.optionalKey(ServerPreviewGateway),
   settings: ServerSettings,
 });
 export type ServerConfig = typeof ServerConfig.Type;

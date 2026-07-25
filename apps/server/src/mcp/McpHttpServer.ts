@@ -15,6 +15,8 @@ import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import { CommandCenterToolkitHandlersLive } from "./toolkits/command-center/handlers.ts";
 import { CommandCenterToolkit } from "./toolkits/command-center/tools.ts";
+import { SupabaseToolkitHandlersLive } from "./toolkits/supabase/handlers.ts";
+import { SupabaseToolkit } from "./toolkits/supabase/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -214,9 +216,14 @@ export const CommandCenterToolkitRegistrationLive = McpServer.toolkit(CommandCen
   Layer.provide(CommandCenterToolkitHandlersLive),
 );
 
+export const SupabaseToolkitRegistrationLive = McpServer.toolkit(SupabaseToolkit).pipe(
+  Layer.provide(SupabaseToolkitHandlersLive),
+);
+
 const ToolkitRegistrationLive = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   CommandCenterToolkitRegistrationLive,
+  SupabaseToolkitRegistrationLive,
 );
 
 const McpTransportLive = McpServer.layerHttp({
