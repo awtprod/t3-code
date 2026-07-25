@@ -1325,8 +1325,7 @@ const make = Effect.gen(function* () {
         (event.sessionGeneration !== undefined &&
           thread.session?.sessionGeneration !== undefined &&
           thread.session.sessionGeneration !== event.sessionGeneration);
-      const supersededTerminalEvent =
-        event.type === "session.exited" && supersededEventIdentity;
+      const supersededTerminalEvent = event.type === "session.exited" && supersededEventIdentity;
       // Lifecycle events from a superseded runtime must not touch the projection
       // session at all. Only lifecycle-bearing types are gated: item/content
       // events carry no session identity to clobber, and dropping them would
@@ -2186,12 +2185,10 @@ const make = Effect.gen(function* () {
           (thread) => !orphanedIds.has(thread.id) && !liveTurnsByThreadId.has(thread.id),
         ),
         (thread) =>
-          projectionTurnRepository
-            .getPendingTurnStartByThreadId({ threadId: thread.id })
-            .pipe(
-              Effect.map((pending) => (Option.isSome(pending) ? thread : null)),
-              Effect.orElseSucceed(() => null),
-            ),
+          projectionTurnRepository.getPendingTurnStartByThreadId({ threadId: thread.id }).pipe(
+            Effect.map((pending) => (Option.isSome(pending) ? thread : null)),
+            Effect.orElseSucceed(() => null),
+          ),
         { concurrency: 1 },
       ).pipe(Effect.map((threads) => threads.filter((thread) => thread !== null)));
 
@@ -2202,16 +2199,14 @@ const make = Effect.gen(function* () {
       yield* Effect.forEach(
         pendingOnlyOrphans,
         (thread) =>
-          projectionTurnRepository
-            .deletePendingTurnStartByThreadId({ threadId: thread.id })
-            .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("failed to clear orphaned pending turn start", {
-                  threadId: thread.id,
-                  cause: Cause.pretty(cause),
-                }),
-              ),
+          projectionTurnRepository.deletePendingTurnStartByThreadId({ threadId: thread.id }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("failed to clear orphaned pending turn start", {
+                threadId: thread.id,
+                cause: Cause.pretty(cause),
+              }),
             ),
+          ),
         { concurrency: 1 },
       );
 

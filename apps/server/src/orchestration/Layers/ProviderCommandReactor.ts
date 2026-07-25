@@ -839,10 +839,7 @@ const make = Effect.gen(function* () {
     });
 
     const initialTurnStartClaim = yield* readTurnStartClaim;
-    if (
-      initialTurnStartClaim.supersededBySameMessage ||
-      initialTurnStartClaim.interruptedAfter
-    ) {
+    if (initialTurnStartClaim.supersededBySameMessage || initialTurnStartClaim.interruptedAfter) {
       return;
     }
 
