@@ -12,9 +12,10 @@
  *    It is always `127.0.0.1`; only the *port* is caller-supplied. Without this
  *    the route is an open forward proxy sitting behind the user's Tailscale
  *    identity — anything on the tailnet could reach anything the server can.
- * 2. **Port-bounded.** Only unprivileged ports (>= 1024) are reachable, and the
+ * 2. **Port-bounded.** Only unprivileged ports (>= 1024) are reachable, the
  *    server's own port is excluded so the gateway can never be aimed back at
- *    itself (a request loop that would consume a connection slot per hop).
+ *    itself (a request loop that would consume a connection slot per hop), and
+ *    a set of well-known control-plane ports is refused outright.
  */
 
 /** Lowest port the gateway will forward to. Privileged ports are never dev servers. */
@@ -25,11 +26,80 @@ export const MAX_GATEWAY_PORT = 65_535;
 /** The only host the gateway ever connects to. Deliberately not caller-supplied. */
 export const GATEWAY_TARGET_HOST = "127.0.0.1";
 
+/**
+ * Loopback ports the gateway refuses to forward to even for an authenticated
+ * caller.
+ *
+ * Loopback is where processes put the interfaces they believe nobody can reach:
+ * debuggers that evaluate arbitrary code, container daemons that start
+ * privileged containers, databases and secret stores that skip authentication
+ * *because* they are bound to 127.0.0.1. The gateway makes loopback reachable
+ * from the tailnet, so it inherits responsibility for that assumption.
+ *
+ * Two honest limits on what this buys, both deliberate:
+ *
+ * - **It is a deny-list, so it is incomplete by construction.** A service on a
+ *   port not listed here is still reachable. The real boundary remains the
+ *   session auth on every gateway route; this narrows the blast radius of a
+ *   stolen or misused session rather than replacing that check.
+ * - **An allow-list was considered and rejected.** The obvious source is
+ *   `PortDiscovery`, but it shells to `lsof -iTCP -sTCP:LISTEN`, which
+ *   enumerates *every* listener — a Chrome debug port and a Docker socket are
+ *   discovered exactly as readily as a Vite server. Gating on "was discovered"
+ *   would add ceremony without excluding a single dangerous port, since a port
+ *   nothing is listening on has nothing to reach in the first place.
+ *
+ * The Chrome/Node debugger range is the sharpest of these: `9229` speaks the
+ * inspector protocol, which is remote code execution by design.
+ */
+export const BLOCKED_GATEWAY_PORTS: ReadonlySet<number> = new Set([
+  2049, // NFS
+  2375, // Docker daemon, plaintext — container create is root on the host
+  2376, // Docker daemon, TLS
+  2379, // etcd client
+  2380, // etcd peer
+  3306, // MySQL / MariaDB
+  4646, // Nomad HTTP
+  4647, // Nomad RPC
+  4648, // Nomad Serf
+  5432, // PostgreSQL
+  5433, // PostgreSQL, common alternate
+  5984, // CouchDB
+  6379, // Redis — loopback Redis is conventionally unauthenticated
+  6443, // Kubernetes API server
+  8200, // HashiCorp Vault
+  8500, // Consul HTTP
+  9200, // Elasticsearch / OpenSearch HTTP
+  9300, // Elasticsearch transport
+  10_250, // kubelet
+  11_211, // memcached
+  27_017, // MongoDB
+  27_018, // MongoDB shard
+  27_019, // MongoDB config server
+]);
+
+/**
+ * Inclusive port range used by Chrome DevTools and the Node inspector.
+ *
+ * Ranged rather than enumerated because `--inspect` and `--remote-debugging-port`
+ * are routinely given an offset (`9223`, `9230`) when several processes debug at
+ * once, and every port in the range speaks a protocol that evaluates arbitrary
+ * code in the target process.
+ */
+export const BLOCKED_DEBUGGER_PORT_RANGE = { first: 9222, last: 9239 } as const;
+
+/** Whether a port hosts a service the gateway must never expose. */
+export function isBlockedGatewayPort(port: number): boolean {
+  if (BLOCKED_GATEWAY_PORTS.has(port)) return true;
+  return port >= BLOCKED_DEBUGGER_PORT_RANGE.first && port <= BLOCKED_DEBUGGER_PORT_RANGE.last;
+}
+
 export type GatewayPortRejection =
   | "not-a-number"
   | "out-of-range"
   | "reserved-privileged"
-  | "gateway-self";
+  | "gateway-self"
+  | "blocked-service";
 
 export type GatewayPortResolution =
   | { readonly ok: true; readonly port: number }
@@ -67,6 +137,9 @@ export function resolveGatewayPort(
   if (selfPorts.includes(port)) {
     return { ok: false, reason: "gateway-self" };
   }
+  if (isBlockedGatewayPort(port)) {
+    return { ok: false, reason: "blocked-service" };
+  }
   return { ok: true, port };
 }
 
@@ -81,6 +154,8 @@ export function describeGatewayPortRejection(reason: GatewayPortRejection): stri
       return `Preview ports below ${MIN_GATEWAY_PORT} are not reachable through the gateway.`;
     case "gateway-self":
       return "The gateway cannot forward to its own port.";
+    case "blocked-service":
+      return "That port is reserved for a system service and is not reachable through the gateway.";
   }
 }
 

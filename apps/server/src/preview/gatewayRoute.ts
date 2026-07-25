@@ -31,15 +31,19 @@
  *    main origin will carry the session cookie. CORS keeps responses unreadable,
  *    but state-changing same-site requests are not blocked by `sameSite: "lax"`.
  *    Fully closing this needs a separate hostname for previews.
- * 2. Following from (1): the main control-plane WebSocket authenticates that
- *    cookie but does not validate `Origin` (`../ws.ts`), so preview content can
- *    open it with the victim's scopes. Server-side origin/host enforcement is
- *    tracked separately — it changes auth behaviour for every existing client,
- *    not just previews.
+ * 2. Following from (1): preview content could open the main control-plane
+ *    WebSocket with the victim's ambient session. **Closed** — `../ws.ts` now
+ *    rejects the `/ws` upgrade unless `Origin` matches the request `Host`, the
+ *    dev server origin, or a desktop renderer scheme
+ *    ({@link ../auth/websocketOrigin.ts}). Residual: clients that send no
+ *    `Origin` at all (desktop, mobile) are still allowed through, since only
+ *    browsers set that header and requiring it would lock those clients out.
  * 3. Any unprivileged port is reachable, not just discovered dev servers, so an
- *    authenticated caller can reach other loopback services (a debug port, a
- *    container socket). Narrowing this needs a discovery source the gateway does
- *    not have yet.
+ *    authenticated caller can reach other loopback services. **Narrowed, not
+ *    closed** — well-known control-plane ports (container daemons, databases,
+ *    secret stores) and the debugger range are refused outright by
+ *    {@link ./gatewayTarget.ts}. That deny-list is incomplete by construction;
+ *    the reasoning for not using an allow-list is recorded there.
  */
 
 import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";

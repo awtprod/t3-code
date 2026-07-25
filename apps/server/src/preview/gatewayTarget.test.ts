@@ -75,12 +75,52 @@ describe("resolveGatewayPort", () => {
     assert.deepStrictEqual(resolveGatewayPort("5173", [13_773, 8445]), { ok: true, port: 5173 });
   });
 
+  // Loopback is where processes put interfaces they assume nothing can reach.
+  // The gateway makes loopback reachable from the tailnet, so an authenticated
+  // caller must not be able to aim it at a debugger or a container daemon.
+  it("refuses well-known control-plane service ports", () => {
+    for (const port of [2375, 2376, 5432, 6379, 27_017, 8200, 6443, 11_211]) {
+      assert.deepStrictEqual(
+        resolveGatewayPort(port),
+        { ok: false, reason: "blocked-service" },
+        `port ${port} must not be reachable`,
+      );
+    }
+  });
+
+  // The inspector protocol evaluates arbitrary code in the target process, and
+  // the port is routinely offset when several processes debug at once — so the
+  // whole conventional range is refused, not just the two default ports.
+  it("refuses the whole debugger port range", () => {
+    for (const port of [9222, 9229, 9230, 9239]) {
+      assert.deepStrictEqual(
+        resolveGatewayPort(port),
+        { ok: false, reason: "blocked-service" },
+        `debugger port ${port} must not be reachable`,
+      );
+    }
+    // The range is bounded: ordinary dev servers sit on either side of it.
+    assert.deepStrictEqual(resolveGatewayPort(9221), { ok: true, port: 9221 });
+    assert.deepStrictEqual(resolveGatewayPort(9240), { ok: true, port: 9240 });
+  });
+
+  it("still accepts the ports dev servers actually use", () => {
+    for (const port of [3000, 4200, 5173, 5174, 8080, 8081, 4321]) {
+      assert.deepStrictEqual(
+        resolveGatewayPort(port),
+        { ok: true, port },
+        `port ${port} must stay reachable`,
+      );
+    }
+  });
+
   it("explains every rejection", () => {
     for (const reason of [
       "not-a-number",
       "out-of-range",
       "reserved-privileged",
       "gateway-self",
+      "blocked-service",
     ] as const) {
       assert.ok(describeGatewayPortRejection(reason).length > 0);
     }

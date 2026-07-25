@@ -118,6 +118,15 @@ describe("verifyPreviewPortCookie", () => {
       ok: false,
       reason: "unusable-port",
     });
+    // Cookies live 12 hours, so one signed before a port joined the blocked set
+    // must be re-checked on use rather than trusted for the rest of its life.
+    for (const blockedPort of [2375, 6379, 9229]) {
+      assert.deepStrictEqual(
+        verifyPreviewPortCookie({ value: mint(blockedPort), secret, nowMillis: now }),
+        { ok: false, reason: "unusable-port" },
+        `a signed cookie must not reach port ${blockedPort}`,
+      );
+    }
     assert.deepStrictEqual(
       verifyPreviewPortCookie({
         value: mint(13_773),

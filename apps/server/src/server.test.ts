@@ -881,6 +881,36 @@ const wsRpcProtocolLayer = (wsUrl: string) => {
   );
 };
 
+/**
+ * Open a raw WebSocket to `wsUrl` with an explicit `Origin`, and report whether
+ * the server completed the upgrade.
+ *
+ * The RPC client helpers cannot express this: they build the socket internally
+ * and set no `Origin`, which is exactly the case the origin check lets through.
+ * A browser is the only client that sends the header, so proving a foreign
+ * origin is refused means sending it the way a browser would.
+ */
+const attemptWsUpgradeWithOrigin = (
+  wsUrl: string,
+  origin: string,
+): Effect.Effect<"opened" | "rejected"> =>
+  Effect.callback<"opened" | "rejected">((resume) => {
+    const { cookie, url } = parseSessionCookieFromWsUrl(wsUrl);
+    const socket = new NodeSocket.NodeWS.WebSocket(url, undefined, {
+      headers: { origin, ...(cookie ? { cookie } : {}) },
+    });
+    socket.on("open", () => {
+      socket.close();
+      resume(Effect.succeed("opened"));
+    });
+    socket.on("error", () => {
+      resume(Effect.succeed("rejected"));
+    });
+    return Effect.sync(() => {
+      socket.terminate();
+    });
+  });
+
 const makeWsRpcClient = RpcClient.make(WsRpcGroup);
 type WsRpcClient =
   typeof makeWsRpcClient extends Effect.Effect<infer Client, any, any> ? Client : never;
@@ -4226,6 +4256,55 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         failureMessage.includes("Unauthorized") ||
           failureMessage.includes("An error occurred during Open"),
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // The gateway serves previews on a different port of the same host, and
+  // cookies are scoped by host rather than by port — so a preview page's
+  // JavaScript can open /ws and the session cookie rides along ambiently.
+  // Every assertion below carries a *valid* session cookie, so auth is not what
+  // rejects the connection; the origin is.
+  it.effect("refuses a websocket upgrade from a foreign origin with a valid session", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const server = yield* HttpServer.HttpServer;
+      const address = server.address as HttpServer.TcpAddress;
+      const wsUrl = yield* getWsServerUrl("/ws");
+
+      // A preview served through the gateway: same host, different port.
+      const previewOrigin = `http://127.0.0.1:${address.port + 1}`;
+      assert.equal(yield* attemptWsUpgradeWithOrigin(wsUrl, previewOrigin), "rejected");
+
+      // An ordinary hostile page.
+      assert.equal(
+        yield* attemptWsUpgradeWithOrigin(wsUrl, "https://evil.example.com"),
+        "rejected",
+      );
+
+      // Control: the same credential and the same code path succeed when the
+      // origin matches the authority the request was addressed to. Without this
+      // the assertions above would also pass if the upgrade were simply broken.
+      assert.equal(
+        yield* attemptWsUpgradeWithOrigin(wsUrl, `http://127.0.0.1:${address.port}`),
+        "opened",
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // Desktop and mobile connect through Socket.layerWebSocket, which sends no
+  // Origin at all. Enforcement must not lock them out — and every other
+  // websocket test in this file relies on that, since none of them send one.
+  it.effect("allows a websocket upgrade from a client that sends no origin", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({})),
+      );
+
+      assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
