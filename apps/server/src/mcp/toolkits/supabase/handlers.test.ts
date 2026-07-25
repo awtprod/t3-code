@@ -9,10 +9,23 @@ import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 it.effect("routes a Supabase tool through the credential-bound project scope", () => {
-  const calls: Array<SupabaseMcpConnector.SupabaseRemoteToolName> = [];
+  // The whole input, not just the tool name: the credential-bound scope this
+  // test is named for lives in `projectId`/`cwd`, so recording only the name
+  // would let the toolkit stop forwarding them without failing here.
+  const calls: Array<{
+    readonly projectId: ProjectId | undefined;
+    readonly cwd: string | undefined;
+    readonly tool: SupabaseMcpConnector.SupabaseRemoteToolName;
+    readonly arguments: Readonly<Record<string, unknown>>;
+  }> = [];
   const connector = SupabaseMcpConnector.SupabaseMcpConnector.of({
     callTool: (input) => {
-      calls.push(input.tool);
+      calls.push({
+        projectId: input.projectId,
+        cwd: input.cwd,
+        tool: input.tool,
+        arguments: input.arguments,
+      });
       return Effect.succeed({
         projectRef: "supabase-a",
         readOnly: true,
@@ -62,6 +75,13 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
       projectRef: "supabase-a",
       readOnly: true,
     });
-    expect(calls).toEqual(["list_tables"]);
+    expect(calls).toEqual([
+      {
+        projectId: "project-a",
+        cwd: "/work/project-a-worktree",
+        tool: "list_tables",
+        arguments: { schemas: ["public"] },
+      },
+    ]);
   }).pipe(Effect.provide(testLayer));
 });

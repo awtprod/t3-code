@@ -122,6 +122,11 @@ function normalizePathAndQuery(pathAndQuery: string): string {
  * connection-scoped per RFC 9110 and forwarding them corrupts keep-alive and
  * upgrade handling. `accept-encoding` is dropped on the way up so the upstream
  * responds uncompressed and we never have to re-encode a body we are streaming.
+ *
+ * `authorization` and `dpop` are dropped for the same reason the session cookie
+ * is: they are live credentials for *this* environment, and the dev server on
+ * the far side is arbitrary user code. A bearer token handed to it is reusable
+ * against the control plane.
  */
 export const GATEWAY_STRIPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set([
   "host",
@@ -134,6 +139,8 @@ export const GATEWAY_STRIPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set([
   "transfer-encoding",
   "upgrade",
   "accept-encoding",
+  "authorization",
+  "dpop",
 ]);
 
 /** Response headers that are connection-scoped and must not be relayed downstream. */

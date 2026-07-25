@@ -144,11 +144,26 @@ const firstSearchParam = (
 };
 
 /**
+ * Methods the proxy treats as read-only.
+ *
+ * `GET` covers the HMR WebSocket upgrade too, so a read-only session still gets
+ * a working live-reloading preview.
+ */
+const SAFE_PROXY_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
  * Only same-origin, absolute-path redirects are honoured after a selection, so
  * the select route cannot be used as an open redirect.
+ *
+ * A leading `//` is scheme-relative and escapes the origin. So does `/\`: both
+ * `new URL()` and every browser normalise a backslash in the authority position
+ * to a slash, so `/\evil.example/x` resolves to `https://evil.example/x`. The
+ * check has to look at the second character in *either* form, which is why this
+ * rejects any backslash outright rather than just the leading pair.
  */
 const resolveRedirectTarget = (raw: string | undefined): string => {
   if (raw === undefined || !raw.startsWith("/") || raw.startsWith("//")) return "/";
+  if (raw.includes("\\")) return "/";
   return raw;
 };
 
@@ -245,8 +260,17 @@ export const makePreviewGatewayRoutesLayer = Layer.unwrap(
       "*",
       "/*",
       Effect.gen(function* () {
-        yield* authenticateGatewayRequest(AuthOrchestrationReadScope);
         const request = yield* HttpServerRequest.HttpServerRequest;
+        // The port cookie carries only `{port, exp}`, so possession of it says
+        // nothing about the scopes of the session that earned it. Selection
+        // needs operate; the proxy re-derives the requirement per request so a
+        // read-only session holding the cookie can browse a preview but cannot
+        // drive state changes through it.
+        yield* authenticateGatewayRequest(
+          SAFE_PROXY_METHODS.has(request.method)
+            ? AuthOrchestrationReadScope
+            : AuthOrchestrationOperateScope,
+        );
         const sessions = yield* SessionStore.SessionStore;
 
         const verification = yield* resolveUpstreamPort;
@@ -307,7 +331,16 @@ export const makePreviewGatewayRoutesLayer = Layer.unwrap(
           // Relayed through the cookie channel rather than the header map: the
           // header map is a `Record`, so multiple `Set-Cookie` values collapse
           // to the last one and every other cookie is lost.
-          cookies: response.cookies,
+          //
+          // The gateway's own two cookies are dropped from the relay first. They
+          // share a host with the dev server, so an upstream that sets either
+          // name would overwrite the live session or hijack the port selection —
+          // the write direction of the same host-scoping caveat noted at the top
+          // of this file.
+          cookies: Cookies.remove(
+            Cookies.remove(response.cookies, sessions.cookieName),
+            previewCookieName,
+          ),
         };
 
         return HttpServerResponse.stream(emptyOnAbsentBody(response.stream), responseOptions);

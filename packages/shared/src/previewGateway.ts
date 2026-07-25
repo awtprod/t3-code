@@ -51,8 +51,11 @@ export function buildPreviewGatewaySelectUrl(input: {
 
 function normalizeRedirectTarget(to: string | undefined): string {
   if (to === undefined || to === "") return "/";
-  // `//host/path` is scheme-relative, not a path. Collapsing the leading slashes
-  // keeps the intended path instead of handing the gateway a value it will drop.
-  if (to.startsWith("//")) return `/${to.replace(/^\/+/, "")}`;
-  return to.startsWith("/") ? to : `/${to}`;
+  // Browsers treat a backslash in the authority position as a slash, so `/\host`
+  // is scheme-relative just like `//host`. Fold them together before collapsing
+  // so both forms normalise to the same same-origin path; the gateway rejects
+  // either one outright, and this keeps the intended path instead.
+  const slashed = to.replaceAll("\\", "/");
+  if (slashed.startsWith("//")) return `/${slashed.replace(/^\/+/, "")}`;
+  return slashed.startsWith("/") ? slashed : `/${slashed}`;
 }

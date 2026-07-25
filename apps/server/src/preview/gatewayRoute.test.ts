@@ -32,6 +32,7 @@ import * as ServerConfig from "../config.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 
 import { makePreviewGatewayRoutesLayer } from "./gatewayRoute.ts";
+import { stripCookie } from "./gatewayTarget.ts";
 
 /**
  * A stand-in for the dev server behind the gateway.
@@ -409,6 +410,26 @@ it.layer(NodeServices.layer)("preview gateway", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("ignores a backslash redirect target that browsers read as off-origin", () =>
+    Effect.gen(function* () {
+      const gateway = yield* buildGatewayUnderTest();
+      const sessionCookie = yield* gateway.issueSessionCookie();
+
+      // `/\evil.example.com/` starts with a single slash, so a `//`-only guard
+      // admits it — but `new URL()` and every browser normalise the backslash to
+      // a slash and resolve it to `https://evil.example.com/`.
+      for (const encoded of ["%2F%5Cevil.example.com%2F", "%2F%5C%5Cevil.example.com%2F"]) {
+        const response = yield* gatewayRequest(
+          `${PREVIEW_GATEWAY_SELECT_PATH}?${PREVIEW_GATEWAY_PORT_PARAM}=45678&${PREVIEW_GATEWAY_REDIRECT_PARAM}=${encoded}`,
+          { cookie: sessionCookie },
+        );
+
+        assert.equal(response.status, 303);
+        assert.equal(response.headers.location, "/");
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("forwards path, query, and body to the selected upstream", () =>
     Effect.gen(function* () {
       const gateway = yield* buildGatewayUnderTest();
@@ -453,6 +474,90 @@ it.layer(NodeServices.layer)("preview gateway", (it) => {
       assert.notInclude(forwardedCookie, "t3_preview_port");
       // The dev server's own cookies still have to survive the trip.
       assert.include(forwardedCookie, "app_pref=dark");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("strips bearer and DPoP credentials from what the upstream receives", () =>
+    Effect.gen(function* () {
+      const gateway = yield* buildGatewayUnderTest();
+      const sessionCookie = yield* gateway.issueSessionCookie();
+      const upstream = yield* startUpstream(() => ({ body: "ok" }));
+      const cookie = yield* selectPreviewPort({ sessionCookie, port: upstream.port });
+
+      yield* gatewayRequest("/", {
+        cookie,
+        headers: {
+          authorization: "Bearer super-secret-token",
+          dpop: "eyJ0eXAiOiJkcG9wK2p3dCJ9.proof",
+          "x-app-header": "kept",
+        },
+      });
+
+      const record = upstream.received[0];
+      assert.isDefined(record);
+      assert.isUndefined(record.headers.authorization);
+      assert.isUndefined(record.headers.dpop);
+      // Ordinary headers still have to reach the dev server.
+      assert.equal(record.headers["x-app-header"], "kept");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("refuses to relay upstream cookies that would overwrite gateway credentials", () =>
+    Effect.gen(function* () {
+      const gateway = yield* buildGatewayUnderTest();
+      const sessionCookie = yield* gateway.issueSessionCookie();
+      // A hostile dev server trying to delete the session and re-point the port.
+      const upstream = yield* startUpstream(() => ({
+        body: "ok",
+        headers: {
+          "set-cookie": [
+            `${gateway.sessionCookieName}=; Max-Age=0; Path=/`,
+            "t3_preview_port=forged; Path=/",
+            "app_pref=dark; Path=/",
+          ],
+        },
+      }));
+      const cookie = yield* selectPreviewPort({ sessionCookie, port: upstream.port });
+
+      const response = yield* gatewayRequest("/", { cookie });
+
+      const relayed = Cookies.toCookieHeader(response.cookies);
+      assert.notInclude(relayed, gateway.sessionCookieName);
+      assert.notInclude(relayed, "t3_preview_port");
+      // The dev server's own cookies are still its business.
+      assert.include(relayed, "app_pref=dark");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("lets a read-only session browse a preview but not write through it", () =>
+    Effect.gen(function* () {
+      const gateway = yield* buildGatewayUnderTest();
+      const operateCookie = yield* gateway.issueSessionCookie();
+      const upstream = yield* startUpstream(() => ({ body: "ok" }));
+      // Selection needs operate; the port cookie it mints carries only `{port, exp}`,
+      // so it says nothing about the scopes of whoever ends up holding it.
+      const bothCookies = yield* selectPreviewPort({
+        sessionCookie: operateCookie,
+        port: upstream.port,
+      });
+      const portCookie = stripCookie(bothCookies, gateway.sessionCookieName);
+      const readOnlyCookie = yield* gateway.issueSessionCookie([AuthOrchestrationReadScope]);
+      const readOnlyWithPort = `${readOnlyCookie}; ${portCookie}`;
+
+      const read = yield* gatewayRequest("/", { cookie: readOnlyWithPort });
+      assert.equal(read.status, 200);
+
+      const write = yield* gatewayRequest("/api/thing", {
+        method: "POST",
+        cookie: readOnlyWithPort,
+        body: "payload",
+      });
+      assert.equal(write.status, 403);
+      // The write must not have reached the dev server at all.
+      assert.deepEqual(
+        upstream.received.map((record) => record.method),
+        ["GET"],
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -668,22 +773,62 @@ it.layer(NodeServices.layer)("preview gateway", (it) => {
   it.effect("refuses a websocket upgrade from an unauthenticated client", () =>
     Effect.gen(function* () {
       const gateway = yield* buildGatewayUnderTest();
+      const sessionCookie = yield* gateway.issueSessionCookie();
 
-      const outcome = yield* Effect.promise(
-        () =>
-          new Promise<string>((resolve) => {
-            const client = new NodeSocket.NodeWS.WebSocket(
-              `ws://127.0.0.1:${gateway.gatewayPort}/hmr`,
-            );
-            client.on("error", () => resolve("rejected"));
-            client.on("open", () => {
-              client.close();
-              resolve("opened");
-            });
-          }),
-      ).pipe(Effect.timeout(Duration.seconds(10)));
+      // A live upstream and a *valid* port cookie, so authentication is the only
+      // thing left that can refuse this upgrade. Without them the request would
+      // fail at port resolution instead and the test would still pass with the
+      // auth check deleted.
+      const upstreamSockets = yield* Effect.acquireRelease(
+        Effect.promise(async () => {
+          const server = new NodeSocket.NodeWS.WebSocketServer({ port: 0, host: "127.0.0.1" });
+          await new Promise<void>((resolve) => server.once("listening", resolve));
+          server.on("connection", (socket) => socket.send("hello"));
+          return server;
+        }),
+        (server) =>
+          Effect.promise(
+            () =>
+              new Promise<void>((resolve) => {
+                for (const client of server.clients) client.terminate();
+                server.close(() => resolve());
+              }),
+          ),
+      );
+      const upstreamAddress = upstreamSockets.address();
+      if (upstreamAddress === null || typeof upstreamAddress === "string") {
+        return yield* Effect.die(new Error("Expected a TCP address for the upstream socket."));
+      }
+      const bothCookies = yield* selectPreviewPort({
+        sessionCookie,
+        port: upstreamAddress.port,
+      });
+      // Keep the port cookie, drop the session cookie: this is exactly the
+      // credential set an unauthenticated caller could hold after a leak.
+      const portCookieOnly = stripCookie(bothCookies, gateway.sessionCookieName);
+      assert.notEqual(portCookieOnly, "");
+      assert.notInclude(portCookieOnly, gateway.sessionCookieName);
 
-      assert.equal(outcome, "rejected");
+      const connect = (cookie: string) =>
+        Effect.promise(
+          () =>
+            new Promise<string>((resolve) => {
+              const client = new NodeSocket.NodeWS.WebSocket(
+                `ws://127.0.0.1:${gateway.gatewayPort}/hmr`,
+                { headers: { cookie } },
+              );
+              client.on("error", () => resolve("rejected"));
+              client.on("open", () => {
+                client.close();
+                resolve("opened");
+              });
+            }),
+        ).pipe(Effect.timeout(Duration.seconds(10)));
+
+      assert.equal(yield* connect(portCookieOnly), "rejected");
+      // Control: the same upgrade succeeds once the session cookie is restored,
+      // proving the rejection above came from auth and not from a dead upstream.
+      assert.equal(yield* connect(bothCookies), "opened");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 });
