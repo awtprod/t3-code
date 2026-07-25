@@ -15,15 +15,31 @@
  *   cookie as the rest of the server. There is no gateway-specific auth path.
  * - Upstreams are loopback-only and port-bounded ({@link ./gatewayTarget.ts});
  *   this is deliberately not a general forward proxy.
- * - The session cookie is stripped before the request reaches the dev server —
- *   arbitrary user code on a loopback port has no use for the credential.
+ * - Both credentials are stripped before the request reaches the dev server —
+ *   the session cookie, the port cookie, and any `authorization`/`dpop` header.
+ *   Arbitrary user code on a loopback port has no business holding any of them.
+ * - `Set-Cookie` from the upstream is filtered on the way back so a dev server
+ *   cannot delete the session or re-point the port selection.
+ * - Safe methods need `orchestration:read`; anything that can change state needs
+ *   `orchestration:operate`, because the port cookie carries only `{port, exp}`
+ *   and so proves nothing about the scopes of whoever holds it.
  *
- * Known residual risk (documented, not solved here): cookies are scoped by host,
- * not by port, so a page served *through* the gateway is same-site with the main
- * app and its credentialed requests to the main origin will carry the session
- * cookie. CORS keeps responses unreadable, but state-changing same-site requests
- * are not blocked by `sameSite: "lax"`. Fully closing this needs a separate
- * hostname for previews, which is out of scope for this slice.
+ * Known residual risks (documented, not solved here):
+ *
+ * 1. Cookies are scoped by host, not by port, so a page served *through* the
+ *    gateway is same-site with the main app and its credentialed requests to the
+ *    main origin will carry the session cookie. CORS keeps responses unreadable,
+ *    but state-changing same-site requests are not blocked by `sameSite: "lax"`.
+ *    Fully closing this needs a separate hostname for previews.
+ * 2. Following from (1): the main control-plane WebSocket authenticates that
+ *    cookie but does not validate `Origin` (`../ws.ts`), so preview content can
+ *    open it with the victim's scopes. Server-side origin/host enforcement is
+ *    tracked separately — it changes auth behaviour for every existing client,
+ *    not just previews.
+ * 3. Any unprivileged port is reachable, not just discovered dev servers, so an
+ *    authenticated caller can reach other loopback services (a debug port, a
+ *    container socket). Narrowing this needs a discovery source the gateway does
+ *    not have yet.
  */
 
 import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
