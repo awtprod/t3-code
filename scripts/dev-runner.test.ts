@@ -1,14 +1,14 @@
-import * as NodeFS from "node:fs";
-
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -66,15 +66,30 @@ const devServerInput = {
   runArgs: ["--inspect", "secret-token-value"],
 } as const;
 
+/**
+ * Only the scripts this test asserts on. Everything else in the manifest is
+ * ignored on purpose, so an unrelated field added to the server package cannot
+ * fail this test.
+ */
+const ServerPackageJson = Schema.fromJsonString(
+  Schema.Struct({
+    scripts: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  }),
+);
+
+const decodeServerPackageJson = Schema.decodeUnknownEffect(ServerPackageJson);
+
 it.layer(NodeServices.layer)("dev-runner", (it) => {
   describe("getDevRunnerModeArgs", () => {
     it.effect("keeps the server stable by default and makes watch mode explicit", () =>
-      Effect.sync(() => {
-        const serverPackage = JSON.parse(
-          NodeFS.readFileSync(new URL("../apps/server/package.json", import.meta.url), "utf8"),
-        ) as {
-          readonly scripts?: Readonly<Record<string, string>>;
-        };
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const packagePath = yield* path.fromFileUrl(
+          new URL("../apps/server/package.json", import.meta.url),
+        );
+        const raw = yield* fileSystem.readFileString(packagePath);
+        const serverPackage = yield* decodeServerPackageJson(raw);
 
         assert.equal(serverPackage.scripts?.dev, "node src/bin.ts");
         assert.equal(serverPackage.scripts?.["dev:watch"], "node --watch src/bin.ts");
