@@ -1,5 +1,5 @@
 import type { CapabilityName, RepositoryId, SpaceId } from "@command-center/core";
-import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { type ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -15,6 +15,8 @@ import * as McpProviderSession from "./McpProviderSession.ts";
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly projectId?: ProjectId;
+  readonly cwd?: string;
   readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
   readonly spaceId?: SpaceId;
   readonly repositoryId?: RepositoryId;
@@ -136,6 +138,8 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
+        ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+        ...(request.cwd?.trim() ? { cwd: request.cwd.trim() } : {}),
         capabilities: request.capabilities ?? registeredScope?.capabilities ?? new Set(["preview"]),
         ...(spaceId === undefined ? {} : { spaceId }),
         ...(repositoryId === undefined ? {} : { repositoryId }),

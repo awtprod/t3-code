@@ -3,6 +3,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProjectId,
   ServerSettings,
   ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -588,5 +589,63 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         "sk-or-secret",
       );
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect(
+    "stores Supabase access tokens outside settings.json and preserves redacted updates",
+    () =>
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const projectId = ProjectId.make("project-database");
+
+        const next = yield* serverSettings.updateSettings({
+          databaseConnections: {
+            [projectId]: {
+              provider: "supabase",
+              workspaceRoot: "/work/project-database",
+              projectRef: "abcdefghijk",
+              readOnly: true,
+              accessToken: "sbp-database-secret",
+            },
+          },
+        });
+
+        assert.equal(next.databaseConnections[projectId]?.accessToken, "sbp-database-secret");
+        assert.isTrue(next.databaseConnections[projectId]?.accessTokenRedacted);
+        assert.equal(
+          ServerSettingsModule.redactServerSettingsForClient(next).databaseConnections[projectId]
+            ?.accessToken,
+          "",
+        );
+
+        const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+        assert.notInclude(raw, "sbp-database-secret");
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        assert.deepInclude(JSON.parse(raw).databaseConnections[projectId], {
+          projectRef: "abcdefghijk",
+          accessToken: "",
+          accessTokenRedacted: true,
+        });
+
+        const roundTripped = yield* serverSettings.updateSettings({
+          databaseConnections: {
+            [projectId]: {
+              provider: "supabase",
+              workspaceRoot: "/work/project-database",
+              projectRef: "abcdefghijk",
+              readOnly: false,
+              accessToken: "",
+              accessTokenRedacted: true,
+            },
+          },
+        });
+        assert.equal(
+          roundTripped.databaseConnections[projectId]?.accessToken,
+          "sbp-database-secret",
+        );
+        assert.isFalse(roundTripped.databaseConnections[projectId]?.readOnly);
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 });
