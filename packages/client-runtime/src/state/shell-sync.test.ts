@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   ORCHESTRATION_WS_METHODS,
+  ProjectId,
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamItem,
 } from "@t3tools/contracts";
@@ -199,6 +200,94 @@ describe("environment shell synchronization", () => {
 
       expect(yield* SubscriptionRef.get(capturedAfterSequence)).toBe(5);
       expect(yield* SubscriptionRef.get(loaderCalls)).toBe(0);
+    }),
+  );
+
+  it.effect("resubscribes from the latest applied sequence, not the original snapshot", () =>
+    Effect.gen(function* () {
+      const cachedSnapshot: OrchestrationShellSnapshot = {
+        snapshotSequence: 5,
+        projects: [],
+        threads: [],
+        updatedAt: "2026-06-06T00:00:00.000Z",
+      };
+      const events = yield* Queue.unbounded<OrchestrationShellStreamItem>();
+      const capturedAfterSequence = yield* SubscriptionRef.make<number | undefined>(undefined);
+      const subscriptionCount = yield* SubscriptionRef.make(0);
+      const client = {
+        [ORCHESTRATION_WS_METHODS.subscribeShell]: (input: { readonly afterSequence?: number }) =>
+          Stream.unwrap(
+            SubscriptionRef.set(capturedAfterSequence, input.afterSequence).pipe(
+              Effect.andThen(SubscriptionRef.update(subscriptionCount, (count) => count + 1)),
+              Effect.as(Stream.fromQueue(events)),
+            ),
+          ),
+      } as unknown as WsRpcProtocolClient;
+      const supervisorState = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
+      const activeSession = yield* SubscriptionRef.make<Option.Option<RpcSession.RpcSession>>(
+        Option.some(session(client)),
+      );
+      const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+        target: TARGET,
+        state: supervisorState,
+        session: activeSession,
+        prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
+        connect: Effect.void,
+        disconnect: Effect.void,
+        retryNow: Effect.void,
+      } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+      const cache = Persistence.EnvironmentCacheStore.of({
+        loadShell: () => Effect.succeed(Option.some(cachedSnapshot)),
+        saveShell: () => Effect.void,
+        loadThread: () => Effect.succeed(Option.none()),
+        saveThread: () => Effect.void,
+        removeThread: () => Effect.void,
+        loadServerConfig: () => Effect.succeed(Option.none()),
+        saveServerConfig: () => Effect.void,
+        loadVcsRefs: () => Effect.succeed(Option.none()),
+        saveVcsRefs: () => Effect.void,
+        clear: () => Effect.void,
+      });
+      const snapshotLoader = ShellSnapshotLoader.of({
+        load: () => Effect.succeed(Option.none()),
+      });
+      const shellState = yield* makeEnvironmentShellState().pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.provideService(Persistence.EnvironmentCacheStore, cache),
+        Effect.provideService(ShellSnapshotLoader, snapshotLoader),
+      );
+
+      // Advance well past the cached sequence, so the two cursors are
+      // distinguishable.
+      yield* Queue.offer(events, {
+        kind: "project-removed",
+        sequence: 11,
+        projectId: ProjectId.make("project-gone"),
+      });
+      yield* SubscriptionRef.changes(shellState).pipe(
+        Stream.filter((state) =>
+          Option.match(state.snapshot, {
+            onNone: () => false,
+            onSome: (snapshot) => snapshot.snapshotSequence === 11,
+          }),
+        ),
+        Stream.runHead,
+      );
+      expect(yield* SubscriptionRef.get(capturedAfterSequence)).toBe(5);
+
+      // A reconnect re-issues the subscription. It must ask for what it actually
+      // missed; resending the original cursor replays every event since the
+      // cached snapshot on every reconnect, and that replay grows unboundedly.
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* SubscriptionRef.get(subscriptionCount)) >= 2) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+
+      expect(yield* SubscriptionRef.get(subscriptionCount)).toBe(2);
+      expect(yield* SubscriptionRef.get(capturedAfterSequence)).toBe(11);
     }),
   );
 });

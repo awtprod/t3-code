@@ -727,6 +727,21 @@ const makeWsRpcLayer = (
               : {}),
             otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
           },
+          // Only advertised once the gateway is actually listening; a client
+          // that sees this field will route previews through it, so announcing
+          // a port nothing answers would break previews that work today.
+          ...(config.previewGatewayEnabled && config.previewGatewayPort > 0
+            ? {
+                previewGateway: {
+                  loopbackPort: config.previewGatewayPort,
+                  // Tailscale Serve is what makes the gateway reachable from
+                  // another machine; without it there is no public port to name.
+                  ...(config.tailscaleServeEnabled
+                    ? { publicHttpsPort: config.previewGatewayServePort }
+                    : {}),
+                },
+              }
+            : {}),
           settings,
         };
       });

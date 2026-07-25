@@ -36,11 +36,12 @@ import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
-import * as SupabaseMcpConnector from "./database/SupabaseMcpConnector.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
+import * as SupabaseMcpConnector from "./database/SupabaseMcpConnector.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
+import { makePreviewGatewayRoutesLayer } from "./preview/gatewayRoute.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -165,6 +166,60 @@ const HttpServerLive = Layer.unwrap(
     }
   }),
 );
+
+/**
+ * The preview gateway's own listener.
+ *
+ * It cannot share the main server: the gateway is mounted at `/` (dev servers
+ * emit absolute URLs that would 404 under a path prefix), and `/` on the main
+ * server is already claimed by the static/dev catch-all route. Always loopback —
+ * reachability from another machine is Tailscale Serve's job, not the socket's.
+ */
+const PreviewGatewayHttpServerLive = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    if (typeof Bun !== "undefined") {
+      const BunHttpServer = yield* Effect.promise(
+        () => import("@effect/platform-bun/BunHttpServer"),
+      );
+      return BunHttpServer.layer({
+        port: config.previewGatewayPort,
+        hostname: "127.0.0.1",
+        gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
+      });
+    }
+    const [NodeHttpServer, NodeHttp] = yield* Effect.all([
+      Effect.promise(() => import("@effect/platform-node/NodeHttpServer")),
+      Effect.promise(() => import("node:http")),
+    ]);
+    return NodeHttpServer.layer(NodeHttp.createServer, {
+      host: "127.0.0.1",
+      port: config.previewGatewayPort,
+      gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
+    });
+  }),
+);
+
+/**
+ * Serve the preview gateway's routes on their own listener.
+ *
+ * `Layer.fresh` is the load-bearing part. `HttpRouter.serve` builds its router
+ * from the module-level `HttpRouter.layer`, and layers are memoized by identity
+ * within a single build — so without it the gateway registers its routes into
+ * the *main app's* router. Both mount a catch-all at `/`, and startup dies with
+ * `Method 'GET' already declared for route '/*'`. (Observed on a live boot with
+ * `--preview-gateway`; a control boot without the flag started clean.)
+ *
+ * The listener is a parameter so a test can supply an ephemeral one and still
+ * exercise this exact composition rather than a copy of it.
+ */
+export const makePreviewGatewayServedLayer = <A extends HttpServer.HttpServer, E, R>(
+  httpServerLayer: Layer.Layer<A, E, R>,
+) =>
+  HttpRouter.serve(makePreviewGatewayRoutesLayer, { disableLogger: true }).pipe(
+    Layer.fresh,
+    Layer.provide(httpServerLayer),
+  );
 
 const PlatformServicesLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -583,6 +638,50 @@ export const makeServerLayer = Layer.unwrap(
           ),
         )
       : Layer.empty;
+    // The gateway is a second listener, so it needs its own Serve mapping on its
+    // own HTTPS port. It is published from the configured port rather than the
+    // bound address because the gateway server lives in a sibling layer scope.
+    const previewGatewayTailscaleServeLayer =
+      config.tailscaleServeEnabled && config.previewGatewayEnabled && config.previewGatewayPort > 0
+        ? Layer.effectDiscard(
+            Effect.acquireRelease(
+              ensureTailscaleServe({
+                localPort: config.previewGatewayPort,
+                servePort: config.previewGatewayServePort,
+                localHost: "127.0.0.1",
+              }).pipe(
+                Effect.as({ servePort: config.previewGatewayServePort }),
+                Effect.tap(() =>
+                  Effect.logInfo("Tailscale Serve configured for preview gateway", {
+                    localPort: config.previewGatewayPort,
+                    servePort: config.previewGatewayServePort,
+                  }),
+                ),
+                Effect.catch((cause) =>
+                  Effect.logWarning("Failed to configure Tailscale Serve for preview gateway", {
+                    cause,
+                    localPort: config.previewGatewayPort,
+                    servePort: config.previewGatewayServePort,
+                  }).pipe(Effect.as(null)),
+                ),
+              ),
+              (configured) =>
+                configured
+                  ? disableTailscaleServe({ servePort: configured.servePort }).pipe(
+                      Effect.catch((cause) =>
+                        Effect.logWarning("Failed to disable Tailscale Serve for preview gateway", {
+                          cause,
+                          servePort: configured.servePort,
+                        }),
+                      ),
+                    )
+                  : Effect.void,
+            ),
+          )
+        : Layer.empty;
+    const previewGatewayLayer = config.previewGatewayEnabled
+      ? makePreviewGatewayServedLayer(PreviewGatewayHttpServerLive)
+      : Layer.empty;
     const cloudDesiredLinkReconcileLayer = Layer.effectDiscard(
       Effect.gen(function* () {
         if (!hasCloudPublicConfig) return;
@@ -612,6 +711,8 @@ export const makeServerLayer = Layer.unwrap(
       httpListeningLayer,
       runtimeStateLayer,
       tailscaleServeLayer,
+      previewGatewayLayer,
+      previewGatewayTailscaleServeLayer,
       cloudDesiredLinkReconcileLayer,
     );
 
