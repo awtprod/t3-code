@@ -12,7 +12,7 @@
  * `Origin` is the right discriminator because it is one of the headers a browser
  * sets itself and page script cannot override — including on WebSocket upgrades.
  *
- * Three rules, each of which exists because a simpler version breaks something
+ * Four rules, each of which exists because a simpler version breaks something
  * real in this repo:
  *
  * 1. **Enforced only when `Origin` is present.** Non-browser clients — desktop
@@ -66,6 +66,17 @@
  * rule 2 refuses to trust precisely because it is caller-supplied on a directly
  * reachable listener. Trading a real, reachable spoof for a narrower one is a
  * bad deal, so the port ambiguity stays and is pinned by a test.
+ *
+ * `Sec-Fetch-Site` has been proposed as a way to close this without trusting a
+ * forwarded header, since it is browser-set and encodes scheme as well as host
+ * and port. It does not work here: **browsers do not send `Sec-Fetch-*` on a
+ * WebSocket handshake.** Measured against a live Chrome (this repo's DevTools
+ * MCP) opening both a same-origin and a cross-origin `WebSocket` to a raw
+ * `http.Server`: both upgrades arrived carrying `Origin` and exactly three
+ * `sec-` headers — `sec-websocket-version`, `sec-websocket-key`,
+ * `sec-websocket-extensions` — with `sec-fetch-site`, `sec-fetch-mode` and
+ * `sec-fetch-dest` all absent. Requiring `Sec-Fetch-Site: same-origin` would
+ * therefore refuse every real browser client, not just the ambiguous ones.
  */
 
 /** A WebSocket upgrade is refused only when the browser names a foreign origin. */

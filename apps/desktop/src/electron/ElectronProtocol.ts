@@ -32,7 +32,19 @@ export function getDesktopScheme(isDevelopment: boolean): string {
  * registration makes it arrive as `Origin: t3code://app`.
  *
  * Must be called at module scope — Electron requires it before the `ready`
- * event, and it throws if called afterwards.
+ * event, and it throws if called afterwards. Measured on Electron 41.5.0:
+ * `ready` fires ~87 ms in, and a caller that awaits any real I/O first is
+ * already too late, so this cannot be moved inside a layer.
+ *
+ * **This is deliberately not the only registration of these schemes.**
+ * `@clerk/electron`'s `createClerkBridge` registers whichever scheme is active
+ * (see `../app/DesktopClerk.ts`), and Electron documents the API as one-shot.
+ * Measured on the pinned version, a second call before `ready` neither throws
+ * nor replaces: the privileges *merge*, and `standard: true` wins regardless of
+ * which call sets it. Clerk's registration is nonetheless not sufficient on its
+ * own — it only covers the active scheme, and it runs during layer construction,
+ * which is the window `ready` can beat. The privileges below are kept identical
+ * to Clerk's so the merged result does not depend on call order.
  */
 export function registerDesktopSchemesAsPrivileged(): void {
   Electron.protocol.registerSchemesAsPrivileged(
@@ -40,10 +52,12 @@ export function registerDesktopSchemesAsPrivileged(): void {
       scheme,
       privileges: {
         // `standard` is the one that grants a real origin; the rest keep the
-        // renderer's capabilities equivalent to the https page it replaces.
+        // renderer's capabilities equivalent to the https page it replaces, and
+        // match `@clerk/electron`'s own registration exactly.
         standard: true,
         secure: true,
         supportFetchAPI: true,
+        corsEnabled: true,
         allowServiceWorkers: true,
         stream: true,
       },
