@@ -1115,6 +1115,22 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           // oldest row — that is exactly the misattribution being fixed.
           const adoptedPendingTurnStart =
             requestSequence === undefined ? pendingTurnStarts[0] : matchedPendingTurnStart;
+          // Adopting nothing is a real outcome with real consequences — the
+          // turn loses its pendingMessageId, its source plan and its
+          // born-interrupted flag — so it must not be silent. On replay the
+          // placeholder is legitimately gone, but rows still WAITING while a
+          // correlated start declines to adopt any of them is the signature
+          // of a correlation bug, and without this line the only evidence is
+          // a turn that quietly forgot which message asked for it.
+          if (requestSequence !== undefined && matchedPendingTurnStart === undefined) {
+            yield* Effect.logWarning("projection.turn-start.pending-start-not-correlated", {
+              threadId: event.payload.threadId,
+              turnId,
+              requestSequence,
+              pendingTurnStartCount: pendingTurnStarts.length,
+              pendingRequestSequences: pendingTurnStarts.map((row) => row.requestSequence),
+            });
+          }
           const pendingTurnStart: Option.Option<ProjectionPendingTurnStart> =
             adoptedPendingTurnStart === undefined
               ? Option.none()

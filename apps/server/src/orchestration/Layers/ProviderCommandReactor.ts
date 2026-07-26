@@ -4,6 +4,7 @@ import {
   EventId,
   type ModelSelection,
   type OrchestrationEvent,
+  type OrchestrationProposedPlanId,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
@@ -37,7 +38,10 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
-import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
+import {
+  ProviderTurnSendClaimRepository,
+  type ProviderTurnSendClaimOutcome,
+} from "../../persistence/Services/ProviderTurnSendClaims.ts";
 import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
 import {
   ProviderCommandReactor,
@@ -247,10 +251,68 @@ const make = Effect.gen(function* () {
 
   const threadModelSelections = new Map<string, ModelSelection>();
 
+  /**
+   * Raise a thread's cancel barrier, retrying, and report whether it holds.
+   *
+   * Both stop paths — turn-interrupt and session-stop — depend on this write
+   * for the half of the stop that reaches work not yet sent. A queued
+   * turn-start tests the barrier when it acquires its claim, so a barrier that
+   * was never written is a turn-start that will pass its guard, call
+   * `sendTurn`, and (on the session-stop path) recover the binding and
+   * resurrect the very session the user just shut down.
+   *
+   * Retried because the failure mode is a contended SQLite write, and repeating
+   * the raise is free: it is monotonic, so a second write at the same sequence
+   * changes nothing.
+   *
+   * Returns whether the barrier is up rather than failing, because the two
+   * callers must act on that answer rather than abort — a stop that cannot be
+   * recorded still has a live provider session to stop, and abandoning the rest
+   * of the handler would leave the session running as well as unbarriered.
+   */
+  const raiseCancelBarrier = (input: {
+    readonly threadId: ThreadId;
+    readonly canceledThroughSequence: number;
+    readonly updatedAt: string;
+    readonly failureKind: "provider.turn.interrupt.failed" | "provider.session.stop.failed";
+    readonly failureSummary: string;
+    readonly failureDetailPrefix: string;
+    readonly turnId: TurnId | null;
+  }) =>
+    providerTurnSendClaimRepository
+      .cancel({
+        threadId: input.threadId,
+        canceledThroughSequence: input.canceledThroughSequence,
+        updatedAt: input.updatedAt,
+      })
+      .pipe(
+        Effect.retry({ times: 2, schedule: Schedule.exponential(100) }),
+        Effect.as(true),
+        Effect.catchCause((cause) =>
+          appendProviderFailureActivity({
+            threadId: input.threadId,
+            kind: input.failureKind,
+            summary: input.failureSummary,
+            detail: `${input.failureDetailPrefix}: ${Cause.pretty(cause)}`,
+            turnId: input.turnId,
+            createdAt: input.updatedAt,
+          }).pipe(
+            Effect.catchCause((appendCause) =>
+              Effect.logError("provider command reactor failed to report an unraised barrier", {
+                threadId: input.threadId,
+                cause: Cause.pretty(appendCause),
+              }),
+            ),
+            Effect.as(false),
+          ),
+        ),
+      );
+
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
     readonly kind:
       | "provider.turn.start.failed"
+      | "provider.turn.fold.failed"
       | "provider.turn.interrupt.failed"
       | "provider.approval.respond.failed"
       | "provider.user-input.respond.failed"
@@ -841,6 +903,49 @@ const make = Effect.gen(function* () {
    * worse than before; adapters that honor it are now precise.
    */
   /**
+   * Mark a plan implemented when the send that carried it was folded.
+   *
+   * Ingestion marks plans off `turn.started`, which a steer never emits. So a
+   * plan-implementation message delivered as a steer would otherwise sit in the
+   * user's queue forever — implemented in fact, unimplemented on screen, with no
+   * later event able to correct it because the placeholder holding the plan
+   * reference is deleted by the fold itself.
+   *
+   * Idempotent by the same `implementedAt !== null` check ingestion uses, so a
+   * plan already marked by a racing `turn.started` is left alone rather than
+   * restamped with a second implementation thread.
+   */
+  const markFoldedSourceProposedPlanImplemented = (input: {
+    readonly sourceThreadId: ThreadId;
+    readonly sourcePlanId: OrchestrationProposedPlanId;
+    readonly implementationThreadId: ThreadId;
+    readonly implementedAt: string;
+  }) =>
+    Effect.gen(function* () {
+      const sourceThread = yield* resolveThread(input.sourceThreadId);
+      const sourcePlan = sourceThread?.proposedPlans.find(
+        (entry) => entry.id === input.sourcePlanId,
+      );
+      if (!sourceThread || !sourcePlan || sourcePlan.implementedAt !== null) {
+        return;
+      }
+
+      const commandId = yield* serverCommandId("source-proposed-plan-implemented");
+      yield* orchestrationEngine.dispatch({
+        type: "thread.proposed-plan.upsert",
+        commandId,
+        threadId: sourceThread.id,
+        proposedPlan: {
+          ...sourcePlan,
+          implementedAt: input.implementedAt,
+          implementationThreadId: input.implementationThreadId,
+          updatedAt: input.implementedAt,
+        },
+        createdAt: input.implementedAt,
+      });
+    });
+
+  /**
    * Record that a send was folded into an already-running turn.
    *
    * A steer produces no `turn.started`, and `turn.started` is the only thing
@@ -851,10 +956,12 @@ const make = Effect.gen(function* () {
    * component that knows a fold happened, so it reports it and this dispatch
    * turns that report into the durable fact the projector consumes.
    *
-   * Failure is logged, not propagated. The prompt is with the provider either
-   * way, so failing the turn-start here would report a start that did not fail;
-   * but it is logged at error level because a lost fold silently restores the
-   * duplicate-prompt defect rather than degrading anything visible.
+   * Retried before giving up, and reported to the user if it never lands. The
+   * prompt is with the provider either way, so failing the turn-start here would
+   * report a start that did not fail — but a silently lost fold restores the
+   * duplicate-prompt defect this exists to prevent, which is the failure the
+   * user actually feels. So it gets the same treatment as an undeliverable
+   * stop: retry the transient case, then say so on the thread.
    */
   const foldSteeredTurnStart = (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
@@ -871,6 +978,38 @@ const make = Effect.gen(function* () {
           createdAt: event.payload.createdAt,
         }),
       ),
+      // A dispatch failure here is far likelier to be transient (a busy write,
+      // a contended connection) than deterministic, and a repeated fold is
+      // harmless: the projector's delete is keyed by request sequence, so the
+      // second one finds nothing to remove.
+      Effect.retry({ times: 2, schedule: Schedule.exponential(100) }),
+      Effect.flatMap(() => {
+        const sourceProposedPlan = event.payload.sourceProposedPlan;
+        if (sourceProposedPlan === undefined) {
+          return Effect.void;
+        }
+        return markFoldedSourceProposedPlanImplemented({
+          sourceThreadId: sourceProposedPlan.threadId,
+          sourcePlanId: sourceProposedPlan.planId,
+          implementationThreadId: event.payload.threadId,
+          implementedAt: event.payload.createdAt,
+        }).pipe(
+          // The fold itself is durable by this point, which is the part that
+          // prevents a duplicate prompt. A plan left unmarked is wrong on
+          // screen but costs no work, so it must not undo the retry above.
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              "provider command reactor failed to mark a folded source proposed plan",
+              {
+                threadId: event.payload.threadId,
+                sourceThreadId: sourceProposedPlan.threadId,
+                planId: sourceProposedPlan.planId,
+                cause: Cause.pretty(cause),
+              },
+            ),
+          ),
+        );
+      }),
       Effect.catchCause((cause) =>
         Effect.logError("provider command reactor failed to fold a steered turn start", {
           threadId: event.payload.threadId,
@@ -878,7 +1017,29 @@ const make = Effect.gen(function* () {
           requestSequence: event.sequence,
           turnId: turn.turnId,
           cause: Cause.pretty(cause),
-        }),
+        }).pipe(
+          Effect.flatMap(() =>
+            appendProviderFailureActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.turn.fold.failed",
+              summary: "Provider turn bookkeeping failed",
+              detail: `The message was delivered to the running turn but could not be recorded as such, so it may be sent a second time on recovery: ${formatFailureDetail(cause)}`,
+              turnId: turn.turnId,
+              createdAt: event.payload.createdAt,
+            }),
+          ),
+          // Last line of defence, as with the fence: if reporting also fails
+          // there is nothing further to try, and taking the turn-start fiber
+          // down over a log entry helps no one.
+          Effect.catchCause((appendCause) =>
+            Effect.logError("provider command reactor failed to report a lost fold", {
+              threadId: event.payload.threadId,
+              requestSequence: event.sequence,
+              turnId: turn.turnId,
+              cause: Cause.pretty(appendCause),
+            }),
+          ),
+        ),
       ),
     );
 
@@ -894,6 +1055,58 @@ const make = Effect.gen(function* () {
         claimedAt: event.payload.createdAt,
       })
       .pipe(
+        // Retried before anything downstream sees a failure. An unreadable
+        // claim is not "no stop" — it is "we do not know", and the two are
+        // opposite instructions: the first says leave the turn running, the
+        // second says a user may be waiting for it to die. Treating the read as
+        // authoritative when it never completed is what made this path fail
+        // open silently. A repeat read is free (the acquire is idempotent for
+        // the same request: a replay re-reads its own winning row), so the
+        // transient case — a contended SQLite write — is absorbed here rather
+        // than escalated into a missed stop.
+        Effect.retry({ times: 2, schedule: Schedule.exponential(100) }),
+        // Second opinion when the claim is still unreadable. The claim table
+        // and the event log are separate stores answering overlapping
+        // questions, so an outage of one does not have to end the enquiry —
+        // and "we do not know" must not silently resolve to "no stop", which
+        // is the one answer that costs the user a turn they asked to kill.
+        //
+        // Deliberately only ever ESCALATES to `canceled`. This read cannot see
+        // a supersession by the same message the way the claim can, so an
+        // absent interrupt here is not evidence the send is still the live one
+        // — it is just an absent interrupt. Mapping that to `acquired` would
+        // manufacture certainty the fallback does not have; mapping it to
+        // `superseded` costs nothing, since both non-canceled tags take the
+        // same do-nothing branch below.
+        //
+        // If this read fails too, the original claim failure is what propagates
+        // — it is the one the outer handler reports, and the fallback failing
+        // is not new information about the user's turn.
+        Effect.catchCause((claimCause) =>
+          Effect.logWarning(
+            "provider command reactor falling back to the event log after an unreadable send claim",
+            {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              requestSequence: event.sequence,
+              turnId: turn.turnId,
+              cause: Cause.pretty(claimCause),
+            },
+          ).pipe(
+            Effect.flatMap(() =>
+              orchestrationEventStore.getThreadTurnStartClaim({
+                threadId: event.payload.threadId,
+                messageId: event.payload.messageId,
+                afterSequence: event.sequence,
+              }),
+            ),
+            Effect.map(
+              (claim): ProviderTurnSendClaimOutcome =>
+                claim.interruptedAfter ? { _tag: "canceled" } : { _tag: "superseded" },
+            ),
+            Effect.catchCause(() => Effect.failCause(claimCause)),
+          ),
+        ),
         Effect.flatMap((outcome) => {
           if (outcome._tag !== "canceled") {
             return Effect.logDebug("provider-command-reactor.turn-start.fence-clear", {
@@ -919,24 +1132,77 @@ const make = Effect.gen(function* () {
                 turnId: turn.turnId,
               }),
             ),
-            // One retry, then tell the user. The interrupt is a message to
-            // another process and a transient failure is the likeliest kind, so
+            // One retry, then escalate. The interrupt is a message to another
+            // process and a transient failure is the likeliest kind, so
             // retrying is worth more than the cost of a duplicate interrupt —
             // which is nothing, the call being idempotent for a turn already
             // stopped.
             Effect.retry({ times: 1, schedule: Schedule.exponential(100) }),
+            // An interrupt that will not land leaves the user's stop unenforced
+            // against a turn running RIGHT NOW, so it escalates to the bigger
+            // hammer instead of going straight to an apology. Stopping the
+            // session is strictly stronger than interrupting one turn inside
+            // it, and the barrier that put us on this branch already covers
+            // everything queued behind — so there is nothing left in this
+            // session the user still wants.
+            //
+            // Escalation goes through the ordinary `thread.session.stop`
+            // intent rather than calling `providerService.stopSession`
+            // directly, because that handler does the OTHER half too: it raises
+            // the barrier and writes the `stopped` session projection. A direct
+            // provider call would kill the runtime while leaving the UI showing
+            // a live session — trading a turn that ignores stop for a thread
+            // that lies about it.
+            //
+            // Only reached when the retried interrupt failed outright, so it
+            // cannot cost a session anyone was still using: the alternative on
+            // this branch is a turn that ignores stop entirely.
+            Effect.catchCause((interruptCause) =>
+              Effect.logWarning(
+                "provider command reactor escalating an undeliverable interrupt to a session stop",
+                {
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  turnId: turn.turnId,
+                  cause: Cause.pretty(interruptCause),
+                },
+              ).pipe(
+                Effect.flatMap(() => serverCommandId("fence-escalated-session-stop")),
+                Effect.flatMap((commandId) =>
+                  orchestrationEngine.dispatch({
+                    type: "thread.session.stop",
+                    commandId,
+                    threadId: event.payload.threadId,
+                    createdAt: event.payload.createdAt,
+                  }),
+                ),
+                // Re-raised either way, escalated or not. The user asked to stop
+                // one turn and either got no stop at all or lost the whole
+                // session instead — both are outcomes they have to be told
+                // about, and the outer handler below is what tells them. The
+                // original interrupt cause is the one carried, because it is
+                // what actually happened to their turn; a failed escalation is
+                // already logged above and would only bury it.
+                Effect.catchCause(() => Effect.void),
+                Effect.flatMap(() => Effect.failCause(interruptCause)),
+              ),
+            ),
           );
         }),
-        // The turn is running and the stop could not be delivered. This must not
-        // fail the turn-start — the prompt is with the provider either way, and
-        // reporting a start failure for a turn that started would be a worse lie
-        // than the missed stop. But it must not be silent either: the user
-        // pressed stop and the turn kept going, so the same interrupt-failure
-        // activity every other unfulfillable stop appends is appended here, and
-        // the UI shows a turn that did not obey rather than one that quietly did
-        // not. Failing open WITHOUT telling anyone was the defect; failing open
-        // loudly is the only available behavior, since nothing here can unsend
-        // an RPC that already landed.
+        // Last resort, reached only after the claim read was retried, the
+        // interrupt was retried, AND the escalation to a session stop also
+        // failed. Every mechanism this process has for stopping the turn is
+        // exhausted by this point, so what remains is genuinely a report and
+        // not a choice to fail open: nothing here can unsend an RPC that
+        // already landed, and no further call is available to make it stop.
+        //
+        // It must not fail the turn-start — the prompt is with the provider
+        // either way, and reporting a start failure for a turn that started
+        // would be a worse lie than the missed stop. But it must not be silent
+        // either: the user pressed stop and the turn kept going, so the same
+        // interrupt-failure activity every other unfulfillable stop appends is
+        // appended here, and the UI shows a turn that did not obey rather than
+        // one that quietly did not.
         Effect.catchCause((cause) =>
           Effect.logWarning("provider command reactor failed to fence send against late stop", {
             threadId: event.payload.threadId,
@@ -1151,62 +1417,62 @@ const make = Effect.gen(function* () {
     // (`recoverTurnStartFailure` below), not as permission to send: if we cannot
     // tell whether the user stopped this turn, sending it anyway is the one
     // outcome that cannot be taken back.
-    yield* readTurnStartClaim
-      .pipe(
-        Effect.flatMap((finalTurnStartClaim) =>
-          finalTurnStartClaim.supersededBySameMessage || finalTurnStartClaim.interruptedAfter
-            ? Effect.logDebug("provider-command-reactor.turn-start.superseded-before-send", {
+    yield* readTurnStartClaim.pipe(
+      Effect.flatMap((finalTurnStartClaim) =>
+        finalTurnStartClaim.supersededBySameMessage || finalTurnStartClaim.interruptedAfter
+          ? Effect.logDebug("provider-command-reactor.turn-start.superseded-before-send", {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              supersededBySameMessage: finalTurnStartClaim.supersededBySameMessage,
+              interruptedAfter: finalTurnStartClaim.interruptedAfter,
+            })
+          : // The acquire tests "already claimed by another request for this
+            // message" and "canceled by a stop at or above my sequence" in one
+            // statement, so nothing can interleave between the decision and the
+            // claim, and only the holder sends. It does NOT make the send
+            // itself atomic — no database write spans an RPC to another
+            // process — so a stop landing during `sendTurn` is caught after the
+            // fact by the fence below rather than prevented here.
+            providerTurnSendClaimRepository
+              .acquire({
                 threadId: event.payload.threadId,
                 messageId: event.payload.messageId,
-                supersededBySameMessage: finalTurnStartClaim.supersededBySameMessage,
-                interruptedAfter: finalTurnStartClaim.interruptedAfter,
+                requestSequence: event.sequence,
+                claimedAt: event.payload.createdAt,
               })
-            : // The acquire tests "already claimed by another request for this
-              // message" and "canceled by a stop at or above my sequence" in one
-              // statement, so nothing can interleave between the decision and the
-              // claim, and only the holder sends. It does NOT make the send
-              // itself atomic — no database write spans an RPC to another
-              // process — so a stop landing during `sendTurn` is caught after the
-              // fact by the fence below rather than prevented here.
-              providerTurnSendClaimRepository
-                .acquire({
-                  threadId: event.payload.threadId,
-                  messageId: event.payload.messageId,
-                  requestSequence: event.sequence,
-                  claimedAt: event.payload.createdAt,
-                })
-                .pipe(
-                  Effect.flatMap((outcome) =>
-                    outcome._tag === "acquired"
-                      ? providerService.sendTurn(sendTurnRequest.value).pipe(
-                          Effect.flatMap((turn) =>
-                            // Fold BEFORE fencing. The fold records a fact that
-                            // is already true — the provider has the message —
-                            // and the fence can interrupt, which does not make
-                            // it any less true. Ordering it after would leave
-                            // the placeholder stranded on exactly the paths
-                            // (stop mid-send, interrupt failure) where a wrong
-                            // "never sent" reading is most damaging.
-                            (turn.steered === true
-                              ? foldSteeredTurnStart(event, turn)
-                              : Effect.void
-                            ).pipe(Effect.flatMap(() => fenceSendAgainstLateStop(event, turn))),
-                          ),
-                        )
-                      : Effect.logDebug(
-                          "provider-command-reactor.turn-start.send-claim-not-acquired",
-                          {
-                            threadId: event.payload.threadId,
-                            messageId: event.payload.messageId,
-                            requestSequence: event.sequence,
-                            reason: outcome._tag,
-                          },
+              .pipe(
+                Effect.flatMap((outcome) =>
+                  outcome._tag === "acquired"
+                    ? providerService.sendTurn(sendTurnRequest.value).pipe(
+                        Effect.flatMap((turn) =>
+                          // Fold BEFORE fencing. The fold records a fact that
+                          // is already true — the provider has the message —
+                          // and the fence can interrupt, which does not make
+                          // it any less true. Ordering it after would leave
+                          // the placeholder stranded on exactly the paths
+                          // (stop mid-send, interrupt failure) where a wrong
+                          // "never sent" reading is most damaging.
+                          (turn.steered === true
+                            ? foldSteeredTurnStart(event, turn)
+                            : Effect.void
+                          ).pipe(Effect.flatMap(() => fenceSendAgainstLateStop(event, turn))),
                         ),
-                  ),
+                      )
+                    : Effect.logDebug(
+                        "provider-command-reactor.turn-start.send-claim-not-acquired",
+                        {
+                          threadId: event.payload.threadId,
+                          messageId: event.payload.messageId,
+                          requestSequence: event.sequence,
+                          reason: outcome._tag,
+                        },
+                      ),
                 ),
-        ),
-      )
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+              ),
+      ),
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
@@ -1238,24 +1504,23 @@ const make = Effect.gen(function* () {
     // A failed write must not be swallowed: if we cannot record the stop, the
     // turn-start still holds its claim, so this is reported as an interrupt
     // failure rather than logged and forgotten.
-    yield* providerTurnSendClaimRepository
-      .cancel({
-        threadId: event.payload.threadId,
-        canceledThroughSequence: event.sequence,
-        updatedAt: event.payload.createdAt,
-      })
-      .pipe(
-        Effect.catchCause((cause) =>
-          appendProviderFailureActivity({
-            threadId: event.payload.threadId,
-            kind: "provider.turn.interrupt.failed",
-            summary: "Provider turn interrupt failed",
-            detail: `Failed to record the stop before interrupting: ${Cause.pretty(cause)}`,
-            turnId: event.payload.turnId ?? null,
-            createdAt: event.payload.createdAt,
-          }),
-        ),
-      );
+    //
+    // Unlike the session-stop path, a failure here does NOT abandon the rest of
+    // the handler. The two halves of an interrupt are independent: the barrier
+    // stops work not yet sent, and `interruptTurn` below stops the turn already
+    // running. Losing the first is no reason to skip the second — that would
+    // turn one unstopped queued prompt into a running turn left running too.
+    // Nothing here can resurrect a session, which is what makes the asymmetry
+    // with session-stop correct rather than inconsistent.
+    yield* raiseCancelBarrier({
+      threadId: event.payload.threadId,
+      canceledThroughSequence: event.sequence,
+      updatedAt: event.payload.createdAt,
+      failureKind: "provider.turn.interrupt.failed",
+      failureSummary: "Provider turn interrupt failed",
+      failureDetailPrefix: "Failed to record the stop before interrupting",
+      turnId: event.payload.turnId ?? null,
+    });
 
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
@@ -1382,27 +1647,38 @@ const make = Effect.gen(function* () {
     // session is already gone is exactly the case where an undriven turn-start
     // is still queued, so returning first would skip the barrier for the only
     // requests it can still stop.
-    yield* providerTurnSendClaimRepository
-      .cancel({
-        threadId: event.payload.threadId,
-        canceledThroughSequence: event.sequence,
-        updatedAt: event.payload.createdAt,
-      })
-      .pipe(
-        Effect.catchCause((cause) =>
-          appendProviderFailureActivity({
-            threadId: event.payload.threadId,
-            kind: "provider.session.stop.failed",
-            summary: "Provider session stop failed",
-            detail: `Failed to record the stop before stopping the session: ${Cause.pretty(cause)}`,
-            turnId: null,
-            createdAt: event.payload.createdAt,
-          }),
-        ),
-      );
+    const barrierRaised = yield* raiseCancelBarrier({
+      threadId: event.payload.threadId,
+      canceledThroughSequence: event.sequence,
+      updatedAt: event.payload.createdAt,
+      failureKind: "provider.session.stop.failed",
+      failureSummary: "Provider session stop failed",
+      failureDetailPrefix: "Failed to record the stop before stopping the session",
+      turnId: null,
+    });
 
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
+      return;
+    }
+
+    // An unraised barrier makes the rest of this handler actively harmful.
+    //
+    // Stopping the provider and marking the projection `stopped` is the half of
+    // the stop the user can see; the barrier is the half that stops work not
+    // yet sent. With only the visible half done, a queued turn-start still
+    // passes its claim guard, calls `sendTurn`, and — because a send to a
+    // stopped session resolves with `allowRecovery: true` — recovers the
+    // persisted binding and RESURRECTS the session, delivering a prompt to a
+    // provider the user had finished with, against a thread the UI now shows as
+    // stopped.
+    //
+    // So this stops here rather than completing a stop it cannot enforce. The
+    // failure was already reported on the thread by `raiseCancelBarrier`, and a
+    // session that is still visibly running is a state the user can act on by
+    // pressing stop again; one that reads as stopped while accepting new turns
+    // is not.
+    if (!barrierRaised) {
       return;
     }
 

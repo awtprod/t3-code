@@ -474,6 +474,84 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  it.effect("ignores an interrupt aimed at a turn that is no longer the running one", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-stale-interrupt");
+
+      // Turn ids are read off the event stream rather than `sendTurn`'s return,
+      // because the first turn has to FAIL to end — a turn that merely got
+      // interrupted keeps `activeTurnId` set here, and the next send would fold
+      // into it instead of opening the second turn this test needs.
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.filter((event) => event.type === "turn.started" || event.type === "turn.aborted"),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      runtimeMock.state.promptAsyncError = new Error("first turn failed");
+      yield* adapter
+        .sendTurn({
+          threadId,
+          input: "first message",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("opencode"),
+            model: "openai/gpt-5",
+          },
+        })
+        .pipe(Effect.result);
+
+      // A SECOND message opens a new turn. This is the shape the reactor's
+      // post-send fence can arrive in late: it decided a stop covered the first
+      // request, but by the time it says so the user's next message is the one
+      // actually running.
+      runtimeMock.state.promptAsyncError = null;
+      const secondTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "second message",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "openai/gpt-5",
+        },
+      });
+
+      const lifecycle = Array.from(
+        yield* Fiber.join(eventsFiber).pipe(Effect.timeout("2 seconds")),
+      );
+      const firstTurnId = lifecycle[0]?.turnId;
+      NodeAssert.equal(lifecycle[0]?.type, "turn.started");
+      NodeAssert.equal(lifecycle[1]?.type, "turn.aborted");
+      NodeAssert.notEqual(String(secondTurn.turnId), String(firstTurnId));
+
+      const abortsBeforeStaleInterrupt = runtimeMock.state.abortCalls.length;
+
+      // The late interrupt names the FIRST turn. `session.abort` is thread-wide
+      // — it tears down the whole OpenCode session — so honoring this would
+      // destroy the second turn, which nobody asked to stop.
+      yield* adapter.interruptTurn(threadId, firstTurnId);
+
+      NodeAssert.equal(runtimeMock.state.abortCalls.length, abortsBeforeStaleInterrupt);
+      const sessions = yield* adapter.listSessions();
+      const session = sessions.find((entry) => entry.threadId === threadId);
+      NodeAssert.equal(session?.status, "running");
+      NodeAssert.equal(String(session?.activeTurnId), String(secondTurn.turnId));
+
+      // And the scoping is a targeting rule, not a blanket refusal: naming the
+      // turn that IS running still aborts. Without this half the test would
+      // also pass against an adapter whose interrupt did nothing at all.
+      yield* adapter.interruptTurn(threadId, secondTurn.turnId);
+      NodeAssert.equal(runtimeMock.state.abortCalls.length, abortsBeforeStaleInterrupt + 1);
+    }),
+  );
+
   it.effect("keeps the running turn when a steer prompt fails", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;

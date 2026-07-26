@@ -1185,6 +1185,78 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }),
   );
 
+  it.effect("ignores an interrupt aimed at a turn that is no longer the running one", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-stale-interrupt");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-acp-")),
+      );
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const argvLogPath = NodePath.join(tempDir, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+
+      // Two sequential turns: the first completes before the second is sent, so
+      // these are genuinely distinct turns rather than a steer folding into one.
+      const firstTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "first message",
+        attachments: [],
+      });
+      const secondTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "second message",
+        attachments: [],
+      });
+      assert.notEqual(String(secondTurn.turnId), String(firstTurn.turnId));
+
+      // The late interrupt names the FIRST turn — the shape the reactor's
+      // post-send fence arrives in when it decides a stop covered an earlier
+      // request while a newer message is the one actually running. `session/cancel`
+      // is thread-wide, so honoring this would kill the second turn.
+      yield* adapter.interruptTurn(threadId, firstTurn.turnId);
+
+      // Then one aimed at the turn that IS running, which must be delivered:
+      // the scoping is a targeting rule, not a blanket refusal, and without
+      // this half the test would pass just as well against an adapter whose
+      // interrupt did nothing at all.
+      //
+      // Ordered this way on purpose. `session/cancel` is an ACP notification
+      // and the agent logs it asynchronously, so asserting "no cancel yet"
+      // straight after the stale call would race the writer and pass whether
+      // or not the guard exists. Both notifications travel the same stdio
+      // pipe in order, so the live one appearing in the log is proof that a
+      // leaked stale one would already be there too — which makes the count
+      // below a real measurement rather than a snapshot of a pending write.
+      yield* adapter.interruptTurn(threadId, secondTurn.turnId);
+
+      const requests = yield* waitForJsonLogMatch(
+        requestLogPath,
+        (entry) => entry.method === "session/cancel",
+      );
+      assert.lengthOf(
+        requests.filter((entry) => entry.method === "session/cancel"),
+        1,
+        "exactly one cancel: the live turn's, never the stale turn's",
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("broadcasts runtime events to multiple stream consumers", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;

@@ -14,6 +14,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -2796,6 +2797,127 @@ it.effect("adopts the placeholder a correlated turn.started names, not the oldes
       Layer.provideMerge(
         ServerConfig.layerTest(process.cwd(), {
           prefix: "t3-projection-pipeline-correlated-turn-",
+        }),
+        NodeServices.layer,
+      ),
+    ),
+  ),
+);
+
+it.effect("warns instead of silently adopting nothing when correlation finds no placeholder", () =>
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    const logMessages: Array<string> = [];
+    // Merged into the projection layer rather than chained after it: a second
+    // `Effect.provide` would build the pipeline's services under a different
+    // lifecycle than the logger they log through.
+    const projectionLayer = Layer.mergeAll(
+      OrchestrationProjectionPipelineLive.pipe(
+        Layer.provideMerge(OrchestrationEventStoreLive),
+        Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
+      ),
+      Logger.layer([
+        Logger.make<unknown, void>((options) => {
+          logMessages.push(String(options.message));
+        }),
+      ]),
+    );
+
+    const threadId = ThreadId.make("thread-uncorrelated");
+    const turnId = TurnId.make("turn-uncorrelated");
+    const messageId = MessageId.make("message-uncorrelated");
+    const requestedAt = "2026-03-05T09:00:00.000Z";
+    const sessionSetAt = "2026-03-05T09:00:02.000Z";
+
+    const rows = yield* Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const sql = yield* SqlClient.SqlClient;
+
+      // One placeholder IS waiting — it just isn't the one the turn names.
+      // That combination is the interesting one: falling back to the oldest
+      // row here is the misattribution bug, and adopting nothing is correct
+      // but lossy, so it has to leave a trace.
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-uncorrelated-1"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: requestedAt,
+        commandId: CommandId.make("cmd-uncorrelated-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-uncorrelated-1"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId,
+          runtimeMode: "approval-required",
+          createdAt: requestedAt,
+        },
+      });
+
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-uncorrelated-2"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: sessionSetAt,
+        commandId: CommandId.make("cmd-uncorrelated-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-uncorrelated-2"),
+        metadata: {},
+        payload: {
+          threadId,
+          // A sequence no pending row carries — the shape a replayed or
+          // already-consumed placeholder leaves behind.
+          turnRequestSequence: 9999,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: sessionSetAt,
+          },
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const pendingRows = yield* sql<{ readonly messageId: string | null }>`
+        SELECT pending_message_id AS "messageId"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND turn_id IS NULL
+          AND state = 'pending'
+        ORDER BY request_sequence ASC
+      `;
+
+      const turnRows = yield* sql<{
+        readonly turnId: string;
+        readonly userMessageId: string | null;
+      }>`
+        SELECT turn_id AS "turnId", pending_message_id AS "userMessageId"
+        FROM projection_turns
+        WHERE turn_id = ${turnId}
+      `;
+
+      return { pendingRows, turnRows };
+    }).pipe(Effect.provide(projectionLayer));
+
+    // Adopting nothing is still the right call — the unrelated placeholder
+    // keeps its message and stays outstanding.
+    assert.deepEqual(rows.turnRows, [{ turnId: "turn-uncorrelated", userMessageId: null }]);
+    assert.deepEqual(rows.pendingRows, [{ messageId: "message-uncorrelated" }]);
+    // But it is no longer silent. Without the warning the only symptom is a
+    // turn that quietly forgot which message asked for it.
+    assert.include(logMessages.join("\n"), "projection.turn-start.pending-start-not-correlated");
+  }).pipe(
+    Effect.provide(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3-projection-pipeline-uncorrelated-turn-",
         }),
         NodeServices.layer,
       ),

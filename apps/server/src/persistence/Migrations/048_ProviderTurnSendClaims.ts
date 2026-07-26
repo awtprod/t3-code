@@ -35,7 +35,17 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
  * SQLite serializes the two writes: either the barrier lands first and the claim
  * writes zero rows, or the claim lands first and the barrier arrives to find the
  * turn already sent — which is the normal running-turn interrupt path, not a lost
- * stop. The ambiguous middle no longer exists.
+ * stop.
+ *
+ * What this does NOT close: the send itself is not inside that statement. A stop
+ * committed after the claim is granted but before the adapter call returns finds
+ * a claim already taken, so the barrier alone cannot stop it — the turn is
+ * running by then and has to be interrupted rather than prevented. That case is
+ * the reason `fenceSendAgainstLateStop` exists in the reactor: it re-reads the
+ * claim after the send and interrupts the turn it just started when the barrier
+ * has since risen above it. So these tables remove the ambiguity from the
+ * DECISION (was this send authorized?), not from the delivery; the post-send
+ * fence, not this migration, is what makes a late stop take effect.
  *
  * Growth: one claim row per user message ever sent, the same cardinality as the
  * thread's user messages and far below `orchestration_events`, plus one barrier

@@ -1072,16 +1072,48 @@ export function makeCursorAdapter(
         );
       });
 
-    const interruptTurn: CursorAdapterShape["interruptTurn"] = (threadId) =>
+    const interruptTurn: CursorAdapterShape["interruptTurn"] = (threadId, turnId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
+        // Scoped to the named turn when the caller named one. `session/cancel`
+        // is thread-wide — it stops whatever the agent is doing now — so
+        // cancelling on behalf of a turn that already finished kills the turn
+        // that REPLACED it. The reactor's post-send fence can reach this point
+        // holding a stop that covered request A while message B is the one
+        // running; interrupting then destroys work the user never asked to
+        // stop, which is worse than the missed stop the fence guards against.
+        //
+        // The check precedes the settlements deliberately. Cancelling the
+        // pending approvals of a turn that is still legitimately running would
+        // answer prompts the user is looking at, so a stale target must change
+        // nothing at all rather than merely skip the cancel.
+        //
+        // An undefined `turnId` still means "whatever is running" — the
+        // session-stop and watchdog path, where thread-wide is the intent.
+        const activeTurnId = ctx.activeTurnId ?? ctx.session.activeTurnId;
+        if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
+          yield* Effect.logDebug("cursor-adapter.interrupt-turn.stale-target", {
+            threadId,
+            requestedTurnId: turnId,
+            activeTurnId,
+          });
+          return;
+        }
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
         yield* settlePendingUserInputsAsEmptyAnswers(ctx.pendingUserInputs);
-        yield* Effect.ignore(
-          ctx.acp.cancel.pipe(
-            Effect.mapError((error) =>
-              mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
-            ),
+        // Propagated, not ignored. `session/cancel` is an ACP notification, so
+        // about the only way it fails is that the transport to the agent is
+        // gone — which is precisely when the turn is NOT being stopped and the
+        // caller most needs to know. Swallowing it reported every interrupt as
+        // delivered and left the reactor with nothing to retry, escalate, or
+        // tell the user about after they pressed stop and the turn kept going.
+        //
+        // The two settlements above run first and unconditionally, so a failure
+        // here still leaves pending approvals and user inputs resolved rather
+        // than parked behind a turn nobody is going to answer.
+        yield* ctx.acp.cancel.pipe(
+          Effect.mapError((error) =>
+            mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
           ),
         );
       });

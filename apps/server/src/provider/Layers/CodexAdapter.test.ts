@@ -608,11 +608,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     const runtimeFactory = makeRuntimeFactory();
     const layer = Layer.effect(
       CodexAdapter,
-      Effect.gen(function* () {
-        return yield* makeCodexAdapter(decodeCodexSettings({}), {
-          makeRuntime: runtimeFactory.factory,
-        });
-      }),
+      makeCodexAdapter(decodeCodexSettings({}), { makeRuntime: runtimeFactory.factory }),
     ).pipe(
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(ServerSettingsService.layerTest()),
@@ -825,6 +821,107 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       });
       yield* collector.awaitCount(2);
 
+      NodeAssert.deepStrictEqual(collector.stamps, [
+        ["turn-0", undefined],
+        ["turn-live", 999],
+      ]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("stops stamping from the parked slot once a resolved id is forgotten", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-resolved-set-overflow");
+    // One more than CODEX_RESOLVED_TURN_ID_LIMIT, so the oldest resolved id is
+    // evicted. The sibling test above stays under the bound and shows the
+    // fallback still working; this one crosses it.
+    //
+    // Past that point the set can no longer answer "was this turn already
+    // spoken for?", which is the only question that makes the parked slot safe
+    // to hand out. So the fallback retires rather than guessing — a turn that
+    // genuinely raced loses its stamp, instead of taking a stamp that belongs
+    // to a live unrelated send.
+    const resolvedSendCount = 513;
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      let releaseLiveSend: ((turnId: TurnId) => void) | undefined;
+      let liveSendEntered = false;
+      runtime.sendTurnImpl.mockImplementation((input) => {
+        if (input.input === "live") {
+          liveSendEntered = true;
+          return new Promise<ProviderTurnStartResult>((resolve) => {
+            releaseLiveSend = (turnId) => resolve({ threadId, turnId });
+          });
+        }
+        return Promise.resolve({ threadId, turnId: asTurnId(`turn-${input.input}`) });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      // Every one of these resolves its turn id, so each lands in the
+      // resolved-id set and the last pushes it over the bound.
+      for (let index = 0; index < resolvedSendCount; index += 1) {
+        yield* adapter.sendTurn({
+          threadId,
+          input: String(index),
+          turnRequestSequence: 100 + index,
+        });
+      }
+
+      const liveSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "live", turnRequestSequence: 999 })
+        .pipe(Effect.forkChild);
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          if (liveSendEntered) {
+            return;
+          }
+          yield* Effect.sleep("2 millis");
+        }
+        throw new Error("Timed out waiting for the live send to reach its RPC.");
+      });
+
+      // A notification for a turn the set has forgotten. Before the trust flag
+      // this reached the parked slot and walked off with request 999 — the live
+      // send's sequence, stamped onto an unrelated turn.
+      yield* runtime.emit({
+        id: asEventId("evt-started-forgotten"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-0"),
+      });
+      yield* collector.awaitCount(1);
+
+      NodeAssert.ok(releaseLiveSend);
+      releaseLiveSend(asTurnId("turn-live"));
+      yield* Fiber.join(liveSendFiber);
+      yield* runtime.emit({
+        id: asEventId("evt-started-live-after-overflow"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-live"),
+      });
+      yield* collector.awaitCount(2);
+
+      // The live send keeps its own sequence: retiring the fallback costs a
+      // raced stamp, never a correct one, because the id-keyed path is
+      // untouched.
       NodeAssert.deepStrictEqual(collector.stamps, [
         ["turn-0", undefined],
         ["turn-live", 999],

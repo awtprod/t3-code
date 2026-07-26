@@ -132,10 +132,25 @@ export interface CodexAdapterLiveOptions {
  * parked slot of an unrelated send that is genuinely mid-RPC, stamping that
  * send's placeholder onto the wrong turn. Remembering which ids are already
  * accounted for keeps the fallback to the one case it was written for.
+ *
+ * `fallbackTrustworthy` is what stops that guarantee from silently expiring.
+ * The set is bounded, so a long enough session must eventually forget its
+ * oldest ids — and a forgotten id is indistinguishable from one never
+ * recorded, which is precisely the confusion the set exists to prevent. Rather
+ * than let the defect reopen unannounced at the bound, forgetting anything
+ * retires the fallback for the rest of the session: a genuine race then loses
+ * its stamp instead of taking someone else's.
+ *
+ * That asymmetry is the whole argument. An unstamped placeholder is one the
+ * projector declines to adopt — visible, and recoverable by the paths that
+ * already handle an unadopted row. A misstamped one silently marks the wrong
+ * user message as started, which nothing downstream can detect. Losing a rare
+ * race is the cheaper failure, so it is the one to fail into.
  */
 interface CodexTurnRequestCorrelation {
   readonly byTurnId: Map<TurnId, number>;
   readonly resolvedTurnIds: Set<TurnId>;
+  fallbackTrustworthy: boolean;
   inFlight: number | undefined;
 }
 
@@ -167,11 +182,16 @@ const CODEX_TURN_REQUEST_CORRELATION_LIMIT = 64;
 /**
  * Upper bound on remembered resolved turn ids.
  *
- * These are only needed to distinguish "consumed/evicted" from "response has
- * not landed yet" for a notification that arrives shortly after its turn was
- * recorded, so a bound well above the in-flight correlation limit is ample.
- * Forgetting the oldest can at worst restore the pre-existing behaviour for a
- * notification that is thousands of turns stale.
+ * These distinguish "consumed/evicted" from "the response has not landed yet"
+ * for a notification arriving shortly after its turn was recorded, which is a
+ * millisecond-scale window — so this bound is far above what the mechanism
+ * needs and exists only to cap memory on a very long session.
+ *
+ * Reaching it is therefore not routine, and is not treated as routine:
+ * evicting anything sets `fallbackTrustworthy` to false, retiring the
+ * `inFlight` fallback rather than reopening the mis-stamp it guards against.
+ * See `CodexTurnRequestCorrelation` for why losing a stamp is the failure to
+ * prefer.
  */
 const CODEX_RESOLVED_TURN_ID_LIMIT = 512;
 
@@ -639,6 +659,11 @@ function rememberResolvedCodexTurnId(
       break;
     }
     correlation.resolvedTurnIds.delete(oldest.value);
+    // Once an id is forgotten it is indistinguishable from one never recorded,
+    // so the fallback can no longer tell "this turn is already spoken for" from
+    // "this turn's response has not landed yet" — the exact distinction it
+    // depends on. Retire it instead of letting it guess.
+    correlation.fallbackTrustworthy = false;
   }
 }
 
@@ -656,6 +681,12 @@ function takeCodexTurnRequestSequence(
     // This turn's correlation was already consumed by an earlier notification,
     // or evicted once the id-keyed map hit its bound. Either way it is spoken
     // for, and the parked slot below belongs to a different send.
+    return undefined;
+  }
+  if (!correlation.fallbackTrustworthy) {
+    // The resolved-id set has forgotten at least one entry, so "not in the set"
+    // no longer means "never recorded". Declining to stamp costs this turn its
+    // correlation; guessing would cost some other turn its correctness.
     return undefined;
   }
   // The notification beat the `turn/start` response. `sendLock` guarantees at
@@ -1761,6 +1792,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const turnRequestCorrelation: CodexTurnRequestCorrelation = {
           byTurnId: new Map<TurnId, number>(),
           resolvedTurnIds: new Set<TurnId>(),
+          fallbackTrustworthy: true,
           inFlight: undefined,
         };
         const sendLock = yield* Semaphore.make(1);
@@ -1788,11 +1820,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(
-              event,
-              event.threadId,
-              turnRequestCorrelation,
-            );
+            const runtimeEvents = mapToRuntimeEvents(event, event.threadId, turnRequestCorrelation);
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,

@@ -1301,6 +1301,28 @@ export function makeOpenCodeAdapter(
     const interruptTurn: OpenCodeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
       function* (threadId, turnId) {
         const context = yield* ensureSessionContext(sessions, threadId);
+        // Scoped to the named turn when the caller named one. `session.abort`
+        // is the bluntest of the adapters' interrupts — it aborts the whole
+        // OpenCode session, not one turn — so issuing it on behalf of a turn
+        // that has already finished tears down the turn that REPLACED it. The
+        // reactor's post-send fence can reach here holding a stop that covered
+        // request A while message B is the one actually running; aborting then
+        // destroys work the user never asked to stop.
+        //
+        // An undefined `turnId` still means "whatever is running" — the
+        // session-stop and watchdog path, where thread-wide is the intent.
+        if (
+          turnId !== undefined &&
+          context.activeTurnId !== undefined &&
+          context.activeTurnId !== turnId
+        ) {
+          yield* Effect.logDebug("opencode-adapter.interrupt-turn.stale-target", {
+            threadId,
+            requestedTurnId: turnId,
+            activeTurnId: context.activeTurnId,
+          });
+          return;
+        }
         yield* runOpenCodeSdk("session.abort", () =>
           context.client.session.abort({ sessionID: context.openCodeSessionId }),
         ).pipe(Effect.mapError(toRequestError));

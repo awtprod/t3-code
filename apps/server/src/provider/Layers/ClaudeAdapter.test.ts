@@ -931,6 +931,81 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("ignores an interrupt aimed at a turn that is no longer the running one", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      // The first turn is driven all the way to `turn.completed` before the
+      // second is sent, so these are genuinely two turns rather than one
+      // steer folded into another — a mid-turn send would return the SAME
+      // turn id and the test below would be vacuous.
+      const firstTurnDone = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const firstTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "first message",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-1",
+        uuid: "result-first",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(firstTurnDone);
+
+      const secondTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "second message",
+        attachments: [],
+      });
+      assert.notEqual(String(secondTurn.turnId), String(firstTurn.turnId));
+
+      // The late interrupt names the FIRST turn. This is the shape the
+      // reactor's post-send fence arrives in when it decides a stop covered
+      // an earlier request while a newer message is the one actually
+      // running: `query.interrupt()` is thread-wide, so honouring a stale
+      // target would kill the second turn, which nobody asked to stop.
+      yield* adapter.interruptTurn(session.threadId, firstTurn.turnId);
+      assert.lengthOf(
+        harness.query.interruptCalls,
+        0,
+        "a stale interrupt must not stop the turn that replaced its target",
+      );
+
+      // Targeting rule, not a blanket refusal: naming the turn that IS
+      // running still interrupts. Without this half the test would pass just
+      // as well against an adapter whose interrupt did nothing at all.
+      yield* adapter.interruptTurn(session.threadId, secondTurn.turnId);
+      assert.lengthOf(
+        harness.query.interruptCalls,
+        1,
+        "an interrupt naming the running turn must still be delivered",
+      );
+
+      // An unnamed interrupt still means "whatever is running" — the
+      // session-stop and watchdog path, where thread-wide is the intent.
+      yield* adapter.interruptTurn(session.threadId, undefined);
+      assert.lengthOf(harness.query.interruptCalls, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("steers a running turn instead of opening a new one on mid-turn sendTurn", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

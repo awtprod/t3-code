@@ -36,6 +36,7 @@ import { TextGenerationError } from "@t3tools/contracts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
+import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import {
   ProviderService,
@@ -491,6 +492,12 @@ describe("ProviderCommandReactor", () => {
       drain,
       cancelSendClaims,
       acquireSendClaim,
+      // The service OBJECT, not just wrappers around it. Layer memoization
+      // means this is the same instance the reactor resolved, so a spy
+      // installed on it here is the one the reactor calls — the only way to
+      // inject a barrier-write failure, which no amount of driving the
+      // repository from outside can produce.
+      sendClaims,
       readEvents,
       readEventsWithPayloads,
     };
@@ -797,7 +804,9 @@ describe("ProviderCommandReactor", () => {
     // matches placeholders on exactly this value, so a send stamped with
     // anything else silently reverts to positional adoption.
     const events = await harness.readEvents();
-    const turnStartRequested = events.filter((event) => event.type === "thread.turn-start-requested");
+    const turnStartRequested = events.filter(
+      (event) => event.type === "thread.turn-start-requested",
+    );
     expect(turnStartRequested).toHaveLength(1);
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
@@ -2505,9 +2514,8 @@ describe("ProviderCommandReactor", () => {
       const readModel = await harness.readModel();
       const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
       return (
-        thread?.activities.some(
-          (activity) => activity.kind === "provider.turn.interrupt.failed",
-        ) ?? false
+        thread?.activities.some((activity) => activity.kind === "provider.turn.interrupt.failed") ??
+        false
       );
     });
 
@@ -2525,6 +2533,173 @@ describe("ProviderCommandReactor", () => {
     // and a duplicate interrupt costs nothing, so one retry is worth having and
     // its absence would be a silently weaker guarantee.
     expect(harness.interruptTurn.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("escalates to a session stop when the fence's interrupt will not land", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    // Reporting an unstoppable turn is the last resort, not the first. Before
+    // it, there is a strictly stronger tool available: the session the turn is
+    // running in. The barrier that put the fence on this branch already covers
+    // everything queued behind the send, so nothing in this session is still
+    // wanted — killing it honors the stop that the interrupt could not.
+    //
+    // Without this the user's only recourse is a turn that visibly ignores
+    // stop, which is indistinguishable from a broken button.
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.promise(async () => {
+        await harness.cancelSendClaims({
+          threadId: ThreadId.make("thread-1"),
+          canceledThroughSequence: 1_000_000,
+          updatedAt: createdAt,
+        });
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        };
+      }),
+    );
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "session/interrupt",
+          detail: "provider socket closed",
+        }),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-interrupt-escalates"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "stop me, and fail the stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await harness.drain();
+
+    expect(harness.stopSession.mock.calls[0]?.[0]).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+    });
+
+    // Escalated through the ordinary stop intent, not by calling the provider
+    // behind the projection's back. The event is what makes the session read as
+    // stopped in the UI and what raises the barrier; a direct provider call
+    // would kill the runtime while the thread still showed a live session.
+    const events = await harness.readEvents();
+    expect(events.filter((event) => event.type === "thread.session-stop-requested")).toHaveLength(
+      1,
+    );
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session?.status).toBe("stopped");
+
+    // And still reported. Losing the whole session is not a silent success —
+    // the user asked to stop one turn and got something blunter.
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.turn.interrupt.failed"),
+    ).toMatchObject({
+      turnId: asTurnId("turn-1"),
+      payload: { detail: expect.stringContaining("provider socket closed") },
+    });
+  });
+
+  it("falls back to the event log when the fence cannot read its send claim", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    // An unreadable claim is "we do not know", not "no stop" — and only one of
+    // those two answers leaves a turn the user killed still running. The claim
+    // table and the event log are separate stores, so an outage of one is no
+    // reason to stop asking; the log records the interrupt independently.
+    //
+    // Failing EVERY attempt is what makes this a test of the fallback rather
+    // than of the retry: a single rejection would be absorbed upstream.
+    const originalAcquire = harness.sendClaims.acquire;
+    const acquireAttempts: Array<number> = [];
+    const acquireSpy = vi
+      .spyOn(harness.sendClaims, "acquire")
+      .mockImplementation((input: Parameters<typeof harness.sendClaims.acquire>[0]) =>
+        // Counted inside the effect: the reactor builds the acquire effect once
+        // and retries that value, so a counter in the mock body would record
+        // one call however many times it ran.
+        Effect.suspend(() => {
+          // The PRE-send acquire is left working. It is a different question at
+          // a different moment — "may I send at all", asked before any stop
+          // exists — and breaking it would stop the send from happening, which
+          // is the premise this test needs rather than the behavior it checks.
+          // Only the post-send fence read is broken.
+          if (acquireAttempts.length === 0 && harness.sendTurn.mock.calls.length === 0) {
+            acquireAttempts.push(-1);
+            return originalAcquire(input);
+          }
+          acquireAttempts.push(input.requestSequence);
+          return Effect.fail(
+            new PersistenceSqlError({ operation: "acquire", detail: "claim read failed" }),
+          );
+        }),
+      );
+
+    // The stop lands in the EVENT LOG while the send is in flight, and nowhere
+    // else — no barrier is raised through the repository, because the whole
+    // point is that the repository is the thing that is broken.
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.promise(async () => {
+        await harness.dispatch({
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("cmd-interrupt-during-unreadable-claim"),
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt,
+        });
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-unreadable-claim"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "stop me while the claim table is down",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    // The fence's interrupt, addressed to the turn this send started. The
+    // separate interrupt-handler call is thread-scoped and carries no turnId,
+    // so this is the fence's and not a coincidence of the stop itself.
+    await waitFor(() =>
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-1"),
+      ),
+    );
+    await harness.drain();
+    acquireSpy.mockRestore();
+
+    // Four entries: the pre-send acquire that was allowed through, then the
+    // fence's three — the initial one plus `times: 2`. Fewer means the retry is
+    // not wired; more means it is unbounded.
+    expect(acquireAttempts.filter((entry) => entry >= 0)).toHaveLength(3);
   });
 
   // --- Steered sends (folds) ----------------------------------------------
@@ -2673,6 +2848,288 @@ describe("ProviderCommandReactor", () => {
       turnRequestSequence: requested?.sequence,
       turnId: asTurnId("turn-running"),
     });
+  });
+
+  /**
+   * Seed a proposed plan on a second thread and return its id.
+   *
+   * "Implement this plan" sends carry a reference to a plan that lives on
+   * ANOTHER thread, so a test for that path needs both threads and a real plan
+   * row — the decider rejects a `sourceProposedPlan` naming a plan that does
+   * not exist, so a fabricated id would fail the dispatch instead of exercising
+   * the bookkeeping.
+   */
+  const seedSourceProposedPlan = async (
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    input: {
+      readonly sourceThreadId: ThreadId;
+      readonly planId: string;
+      readonly createdAt: string;
+    },
+  ) => {
+    await harness.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`cmd-thread-create-${input.sourceThreadId}`),
+      threadId: input.sourceThreadId,
+      projectId: asProjectId("project-1"),
+      title: "Planning Thread",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt: input.createdAt,
+    });
+    await harness.dispatch({
+      type: "thread.proposed-plan.upsert",
+      commandId: CommandId.make(`cmd-plan-upsert-${input.planId}`),
+      threadId: input.sourceThreadId,
+      proposedPlan: {
+        id: input.planId,
+        turnId: null,
+        planMarkdown: "# Source plan",
+        implementedAt: null,
+        implementationThreadId: null,
+        createdAt: input.createdAt,
+        updatedAt: input.createdAt,
+      },
+      createdAt: input.createdAt,
+    });
+    return input.planId;
+  };
+
+  const readSourcePlan = async (
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    input: { readonly sourceThreadId: ThreadId; readonly planId: string },
+  ) => {
+    const readModel = await harness.readModel();
+    return readModel.threads
+      .find((entry) => entry.id === input.sourceThreadId)
+      ?.proposedPlans.find((entry) => entry.id === input.planId);
+  };
+
+  it("marks the source plan implemented when a plan-backed send is steered", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const sourceThreadId = ThreadId.make("thread-plan-source");
+    const planId = await seedSourceProposedPlan(harness, {
+      sourceThreadId,
+      planId: "plan:thread-plan-source:turn:plan-1",
+      createdAt,
+    });
+
+    // Ingestion marks a plan implemented off `turn.started`. A steer emits no
+    // such event BY DESIGN — it is not a turn boundary — so on this path the
+    // plan reference the request carried has exactly one chance to be acted on
+    // before the fold deletes the row holding it. Missing it leaves a plan the
+    // provider has already been asked to implement showing as unimplemented
+    // forever, with no later event able to correct it.
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.succeed({
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-running"),
+        steered: true,
+      }),
+    );
+
+    expect((await readSourcePlan(harness, { sourceThreadId, planId }))?.implementedAt).toBeNull();
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-steered-plan"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-steer-plan"),
+        role: "user",
+        text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
+        attachments: [],
+      },
+      sourceProposedPlan: { threadId: sourceThreadId, planId },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await waitFor(async () => foldedEvents(await harness.readEventsWithPayloads()).length === 1);
+    await waitFor(
+      async () =>
+        (await readSourcePlan(harness, { sourceThreadId, planId }))?.implementedAt !== null,
+    );
+    await harness.drain();
+
+    const sourcePlan = await readSourcePlan(harness, { sourceThreadId, planId });
+    expect(sourcePlan?.implementedAt).toBe(createdAt);
+    // The thread doing the work, not the thread that proposed it — this is the
+    // link the UI follows from a plan to its implementation.
+    expect(sourcePlan?.implementationThreadId).toBe(ThreadId.make("thread-1"));
+  });
+
+  it("does not touch a source plan another turn already marked implemented", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const alreadyImplementedAt = "2025-12-31T00:00:00.000Z";
+    const sourceThreadId = ThreadId.make("thread-plan-source-taken");
+    const planId = await seedSourceProposedPlan(harness, {
+      sourceThreadId,
+      planId: "plan:thread-plan-source-taken:turn:plan-1",
+      createdAt,
+    });
+
+    // A `turn.started` racing this fold can mark the same plan first, and
+    // whichever loses must not restamp it: doing so would repoint the plan at a
+    // second implementation thread and rewrite the timestamp, silently
+    // rewriting history the user can see. Idempotence here is the same
+    // `implementedAt !== null` guard ingestion uses, checked on this path too.
+    await harness.dispatch({
+      type: "thread.proposed-plan.upsert",
+      commandId: CommandId.make("cmd-plan-already-implemented"),
+      threadId: sourceThreadId,
+      proposedPlan: {
+        id: planId,
+        turnId: null,
+        planMarkdown: "# Source plan",
+        implementedAt: alreadyImplementedAt,
+        implementationThreadId: ThreadId.make("thread-2"),
+        createdAt,
+        updatedAt: alreadyImplementedAt,
+      },
+      createdAt: alreadyImplementedAt,
+    });
+
+    // Cancel the claim from inside `sendTurn` so the fence interrupts. That is
+    // not the behavior under test — it is the happens-after barrier. The fence
+    // runs strictly downstream of the plan-marking step, so an observed
+    // interrupt proves the plan-marking step has already run (or declined to),
+    // which "drain, then look" alone does not: a mark landing a moment later
+    // would sail past the assertion and make this test vacuous.
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.promise(async () => {
+        await harness.cancelSendClaims({
+          threadId: ThreadId.make("thread-1"),
+          canceledThroughSequence: 1_000_000,
+          updatedAt: createdAt,
+        });
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-running"),
+          steered: true,
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-steered-plan-taken"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-steer-plan-taken"),
+        role: "user",
+        text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
+        attachments: [],
+      },
+      sourceProposedPlan: { threadId: sourceThreadId, planId },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await waitFor(async () => foldedEvents(await harness.readEventsWithPayloads()).length === 1);
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    // Nothing was written at all — not "written with the same values". A
+    // conditional that re-upserts identical-looking data would still repoint
+    // `updatedAt` and re-emit an event, so count the events rather than
+    // compare the row.
+    const upserts = (await harness.readEventsWithPayloads()).filter(
+      (event) => event.type === "thread.proposed-plan-upserted",
+    );
+    expect(upserts).toHaveLength(2);
+
+    const sourcePlan = await readSourcePlan(harness, { sourceThreadId, planId });
+    expect(sourcePlan?.implementedAt).toBe(alreadyImplementedAt);
+    expect(sourcePlan?.implementationThreadId).toBe(ThreadId.make("thread-2"));
+  });
+
+  it("reports a lost fold on the thread instead of swallowing it", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    // The fold is the only record that a steered message reached the provider.
+    // If it never lands, recovery reads the surviving placeholder as "never
+    // sent" and re-issues a prompt the provider already acted on — so the
+    // failure has a real, duplicated-work consequence and must not be a log
+    // line nobody reads.
+    //
+    // Failing every attempt (rather than one) also pins the retry: a single
+    // rejection would be absorbed and prove nothing about the fallback.
+    const originalDispatch = harness.engine.dispatch;
+    const foldAttempts: Array<string> = [];
+    const dispatchSpy = vi
+      .spyOn(harness.engine, "dispatch")
+      .mockImplementation((command: Parameters<typeof originalDispatch>[0]) => {
+        if (command.type === "thread.turn-start.fold") {
+          foldAttempts.push(command.commandId);
+          // A typed persistence failure, not a defect: the retry is scoped to
+          // the error channel, and a contended SQLite write is exactly the
+          // transient case it exists for.
+          return Effect.fail(
+            new PersistenceSqlError({ operation: "dispatch", detail: "fold write failed" }),
+          );
+        }
+        return originalDispatch(command);
+      });
+
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.succeed({
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-running"),
+        steered: true,
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-fold-fails"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-fold-fails"),
+        role: "user",
+        text: "steer me, then lose the fold",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      return (
+        readModel.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some((activity) => activity.kind === "provider.turn.fold.failed") === true
+      );
+    });
+    await harness.drain();
+    dispatchSpy.mockRestore();
+
+    // Three attempts: the initial one plus `times: 2`. Fewer means the retry
+    // is not wired; more means it is unbounded.
+    expect(foldAttempts).toHaveLength(3);
+
+    const readModel = await harness.readModel();
+    const activity = readModel.threads
+      .find((entry) => entry.id === ThreadId.make("thread-1"))
+      ?.activities.find((entry) => entry.kind === "provider.turn.fold.failed");
+    expect(activity?.tone).toBe("error");
+    expect(activity?.turnId).toBe(asTurnId("turn-running"));
   });
 
   it("leaves a newer turn alone when an older send loses its claim to it", async () => {
@@ -3139,6 +3596,104 @@ describe("ProviderCommandReactor", () => {
       claimedAt: stopCreatedAt,
     })) as { _tag: string };
     expect(above._tag).toBe("acquired");
+  });
+
+  it("abandons a session stop it cannot record rather than half-stopping the session", async () => {
+    const harness = await createHarness();
+    const stopCreatedAt = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-for-unraisable-stop"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "ready",
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex_work"),
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: stopCreatedAt,
+      },
+      createdAt: stopCreatedAt,
+    });
+
+    // The barrier is the half of the stop that reaches work not yet sent; the
+    // provider call and the `stopped` projection are the half the user can see.
+    // Completing only the visible half is worse than completing neither: a
+    // queued turn-start still passes its claim guard, calls `sendTurn`, and —
+    // because a send to a stopped session resolves with `allowRecovery: true` —
+    // recovers the persisted binding and RESURRECTS the session, delivering a
+    // prompt against a thread the UI now reads as stopped.
+    //
+    // Spied on the resolved service instance rather than driven from outside,
+    // because a barrier write that FAILS is not a state any external caller can
+    // produce; layer memoization makes this the same object the reactor holds.
+    const cancelAttempts: Array<number> = [];
+    const cancelSpy = vi
+      .spyOn(harness.sendClaims, "cancel")
+      .mockImplementation((input: Parameters<typeof harness.sendClaims.cancel>[0]) =>
+        // Counted INSIDE the effect, not in the mock body. The reactor builds
+        // the cancel effect once and retries that value, so a counter in the
+        // body would record a single call however many times the effect ran —
+        // and this test's whole point is the retry count.
+        Effect.suspend(() => {
+          cancelAttempts.push(input.canceledThroughSequence);
+          // A typed persistence failure, not a defect: the retry is scoped to
+          // the error channel, and a contended SQLite write is the transient
+          // case it exists for.
+          return Effect.fail(
+            new PersistenceSqlError({ operation: "cancel", detail: "barrier write failed" }),
+          );
+        }),
+      );
+
+    await harness.dispatch({
+      type: "thread.session.stop",
+      commandId: CommandId.make("cmd-session-stop-unraisable-barrier"),
+      threadId: ThreadId.make("thread-1"),
+      createdAt: stopCreatedAt,
+    });
+
+    // The reported failure is the happens-after point, not a FIFO sentinel on
+    // another thread. Every assertion below is about what did NOT happen, and
+    // the activity is appended by `raiseCancelBarrier` itself — strictly after
+    // the last retry and strictly before the handler could reach `stopSession`.
+    // Draining alone would not do: the retries sleep on the real clock, so a
+    // drain that returned mid-backoff would restore the spy and let the
+    // remaining attempts hit the real (working) repository, quietly turning
+    // this into a test of the success path.
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some((activity) => activity.kind === "provider.session.stop.failed") === true
+      );
+    });
+    await harness.drain();
+    cancelSpy.mockRestore();
+
+    // Three attempts: the initial one plus `times: 2`. Fewer means the retry is
+    // not wired; more means it is unbounded.
+    expect(cancelAttempts).toHaveLength(3);
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+
+    // Reported, not swallowed — the user has to be able to see that the stop
+    // did not take and press it again.
+    const activity = thread?.activities.find(
+      (entry) => entry.kind === "provider.session.stop.failed",
+    );
+    expect(activity?.tone).toBe("error");
+
+    // And the visible half was NOT performed. Both assertions matter: skipping
+    // only one of them leaves the thread reading as stopped while still able to
+    // accept — and resurrect on — a queued send.
+    expect(harness.stopSession).not.toHaveBeenCalled();
+    expect(thread?.session?.status).toBe("ready");
   });
 
   it("skips a turn-start-requested superseded by a newer re-request for the same message", async () => {
