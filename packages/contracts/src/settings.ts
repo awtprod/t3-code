@@ -2,7 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { ProjectId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { DEFAULT_GIT_TEXT_GENERATION_MODEL, ProviderOptionSelections } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
@@ -361,6 +361,19 @@ export const ObservabilitySettings = Schema.Struct({
 });
 export type ObservabilitySettings = typeof ObservabilitySettings.Type;
 
+export const SupabaseDatabaseConnection = Schema.Struct({
+  provider: Schema.Literal("supabase"),
+  workspaceRoot: TrimmedNonEmptyString,
+  projectRef: TrimmedNonEmptyString,
+  readOnly: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  accessToken: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  accessTokenRedacted: Schema.optional(Schema.Boolean),
+});
+export type SupabaseDatabaseConnection = typeof SupabaseDatabaseConnection.Type;
+
+export const DatabaseConnection = SupabaseDatabaseConnection;
+export type DatabaseConnection = typeof DatabaseConnection.Type;
+
 export const DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL = Duration.seconds(30);
 
 export const ServerSettings = Schema.Struct({
@@ -408,6 +421,9 @@ export const ServerSettings = Schema.Struct({
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  databaseConnections: Schema.Record(ProjectId, DatabaseConnection).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
@@ -434,6 +450,7 @@ export class ServerSettingsError extends Schema.TaggedErrorClass<ServerSettingsE
     operation: ServerSettingsOperation,
     providerInstanceId: Schema.optional(Schema.String),
     environmentVariable: Schema.optional(Schema.String),
+    databaseProjectId: Schema.optional(Schema.String),
     cause: Schema.Defect(),
   },
 ) {
@@ -444,7 +461,9 @@ export class ServerSettingsError extends Schema.TaggedErrorClass<ServerSettingsE
       this.environmentVariable === undefined
         ? ""
         : ` and environment variable ${this.environmentVariable}`;
-    return `Server settings ${this.operation} failed${provider}${variable} at ${this.settingsPath}.`;
+    const database =
+      this.databaseProjectId === undefined ? "" : ` for database project ${this.databaseProjectId}`;
+    return `Server settings ${this.operation} failed${provider}${variable}${database} at ${this.settingsPath}.`;
   }
 }
 
@@ -530,6 +549,9 @@ export const ServerSettingsPatch = Schema.Struct({
   // patches risk leaving driver-specific config in a half-merged state.
   // The web UI sends a fully-formed map every time it edits this field.
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
+  // Database bindings are also replaced as a whole. Credentials in redacted
+  // entries are materialized and persisted by the server settings service.
+  databaseConnections: Schema.optionalKey(Schema.Record(ProjectId, DatabaseConnection)),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 

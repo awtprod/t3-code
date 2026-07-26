@@ -206,6 +206,56 @@ function truncateDetail(value: string, limit = 180): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
 }
 
+/**
+ * Cap on any single string inside a tool activity's opaque `data` blob.
+ *
+ * Tool payloads are the dominant consumer of the event store: on this instance
+ * `item.aggregatedOutput` alone accounted for 33.7 MB — 87% of all text across
+ * 9,295 tool activities — with individual rows hitting the provider's own 1 MiB
+ * ceiling. Every event is also projected into `projection_thread_activities`,
+ * so an uncapped payload is written twice and replayed on every reconnect.
+ *
+ * 32 KiB keeps a command's output readable (the p99 command here is far under
+ * it) while turning a pathological 1 MiB row into a bounded one. Truncation is
+ * marked inline so a reader can tell the difference between "the command
+ * printed nothing more" and "we stopped recording".
+ */
+const MAX_ACTIVITY_DATA_STRING_CHARS = 32_768;
+const MAX_ACTIVITY_DATA_DEPTH = 8;
+
+const truncationNotice = (originalLength: number): string =>
+  `\n… [truncated ${(originalLength - MAX_ACTIVITY_DATA_STRING_CHARS).toLocaleString("en-US")} more characters]`;
+
+/**
+ * Bound every string in a tool payload, structure preserved.
+ *
+ * `payload` is `Schema.Unknown` in the contract and the shapes come straight
+ * from provider SDKs, so this walks generically rather than naming fields:
+ * capping `aggregatedOutput` by name would miss the next provider's equivalent.
+ * Non-string leaves, object keys, and array positions are all left intact, so
+ * consumers that read a specific path still find it.
+ */
+function truncateActivityData(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") {
+    return value.length > MAX_ACTIVITY_DATA_STRING_CHARS
+      ? `${value.slice(0, MAX_ACTIVITY_DATA_STRING_CHARS)}${truncationNotice(value.length)}`
+      : value;
+  }
+  // Depth guard: provider payloads are attacker-adjacent (a tool prints what it
+  // likes) and a cyclic or absurdly nested blob must not take the ingester down.
+  if (depth >= MAX_ACTIVITY_DATA_DEPTH || value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => truncateActivityData(entry, depth + 1));
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    result[key] = truncateActivityData(entry, depth + 1);
+  }
+  return result;
+}
+
 function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string | undefined {
   const trimmed = planMarkdown?.trim();
   if (!trimmed) {
@@ -609,7 +659,9 @@ function runtimeEventToActivities(
             itemType: event.payload.itemType,
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
-            ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
+            ...(event.payload.data !== undefined
+              ? { data: truncateActivityData(event.payload.data) }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -631,7 +683,9 @@ function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
-            ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
+            ...(event.payload.data !== undefined
+              ? { data: truncateActivityData(event.payload.data) }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1248,17 +1302,15 @@ const make = Effect.gen(function* () {
   const getSourceProposedPlanReferenceForPendingTurnStart = Effect.fn(
     "getSourceProposedPlanReferenceForPendingTurnStart",
   )(function* (threadId: ThreadId, requestSequence: number | undefined) {
-    const pendingTurnStart = yield* (requestSequence === undefined
+    const pendingTurnStart = yield* requestSequence === undefined
       ? projectionTurnRepository.getPendingTurnStartByThreadId({ threadId })
       : projectionTurnRepository
           .listPendingTurnStartsByThreadId({ threadId })
           .pipe(
             Effect.map((rows) =>
-              Option.fromUndefinedOr(
-                rows.find((row) => row.requestSequence === requestSequence),
-              ),
+              Option.fromUndefinedOr(rows.find((row) => row.requestSequence === requestSequence)),
             ),
-          ));
+          );
     if (Option.isNone(pendingTurnStart)) {
       return null;
     }
@@ -1567,8 +1619,7 @@ const make = Effect.gen(function* () {
             // exits, completions) is about the session, not about which queued
             // message just began, so stamping them would let an unrelated
             // transition consume a placeholder.
-            ...(event.type === "turn.started" &&
-            event.payload?.turnRequestSequence !== undefined
+            ...(event.type === "turn.started" && event.payload?.turnRequestSequence !== undefined
               ? { turnRequestSequence: event.payload.turnRequestSequence }
               : {}),
             createdAt: now,
@@ -2022,8 +2073,7 @@ const make = Effect.gen(function* () {
           !parkedOnHuman &&
           !archived &&
           (!userInterruptedActiveTurn || hasOrphanedPendingTurnStart);
-        const eligibleIgnoringSideEffects =
-          eligibleIgnoringRefusals && !nonRecoverableBlocksResume;
+        const eligibleIgnoringSideEffects = eligibleIgnoringRefusals && !nonRecoverableBlocksResume;
         const baseEligible = eligibleIgnoringSideEffects && !hasCommittedSideEffects;
 
         if (eligibleIgnoringRefusals && nonRecoverableBlocksResume) {

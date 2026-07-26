@@ -10,6 +10,8 @@
     "dev:marketing": "vp run --filter @t3tools/marketing dev",
     "dev:desktop": "node scripts/dev-runner.ts dev:desktop",
     "dev:stop": "node scripts/dev-stop.ts",
+    "serve": "node scripts/dev-runner.ts serve",
+    "serve:fast": "node scripts/dev-runner.ts serve --skip-build",
     "start": "vp run --filter t3 start",
     "start:desktop": "vp run --filter @t3tools/desktop start",
     "start:marketing": "vp run --filter @t3tools/marketing preview",

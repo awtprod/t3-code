@@ -19,6 +19,7 @@ import {
   ProviderSendTurnInput,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
+  ProjectId,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -124,6 +125,7 @@ function toRuntimePayloadFromSession(
   session: ProviderSession,
   extra?: {
     readonly modelSelection?: unknown;
+    readonly projectId?: ProjectId;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
   },
@@ -134,6 +136,7 @@ function toRuntimePayloadFromSession(
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
+    ...(extra?.projectId !== undefined ? { projectId: extra.projectId } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
       ? { lastRuntimeEventAt: extra.lastRuntimeEventAt }
@@ -161,6 +164,17 @@ function readPersistedCwd(
   if (typeof rawCwd !== "string") return undefined;
   const trimmed = rawCwd.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readPersistedProjectId(
+  runtimePayload: ProviderSessionDirectory.ProviderRuntimeBinding["runtimePayload"],
+): ProjectId | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return undefined;
+  }
+  const rawProjectId = "projectId" in runtimePayload ? runtimePayload.projectId : undefined;
+  if (typeof rawProjectId !== "string" || rawProjectId.trim().length === 0) return undefined;
+  return ProjectId.make(rawProjectId.trim());
 }
 
 const dieOnMissingBindingInstanceId = (
@@ -215,8 +229,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-  const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
-    McpSessionRegistry.issueActiveMcpCredential({ threadId, providerInstanceId }).pipe(
+  const prepareMcpSession = (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+    projectId?: ProjectId,
+    cwd?: string,
+  ) =>
+    McpSessionRegistry.issueActiveMcpCredential({
+      threadId,
+      providerInstanceId,
+      ...(projectId === undefined ? {} : { projectId }),
+      ...(cwd === undefined ? {} : { cwd }),
+    }).pipe(
       Effect.tap((credential) =>
         credential
           ? Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config))
@@ -262,6 +286,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     threadId: ThreadId,
     extra?: {
       readonly modelSelection?: unknown;
+      readonly projectId?: ProjectId;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
     },
@@ -405,9 +430,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
+      const persistedProjectId = readPersistedProjectId(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
-      yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+      yield* prepareMcpSession(
+        input.binding.threadId,
+        bindingInstanceId,
+        persistedProjectId,
+        persistedCwd,
+      );
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -631,7 +662,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
-        yield* prepareMcpSession(threadId, resolvedInstanceId);
+        yield* prepareMcpSession(threadId, resolvedInstanceId, input.projectId, effectiveCwd);
         const session = yield* adapter
           .startSession({
             ...input,
@@ -659,6 +690,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
+          ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
         });
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,

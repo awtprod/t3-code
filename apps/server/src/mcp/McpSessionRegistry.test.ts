@@ -1,7 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { RepositoryId, SpaceId } from "@command-center/core";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/unstable/http";
 
@@ -53,6 +53,23 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
     expect(yield* registry.resolve(token)).toBeUndefined();
 
     timestamp += 2_000;
+  }),
+);
+
+it.effect("binds project and working-directory scope into the issued credential", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-project-scope"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      projectId: ProjectId.make("project-a"),
+      cwd: "  /work/project-a  ",
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const resolved = yield* registry.resolve(token);
+
+    expect(resolved?.projectId).toBe("project-a");
+    expect(resolved?.cwd).toBe("/work/project-a");
   }),
 );
 

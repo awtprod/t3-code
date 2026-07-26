@@ -984,6 +984,112 @@ describe("ProviderRuntimeIngestion", () => {
     expect(payload?.detail).toBe("bun run lint");
   });
 
+  it("caps oversized command output stored in tool activity data", async () => {
+    const harness = await createHarness();
+    // 1 MiB is the provider's own ceiling for aggregatedOutput, and rows that
+    // size are what drove the event store to 33.7 MB of command output here.
+    const hugeOutput = "x".repeat(1_048_576);
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-huge-output"),
+      provider: ProviderDriverKind.make("cursor"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-huge-output"),
+      itemId: asItemId("item-huge-output"),
+      payload: {
+        itemType: "command_execution",
+        status: "completed",
+        title: "Ran command",
+        detail: "pnpm build",
+        data: {
+          completedAtMs: 1,
+          item: {
+            aggregatedOutput: hugeOutput,
+            command: "pnpm build",
+            exitCode: 0,
+            type: "command_execution",
+          },
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-huge-output",
+      ),
+    );
+    const activity = thread.activities.find(
+      (entry: ProviderRuntimeTestActivity) => entry.id === "evt-huge-output",
+    );
+    const payload = activity?.payload as Record<string, unknown> | undefined;
+    const data = payload?.["data"] as Record<string, unknown> | undefined;
+    const item = data?.["item"] as Record<string, unknown> | undefined;
+    const stored = item?.["aggregatedOutput"];
+
+    // Bounded, and by a wide margin over the 1 MiB input.
+    expect(typeof stored).toBe("string");
+    expect((stored as string).length).toBeLessThan(40_000);
+    expect(stored).toContain("… [truncated");
+    // The head of the output survives — this is a cap, not a drop.
+    expect((stored as string).startsWith("x".repeat(1000))).toBe(true);
+    // Structure and sibling fields are untouched, so consumers still resolve.
+    expect(item?.["command"]).toBe("pnpm build");
+    expect(item?.["exitCode"]).toBe(0);
+    expect(data?.["completedAtMs"]).toBe(1);
+    expect(payload?.["detail"]).toBe("pnpm build");
+  });
+
+  it("leaves normal-sized tool activity data untouched", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-small-output"),
+      provider: ProviderDriverKind.make("cursor"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-small-output"),
+      itemId: asItemId("item-small-output"),
+      payload: {
+        itemType: "command_execution",
+        status: "completed",
+        title: "Ran command",
+        detail: "pnpm lint",
+        data: {
+          item: {
+            aggregatedOutput: "all files pass\n",
+            commandActions: [{ command: "pnpm lint" }],
+            exitCode: 0,
+          },
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-small-output",
+      ),
+    );
+    const activity = thread.activities.find(
+      (entry: ProviderRuntimeTestActivity) => entry.id === "evt-small-output",
+    );
+    const data = (activity?.payload as Record<string, unknown> | undefined)?.["data"] as
+      | Record<string, unknown>
+      | undefined;
+    const item = data?.["item"] as Record<string, unknown> | undefined;
+
+    expect(item?.["aggregatedOutput"]).toBe("all files pass\n");
+    expect(item?.["exitCode"]).toBe(0);
+    // Arrays keep their shape rather than being flattened into objects.
+    const commandActions = item?.["commandActions"];
+    expect(Array.isArray(commandActions)).toBe(true);
+    expect((commandActions as ReadonlyArray<Record<string, unknown>>)[0]?.["command"]).toBe(
+      "pnpm lint",
+    );
+  });
+
   it("uses structured read-file paths when available", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -1420,9 +1526,9 @@ describe("ProviderRuntimeIngestion", () => {
       targetThreadId,
     );
 
-    const sourceAfterPlain = await harness.readModel().then((snapshot) =>
-      snapshot.threads.find((entry) => entry.id === sourceThreadId),
-    );
+    const sourceAfterPlain = await harness
+      .readModel()
+      .then((snapshot) => snapshot.threads.find((entry) => entry.id === sourceThreadId));
     expect(
       sourceAfterPlain?.proposedPlans.find((entry) => entry.id === sourcePlan.id),
     ).toMatchObject({
@@ -1462,11 +1568,11 @@ describe("ProviderRuntimeIngestion", () => {
       2_000,
       sourceThreadId,
     );
-    expect(
-      sourceAfterPlan.proposedPlans.find((entry) => entry.id === sourcePlan.id),
-    ).toMatchObject({
-      implementationThreadId: targetThreadId,
-    });
+    expect(sourceAfterPlan.proposedPlans.find((entry) => entry.id === sourcePlan.id)).toMatchObject(
+      {
+        implementationThreadId: targetThreadId,
+      },
+    );
   });
 
   it("does not mark the source proposed plan implemented for a rejected turn.started event", async () => {

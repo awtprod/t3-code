@@ -68,7 +68,12 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { clamp } from "effect/Number";
-import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
+import {
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerRespondable,
+  HttpServerResponse,
+} from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -121,6 +126,8 @@ import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
+import { decideWebSocketOrigin } from "./auth/websocketOrigin.ts";
+import { DESKTOP_RENDERER_ORIGINS } from "./httpCors.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
@@ -727,6 +734,21 @@ const makeWsRpcLayer = (
               : {}),
             otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
           },
+          // Only advertised once the gateway is actually listening; a client
+          // that sees this field will route previews through it, so announcing
+          // a port nothing answers would break previews that work today.
+          ...(config.previewGatewayEnabled && config.previewGatewayPort > 0
+            ? {
+                previewGateway: {
+                  loopbackPort: config.previewGatewayPort,
+                  // Tailscale Serve is what makes the gateway reachable from
+                  // another machine; without it there is no public port to name.
+                  ...(config.tailscaleServeEnabled
+                    ? { publicHttpsPort: config.previewGatewayServePort }
+                    : {}),
+                },
+              }
+            : {}),
           settings,
         };
       });
@@ -1996,6 +2018,14 @@ const makeWsRpcLayer = (
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const config = yield* ServerConfig.ServerConfig;
+    // Origins no `Host` header can produce: the Vite dev server (the document
+    // is served there and proxied here, so the browser reports the dev origin)
+    // and the Electron renderer's custom scheme.
+    const allowedWebSocketOrigins = [
+      ...(config.devUrl ? [config.devUrl.origin] : []),
+      ...DESKTOP_RENDERER_ORIGINS,
+    ];
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -2003,6 +2033,28 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         const request = yield* HttpServerRequest.HttpServerRequest;
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
         const sessions = yield* SessionStore.SessionStore;
+
+        // Checked before authentication, not after: the session cookie is
+        // ambient, so a hostile page reaching this route arrives *already*
+        // authenticated. Rejecting on origin first also keeps a cross-origin
+        // probe from learning whether a valid session exists.
+        // `request.headers` is already lowercase-keyed by the platform's header
+        // parsing, so these lookups need no case folding of their own.
+        const originDecision = decideWebSocketOrigin({
+          origin: request.headers.origin,
+          host: request.headers.host,
+          allowedOrigins: allowedWebSocketOrigins,
+        });
+        if (!originDecision.allowed) {
+          yield* Effect.logWarning("Rejected WebSocket upgrade from a foreign origin", {
+            origin: originDecision.origin,
+          });
+          // 403, not 401: the credential is not the problem and re-authenticating
+          // would not help. The body stays generic — the caller is hostile by
+          // assumption and the allowed origins are not its business.
+          return HttpServerResponse.text("Forbidden WebSocket origin.", { status: 403 });
+        }
+
         const session = yield* serverAuth.authenticateWebSocketUpgrade(request).pipe(
           Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
             failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),

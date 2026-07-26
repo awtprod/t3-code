@@ -829,10 +829,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             ]);
             yield* PubSub.publish(changes, refreshedProvider);
 
+            // The snapshot is written to the real filesystem while this loop
+            // advances a TestClock, so what bounds the wait is fiber scheduling,
+            // not simulated time — under a loaded parallel run the write can
+            // need far more than 50 turns to land. The budget is generous
+            // rather than tight because it only decides how long a *broken*
+            // implementation takes to fail: a write that never happens still
+            // fails the assertion below.
             let cachedProvider = yield* readProviderStatusCache(filePath);
             for (
               let attempt = 0;
-              attempt < 50 && cachedProvider?.checkedAt !== refreshedProvider.checkedAt;
+              attempt < 2_000 && cachedProvider?.checkedAt !== refreshedProvider.checkedAt;
               attempt += 1
             ) {
               yield* TestClock.adjust("10 millis");

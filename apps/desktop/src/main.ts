@@ -197,4 +197,10 @@ const desktopRuntimeLayer = desktopClerkLayer.pipe(
   ),
 );
 
+// Must run before Electron reaches `ready`, which building the runtime below
+// will trigger — so it goes here at module scope rather than inside a layer.
+// Without it the renderer's custom scheme gets an opaque origin and the server
+// refuses its WebSocket upgrade. See registerDesktopSchemesAsPrivileged.
+ElectronProtocol.registerDesktopSchemesAsPrivileged();
+
 DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer), NodeRuntime.runMain);

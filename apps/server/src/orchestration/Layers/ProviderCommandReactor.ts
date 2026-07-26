@@ -510,6 +510,7 @@ const make = Effect.gen(function* () {
     }) =>
       providerService.startSession(threadId, {
         threadId,
+        projectId: thread.projectId,
         ...(preferredProvider ? { provider: preferredProvider } : {}),
         providerInstanceId: desiredInstanceId,
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
@@ -957,15 +958,12 @@ const make = Effect.gen(function* () {
             // there is nothing left to try, and taking down the turn-start fiber
             // over a failed log entry would help no one.
             Effect.catchCause((appendCause) =>
-              Effect.logError(
-                "provider command reactor failed to report an undeliverable stop",
-                {
-                  threadId: event.payload.threadId,
-                  messageId: event.payload.messageId,
-                  turnId: turn.turnId,
-                  cause: Cause.pretty(appendCause),
-                },
-              ),
+              Effect.logError("provider command reactor failed to report an undeliverable stop", {
+                threadId: event.payload.threadId,
+                messageId: event.payload.messageId,
+                turnId: turn.turnId,
+                cause: Cause.pretty(appendCause),
+              }),
             ),
           ),
         ),

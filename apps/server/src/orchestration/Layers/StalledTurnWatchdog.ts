@@ -21,8 +21,22 @@ import {
 // bumps — it tracks the provider stream precisely and freezes the instant the
 // stream goes silent (unlike `provider_session_runtime.last_seen_at`, which only
 // bumps on session-lifecycle changes and reads stale during a healthy long turn).
-const DEFAULT_STALL_THRESHOLD_MS = 20 * 60 * 1000;
-const DEFAULT_SWEEP_INTERVAL_MS = 2 * 60 * 1000;
+//
+// The watchdog is the *only* recovery path for a turn that stalls while its
+// provider session stays alive: a session that exits emits `session.exited`,
+// which settles the turn within ~1s, but a live session that simply stops
+// emitting `turn.completed` produces no signal at all. Measured over 4 days of
+// local provider logs, 8 such turns hung behind a live codex session — one for
+// 20m11s, ending only when this sweep fired.
+//
+// Threshold derived from the same logs rather than guessed. Across 60 healthy
+// completed turns, the longest silence *within* a turn was: p50 12.4s, p90
+// 52.4s, p95 68.0s, and a single 430s (7.2m) outlier — the next longest was
+// 75.9s. 10 minutes leaves ~40% headroom over the worst legitimate silence
+// observed while halving the window a user spends watching a false spinner.
+// Worst case to recovery is threshold + sweep interval.
+const DEFAULT_STALL_THRESHOLD_MS = 10 * 60 * 1000;
+const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export interface StalledTurnWatchdogLiveOptions {
   readonly stallThresholdMs?: number;

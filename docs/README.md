@@ -1,6 +1,7 @@
 # Documentation
 
 - [Getting started](./getting-started/quick-start.md)
+- [Dev mode vs serve mode](./getting-started/dev-vs-serve.md)
 - [Architecture](./architecture/overview.md)
 - [T3 Connect](./cloud/t3-connect-clerk.md)
 - [Integrations](./integrations/source-control-providers.md)

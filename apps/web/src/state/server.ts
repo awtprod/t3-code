@@ -1,6 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   type EditorId,
+  type EnvironmentId,
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
@@ -15,6 +16,7 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 import { environmentSession } from "./session";
 
@@ -25,6 +27,15 @@ export const environmentServerConfigsAtom = createEnvironmentServerConfigsAtom({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   serverConfigValueAtom: serverEnvironment.configValueAtom,
 });
+
+/**
+ * Read an environment's server config outside React, mirroring
+ * `readPreparedConnection`. Preview URL resolution runs from imperative call
+ * sites (navigation handlers, the server picker) that have no hook context.
+ */
+export function readServerConfig(environmentId: EnvironmentId): ServerConfig | null {
+  return appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId));
+}
 
 interface PrimaryServerState {
   readonly config: ServerConfig | null;

@@ -152,9 +152,20 @@ export function runStream<TTag extends EnvironmentStreamCommandRpcTag>(
   );
 }
 
+/**
+ * Subscribe to an RPC stream, re-establishing it across session changes.
+ *
+ * `input` may be a thunk. A plain value is captured once, which is wrong for
+ * any resumable subscription: the stream is torn down and re-issued on every
+ * reconnect, so a fixed `afterSequence` replays from the *original* cursor
+ * every time, and the replay grows without bound as the session ages. Passing
+ * a thunk lets the caller re-read its live cursor at each attempt, so each
+ * reconnect replays only what it actually missed. The thunk is evaluated
+ * inside `Stream.suspend`, i.e. once per subscribe attempt.
+ */
 export function subscribe<TTag extends EnvironmentSubscriptionRpcTag>(
   tag: TTag,
-  input: EnvironmentRpcInput<TTag>,
+  input: EnvironmentRpcInput<TTag> | (() => EnvironmentRpcInput<TTag>),
   options?: {
     readonly onExpectedFailure?: (
       cause: Cause.Cause<EnvironmentRpcStreamFailure<TTag>>,
@@ -185,7 +196,7 @@ export function subscribe<TTag extends EnvironmentSubscriptionRpcTag>(
                   EnvironmentRpcStreamFailure<TTag>
                 > =>
                   Stream.suspend(() =>
-                    method(input).pipe(
+                    method(typeof input === "function" ? input() : input).pipe(
                       Stream.catchCause((cause) => {
                         const hasOnlyExpectedFailures =
                           cause.reasons.length > 0 &&
@@ -198,13 +209,13 @@ export function subscribe<TTag extends EnvironmentSubscriptionRpcTag>(
                         if (isTransportFailure) {
                           return Stream.fromEffect(
                             Effect.logWarning(
-                              "Durable RPC subscription lost its transport; waiting for the next session.",
+                              "Durable RPC subscription lost its transport; requesting a new session.",
                               {
                                 cause: Cause.pretty(cause),
                                 method: tag,
                                 environmentId: supervisor.target.environmentId,
                               },
-                            ),
+                            ).pipe(Effect.andThen(supervisor.retryNow)),
                           ).pipe(Stream.drain);
                         }
                         if (hasOnlyExpectedFailures && options?.onExpectedFailure !== undefined) {

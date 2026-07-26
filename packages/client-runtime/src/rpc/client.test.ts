@@ -218,6 +218,14 @@ describe("environment RPC", () => {
       for (let attempt = 0; attempt < 100 && subscriptions.length < 1; attempt += 1) {
         yield* Effect.yieldNow;
       }
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(retryCount)) >= 1) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+      expect(yield* Ref.get(retryCount)).toBe(1);
+
       yield* SubscriptionRef.set(activeSession, Option.none());
       yield* SubscriptionRef.set(activeSession, Option.some(session(secondClient)));
 
@@ -227,7 +235,7 @@ describe("environment RPC", () => {
       yield* Fiber.interrupt(subscriptionFiber);
 
       expect(subscriptions).toEqual(["first", "second"]);
-      expect(yield* Ref.get(retryCount)).toBe(0);
+      expect(yield* Ref.get(retryCount)).toBe(1);
     }),
   );
 
