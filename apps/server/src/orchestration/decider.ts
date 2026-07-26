@@ -654,6 +654,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.session-stop-requested",
         payload: {
           threadId: command.threadId,
+          // Carried through rather than defaulted to this event's own sequence,
+          // because the two coincide only for a stop the user pressed. An
+          // escalated stop must keep the narrower cutoff it was handed; see
+          // `ThreadSessionStopCommand.canceledThroughSequence`.
+          ...(command.canceledThroughSequence !== undefined
+            ? { canceledThroughSequence: command.canceledThroughSequence }
+            : {}),
           createdAt: command.createdAt,
         },
       };

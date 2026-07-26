@@ -3,6 +3,7 @@ import {
   CommandId,
   EventId,
   type ModelSelection,
+  NonNegativeInt,
   type OrchestrationEvent,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
@@ -1114,6 +1115,19 @@ const make = Effect.gen(function* () {
   const interruptTurnOrEscalateToSessionStop = (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId | null;
+    /**
+     * Sequence of the cancellation this escalation is widening.
+     *
+     * The escalation happens strictly LATER than the stop that prompted it — a
+     * retried interrupt has to fail first — so the escalated stop lands at a
+     * higher sequence than anything the user submitted while that retry was in
+     * flight. Handing the original cutoff down keeps the widening to its
+     * intended axis: from one turn to the whole session, not from one moment to
+     * a later one. Interrupt semantics deliberately let requests above the
+     * interrupt's sequence through, and an internally-delayed escalation must
+     * not quietly revoke that.
+     */
+    readonly canceledThroughSequence: number;
     readonly createdAt: string;
     readonly escalationTag: string;
     readonly logContext: Record<string, unknown>;
@@ -1146,6 +1160,7 @@ const make = Effect.gen(function* () {
               type: "thread.session.stop",
               commandId,
               threadId: input.threadId,
+              canceledThroughSequence: NonNegativeInt.make(input.canceledThroughSequence),
               createdAt: input.createdAt,
             }),
           ),
@@ -1247,6 +1262,15 @@ const make = Effect.gen(function* () {
               interruptTurnOrEscalateToSessionStop({
                 threadId: event.payload.threadId,
                 turnId: turn.turnId,
+                // This request's own sequence, which is the weakest cutoff that
+                // still covers what got us here: reaching this branch means the
+                // claim came back `canceled`, i.e. a barrier at or above this
+                // sequence already exists. Re-raising to it is therefore a
+                // no-op against a monotonic barrier, and it deliberately does
+                // NOT re-declare the real stop's cutoff, which is unknown here
+                // and may be higher. Anything the genuine stop covers stays
+                // covered by that stop; the escalation adds nothing of its own.
+                canceledThroughSequence: event.sequence,
                 createdAt: event.payload.createdAt,
                 escalationTag: "fence-escalated-session-stop",
                 logContext: { messageId: event.payload.messageId },
@@ -1616,6 +1640,11 @@ const make = Effect.gen(function* () {
     yield* interruptTurnOrEscalateToSessionStop({
       threadId: event.payload.threadId,
       turnId: null,
+      // The interrupt's OWN sequence, which is the cutoff the user chose and the
+      // one already raised above. The escalation is only allowed to widen what
+      // is stopped, never when: a message submitted during the retry delay sits
+      // above this line and is work the user asked for AFTER pressing stop.
+      canceledThroughSequence: event.sequence,
       createdAt: event.payload.createdAt,
       escalationTag: "interrupt-escalated-session-stop",
       logContext: {},
@@ -1756,9 +1785,21 @@ const make = Effect.gen(function* () {
     // session is already gone is exactly the case where an undriven turn-start
     // is still queued, so returning first would skip the barrier for the only
     // requests it can still stop.
+    //
+    // The cutoff is the payload's when it declares one, and this event's own
+    // sequence otherwise. A user-pressed stop declares none and cancels
+    // everything queued as of its position, which is what its sequence means.
+    // An ESCALATED stop declares the sequence of the interrupt it is widening,
+    // because it is dispatched only after that interrupt's retries ran out —
+    // strictly later than the failure it reports and later, therefore, than
+    // anything the user submitted in that window. Raising at this event's
+    // sequence would date the stop to when the reactor gave up rather than to
+    // what the user stopped, silently canceling a replacement prompt they typed
+    // after pressing stop. Lower is the safe direction here regardless: the
+    // barrier is monotonic, so a raise below an existing one changes nothing.
     const barrierRaised = yield* raiseCancelBarrier({
       threadId: event.payload.threadId,
-      canceledThroughSequence: event.sequence,
+      canceledThroughSequence: event.payload.canceledThroughSequence ?? event.sequence,
       updatedAt: event.payload.createdAt,
       failureKind: "provider.session.stop.failed",
       failureSummary: "Provider session stop failed",

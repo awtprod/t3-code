@@ -201,6 +201,22 @@ const makeEventStore = Effect.gen(function* () {
   // harmlessly, it revives the stopped session to deliver a prompt the user had
   // already abandoned.
   //
+  // A stop counts against this request only if the stop's own CUTOFF reaches it.
+  // For every stop the user pressed that cutoff is the stop's sequence, which is
+  // above `afterSequence` by the WHERE clause below — so those all still count,
+  // exactly as before. `thread.session-stop-requested` is the one event type
+  // that can declare a narrower cutoff in its payload, and it does so in exactly
+  // one situation: when the reactor escalated an interrupt whose delivery
+  // failed. That escalation is dispatched only after the interrupt's retries ran
+  // out, so it necessarily lands at a higher sequence than a message the user
+  // typed during the retry delay — and counting it at its own sequence would
+  // suppress that message, which the user submitted deliberately AFTER pressing
+  // stop and which the original interrupt's cutoff was careful to let through.
+  //
+  // `>=` rather than `>` matches the durable barrier's own test
+  // (`canceled_through_sequence >= request_sequence`), so the event-log fallback
+  // and the claim table cannot disagree about which requests a stop covers.
+  //
   // All of it comes from the append-only event log rather than the single-slot
   // pending projection row, which a turn-start for a different message evicts.
   // `stream_id` + `sequence` is indexed (`idx_orch_events_stream_sequence`), so
@@ -224,6 +240,10 @@ const makeEventStore = Effect.gen(function* () {
                 'thread.turn-interrupt-requested',
                 'thread.session-stop-requested'
               )
+              AND COALESCE(
+                json_extract(payload_json, '$.canceledThroughSequence'),
+                sequence
+              ) >= ${request.afterSequence}
               THEN 1 ELSE 0
             END
           ), 0) AS "interruptCount"

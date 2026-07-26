@@ -1967,6 +1967,148 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it("escalates without canceling a message the user sent while the interrupt was retrying", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-late-interrupt"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "the turn the user will stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    // The escalation ladder runs on the reactor's clock, not the user's: the
+    // interrupt fails, waits, fails again, and only then dispatches a session
+    // stop. Every one of those steps happens AFTER the sequence the user's stop
+    // actually occupies, so a message typed into that window sits between the
+    // two — above the interrupt, below the escalated stop.
+    //
+    // Dispatched from inside the failing interrupt rather than racing a timer,
+    // because the ordering is the whole subject of the test: doing it here
+    // pins the replacement between the interrupt that is mid-retry and the
+    // escalation that has not been decided on yet.
+    let dispatchedReplacement = false;
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.promise(async () => {
+        if (dispatchedReplacement) {
+          return;
+        }
+        dispatchedReplacement = true;
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-during-interrupt-retry"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-2"),
+            role: "user",
+            text: "actually, do this instead",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.flatMap(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "session/interrupt",
+              detail: "provider socket closed",
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-with-replacement"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    // The stop is the LAST thing enqueued on this thread — it is dispatched
+    // after the replacement — so a worker that has driven it has driven the
+    // replacement too. Waiting on the stop rather than on the send is what
+    // makes a regression fail fast and loudly instead of timing out.
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await harness.drain();
+
+    const events = await harness.readEventsWithPayloads();
+    const interruptSequence = events.find(
+      (event) => event.type === "thread.turn-interrupt-requested",
+    )?.sequence;
+    const replacementSequence = events.find(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === "user-message-2",
+    )?.sequence;
+    const stop = events.find((event) => event.type === "thread.session-stop-requested");
+    expect(interruptSequence).toBeDefined();
+    expect(replacementSequence).toBeDefined();
+    expect(stop).toBeDefined();
+
+    // The interleaving the fix exists for. Asserted rather than assumed,
+    // because if the replacement did not land inside the retry window the rest
+    // of this test proves nothing about the escalation's cutoff.
+    expect(replacementSequence!).toBeGreaterThan(interruptSequence!);
+    expect(stop!.sequence).toBeGreaterThan(replacementSequence!);
+
+    // The escalation is dated to what the user stopped, not to when the reactor
+    // gave up trying. Carrying the interrupt's own sequence is what keeps the
+    // widening on its intended axis — one turn to the whole session — instead
+    // of also widening the moment it applies to.
+    expect((stop!.payload as { canceledThroughSequence?: number }).canceledThroughSequence).toBe(
+      interruptSequence,
+    );
+
+    // The point of all of it: a prompt submitted after the stop is still the
+    // user's most recent instruction, and it reaches the provider. Before this
+    // fix the event-log supersession guard counted the escalated stop as an
+    // interrupt landing after the request, so it was dropped silently, leaving
+    // a stranded pending placeholder and a user watching a thread that ignored
+    // what they just typed.
+    expect(
+      harness.sendTurn.mock.calls.filter(
+        (call) => (call[0] as { input?: string }).input === "actually, do this instead",
+      ),
+    ).toHaveLength(1);
+
+    // And the durable barrier agrees, which the send above cannot show on its
+    // own. The two gates are independent and fail on different timescales: the
+    // event-log guard decides this process's send, while the barrier is a row
+    // that outlives the process and is re-read by any later replay of this same
+    // request. A barrier raised at the escalation's own sequence would sit above
+    // the replacement, so a crash here would resurrect as a refusal — this
+    // request re-reads as `canceled` and is never re-driven — even though the
+    // in-memory run had already delivered it.
+    //
+    // Asked as the request itself, at its own sequence, because that is
+    // verbatim the question a replay asks: `acquire` is idempotent for a repeat
+    // of the winner, so the only thing that can turn this answer into
+    // `canceled` is a barrier standing above it.
+    const replayed = (await harness.acquireSendClaim({
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-2"),
+      requestSequence: replacementSequence!,
+      claimedAt: now,
+    })) as { _tag: string };
+    expect(replayed._tag).toBe("acquired");
+  });
+
   it("starts a fresh session when only projected session state exists", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

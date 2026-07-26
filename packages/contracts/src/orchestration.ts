@@ -702,6 +702,23 @@ const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
   threadId: ThreadId,
+  /**
+   * Highest request sequence this stop is allowed to cancel.
+   *
+   * Absent for a stop the user pressed, which cancels everything queued at the
+   * moment it is accepted and therefore needs no cutoff beyond its own position
+   * in the log. Present only when the stop is an ESCALATION of an earlier,
+   * narrower cancellation — an interrupt whose delivery failed and had to be
+   * widened to the session — in which case it carries that interrupt's sequence
+   * so the widening does not also swallow work the user submitted in between.
+   *
+   * Without it the escalation dates itself to when it gave up rather than to
+   * what the user actually stopped: a message typed during the interrupt's
+   * retry delay sits at a LOWER sequence than the escalated stop and is
+   * retroactively canceled by it, silently, having been submitted after the
+   * user's stop and therefore explicitly wanted.
+   */
+  canceledThroughSequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
 });
 
@@ -1041,6 +1058,8 @@ export const ThreadRevertedPayload = Schema.Struct({
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  /** See `ThreadSessionStopCommand.canceledThroughSequence`. */
+  canceledThroughSequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
 });
 
