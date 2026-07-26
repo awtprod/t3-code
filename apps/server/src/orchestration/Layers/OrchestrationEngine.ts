@@ -32,6 +32,7 @@ import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import {
+  COMMAND_PRODUCED_NO_EVENTS_DETAIL,
   OrchestrationCommandInvariantError,
   OrchestrationCommandPreviouslyRejectedError,
   type OrchestrationDispatchError,
@@ -183,7 +184,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               if (lastSavedEvent === null) {
                 return yield* new OrchestrationCommandInvariantError({
                   commandType: envelope.command.type,
-                  detail: "Command produced no events.",
+                  detail: COMMAND_PRODUCED_NO_EVENTS_DETAIL,
                 });
               }
 

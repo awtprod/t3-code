@@ -307,10 +307,27 @@ const makeEventStore = Effect.gen(function* () {
   //    request it answers via `turnRequestSequence`. A never-adopted request has
   //    no adoption sequence, `MIN(...)` yields NULL, the comparison is NULL rather
   //    than true, and it is correctly kept — which is the common case here, since
-  //    a request the teardown destroyed is exactly one that never settled. The
-  //    settling write must land BELOW the stop: the stop's own teardown clears
-  //    `activeTurnId` for every candidate at once, so counting it would empty the
-  //    list on every call and silently restore the defect this read exists to fix.
+  //    a request the teardown destroyed is exactly one that never settled.
+  //
+  //    Settlement is recognized by the session STATUS the write carries, not by
+  //    where it sits relative to the stop. The stop's own teardown must not count
+  //    as settlement — it clears `activeTurnId` for every candidate at once, so
+  //    counting it would empty the list on every call and silently restore the
+  //    very defect this read exists to fix — and it is identifiable directly: the
+  //    teardown hardcodes `status: 'stopped'`, as does a provider `session.exited`.
+  //    Every way a turn reaches its own end writes something else: 'ready' on a
+  //    normal completion, 'error' on a failed one or a watchdog auto-fail,
+  //    'interrupted' when the runtime reports that state.
+  //
+  //    Excluding by sequence instead looks equivalent but is not: a genuine
+  //    `turn.completed` can be ingested after the stop event commits and before
+  //    this read runs, and a sequence bound would ignore that settlement and
+  //    re-drive work the user already received. Matching on status settles both
+  //    orderings correctly. The test is written as "not 'stopped'" rather than an
+  //    allowlist of terminal statuses so that the failure direction stays safe: a
+  //    status added later is treated as settlement (at worst a prompt the user
+  //    must re-send by hand, which the re-drive failure path already reports)
+  //    rather than as a live turn, which would silently re-run finished work.
   //
   // Same index as the claim read (`idx_orch_events_stream_sequence`); the outer
   // range is bounded on both sides and every sub-select is scoped to the same
@@ -353,7 +370,7 @@ const makeEventStore = Effect.gen(function* () {
               AND settle_event.stream_id = turn_start.stream_id
               AND settle_event.event_type = 'thread.session-set'
               AND json_extract(settle_event.payload_json, '$.session.activeTurnId') IS NULL
-              AND settle_event.sequence < ${request.stopSequence}
+              AND json_extract(settle_event.payload_json, '$.session.status') <> 'stopped'
               AND settle_event.sequence > (
                 SELECT MIN(adopt_event.sequence)
                 FROM orchestration_events AS adopt_event

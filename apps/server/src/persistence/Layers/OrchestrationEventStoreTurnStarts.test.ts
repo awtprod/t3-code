@@ -102,10 +102,18 @@ const appendStop = (
     },
   } as never);
 
+/**
+ * `status` is not decoration here. The read distinguishes the stop's own
+ * teardown from a turn reaching its own end by that field alone — teardown
+ * writes "stopped", a completion writes "ready"/"error"/"interrupted" — so a
+ * fixture that writes the wrong one tests the opposite of what it claims.
+ * Callers must therefore say which of the two they are building.
+ */
 const appendSessionSet = (
   store: typeof OrchestrationEventStore.Service,
   input: {
     readonly activeTurnId: string | null;
+    readonly status?: "ready" | "error" | "interrupted" | "stopped";
     readonly turnRequestSequence?: number;
   },
 ) =>
@@ -123,7 +131,7 @@ const appendSessionSet = (
       threadId: THREAD_ID,
       session: {
         threadId: THREAD_ID,
-        status: input.activeTurnId === null ? "ready" : "running",
+        status: input.status ?? (input.activeTurnId === null ? "ready" : "running"),
         providerName: "codex",
         runtimeMode: "approval-required",
         activeTurnId: input.activeTurnId === null ? null : TurnId.make(input.activeTurnId),
@@ -241,8 +249,10 @@ layer("OrchestrationEventStore.listThreadTurnStartsAboveCutoff", (it) => {
       // `processSessionStopRequested` writes the stopped session BEFORE calling
       // this read. It clears `activeTurnId` for whatever was running, so a
       // settlement check that counted it would exclude every candidate on every
-      // call and quietly turn this read into a no-op.
-      yield* appendSessionSet(store, { activeTurnId: null });
+      // call and quietly turn this read into a no-op. `status: "stopped"` is
+      // what makes it the teardown and not a completion — the reactor hardcodes
+      // that status at the one site that performs this write.
+      yield* appendSessionSet(store, { activeTurnId: null, status: "stopped" });
 
       const result = yield* store.listThreadTurnStartsAboveCutoff({
         threadId: THREAD_ID,
@@ -254,6 +264,68 @@ layer("OrchestrationEventStore.listThreadTurnStartsAboveCutoff", (it) => {
         result.map((entry) => entry.messageId),
         ["msg-b"],
       );
+    }),
+  );
+
+  it.effect("excludes a spared request that completed after the stop was appended", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore;
+
+      // The ordering that a sequence bound gets wrong. The stop event commits,
+      // and the provider's `turn.completed` for an already-running spared turn
+      // is ingested in the window BEFORE the stop handler performs this read.
+      // That completion is a genuine settlement — the user has the answer — but
+      // it sits above the stop, so a guard that only looked below would miss it
+      // and re-drive the prompt a second time.
+      const interrupted = yield* appendTurnStart(store, { messageId: "msg-a" });
+      const replacement = yield* appendTurnStart(store, { messageId: "msg-b" });
+      yield* appendSessionSet(store, {
+        activeTurnId: "turn-b",
+        turnRequestSequence: replacement.sequence,
+      });
+      const escalation = yield* appendStop(store, {
+        canceledThroughSequence: interrupted.sequence,
+      });
+      // Above the stop, and "ready" rather than "stopped": ingestion's mapping
+      // for a `turn.completed` that did not fail.
+      yield* appendSessionSet(store, { activeTurnId: null, status: "ready" });
+
+      const result = yield* store.listThreadTurnStartsAboveCutoff({
+        threadId: THREAD_ID,
+        canceledThroughSequence: NonNegativeInt.make(interrupted.sequence),
+        stopSequence: NonNegativeInt.make(escalation.sequence),
+      });
+
+      assert.deepEqual(result, []);
+    }),
+  );
+
+  it.effect("excludes a spared request whose turn was interrupted after the stop", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore;
+
+      // Same ordering, the other terminal status a live runtime can report.
+      // Guarding by an allowlist of "ready"/"error" would re-drive this one:
+      // `session.state.changed` maps runtime state "interrupted" straight
+      // through, so settlement is anything that is NOT the stop's teardown.
+      const interrupted = yield* appendTurnStart(store, { messageId: "msg-a" });
+      const replacement = yield* appendTurnStart(store, { messageId: "msg-b" });
+      yield* appendSessionSet(store, {
+        activeTurnId: "turn-b",
+        turnRequestSequence: replacement.sequence,
+      });
+      const escalation = yield* appendStop(store, {
+        canceledThroughSequence: interrupted.sequence,
+      });
+      yield* appendSessionSet(store, { activeTurnId: null, status: "interrupted" });
+
+      const result = yield* store.listThreadTurnStartsAboveCutoff({
+        threadId: THREAD_ID,
+        canceledThroughSequence: NonNegativeInt.make(interrupted.sequence),
+        stopSequence: NonNegativeInt.make(escalation.sequence),
+      });
+
+      assert.deepEqual(result, []);
     }),
   );
 

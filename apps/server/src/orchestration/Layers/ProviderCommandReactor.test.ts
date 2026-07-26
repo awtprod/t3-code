@@ -45,6 +45,10 @@ import {
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import { TextGeneration, type TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
+import {
+  COMMAND_PRODUCED_NO_EVENTS_DETAIL,
+  OrchestrationCommandInvariantError,
+} from "../Errors.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
@@ -2903,6 +2907,234 @@ describe("ProviderCommandReactor", () => {
           event.type === "thread.turn-start-requested" &&
           (event.payload as { messageId?: string }).messageId === "user-message-2" &&
           event.sequence > stop!.sequence,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("reports a re-drive that failed an invariant it did not merely no-op on", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-invariant-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "the turn the user will stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    // `OrchestrationCommandInvariantError` is raised for two very different
+    // things. One is benign — the decider produced no events because the message
+    // is gone — and must stay a quiet no-op. The other is a genuine failure that
+    // happens to share the tag: the engine wraps a failed event-id generation in
+    // it, and the decider raises it for a source plan that no longer resolves.
+    // Catching the tag wholesale silently drops the prompt on those, which is
+    // exactly the lost-prompt behaviour the re-drive exists to prevent, so this
+    // failure carries the genuine shape: a different `detail`, and a `cause`,
+    // neither of which the empty-decision invariant ever has.
+    const engineDispatch = harness.engine.dispatch.bind(harness.engine);
+    const dispatchSpy = vi
+      .spyOn(harness.engine, "dispatch")
+      .mockImplementation((command: Parameters<typeof harness.engine.dispatch>[0]) =>
+        command.type === "thread.turn.resume" &&
+        command.commandId.includes("escalated-stop-redrive")
+          ? Effect.fail(
+              new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: "Failed to generate an event identifier.",
+                cause: new Error("crypto unavailable"),
+              }) as never,
+            )
+          : engineDispatch(command),
+      );
+
+    let dispatchedReplacement = false;
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.promise(async () => {
+        if (dispatchedReplacement) {
+          return;
+        }
+        dispatchedReplacement = true;
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-spared-invariant"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-2"),
+            role: "user",
+            text: "actually, do this instead",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.flatMap(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "session/interrupt",
+              detail: "provider socket closed",
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-before-invariant-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some(
+            (activity) =>
+              activity.kind === "provider.session.stop.failed" &&
+              activity.summary === "A message sent while stopping was not recovered",
+          ) === true
+      );
+    });
+    await harness.drain();
+    dispatchSpy.mockRestore();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const activity = thread?.activities.find(
+      (entry) =>
+        entry.kind === "provider.session.stop.failed" &&
+        entry.summary === "A message sent while stopping was not recovered",
+    );
+    expect(activity?.tone).toBe("error");
+
+    // And the prompt really is gone, so the activity is not describing a loss
+    // that something else quietly repaired.
+    const events = await harness.readEvents();
+    const stop = events.find((event) => event.type === "thread.session-stop-requested");
+    expect(stop).toBeDefined();
+    const eventsWithPayloads = await harness.readEventsWithPayloads();
+    expect(
+      eventsWithPayloads.filter(
+        (event) =>
+          event.type === "thread.turn-start-requested" &&
+          (event.payload as { messageId?: string }).messageId === "user-message-2" &&
+          event.sequence > stop!.sequence,
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("stays quiet when a re-drive finds nothing left to resume", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-noop-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "the turn the user will stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    // The other side of the same discrimination, and the reason it cannot just
+    // report everything: the empty decision is the NORMAL outcome when the
+    // message is gone. Reporting it would put a red "was not recovered" activity
+    // on a thread where nothing was lost, every time. Same tag as the test
+    // above, benign detail, no cause.
+    const engineDispatch = harness.engine.dispatch.bind(harness.engine);
+    const dispatchSpy = vi
+      .spyOn(harness.engine, "dispatch")
+      .mockImplementation((command: Parameters<typeof harness.engine.dispatch>[0]) =>
+        command.type === "thread.turn.resume" &&
+        command.commandId.includes("escalated-stop-redrive")
+          ? Effect.fail(
+              new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: COMMAND_PRODUCED_NO_EVENTS_DETAIL,
+              }) as never,
+            )
+          : engineDispatch(command),
+      );
+
+    let dispatchedReplacement = false;
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.promise(async () => {
+        if (dispatchedReplacement) {
+          return;
+        }
+        dispatchedReplacement = true;
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-spared-noop"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-2"),
+            role: "user",
+            text: "actually, do this instead",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.flatMap(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "session/interrupt",
+              detail: "provider socket closed",
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-before-noop-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    // The stop still completes, which is what tells us the re-drive was reached
+    // and returned rather than that the assertion below raced ahead of it.
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await harness.drain();
+    dispatchSpy.mockRestore();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(
+      thread?.activities.filter(
+        (entry) =>
+          entry.kind === "provider.session.stop.failed" &&
+          entry.summary === "A message sent while stopping was not recovered",
       ),
     ).toHaveLength(0);
   });

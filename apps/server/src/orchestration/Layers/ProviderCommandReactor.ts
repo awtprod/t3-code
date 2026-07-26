@@ -33,6 +33,7 @@ import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
+import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
@@ -1994,12 +1995,24 @@ const make = Effect.gen(function* () {
             // The decider returns no events when the message is gone or is not a
             // user message, which surfaces as this invariant error. That is the
             // correct outcome, not a failure: there is nothing to resume.
-            Effect.catchTag("OrchestrationCommandInvariantError", (error) =>
-              Effect.logDebug("provider-command-reactor.escalated-stop-redrive.noop", {
-                threadId: event.payload.threadId,
-                messageId: entry.messageId,
-                reason: error.message,
-              }),
+            //
+            // Only THAT invariant, though. The tag is shared: the engine raises
+            // it for genuine failures too — a failed event-id generation, a
+            // source plan that no longer resolves — and swallowing those would
+            // put the prompt back on the exact silent-loss path this re-drive
+            // exists to close, with a debug log as the only trace. So the empty
+            // decision is matched by its own detail and everything else falls
+            // through to the report below.
+            Effect.catchIf(
+              (error) =>
+                error._tag === "OrchestrationCommandInvariantError" &&
+                error.detail === COMMAND_PRODUCED_NO_EVENTS_DETAIL,
+              (error) =>
+                Effect.logDebug("provider-command-reactor.escalated-stop-redrive.noop", {
+                  threadId: event.payload.threadId,
+                  messageId: entry.messageId,
+                  reason: error.message,
+                }),
             ),
             // Same reasoning as the read above: the stop stands either way, but
             // the dropped prompt is reported on the thread rather than only in
