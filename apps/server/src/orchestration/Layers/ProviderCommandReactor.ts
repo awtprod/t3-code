@@ -634,6 +634,15 @@ const make = Effect.gen(function* () {
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
     readonly createdAt: string;
+    /**
+     * Sequence of the `thread.turn-start-requested` this send answers.
+     *
+     * Rides through to the adapter so the `turn.started` it produces can name
+     * the placeholder it belongs to. Optional because this builder also serves
+     * paths with no requesting event (resume, adapter-internal starts), which
+     * legitimately fall back to oldest-first adoption.
+     */
+    readonly turnRequestSequence?: number;
   }) {
     const thread = yield* resolveThread(input.threadId);
     if (!thread) {
@@ -685,6 +694,9 @@ const make = Effect.gen(function* () {
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+      ...(input.turnRequestSequence !== undefined
+        ? { turnRequestSequence: input.turnRequestSequence }
+        : {}),
     };
   });
 
@@ -787,6 +799,62 @@ const make = Effect.gen(function* () {
       );
     },
   );
+
+  /**
+   * Re-check the claim immediately AFTER the send and interrupt the provider if
+   * the stop landed during it.
+   *
+   * A durable claim can make "may I send?" atomic; it cannot make the send
+   * itself atomic, because `sendTurn` is an RPC to another process and no
+   * database write spans it. So a stop committed between the acquire returning
+   * true and the provider receiving the prompt passes both — the claim was
+   * genuinely held when it was read, and the turn is genuinely running by the
+   * time the interrupt path looks for a session to stop.
+   *
+   * That residual window is closed by fencing rather than by locking: send
+   * first, then ask again, and if the answer changed, stop what we just started.
+   * The user sees a turn that begins and is immediately interrupted instead of
+   * one that ignores their stop — recoverable, where an unstoppable turn is not.
+   *
+   * `interruptTurn` is safe to call here even if the interrupt path also calls
+   * it: it targets the session, is idempotent for an already-stopped turn, and
+   * arriving twice is a no-op, whereas arriving zero times is the defect.
+   */
+  const fenceSendAgainstLateStop = (
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+  ) =>
+    providerTurnSendClaimRepository
+      .acquire({
+        threadId: event.payload.threadId,
+        messageId: event.payload.messageId,
+        requestSequence: event.sequence,
+        claimedAt: event.payload.createdAt,
+      })
+      .pipe(
+        Effect.flatMap((stillHeld) =>
+          stillHeld
+            ? Effect.void
+            : Effect.logDebug("provider-command-reactor.turn-start.stopped-during-send", {
+                threadId: event.payload.threadId,
+                messageId: event.payload.messageId,
+                requestSequence: event.sequence,
+              }).pipe(
+                Effect.flatMap(() =>
+                  providerService.interruptTurn({ threadId: event.payload.threadId }),
+                ),
+              ),
+        ),
+        // A failed fence must not fail the turn that was already sent — the
+        // prompt is with the provider either way, and reporting a start failure
+        // for a turn that started would be a worse lie than the missed stop.
+        Effect.catchCause((cause) =>
+          Effect.logWarning("provider command reactor failed to fence send against late stop", {
+            threadId: event.payload.threadId,
+            messageId: event.payload.messageId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      );
 
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
@@ -934,6 +1002,7 @@ const make = Effect.gen(function* () {
         : {}),
       interactionMode: event.payload.interactionMode,
       createdAt: event.payload.createdAt,
+      turnRequestSequence: event.sequence,
     }).pipe(
       Effect.map(Option.some),
       Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
@@ -979,10 +1048,13 @@ const make = Effect.gen(function* () {
                 supersededBySameMessage: finalTurnStartClaim.supersededBySameMessage,
                 interruptedAfter: finalTurnStartClaim.interruptedAfter,
               })
-            : // Atomic point of no return. The acquire tests "already claimed by
-              // another request for this message" and "canceled by a stop at or
-              // above my sequence" inside one statement, so nothing can interleave
-              // between the decision and the claim. Only the holder sends.
+            : // The acquire tests "already claimed by another request for this
+              // message" and "canceled by a stop at or above my sequence" in one
+              // statement, so nothing can interleave between the decision and the
+              // claim, and only the holder sends. It does NOT make the send
+              // itself atomic — no database write spans an RPC to another
+              // process — so a stop landing during `sendTurn` is caught after the
+              // fact by the fence below rather than prevented here.
               providerTurnSendClaimRepository
                 .acquire({
                   threadId: event.payload.threadId,
@@ -993,7 +1065,9 @@ const make = Effect.gen(function* () {
                 .pipe(
                   Effect.flatMap((claimed) =>
                     claimed
-                      ? providerService.sendTurn(sendTurnRequest.value)
+                      ? providerService
+                          .sendTurn(sendTurnRequest.value)
+                          .pipe(Effect.flatMap(() => fenceSendAgainstLateStop(event)))
                       : Effect.logDebug(
                           "provider-command-reactor.turn-start.send-claim-not-acquired",
                           {
@@ -1018,9 +1092,15 @@ const make = Effect.gen(function* () {
     // This is the half of the send-claim that stops undriven work. A turn-start
     // being processed concurrently acquires its claim in a statement that tests
     // this barrier, so SQLite's write serialization decides the outcome: barrier
-    // first and the send never happens, claim first and the turn is genuinely
-    // running by the time we get here — which the `interruptTurn` call below then
-    // handles. There is no third case, which is the point.
+    // first and the send never happens; claim first and the turn is on its way
+    // to the provider, which the `interruptTurn` call below handles.
+    //
+    // Those two are not exhaustive, and pretending otherwise was the earlier
+    // mistake here. The barrier can also land while `sendTurn` is in flight —
+    // after the claim was read, before the provider has a session to interrupt —
+    // so this call finds nothing to stop. That third case is covered on the
+    // other side, by `fenceSendAgainstLateStop` re-reading the claim after the
+    // send and interrupting there. Neither half is sufficient alone.
     //
     // Ordering matters twice over. It precedes the no-session early return
     // because a turn-start that has not reached the provider yet is exactly the

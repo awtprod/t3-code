@@ -1527,6 +1527,15 @@ const make = Effect.gen(function* () {
               lastError,
               updatedAt: now,
             },
+            // Only a turn.started answers a specific turn-start request. Every
+            // other lifecycle event that lands here (session state changes,
+            // exits, completions) is about the session, not about which queued
+            // message just began, so stamping them would let an unrelated
+            // transition consume a placeholder.
+            ...(event.type === "turn.started" &&
+            event.payload?.turnRequestSequence !== undefined
+              ? { turnRequestSequence: event.payload.turnRequestSequence }
+              : {}),
             createdAt: now,
           });
         }
@@ -1955,14 +1964,68 @@ const make = Effect.gen(function* () {
         // turn stops here and only they can decide whether re-running is safe.
         // Silently declining would reproduce the defect this PR fixes
         // elsewhere — a turn that just stops with no explanation.
-        const eligibleIgnoringSideEffects =
+        // The provider's "do not retry" claim is about the work it was RUNNING.
+        // A resume that targets an unstarted steer re-issues a different message
+        // the provider was never given, so there is nothing of that claim's
+        // subject to duplicate — the same reasoning, and the same evidence (a
+        // pending row with turn_id NULL), that scopes the side-effect gate above.
+        // Left thread-wide, this gate strands the user's newest message on a
+        // thread whose OLDER turn happened to die badly.
+        //
+        // Scoped, not dropped: when the resume would re-issue the very message
+        // the non-recoverable turn was running, the claim applies in full and the
+        // resume is still refused. What changes is that the refusal is reported
+        // rather than dropped in silence, which is the defect this whole path
+        // exists to fix.
+        const nonRecoverableBlocksResume = declaredNonRecoverable && !resumeTargetsUnstartedSteer;
+        // Eligible on every ground except the two refusals we report: the
+        // provider's non-recoverable claim, and side effects we observed. Split
+        // out so each refusal can be explained rather than inferred from silence.
+        const eligibleIgnoringRefusals =
           activeTurnId !== null &&
           !gracefulExit &&
-          !declaredNonRecoverable &&
           !parkedOnHuman &&
           !archived &&
           (!userInterruptedActiveTurn || hasOrphanedPendingTurnStart);
+        const eligibleIgnoringSideEffects =
+          eligibleIgnoringRefusals && !nonRecoverableBlocksResume;
         const baseEligible = eligibleIgnoringSideEffects && !hasCommittedSideEffects;
+
+        if (eligibleIgnoringRefusals && nonRecoverableBlocksResume) {
+          // A crash the provider itself declared unsafe to retry, on a turn that
+          // would otherwise have been resumed. The turn stops here and only the
+          // user can decide whether re-sending is safe — but they can only decide
+          // if they are told, and the provider's own reason is the useful part.
+          const nonRecoverableActivityId = yield* crypto.randomUUIDv4.pipe(
+            Effect.map((uuid) =>
+              EventId.make(`auto-resume-non-recoverable:${event.eventId}:${uuid}`),
+            ),
+          );
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* providerCommandId(event, "auto-resume-non-recoverable-activity"),
+            threadId: thread.id,
+            activity: {
+              id: nonRecoverableActivityId,
+              tone: "error",
+              kind: "provider.turn.auto-resume-blocked",
+              summary: "Not auto-resumed: the provider reported an unrecoverable exit",
+              payload: {
+                detail:
+                  `The provider session exited mid-turn and reported the exit as ` +
+                  `unrecoverable, so this turn was not re-issued automatically — ` +
+                  `retrying it could repeat work the provider is telling us is ` +
+                  `unsafe to repeat, and the conversation context may not carry ` +
+                  `over. Re-send the message yourself if it is safe to repeat.`,
+                exitReason: event.payload.reason ?? "provider session exited",
+                detectedFrom: "provider-non-recoverable-exit",
+              },
+              turnId: activeTurnId,
+              createdAt: now,
+            },
+            createdAt: now,
+          });
+        }
 
         if (eligibleIgnoringSideEffects && hasCommittedSideEffects) {
           const blockedActivityId = yield* crypto.randomUUIDv4.pipe(

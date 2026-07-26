@@ -30,6 +30,7 @@ import {
 } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import {
+  type ProjectionPendingTurnStart,
   type ProjectionTurn,
   ProjectionTurnRepository,
 } from "../../persistence/Services/ProjectionTurns.ts";
@@ -1088,9 +1089,36 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
             turnId,
           });
-          const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-            threadId: event.payload.threadId,
-          });
+          // Adopt the placeholder this turn was actually started for, not
+          // whichever one happens to be oldest. Sends run in independent
+          // fibers and every adapter has a yield point between "is a turn
+          // active?" and recording the new turn, so two turn-start requests
+          // can produce `turn.started` events in the opposite order to the
+          // requests. Positional adoption then hands the later turn the
+          // earlier message's model, source plan and interrupt flag.
+          //
+          // `turnRequestSequence` is the request's own event sequence, carried
+          // through the send input and echoed back on `turn.started`. When it
+          // is absent — a synthetic or adapter-internal turn that answers no
+          // request — oldest-first remains the only available ordering, which
+          // is the historical behaviour.
+          const pendingTurnStarts = yield* projectionTurnRepository.listPendingTurnStartsByThreadId(
+            { threadId: event.payload.threadId },
+          );
+          const requestSequence = event.payload.turnRequestSequence;
+          const matchedPendingTurnStart =
+            requestSequence === undefined
+              ? undefined
+              : pendingTurnStarts.find((row) => row.requestSequence === requestSequence);
+          // A correlated turn whose placeholder is already gone (replay, or a
+          // start that raced its own consumption) must not fall back to the
+          // oldest row — that is exactly the misattribution being fixed.
+          const adoptedPendingTurnStart =
+            requestSequence === undefined ? pendingTurnStarts[0] : matchedPendingTurnStart;
+          const pendingTurnStart: Option.Option<ProjectionPendingTurnStart> =
+            adoptedPendingTurnStart === undefined
+              ? Option.none()
+              : Option.some(adoptedPendingTurnStart);
           // A user interrupt that landed on the pending start before the provider
           // reported `turn.started` (id-less interrupt) births this turn already
           // `interrupted`, so the ensuing session exit does not auto-resume it.
@@ -1164,12 +1192,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
 
           // Consume only the placeholder this turn actually corresponds to —
-          // the oldest one, which is what `getPendingTurnStartByThreadId`
-          // returned above and whose metadata was just copied onto the turn.
-          // Clearing the whole thread here would silently discard messages the
-          // user queued behind this turn, leaving no row for the provider's
-          // next `turn.started` to adopt and nothing for reconciliation to
-          // report if the session dies first.
+          // the correlated one selected above, whose metadata was just copied
+          // onto the turn. Clearing the whole thread here would silently
+          // discard messages the user queued behind this turn, leaving no row
+          // for the provider's next `turn.started` to adopt and nothing for
+          // reconciliation to report if the session dies first.
           if (Option.isSome(pendingTurnStart)) {
             yield* projectionTurnRepository.deletePendingTurnStart({
               threadId: event.payload.threadId,

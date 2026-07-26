@@ -358,6 +358,21 @@ export type ThreadRealtimeClosedPayload = typeof ThreadRealtimeClosedPayload.Typ
 const TurnStartedPayload = Schema.Struct({
   model: Schema.optional(TrimmedNonEmptyStringSchema),
   effort: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * Sequence of the `thread.turn-start-requested` this turn was started for,
+   * echoed back from `ProviderSendTurnInput.turnRequestSequence`.
+   *
+   * This is the correlation the projector needs to adopt the RIGHT pending
+   * placeholder. Turn ids are minted by the adapter and mean nothing to the
+   * orchestration layer until this event arrives, so without the echo the only
+   * available association is positional — oldest placeholder wins — which is
+   * wrong exactly when two starts are reported out of order.
+   *
+   * Optional: adapter-internal and synthetic turns have no requesting event,
+   * and a turn reported by a provider notification rather than by the send
+   * itself may not carry one. Absent means "fall back to oldest-first".
+   */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
 });
 export type TurnStartedPayload = typeof TurnStartedPayload.Type;
 

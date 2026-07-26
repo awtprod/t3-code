@@ -61,6 +61,14 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
   // RETURNING would then yield nothing and could not distinguish "a newer
   // request holds it" from "a stop blocked it", which are different outcomes to
   // log and, for a replay of the winner itself, a different answer entirely.
+  //
+  // The barrier is re-tested HERE as well as in the insert, and that is not
+  // redundant: the insert's test only covers a stop that lands BEFORE the claim
+  // row exists. A stop that lands after it writes only to the barrier table —
+  // nothing revokes the row — so a read that consulted the claim alone would
+  // still name the canceled request as owner and let it send stopped work. This
+  // is the interrupt-to-send half of the race; the insert closes the
+  // send-to-interrupt half.
   const readClaimOwner = SqlSchema.findOneOption({
     Request: Schema.Struct({
       threadId: AcquireProviderTurnSendClaimInput.fields.threadId,
@@ -69,10 +77,15 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
     Result: ClaimOwnerRowSchema,
     execute: ({ threadId, messageId }) =>
       sql`
-        SELECT request_sequence AS "requestSequence"
-        FROM provider_turn_send_claims
-        WHERE thread_id = ${threadId}
-          AND message_id = ${messageId}
+        SELECT claim.request_sequence AS "requestSequence"
+        FROM provider_turn_send_claims AS claim
+        WHERE claim.thread_id = ${threadId}
+          AND claim.message_id = ${messageId}
+          AND NOT EXISTS (
+            SELECT 1 FROM provider_turn_send_barriers AS barrier
+            WHERE barrier.thread_id = ${threadId}
+              AND barrier.canceled_through_sequence >= claim.request_sequence
+          )
       `,
   });
 

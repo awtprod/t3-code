@@ -2668,6 +2668,141 @@ it.effect("keeps one pending turn-start per request and consumes only the oldest
   ),
 );
 
+it.effect("adopts the placeholder a correlated turn.started names, not the oldest", () =>
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    const projectionLayer = OrchestrationProjectionPipelineLive.pipe(
+      Layer.provideMerge(OrchestrationEventStoreLive),
+      Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
+    );
+
+    const threadId = ThreadId.make("thread-correlated");
+    const secondTurnId = TurnId.make("turn-correlated-2");
+    const firstMessageId = MessageId.make("message-correlated-1");
+    const secondMessageId = MessageId.make("message-correlated-2");
+    const firstRequestedAt = "2026-03-04T09:00:00.000Z";
+    const secondRequestedAt = "2026-03-04T09:00:01.000Z";
+    const sessionSetAt = "2026-03-04T09:00:02.000Z";
+
+    const rows = yield* Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-correlated-1"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: firstRequestedAt,
+        commandId: CommandId.make("cmd-correlated-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-correlated-1"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: firstMessageId,
+          runtimeMode: "approval-required",
+          createdAt: firstRequestedAt,
+        },
+      });
+      // Sends run in independent fibers, so the SECOND request's turn can be
+      // the first one the provider announces. Its `turn.started` carries the
+      // request sequence it was started for.
+      const secondRequest = yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-correlated-2"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: secondRequestedAt,
+        commandId: CommandId.make("cmd-correlated-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-correlated-2"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: secondMessageId,
+          runtimeMode: "approval-required",
+          createdAt: secondRequestedAt,
+        },
+      });
+
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-correlated-3"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: sessionSetAt,
+        commandId: CommandId.make("cmd-correlated-3"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-correlated-3"),
+        metadata: {},
+        payload: {
+          threadId,
+          turnRequestSequence: secondRequest.sequence,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: secondTurnId,
+            lastError: null,
+            updatedAt: sessionSetAt,
+          },
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const pendingRows = yield* sql<{ readonly messageId: string | null }>`
+        SELECT pending_message_id AS "messageId"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND turn_id IS NULL
+          AND state = 'pending'
+        ORDER BY request_sequence ASC
+      `;
+
+      const turnRows = yield* sql<{
+        readonly turnId: string;
+        readonly userMessageId: string | null;
+        readonly startedAt: string;
+      }>`
+        SELECT
+          turn_id AS "turnId",
+          pending_message_id AS "userMessageId",
+          started_at AS "startedAt"
+        FROM projection_turns
+        WHERE turn_id = ${secondTurnId}
+      `;
+
+      return { pendingRows, turnRows };
+    }).pipe(Effect.provide(projectionLayer));
+
+    // The turn carries the SECOND message and the SECOND request's timestamp,
+    // because that is the request it names. Oldest-first adoption would hand
+    // it `message-correlated-1` and the earlier `startedAt`.
+    assert.deepEqual(rows.turnRows, [
+      {
+        turnId: "turn-correlated-2",
+        userMessageId: "message-correlated-2",
+        startedAt: secondRequestedAt,
+      },
+    ]);
+    // And the first request is untouched, still waiting for its own turn.
+    assert.deepEqual(rows.pendingRows, [{ messageId: "message-correlated-1" }]);
+  }).pipe(
+    Effect.provide(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3-projection-pipeline-correlated-turn-",
+        }),
+        NodeServices.layer,
+      ),
+    ),
+  ),
+);
+
 const engineLayer = it.layer(
   OrchestrationEngineLive.pipe(
     Layer.provide(OrchestrationProjectionSnapshotQueryLive),

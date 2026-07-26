@@ -4,6 +4,7 @@ import {
   ApprovalRequestId,
   EventId,
   IsoDateTime,
+  NonNegativeInt,
   ProviderItemId,
   ThreadId,
   TurnId,
@@ -85,6 +86,20 @@ export const ProviderSendTurnInput = Schema.Struct({
   ),
   modelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  /**
+   * Sequence of the `thread.turn-start-requested` event that drove this send.
+   *
+   * Carried through the adapter and stamped back onto the `turn.started` it
+   * produces, so the projector can adopt the placeholder this turn actually
+   * belongs to instead of guessing positionally. Without it, two sends whose
+   * `turn.started` events arrive out of order swap each other's message,
+   * model, source plan, and interrupt flag.
+   *
+   * Optional because not every send originates from a turn-start request —
+   * an adapter-internal or synthetic turn has no requesting event, and those
+   * legitimately fall back to oldest-first adoption.
+   */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
 });
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 

@@ -3716,7 +3716,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         createdAt: turnStartedStamp.createdAt,
         threadId: context.session.threadId,
         turnId,
-        payload: modelSelection?.model ? { model: modelSelection.model } : {},
+        payload: {
+          ...(modelSelection?.model ? { model: modelSelection.model } : {}),
+          // Echo the requesting event's sequence so the projector adopts the
+          // placeholder this turn was started for. Only on a real turn
+          // boundary: a steer folds into a turn whose placeholder was already
+          // consumed, and the synthetic-turn emitter above has no requesting
+          // event at all.
+          ...(input.turnRequestSequence !== undefined
+            ? { turnRequestSequence: input.turnRequestSequence }
+            : {}),
+        },
         providerRefs: {},
       });
     }

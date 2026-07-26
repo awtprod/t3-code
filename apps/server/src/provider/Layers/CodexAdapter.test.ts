@@ -519,6 +519,77 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       });
     }).pipe(Effect.provide(customLayer));
   });
+
+  it.effect("stamps each turn.started with the request its own send named", () => {
+    const correlationRuntimeFactory = makeRuntimeFactory();
+    const correlationLayer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          makeRuntime: correlationRuntimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    const threadId = asThreadId("sess-correlate");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = correlationRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.sendTurnImpl.mockImplementation((input) =>
+        Promise.resolve({
+          threadId,
+          turnId: asTurnId(input.input === "first" ? "turn-first" : "turn-second"),
+        }),
+      );
+
+      yield* adapter.sendTurn({ threadId, input: "first", turnRequestSequence: 11 });
+      yield* adapter.sendTurn({ threadId, input: "second", turnRequestSequence: 22 });
+
+      const startedFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      // The provider announces the SECOND turn first. Positional correlation
+      // would hand it request 11; only the id-keyed association gets it right.
+      for (const turnId of ["turn-second", "turn-first"]) {
+        yield* runtime.emit({
+          id: asEventId(`evt-started-${turnId}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "turn/started",
+          threadId,
+          turnId: asTurnId(turnId),
+        });
+      }
+
+      const started = yield* Fiber.join(startedFiber);
+      NodeAssert.deepStrictEqual(
+        started.map((event) => [
+          event.turnId,
+          event.type === "turn.started" ? event.payload.turnRequestSequence : undefined,
+        ]),
+        [
+          ["turn-second", 22],
+          ["turn-first", 11],
+        ],
+      );
+    }).pipe(Effect.provide(correlationLayer));
+  });
 });
 
 const lifecycleRuntimeFactory = makeRuntimeFactory();

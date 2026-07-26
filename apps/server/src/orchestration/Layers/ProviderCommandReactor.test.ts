@@ -392,6 +392,17 @@ describe("ProviderCommandReactor", () => {
     runtime = managed;
 
     const engine = await managed.runPromise(Effect.service(OrchestrationEngineService));
+    // Same harness-runtime pattern as `dispatch`/`cancelSendClaims`: tests that
+    // need the durable sequence a correlation must match read it from the log
+    // the reactor itself read, not from a guess.
+    const readEvents = (): Promise<ReadonlyArray<{ type: string; sequence: number }>> =>
+      managed.runPromise(
+        Stream.runCollect(engine.readEvents(0, Number.MAX_SAFE_INTEGER)).pipe(
+          Effect.map((events) =>
+            events.map((event) => ({ type: event.type, sequence: event.sequence })),
+          ),
+        ),
+      );
     const snapshotQuery = await managed.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await managed.runPromise(Effect.service(ProviderCommandReactor));
     const sendClaims = await managed.runPromise(Effect.service(ProviderTurnSendClaimRepository));
@@ -450,6 +461,7 @@ describe("ProviderCommandReactor", () => {
       stateDir,
       drain,
       cancelSendClaims,
+      readEvents,
     };
   }
 
@@ -726,6 +738,39 @@ describe("ProviderCommandReactor", () => {
         { id: "reasoningEffort", value: "high" },
         { id: "fastMode", value: true },
       ]),
+    });
+  });
+
+  it("stamps the send with the turn-start request's own sequence", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-correlated"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-correlated"),
+        role: "user",
+        text: "hello correlated",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    // Read the durable sequence rather than assert a literal: the projector
+    // matches placeholders on exactly this value, so a send stamped with
+    // anything else silently reverts to positional adoption.
+    const events = await harness.readEvents();
+    const turnStartRequested = events.filter((event) => event.type === "thread.turn-start-requested");
+    expect(turnStartRequested).toHaveLength(1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+      turnRequestSequence: turnStartRequested[0]?.sequence,
     });
   });
 
@@ -2312,6 +2357,138 @@ describe("ProviderCommandReactor", () => {
     // superseded the resume and nothing canceled it, so refusing it would be a
     // lost turn, not a saved duplicate.
     expect(drives.length).toBe(2);
+  });
+
+  it("interrupts a turn the user stopped while the send was in flight", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    // The sibling test above drives the barrier to its post-condition because
+    // the pre-send interleaving cannot be scheduled from outside. This one CAN
+    // schedule the remaining window, because it lives inside `sendTurn` itself:
+    // the mock raises the barrier while the send is in flight, which is exactly
+    // a user hitting stop after the claim was granted and before the provider
+    // has a turn to interrupt.
+    //
+    // No amount of database atomicity closes this window — `sendTurn` is an RPC
+    // to another process and no write spans it — so the claim CANNOT prevent
+    // this send, and the reactor must instead notice afterwards and stop what it
+    // started. Asserting `interruptTurn` fired is asserting the user's stop was
+    // ultimately honored rather than swallowed by a race.
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.promise(async () => {
+        await harness.cancelSendClaims({
+          threadId: ThreadId.make("thread-1"),
+          canceledThroughSequence: 1_000_000,
+          updatedAt: createdAt,
+        });
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-stopped-mid-send"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "stop me mid-flight",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    // The send does happen — that is the premise, not a failure.
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    // And the turn it started is then stopped.
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+
+    expect(harness.interruptTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+    });
+  });
+
+  it("sends once when the identical turn-start command is delivered twice", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const sentinelCreatedAt = "2026-01-01T00:00:02.000Z";
+
+    // The send-claim repository is row-idempotent but NOT send-idempotent: an
+    // identical retry re-acquires its own claim and is granted `true` a second
+    // time, by design, so a replayed request is not misread as superseded by
+    // itself. At-most-once for the PROVIDER is therefore established above that
+    // table, and this pins it at the boundary where a duplicate actually costs
+    // something — a second prompt delivered to the provider.
+    //
+    // Two independent mechanisms currently cover this: the engine's command
+    // receipt (same commandId returns the recorded result without re-deciding)
+    // and the reactor's own `hasHandledTurnStartRecently` key. Disabling either
+    // one alone leaves this test passing; disabling both makes it fail with 2
+    // sends. That is deliberate — the assertion is the end-to-end guarantee, not
+    // any single implementation of it, so a refactor that moves suppression
+    // between the two layers stays green while removing it does not.
+    const duplicate = {
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-delivered-twice"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "deliver me twice",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    } as const;
+
+    await harness.dispatch(duplicate);
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "deliver me twice",
+      ),
+    );
+    // Redelivered only after the first has genuinely reached the provider, which
+    // is the ordering that makes the duplicate dangerous: the claim row now
+    // exists and names this very request, so the repository will say yes again.
+    await harness.dispatch(duplicate);
+
+    // Sentinel after the redelivery, so "not sent twice" is distinguishable
+    // from "the second delivery has not been processed yet".
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-duplicate-sentinel"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-2"),
+        role: "user",
+        text: "duplicate sentinel",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: sentinelCreatedAt,
+    });
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "duplicate sentinel",
+      ),
+    );
+    await harness.drain();
+
+    const drivenInputs = harness.sendTurn.mock.calls.map(
+      (call) => (call[0] as { input?: string }).input,
+    );
+    expect(drivenInputs.filter((input) => input === "deliver me twice").length).toBe(1);
+    // Control: a reactor that had simply stopped sending would also satisfy the
+    // count above.
+    expect(drivenInputs).toContain("duplicate sentinel");
   });
 
   it("refuses to send a turn-start the cancel barrier already covers", async () => {

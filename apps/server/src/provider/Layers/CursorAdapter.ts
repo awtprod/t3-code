@@ -956,7 +956,16 @@ export function makeCursorAdapter(
               provider: PROVIDER,
               threadId: input.threadId,
               turnId,
-              payload: { model: resolvedModel },
+              payload: {
+                model: resolvedModel,
+                // Echo the requesting event's sequence so the projector adopts
+                // the placeholder this turn was started for. Only on a real
+                // turn boundary: a steer folds into a turn whose placeholder
+                // was already consumed, and re-stamping would re-adopt it.
+                ...(input.turnRequestSequence !== undefined
+                  ? { turnRequestSequence: input.turnRequestSequence }
+                  : {}),
+              },
             });
           }
 

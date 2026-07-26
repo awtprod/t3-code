@@ -22,6 +22,7 @@ import {
   RuntimeRequestId,
   ProviderApprovalDecision,
   ThreadId,
+  type TurnId,
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -33,6 +34,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexErrors from "effect-codex-app-server/errors";
@@ -103,13 +105,51 @@ export interface CodexAdapterLiveOptions {
   readonly commandCenterPlatform?: NodeJS.Platform;
 }
 
+/**
+ * Correlates a provider `turn/started` notification back to the
+ * `thread.turn-start-requested` whose send produced it.
+ *
+ * Codex is the one adapter that cannot stamp the correlation at the emit site:
+ * `turn.started` is built by `mapToRuntimeEvents` from an app-server
+ * notification on the event fiber, which never sees the send input. So the
+ * send records the association here and the event fiber reads it.
+ *
+ * Two lookups, because the notification and the `turn/start` response race:
+ * - `byTurnId` covers the ordinary case where the response landed first, so
+ *   the turn id is already known.
+ * - `inFlight` covers the notification arriving before the response was
+ *   decoded. It is only unambiguous because `sendLock` admits one `turn/start`
+ *   at a time — with two concurrent sends, "the send currently in flight" would
+ *   name two different requests. Serializing is safe here (and only here)
+ *   because Codex's `sendTurn` returns as soon as the RPC responds; the ACP
+ *   adapters await the whole turn inside `sendTurn`, where a lock would
+ *   deadlock steering.
+ */
+interface CodexTurnRequestCorrelation {
+  readonly byTurnId: Map<TurnId, number>;
+  inFlight: number | undefined;
+}
+
 interface CodexAdapterSessionContext {
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
+  readonly turnRequestCorrelation: CodexTurnRequestCorrelation;
+  readonly sendLock: Semaphore.Semaphore;
   stopped: boolean;
 }
+
+/**
+ * Upper bound on un-consumed `turnId -> requestSequence` entries.
+ *
+ * Every entry is normally removed by the `turn/started` that consumes it, but a
+ * turn that fails before the provider ever announces it leaves its entry
+ * behind. The bound keeps that leak from growing without limit over a long
+ * session; evicting the oldest is correct because correlations are consumed
+ * within milliseconds of being recorded, so anything this old is already dead.
+ */
+const CODEX_TURN_REQUEST_CORRELATION_LIMIT = 64;
 
 function mapCodexRuntimeError(
   threadId: ThreadId,
@@ -518,9 +558,67 @@ function mapItemLifecycle(
   };
 }
 
+/**
+ * Records the request sequence a `turn/start` was issued for.
+ *
+ * Called twice per send: once before the RPC (turn id unknown, so it parks in
+ * `inFlight`) and once after it responds (promoting to the id-keyed map).
+ */
+function recordCodexTurnRequestSequence(
+  correlation: CodexTurnRequestCorrelation,
+  turnId: TurnId | undefined,
+  requestSequence: number | undefined,
+): void {
+  if (requestSequence === undefined) {
+    if (turnId === undefined) {
+      correlation.inFlight = undefined;
+    }
+    return;
+  }
+  if (turnId === undefined) {
+    correlation.inFlight = requestSequence;
+    return;
+  }
+  if (correlation.inFlight !== requestSequence) {
+    // The parked slot is already gone, which under `sendLock` can only mean
+    // the `turn/started` notification beat this response and consumed it.
+    // Promoting it to the id-keyed map now would leave an entry no event will
+    // ever claim.
+    return;
+  }
+  correlation.inFlight = undefined;
+  correlation.byTurnId.set(turnId, requestSequence);
+  while (correlation.byTurnId.size > CODEX_TURN_REQUEST_CORRELATION_LIMIT) {
+    // Map iteration is insertion-ordered, so the first key is the oldest.
+    const oldest = correlation.byTurnId.keys().next();
+    if (oldest.done === true) {
+      break;
+    }
+    correlation.byTurnId.delete(oldest.value);
+  }
+}
+
+/** Reads and removes the correlation for a turn id, if one was recorded. */
+function takeCodexTurnRequestSequence(
+  correlation: CodexTurnRequestCorrelation,
+  turnId: TurnId,
+): number | undefined {
+  const recorded = correlation.byTurnId.get(turnId);
+  if (recorded !== undefined) {
+    correlation.byTurnId.delete(turnId);
+    return recorded;
+  }
+  // The notification beat the `turn/start` response. `sendLock` guarantees at
+  // most one send is mid-RPC, so the parked value belongs to this turn.
+  const inFlight = correlation.inFlight;
+  correlation.inFlight = undefined;
+  return inFlight;
+}
+
 function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
+  correlation?: CodexTurnRequestCorrelation,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   if (event.kind === "error") {
     if (!event.message) {
@@ -781,12 +879,18 @@ function mapToRuntimeEvents(
     if (!turnId) {
       return [];
     }
+    // Consume the correlation rather than just reading it: one recorded
+    // request answers exactly one `turn/started`, and leaving it behind would
+    // let a later turn re-stamp a placeholder that has already been adopted.
+    const turnRequestSequence = correlation
+      ? takeCodexTurnRequestSequence(correlation, turnId)
+      : undefined;
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
         turnId,
         type: "turn.started",
-        payload: {},
+        payload: turnRequestSequence !== undefined ? { turnRequestSequence } : {},
       },
     ];
   }
@@ -1601,6 +1705,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : {}),
           ...(appServerArgs.length > 0 ? { appServerArgs } : {}),
         };
+        const turnRequestCorrelation: CodexTurnRequestCorrelation = {
+          byTurnId: new Map<TurnId, number>(),
+          inFlight: undefined,
+        };
+        const sendLock = yield* Semaphore.make(1);
         const sessionScope = yield* Scope.make("sequential");
         let sessionScopeTransferred = false;
         yield* Effect.addFinalizer(() =>
@@ -1625,7 +1734,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
+            const runtimeEvents = mapToRuntimeEvents(
+              event,
+              event.threadId,
+              turnRequestCorrelation,
+            );
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,
@@ -1664,6 +1777,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           scope: sessionScope,
           runtime,
           eventFiber,
+          turnRequestCorrelation,
+          sendLock,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -1720,22 +1835,55 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
-    return yield* session.runtime
-      .sendTurn({
-        ...(input.input !== undefined ? { input: input.input } : {}),
-        ...(input.modelSelection?.instanceId === boundInstanceId
-          ? { model: input.modelSelection.model }
-          : {}),
-        ...(reasoningEffort
-          ? {
-              effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
-            }
-          : {}),
-        ...(serviceTier ? { serviceTier } : {}),
-        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-        ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-      })
-      .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
+    // Serialize the RPC so the pre-response correlation slot names exactly one
+    // request. See `CodexTurnRequestCorrelation` for why this is safe for Codex
+    // specifically: `sendTurn` returns when the RPC responds, not at turn end.
+    return yield* session.sendLock.withPermit(
+      Effect.gen(function* () {
+        recordCodexTurnRequestSequence(
+          session.turnRequestCorrelation,
+          undefined,
+          input.turnRequestSequence,
+        );
+        const started = yield* session.runtime
+          .sendTurn({
+            ...(input.input !== undefined ? { input: input.input } : {}),
+            ...(input.modelSelection?.instanceId === boundInstanceId
+              ? { model: input.modelSelection.model }
+              : {}),
+            ...(reasoningEffort
+              ? {
+                  effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
+                }
+              : {}),
+            ...(serviceTier ? { serviceTier } : {}),
+            ...(input.interactionMode !== undefined
+              ? { interactionMode: input.interactionMode }
+              : {}),
+            ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+          })
+          .pipe(
+            Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)),
+            // A failed start never produces a `turn.started`, so its parked
+            // slot would otherwise be claimed by whichever turn announced next.
+            Effect.onError(() =>
+              Effect.sync(() => {
+                recordCodexTurnRequestSequence(
+                  session.turnRequestCorrelation,
+                  undefined,
+                  undefined,
+                );
+              }),
+            ),
+          );
+        recordCodexTurnRequestSequence(
+          session.turnRequestCorrelation,
+          started.turnId,
+          input.turnRequestSequence,
+        );
+        return started;
+      }),
+    );
   });
 
   const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {

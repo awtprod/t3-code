@@ -1231,6 +1231,13 @@ export function makeOpenCodeAdapter(
           payload: {
             model: modelSelection?.model ?? context.session.model,
             ...(variant ? { effort: variant } : {}),
+            // Echo the requesting event's sequence so the projector adopts the
+            // placeholder this turn was started for. Only on a real turn
+            // boundary: a steer folds into a turn whose placeholder was
+            // already consumed.
+            ...(input.turnRequestSequence !== undefined
+              ? { turnRequestSequence: input.turnRequestSequence }
+              : {}),
           },
         });
       }

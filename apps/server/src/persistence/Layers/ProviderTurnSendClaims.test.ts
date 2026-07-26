@@ -68,7 +68,16 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         claimedAt: at(1),
       });
       // ...and the original, if it retries after losing, is now correctly told
-      // it no longer holds the claim, so the prompt is still sent exactly once.
+      // it no longer holds the claim.
+      //
+      // Note what this does and does not establish. It bounds the ORIGINAL to a
+      // single send; it does not make the message as a whole exactly-once at
+      // this layer, because the resume was also granted, so two acquisitions
+      // returned true for one message id. That is deliberate — the resume exists
+      // precisely to re-drive a prompt whose first attempt died with its session
+      // — and at-most-once for the *provider* is enforced above this table, by
+      // the reactor's turn-start dedup and supersession guard. This repository
+      // decides who may send, not how many sends reach the provider.
       const originalRetry = yield* claims.acquire({
         threadId,
         messageId,
@@ -91,6 +100,13 @@ layer("ProviderTurnSendClaimRepository", (it) => {
       // A request that already won must keep winning: the reactor can be
       // re-entered for the same event, and reading "someone holds this" as
       // "I was superseded" would drop the send entirely.
+      //
+      // So an identical retry is row-idempotent but NOT send-idempotent: both
+      // calls return true, and a caller that sent on each would prompt the
+      // provider twice. Suppressing the duplicate is the reactor's job (the
+      // `hasHandledTurnStartRecently` key), and the reactor test
+      // "does not send twice when the same turn-start is delivered twice"
+      // pins that at the boundary where it actually matters.
       const first = yield* claims.acquire({
         threadId,
         messageId,
@@ -106,6 +122,52 @@ layer("ProviderTurnSendClaimRepository", (it) => {
 
       assert.strictEqual(first, true);
       assert.strictEqual(replay, true);
+    }),
+  );
+
+  it.effect("converges on one owner when many requests race for the same message", () =>
+    Effect.gen(function* () {
+      const claims = yield* ProviderTurnSendClaimRepository;
+      const threadId = ThreadId.make("thread-race");
+      const messageId = MessageId.make("message-race");
+
+      // Every other case here calls `acquire` sequentially, so they establish
+      // the resolution RULE while leaving the actual contention untested: the
+      // production callers are independent fibers, and a rule that only holds
+      // when the writes happen to be ordered is not a claim. Eight fibers race
+      // for one message so the interleaving is the driver's to pick.
+      const sequences = [100, 101, 102, 103, 104, 105, 106, 107];
+      yield* Effect.all(
+        sequences.map((requestSequence) =>
+          claims.acquire({ threadId, messageId, requestSequence, claimedAt: at(0) }),
+        ),
+        { concurrency: "unbounded" },
+      );
+
+      // The outcome is asserted after the race rather than from its return
+      // values, because who wins DURING the race is genuinely nondeterministic —
+      // a fiber granted the claim can be superseded a microsecond later, so its
+      // `true` was honest when returned and stale by the time it is read. What
+      // must be deterministic is where the contention settles: last-wins by
+      // sequence, so the highest is the only one that may still send, and every
+      // loser that retries is told so. A repository that dropped writes or
+      // resolved by arrival order would leave a different sequence holding.
+      const winnerRetry = yield* claims.acquire({
+        threadId,
+        messageId,
+        requestSequence: 107,
+        claimedAt: at(1),
+      });
+      const loserRetries = yield* Effect.all(
+        sequences
+          .filter((requestSequence) => requestSequence !== 107)
+          .map((requestSequence) =>
+            claims.acquire({ threadId, messageId, requestSequence, claimedAt: at(2) }),
+          ),
+      );
+
+      assert.strictEqual(winnerRetry, true);
+      assert.deepStrictEqual(loserRetries, [false, false, false, false, false, false, false]);
     }),
   );
 
@@ -125,6 +187,41 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         claimedAt: at(1),
       });
       assert.strictEqual(blocked, false);
+    }),
+  );
+
+  it.effect("revokes a claim the stop overtakes after it was already granted", () =>
+    Effect.gen(function* () {
+      const claims = yield* ProviderTurnSendClaimRepository;
+      const threadId = ThreadId.make("thread-revoked");
+      const messageId = MessageId.make("message-revoked");
+
+      // The other cancel tests all raise the barrier BEFORE the claim exists, so
+      // they only ever exercise the insert's guard. This is the opposite order,
+      // and it is the one that actually happens when a user hits stop on a turn
+      // that is already being prepared: the claim row is written first and the
+      // stop arrives afterwards.
+      //
+      // Nothing deletes or rewrites the claim row when a barrier is raised — the
+      // cancel touches a different table entirely — so an owner read that
+      // consulted only the claim would still name this request as holder and
+      // wave through a send the user already stopped.
+      const granted = yield* claims.acquire({
+        threadId,
+        messageId,
+        requestSequence: 80,
+        claimedAt: at(0),
+      });
+      yield* claims.cancel({ threadId, canceledThroughSequence: 80, updatedAt: at(1) });
+      const afterStop = yield* claims.acquire({
+        threadId,
+        messageId,
+        requestSequence: 80,
+        claimedAt: at(2),
+      });
+
+      assert.strictEqual(granted, true);
+      assert.strictEqual(afterStop, false);
     }),
   );
 

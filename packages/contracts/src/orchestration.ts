@@ -752,6 +752,19 @@ const ThreadSessionSetCommand = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
   createdAt: IsoDateTime,
+  /**
+   * Set only when this session-set is driven by a provider `turn.started`, and
+   * carries the sequence of the `thread.turn-start-requested` that turn was
+   * started for.
+   *
+   * It rides the command rather than `OrchestrationSession` on purpose: the
+   * session struct is durable state that outlives the turn, while this is a
+   * fact about ONE transition — which request the arriving turn answers. The
+   * projector consumes it to adopt the matching pending placeholder instead of
+   * the oldest one, which is what keeps two out-of-order starts from swapping
+   * each other's message, model, source plan, and interrupt flag.
+   */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
 });
 
 const ThreadMessageAssistantDeltaCommand = Schema.Struct({
@@ -1003,6 +1016,8 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  /** See `ThreadSessionSetCommand.turnRequestSequence`. */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({

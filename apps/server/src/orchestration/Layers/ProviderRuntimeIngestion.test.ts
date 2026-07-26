@@ -4074,6 +4074,63 @@ describe("ProviderRuntimeIngestion", () => {
     expect(autoResumedActivities(thread)).toHaveLength(0);
     expect(exhaustedActivities(thread)).toHaveLength(0);
     expect(userMessages(thread)).toHaveLength(1);
+    // And it is REPORTED, not silently dropped. A turn that just stops with no
+    // explanation is the exact defect this path exists to fix, so the refusal
+    // has to reach the user along with the provider's own stated reason.
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.turnId).toBe("turn-a");
+    expect(blocked[0]?.summary).toContain("unrecoverable");
+    expect(blocked[0]?.payload).toMatchObject({
+      detectedFrom: "provider-non-recoverable-exit",
+      exitReason: "Transport failure: connection lost.",
+    });
+  });
+
+  it("resumes an unstarted pending steer even when the older turn exited non-recoverably", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // The user steered while turn-a was running. msg-2's turn-start row is
+    // pending with turn_id NULL — no turn for it ever started, so the provider
+    // was never given it.
+    await seedUserMessage(harness, "msg-2");
+
+    // Now turn-a's session dies and the provider declares the exit
+    // unrecoverable. That claim is about the work it was RUNNING: re-issuing
+    // msg-1 is unsafe. It says nothing about msg-2, which the provider never
+    // saw and therefore cannot have half-executed.
+    //
+    // Treating the flag as a thread-wide exclusion strands the user's newest
+    // message permanently and silently — the same failure the side-effect gate
+    // was already scoped to avoid, reached through a different gate.
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-nonrecoverable-steer"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: {
+        reason: "Transport failure: connection lost.",
+        recoverable: false,
+      },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+    // Nothing was refused: the claim's subject (msg-1) is not what gets resumed.
+    expect(resumeBlockedActivities(thread)).toHaveLength(0);
+    // And the resume targets msg-2 — the unstarted steer — not the
+    // non-recoverable msg-1, whose only turn-start is its original one.
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-2"),
+    ).toHaveLength(2);
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
+    ).toHaveLength(1);
+    // No duplicate user messages: both are re-issues of existing rows.
+    expect(userMessages(thread)).toHaveLength(2);
   });
 
   it("auto-resumes after a turn-less runtime error immediately precedes the exit", async () => {
