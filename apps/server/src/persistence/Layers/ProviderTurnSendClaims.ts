@@ -179,9 +179,37 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProviderTurnSendClaimRepository.cancel:query")),
     );
 
+  // Existence only, and deliberately barrier-blind: a stop raised after the
+  // claim does not un-send the prompt, so filtering by the barrier here would
+  // report a delivered message as never-attempted. See `hasEverClaimed` on the
+  // service for why recovery needs this rather than the pending row.
+  const readAnyClaimForMessage = SqlSchema.findOneOption({
+    Request: Schema.Struct({
+      threadId: AcquireProviderTurnSendClaimInput.fields.threadId,
+      messageId: AcquireProviderTurnSendClaimInput.fields.messageId,
+    }),
+    Result: ClaimOwnerRowSchema,
+    execute: ({ threadId, messageId }) =>
+      sql`
+        SELECT request_sequence AS "requestSequence"
+        FROM provider_turn_send_claims
+        WHERE thread_id = ${threadId}
+          AND message_id = ${messageId}
+      `,
+  });
+
+  const hasEverClaimed: ProviderTurnSendClaimRepositoryShape["hasEverClaimed"] = (input) =>
+    readAnyClaimForMessage(input).pipe(
+      Effect.map((row) => row._tag === "Some"),
+      Effect.mapError(
+        toPersistenceSqlError("ProviderTurnSendClaimRepository.hasEverClaimed:query"),
+      ),
+    );
+
   return {
     acquire,
     cancel,
+    hasEverClaimed,
   } satisfies ProviderTurnSendClaimRepositoryShape;
 });
 

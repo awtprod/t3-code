@@ -39,6 +39,8 @@ import {
   type ProjectionPendingTurnStart,
 } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
+import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
+import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -776,6 +778,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const providerSessionDirectory = yield* ProviderSessionDirectory;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
+  const providerTurnSendClaimRepository = yield* ProviderTurnSendClaimRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -1335,6 +1338,30 @@ const make = Effect.gen(function* () {
     },
   );
 
+  // The `activeTurnId` cross-check is a fallback, NOT the primary correlation,
+  // and applying it to a correlated event is a false negative with real cost.
+  //
+  // `ProviderService.sendTurn` writes `activeTurnId` into the session directory
+  // only AFTER the adapter's `sendTurn` resolves. Codex deliberately emits
+  // `turn.started` before its `turn/start` response returns — that ordering is
+  // supported and tested by the adapter — so a plan-backed turn arrives here
+  // while the provider session still has no active turn at all. Requiring the
+  // match then discards the mark for a plan the provider is at that moment
+  // implementing, and nothing retries: the same accepted `turn.started` projects
+  // the running turn and consumes the pending row, so the placeholder is gone by
+  // the time the directory catches up. The plan stays actionable in the UI
+  // forever and the user can run it a second time.
+  //
+  // When `turnRequestSequence` is present the placeholder lookup below is
+  // already an exact correlation — the request's own event sequence, echoed back
+  // by the adapter on the event, matched against the row that carries the plan
+  // reference. That is strictly stronger evidence than "the directory happens to
+  // name this turn", and it is the same key `ProjectionPipeline` uses to adopt
+  // the row. There is no misattribution left for the id check to prevent.
+  //
+  // Absent a request sequence the lookup degrades to oldest-first, which CAN
+  // pick an unrelated row, so the id check is retained there as the only
+  // remaining guard against marking a plan the event does not answer.
   const getSourceProposedPlanReferenceForAcceptedTurnStart = Effect.fn(
     "getSourceProposedPlanReferenceForAcceptedTurnStart",
   )(function* (
@@ -1346,9 +1373,11 @@ const make = Effect.gen(function* () {
       return null;
     }
 
-    const expectedTurnId = yield* getExpectedProviderTurnIdForThread(threadId);
-    if (!sameId(expectedTurnId, eventTurnId)) {
-      return null;
+    if (requestSequence === undefined) {
+      const expectedTurnId = yield* getExpectedProviderTurnIdForThread(threadId);
+      if (!sameId(expectedTurnId, eventTurnId)) {
+        return null;
+      }
     }
 
     return yield* getSourceProposedPlanReferenceForPendingTurnStart(threadId, requestSequence);
@@ -2035,22 +2064,51 @@ const make = Effect.gen(function* () {
         // still differs from the active turn's originating message, so the
         // message-differs test alone would call work the provider already ran
         // "unstarted" and re-issue it past both refusal gates — the exact
-        // duplicate-side-effect outcome those gates exist to prevent. The
-        // surviving pending row (turn_id NULL) is the only positive evidence
-        // that nothing could have executed on this message's behalf, so it is
-        // required rather than inferred. A deleted row is indistinguishable
-        // from a delivered fold, and the safe reading of ambiguity here is
-        // that the work may have landed.
+        // duplicate-side-effect outcome those gates exist to prevent.
         const resumeTargetHasPendingTurnStart =
           resumeTargetMessageId !== null &&
           orphanedPendingTurnStarts.some((pending) =>
             sameId(pending.messageId, resumeTargetMessageId),
           );
+        // The surviving pending row is necessary but NOT sufficient, and
+        // treating it as proof was the remaining hole. It proves only that
+        // neither `turn.started` nor the post-return fold was projected — both
+        // of which happen strictly AFTER `sendTurn` returns. A provider that
+        // received the steer, began running tools on it, and then exited before
+        // returning leaves the row exactly as an undelivered steer would, so the
+        // row alone cannot separate "never sent" from "sent, ran, and died mid
+        // call". Believing it re-issues a prompt whose tools already executed,
+        // and — because this same flag suppresses the observed-side-effect check
+        // and bypasses the provider's own `recoverable: false` — it does so past
+        // every gate that would otherwise have stopped it.
+        //
+        // The durable send claim is the positive evidence the projection cannot
+        // supply. The reactor acquires it in the statement immediately upstream
+        // of `sendTurn`, so no row means the adapter was never called for this
+        // message. It is checked here as the authority and the pending row is
+        // kept alongside it: the claim answers "was a send attempted", the row
+        // answers "did a turn or fold ever result", and a resume needs both to
+        // read no.
+        //
+        // A failed read is NOT "no claim". An unreadable claim tells us nothing
+        // about whether the prompt was sent, and the safe reading of nothing is
+        // that it may have been — so the bypass is refused, the ordinary
+        // side-effect and non-recoverable gates apply in full, and the worst
+        // outcome is a steer the user re-sends by hand.
+        const resumeTargetHasNeverBeenSent =
+          resumeTargetMessageId !== null &&
+          !(yield* providerTurnSendClaimRepository
+            .hasEverClaimed({
+              threadId: thread.id,
+              messageId: resumeTargetMessageId,
+            })
+            .pipe(Effect.orElseSucceed(() => true)));
         const resumeTargetsUnstartedSteer =
           resumeTargetMessageId !== null &&
           activeTurnMessageId !== null &&
           !sameId(activeTurnMessageId, resumeTargetMessageId) &&
-          resumeTargetHasPendingTurnStart;
+          resumeTargetHasPendingTurnStart &&
+          resumeTargetHasNeverBeenSent;
         const sideEffectActivityKind =
           activeTurnId === null ||
           resumeTargetsUnstartedSteer ||
@@ -2773,4 +2831,6 @@ const make = Effect.gen(function* () {
 export const ProviderRuntimeIngestionLive = Layer.effect(
   ProviderRuntimeIngestionService,
   make,
-).pipe(Layer.provide(ProjectionTurnRepositoryLive));
+).pipe(
+  Layer.provide(Layer.mergeAll(ProjectionTurnRepositoryLive, ProviderTurnSendClaimRepositoryLive)),
+);

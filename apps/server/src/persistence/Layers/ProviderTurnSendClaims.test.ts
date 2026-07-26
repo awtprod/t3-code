@@ -332,4 +332,65 @@ layer("ProviderTurnSendClaimRepository", (it) => {
       assert.strictEqual(tagOf(unaffected), "acquired");
     }),
   );
+
+  it.effect("reports whether a message was ever cleared to reach the provider", () =>
+    Effect.gen(function* () {
+      const claims = yield* ProviderTurnSendClaimRepository;
+      const threadId = ThreadId.make("thread-ever-claimed");
+      const sent = MessageId.make("message-ever-sent");
+      const neverSent = MessageId.make("message-never-sent");
+
+      // Recovery asks this question to decide whether re-issuing a message
+      // could duplicate work the provider already did. A message with no claim
+      // provably never reached the adapter — the acquire is the statement
+      // immediately upstream of `sendTurn`.
+      assert.strictEqual(yield* claims.hasEverClaimed({ threadId, messageId: sent }), false);
+      assert.strictEqual(yield* claims.hasEverClaimed({ threadId, messageId: neverSent }), false);
+
+      yield* claims.acquire({
+        threadId,
+        messageId: sent,
+        requestSequence: 90,
+        claimedAt: at(0),
+      });
+
+      assert.strictEqual(yield* claims.hasEverClaimed({ threadId, messageId: sent }), true);
+      // Scoped to the message, not the thread: a sibling message on the same
+      // thread must not inherit its neighbour's send.
+      assert.strictEqual(yield* claims.hasEverClaimed({ threadId, messageId: neverSent }), false);
+      // And scoped to the thread: the same message id elsewhere is other work.
+      assert.strictEqual(
+        yield* claims.hasEverClaimed({
+          threadId: ThreadId.make("thread-ever-claimed-other"),
+          messageId: sent,
+        }),
+        false,
+      );
+    }),
+  );
+
+  it.effect("still reports a claimed message as sent after a later stop cancels the thread", () =>
+    Effect.gen(function* () {
+      const claims = yield* ProviderTurnSendClaimRepository;
+      const threadId = ThreadId.make("thread-ever-claimed-stopped");
+      const messageId = MessageId.make("message-ever-claimed-stopped");
+
+      yield* claims.acquire({ threadId, messageId, requestSequence: 100, claimedAt: at(0) });
+      // The user stops the thread afterwards. That raises the barrier, so a
+      // fresh acquire is refused — but it does not un-send the prompt that
+      // already went out, and recovery is asking about the past, not the
+      // present. Filtering this read by the barrier would report delivered work
+      // as never-attempted and re-run it.
+      yield* claims.cancel({ threadId, canceledThroughSequence: 100, updatedAt: at(1) });
+
+      const refused = yield* claims.acquire({
+        threadId,
+        messageId,
+        requestSequence: 100,
+        claimedAt: at(2),
+      });
+      assert.strictEqual(tagOf(refused), "canceled");
+      assert.strictEqual(yield* claims.hasEverClaimed({ threadId, messageId }), true);
+    }),
+  );
 });

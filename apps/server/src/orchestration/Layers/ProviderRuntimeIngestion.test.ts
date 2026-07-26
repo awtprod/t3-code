@@ -16,7 +16,9 @@ import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
+  IsoDateTime,
   MessageId,
+  NonNegativeInt,
   OrchestrationProposedPlanId,
   ProjectId,
   ProviderItemId,
@@ -39,6 +41,8 @@ import { OrchestrationEventStoreLive } from "../../persistence/Layers/Orchestrat
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
+import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import {
   ProviderService,
@@ -213,7 +217,8 @@ describe("ProviderRuntimeIngestion", () => {
     | ProviderRuntimeIngestionService
     | ProjectionSnapshotQuery
     | ProviderSessionDirectory
-    | ProjectionTurnRepository,
+    | ProjectionTurnRepository
+    | ProviderTurnSendClaimRepository,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -266,6 +271,12 @@ describe("ProviderRuntimeIngestion", () => {
       // rows the ingestion layer writes — the reconciliation sweep's effect is
       // invisible in the snapshot, since a pending row has no turn id to surface.
       Layer.provideMerge(ProjectionTurnRepositoryLive),
+      // Likewise merged so tests can write the send claim the reactor would have
+      // written. The reactor is not installed in this suite, so a test that needs
+      // "this message did reach the provider" has to record that fact itself —
+      // and it must be the SAME claim table the ingestion layer reads, which the
+      // shared in-memory SqlClient below guarantees.
+      Layer.provideMerge(ProviderTurnSendClaimRepositoryLive),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
@@ -279,6 +290,9 @@ describe("ProviderRuntimeIngestion", () => {
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
     const directory = await runtime.runPromise(Effect.service(ProviderSessionDirectory));
     const turnRepository = await runtime.runPromise(Effect.service(ProjectionTurnRepository));
+    const sendClaimRepository = await runtime.runPromise(
+      Effect.service(ProviderTurnSendClaimRepository),
+    );
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(ingestion.drain);
@@ -378,6 +392,19 @@ describe("ProviderRuntimeIngestion", () => {
       directory,
       seedBinding: (binding: Parameters<typeof directory.upsert>[0]) =>
         run(directory.upsert(binding)),
+      // Records what the reactor's acquire would have recorded immediately
+      // before calling `sendTurn`. The reactor is not installed in this suite,
+      // so a test asserting "the provider did receive this message" has to write
+      // that evidence itself.
+      claimSend: (input: { messageId: string; requestSequence: number }) =>
+        run(
+          sendClaimRepository.acquire({
+            threadId: asThreadId("thread-1"),
+            messageId: asMessageId(input.messageId),
+            requestSequence: NonNegativeInt.make(input.requestSequence),
+            claimedAt: IsoDateTime.make("2026-01-01T00:00:00.000Z"),
+          }),
+        ),
       turnStartRequests: () =>
         collectedDomainEvents.filter(
           (evt): evt is Extract<OrchestrationEvent, { type: "thread.turn-start-requested" }> =>
@@ -1573,6 +1600,164 @@ describe("ProviderRuntimeIngestion", () => {
         implementationThreadId: targetThreadId,
       },
     );
+  });
+
+  it("marks a correlated plan even when turn.started precedes the provider's turn/start response", async () => {
+    const harness = await createHarness();
+    const sourceThreadId = asThreadId("thread-plan");
+    const targetThreadId = asThreadId("thread-implement");
+    const sourceTurnId = asTurnId("turn-plan-source");
+    const targetTurnId = asTurnId("turn-plan-implement");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    // Codex emits `turn.started` BEFORE its `turn/start` response returns — an
+    // ordering the adapter supports and tests deliberately. `activeTurnId` is
+    // written by `ProviderService.sendTurn` only after that response, so this
+    // event legitimately arrives while the provider session has no active turn
+    // at all.
+    //
+    // Requiring the session's `activeTurnId` to match then throws away the mark
+    // for a plan the provider is at that moment implementing — and nothing
+    // retries, because this same accepted `turn.started` projects the running
+    // turn and consumes the pending row. The plan stays actionable forever and
+    // the user can launch it a second time.
+    //
+    // The `turnRequestSequence` on the event is the exact correlation the
+    // projector itself adopts by; it is strictly stronger evidence than the
+    // directory naming the turn, which is why the id check is not needed here.
+    for (const [threadId, title, interactionMode, commandSuffix] of [
+      [sourceThreadId, "Plan Source", "plan", "plan-source"],
+      [targetThreadId, "Plan Target", DEFAULT_PROVIDER_INTERACTION_MODE, "plan-target"],
+    ] as const) {
+      await harness.run(
+        harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`cmd-thread-create-early-start-${commandSuffix}`),
+          threadId,
+          projectId: asProjectId("project-1"),
+          title,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      await harness.run(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-set-early-start-${commandSuffix}`),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            updatedAt: createdAt,
+            lastError: null,
+          },
+          createdAt,
+        }),
+      );
+    }
+
+    harness.emit({
+      type: "turn.proposed.completed",
+      eventId: asEventId("evt-early-start-plan-source-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId: sourceThreadId,
+      turnId: sourceTurnId,
+      payload: {
+        planMarkdown: "# Source plan",
+      },
+    });
+    const sourceThreadWithPlan = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.proposedPlans.some(
+          (proposedPlan: ProviderRuntimeTestProposedPlan) =>
+            proposedPlan.id === "plan:thread-plan:turn:turn-plan-source" &&
+            proposedPlan.implementedAt === null,
+        ),
+      2_000,
+      sourceThreadId,
+    );
+    const sourcePlan = sourceThreadWithPlan.proposedPlans.find(
+      (entry: ProviderRuntimeTestProposedPlan) =>
+        entry.id === "plan:thread-plan:turn:turn-plan-source",
+    );
+    if (!sourcePlan) {
+      throw new Error("Expected source plan to exist.");
+    }
+
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-early-start-plan"),
+        threadId: targetThreadId,
+        message: {
+          messageId: asMessageId("msg-early-start-plan"),
+          role: "user",
+          text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
+          attachments: [],
+        },
+        sourceProposedPlan: {
+          threadId: sourceThreadId,
+          planId: sourcePlan.id,
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      }),
+    );
+
+    const planRequestSequence = harness
+      .turnStartRequests()
+      .find((evt) => evt.payload.messageId === "msg-early-start-plan")?.sequence;
+    expect(planRequestSequence).toBeDefined();
+
+    // The provider session exists and is bound, but `activeTurnId` has NOT been
+    // written yet: the send is still in flight. This is the whole scenario.
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: targetThreadId,
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-early-start-plan-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: targetThreadId,
+      turnId: targetTurnId,
+      payload: { turnRequestSequence: planRequestSequence! },
+    });
+
+    const sourceAfterStart = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.proposedPlans.some(
+          (proposedPlan: ProviderRuntimeTestProposedPlan) =>
+            proposedPlan.id === sourcePlan.id && proposedPlan.implementedAt !== null,
+        ),
+      2_000,
+      sourceThreadId,
+    );
+    expect(
+      sourceAfterStart.proposedPlans.find((entry) => entry.id === sourcePlan.id),
+    ).toMatchObject({
+      implementationThreadId: targetThreadId,
+    });
   });
 
   it("does not mark the source proposed plan implemented for a rejected turn.started event", async () => {
@@ -4162,6 +4347,46 @@ describe("ProviderRuntimeIngestion", () => {
     expect(
       harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
     ).toHaveLength(1);
+  });
+
+  it("refuses to resume a steer that reached the provider even though its pending row survived", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    await runToolItem(harness, "turn-a");
+    // The user steers with msg-2. Everything below is identical to the test
+    // above — same pending row, same newest-message, same tool-running older
+    // turn — with ONE difference: the reactor got as far as claiming the send.
+    await seedUserMessage(harness, "msg-2");
+    // That claim is the reactor's last durable act before `sendTurn`, and here
+    // the adapter did deliver: the provider accepted the steer and started
+    // working on it. Then it died before `sendTurn` returned, so no turn.started
+    // and no fold were ever projected and msg-2's pending row is still sitting
+    // there looking exactly like a steer that never left the building.
+    //
+    // The claim is what separates the two. Without it the resume re-issues a
+    // prompt whose tools already ran, and does so past BOTH refusal gates,
+    // because the unstarted-steer bypass also suppresses the observed
+    // side-effect check and the provider's own non-recoverable verdict.
+    const claimSequence =
+      harness.turnStartRequests().find((evt) => evt.payload.messageId === "msg-2")?.sequence ?? 0;
+    await harness.claimSend({ messageId: "msg-2", requestSequence: claimSequence });
+    await crashSession(harness, "steer-delivered-then-crash");
+
+    const thread = await readThread(harness);
+    // No resume, and — critically — no second turn-start-requested for msg-2.
+    // The request count is the real assertion: the activity markers alone could
+    // be appended without anything reaching a provider.
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-2"),
+    ).toHaveLength(1);
+    // And it does not go silent. Refusing without saying so leaves the user
+    // watching a dead thread, which is the failure this whole path exists to
+    // avoid; the side-effect gate now applies in full and reports itself.
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.tone).toBe("error");
   });
 
   it("refuses a second resume once the retried turn has run tools", async () => {

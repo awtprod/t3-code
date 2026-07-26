@@ -1882,6 +1882,91 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it("retries, escalates, and reports when the ordinary interrupt cannot be delivered", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    // The projection marks the turn interrupted the moment
+    // `thread.turn-interrupt-requested` is appended, BEFORE the provider is
+    // told anything. So a failed `interruptTurn` on this path is not a missed
+    // stop that the UI still shows as running — it is a UI that says stopped
+    // over a provider that is still running the turn and still taking side
+    // effects. Swallowing it into the reactor's generic warning logger, which
+    // is what this path did, is the one handling that cannot be recovered from
+    // by anything downstream.
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "session/interrupt",
+          detail: "provider socket closed",
+        }),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-undeliverable"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "running",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("turn-1"),
+        lastError: null,
+        updatedAt: now,
+      },
+      createdAt: now,
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-undeliverable"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.activities.some((activity) => activity.kind === "provider.turn.interrupt.failed") ??
+        false
+      );
+    });
+    await harness.drain();
+
+    // Retried once before escalating — a transient transport failure is the
+    // likeliest kind and a duplicate interrupt is free.
+    expect(harness.interruptTurn.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    // Escalated to the session, through the ordinary stop intent rather than a
+    // direct provider call, so the barrier is raised and the projection agrees
+    // with the runtime.
+    const events = await harness.readEvents();
+    expect(events.filter((event) => event.type === "thread.session-stop-requested")).toHaveLength(
+      1,
+    );
+    expect(harness.stopSession.mock.calls.length).toBe(1);
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session?.status).toBe("stopped");
+
+    // And reported either way. The user pressed stop on one turn and lost the
+    // whole session instead; that is not a silent success.
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.turn.interrupt.failed"),
+    ).toMatchObject({
+      turnId: asTurnId("turn-1"),
+      payload: {
+        detail: expect.stringContaining("provider socket closed"),
+      },
+    });
+  });
+
   it("starts a fresh session when only projected session state exists", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

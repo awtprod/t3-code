@@ -112,6 +112,34 @@ export interface ProviderTurnSendClaimRepositoryShape {
   readonly cancel: (
     input: CancelProviderTurnSendClaimsInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Has any request for this message ever been cleared to reach the provider?
+   *
+   * This is the only durable record of an ATTEMPTED send. The reactor acquires
+   * the claim in the statement immediately upstream of
+   * `providerService.sendTurn`, with nothing between them, so a missing row
+   * proves the adapter was never called for this message — and a present row
+   * means it may have been: the prompt could be in flight, delivered, or already
+   * executing tools, and a crash before `sendTurn` returns leaves all three
+   * indistinguishable.
+   *
+   * That asymmetry is the point. Recovery needs positive evidence that nothing
+   * was sent before it re-issues a message, and the absence of a projection row
+   * cannot supply it. A steer that was DELIVERED and folded loses its pending
+   * row, but a steer delivered without folding — the adapter began the work and
+   * the provider died before `sendTurn` returned, so no `turn.started` and no
+   * fold were ever projected — KEEPS its pending row while having reached the
+   * provider. The placeholder cannot tell those apart; the claim can.
+   *
+   * Deliberately NOT filtered by the cancel barrier, unlike the reads inside
+   * `acquire`. A barrier that rose after the claim does not un-send the prompt,
+   * and the question here is only ever "could the provider have received this?".
+   */
+  readonly hasEverClaimed: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+  }) => Effect.Effect<boolean, ProjectionRepositoryError>;
 }
 
 /**

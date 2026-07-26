@@ -1082,6 +1082,79 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  /**
+   * Interrupt a turn, retrying, then escalating to a session stop.
+   *
+   * Both stop paths need the same three-step ladder, and the ordinary
+   * `thread.turn.interrupt` handler used to have none of it: it called
+   * `interruptTurn` bare, so a transport failure went to the reactor's generic
+   * warning logger while the projection had ALREADY marked the turn
+   * interrupted. That combination is the worst one available — the UI says
+   * stopped, the provider keeps running, and nothing retries or tells the user.
+   *
+   * One retry, because the interrupt is a message to another process and a
+   * transient failure is the likeliest kind; a duplicate interrupt costs
+   * nothing, the call being idempotent for a turn already stopped.
+   *
+   * Then the session, because it is strictly stronger than interrupting one
+   * turn inside it and the caller has already raised (or is covered by) the
+   * cancel barrier, so nothing queued behind is still wanted. Escalation goes
+   * through the ordinary `thread.session.stop` intent rather than calling
+   * `providerService.stopSession` directly, because that handler does the OTHER
+   * half too: it raises the barrier and writes the `stopped` session
+   * projection. A direct provider call would kill the runtime while leaving the
+   * UI showing a live session — trading a turn that ignores stop for a thread
+   * that lies about it.
+   *
+   * The original interrupt cause is always re-raised, escalated or not: the
+   * user asked to stop one turn and either got no stop at all or lost the whole
+   * session instead, and both are outcomes the caller has to report. A failed
+   * escalation is logged here and deliberately does not replace that cause.
+   */
+  const interruptTurnOrEscalateToSessionStop = (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId | null;
+    readonly createdAt: string;
+    readonly escalationTag: string;
+    readonly logContext: Record<string, unknown>;
+  }) =>
+    // Suspended so the retry below re-INVOKES the service rather than re-running
+    // an already-built effect. The two are the same in production today, but
+    // only by accident of `interruptTurn` being an `Effect.fn`; suspending makes
+    // the retry mean what it says regardless.
+    Effect.suspend(() =>
+      providerService.interruptTurn(
+        input.turnId === null
+          ? { threadId: input.threadId }
+          : { threadId: input.threadId, turnId: input.turnId },
+      ),
+    ).pipe(
+      Effect.retry({ times: 1, schedule: Schedule.exponential(100) }),
+      Effect.catchCause((interruptCause) =>
+        Effect.logWarning(
+          "provider command reactor escalating an undeliverable interrupt to a session stop",
+          {
+            ...input.logContext,
+            threadId: input.threadId,
+            turnId: input.turnId,
+            cause: Cause.pretty(interruptCause),
+          },
+        ).pipe(
+          Effect.flatMap(() => serverCommandId(input.escalationTag)),
+          Effect.flatMap((commandId) =>
+            orchestrationEngine.dispatch({
+              type: "thread.session.stop",
+              commandId,
+              threadId: input.threadId,
+              createdAt: input.createdAt,
+            }),
+          ),
+          Effect.catchCause(() => Effect.void),
+          Effect.flatMap(() => Effect.failCause(interruptCause)),
+        ),
+      ),
+    );
+
   const fenceSendAgainstLateStop = (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
     turn: ProviderTurnStartResult,
@@ -1165,66 +1238,19 @@ const make = Effect.gen(function* () {
             requestSequence: event.sequence,
             turnId: turn.turnId,
           }).pipe(
+            // One retry, then escalate to the session — the shared ladder, so
+            // the ordinary interrupt path and this one cannot drift apart.
+            // Only reached when the retried interrupt failed outright, so the
+            // escalation cannot cost a session anyone was still using: the
+            // alternative on this branch is a turn that ignores stop entirely.
             Effect.flatMap(() =>
-              providerService.interruptTurn({
+              interruptTurnOrEscalateToSessionStop({
                 threadId: event.payload.threadId,
                 turnId: turn.turnId,
+                createdAt: event.payload.createdAt,
+                escalationTag: "fence-escalated-session-stop",
+                logContext: { messageId: event.payload.messageId },
               }),
-            ),
-            // One retry, then escalate. The interrupt is a message to another
-            // process and a transient failure is the likeliest kind, so
-            // retrying is worth more than the cost of a duplicate interrupt —
-            // which is nothing, the call being idempotent for a turn already
-            // stopped.
-            Effect.retry({ times: 1, schedule: Schedule.exponential(100) }),
-            // An interrupt that will not land leaves the user's stop unenforced
-            // against a turn running RIGHT NOW, so it escalates to the bigger
-            // hammer instead of going straight to an apology. Stopping the
-            // session is strictly stronger than interrupting one turn inside
-            // it, and the barrier that put us on this branch already covers
-            // everything queued behind — so there is nothing left in this
-            // session the user still wants.
-            //
-            // Escalation goes through the ordinary `thread.session.stop`
-            // intent rather than calling `providerService.stopSession`
-            // directly, because that handler does the OTHER half too: it raises
-            // the barrier and writes the `stopped` session projection. A direct
-            // provider call would kill the runtime while leaving the UI showing
-            // a live session — trading a turn that ignores stop for a thread
-            // that lies about it.
-            //
-            // Only reached when the retried interrupt failed outright, so it
-            // cannot cost a session anyone was still using: the alternative on
-            // this branch is a turn that ignores stop entirely.
-            Effect.catchCause((interruptCause) =>
-              Effect.logWarning(
-                "provider command reactor escalating an undeliverable interrupt to a session stop",
-                {
-                  threadId: event.payload.threadId,
-                  messageId: event.payload.messageId,
-                  turnId: turn.turnId,
-                  cause: Cause.pretty(interruptCause),
-                },
-              ).pipe(
-                Effect.flatMap(() => serverCommandId("fence-escalated-session-stop")),
-                Effect.flatMap((commandId) =>
-                  orchestrationEngine.dispatch({
-                    type: "thread.session.stop",
-                    commandId,
-                    threadId: event.payload.threadId,
-                    createdAt: event.payload.createdAt,
-                  }),
-                ),
-                // Re-raised either way, escalated or not. The user asked to stop
-                // one turn and either got no stop at all or lost the whole
-                // session instead — both are outcomes they have to be told
-                // about, and the outer handler below is what tells them. The
-                // original interrupt cause is the one carried, because it is
-                // what actually happened to their turn; a failed escalation is
-                // already logged above and would only bury it.
-                Effect.catchCause(() => Effect.void),
-                Effect.flatMap(() => Effect.failCause(interruptCause)),
-              ),
             ),
           );
         }),
@@ -1578,7 +1604,51 @@ const make = Effect.gen(function* () {
     }
 
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    //
+    // This call used to be bare, and a failure went nowhere but the reactor's
+    // generic warning logger. That is the one outcome the projection cannot
+    // tolerate: `thread.turn-interrupt-requested` has ALREADY marked the turn
+    // interrupted by the time this runs, so a swallowed failure leaves the UI
+    // showing a stopped turn while the provider keeps running it — side effects
+    // and all — with nothing retrying and nobody told. It gets the same ladder
+    // the post-send fence uses, and the same interrupt-failure activity when
+    // every rung of it is exhausted.
+    yield* interruptTurnOrEscalateToSessionStop({
+      threadId: event.payload.threadId,
+      turnId: null,
+      createdAt: event.payload.createdAt,
+      escalationTag: "interrupt-escalated-session-stop",
+      logContext: {},
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider command reactor failed to deliver a turn interrupt", {
+          threadId: event.payload.threadId,
+          turnId: event.payload.turnId ?? null,
+          cause: Cause.pretty(cause),
+        }).pipe(
+          Effect.flatMap(() =>
+            appendProviderFailureActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.turn.interrupt.failed",
+              summary: "Provider turn interrupt failed",
+              detail: `The turn was marked stopped but the provider could not be told: ${formatFailureDetail(cause)}`,
+              turnId: event.payload.turnId ?? null,
+              createdAt: event.payload.createdAt,
+            }),
+          ),
+          // Last line of defence. If reporting also fails there is nothing
+          // further to try, and failing this handler over a log entry would
+          // only requeue an interrupt that already ran its whole ladder.
+          Effect.catchCause((appendCause) =>
+            Effect.logError("provider command reactor failed to report an undelivered interrupt", {
+              threadId: event.payload.threadId,
+              turnId: event.payload.turnId ?? null,
+              cause: Cause.pretty(appendCause),
+            }),
+          ),
+        ),
+      ),
+    );
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
