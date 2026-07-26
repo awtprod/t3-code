@@ -2081,11 +2081,17 @@ describe("ProviderCommandReactor", () => {
     // interrupt landing after the request, so it was dropped silently, leaving
     // a stranded pending placeholder and a user watching a thread that ignored
     // what they just typed.
+    //
+    // Twice, not once: the first send is this fix's — it passes the narrowed
+    // cutoff — and the second is the re-drive that follows the escalated stop's
+    // teardown, because that teardown destroys the session the first send
+    // landed in. Sparing the request at the barrier is only half the guarantee;
+    // the sibling test below owns the other half.
     expect(
       harness.sendTurn.mock.calls.filter(
         (call) => (call[0] as { input?: string }).input === "actually, do this instead",
       ),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
 
     // And the durable barrier agrees, which the send above cannot show on its
     // own. The two gates are independent and fail on different timescales: the
@@ -2100,13 +2106,146 @@ describe("ProviderCommandReactor", () => {
     // verbatim the question a replay asks: `acquire` is idempotent for a repeat
     // of the winner, so the only thing that can turn this answer into
     // `canceled` is a barrier standing above it.
+    //
+    // `superseded`, not `acquired`, and the distinction is the whole point.
+    // Both mean "no barrier covers this request" — which is what this
+    // assertion tests — but they differ in who holds the claim now, and the
+    // holder here is the post-teardown re-drive of the SAME message, pinned by
+    // `heldBySequence` below. A `canceled` here would mean the escalation had
+    // dated its barrier to itself and buried the replacement; `superseded` by a
+    // newer request for the same prompt means the replacement is alive and has
+    // simply moved up.
+    const redriveSequence = events.find(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === "user-message-2" &&
+        event.sequence > stop!.sequence,
+    )?.sequence;
+    expect(redriveSequence).toBeDefined();
+
     const replayed = (await harness.acquireSendClaim({
       threadId: ThreadId.make("thread-1"),
       messageId: asMessageId("user-message-2"),
       requestSequence: replacementSequence!,
       claimedAt: now,
-    })) as { _tag: string };
-    expect(replayed._tag).toBe("acquired");
+    })) as { _tag: string; heldBySequence?: number };
+    expect(replayed._tag).toBe("superseded");
+    expect(replayed.heldBySequence).toBe(redriveSequence);
+  });
+
+  it("re-drives a spared message after the escalated stop tears down the session it was sent into", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-redrive-escalation"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "the turn the user will stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    // Same interleaving as the test above — the replacement is submitted while
+    // the interrupt is mid-retry, so it lands above the interrupt's cutoff and
+    // below the escalated stop, and the narrowed cutoff deliberately spares it.
+    let dispatchedReplacement = false;
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.promise(async () => {
+        if (dispatchedReplacement) {
+          return;
+        }
+        dispatchedReplacement = true;
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-spared-by-escalated-stop"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-2"),
+            role: "user",
+            text: "actually, do this instead",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.flatMap(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "session/interrupt",
+              detail: "provider socket closed",
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-before-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    // The re-drive is the last thing this chain produces, and it is what the
+    // test is about — so wait for it explicitly rather than for the stop, which
+    // a regression would also satisfy.
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await harness.drain();
+
+    const events = await harness.readEventsWithPayloads();
+    const stop = events.find((event) => event.type === "thread.session-stop-requested");
+    expect(stop).toBeDefined();
+
+    const replacementStarts = events.filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === "user-message-2",
+    );
+
+    // The original request, spared by the cutoff, plus the re-drive. The
+    // original sits below the stop (that is what "spared" means, and the test
+    // above pins it); the re-drive sits above it, which is the only place it can
+    // sit and still be driven — the barrier refuses anything at or below the
+    // cutoff, and the session it would have run in is gone.
+    expect(replacementStarts).toHaveLength(2);
+    expect(replacementStarts[0]!.sequence).toBeLessThan(stop!.sequence);
+    expect(replacementStarts[1]!.sequence).toBeGreaterThan(stop!.sequence);
+
+    // The user's instruction survives the teardown. Without the re-drive the
+    // first send below still happens — it wins the race with the stop on this
+    // interleaving — but it is delivered into a session destroyed moments
+    // later, so the prompt is lost with no error anywhere. That failure is
+    // invisible to a "was it sent?" assertion, which is why this one counts the
+    // sends including the one that happens AFTER the teardown.
+    const replacementSends = harness.sendTurn.mock.calls.filter(
+      (call) => (call[0] as { input?: string }).input === "actually, do this instead",
+    );
+    expect(replacementSends).toHaveLength(2);
+
+    // Into a fresh session, not the torn-down one: the re-driven start goes
+    // through the ordinary turn-start path, which finds the projection
+    // `stopped` and starts a new provider session before sending.
+    expect(harness.startSession.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    // And the thread does not read as stopped while that re-driven turn is
+    // running in it.
+    expect(thread?.session?.status).not.toBe("stopped");
   });
 
   it("starts a fresh session when only projected session state exists", async () => {

@@ -717,8 +717,49 @@ const ThreadSessionStopCommand = Schema.Struct({
    * retry delay sits at a LOWER sequence than the escalated stop and is
    * retroactively canceled by it, silently, having been submitted after the
    * user's stop and therefore explicitly wanted.
+   *
+   * SERVER-ONLY. Absent from `ClientThreadSessionStopCommand`, which is what
+   * the client union admits, so a remote caller cannot choose the cutoff of a
+   * stop it requests. See that schema for what a client-chosen value would buy.
    */
   canceledThroughSequence: Schema.optional(NonNegativeInt),
+  createdAt: IsoDateTime,
+});
+
+/**
+ * The stop a client may ask for: everything queued as of the moment the server
+ * accepts it.
+ *
+ * `canceledThroughSequence` is omitted rather than optional, and the omission
+ * is a security boundary, not tidiness. The field is only ever correct when the
+ * reactor derives it from an interrupt it is escalating; a value that arrived
+ * over the wire has no such provenance, and both directions of a wrong one are
+ * durable:
+ *
+ * - A cutoff BELOW the stop's own sequence under-cancels. Requests already
+ *   queued pass both the durable barrier and the event-log guard, and a
+ *   turn-start that survives a stop resurrects the session it was stopping —
+ *   `sendTurn` to a stopped session resolves with `allowRecovery: true`.
+ *   Sending `0` turns any stop into a no-op while the UI reports it as done.
+ * - A cutoff ABOVE it poisons the thread. The barrier raise is monotonic by
+ *   design (an out-of-order interrupt must not un-cancel earlier work), so a
+ *   large value cannot be lowered by anything: every later request is refused
+ *   at the claim until the thread's own sequence climbs past it. The event-log
+ *   guard, which scans only events after a request, never sees that old stop
+ *   for those later requests — so the two gates disagree, one silently
+ *   refusing what the other allows.
+ *
+ * A stop the user pressed needs no cutoff: its position in the log already says
+ * when it happened, and `processSessionStopRequested` falls back to
+ * `event.sequence` for exactly that reason. So nothing is lost by withholding
+ * the field, and the escalation path — the only caller that legitimately sets
+ * it — builds `ThreadSessionStopCommand` inside the server and never crosses
+ * this boundary.
+ */
+const ClientThreadSessionStopCommand = Schema.Struct({
+  type: Schema.Literal("thread.session.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
   createdAt: IsoDateTime,
 });
 
@@ -759,7 +800,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
-  ThreadSessionStopCommand,
+  ClientThreadSessionStopCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 

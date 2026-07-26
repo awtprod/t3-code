@@ -8,6 +8,7 @@ import {
   OrchestrationEvent,
   OrchestrationEventMetadata,
   OrchestrationEventType,
+  MessageId,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -27,6 +28,7 @@ import {
   OrchestrationEventStore,
   type OrchestrationEventStoreShape,
   ThreadTurnStartClaimInput,
+  ThreadTurnStartsAboveCutoffInput,
 } from "../Services/OrchestrationEventStore.ts";
 
 // Both counts are non-negative by construction (each CASE contributes 0 or 1)
@@ -35,6 +37,15 @@ import {
 const ThreadTurnStartClaimRowSchema = Schema.Struct({
   sameMessageRestartCount: NonNegativeInt,
   interruptCount: NonNegativeInt,
+});
+
+// `messageId` comes out of the payload JSON rather than a column, because the
+// event table is generic over payloads. The query's WHERE clause restricts rows
+// to `thread.turn-start-requested`, whose payload always carries one, so the
+// extraction cannot be null for any row this schema decodes.
+const ThreadTurnStartAboveCutoffRowSchema = Schema.Struct({
+  sequence: NonNegativeInt,
+  messageId: MessageId,
 });
 
 const decodeEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
@@ -254,6 +265,47 @@ const makeEventStore = Effect.gen(function* () {
       `,
   });
 
+  // Selects the turn-starts a stop's narrowed cutoff deliberately spared.
+  //
+  // `sequence > canceledThroughSequence` is the exact complement of the barrier's
+  // inclusive `canceled_through_sequence >= request_sequence` coverage test, so a
+  // request is either refused by the barrier or listed here, never both and never
+  // neither. `sequence < stopSequence` keeps the scan below the stop itself: a
+  // turn-start appended after the stop was accepted has not been processed yet and
+  // will drive itself, so re-driving it here would duplicate it.
+  //
+  // Same index as the claim read (`idx_orch_events_stream_sequence`), and the
+  // range is bounded on both sides, so this touches only the slice of one
+  // thread's stream between the cutoff and the stop.
+  const readThreadTurnStartsAboveCutoffRows = SqlSchema.findAll({
+    Request: ThreadTurnStartsAboveCutoffInput,
+    Result: ThreadTurnStartAboveCutoffRowSchema,
+    execute: (request) =>
+      sql`
+        SELECT
+          sequence,
+          json_extract(payload_json, '$.messageId') AS "messageId"
+        FROM orchestration_events
+        WHERE aggregate_kind = 'thread'
+          AND stream_id = ${request.threadId}
+          AND event_type = 'thread.turn-start-requested'
+          AND sequence > ${request.canceledThroughSequence}
+          AND sequence < ${request.stopSequence}
+        ORDER BY sequence ASC
+      `,
+  });
+
+  const listThreadTurnStartsAboveCutoff: OrchestrationEventStoreShape["listThreadTurnStartsAboveCutoff"] =
+    (input) =>
+      readThreadTurnStartsAboveCutoffRows(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "OrchestrationEventStore.listThreadTurnStartsAboveCutoff:query",
+            "OrchestrationEventStore.listThreadTurnStartsAboveCutoff:decodeRows",
+          ),
+        ),
+      );
+
   const getThreadTurnStartClaim: OrchestrationEventStoreShape["getThreadTurnStartClaim"] = (
     input,
   ) =>
@@ -372,6 +424,7 @@ const makeEventStore = Effect.gen(function* () {
     readFromSequence,
     readAll: () => readFromSequence(0, Number.MAX_SAFE_INTEGER),
     getThreadTurnStartClaim,
+    listThreadTurnStartsAboveCutoff,
   } satisfies OrchestrationEventStoreShape;
 });
 

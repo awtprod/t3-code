@@ -51,6 +51,30 @@ export const ThreadTurnStartClaim = Schema.Struct({
 });
 export type ThreadTurnStartClaim = typeof ThreadTurnStartClaim.Type;
 
+export const ThreadTurnStartsAboveCutoffInput = Schema.Struct({
+  threadId: ThreadId,
+  /**
+   * The stop's cancellation cutoff. Turn-starts at or below it were canceled by
+   * the stop and are deliberately excluded; only those the stop spared are
+   * returned, matching the barrier's inclusive `>=` coverage test so this read
+   * and the durable claim cannot disagree about which requests a stop covers.
+   */
+  canceledThroughSequence: NonNegativeInt,
+  /**
+   * The stop's own sequence. Bounds the scan from above so a turn-start the user
+   * submitted AFTER the stop was accepted is not re-driven by it: that request
+   * has not been processed yet and will run on its own.
+   */
+  stopSequence: NonNegativeInt,
+});
+export type ThreadTurnStartsAboveCutoffInput = typeof ThreadTurnStartsAboveCutoffInput.Type;
+
+export const ThreadTurnStartAboveCutoff = Schema.Struct({
+  sequence: NonNegativeInt,
+  messageId: MessageId,
+});
+export type ThreadTurnStartAboveCutoff = typeof ThreadTurnStartAboveCutoff.Type;
+
 /**
  * OrchestrationEventStoreShape - Service API for orchestration event persistence.
  */
@@ -108,6 +132,31 @@ export interface OrchestrationEventStoreShape {
   readonly getThreadTurnStartClaim: (
     input: ThreadTurnStartClaimInput,
   ) => Effect.Effect<ThreadTurnStartClaim, OrchestrationEventStoreError>;
+
+  /**
+   * Lists the turn-starts on this thread that a stop's narrowed cutoff spared —
+   * those strictly above `canceledThroughSequence` and below `stopSequence`.
+   *
+   * Exists because a session stop is broader than its own cutoff. The cutoff
+   * governs which QUEUED requests the barrier refuses, but the stop still tears
+   * the whole provider session down, and a request the cutoff spared may already
+   * have reached that session. Sparing it at the barrier and then killing the
+   * session it is running in loses the same instruction the narrowing existed to
+   * protect — only later, and only when the scheduler happens to let the send win
+   * the race. The reactor uses this to re-drive those requests after the
+   * teardown, so the outcome no longer depends on which fiber ran first.
+   *
+   * Oldest first, so re-driving preserves the order the user sent them in.
+   *
+   * Reads the append-only log rather than the pending-start projection, because
+   * the projection is consumed: a `turn.started` or a fold deletes the
+   * placeholder, and those are exactly the cases where the request DID reach the
+   * session and therefore most needs re-driving. Scoped to one thread's stream
+   * between two sequences, so it reads that thread's recent tail.
+   */
+  readonly listThreadTurnStartsAboveCutoff: (
+    input: ThreadTurnStartsAboveCutoffInput,
+  ) => Effect.Effect<ReadonlyArray<ThreadTurnStartAboveCutoff>, OrchestrationEventStoreError>;
 }
 
 /**

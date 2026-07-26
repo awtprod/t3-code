@@ -2,6 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  type MessageId,
   type ModelSelection,
   NonNegativeInt,
   type OrchestrationEvent,
@@ -1860,7 +1861,121 @@ const make = Effect.gen(function* () {
       },
       createdAt: now,
     });
+
+    yield* redriveTurnStartsSparedByStop(event);
   });
+
+  /**
+   * Re-issue the turn-starts an escalated stop's narrowed cutoff spared but its
+   * teardown destroyed anyway.
+   *
+   * The cutoff and the teardown do not have the same reach. The cutoff decides
+   * which QUEUED requests the barrier refuses, and an escalated stop narrows it
+   * deliberately so a prompt the user typed AFTER pressing stop survives. The
+   * teardown has no cutoff at all: it kills the provider session outright. So a
+   * spared request that already won the race to `sendTurn` is delivered into a
+   * session that is torn down moments later, and the user loses the very
+   * instruction the narrowing existed to protect — silently, and only on the
+   * scheduler interleavings where the send happened to go first. Narrowing the
+   * cutoff without this turns "reliably suppressed" into "suppressed at random",
+   * which is worse to debug and no better to live with.
+   *
+   * Re-driving through `thread.turn.resume` rather than trying to keep the
+   * session alive, because the session genuinely has to die: this handler is
+   * only reached after an interrupt could not be delivered, and the teardown is
+   * the last remaining way to stop the turn that ignored it. So the session goes,
+   * and the spared requests are re-appended above the barrier where the ordinary
+   * turn-start path can start a fresh session and drive them normally.
+   *
+   * Skipped entirely for a stop the user pressed. That stop declares no cutoff,
+   * means "everything queued as of now", and must keep tearing down without
+   * resurrecting anything.
+   */
+  const redriveTurnStartsSparedByStop = (
+    event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
+  ) =>
+    Effect.gen(function* () {
+      const canceledThroughSequence = event.payload.canceledThroughSequence;
+      // `undefined` is a user-pressed stop; `>= event.sequence` is a stop whose
+      // cutoff already covers everything below it, so it spared nothing and
+      // there is nothing to re-drive.
+      if (canceledThroughSequence === undefined || canceledThroughSequence >= event.sequence) {
+        return;
+      }
+
+      const spared = yield* orchestrationEventStore
+        .listThreadTurnStartsAboveCutoff({
+          threadId: event.payload.threadId,
+          canceledThroughSequence: NonNegativeInt.make(canceledThroughSequence),
+          stopSequence: NonNegativeInt.make(event.sequence),
+        })
+        .pipe(
+          Effect.retry({ times: 2, schedule: Schedule.exponential(100) }),
+          // A failed read must not fail the stop: the stop itself already
+          // landed and is the half the user asked for. Losing the re-drive
+          // leaves the pre-existing behaviour (the spared prompt is dropped),
+          // which is bad but not worse than reporting a stop that did happen as
+          // failed.
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              "provider command reactor could not list the turn-starts an escalated stop spared",
+              {
+                threadId: event.payload.threadId,
+                canceledThroughSequence,
+                stopSequence: event.sequence,
+                cause: Cause.pretty(cause),
+              },
+            ).pipe(Effect.as([] as ReadonlyArray<{ readonly messageId: MessageId }>)),
+          ),
+        );
+
+      // One re-drive per message. The log can hold several turn-starts for the
+      // same message in this window (an auto-resume re-issue, say), and they all
+      // name the same prompt — re-driving each would deliver it twice.
+      const redrivenMessageIds = new Set<string>();
+      for (const entry of spared) {
+        if (redrivenMessageIds.has(entry.messageId)) {
+          continue;
+        }
+        redrivenMessageIds.add(entry.messageId);
+
+        const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
+        yield* orchestrationEngine
+          .dispatch({
+            type: "thread.turn.resume",
+            commandId: yield* serverCommandId("escalated-stop-redrive"),
+            threadId: event.payload.threadId,
+            messageId: entry.messageId,
+            ...(cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {}),
+            reason: "re-drive after an escalated session stop tore down a spared turn",
+            createdAt: event.payload.createdAt,
+          })
+          .pipe(
+            // The decider returns no events when the message is gone or is not a
+            // user message, which surfaces as this invariant error. That is the
+            // correct outcome, not a failure: there is nothing to resume.
+            Effect.catchTag("OrchestrationCommandInvariantError", (error) =>
+              Effect.logDebug("provider-command-reactor.escalated-stop-redrive.noop", {
+                threadId: event.payload.threadId,
+                messageId: entry.messageId,
+                reason: error.message,
+              }),
+            ),
+            // Same reasoning as the read above: the stop stands either way, and
+            // one lost re-drive is the old behaviour rather than a new failure.
+            Effect.catchCause((cause) =>
+              Effect.logWarning(
+                "provider command reactor failed to re-drive a turn-start an escalated stop spared",
+                {
+                  threadId: event.payload.threadId,
+                  messageId: entry.messageId,
+                  cause: Cause.pretty(cause),
+                },
+              ),
+            ),
+          );
+      }
+    });
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (
     event: ProviderIntentEvent,

@@ -111,6 +111,7 @@ describe("OrchestrationEngine", () => {
         ),
       getThreadTurnStartClaim: () =>
         Effect.succeed({ supersededBySameMessage: false, interruptedAfter: false }),
+      listThreadTurnStartsAboveCutoff: () => Effect.succeed([]),
     };
 
     const projectionSnapshot = {
@@ -779,6 +780,7 @@ describe("OrchestrationEngine", () => {
       },
       getThreadTurnStartClaim: () =>
         Effect.succeed({ supersededBySameMessage: false, interruptedAfter: false }),
+      listThreadTurnStartsAboveCutoff: () => Effect.succeed([]),
     };
 
     const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -1013,6 +1015,7 @@ describe("OrchestrationEngine", () => {
       },
       getThreadTurnStartClaim: () =>
         Effect.succeed({ supersededBySameMessage: false, interruptedAfter: false }),
+      listThreadTurnStartsAboveCutoff: () => Effect.succeed([]),
     };
 
     let shouldFailProjection = true;
