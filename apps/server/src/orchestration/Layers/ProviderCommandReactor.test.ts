@@ -3056,6 +3056,96 @@ describe("ProviderCommandReactor", () => {
     expect(sourcePlan?.implementationThreadId).toBe(ThreadId.make("thread-2"));
   });
 
+  it("retries and reports a plan mark that never lands, instead of swallowing it", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const sourceThreadId = ThreadId.make("thread-plan-source-unmarkable");
+    const planId = await seedSourceProposedPlan(harness, {
+      sourceThreadId,
+      planId: "plan:thread-plan-source-unmarkable:turn:plan-1",
+      createdAt,
+    });
+
+    // The fold has already deleted the placeholder that carried this plan
+    // reference, and a steer emits no `turn.started` for ingestion to mark
+    // from, so nothing downstream will ever try again: a failure here is
+    // permanent. The plan then shows as unimplemented forever while the
+    // provider is in fact implementing it — a lie the user can only act on if
+    // they are told.
+    //
+    // Failing EVERY attempt (rather than one) pins the retry: a single
+    // rejection would be absorbed and prove nothing about the fallback. Only
+    // the plan upsert is failed, so the fold itself still succeeds — that
+    // separation is the point, since the fold is what must survive.
+    const originalPlanDispatch = harness.engine.dispatch;
+    const markAttempts: Array<string> = [];
+    const planDispatchSpy = vi
+      .spyOn(harness.engine, "dispatch")
+      .mockImplementation((command: Parameters<typeof originalPlanDispatch>[0]) => {
+        if (command.type === "thread.proposed-plan.upsert" && command.threadId === sourceThreadId) {
+          markAttempts.push(command.commandId);
+          return Effect.fail(
+            new PersistenceSqlError({ operation: "dispatch", detail: "plan mark write failed" }),
+          );
+        }
+        return originalPlanDispatch(command);
+      });
+
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.succeed({
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-running"),
+        steered: true,
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-steered-plan-unmarkable"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-steer-plan-unmarkable"),
+        role: "user",
+        text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
+        attachments: [],
+      },
+      sourceProposedPlan: { threadId: sourceThreadId, planId },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      return (
+        readModel.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some(
+            (activity) => activity.kind === "provider.plan.mark-implemented.failed",
+          ) === true
+      );
+    });
+    await harness.drain();
+    planDispatchSpy.mockRestore();
+
+    // Three attempts: the initial one plus `times: 2`. Fewer means the retry
+    // is not wired; more means it is unbounded.
+    expect(markAttempts).toHaveLength(3);
+
+    const planFailureModel = await harness.readModel();
+    const planFailureActivity = planFailureModel.threads
+      .find((entry) => entry.id === ThreadId.make("thread-1"))
+      ?.activities.find((entry) => entry.kind === "provider.plan.mark-implemented.failed");
+    expect(planFailureActivity?.tone).toBe("error");
+    expect(planFailureActivity?.turnId).toBe(asTurnId("turn-running"));
+
+    // And the fold still landed. The whole reason this failure is caught
+    // rather than propagated is that the fold is the part preventing a
+    // duplicate prompt; a plan badge must not cost the user that.
+    expect(foldedEvents(await harness.readEventsWithPayloads())).toHaveLength(1);
+  });
+
   it("reports a lost fold on the thread instead of swallowing it", async () => {
     const harness = await createHarness();
     const createdAt = "2026-01-01T00:00:00.000Z";

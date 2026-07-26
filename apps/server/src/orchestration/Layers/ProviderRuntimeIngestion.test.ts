@@ -5356,6 +5356,82 @@ describe("ProviderRuntimeIngestion", () => {
     expect(userMessages(thread)).toHaveLength(2);
   });
 
+  it("does not resume a folded steer as if it were unstarted when the older turn ran tools", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // turn-a executed a command, so its effect is unknown after the crash.
+    await runToolItem(harness, "turn-a");
+
+    // The user steers with msg-2 — and this time the steer is DELIVERED: the
+    // adapter folded it into the running turn-a, which deletes msg-2's
+    // placeholder. This is the difference from the sibling test above
+    // ("resumes an unstarted pending steer even though the older turn ran
+    // tools"), where msg-2's placeholder survives because nothing ever
+    // consumed it. Same event shape, opposite correct answer, and the pending
+    // row is the only thing that distinguishes them.
+    await seedUserMessage(harness, "msg-2");
+    const pending = await harness.readPendingTurnStart();
+    expect(pending?.messageId).toBe("msg-2");
+    await foldPendingTurnStart(harness, {
+      tag: "delivered-steer",
+      requestSequence: pending!.requestSequence,
+      turnId: "turn-a",
+    });
+    expect(await harness.readPendingTurnStart()).toBeNull();
+
+    await crashSession(harness, "folded-steer-crash-after-tools");
+
+    // msg-2 is still the newest user message and still differs from turn-a's
+    // originating msg-1, so a bypass keyed on that difference alone would call
+    // it "unstarted" and re-issue it — asking the provider to redo work it
+    // already had, on a turn that also left a command in an unknown state.
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(resumeBlockedActivities(thread)).toHaveLength(1);
+    // The hand-off assertion, not just the marker: exactly the one original
+    // turn-start-requested for msg-2, with no resume re-issue behind it.
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-2"),
+    ).toHaveLength(1);
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
+    ).toHaveLength(1);
+  });
+
+  it("does not resume a folded steer past the provider's non-recoverable claim", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    await seedUserMessage(harness, "msg-2");
+    const pending = await harness.readPendingTurnStart();
+    expect(pending?.messageId).toBe("msg-2");
+    await foldPendingTurnStart(harness, {
+      tag: "nonrecoverable-steer",
+      requestSequence: pending!.requestSequence,
+      turnId: "turn-a",
+    });
+
+    // The second gate the same bypass opens. No tool ran here, so only the
+    // provider's own "do not retry" claim stands between the user and a
+    // re-send of a message the provider already received.
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-session-exited-folded-steer-nonrecoverable"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      payload: { reason: "provider refused to resume", recoverable: false },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-2"),
+    ).toHaveLength(1);
+  });
+
   it("keeps a pending turn start when the provider session is still running the thread", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");

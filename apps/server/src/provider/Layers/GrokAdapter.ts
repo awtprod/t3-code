@@ -1342,11 +1342,30 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               observed.interruptedTurnId ?? turnId ?? activeTurnId ?? ctx.session.activeTurnId;
             yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
             yield* settlePendingUserInputsAsCancelled(ctx.pendingUserInputs);
-            yield* Effect.ignore(
-              ctx.acp.cancel.pipe(
-                Effect.mapError((error) =>
-                  mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
-                ),
+            // Propagated, not ignored. `session/cancel` is an ACP notification,
+            // so about the only way it fails is that the transport to the agent
+            // is gone — which is precisely when the turn is NOT being stopped
+            // and the caller most needs to know. Swallowing it reported every
+            // interrupt as delivered and left the reactor with nothing to
+            // retry, escalate, or tell the user about after they pressed stop
+            // and the turn kept going.
+            //
+            // Failing here also, deliberately, skips the local settlement
+            // below. That block records the turn `cancelled` and clears the
+            // in-flight prompts, which is a claim about what the AGENT did; on
+            // an undelivered cancel it is simply false, and a turn shown as
+            // stopped while the provider keeps running it is the worse of the
+            // two failures. The two settlements above ran first and
+            // unconditionally, so pending approvals and user inputs are still
+            // resolved rather than parked behind a turn nobody will answer.
+            //
+            // `interruptedTurnIds` keeps the mark taken before the lock: the
+            // reactor's response to a failed interrupt is to escalate to a
+            // session stop, so the turn is ending either way and treating a
+            // late completion for it as interrupted stays the right reading.
+            yield* ctx.acp.cancel.pipe(
+              Effect.mapError((error) =>
+                mapAcpToAdapterError(PROVIDER, threadId, "session/cancel", error),
               ),
             );
             if (interruptedTurnId) {

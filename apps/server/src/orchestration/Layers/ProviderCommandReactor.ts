@@ -313,6 +313,7 @@ const make = Effect.gen(function* () {
     readonly kind:
       | "provider.turn.start.failed"
       | "provider.turn.fold.failed"
+      | "provider.plan.mark-implemented.failed"
       | "provider.turn.interrupt.failed"
       | "provider.approval.respond.failed"
       | "provider.user-input.respond.failed"
@@ -994,10 +995,27 @@ const make = Effect.gen(function* () {
           implementationThreadId: event.payload.threadId,
           implementedAt: event.payload.createdAt,
         }).pipe(
-          // The fold itself is durable by this point, which is the part that
-          // prevents a duplicate prompt. A plan left unmarked is wrong on
-          // screen but costs no work, so it must not undo the retry above.
+          // Retried for the same reason the fold above is: the likely failure
+          // is a contended write, and the dispatch is idempotent — the upsert
+          // is keyed by plan id, and `markFoldedSourceProposedPlanImplemented`
+          // re-reads the plan and returns early once `implementedAt` is set,
+          // so a repeat is a no-op rather than a second mark.
+          //
+          // Retrying matters more here than anywhere else in this function
+          // because nothing else will ever try again. The fold that triggered
+          // this work has already deleted the pending placeholder, so there is
+          // no row left for recovery to notice and no later event that re-runs
+          // the mark: a failure here is permanent, not deferred.
+          Effect.retry({ times: 2, schedule: Schedule.exponential(100) }),
           Effect.catchCause((cause) =>
+            // The fold itself is durable by this point, which is the part that
+            // prevents a duplicate prompt, so an unmarked plan must not undo
+            // it — hence caught rather than propagated. But it is not merely
+            // cosmetic either: the plan stays "unimplemented" forever while
+            // the provider is in fact implementing it, and the user's only
+            // recourse is to notice and act on that, which they can only do if
+            // told. So it gets the same treatment as the lost fold below —
+            // log, then say so on the thread.
             Effect.logWarning(
               "provider command reactor failed to mark a folded source proposed plan",
               {
@@ -1006,6 +1024,27 @@ const make = Effect.gen(function* () {
                 planId: sourceProposedPlan.planId,
                 cause: Cause.pretty(cause),
               },
+            ).pipe(
+              Effect.flatMap(() =>
+                appendProviderFailureActivity({
+                  threadId: event.payload.threadId,
+                  kind: "provider.plan.mark-implemented.failed",
+                  summary: "Plan could not be marked implemented",
+                  detail: `The message was delivered to the running turn, but its source plan could not be recorded as implemented and will keep showing as unimplemented: ${formatFailureDetail(cause)}`,
+                  turnId: turn.turnId,
+                  createdAt: event.payload.createdAt,
+                }),
+              ),
+              // Last line of defence, as elsewhere on this path: if reporting
+              // also fails there is nothing further to try, and taking the
+              // turn-start fiber down over a plan badge helps no one.
+              Effect.catchCause((appendCause) =>
+                Effect.logError("provider command reactor failed to report an unmarked plan", {
+                  threadId: event.payload.threadId,
+                  planId: sourceProposedPlan.planId,
+                  cause: Cause.pretty(appendCause),
+                }),
+              ),
             ),
           ),
         );

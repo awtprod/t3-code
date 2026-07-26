@@ -2017,16 +2017,40 @@ const make = Effect.gen(function* () {
         // old turn would strand the steer permanently, which is the silent-drop
         // failure this whole path exists to prevent.
         //
-        // The bypass turns on the messages differing, NOT on a pending row
-        // merely existing: an auto-resume writes a fresh pending row for the
-        // SAME message it is retrying, so existence alone would let a second
-        // crash re-run the very tools the first left in an unknown state. Both
-        // ids must be readable to earn the bypass; an unreadable active-turn row
-        // yields null and keeps the gate closed, which is the safe direction.
+        // The bypass needs BOTH halves, and each rejects a different impostor.
+        //
+        // The messages must differ, because an auto-resume writes a fresh
+        // pending row for the SAME message it is retrying: existence alone
+        // would let a second crash re-run the very tools the first left in an
+        // unknown state. Both ids must be readable to earn that half; an
+        // unreadable active-turn row yields null and keeps the gate closed,
+        // which is the safe direction.
+        //
+        // And a pending row for the targeted message must still exist, because
+        // "different message" alone does not mean "never sent". A steer that
+        // was successfully delivered mid-turn is FOLDED into the running turn:
+        // the provider has it, but no turn.started ever names it, and
+        // ProjectionPipeline deletes its pending row on
+        // `thread.turn-start-folded`. Such a message is still the newest and
+        // still differs from the active turn's originating message, so the
+        // message-differs test alone would call work the provider already ran
+        // "unstarted" and re-issue it past both refusal gates — the exact
+        // duplicate-side-effect outcome those gates exist to prevent. The
+        // surviving pending row (turn_id NULL) is the only positive evidence
+        // that nothing could have executed on this message's behalf, so it is
+        // required rather than inferred. A deleted row is indistinguishable
+        // from a delivered fold, and the safe reading of ambiguity here is
+        // that the work may have landed.
+        const resumeTargetHasPendingTurnStart =
+          resumeTargetMessageId !== null &&
+          orphanedPendingTurnStarts.some((pending) =>
+            sameId(pending.messageId, resumeTargetMessageId),
+          );
         const resumeTargetsUnstartedSteer =
           resumeTargetMessageId !== null &&
           activeTurnMessageId !== null &&
-          !sameId(activeTurnMessageId, resumeTargetMessageId);
+          !sameId(activeTurnMessageId, resumeTargetMessageId) &&
+          resumeTargetHasPendingTurnStart;
         const sideEffectActivityKind =
           activeTurnId === null ||
           resumeTargetsUnstartedSteer ||
@@ -2288,8 +2312,15 @@ const make = Effect.gen(function* () {
 
               // A plan-implementation turn that already emitted turn.started has
               // had its pending row consumed — turn.started deletes it and copies
-              // the source-plan onto the concrete turn row. A crash after that
-              // leaves no pending row, so the block above finds nothing; fall
+              // the source-plan onto the concrete turn row. A folded steer is the
+              // other way a row is consumed: it was delivered INTO the running
+              // turn, so `thread.turn-start-folded` deletes its row and the
+              // provider is executing it as part of that turn. Both land here
+              // with no pending row, and for both the active turn's plan is the
+              // right one to carry — the resumed work continues that turn's
+              // implementation rather than starting something the user never
+              // attached a plan to. A crash after that leaves no pending row, so
+              // the block above finds nothing; fall
               // back to the interrupted active turn's persisted source-plan so
               // the resumed turn keeps the linkage the UI uses to associate the
               // turn with (and mark implemented) its plan. Read failure is
