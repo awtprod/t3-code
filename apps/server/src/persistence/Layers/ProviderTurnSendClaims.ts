@@ -1,4 +1,4 @@
-import { NonNegativeInt } from "@t3tools/contracts";
+import { NonNegativeInt, TurnId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -10,14 +10,22 @@ import {
   AcquireProviderTurnSendClaimInput,
   CancelProviderTurnSendClaimsInput,
   ProviderTurnSendClaimRepository,
+  RecordProviderTurnSendDeliveryInput,
   type ProviderTurnSendClaimOutcome,
   type ProviderTurnSendClaimRepositoryShape,
+  type ProviderTurnSendDeliveryState,
 } from "../Services/ProviderTurnSendClaims.ts";
 
 // The claim row's owner, read back after the conditional upsert. Absent only
 // when a cancel barrier blocked the insert and no other request had claimed.
 const ClaimOwnerRowSchema = Schema.Struct({
   requestSequence: NonNegativeInt,
+});
+
+const ClaimDeliveryRowSchema = Schema.Struct({
+  requestSequence: NonNegativeInt,
+  deliveredTurnId: Schema.NullOr(TurnId),
+  supersededDeliveredTurnId: Schema.NullOr(TurnId),
 });
 
 const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
@@ -37,6 +45,17 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
   //
   // Equal sequences do not update, so a replay of the winner re-reads its own
   // row and is still told it holds the claim.
+  //
+  // A higher sequence also advances the DELIVERY state. Ownership alone must
+  // never kill the old sender: the new RPC may fail after stealing the row. If
+  // the old holder already stamped a successful delivery, moving that concrete
+  // id into `superseded_delivered_turn_id` lets the new holder reconcile it
+  // only after the new holder stamps its own successful, distinct replacement.
+  // If the old RPC has not returned yet, `delivered_turn_id` is null and the
+  // late old sender will populate the superseded slot itself. Existing
+  // superseded evidence is preserved when there is no current delivery, so a
+  // chain of ownership changes does not erase the only known successful old
+  // send merely because an intermediate owner failed.
   const upsertClaimIfNotCanceled = SqlSchema.void({
     Request: AcquireProviderTurnSendClaimInput,
     execute: (request) =>
@@ -52,7 +71,13 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
         )
         ON CONFLICT (thread_id, message_id) DO UPDATE SET
           request_sequence = excluded.request_sequence,
-          claimed_at = excluded.claimed_at
+          claimed_at = excluded.claimed_at,
+          delivered_turn_id = NULL,
+          superseded_delivered_turn_id = CASE
+            WHEN provider_turn_send_claims.delivered_turn_id IS NOT NULL
+              THEN provider_turn_send_claims.delivered_turn_id
+            ELSE provider_turn_send_claims.superseded_delivered_turn_id
+          END
         WHERE excluded.request_sequence > provider_turn_send_claims.request_sequence
       `,
   });
@@ -179,6 +204,85 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProviderTurnSendClaimRepository.cancel:query")),
     );
 
+  // Phase two of the claim protocol. A successful CURRENT holder stamps the
+  // current-delivery slot; a successful EX-holder whose RPC crossed a takeover
+  // stamps the superseded slot. The `request_sequence >=` predicate is a safety
+  // fence against impossible/corrupt backwards ownership: without it, a
+  // delivery for a sequence that never owned this row could be recorded as
+  // stale evidence and later used to interrupt an unrelated healthy turn.
+  //
+  // This write and the read below intentionally remain separate statements.
+  // SQLite serializes all claim writes. For two completing sends, whichever
+  // stamp runs second necessarily follows the first stamp; its subsequent read
+  // sees both ids. Wrapping each pair in a transaction is unnecessary for that
+  // invariant and would lengthen the write lock around an ordinary read.
+  const stampDeliveredTurn = SqlSchema.void({
+    Request: RecordProviderTurnSendDeliveryInput,
+    execute: (request) =>
+      sql`
+        UPDATE provider_turn_send_claims
+        SET
+          delivered_turn_id = CASE
+            WHEN request_sequence = ${request.requestSequence}
+              THEN ${request.turnId}
+            ELSE delivered_turn_id
+          END,
+          superseded_delivered_turn_id = CASE
+            WHEN request_sequence > ${request.requestSequence}
+              THEN ${request.turnId}
+            ELSE superseded_delivered_turn_id
+          END
+        WHERE thread_id = ${request.threadId}
+          AND message_id = ${request.messageId}
+          AND request_sequence >= ${request.requestSequence}
+      `,
+  });
+
+  const readDeliveryState = SqlSchema.findOneOption({
+    Request: Schema.Struct({
+      threadId: RecordProviderTurnSendDeliveryInput.fields.threadId,
+      messageId: RecordProviderTurnSendDeliveryInput.fields.messageId,
+      requestSequence: RecordProviderTurnSendDeliveryInput.fields.requestSequence,
+    }),
+    Result: ClaimDeliveryRowSchema,
+    execute: ({ threadId, messageId, requestSequence }) =>
+      sql`
+        SELECT
+          request_sequence AS "requestSequence",
+          delivered_turn_id AS "deliveredTurnId",
+          superseded_delivered_turn_id AS "supersededDeliveredTurnId"
+        FROM provider_turn_send_claims
+        WHERE thread_id = ${threadId}
+          AND message_id = ${messageId}
+          AND request_sequence >= ${requestSequence}
+      `,
+  });
+
+  const recordDelivery: ProviderTurnSendClaimRepositoryShape["recordDelivery"] = (input) =>
+    stampDeliveredTurn(input).pipe(
+      Effect.flatMap(() =>
+        readDeliveryState({
+          threadId: input.threadId,
+          messageId: input.messageId,
+          requestSequence: input.requestSequence,
+        }),
+      ),
+      Effect.map(
+        (row): ProviderTurnSendDeliveryState =>
+          row._tag === "Some"
+            ? {
+                _tag: "recorded",
+                heldBySequence: row.value.requestSequence,
+                deliveredTurnId: row.value.deliveredTurnId,
+                supersededDeliveredTurnId: row.value.supersededDeliveredTurnId,
+              }
+            : { _tag: "unowned" },
+      ),
+      Effect.mapError(
+        toPersistenceSqlError("ProviderTurnSendClaimRepository.recordDelivery:query"),
+      ),
+    );
+
   // Existence only, and deliberately barrier-blind: a stop raised after the
   // claim does not un-send the prompt, so filtering by the barrier here would
   // report a delivered message as never-attempted. See `hasEverClaimed` on the
@@ -209,6 +313,7 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
   return {
     acquire,
     cancel,
+    recordDelivery,
     hasEverClaimed,
   } satisfies ProviderTurnSendClaimRepositoryShape;
 });

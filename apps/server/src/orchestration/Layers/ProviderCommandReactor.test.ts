@@ -9,6 +9,7 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -17,11 +18,13 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
   MessageId,
+  NonNegativeInt,
   ProjectId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
@@ -231,11 +234,12 @@ describe("ProviderCommandReactor", () => {
       runtimeSessions.push(session);
       return Effect.succeed(session);
     });
-    const sendTurn = vi.fn((_: unknown) =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-1"),
-      }),
+    const sendTurn = vi.fn(
+      (_: unknown): Effect.Effect<ProviderTurnStartResult, ProviderAdapterRequestError> =>
+        Effect.succeed({
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        }),
     );
     // Typed to admit a provider failure so tests can exercise the path where a
     // stop cannot be delivered; `Effect.void` alone would narrow the error
@@ -245,20 +249,21 @@ describe("ProviderCommandReactor", () => {
     );
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
-    const stopSession = vi.fn((input: unknown) =>
-      Effect.sync(() => {
-        const threadId =
-          typeof input === "object" && input !== null && "threadId" in input
-            ? (input as { threadId?: ThreadId }).threadId
-            : undefined;
-        if (!threadId) {
-          return;
-        }
-        const index = runtimeSessions.findIndex((session) => session.threadId === threadId);
-        if (index >= 0) {
-          runtimeSessions.splice(index, 1);
-        }
-      }),
+    const stopSession = vi.fn(
+      (input: unknown): Effect.Effect<void, ProviderAdapterRequestError> =>
+        Effect.sync(() => {
+          const threadId =
+            typeof input === "object" && input !== null && "threadId" in input
+              ? (input as { threadId?: ThreadId }).threadId
+              : undefined;
+          if (!threadId) {
+            return;
+          }
+          const index = runtimeSessions.findIndex((session) => session.threadId === threadId);
+          if (index >= 0) {
+            runtimeSessions.splice(index, 1);
+          }
+        }),
     );
     const renameBranch = vi.fn((input: unknown) =>
       Effect.succeed({
@@ -454,6 +459,12 @@ describe("ProviderCommandReactor", () => {
     // the turn".
     const acquireSendClaim = (input: Parameters<typeof sendClaims.acquire>[0]): Promise<unknown> =>
       managed.runPromise(sendClaims.acquire(input));
+    // Effect-backed latches used by concurrency tests stay on the harness
+    // runtime, matching every repository/service effect those tests coordinate.
+    // Wrapping the runner here also keeps individual cases declarative instead
+    // of constructing ad-hoc runtimes.
+    const runEffect = <A, E>(effect: Effect.Effect<A, E>): Promise<A> => managed.runPromise(effect);
+    const makeLatch = (): Promise<Deferred.Deferred<void>> => runEffect(Deferred.make<void>());
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
@@ -518,6 +529,8 @@ describe("ProviderCommandReactor", () => {
       eventStore,
       readEvents,
       readEventsWithPayloads,
+      runEffect,
+      makeLatch,
     };
   }
 
@@ -1983,6 +1996,88 @@ describe("ProviderCommandReactor", () => {
         detail: expect.stringContaining("provider socket closed"),
       },
     });
+  });
+
+  it("preserves the original interrupt failure when escalation dispatch also fails", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-double-stop-failure"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "running",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("turn-1"),
+        lastError: null,
+        updatedAt: now,
+      },
+      createdAt: now,
+    });
+
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "session/interrupt",
+          detail: "original interrupt transport failure",
+        }),
+      ),
+    );
+
+    const originalDispatch = harness.engine.dispatch;
+    const dispatchSpy = vi
+      .spyOn(harness.engine, "dispatch")
+      .mockImplementation((command: Parameters<typeof originalDispatch>[0]) =>
+        command.type === "thread.session.stop"
+          ? Effect.fail(
+              new PersistenceSqlError({
+                operation: "dispatch",
+                detail: "escalation dispatch persistence failure",
+              }) as never,
+            )
+          : originalDispatch(command),
+      );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-double-failure"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some((activity) => activity.kind === "provider.turn.interrupt.failed") ===
+        true
+      );
+    });
+    await harness.drain();
+    dispatchSpy.mockRestore();
+
+    // The harness does not install a log-capturing logger, so pin the observable
+    // propagation contract: escalation failure is logged by production code,
+    // while reporting still carries the ORIGINAL interrupt cause and never
+    // substitutes the persistence failure.
+    const model = await harness.readModel();
+    const activity = model.threads
+      .find((entry) => entry.id === ThreadId.make("thread-1"))
+      ?.activities.find((entry) => entry.kind === "provider.turn.interrupt.failed");
+    const detail = (activity?.payload as { detail?: string } | undefined)?.detail;
+    expect(detail).toContain("original interrupt transport failure");
+    expect(detail).not.toContain("escalation dispatch persistence failure");
+    expect(
+      (await harness.readEvents()).filter(
+        (event) => event.type === "thread.session-stop-requested",
+      ),
+    ).toHaveLength(0);
   });
 
   it("escalates without canceling a message the user sent while the interrupt was retrying", async () => {
@@ -4567,23 +4662,33 @@ describe("ProviderCommandReactor", () => {
   it("interrupts an older delivered turn after a newer same-message request steals its claim", async () => {
     const harness = await createHarness();
     const createdAt = "2026-01-01T00:00:00.000Z";
-    let releaseOlderSend!: () => void;
-    const olderSendReleased = new Promise<void>((resolve) => {
-      releaseOlderSend = resolve;
-    });
-    let markOlderSendEntered!: () => void;
-    const olderSendEntered = new Promise<void>((resolve) => {
-      markOlderSendEntered = resolve;
-    });
+    const releaseOlderSend = await harness.makeLatch();
+    const releaseNewerSend = await harness.makeLatch();
+    const olderSendEntered = await harness.makeLatch();
+    const newerSendEntered = await harness.makeLatch();
+    const olderDeliveryRecorded = await harness.makeLatch();
     let sameMessageSendCount = 0;
 
-    // The first request has already acquired the claim when it enters this RPC.
-    // Hold it there while a real higher-sequence resume request acquires the SAME
-    // message's claim and completes its own send. The old request then returns
-    // after ownership has changed — the exact window no database transaction can
-    // span because `sendTurn` crosses the provider RPC boundary.
+    // Both sends enter the provider before either is allowed to return. Release
+    // the OLD one first and wait until its delivery is durably stamped; only
+    // then let the newer replacement succeed. This is the completion order in
+    // which the winning sender, not the stale sender, must discover and
+    // interrupt the older turn. Hard-coding the newer success before releasing
+    // the race would cover only the opposite direction.
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          Effect.tap(() =>
+            input.turnId === asTurnId("turn-older")
+              ? Deferred.succeed(olderDeliveryRecorded, undefined)
+              : Effect.void,
+          ),
+        ),
+      );
     harness.sendTurn.mockImplementation((input: unknown) =>
-      Effect.promise(async () => {
+      Effect.gen(function* () {
         if ((input as { input?: string }).input !== "supersede me mid-flight") {
           return {
             threadId: ThreadId.make("thread-1"),
@@ -4592,13 +4697,15 @@ describe("ProviderCommandReactor", () => {
         }
         sameMessageSendCount += 1;
         if (sameMessageSendCount === 1) {
-          markOlderSendEntered();
-          await olderSendReleased;
+          yield* Deferred.succeed(olderSendEntered, undefined);
+          yield* Deferred.await(releaseOlderSend);
           return {
             threadId: ThreadId.make("thread-1"),
             turnId: asTurnId("turn-older"),
           };
         }
+        yield* Deferred.succeed(newerSendEntered, undefined);
+        yield* Deferred.await(releaseNewerSend);
         return {
           threadId: ThreadId.make("thread-1"),
           turnId: asTurnId("turn-newer"),
@@ -4620,7 +4727,7 @@ describe("ProviderCommandReactor", () => {
       runtimeMode: "approval-required",
       createdAt,
     });
-    await olderSendEntered;
+    await harness.runEffect(Deferred.await(olderSendEntered));
 
     await harness.dispatch({
       type: "thread.turn.resume",
@@ -4629,7 +4736,7 @@ describe("ProviderCommandReactor", () => {
       messageId: asMessageId("user-message-1"),
       createdAt: "2026-01-01T00:00:01.000Z",
     });
-    await waitFor(() => sameMessageSendCount === 2);
+    await harness.runEffect(Deferred.await(newerSendEntered));
 
     const sameMessageRequests = (await harness.readEventsWithPayloads()).filter(
       (event) =>
@@ -4650,23 +4757,289 @@ describe("ProviderCommandReactor", () => {
       heldBySequence: sameMessageRequests[1]!.sequence,
     });
 
-    releaseOlderSend();
+    await harness.runEffect(Deferred.succeed(releaseOlderSend, undefined));
+    await harness.runEffect(Deferred.await(olderDeliveryRecorded));
+    expect(harness.interruptTurn.mock.calls).toHaveLength(0);
+
+    await harness.runEffect(Deferred.succeed(releaseNewerSend, undefined));
     await waitFor(() =>
       harness.interruptTurn.mock.calls.some(
         (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-older"),
       ),
     );
     await harness.drain();
+    recordDeliverySpy.mockRestore();
 
     expect(sameMessageSendCount).toBe(2);
-    expect(harness.interruptTurn.mock.calls).toEqual([
-      [
-        {
+    expect(
+      harness.interruptTurn.mock.calls.filter(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-older"),
+      ).length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-newer"),
+      ),
+    ).toBe(false);
+    expect(harness.stopSession.mock.calls).toHaveLength(0);
+  });
+
+  it("keeps the older delivered turn alive when the newer claimant's send fails", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const releaseOlderSend = await harness.makeLatch();
+    const olderSendEntered = await harness.makeLatch();
+    const olderDeliveryRecorded = await harness.makeLatch();
+    let sameMessageSendCount = 0;
+
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          Effect.tap(() =>
+            input.turnId === asTurnId("turn-healthy-older")
+              ? Deferred.succeed(olderDeliveryRecorded, undefined)
+              : Effect.void,
+          ),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "new claimant can fail") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sameMessageSendCount += 1;
+        if (sameMessageSendCount === 1) {
+          yield* Deferred.succeed(olderSendEntered, undefined);
+          yield* Deferred.await(releaseOlderSend);
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-healthy-older"),
+          };
+        }
+        return yield* new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "turn/start",
+          detail: "newer replacement failed before delivery",
+        });
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-older-before-failed-replacement"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-failed-replacement"),
+        role: "user",
+        text: "new claimant can fail",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await harness.runEffect(Deferred.await(olderSendEntered));
+
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-failed-replacement"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-failed-replacement"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some(
+            (activity) =>
+              activity.kind === "provider.turn.start.failed" &&
+              (activity.payload as { detail?: string }).detail?.includes(
+                "newer replacement failed before delivery",
+              ),
+          ) === true
+      );
+    });
+
+    await harness.runEffect(Deferred.succeed(releaseOlderSend, undefined));
+    await harness.runEffect(Deferred.await(olderDeliveryRecorded));
+    await harness.drain();
+    recordDeliverySpy.mockRestore();
+
+    expect(sameMessageSendCount).toBe(2);
+    expect(harness.interruptTurn.mock.calls).toHaveLength(0);
+    expect(harness.stopSession.mock.calls).toHaveLength(0);
+  });
+
+  it("does not interrupt when superseding steers return the same active turn id", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const releaseOlderSend = await harness.makeLatch();
+    const olderSendEntered = await harness.makeLatch();
+    const newerDeliveryRecorded = await harness.makeLatch();
+    const olderDeliveryRecorded = await harness.makeLatch();
+    let sameMessageSendCount = 0;
+    let deliveryStampCount = 0;
+
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          Effect.tap(() => {
+            deliveryStampCount += 1;
+            return deliveryStampCount === 1
+              ? Deferred.succeed(newerDeliveryRecorded, undefined)
+              : Deferred.succeed(olderDeliveryRecorded, undefined);
+          }),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "shared steer turn") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sameMessageSendCount += 1;
+        if (sameMessageSendCount === 1) {
+          yield* Deferred.succeed(olderSendEntered, undefined);
+          yield* Deferred.await(releaseOlderSend);
+        }
+        return {
           threadId: ThreadId.make("thread-1"),
-          turnId: asTurnId("turn-older"),
-        },
-      ],
-    ]);
+          turnId: asTurnId("turn-shared-active"),
+          steered: true,
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-shared-steer-older"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-shared-steer"),
+        role: "user",
+        text: "shared steer turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await harness.runEffect(Deferred.await(olderSendEntered));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-shared-steer-newer"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-shared-steer"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.runEffect(Deferred.await(newerDeliveryRecorded));
+    await harness.runEffect(Deferred.succeed(releaseOlderSend, undefined));
+    await harness.runEffect(Deferred.await(olderDeliveryRecorded));
+    await harness.drain();
+    recordDeliverySpy.mockRestore();
+
+    expect(sameMessageSendCount).toBe(2);
+    expect(harness.interruptTurn.mock.calls).toHaveLength(0);
+    expect(harness.stopSession.mock.calls).toHaveLength(0);
+  });
+
+  it("interrupts a late older return after the newer replacement already fenced", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const releaseOlderSend = await harness.makeLatch();
+    const olderSendEntered = await harness.makeLatch();
+    const newerFenceCompleted = await harness.makeLatch();
+    let sameMessageSendCount = 0;
+
+    const originalAcquire = harness.sendClaims.acquire;
+    const acquireSpy = vi
+      .spyOn(harness.sendClaims, "acquire")
+      .mockImplementation((input: Parameters<typeof originalAcquire>[0]) =>
+        originalAcquire(input).pipe(
+          Effect.tap(() =>
+            sameMessageSendCount === 2
+              ? Deferred.succeed(newerFenceCompleted, undefined)
+              : Effect.void,
+          ),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "older returns after fence") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sameMessageSendCount += 1;
+        if (sameMessageSendCount === 1) {
+          yield* Deferred.succeed(olderSendEntered, undefined);
+          yield* Deferred.await(releaseOlderSend);
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-late-older"),
+          };
+        }
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-fenced-newer"),
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-late-older"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-late-older"),
+        role: "user",
+        text: "older returns after fence",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await harness.runEffect(Deferred.await(olderSendEntered));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-fenced-newer"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-late-older"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+
+    // This latch fires from the newer sender's post-delivery acquire, proving
+    // its replacement was stamped and its late-stop fence completed before the
+    // old provider RPC is allowed to return.
+    await harness.runEffect(Deferred.await(newerFenceCompleted));
+    expect(harness.interruptTurn.mock.calls).toHaveLength(0);
+    await harness.runEffect(Deferred.succeed(releaseOlderSend, undefined));
+    await waitFor(() =>
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-late-older"),
+      ),
+    );
+    await harness.drain();
+    acquireSpy.mockRestore();
+
+    expect(
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-fenced-newer"),
+      ),
+    ).toBe(false);
     expect(harness.stopSession.mock.calls).toHaveLength(0);
   });
 
@@ -5057,6 +5430,99 @@ describe("ProviderCommandReactor", () => {
       claimedAt: stopCreatedAt,
     })) as { _tag: string };
     expect(above._tag).toBe("acquired");
+  });
+
+  it("retries a failed provider session stop and reports it without projecting or redriving", async () => {
+    const harness = await createHarness();
+    const stopCreatedAt = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-set-for-provider-stop-failure"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "ready",
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex_work"),
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: stopCreatedAt,
+      },
+      createdAt: stopCreatedAt,
+    });
+
+    // Count executions inside the effect. The reactor suspends the provider
+    // call before retrying, so this pins the actual adapter attempts rather than
+    // how many effect values the mock happened to construct.
+    const stopAttempts: Array<ThreadId> = [];
+    harness.stopSession.mockImplementation((input: unknown) =>
+      Effect.suspend(() => {
+        stopAttempts.push((input as { threadId: ThreadId }).threadId);
+        return Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: ProviderDriverKind.make("codex"),
+            method: "session/stop",
+            detail: "provider stop transport unavailable",
+          }),
+        );
+      }),
+    );
+
+    // A narrowed internal stop would ordinarily inspect and re-drive requests
+    // above its cutoff after teardown. Spying this read makes "no redrive"
+    // load-bearing even though no real prompt needs to be queued in this test:
+    // reaching the success tail would call it regardless of whether it found
+    // rows.
+    const redriveReadSpy = vi.spyOn(harness.eventStore, "listThreadTurnStartsAboveCutoff");
+
+    await harness.dispatch({
+      type: "thread.session.stop",
+      commandId: CommandId.make("cmd-session-provider-stop-fails"),
+      threadId: ThreadId.make("thread-1"),
+      canceledThroughSequence: NonNegativeInt.make(0),
+      createdAt: stopCreatedAt,
+    });
+
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some(
+            (activity) =>
+              activity.kind === "provider.session.stop.failed" &&
+              activity.summary === "Provider session stop failed",
+          ) === true
+      );
+    });
+    await harness.drain();
+
+    expect(stopAttempts).toEqual([ThreadId.make("thread-1"), ThreadId.make("thread-1")]);
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(
+      thread?.activities.find(
+        (activity) =>
+          activity.kind === "provider.session.stop.failed" &&
+          activity.summary === "Provider session stop failed",
+      ),
+    ).toMatchObject({
+      tone: "error",
+      payload: {
+        detail: expect.stringContaining("provider stop transport unavailable"),
+      },
+    });
+
+    // Final stop failure leaves both runtime-facing and projected state live.
+    // In particular, the handler must not enter the success-only recovery tail
+    // and must not drive any provider turn as a side effect.
+    expect(thread?.session?.status).toBe("ready");
+    expect(redriveReadSpy).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    redriveReadSpy.mockRestore();
   });
 
   it("abandons a session stop it cannot record rather than half-stopping the session", async () => {

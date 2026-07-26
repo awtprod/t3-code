@@ -10,7 +10,7 @@
  *
  * @module ProviderTurnSendClaimRepository
  */
-import { IsoDateTime, MessageId, NonNegativeInt, ThreadId } from "@t3tools/contracts";
+import { IsoDateTime, MessageId, NonNegativeInt, ThreadId, TurnId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -50,6 +50,19 @@ export const CancelProviderTurnSendClaimsInput = Schema.Struct({
 });
 export type CancelProviderTurnSendClaimsInput = typeof CancelProviderTurnSendClaimsInput.Type;
 
+export const RecordProviderTurnSendDeliveryInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  requestSequence: NonNegativeInt,
+  /**
+   * The concrete provider turn returned by a successful send. This is delivery
+   * evidence, not merely ownership evidence: callers must never invoke this
+   * method for a failed or indeterminate send.
+   */
+  turnId: TurnId,
+});
+export type RecordProviderTurnSendDeliveryInput = typeof RecordProviderTurnSendDeliveryInput.Type;
+
 /**
  * Why a request may not send, or that it may.
  *
@@ -76,6 +89,28 @@ export type ProviderTurnSendClaimOutcome =
    * that is running correctly.
    */
   | { readonly _tag: "superseded"; readonly heldBySequence?: number };
+
+/**
+ * Delivery evidence after one successful sender has stamped its returned turn.
+ *
+ * `deliveredTurnId` is always the CURRENT holder's successful delivery, if it
+ * has one. `supersededDeliveredTurnId` is an ex-holder's successful delivery,
+ * if one has returned. The repository exposes both rather than deciding what to
+ * interrupt: only the reactor knows which side is calling and can address the
+ * stale concrete turn while leaving the replacement alone.
+ *
+ * `unowned` is the safe result when no row can correlate the delivery. Like the
+ * owner-less `superseded` acquire fallback, it carries no invented owner or turn
+ * and therefore cannot manufacture an interrupt.
+ */
+export type ProviderTurnSendDeliveryState =
+  | {
+      readonly _tag: "recorded";
+      readonly heldBySequence: number;
+      readonly deliveredTurnId: TurnId | null;
+      readonly supersededDeliveredTurnId: TurnId | null;
+    }
+  | { readonly _tag: "unowned" };
 
 /**
  * ProviderTurnSendClaimRepositoryShape - Service API for durable send claims.
@@ -112,6 +147,21 @@ export interface ProviderTurnSendClaimRepositoryShape {
   readonly cancel: (
     input: CancelProviderTurnSendClaimsInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Stamp a successful provider delivery and return the row's reconciliation
+   * evidence.
+   *
+   * If this request still owns the claim, its turn becomes
+   * `deliveredTurnId`. If a higher sequence took the claim while the RPC was in
+   * flight, its turn becomes `supersededDeliveredTurnId` instead. A takeover
+   * also moves an already-stamped former holder into that slot. Consequently
+   * either completion order exposes both successful deliveries to at least one
+   * sender, while a holder whose send failed never acquires delivery evidence.
+   */
+  readonly recordDelivery: (
+    input: RecordProviderTurnSendDeliveryInput,
+  ) => Effect.Effect<ProviderTurnSendDeliveryState, ProjectionRepositoryError>;
 
   /**
    * Has any request for this message ever been cleared to reach the provider?

@@ -1169,11 +1169,173 @@ const make = Effect.gen(function* () {
               createdAt: input.createdAt,
             }),
           ),
-          Effect.catchCause(() => Effect.void),
+          // Dispatch failure must not replace the interrupt failure — the
+          // caller reports the original operation the user asked for — but it
+          // also must not disappear. Losing this log makes an escalation that
+          // never entered the event log indistinguishable from one that was
+          // accepted and later failed in its own handler.
+          Effect.catchCause((escalationCause) =>
+            Effect.logError("provider command reactor failed to dispatch escalated session stop", {
+              ...input.logContext,
+              threadId: input.threadId,
+              turnId: input.turnId,
+              cause: Cause.pretty(escalationCause),
+              originalInterruptCause: Cause.pretty(interruptCause),
+            }),
+          ),
           Effect.flatMap(() => Effect.failCause(interruptCause)),
         ),
       ),
     );
+
+  /**
+   * Reconcile a successful send against another successful claimant.
+   *
+   * Ownership is intentionally insufficient. A newer request takes the claim
+   * BEFORE calling the provider, so it can own the row and still fail its RPC.
+   * Interrupting an old turn on ownership alone turns a healthy delivery into
+   * no delivery. The repository's second phase records concrete returned turn
+   * ids, and this function interrupts only when it can name BOTH the stale
+   * delivery and a distinct replacement delivery.
+   *
+   * Either completion order works. If the old RPC returns first, takeover moves
+   * its stamped id aside and the new sender sees it after stamping the
+   * replacement. If the new RPC returns and fences first, the old sender writes
+   * itself into the superseded slot when it eventually returns and sees the
+   * replacement already stamped. SQLite write serialization ensures the second
+   * stamp observes the first. Both sides are allowed to interrupt the same
+   * stale turn if they observe it: the call is turn-id scoped and provider
+   * runtimes treat a duplicate interrupt for an already-stopped turn as a
+   * harmless no-op.
+   */
+  const reconcileDeliveredSendAgainstSupersession = (
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+    turn: ProviderTurnStartResult,
+  ) =>
+    providerTurnSendClaimRepository
+      .recordDelivery({
+        threadId: event.payload.threadId,
+        messageId: event.payload.messageId,
+        requestSequence: event.sequence,
+        turnId: turn.turnId,
+      })
+      .pipe(
+        // The stamp is durable evidence needed by the OTHER completing sender,
+        // not optional bookkeeping. A transient SQLite contention should not
+        // erase the only side capable of reconciling the pair.
+        Effect.retry({ times: 2, schedule: Schedule.exponential(100) }),
+        Effect.flatMap((state) => {
+          if (state._tag === "unowned") {
+            return Effect.logDebug("provider-command-reactor.turn-start.delivery-unowned", {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              requestSequence: event.sequence,
+              turnId: turn.turnId,
+            });
+          }
+
+          const callerStillOwns = state.heldBySequence === event.sequence;
+          const staleTurnId = callerStillOwns ? state.supersededDeliveredTurnId : turn.turnId;
+          const replacementTurnId = callerStillOwns ? turn.turnId : state.deliveredTurnId;
+
+          // A newer OWNER whose send has not succeeded leaves the current
+          // delivery null. That is the load-bearing failure case: the older
+          // healthy turn stays alive, and the newer send's existing failure
+          // activity is the user-visible signal.
+          if (staleTurnId === null || replacementTurnId === null) {
+            return Effect.logDebug(
+              "provider-command-reactor.turn-start.supersession-not-delivered",
+              {
+                threadId: event.payload.threadId,
+                messageId: event.payload.messageId,
+                requestSequence: event.sequence,
+                heldBySequence: state.heldBySequence,
+                turnId: turn.turnId,
+              },
+            );
+          }
+
+          // Steer requests can both legitimately return the provider's same
+          // active turn. They are two successful deliveries but not two turns;
+          // interrupting that shared id would kill the replacement itself.
+          if (staleTurnId === replacementTurnId) {
+            return Effect.logDebug("provider-command-reactor.turn-start.supersession-shared-turn", {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              requestSequence: event.sequence,
+              heldBySequence: state.heldBySequence,
+              turnId: staleTurnId,
+            });
+          }
+
+          return Effect.logDebug(
+            "provider-command-reactor.turn-start.superseded-delivery-reconciled",
+            {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              requestSequence: event.sequence,
+              heldBySequence: state.heldBySequence,
+              staleTurnId,
+              replacementTurnId,
+            },
+          ).pipe(
+            Effect.flatMap(() =>
+              interruptTurnOrEscalateToSessionStop({
+                threadId: event.payload.threadId,
+                turnId: staleTurnId,
+                // Reconciliation is about this stale request, not a user stop.
+                // If a turn-scoped interrupt cannot land and widens to the
+                // session, preserving this sequence keeps a newer claimant
+                // above the cancel barrier just as the former ownership fence
+                // did.
+                canceledThroughSequence: event.sequence,
+                createdAt: event.payload.createdAt,
+                escalationTag: "supersession-escalated-session-stop",
+                logContext: {
+                  messageId: event.payload.messageId,
+                  heldBySequence: state.heldBySequence,
+                  replacementTurnId,
+                },
+              }),
+            ),
+          );
+        }),
+        Effect.catchCause((cause) =>
+          Effect.logWarning(
+            "provider command reactor failed to reconcile delivered send supersession",
+            {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              requestSequence: event.sequence,
+              turnId: turn.turnId,
+              cause: Cause.pretty(cause),
+            },
+          ).pipe(
+            Effect.flatMap(() =>
+              appendProviderFailureActivity({
+                threadId: event.payload.threadId,
+                kind: "provider.turn.interrupt.failed",
+                summary: "Provider turn interrupt failed",
+                detail: `A delivered turn could not be reconciled with its replacement: ${formatFailureDetail(cause)}`,
+                turnId: turn.turnId,
+                createdAt: event.payload.createdAt,
+              }),
+            ),
+            Effect.catchCause((appendCause) =>
+              Effect.logError(
+                "provider command reactor failed to report delivery reconciliation failure",
+                {
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  requestSequence: event.sequence,
+                  turnId: turn.turnId,
+                  cause: Cause.pretty(appendCause),
+                },
+              ),
+            ),
+          ),
+        ),
+      );
 
   const fenceSendAgainstLateStop = (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
@@ -1241,11 +1403,11 @@ const make = Effect.gen(function* () {
           ),
         ),
         Effect.flatMap((outcome) => {
-          const supersededByNewerRequest =
-            outcome._tag === "superseded" &&
-            outcome.heldBySequence !== undefined &&
-            outcome.heldBySequence > event.sequence;
-          if (outcome._tag !== "canceled" && !supersededByNewerRequest) {
+          // Supersession is deliberately a no-op here. `acquire` proves only
+          // who owns the right to ATTEMPT the send; it says nothing about
+          // whether that owner delivered a replacement. Delivery reconciliation
+          // above is the sole path allowed to interrupt for supersession.
+          if (outcome._tag !== "canceled") {
             return Effect.logDebug("provider-command-reactor.turn-start.fence-clear", {
               threadId: event.payload.threadId,
               messageId: event.payload.messageId,
@@ -1257,37 +1419,28 @@ const make = Effect.gen(function* () {
                 : {}),
             });
           }
-          return Effect.logDebug(
-            supersededByNewerRequest
-              ? "provider-command-reactor.turn-start.superseded-during-send"
-              : "provider-command-reactor.turn-start.stopped-during-send",
-            {
-              threadId: event.payload.threadId,
-              messageId: event.payload.messageId,
-              requestSequence: event.sequence,
-              turnId: turn.turnId,
-              ...(supersededByNewerRequest ? { heldBySequence: outcome.heldBySequence } : {}),
-            },
-          ).pipe(
+          return Effect.logDebug("provider-command-reactor.turn-start.stopped-during-send", {
+            threadId: event.payload.threadId,
+            messageId: event.payload.messageId,
+            requestSequence: event.sequence,
+            turnId: turn.turnId,
+          }).pipe(
             // One retry, then escalate to the session — the shared ladder, so
             // the ordinary interrupt path and this one cannot drift apart. The
-            // interrupt is addressed to THIS send's returned turn id: on genuine
-            // supersession the newer request's turn is deliberately left alone.
+            // interrupt is addressed to THIS send's returned turn id because
+            // this branch is now exclusively a concrete stop barrier.
             Effect.flatMap(() =>
               interruptTurnOrEscalateToSessionStop({
                 threadId: event.payload.threadId,
                 turnId: turn.turnId,
                 // This request's own sequence is the weakest cutoff that covers
-                // the work being fenced. For a stop, the existing monotonic
-                // barrier is already at or above it. For supersession, raising a
-                // barrier only through the stale request keeps the newer owner
-                // eligible if the turn interrupt has to escalate to the session.
+                // the work being fenced. The existing monotonic stop barrier is
+                // already at or above it.
                 canceledThroughSequence: event.sequence,
                 createdAt: event.payload.createdAt,
                 escalationTag: "fence-escalated-session-stop",
                 logContext: {
                   messageId: event.payload.messageId,
-                  ...(supersededByNewerRequest ? { heldBySequence: outcome.heldBySequence } : {}),
                 },
               }),
             ),
@@ -1549,17 +1702,26 @@ const make = Effect.gen(function* () {
                   outcome._tag === "acquired"
                     ? providerService.sendTurn(sendTurnRequest.value).pipe(
                         Effect.flatMap((turn) =>
-                          // Fold BEFORE fencing. The fold records a fact that
+                          // Stamp delivery BEFORE folding or fencing. The stamp
+                          // is what lets either successful claimant reconcile
+                          // a distinct stale turn; neither the consumed pending
+                          // row nor claim ownership can prove replacement.
+                          //
+                          // Fold still precedes the stop fence. It records a fact that
                           // is already true — the provider has the message —
                           // and the fence can interrupt, which does not make
                           // it any less true. Ordering it after would leave
                           // the placeholder stranded on exactly the paths
                           // (stop mid-send, interrupt failure) where a wrong
                           // "never sent" reading is most damaging.
-                          (turn.steered === true
-                            ? foldSteeredTurnStart(event, turn)
-                            : Effect.void
-                          ).pipe(Effect.flatMap(() => fenceSendAgainstLateStop(event, turn))),
+                          reconcileDeliveredSendAgainstSupersession(event, turn).pipe(
+                            Effect.flatMap(() =>
+                              turn.steered === true
+                                ? foldSteeredTurnStart(event, turn)
+                                : Effect.void,
+                            ),
+                            Effect.flatMap(() => fenceSendAgainstLateStop(event, turn)),
+                          ),
                         ),
                       )
                     : Effect.logDebug(
@@ -1849,7 +2011,43 @@ const make = Effect.gen(function* () {
 
     const now = event.payload.createdAt;
     if (thread.session && thread.session.status !== "stopped") {
-      yield* providerService.stopSession({ threadId: thread.id });
+      const stopped = yield* Effect.suspend(() =>
+        providerService.stopSession({ threadId: thread.id }),
+      ).pipe(
+        // Match the turn-interrupt ladder: one bounded exponential retry. A
+        // duplicate session stop is safe, while a transient transport failure
+        // must not leave a provider running behind a generic warning.
+        Effect.retry({ times: 1, schedule: Schedule.exponential(100) }),
+        Effect.as(true),
+        Effect.catchCause((cause) =>
+          appendProviderFailureActivity({
+            threadId: thread.id,
+            kind: "provider.session.stop.failed",
+            summary: "Provider session stop failed",
+            detail: `The cancel barrier was recorded, but the provider session could not be stopped: ${formatFailureDetail(cause)}`,
+            turnId: null,
+            createdAt: now,
+          }).pipe(
+            Effect.catchCause((appendCause) =>
+              Effect.logError("provider command reactor failed to report a session stop failure", {
+                threadId: thread.id,
+                cause: Cause.pretty(appendCause),
+                originalStopCause: Cause.pretty(cause),
+              }),
+            ),
+            Effect.as(false),
+          ),
+        ),
+      );
+
+      // A failed provider stop leaves the runtime and projection live. Marking
+      // the projection stopped would lie to the user; redriving requests spared
+      // by the cutoff would then send still more work into the session that
+      // failed to stop. The visible failure activity above is the terminal
+      // result for this attempt.
+      if (!stopped) {
+        return;
+      }
     }
 
     yield* setThreadSession({

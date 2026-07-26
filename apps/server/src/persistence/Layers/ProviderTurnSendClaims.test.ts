@@ -1,5 +1,5 @@
 import { assert, it } from "@effect/vitest";
-import { MessageId, ThreadId } from "@t3tools/contracts";
+import { MessageId, ThreadId, TurnId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -134,6 +134,162 @@ layer("ProviderTurnSendClaimRepository", (it) => {
 
       assert.strictEqual(tagOf(first), "acquired");
       assert.strictEqual(tagOf(replay), "acquired");
+    }),
+  );
+
+  it.effect("records a successful delivery for the current claim holder", () =>
+    Effect.gen(function* () {
+      const claims = yield* ProviderTurnSendClaimRepository;
+      const threadId = ThreadId.make("thread-delivery-holder");
+      const messageId = MessageId.make("message-delivery-holder");
+
+      yield* claims.acquire({
+        threadId,
+        messageId,
+        requestSequence: 30,
+        claimedAt: at(0),
+      });
+
+      const delivery = yield* claims.recordDelivery({
+        threadId,
+        messageId,
+        requestSequence: 30,
+        turnId: TurnId.make("turn-holder"),
+      });
+
+      assert.deepStrictEqual(delivery, {
+        _tag: "recorded",
+        heldBySequence: 30,
+        deliveredTurnId: TurnId.make("turn-holder"),
+        supersededDeliveredTurnId: null,
+      });
+    }),
+  );
+
+  it.effect("moves an older stamped delivery aside when a newer holder delivers", () =>
+    Effect.gen(function* () {
+      const claims = yield* ProviderTurnSendClaimRepository;
+      const threadId = ThreadId.make("thread-delivery-old-first");
+      const messageId = MessageId.make("message-delivery-old-first");
+
+      // The older RPC returns while it still owns the row and stamps the
+      // current slot. A later claim takeover must move that concrete delivery
+      // aside and clear the current slot: until the new RPC succeeds, ownership
+      // is NOT replacement evidence and the old healthy turn must remain alive.
+      yield* claims.acquire({
+        threadId,
+        messageId,
+        requestSequence: 40,
+        claimedAt: at(0),
+      });
+      yield* claims.recordDelivery({
+        threadId,
+        messageId,
+        requestSequence: 40,
+        turnId: TurnId.make("turn-older"),
+      });
+      yield* claims.acquire({
+        threadId,
+        messageId,
+        requestSequence: 41,
+        claimedAt: at(1),
+      });
+
+      // A takeover by itself clears the current-delivery slot. Re-stamping the
+      // ex-holder before the replacement succeeds exposes that state directly:
+      // ownership 41 is durable, but there is still no delivered replacement
+      // with which a caller could justify interrupting turn-older.
+      const beforeReplacement = yield* claims.recordDelivery({
+        threadId,
+        messageId,
+        requestSequence: 40,
+        turnId: TurnId.make("turn-older"),
+      });
+      const replacement = yield* claims.recordDelivery({
+        threadId,
+        messageId,
+        requestSequence: 41,
+        turnId: TurnId.make("turn-newer"),
+      });
+
+      assert.deepStrictEqual(beforeReplacement, {
+        _tag: "recorded",
+        heldBySequence: 41,
+        deliveredTurnId: null,
+        supersededDeliveredTurnId: TurnId.make("turn-older"),
+      });
+      assert.deepStrictEqual(replacement, {
+        _tag: "recorded",
+        heldBySequence: 41,
+        deliveredTurnId: TurnId.make("turn-newer"),
+        supersededDeliveredTurnId: TurnId.make("turn-older"),
+      });
+    }),
+  );
+
+  it.effect("records a late ex-holder delivery after the newer holder already delivered", () =>
+    Effect.gen(function* () {
+      const claims = yield* ProviderTurnSendClaimRepository;
+      const threadId = ThreadId.make("thread-delivery-new-first");
+      const messageId = MessageId.make("message-delivery-new-first");
+
+      // The opposite completion order. Both requests acquire before either RPC
+      // returns; the replacement stamps first and initially sees no old
+      // delivery. When the old RPC returns late it writes the superseded slot
+      // and reads the replacement already present, so the stale sender has all
+      // the evidence needed to interrupt itself.
+      yield* claims.acquire({
+        threadId,
+        messageId,
+        requestSequence: 50,
+        claimedAt: at(0),
+      });
+      yield* claims.acquire({
+        threadId,
+        messageId,
+        requestSequence: 51,
+        claimedAt: at(1),
+      });
+      const replacementFirst = yield* claims.recordDelivery({
+        threadId,
+        messageId,
+        requestSequence: 51,
+        turnId: TurnId.make("turn-newer"),
+      });
+      const staleLast = yield* claims.recordDelivery({
+        threadId,
+        messageId,
+        requestSequence: 50,
+        turnId: TurnId.make("turn-older"),
+      });
+
+      assert.deepStrictEqual(replacementFirst, {
+        _tag: "recorded",
+        heldBySequence: 51,
+        deliveredTurnId: TurnId.make("turn-newer"),
+        supersededDeliveredTurnId: null,
+      });
+      assert.deepStrictEqual(staleLast, {
+        _tag: "recorded",
+        heldBySequence: 51,
+        deliveredTurnId: TurnId.make("turn-newer"),
+        supersededDeliveredTurnId: TurnId.make("turn-older"),
+      });
+    }),
+  );
+
+  it.effect("does not invent delivery evidence when no claim row owns the send", () =>
+    Effect.gen(function* () {
+      const claims = yield* ProviderTurnSendClaimRepository;
+
+      const delivery = yield* claims.recordDelivery({
+        threadId: ThreadId.make("thread-delivery-unowned"),
+        messageId: MessageId.make("message-delivery-unowned"),
+        requestSequence: 60,
+        turnId: TurnId.make("turn-unowned"),
+      });
+
+      assert.deepStrictEqual(delivery, { _tag: "unowned" });
     }),
   );
 
