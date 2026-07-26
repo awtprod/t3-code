@@ -9,7 +9,9 @@ import {
   OrchestrationEventMetadata,
   OrchestrationEventType,
   MessageId,
+  ModelSelection,
   ProjectId,
+  SourceProposedPlanReference,
   ThreadId,
 } from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -39,13 +41,21 @@ const ThreadTurnStartClaimRowSchema = Schema.Struct({
   interruptCount: NonNegativeInt,
 });
 
-// `messageId` comes out of the payload JSON rather than a column, because the
-// event table is generic over payloads. The query's WHERE clause restricts rows
-// to `thread.turn-start-requested`, whose payload always carries one, so the
-// extraction cannot be null for any row this schema decodes.
+// Every field but `sequence` comes out of the payload JSON rather than a column,
+// because the event table is generic over payloads. The query's WHERE clause
+// restricts rows to `thread.turn-start-requested`, whose payload always carries a
+// `messageId`, so that extraction cannot be null for any row this schema decodes.
+//
+// `modelSelection` and `sourceProposedPlan` are genuinely optional on that
+// payload, and `json_extract` yields SQL NULL for an absent path and the object's
+// JSON TEXT for a present one — hence `NullOr(fromJsonString(...))` rather than a
+// plain decode. They are nulled back to `undefined` at the boundary so callers see
+// the same optionality the event payload has.
 const ThreadTurnStartAboveCutoffRowSchema = Schema.Struct({
   sequence: NonNegativeInt,
   messageId: MessageId,
+  modelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+  sourceProposedPlan: Schema.NullOr(Schema.fromJsonString(SourceProposedPlanReference)),
 });
 
 const decodeEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
@@ -265,7 +275,8 @@ const makeEventStore = Effect.gen(function* () {
       `,
   });
 
-  // Selects the turn-starts a stop's narrowed cutoff deliberately spared.
+  // Selects the turn-starts a stop's narrowed cutoff deliberately spared AND that
+  // still need re-driving.
   //
   // `sequence > canceledThroughSequence` is the exact complement of the barrier's
   // inclusive `canceled_through_sequence >= request_sequence` coverage test, so a
@@ -274,24 +285,92 @@ const makeEventStore = Effect.gen(function* () {
   // turn-start appended after the stop was accepted has not been processed yet and
   // will drive itself, so re-driving it here would duplicate it.
   //
-  // Same index as the claim read (`idx_orch_events_stream_sequence`), and the
-  // range is bounded on both sides, so this touches only the slice of one
-  // thread's stream between the cutoff and the stop.
+  // The two `NOT EXISTS` guards are what make the result a re-drive list rather
+  // than merely a spared list. Both scan UPWARD without an upper bound, because
+  // the events that invalidate a candidate arrive after it and, in the escalated
+  // case, after the stop as well:
+  //
+  //  - Later cancellation. The escalated stop is dispatched only once its
+  //    interrupt's retries are exhausted, so a stop the user pressed in that
+  //    window sits between the interrupt and the escalation and carries a HIGHER
+  //    cutoff. Reusing `getThreadTurnStartClaim`'s coverage expression
+  //    (`COALESCE(payload cutoff, own sequence) >= candidate sequence`) keeps this
+  //    read and the durable barrier deciding coverage the same way — so a request
+  //    the user canceled is never re-appended above the barrier that canceled it.
+  //    This stop cannot exclude its own candidates: its cutoff is below them by
+  //    the outer bound, which is what "spared" means.
+  //  - Already settled. A spared request that was adopted by a turn and whose
+  //    session then went quiet (`activeTurnId` cleared) has run its course —
+  //    completed or interrupted — and re-driving it repeats work the user already
+  //    got. Adoption is the correlation point: a `thread.session-set` from
+  //    `turn.started`, or a `thread.turn-start-folded` from a steer, names the
+  //    request it answers via `turnRequestSequence`. A never-adopted request has
+  //    no adoption sequence, `MIN(...)` yields NULL, the comparison is NULL rather
+  //    than true, and it is correctly kept — which is the common case here, since
+  //    a request the teardown destroyed is exactly one that never settled. The
+  //    settling write must land BELOW the stop: the stop's own teardown clears
+  //    `activeTurnId` for every candidate at once, so counting it would empty the
+  //    list on every call and silently restore the defect this read exists to fix.
+  //
+  // Same index as the claim read (`idx_orch_events_stream_sequence`); the outer
+  // range is bounded on both sides and every sub-select is scoped to the same
+  // thread's stream above one sequence, so this stays within one thread's tail.
   const readThreadTurnStartsAboveCutoffRows = SqlSchema.findAll({
     Request: ThreadTurnStartsAboveCutoffInput,
     Result: ThreadTurnStartAboveCutoffRowSchema,
     execute: (request) =>
       sql`
         SELECT
-          sequence,
-          json_extract(payload_json, '$.messageId') AS "messageId"
-        FROM orchestration_events
-        WHERE aggregate_kind = 'thread'
-          AND stream_id = ${request.threadId}
-          AND event_type = 'thread.turn-start-requested'
-          AND sequence > ${request.canceledThroughSequence}
-          AND sequence < ${request.stopSequence}
-        ORDER BY sequence ASC
+          turn_start.sequence AS "sequence",
+          json_extract(turn_start.payload_json, '$.messageId') AS "messageId",
+          json_extract(turn_start.payload_json, '$.modelSelection') AS "modelSelection",
+          json_extract(turn_start.payload_json, '$.sourceProposedPlan') AS "sourceProposedPlan"
+        FROM orchestration_events AS turn_start
+        WHERE turn_start.aggregate_kind = 'thread'
+          AND turn_start.stream_id = ${request.threadId}
+          AND turn_start.event_type = 'thread.turn-start-requested'
+          AND turn_start.sequence > ${request.canceledThroughSequence}
+          AND turn_start.sequence < ${request.stopSequence}
+          AND NOT EXISTS (
+            SELECT 1
+            FROM orchestration_events AS cancel_event
+            WHERE cancel_event.aggregate_kind = 'thread'
+              AND cancel_event.stream_id = turn_start.stream_id
+              AND cancel_event.event_type IN (
+                'thread.turn-interrupt-requested',
+                'thread.session-stop-requested'
+              )
+              AND cancel_event.sequence > turn_start.sequence
+              AND COALESCE(
+                json_extract(cancel_event.payload_json, '$.canceledThroughSequence'),
+                cancel_event.sequence
+              ) >= turn_start.sequence
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM orchestration_events AS settle_event
+            WHERE settle_event.aggregate_kind = 'thread'
+              AND settle_event.stream_id = turn_start.stream_id
+              AND settle_event.event_type = 'thread.session-set'
+              AND json_extract(settle_event.payload_json, '$.session.activeTurnId') IS NULL
+              AND settle_event.sequence < ${request.stopSequence}
+              AND settle_event.sequence > (
+                SELECT MIN(adopt_event.sequence)
+                FROM orchestration_events AS adopt_event
+                WHERE adopt_event.aggregate_kind = 'thread'
+                  AND adopt_event.stream_id = turn_start.stream_id
+                  AND adopt_event.sequence > turn_start.sequence
+                  AND adopt_event.event_type IN (
+                    'thread.session-set',
+                    'thread.turn-start-folded'
+                  )
+                  AND json_extract(
+                    adopt_event.payload_json,
+                    '$.turnRequestSequence'
+                  ) = turn_start.sequence
+              )
+          )
+        ORDER BY turn_start.sequence ASC
       `,
   });
 
@@ -303,6 +382,20 @@ const makeEventStore = Effect.gen(function* () {
             "OrchestrationEventStore.listThreadTurnStartsAboveCutoff:query",
             "OrchestrationEventStore.listThreadTurnStartsAboveCutoff:decodeRows",
           ),
+        ),
+        // SQL's absent-value is NULL and the event payload's is `undefined`. The
+        // fields are dropped rather than passed through as `null` so a caller
+        // spreading them into a command cannot turn "this request named no model"
+        // into "this request explicitly selected null".
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            sequence: row.sequence,
+            messageId: row.messageId,
+            ...(row.modelSelection !== null ? { modelSelection: row.modelSelection } : {}),
+            ...(row.sourceProposedPlan !== null
+              ? { sourceProposedPlan: row.sourceProposedPlan }
+              : {}),
+          })),
         ),
       );
 

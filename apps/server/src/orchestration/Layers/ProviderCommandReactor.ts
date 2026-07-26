@@ -38,7 +38,10 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
-import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
+import {
+  OrchestrationEventStore,
+  type ThreadTurnStartAboveCutoff,
+} from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import {
   ProviderTurnSendClaimRepository,
@@ -1912,41 +1915,78 @@ const make = Effect.gen(function* () {
         .pipe(
           Effect.retry({ times: 2, schedule: Schedule.exponential(100) }),
           // A failed read must not fail the stop: the stop itself already
-          // landed and is the half the user asked for. Losing the re-drive
-          // leaves the pre-existing behaviour (the spared prompt is dropped),
-          // which is bad but not worse than reporting a stop that did happen as
-          // failed.
+          // landed and is the half the user asked for. But it must not pass
+          // silently either — an empty list here is indistinguishable from "the
+          // stop spared nothing", and the difference is a prompt the user typed
+          // and will never see run. So the thread gets an error activity naming
+          // the loss, and the caller continues with nothing to re-drive.
           Effect.catchCause((cause) =>
-            Effect.logWarning(
-              "provider command reactor could not list the turn-starts an escalated stop spared",
-              {
-                threadId: event.payload.threadId,
-                canceledThroughSequence,
-                stopSequence: event.sequence,
-                cause: Cause.pretty(cause),
-              },
-            ).pipe(Effect.as([] as ReadonlyArray<{ readonly messageId: MessageId }>)),
+            appendProviderFailureActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.session.stop.failed",
+              summary: "Messages sent while stopping may not have been recovered",
+              detail: `The session was stopped, but the reactor could not read which queued messages the stop spared, so any of them are lost and must be re-sent: ${Cause.pretty(cause)}`,
+              turnId: null,
+              createdAt: event.payload.createdAt,
+            }).pipe(
+              Effect.catchCause((appendCause) =>
+                Effect.logError(
+                  "provider command reactor could not report an unrecovered spared turn-start",
+                  {
+                    threadId: event.payload.threadId,
+                    canceledThroughSequence,
+                    stopSequence: event.sequence,
+                    readCause: Cause.pretty(cause),
+                    cause: Cause.pretty(appendCause),
+                  },
+                ),
+              ),
+              Effect.as([] as ReadonlyArray<ThreadTurnStartAboveCutoff>),
+            ),
           ),
         );
 
-      // One re-drive per message. The log can hold several turn-starts for the
-      // same message in this window (an auto-resume re-issue, say), and they all
-      // name the same prompt — re-driving each would deliver it twice.
-      const redrivenMessageIds = new Set<string>();
+      // One re-drive per message, carrying the LATEST request for it.
+      //
+      // The log can hold several turn-starts for the same message in this window
+      // (an auto-resume re-issue, say), and they all name the same prompt — so
+      // re-driving each would deliver it twice. Keeping the newest rather than
+      // the first is what makes the collapse lossless: a re-issue exists
+      // precisely because it corrects the one before it, and its model selection
+      // and source plan are the ones the user last chose. `spared` is ordered
+      // oldest-first, so a later entry overwrites an earlier one here while
+      // `redriveOrder` preserves the position the message first appeared at.
+      const redriveOrder: Array<MessageId> = [];
+      const latestByMessageId = new Map<MessageId, ThreadTurnStartAboveCutoff>();
       for (const entry of spared) {
-        if (redrivenMessageIds.has(entry.messageId)) {
+        if (!latestByMessageId.has(entry.messageId)) {
+          redriveOrder.push(entry.messageId);
+        }
+        latestByMessageId.set(entry.messageId, entry);
+      }
+
+      for (const messageId of redriveOrder) {
+        const entry = latestByMessageId.get(messageId);
+        if (entry === undefined) {
           continue;
         }
-        redrivenMessageIds.add(entry.messageId);
 
-        const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
         yield* orchestrationEngine
           .dispatch({
             type: "thread.turn.resume",
             commandId: yield* serverCommandId("escalated-stop-redrive"),
             threadId: event.payload.threadId,
             messageId: entry.messageId,
-            ...(cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {}),
+            // The request's own selections, not the thread's cache. The cache
+            // holds whichever model was sent last on this thread, which for two
+            // spared requests on different models is the wrong answer for at
+            // least one of them; and it holds no plan reference at all, so a
+            // plan-implementation turn re-driven from it could never mark its
+            // plan implemented.
+            ...(entry.modelSelection !== undefined ? { modelSelection: entry.modelSelection } : {}),
+            ...(entry.sourceProposedPlan !== undefined
+              ? { sourceProposedPlan: entry.sourceProposedPlan }
+              : {}),
             reason: "re-drive after an escalated session stop tore down a spared turn",
             createdAt: event.payload.createdAt,
           })
@@ -1961,16 +2001,30 @@ const make = Effect.gen(function* () {
                 reason: error.message,
               }),
             ),
-            // Same reasoning as the read above: the stop stands either way, and
-            // one lost re-drive is the old behaviour rather than a new failure.
+            // Same reasoning as the read above: the stop stands either way, but
+            // the dropped prompt is reported on the thread rather than only in
+            // the server log, because the user is the only one who can recover
+            // it and they cannot do that without knowing it happened.
             Effect.catchCause((cause) =>
-              Effect.logWarning(
-                "provider command reactor failed to re-drive a turn-start an escalated stop spared",
-                {
-                  threadId: event.payload.threadId,
-                  messageId: entry.messageId,
-                  cause: Cause.pretty(cause),
-                },
+              appendProviderFailureActivity({
+                threadId: event.payload.threadId,
+                kind: "provider.session.stop.failed",
+                summary: "A message sent while stopping was not recovered",
+                detail: `The session was stopped, but re-sending the message queued just before it failed, so it must be re-sent manually: ${Cause.pretty(cause)}`,
+                turnId: null,
+                createdAt: event.payload.createdAt,
+              }).pipe(
+                Effect.catchCause((appendCause) =>
+                  Effect.logError(
+                    "provider command reactor could not report an unrecovered spared turn-start",
+                    {
+                      threadId: event.payload.threadId,
+                      messageId: entry.messageId,
+                      redriveCause: Cause.pretty(cause),
+                      cause: Cause.pretty(appendCause),
+                    },
+                  ),
+                ),
               ),
             ),
           );

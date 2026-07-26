@@ -54,6 +54,7 @@ import {
   ProviderCommandReactorLive,
 } from "./ProviderCommandReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
 import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
@@ -96,7 +97,8 @@ describe("ProviderCommandReactor", () => {
     | OrchestrationEngineService
     | ProviderCommandReactor
     | ProjectionSnapshotQuery
-    | ProviderTurnSendClaimRepository,
+    | ProviderTurnSendClaimRepository
+    | OrchestrationEventStore,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -365,6 +367,12 @@ describe("ProviderCommandReactor", () => {
       // consults. Layer memoization over the shared in-memory DB below means
       // this reads and writes the same rows the reactor sees, not a copy.
       Layer.provideMerge(ProviderTurnSendClaimRepositoryLive),
+      // Same reason, for the event store: `ProviderCommandReactorLive` provides
+      // `OrchestrationEventStoreLive` internally, so without this the resolved
+      // instance is unreachable from a test. Merging the SAME layer value makes
+      // memoization hand back the reactor's own object, which is the only way
+      // to spy a read FAILURE onto it — a state no external caller can produce.
+      Layer.provideMerge(OrchestrationEventStoreLive),
       // Shared in-memory DB (memoized) so the reactor's ProjectionTurnRepository
       // reads the same pending-turn-start rows the engine's projection writes.
       Layer.provideMerge(SqlitePersistenceMemory),
@@ -430,6 +438,7 @@ describe("ProviderCommandReactor", () => {
     const snapshotQuery = await managed.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await managed.runPromise(Effect.service(ProviderCommandReactor));
     const sendClaims = await managed.runPromise(Effect.service(ProviderTurnSendClaimRepository));
+    const eventStore = await managed.runPromise(Effect.service(OrchestrationEventStore));
     // Exposed as a promise, like `dispatch` and `readModel` above, so tests
     // drive the claim through the harness runtime rather than standing up a
     // manual runner of their own.
@@ -498,6 +507,11 @@ describe("ProviderCommandReactor", () => {
       // inject a barrier-write failure, which no amount of driving the
       // repository from outside can produce.
       sendClaims,
+      // The event store OBJECT the reactor resolved, for the same reason
+      // `sendClaims` is exposed: a read that FAILS cannot be produced by
+      // driving the store from outside, only by spying on the instance the
+      // reactor calls.
+      eventStore,
       readEvents,
       readEventsWithPayloads,
     };
@@ -2246,6 +2260,651 @@ describe("ProviderCommandReactor", () => {
     // And the thread does not read as stopped while that re-driven turn is
     // running in it.
     expect(thread?.session?.status).not.toBe("stopped");
+  });
+
+  it("re-drives each spared message on its own model selection, not the thread's last-used one", async () => {
+    // TWO spared messages, on two different models, and that is the whole
+    // design of this test rather than incidental scope.
+    //
+    // The re-drive used to read a process-local cache of "whichever model this
+    // thread last sent on". With a single spared request that cache is written
+    // BY that request's own send, so it holds exactly the right value and a
+    // one-message test passes against the defect — verified, not assumed: the
+    // one-message version of this test survived the mutation that restores the
+    // cache lookup. Two requests on different models is the smallest shape the
+    // cache cannot satisfy, because one cache entry cannot be both answers.
+    const threadModel = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5-codex",
+    };
+    const firstSparedModel = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5-codex-mini",
+    };
+    const secondSparedModel = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5-codex-max",
+    };
+    const harness = await createHarness({ threadModelSelection: threadModel });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-on-thread-model"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "the turn the user will stop",
+        attachments: [],
+      },
+      modelSelection: threadModel,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    let dispatchedReplacements = false;
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.promise(async () => {
+        if (dispatchedReplacements) {
+          return;
+        }
+        dispatchedReplacements = true;
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-spared-on-first-model"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-2"),
+            role: "user",
+            text: "actually, do this instead",
+            attachments: [],
+          },
+          modelSelection: firstSparedModel,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-spared-on-second-model"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-3"),
+            role: "user",
+            text: "and then do this too",
+            attachments: [],
+          },
+          modelSelection: secondSparedModel,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.flatMap(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "session/interrupt",
+              detail: "provider socket closed",
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-before-model-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await harness.drain();
+
+    const events = await harness.readEventsWithPayloads();
+    const stop = events.find((event) => event.type === "thread.session-stop-requested");
+    expect(stop).toBeDefined();
+
+    // The re-driven requests, not the originals: the originals sit below the
+    // stop (that is what "spared" means) and carry their models because the
+    // client sent them. Only the ones ABOVE the stop were synthesized by the
+    // reactor, so they are the only ones whose model selection the re-drive is
+    // responsible for.
+    const redriveModelFor = (messageId: string) =>
+      (
+        events.find(
+          (event) =>
+            event.type === "thread.turn-start-requested" &&
+            (event.payload as { messageId?: string }).messageId === messageId &&
+            event.sequence > stop!.sequence,
+        )?.payload as { modelSelection?: ModelSelection } | undefined
+      )?.modelSelection;
+
+    // Both re-drives exist and each carries ITS OWN model. A cache can hold
+    // only one value, so any single-value source fails at least one of these
+    // two assertions whichever value it happens to hold.
+    expect(redriveModelFor("user-message-2")).toEqual(firstSparedModel);
+    expect(redriveModelFor("user-message-3")).toEqual(secondSparedModel);
+
+    // And they reach the provider on those models. The events alone are not
+    // enough: a resume that carried the right selection but sent on a cached
+    // one would still lose the user's choice, and the send is what they feel.
+    const lastSendModelFor = (text: string) =>
+      harness.sendTurn.mock.calls
+        .map((call) => call[0] as { input?: string; modelSelection?: ModelSelection })
+        .findLast((call) => call.input === text)?.modelSelection;
+    expect(lastSendModelFor("actually, do this instead")).toEqual(firstSparedModel);
+    expect(lastSendModelFor("and then do this too")).toEqual(secondSparedModel);
+  });
+
+  it("re-drives a spared message with its source proposed plan so the plan can still be marked", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    // The plan the spared request implements. It lives on the same thread here
+    // only for brevity — the decider requires the source thread to exist and to
+    // share a project, and this thread satisfies both.
+    await harness.dispatch({
+      type: "thread.proposed-plan.upsert",
+      commandId: CommandId.make("cmd-proposed-plan-for-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      proposedPlan: {
+        id: "plan-1",
+        turnId: null,
+        planMarkdown: "1. do the thing",
+        implementedAt: null,
+        implementationThreadId: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      createdAt: now,
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-plan-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "the turn the user will stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    let dispatchedReplacement = false;
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.promise(async () => {
+        if (dispatchedReplacement) {
+          return;
+        }
+        dispatchedReplacement = true;
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-spared-with-plan"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-2"),
+            role: "user",
+            text: "implement the plan",
+            attachments: [],
+          },
+          sourceProposedPlan: {
+            threadId: ThreadId.make("thread-1"),
+            planId: "plan-1",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.flatMap(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "session/interrupt",
+              detail: "provider socket closed",
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-before-plan-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await harness.drain();
+
+    const events = await harness.readEventsWithPayloads();
+    const stop = events.find((event) => event.type === "thread.session-stop-requested");
+    expect(stop).toBeDefined();
+
+    const redrive = events.find(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === "user-message-2" &&
+        event.sequence > stop!.sequence,
+    );
+    expect(redrive).toBeDefined();
+
+    // Losing this is not cosmetic. The plan is marked implemented from exactly
+    // this payload field when the turn folds or starts, so a re-drive that
+    // drops it leaves the plan open forever with the work already done — and
+    // nothing later ever retries, because the re-drive is the last event that
+    // could have carried it.
+    expect(
+      (redrive!.payload as { sourceProposedPlan?: { threadId: string; planId: string } })
+        .sourceProposedPlan,
+    ).toEqual({ threadId: ThreadId.make("thread-1"), planId: "plan-1" });
+  });
+
+  it("re-drives one spared message once, carrying the latest request for it", async () => {
+    // Two turn-starts for the SAME message inside the spared window, on
+    // different models. Both name the same prompt, so re-driving each would
+    // deliver it twice; and the later one exists precisely because it corrects
+    // the earlier one, so collapsing to the FIRST would restore a selection the
+    // user had already replaced. Different models are what make the two
+    // failures distinguishable — a first-wins collapse and a latest-wins
+    // collapse both produce exactly one re-drive.
+    const firstModel = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5-codex",
+    };
+    const latestModel = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5-codex-mini",
+    };
+    const harness = await createHarness({ threadModelSelection: firstModel });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-dedupe-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "the turn the user will stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    let dispatchedReplacements = false;
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.promise(async () => {
+        if (dispatchedReplacements) {
+          return;
+        }
+        dispatchedReplacements = true;
+        // Both land inside the interrupt's retry window, so both sit above the
+        // narrowed cutoff and below the escalated stop — the exact window the
+        // re-drive scans.
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-spared-first"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-2"),
+            role: "user",
+            text: "actually, do this instead",
+            attachments: [],
+          },
+          modelSelection: firstModel,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+        // A re-issue of the SAME message — the auto-resume shape — dispatched
+        // through the internal resume command so it produces a second
+        // `thread.turn-start-requested` for `user-message-2` without a second
+        // `thread.message-sent`.
+        await harness.dispatch({
+          type: "thread.turn.resume",
+          commandId: CommandId.make("cmd-turn-resume-spared-latest"),
+          threadId: ThreadId.make("thread-1"),
+          messageId: asMessageId("user-message-2"),
+          modelSelection: latestModel,
+          reason: "test re-issue inside the spared window",
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.flatMap(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "session/interrupt",
+              detail: "provider socket closed",
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-before-dedupe-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await harness.drain();
+
+    const events = await harness.readEventsWithPayloads();
+    const stop = events.find((event) => event.type === "thread.session-stop-requested");
+    expect(stop).toBeDefined();
+
+    const sparedStarts = events.filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === "user-message-2" &&
+        event.sequence < stop!.sequence,
+    );
+    // The premise, pinned rather than assumed: if only one request landed in
+    // the window there is nothing to deduplicate and the rest proves nothing.
+    expect(sparedStarts).toHaveLength(2);
+
+    const redrives = events.filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === "user-message-2" &&
+        event.sequence > stop!.sequence,
+    );
+    // Once, not twice — the same prompt delivered a second time is the failure
+    // the collapse exists to prevent.
+    expect(redrives).toHaveLength(1);
+    // And on the LATEST request's model. A first-wins collapse also produces
+    // exactly one re-drive, so this assertion is the only thing separating the
+    // two.
+    expect((redrives[0]!.payload as { modelSelection?: ModelSelection }).modelSelection).toEqual(
+      latestModel,
+    );
+  });
+
+  it("reports on the thread when the spared turn-starts cannot be read", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-unreadable-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "the turn the user will stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    // Spied on the resolved service instance, as with the barrier-write test
+    // above: a read that fails is not a state any external caller can produce,
+    // and layer memoization makes this the same object the reactor holds.
+    //
+    // Counted INSIDE the effect rather than in the mock body, because the
+    // reactor builds the read once and retries that value — a counter in the
+    // body would record one call however many times the effect ran, and the
+    // retry count is half of what this test checks.
+    const readAttempts: Array<number> = [];
+    const readSpy = vi
+      .spyOn(harness.eventStore, "listThreadTurnStartsAboveCutoff")
+      .mockImplementation(
+        (input: Parameters<typeof harness.eventStore.listThreadTurnStartsAboveCutoff>[0]) =>
+          Effect.suspend(() => {
+            readAttempts.push(input.stopSequence);
+            return Effect.fail(
+              new PersistenceSqlError({
+                operation: "listThreadTurnStartsAboveCutoff",
+                detail: "spared turn-start read failed",
+              }),
+            );
+          }),
+      );
+
+    let dispatchedReplacement = false;
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.promise(async () => {
+        if (dispatchedReplacement) {
+          return;
+        }
+        dispatchedReplacement = true;
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-spared-but-unreadable"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-2"),
+            role: "user",
+            text: "actually, do this instead",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.flatMap(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "session/interrupt",
+              detail: "provider socket closed",
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-before-unreadable-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    // Waited on rather than drained, for the same reason the barrier test
+    // waits: the retries sleep on the real clock, so restoring the spy after a
+    // drain that returned mid-backoff would let the remaining attempts hit the
+    // real (working) store and quietly turn this into a test of the success
+    // path.
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some(
+            (activity) =>
+              activity.kind === "provider.session.stop.failed" &&
+              activity.summary === "Messages sent while stopping may not have been recovered",
+          ) === true
+      );
+    });
+    await harness.drain();
+    readSpy.mockRestore();
+
+    // Three attempts: the initial one plus `times: 2`. Fewer means the retry is
+    // not wired; more means it is unbounded.
+    expect(readAttempts).toHaveLength(3);
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const activity = thread?.activities.find(
+      (entry) =>
+        entry.kind === "provider.session.stop.failed" &&
+        entry.summary === "Messages sent while stopping may not have been recovered",
+    );
+    // Reported as an error, not a note: the user's prompt is gone and only they
+    // can re-send it, so the thread has to say so rather than leave the failure
+    // in a server log they will never read.
+    expect(activity?.tone).toBe("error");
+
+    // And the stop itself still stands. Failing the stop over an unreadable
+    // re-drive would report a stop that did happen as failed, which is a
+    // different lie than the one this fix removes.
+    expect(harness.stopSession).toHaveBeenCalled();
+  });
+
+  it("reports on the thread when a spared turn-start cannot be re-driven", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-failed-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "the turn the user will stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    // The read succeeds and finds the spared request; the DISPATCH of its
+    // re-drive is what fails. That is the other half of the finding, and it
+    // fails differently: the read failure loses every spared prompt at once,
+    // this one loses a specific named message.
+    //
+    // Failed by command id rather than by type so only the re-drive is
+    // affected — failing every `thread.turn.resume` would also break unrelated
+    // machinery, and failing the projection write would take down the stop.
+    const engineDispatch = harness.engine.dispatch.bind(harness.engine);
+    const dispatchSpy = vi
+      .spyOn(harness.engine, "dispatch")
+      .mockImplementation((command: Parameters<typeof harness.engine.dispatch>[0]) =>
+        command.type === "thread.turn.resume" &&
+        command.commandId.includes("escalated-stop-redrive")
+          ? Effect.fail(
+              new PersistenceSqlError({
+                operation: "dispatch",
+                detail: "re-drive dispatch failed",
+              }) as never,
+            )
+          : engineDispatch(command),
+      );
+
+    let dispatchedReplacement = false;
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.promise(async () => {
+        if (dispatchedReplacement) {
+          return;
+        }
+        dispatchedReplacement = true;
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-spared-but-undrivable"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-2"),
+            role: "user",
+            text: "actually, do this instead",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+      }).pipe(
+        Effect.flatMap(() =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: ProviderDriverKind.make("codex"),
+              method: "session/interrupt",
+              detail: "provider socket closed",
+            }),
+          ),
+        ),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("cmd-turn-interrupt-before-failed-redrive"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      createdAt: now,
+    });
+
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((entry) => entry.id === ThreadId.make("thread-1"))
+          ?.activities.some(
+            (activity) =>
+              activity.kind === "provider.session.stop.failed" &&
+              activity.summary === "A message sent while stopping was not recovered",
+          ) === true
+      );
+    });
+    await harness.drain();
+    dispatchSpy.mockRestore();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const activity = thread?.activities.find(
+      (entry) =>
+        entry.kind === "provider.session.stop.failed" &&
+        entry.summary === "A message sent while stopping was not recovered",
+    );
+    expect(activity?.tone).toBe("error");
+    // Names the prompt as unrecoverable-by-anything-but-the-user, which is the
+    // only actionable thing left to say about it.
+    expect((activity?.payload as { detail?: string })?.detail).toContain(
+      "must be re-sent manually",
+    );
+
+    // The re-drive genuinely did not happen — no `thread.turn-start-requested`
+    // for the spared message above the stop. Without this the activity could be
+    // reporting a failure that a later retry silently fixed, and the test would
+    // pass on a code path that never lost anything.
+    const events = await harness.readEvents();
+    const stop = events.find((event) => event.type === "thread.session-stop-requested");
+    expect(stop).toBeDefined();
+    const eventsWithPayloads = await harness.readEventsWithPayloads();
+    expect(
+      eventsWithPayloads.filter(
+        (event) =>
+          event.type === "thread.turn-start-requested" &&
+          (event.payload as { messageId?: string }).messageId === "user-message-2" &&
+          event.sequence > stop!.sequence,
+      ),
+    ).toHaveLength(0);
   });
 
   it("starts a fresh session when only projected session state exists", async () => {

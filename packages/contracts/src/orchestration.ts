@@ -252,10 +252,11 @@ export const OrchestrationProposedPlan = Schema.Struct({
 });
 export type OrchestrationProposedPlan = typeof OrchestrationProposedPlan.Type;
 
-const SourceProposedPlanReference = Schema.Struct({
+export const SourceProposedPlanReference = Schema.Struct({
   threadId: ThreadId,
   planId: OrchestrationProposedPlanId,
 });
+export type SourceProposedPlanReference = typeof SourceProposedPlanReference.Type;
 
 export const OrchestrationSessionStatus = Schema.Literals([
   "idle",

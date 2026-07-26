@@ -9,7 +9,14 @@
  *
  * @module OrchestrationEventStore
  */
-import { MessageId, NonNegativeInt, OrchestrationEvent, ThreadId } from "@t3tools/contracts";
+import {
+  MessageId,
+  ModelSelection,
+  NonNegativeInt,
+  OrchestrationEvent,
+  SourceProposedPlanReference,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -72,6 +79,25 @@ export type ThreadTurnStartsAboveCutoffInput = typeof ThreadTurnStartsAboveCutof
 export const ThreadTurnStartAboveCutoff = Schema.Struct({
   sequence: NonNegativeInt,
   messageId: MessageId,
+  /**
+   * The request's OWN model selection, not the thread's and not a cached one.
+   *
+   * Carried because a re-drive that substitutes a thread-wide cached selection
+   * silently reassigns the model: two spared requests submitted on different
+   * models would both restart on whichever was cached last. Optional because a
+   * request that named no model legitimately has none, and the resume path
+   * falls back to the thread default for exactly that case.
+   */
+  modelSelection: Schema.optional(ModelSelection),
+  /**
+   * The request's originating proposed plan, when it had one.
+   *
+   * Dropping it is not cosmetic: a plan-implementation turn that is re-driven
+   * without its plan reference can never mark that plan implemented, so the
+   * plan stays open forever with the work already done. See
+   * `ThreadTurnResumeCommand.sourceProposedPlan`.
+   */
+  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
 });
 export type ThreadTurnStartAboveCutoff = typeof ThreadTurnStartAboveCutoff.Type;
 
@@ -145,6 +171,20 @@ export interface OrchestrationEventStoreShape {
    * protect — only later, and only when the scheduler happens to let the send win
    * the race. The reactor uses this to re-drive those requests after the
    * teardown, so the outcome no longer depends on which fiber ran first.
+   *
+   * Two further exclusions, both of which turn a re-drive into a wrong answer
+   * rather than a missing one, so they belong in the query and not in the
+   * caller:
+   *
+   * - A request a LATER cancellation covers. This stop is not necessarily the
+   *   newest event on the thread — an escalation is dispatched only after its
+   *   interrupt's retries ran out, so a stop the user pressed in that window
+   *   sits between the two. Judging candidates only against this stop's own
+   *   cutoff would re-append a request the user already canceled, above the
+   *   barrier that canceled it, restarting a session they shut down.
+   * - A request whose turn already ran to a terminal state. A spared request
+   *   that was sent, started, and completed before the teardown arrived does
+   *   not need recovering; re-driving it runs the same prompt twice.
    *
    * Oldest first, so re-driving preserves the order the user sent them in.
    *
