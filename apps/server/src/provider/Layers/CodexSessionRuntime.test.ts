@@ -2,10 +2,12 @@ import * as NodeAssert from "node:assert/strict";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -114,6 +116,72 @@ describe("CodexSessionRuntime terminal lifecycle", () => {
         );
         NodeAssert.deepEqual(terminals, ["session/exited"]);
       }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("releases terminal delivery when process-exit emission fails", () =>
+    Effect.gen(function* () {
+      const exitGate = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed(makeFakeChildHandle({ pid: 4299, exitCode: Deferred.await(exitGate) })),
+      );
+      const crypto = yield* Crypto.Crypto;
+      const uuidCalls = yield* Ref.make(0);
+      const exitEmitAttempted = yield* Deferred.make<void>();
+      const uuidError = PlatformError.systemError({
+        _tag: "Unknown",
+        module: "Crypto",
+        method: "randomUUIDv4",
+        description: "terminal event identifier unavailable",
+      });
+      const failingCrypto = {
+        ...crypto,
+        randomUUIDv4: Ref.getAndUpdate(uuidCalls, (calls) => calls + 1).pipe(
+          Effect.flatMap((call) =>
+            call === 1
+              ? Deferred.succeed(exitEmitAttempted, undefined).pipe(
+                  Effect.andThen(Effect.fail(uuidError)),
+                )
+              : crypto.randomUUIDv4,
+          ),
+        ),
+      } satisfies typeof crypto;
+
+      const runtimeScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-exit-emit-failure"),
+        binaryPath: "/usr/bin/codex",
+        cwd: "/tmp/exit-emit-failure",
+        runtimeMode: "approval-required",
+      }).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(Crypto.Crypto, failingCrypto),
+      );
+
+      const methodsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+      const collector = yield* Effect.forkScoped(
+        Stream.runForEach(runtime.events, (event) =>
+          event.kind === "session"
+            ? Ref.update(methodsRef, (methods) => [...methods, event.method])
+            : Effect.void,
+        ),
+      );
+
+      // The process-exit path reaches terminal emission, but UUID generation
+      // fails before the event can be offered. close() must still be allowed to
+      // deliver session/closed rather than trusting the failed claimant's flag.
+      yield* Deferred.succeed(exitGate, ChildProcessSpawner.ExitCode(1));
+      yield* Deferred.await(exitEmitAttempted);
+      yield* runtime.close;
+      yield* Fiber.await(collector);
+
+      const methods = yield* Ref.get(methodsRef);
+      const terminals = methods.filter(
+        (method) => method === "session/exited" || method === "session/closed",
+      );
+      NodeAssert.deepEqual(terminals, ["session/closed"]);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("emits a single terminal event when only a graceful close occurs", () =>

@@ -265,6 +265,41 @@ layer("OrchestrationEventStore.listThreadTurnStartsAboveCutoff", (it) => {
     }),
   );
 
+  it.effect("excludes an older retry when a newer same-message turn settled", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore;
+
+      const interrupted = yield* appendTurnStart(store, { messageId: "msg-a" });
+      const firstAttempt = yield* appendTurnStart(store, { messageId: "msg-retry" });
+      yield* appendSessionSet(store, {
+        activeTurnId: "turn-first",
+        turnRequestSequence: firstAttempt.sequence,
+      });
+      // The first session exits without a settlement stamp. Auto-resume issues a
+      // newer request for the same user message, and that retry runs to completion.
+      const retry = yield* appendTurnStart(store, { messageId: "msg-retry" });
+      yield* appendSessionSet(store, {
+        activeTurnId: "turn-retry",
+        turnRequestSequence: retry.sequence,
+      });
+      yield* appendSessionSet(store, {
+        activeTurnId: null,
+        settledTurnId: "turn-retry",
+      });
+      const escalation = yield* appendStop(store, {
+        canceledThroughSequence: interrupted.sequence,
+      });
+
+      const result = yield* store.listThreadTurnStartsAboveCutoff({
+        threadId: THREAD_ID,
+        canceledThroughSequence: NonNegativeInt.make(interrupted.sequence),
+        stopSequence: NonNegativeInt.make(escalation.sequence),
+      });
+
+      assert.deepEqual(result, []);
+    }),
+  );
+
   it.effect("keeps a spared request whose turn started but never settled", () =>
     Effect.gen(function* () {
       const store = yield* OrchestrationEventStore;

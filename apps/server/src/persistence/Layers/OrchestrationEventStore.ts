@@ -299,22 +299,22 @@ const makeEventStore = Effect.gen(function* () {
   //    the user canceled is never re-appended above the barrier that canceled it.
   //    This stop cannot exclude its own candidates: its cutoff is below them by
   //    the outer bound, which is what "spared" means.
-  //  - Already settled. A spared request that was adopted by a turn and whose
-  //    session then went quiet (`activeTurnId` cleared) has run its course —
-  //    completed or interrupted — and re-driving it repeats work the user already
-  //    got. Adoption is the correlation point: a `thread.session-set` from
-  //    `turn.started`, or a `thread.turn-start-folded` from a steer, names the
-  //    request it answers via `turnRequestSequence`. A never-adopted request has
-  //    no adoption sequence, `MIN(...)` yields NULL, the comparison is NULL rather
-  //    than true, and it is correctly kept — which is the common case here, since
-  //    a request the teardown destroyed is exactly one that never settled.
+  //  - Already settled. A spared request has run its course when it, or a newer
+  //    retry for the SAME message, was adopted by a turn that later settled.
+  //    Re-driving either request would repeat work the user already got. Adoption
+  //    is the correlation point: a `thread.session-set` from `turn.started`, or a
+  //    `thread.turn-start-folded` from a steer, names the request it answers via
+  //    `turnRequestSequence`. A never-adopted message has no matching adoption and
+  //    is correctly kept — which is the common case here, since a request the
+  //    teardown destroyed is exactly one that never settled.
   //
   //    Settlement is recognized by an explicit correlation, not inferred from
   //    the session snapshot the write happens to carry. Only the writers that
   //    KNOW a turn ended stamp `settledTurnId` on their session-set — ingestion
   //    when a `turn.completed` arrives, the stall watchdog when it fails the
   //    turn it timed out — and this read counts a candidate settled only when
-  //    some session-set names the very turn that adopted it. Everything else
+  //    some session-set names the very turn that adopted the candidate or a newer
+  //    same-message retry. Everything else
   //    that clears `activeTurnId` is thereby excluded for free, and each of
   //    those exclusions is load-bearing:
   //      - the stop's own teardown clears it for every candidate at once;
@@ -376,31 +376,43 @@ const makeEventStore = Effect.gen(function* () {
           )
           AND NOT EXISTS (
             SELECT 1
-            FROM orchestration_events AS settle_event
-            WHERE settle_event.aggregate_kind = 'thread'
-              AND settle_event.stream_id = turn_start.stream_id
-              AND settle_event.event_type = 'thread.session-set'
-              AND settle_event.sequence > turn_start.sequence
-              AND json_extract(settle_event.payload_json, '$.settledTurnId') IS NOT NULL
-              AND json_extract(settle_event.payload_json, '$.settledTurnId') = (
-                SELECT COALESCE(
-                  json_extract(adopt_event.payload_json, '$.turnId'),
-                  json_extract(adopt_event.payload_json, '$.session.activeTurnId')
-                )
-                FROM orchestration_events AS adopt_event
-                WHERE adopt_event.aggregate_kind = 'thread'
-                  AND adopt_event.stream_id = turn_start.stream_id
-                  AND adopt_event.sequence > turn_start.sequence
-                  AND adopt_event.event_type IN (
-                    'thread.session-set',
-                    'thread.turn-start-folded'
+            FROM orchestration_events AS same_message_turn_start
+            WHERE same_message_turn_start.aggregate_kind = 'thread'
+              AND same_message_turn_start.stream_id = turn_start.stream_id
+              AND same_message_turn_start.event_type = 'thread.turn-start-requested'
+              AND same_message_turn_start.sequence >= turn_start.sequence
+              AND json_extract(
+                same_message_turn_start.payload_json,
+                '$.messageId'
+              ) = json_extract(turn_start.payload_json, '$.messageId')
+              AND EXISTS (
+                SELECT 1
+                FROM orchestration_events AS settle_event
+                WHERE settle_event.aggregate_kind = 'thread'
+                  AND settle_event.stream_id = turn_start.stream_id
+                  AND settle_event.event_type = 'thread.session-set'
+                  AND settle_event.sequence > same_message_turn_start.sequence
+                  AND json_extract(settle_event.payload_json, '$.settledTurnId') IS NOT NULL
+                  AND json_extract(settle_event.payload_json, '$.settledTurnId') = (
+                    SELECT COALESCE(
+                      json_extract(adopt_event.payload_json, '$.turnId'),
+                      json_extract(adopt_event.payload_json, '$.session.activeTurnId')
+                    )
+                    FROM orchestration_events AS adopt_event
+                    WHERE adopt_event.aggregate_kind = 'thread'
+                      AND adopt_event.stream_id = turn_start.stream_id
+                      AND adopt_event.sequence > same_message_turn_start.sequence
+                      AND adopt_event.event_type IN (
+                        'thread.session-set',
+                        'thread.turn-start-folded'
+                      )
+                      AND json_extract(
+                        adopt_event.payload_json,
+                        '$.turnRequestSequence'
+                      ) = same_message_turn_start.sequence
+                    ORDER BY adopt_event.sequence ASC
+                    LIMIT 1
                   )
-                  AND json_extract(
-                    adopt_event.payload_json,
-                    '$.turnRequestSequence'
-                  ) = turn_start.sequence
-                ORDER BY adopt_event.sequence ASC
-                LIMIT 1
               )
           )
         ORDER BY turn_start.sequence ASC

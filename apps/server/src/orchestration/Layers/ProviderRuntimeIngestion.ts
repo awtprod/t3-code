@@ -2431,10 +2431,11 @@ const make = Effect.gen(function* () {
               //    the resume decider emits no events and the engine rejects the
               //    command — treat that as a benign no-op so we do NOT append the
               //    marker or consume budget for a resume that never happened.
-              const resumeOutcome = yield* orchestrationEngine
-                .dispatch({
+              const resumeOutcome = yield* Effect.gen(function* () {
+                const commandId = yield* providerCommandId(event, "auto-resume");
+                yield* orchestrationEngine.dispatch({
                   type: "thread.turn.resume",
-                  commandId: yield* providerCommandId(event, "auto-resume"),
+                  commandId,
                   threadId: thread.id,
                   messageId: targetMessageId,
                   ...(resumeModelSelection !== undefined
@@ -2445,87 +2446,105 @@ const make = Effect.gen(function* () {
                     : {}),
                   reason: `auto-resume after provider session exit: ${exitReason}`,
                   createdAt: now,
-                })
-                .pipe(
-                  Effect.as("resumed" as const),
-                  // Only THAT invariant is benign, though. The tag is shared:
-                  // the engine raises it for genuine failures too — a failed
-                  // event-id generation, a source plan that no longer resolves —
-                  // and the session has already stopped, so swallowing one of
-                  // those leaves the user's prompt unrun with a debug log as its
-                  // only trace, which is the silent loss this auto-resume exists
-                  // to close. Match the empty decision by its own detail and let
-                  // everything else fall through to the report below.
-                  Effect.catchIf(
-                    (error) =>
-                      error._tag === "OrchestrationCommandInvariantError" &&
-                      error.detail === COMMAND_PRODUCED_NO_EVENTS_DETAIL,
-                    (error) =>
-                      Effect.logDebug("provider-runtime.auto-resume.noop", {
-                        threadId: thread.id,
-                        messageId: targetMessageId,
-                        interruptedTurnId: activeTurnId,
-                        reason: error.message,
-                      }).pipe(Effect.as("noop" as const)),
-                  ),
-                  // The session is down either way, but the un-resumed prompt is
-                  // reported on the thread rather than only in the server log:
-                  // the user is the only one who can recover it, and they cannot
-                  // do that without knowing it happened.
-                  Effect.catchTag("OrchestrationCommandInvariantError", (error) =>
-                    Effect.gen(function* () {
-                      yield* Effect.logWarning("provider-runtime.auto-resume.dispatch-failed", {
-                        threadId: thread.id,
-                        messageId: targetMessageId,
-                        interruptedTurnId: activeTurnId,
-                        detail: error.detail,
-                        reason: error.message,
-                      });
-                      const failedActivityId = yield* crypto.randomUUIDv4.pipe(
-                        Effect.map((uuid) =>
-                          EventId.make(`auto-resume-failed:${event.eventId}:${uuid}`),
-                        ),
-                      );
-                      yield* orchestrationEngine.dispatch({
-                        type: "thread.activity.append",
-                        commandId: yield* providerCommandId(event, "auto-resume-failed-activity"),
-                        threadId: thread.id,
-                        activity: {
-                          id: failedActivityId,
-                          tone: "error",
-                          kind: "provider.turn.auto-resume-failed",
-                          summary: "Not auto-resumed: re-issuing the turn failed",
-                          payload: {
-                            detail:
-                              `The provider session exited mid-turn and this turn was ` +
-                              `eligible to be re-issued, but re-issuing it failed, so the ` +
-                              `message was NOT sent again: ${error.detail}. Re-send the ` +
-                              `message yourself to run it.`,
-                            exitReason,
-                            invariantDetail: error.detail,
-                          },
-                          turnId: activeTurnId,
-                          createdAt: now,
-                        },
-                        createdAt: now,
-                      });
-                    }).pipe(
-                      Effect.catchCause((appendCause) =>
-                        Effect.logError(
-                          "provider runtime ingestion could not report a failed auto-resume",
-                          {
-                            threadId: thread.id,
-                            messageId: targetMessageId,
-                            interruptedTurnId: activeTurnId,
-                            resumeDetail: error.detail,
-                            cause: Cause.pretty(appendCause),
-                          },
-                        ),
+                });
+                return "resumed" as const;
+              }).pipe(
+                // Only THAT invariant is benign, though. The tag is shared:
+                // the engine raises it for genuine failures too — a failed
+                // event-id generation, a source plan that no longer resolves —
+                // and the session has already stopped, so swallowing one of
+                // those leaves the user's prompt unrun with a debug log as its
+                // only trace, which is the silent loss this auto-resume exists
+                // to close. Match the empty decision by its own detail and let
+                // everything else fall through to the report below.
+                Effect.catchIf(
+                  (error) =>
+                    error._tag === "OrchestrationCommandInvariantError" &&
+                    error.detail === COMMAND_PRODUCED_NO_EVENTS_DETAIL,
+                  (error) =>
+                    Effect.logDebug("provider-runtime.auto-resume.noop", {
+                      threadId: thread.id,
+                      messageId: targetMessageId,
+                      interruptedTurnId: activeTurnId,
+                      reason: error.message,
+                    }).pipe(Effect.as("noop" as const)),
+                ),
+                // The session is down either way, but the un-resumed prompt is
+                // reported on the thread rather than only in the server log:
+                // the user is the only one who can recover it, and they cannot
+                // do that without knowing it happened. Catch the entire attempt,
+                // including command-id generation and defects from dispatch.
+                Effect.catchCause((resumeCause) => {
+                  if (Cause.hasInterruptsOnly(resumeCause)) {
+                    return Effect.failCause(resumeCause);
+                  }
+                  const resumeError = Cause.squash(resumeCause);
+                  const invariantDetail =
+                    typeof resumeError === "object" &&
+                    resumeError !== null &&
+                    "_tag" in resumeError &&
+                    resumeError._tag === "OrchestrationCommandInvariantError" &&
+                    "detail" in resumeError &&
+                    typeof resumeError.detail === "string"
+                      ? resumeError.detail
+                      : undefined;
+                  const resumeDetail =
+                    invariantDetail ??
+                    (resumeError instanceof Error
+                      ? resumeError.message
+                      : Cause.pretty(resumeCause));
+
+                  return Effect.gen(function* () {
+                    yield* Effect.logWarning("provider-runtime.auto-resume.dispatch-failed", {
+                      threadId: thread.id,
+                      messageId: targetMessageId,
+                      interruptedTurnId: activeTurnId,
+                      detail: resumeDetail,
+                      cause: Cause.pretty(resumeCause),
+                    });
+                    yield* orchestrationEngine.dispatch({
+                      type: "thread.activity.append",
+                      commandId: CommandId.make(
+                        `provider:${event.eventId}:auto-resume-failed-activity`,
                       ),
-                      Effect.as("failed" as const),
+                      threadId: thread.id,
+                      activity: {
+                        id: EventId.make(`auto-resume-failed:${event.eventId}`),
+                        tone: "error",
+                        kind: "provider.turn.auto-resume-failed",
+                        summary: "Not auto-resumed: re-issuing the turn failed",
+                        payload: {
+                          detail:
+                            `The provider session exited mid-turn and this turn was ` +
+                            `eligible to be re-issued, but re-issuing it failed, so the ` +
+                            `message was NOT sent again: ${resumeDetail}. Re-send the ` +
+                            `message yourself to run it.`,
+                          exitReason,
+                          failureDetail: resumeDetail,
+                          ...(invariantDetail !== undefined ? { invariantDetail } : {}),
+                        },
+                        turnId: activeTurnId,
+                        createdAt: now,
+                      },
+                      createdAt: now,
+                    });
+                  }).pipe(
+                    Effect.catchCause((appendCause) =>
+                      Effect.logError(
+                        "provider runtime ingestion could not report a failed auto-resume",
+                        {
+                          threadId: thread.id,
+                          messageId: targetMessageId,
+                          interruptedTurnId: activeTurnId,
+                          resumeDetail,
+                          cause: Cause.pretty(appendCause),
+                        },
+                      ),
                     ),
-                  ),
-                );
+                    Effect.as("failed" as const),
+                  );
+                }),
+              );
 
               if (resumeOutcome === "resumed") {
                 yield* Ref.update(autoResumeAttemptsByThreadId, (map) => {

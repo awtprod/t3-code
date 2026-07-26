@@ -27,6 +27,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -79,6 +80,10 @@ const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asProposedPlanId = (value: string): OrchestrationProposedPlanId =>
   OrchestrationProposedPlanId.make(value);
+
+class AutoResumeDispatchError extends Data.TaggedError("AutoResumeDispatchError")<{
+  readonly message: string;
+}> {}
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
@@ -3920,6 +3925,48 @@ describe("ProviderRuntimeIngestion", () => {
     expect(failures[0]?.summary).toContain("Not auto-resumed");
     // The resume never happened, so nothing may claim it did.
     expect(autoResumedActivities(thread)).toHaveLength(0);
+  });
+
+  it("reports a non-invariant auto-resume dispatch failure", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+
+    const engineDispatch = harness.engine.dispatch.bind(harness.engine);
+    vi.spyOn(harness.engine, "dispatch").mockImplementation(
+      (command: Parameters<typeof harness.engine.dispatch>[0]) =>
+        command.type === "thread.turn.resume"
+          ? (Effect.fail(
+              new AutoResumeDispatchError({ message: "resume transport unavailable" }),
+            ) as never)
+          : engineDispatch(command),
+    );
+
+    await crashSession(harness, "crash-non-invariant");
+
+    const thread = await readThread(harness);
+    const failures = resumeFailedActivities(thread);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.tone).toBe("error");
+    expect(failures[0]?.payload).toMatchObject({
+      failureDetail: "resume transport unavailable",
+    });
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+
+    const failureEvents = harness
+      .domainEvents()
+      .filter(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.activity-appended" }> =>
+          event.type === "thread.activity-appended" &&
+          event.payload.activity.kind === "provider.turn.auto-resume-failed",
+      );
+    expect(failureEvents).toHaveLength(1);
+    expect(failureEvents[0]?.commandId).toBe(
+      "provider:evt-session-exited-crash-non-invariant:auto-resume-failed-activity",
+    );
+    expect(failureEvents[0]?.payload.activity.id).toBe(
+      "auto-resume-failed:evt-session-exited-crash-non-invariant",
+    );
   });
 
   it("stays quiet when the auto-resume dispatch merely produced no events", async () => {
