@@ -103,11 +103,14 @@ const appendStop = (
   } as never);
 
 /**
- * `status` is not decoration here. The read distinguishes the stop's own
- * teardown from a turn reaching its own end by that field alone — teardown
- * writes "stopped", a completion writes "ready"/"error"/"interrupted" — so a
- * fixture that writes the wrong one tests the opposite of what it claims.
- * Callers must therefore say which of the two they are building.
+ * `settledTurnId` is the field this suite exists to exercise. The read counts
+ * a spared request settled only when a session-set NAMES the turn that adopted
+ * it — merely going quiet (`activeTurnId: null`, any status) settles nothing,
+ * because teardown, rebind, and a different request's failure all write that
+ * same quiet shape. A fixture standing in for a genuine completion must
+ * therefore stamp `settledTurnId`, exactly as ingestion's `turn.completed`
+ * session-set and the stall watchdog's auto-fail do; a fixture standing in for
+ * any of the other writers must not.
  */
 const appendSessionSet = (
   store: typeof OrchestrationEventStore.Service,
@@ -115,6 +118,7 @@ const appendSessionSet = (
     readonly activeTurnId: string | null;
     readonly status?: "ready" | "error" | "interrupted" | "stopped";
     readonly turnRequestSequence?: number;
+    readonly settledTurnId?: string;
   },
 ) =>
   store.append({
@@ -141,6 +145,37 @@ const appendSessionSet = (
       ...(input.turnRequestSequence !== undefined
         ? { turnRequestSequence: NonNegativeInt.make(input.turnRequestSequence) }
         : {}),
+      ...(input.settledTurnId !== undefined
+        ? { settledTurnId: TurnId.make(input.settledTurnId) }
+        : {}),
+    },
+  } as never);
+
+/**
+ * A steer's adoption: the request was folded into an already-running turn
+ * rather than opening its own. Settlement for a folded request is that TURN's
+ * completion, which is why the read resolves the adopted id from `$.turnId`
+ * here and `$.session.activeTurnId` on a turn.started session-set.
+ */
+const appendTurnStartFolded = (
+  store: typeof OrchestrationEventStore.Service,
+  input: { readonly turnRequestSequence: number; readonly turnId: string },
+) =>
+  store.append({
+    type: "thread.turn-start-folded",
+    eventId: nextEventId(),
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    occurredAt: NOW,
+    commandId: CommandId.make(`cmd-fold-${eventCounter}`),
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    payload: {
+      threadId: THREAD_ID,
+      turnRequestSequence: NonNegativeInt.make(input.turnRequestSequence),
+      turnId: TurnId.make(input.turnId),
+      createdAt: NOW,
     },
   } as never);
 
@@ -208,13 +243,14 @@ layer("OrchestrationEventStore.listThreadTurnStartsAboveCutoff", (it) => {
 
       const interrupted = yield* appendTurnStart(store, { messageId: "msg-a" });
       const replacement = yield* appendTurnStart(store, { messageId: "msg-b" });
-      // Adopted by a turn that names it, then settled: the session goes quiet
-      // with no active turn while the escalation is still retrying.
+      // Adopted by a turn that names it, then settled: ingestion's
+      // `turn.completed` session-set stamps the id of the turn it closed
+      // while the escalation is still retrying.
       yield* appendSessionSet(store, {
         activeTurnId: "turn-b",
         turnRequestSequence: replacement.sequence,
       });
-      yield* appendSessionSet(store, { activeTurnId: null });
+      yield* appendSessionSet(store, { activeTurnId: null, settledTurnId: "turn-b" });
       const escalation = yield* appendStop(store, {
         canceledThroughSequence: interrupted.sequence,
       });
@@ -286,9 +322,13 @@ layer("OrchestrationEventStore.listThreadTurnStartsAboveCutoff", (it) => {
       const escalation = yield* appendStop(store, {
         canceledThroughSequence: interrupted.sequence,
       });
-      // Above the stop, and "ready" rather than "stopped": ingestion's mapping
-      // for a `turn.completed` that did not fail.
-      yield* appendSessionSet(store, { activeTurnId: null, status: "ready" });
+      // Above the stop: ingestion's mapping for a `turn.completed` that did
+      // not fail — status "ready", and the settled turn named explicitly.
+      yield* appendSessionSet(store, {
+        activeTurnId: null,
+        status: "ready",
+        settledTurnId: "turn-b",
+      });
 
       const result = yield* store.listThreadTurnStartsAboveCutoff({
         threadId: THREAD_ID,
@@ -304,10 +344,11 @@ layer("OrchestrationEventStore.listThreadTurnStartsAboveCutoff", (it) => {
     Effect.gen(function* () {
       const store = yield* OrchestrationEventStore;
 
-      // Same ordering, the other terminal status a live runtime can report.
-      // Guarding by an allowlist of "ready"/"error" would re-drive this one:
-      // `session.state.changed` maps runtime state "interrupted" straight
-      // through, so settlement is anything that is NOT the stop's teardown.
+      // Same ordering, ending in an interrupt instead of a natural finish.
+      // The faithful event shape matters here: a runtime `interrupted` state
+      // change PRESERVES the active turn and settles nothing — the interrupt
+      // only becomes final when the provider's `turn.completed` (state
+      // "interrupted") lands, and that is the write that names the turn.
       const interrupted = yield* appendTurnStart(store, { messageId: "msg-a" });
       const replacement = yield* appendTurnStart(store, { messageId: "msg-b" });
       yield* appendSessionSet(store, {
@@ -317,7 +358,115 @@ layer("OrchestrationEventStore.listThreadTurnStartsAboveCutoff", (it) => {
       const escalation = yield* appendStop(store, {
         canceledThroughSequence: interrupted.sequence,
       });
-      yield* appendSessionSet(store, { activeTurnId: null, status: "interrupted" });
+      yield* appendSessionSet(store, { activeTurnId: "turn-b", status: "interrupted" });
+      yield* appendSessionSet(store, {
+        activeTurnId: null,
+        status: "ready",
+        settledTurnId: "turn-b",
+      });
+
+      const result = yield* store.listThreadTurnStartsAboveCutoff({
+        threadId: THREAD_ID,
+        canceledThroughSequence: NonNegativeInt.make(interrupted.sequence),
+        stopSequence: NonNegativeInt.make(escalation.sequence),
+      });
+
+      assert.deepEqual(result, []);
+    }),
+  );
+
+  it.effect("keeps a spared request when an unrelated failure write goes quiet", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore;
+
+      // The ambiguity codex named: a DIFFERENT request's turn-start fails at
+      // the reactor, which writes the session back to `ready` with no active
+      // turn. That write is byte-for-byte the same session snapshot a genuine
+      // completion used to be recognized by — quiet, non-stopped — but it
+      // closed nothing. If the read counted it as msg-b's settlement, the
+      // spared prompt would silently vanish from re-drive.
+      const interrupted = yield* appendTurnStart(store, { messageId: "msg-a" });
+      const replacement = yield* appendTurnStart(store, { messageId: "msg-b" });
+      yield* appendSessionSet(store, {
+        activeTurnId: "turn-b",
+        turnRequestSequence: replacement.sequence,
+      });
+      const escalation = yield* appendStop(store, {
+        canceledThroughSequence: interrupted.sequence,
+      });
+      // The reactor's turn-start-failure write: ready, no turn, and — the
+      // point — no settledTurnId, because it does not know any turn ended.
+      yield* appendSessionSet(store, { activeTurnId: null, status: "ready" });
+
+      const result = yield* store.listThreadTurnStartsAboveCutoff({
+        threadId: THREAD_ID,
+        canceledThroughSequence: NonNegativeInt.make(interrupted.sequence),
+        stopSequence: NonNegativeInt.make(escalation.sequence),
+      });
+
+      assert.deepEqual(
+        result.map((entry) => entry.messageId),
+        ["msg-b"],
+      );
+    }),
+  );
+
+  it.effect("keeps a spared request when a settlement names a different turn", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore;
+
+      // Settlement is a correlation, not a flag: a completion that closes
+      // some OTHER turn must not be mistaken for this candidate's, even
+      // though it carries a settledTurnId and leaves the session quiet.
+      const interrupted = yield* appendTurnStart(store, { messageId: "msg-a" });
+      const replacement = yield* appendTurnStart(store, { messageId: "msg-b" });
+      yield* appendSessionSet(store, {
+        activeTurnId: "turn-b",
+        turnRequestSequence: replacement.sequence,
+      });
+      const escalation = yield* appendStop(store, {
+        canceledThroughSequence: interrupted.sequence,
+      });
+      yield* appendSessionSet(store, {
+        activeTurnId: null,
+        status: "ready",
+        settledTurnId: "turn-other",
+      });
+
+      const result = yield* store.listThreadTurnStartsAboveCutoff({
+        threadId: THREAD_ID,
+        canceledThroughSequence: NonNegativeInt.make(interrupted.sequence),
+        stopSequence: NonNegativeInt.make(escalation.sequence),
+      });
+
+      assert.deepEqual(
+        result.map((entry) => entry.messageId),
+        ["msg-b"],
+      );
+    }),
+  );
+
+  it.effect("excludes a spared steer folded into a turn that later settled", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore;
+
+      // The other adoption shape: the spared request never opened its own
+      // turn — it was folded into one already running. Its settlement is that
+      // turn's completion, correlated through the fold event's `turnId`.
+      const interrupted = yield* appendTurnStart(store, { messageId: "msg-a" });
+      const folded = yield* appendTurnStart(store, { messageId: "msg-b" });
+      yield* appendTurnStartFolded(store, {
+        turnRequestSequence: folded.sequence,
+        turnId: "turn-host",
+      });
+      const escalation = yield* appendStop(store, {
+        canceledThroughSequence: interrupted.sequence,
+      });
+      yield* appendSessionSet(store, {
+        activeTurnId: null,
+        status: "ready",
+        settledTurnId: "turn-host",
+      });
 
       const result = yield* store.listThreadTurnStartsAboveCutoff({
         threadId: THREAD_ID,

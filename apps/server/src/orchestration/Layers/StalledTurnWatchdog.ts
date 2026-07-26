@@ -160,6 +160,12 @@ const makeStalledTurnWatchdog = (options?: StalledTurnWatchdogLiveOptions) =>
             lastError: `Stalled: no provider activity for ${stallMinutes}m; auto-failed by watchdog`,
             updatedAt: nowIso,
           },
+          // This write genuinely closes the stalled turn, and the escalated-stop
+          // re-drive counts settlement only from session-sets that name the turn
+          // they closed. Without the stamp, an auto-failed turn would look
+          // unsettled to that read and its prompt would be re-driven on a later
+          // stop — re-running the very work the watchdog just declared wedged.
+          settledTurnId: activeTurnId,
           createdAt: nowIso,
         });
 

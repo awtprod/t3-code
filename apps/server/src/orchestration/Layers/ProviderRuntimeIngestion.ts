@@ -42,6 +42,7 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
 import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
 import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
 import { isGitRepository } from "../../git/Utils.ts";
+import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -1600,6 +1601,12 @@ const make = Effect.gen(function* () {
               : status === "ready"
                 ? null
                 : (thread.session?.lastError ?? null);
+        // The turn a `turn.completed` closes: the event's own id when it
+        // carries one, else the tracked active turn (the lifecycle guard has
+        // already vouched they agree when both exist). Null only when neither
+        // side knows a turn, in which case the write settles nothing.
+        const settledTurnIdForCompletion =
+          event.type === "turn.completed" ? (eventTurnId ?? activeTurnId) : null;
 
         if (shouldApplyThreadLifecycle && !supersededLifecycleEvent) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
@@ -1650,6 +1657,18 @@ const make = Effect.gen(function* () {
             // transition consume a placeholder.
             ...(event.type === "turn.started" && event.payload?.turnRequestSequence !== undefined
               ? { turnRequestSequence: event.payload.turnRequestSequence }
+              : {}),
+            // And only a turn.completed closes a specific turn. This is the
+            // write the escalated-stop re-drive reads to decide a spared
+            // request already ran to its end, and it must name WHICH turn
+            // ended: several other writers produce a session-set with no
+            // active turn (teardown, rebind, a different request's failure),
+            // and treating any of those as this turn's settlement silently
+            // drops a prompt from re-drive. A session.exited also clears the
+            // active turn but settles nothing — the turn died with the
+            // session, which is exactly the case re-drive exists for.
+            ...(event.type === "turn.completed" && settledTurnIdForCompletion !== null
+              ? { settledTurnId: settledTurnIdForCompletion }
               : {}),
             createdAt: now,
           });
@@ -2429,13 +2448,82 @@ const make = Effect.gen(function* () {
                 })
                 .pipe(
                   Effect.as("resumed" as const),
+                  // Only THAT invariant is benign, though. The tag is shared:
+                  // the engine raises it for genuine failures too — a failed
+                  // event-id generation, a source plan that no longer resolves —
+                  // and the session has already stopped, so swallowing one of
+                  // those leaves the user's prompt unrun with a debug log as its
+                  // only trace, which is the silent loss this auto-resume exists
+                  // to close. Match the empty decision by its own detail and let
+                  // everything else fall through to the report below.
+                  Effect.catchIf(
+                    (error) =>
+                      error._tag === "OrchestrationCommandInvariantError" &&
+                      error.detail === COMMAND_PRODUCED_NO_EVENTS_DETAIL,
+                    (error) =>
+                      Effect.logDebug("provider-runtime.auto-resume.noop", {
+                        threadId: thread.id,
+                        messageId: targetMessageId,
+                        interruptedTurnId: activeTurnId,
+                        reason: error.message,
+                      }).pipe(Effect.as("noop" as const)),
+                  ),
+                  // The session is down either way, but the un-resumed prompt is
+                  // reported on the thread rather than only in the server log:
+                  // the user is the only one who can recover it, and they cannot
+                  // do that without knowing it happened.
                   Effect.catchTag("OrchestrationCommandInvariantError", (error) =>
-                    Effect.logDebug("provider-runtime.auto-resume.noop", {
-                      threadId: thread.id,
-                      messageId: targetMessageId,
-                      interruptedTurnId: activeTurnId,
-                      reason: error.message,
-                    }).pipe(Effect.as("noop" as const)),
+                    Effect.gen(function* () {
+                      yield* Effect.logWarning("provider-runtime.auto-resume.dispatch-failed", {
+                        threadId: thread.id,
+                        messageId: targetMessageId,
+                        interruptedTurnId: activeTurnId,
+                        detail: error.detail,
+                        reason: error.message,
+                      });
+                      const failedActivityId = yield* crypto.randomUUIDv4.pipe(
+                        Effect.map((uuid) =>
+                          EventId.make(`auto-resume-failed:${event.eventId}:${uuid}`),
+                        ),
+                      );
+                      yield* orchestrationEngine.dispatch({
+                        type: "thread.activity.append",
+                        commandId: yield* providerCommandId(event, "auto-resume-failed-activity"),
+                        threadId: thread.id,
+                        activity: {
+                          id: failedActivityId,
+                          tone: "error",
+                          kind: "provider.turn.auto-resume-failed",
+                          summary: "Not auto-resumed: re-issuing the turn failed",
+                          payload: {
+                            detail:
+                              `The provider session exited mid-turn and this turn was ` +
+                              `eligible to be re-issued, but re-issuing it failed, so the ` +
+                              `message was NOT sent again: ${error.detail}. Re-send the ` +
+                              `message yourself to run it.`,
+                            exitReason,
+                            invariantDetail: error.detail,
+                          },
+                          turnId: activeTurnId,
+                          createdAt: now,
+                        },
+                        createdAt: now,
+                      });
+                    }).pipe(
+                      Effect.catchCause((appendCause) =>
+                        Effect.logError(
+                          "provider runtime ingestion could not report a failed auto-resume",
+                          {
+                            threadId: thread.id,
+                            messageId: targetMessageId,
+                            interruptedTurnId: activeTurnId,
+                            resumeDetail: error.detail,
+                            cause: Cause.pretty(appendCause),
+                          },
+                        ),
+                      ),
+                      Effect.as("failed" as const),
+                    ),
                   ),
                 );
 

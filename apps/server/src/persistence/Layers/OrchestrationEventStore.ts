@@ -309,25 +309,36 @@ const makeEventStore = Effect.gen(function* () {
   //    than true, and it is correctly kept — which is the common case here, since
   //    a request the teardown destroyed is exactly one that never settled.
   //
-  //    Settlement is recognized by the session STATUS the write carries, not by
-  //    where it sits relative to the stop. The stop's own teardown must not count
-  //    as settlement — it clears `activeTurnId` for every candidate at once, so
-  //    counting it would empty the list on every call and silently restore the
-  //    very defect this read exists to fix — and it is identifiable directly: the
-  //    teardown hardcodes `status: 'stopped'`, as does a provider `session.exited`.
-  //    Every way a turn reaches its own end writes something else: 'ready' on a
-  //    normal completion, 'error' on a failed one or a watchdog auto-fail,
-  //    'interrupted' when the runtime reports that state.
+  //    Settlement is recognized by an explicit correlation, not inferred from
+  //    the session snapshot the write happens to carry. Only the writers that
+  //    KNOW a turn ended stamp `settledTurnId` on their session-set — ingestion
+  //    when a `turn.completed` arrives, the stall watchdog when it fails the
+  //    turn it timed out — and this read counts a candidate settled only when
+  //    some session-set names the very turn that adopted it. Everything else
+  //    that clears `activeTurnId` is thereby excluded for free, and each of
+  //    those exclusions is load-bearing:
+  //      - the stop's own teardown clears it for every candidate at once;
+  //        counting it would empty this list on every call and silently
+  //        restore the very defect the read exists to fix;
+  //      - a concurrent turn-start FAILURE for a different request writes
+  //        `ready`/null; counting it would drop a genuinely spared prompt;
+  //      - a session rebind writes a non-stopped status with no active turn
+  //        while the spared turn it displaced never ran to its end;
+  //      - a provider `session.exited` clears it because the turn DIED with
+  //        the session — the exact case a re-drive exists for.
+  //    An earlier version inferred settlement from `status <> 'stopped'` with
+  //    `activeTurnId` null; the second and third writers above produce exactly
+  //    that shape without settling anything, which is why the correlation is
+  //    explicit now.
   //
-  //    Excluding by sequence instead looks equivalent but is not: a genuine
+  //    Excluding by sequence position instead is also wrong: a genuine
   //    `turn.completed` can be ingested after the stop event commits and before
   //    this read runs, and a sequence bound would ignore that settlement and
-  //    re-drive work the user already received. Matching on status settles both
-  //    orderings correctly. The test is written as "not 'stopped'" rather than an
-  //    allowlist of terminal statuses so that the failure direction stays safe: a
-  //    status added later is treated as settlement (at worst a prompt the user
-  //    must re-send by hand, which the re-drive failure path already reports)
-  //    rather than as a live turn, which would silently re-run finished work.
+  //    re-drive work the user already received. The settled-turn match is
+  //    position-independent, so it settles both orderings correctly. Matching
+  //    is by the ADOPTED turn id (the adoption names it: `$.turnId` on a fold,
+  //    `$.session.activeTurnId` on a turn.started session-set), which also
+  //    settles a steer folded into a running turn when that turn completes.
   //
   // Same index as the claim read (`idx_orch_events_stream_sequence`); the outer
   // range is bounded on both sides and every sub-select is scoped to the same
@@ -369,10 +380,13 @@ const makeEventStore = Effect.gen(function* () {
             WHERE settle_event.aggregate_kind = 'thread'
               AND settle_event.stream_id = turn_start.stream_id
               AND settle_event.event_type = 'thread.session-set'
-              AND json_extract(settle_event.payload_json, '$.session.activeTurnId') IS NULL
-              AND json_extract(settle_event.payload_json, '$.session.status') <> 'stopped'
-              AND settle_event.sequence > (
-                SELECT MIN(adopt_event.sequence)
+              AND settle_event.sequence > turn_start.sequence
+              AND json_extract(settle_event.payload_json, '$.settledTurnId') IS NOT NULL
+              AND json_extract(settle_event.payload_json, '$.settledTurnId') = (
+                SELECT COALESCE(
+                  json_extract(adopt_event.payload_json, '$.turnId'),
+                  json_extract(adopt_event.payload_json, '$.session.activeTurnId')
+                )
                 FROM orchestration_events AS adopt_event
                 WHERE adopt_event.aggregate_kind = 'thread'
                   AND adopt_event.stream_id = turn_start.stream_id
@@ -385,6 +399,8 @@ const makeEventStore = Effect.gen(function* () {
                     adopt_event.payload_json,
                     '$.turnRequestSequence'
                   ) = turn_start.sequence
+                ORDER BY adopt_event.sequence ASC
+                LIMIT 1
               )
           )
         ORDER BY turn_start.sequence ASC

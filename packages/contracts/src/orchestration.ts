@@ -824,6 +824,22 @@ const ThreadSessionSetCommand = Schema.Struct({
    * each other's message, model, source plan, and interrupt flag.
    */
   turnRequestSequence: Schema.optional(NonNegativeInt),
+  /**
+   * Set only when this session-set closes a specific turn — a provider
+   * `turn.completed`, or the stall watchdog failing the turn it timed out —
+   * and names that turn.
+   *
+   * This exists because "the session went quiet" is not evidence that any
+   * particular turn finished. Several writers produce a session-set with no
+   * active turn for reasons that settle nothing: a concurrent turn-start
+   * failure, a session rebind, the stop's own teardown. The escalated-stop
+   * re-drive must distinguish "this spared request's turn ran to its end"
+   * (do not re-send the prompt) from all of those (do re-send it), and the
+   * only way to do that without guessing from status strings is for the one
+   * writer that actually knows a turn ended to say which turn. Absent means
+   * "this write settles no turn", never "unknown".
+   */
+  settledTurnId: Schema.optional(TurnId),
 });
 
 /**
@@ -1110,6 +1126,8 @@ export const ThreadSessionSetPayload = Schema.Struct({
   session: OrchestrationSession,
   /** See `ThreadSessionSetCommand.turnRequestSequence`. */
   turnRequestSequence: Schema.optional(NonNegativeInt),
+  /** See `ThreadSessionSetCommand.settledTurnId`. */
+  settledTurnId: Schema.optional(TurnId),
 });
 
 /** See `ThreadTurnStartFoldCommand`. */

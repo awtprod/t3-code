@@ -687,6 +687,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.turnRequestSequence !== undefined
             ? { turnRequestSequence: command.turnRequestSequence }
             : {}),
+          ...(command.settledTurnId !== undefined ? { settledTurnId: command.settledTurnId } : {}),
         },
       };
     }

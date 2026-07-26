@@ -35,7 +35,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -56,6 +56,10 @@ import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
+import {
+  COMMAND_PRODUCED_NO_EVENTS_DETAIL,
+  OrchestrationCommandInvariantError,
+} from "../Errors.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -410,6 +414,7 @@ describe("ProviderRuntimeIngestion", () => {
           (evt): evt is Extract<OrchestrationEvent, { type: "thread.turn-start-requested" }> =>
             evt.type === "thread.turn-start-requested",
         ),
+      domainEvents: () => collectedDomainEvents,
     };
   }
 
@@ -453,6 +458,68 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
+
+    // The completion write is the ONLY lifecycle write that settles the turn,
+    // and it must name it: the escalated-stop re-drive correlates spared
+    // requests against this stamp. The turn.started write must not carry one.
+    const sessionSets = harness
+      .domainEvents()
+      .filter(
+        (evt): evt is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
+          evt.type === "thread.session-set",
+      );
+    const startedSet = sessionSets.find((evt) => evt.payload.session.activeTurnId === "turn-1");
+    expect(startedSet).toBeDefined();
+    expect(startedSet?.payload.settledTurnId).toBeUndefined();
+    const completedSet = sessionSets.find((evt) => evt.payload.settledTurnId !== undefined);
+    expect(completedSet).toBeDefined();
+    expect(completedSet?.payload.settledTurnId).toBe("turn-1");
+    expect(completedSet?.payload.session.activeTurnId).toBeNull();
+  });
+
+  it("does not stamp a settlement when the session exits under a running turn", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-exit-started"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      turnId: asTurnId("turn-exit"),
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session?.activeTurnId === "turn-exit",
+    );
+
+    // A session.exited clears the active turn, but the turn died with the
+    // session — it did NOT run to its end. Stamping a settlement here would
+    // exclude the prompt from the very re-drive that exists for this case.
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-turn-exit-exited"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: now,
+      payload: {
+        reason: "Codex App Server exited with code 1.",
+      },
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.status === "stopped" && thread.session?.activeTurnId === null,
+    );
+
+    const settledSets = harness
+      .domainEvents()
+      .filter(
+        (evt): evt is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
+          evt.type === "thread.session-set" && evt.payload.settledTurnId !== undefined,
+      );
+    expect(settledSets).toEqual([]);
   });
 
   it("settles a projected active turn when no matching provider turn remains", async () => {
@@ -3771,6 +3838,8 @@ describe("ProviderRuntimeIngestion", () => {
     thread.activities.filter((activity) => activity.kind === "provider.turn.auto-resumed");
   const exhaustedActivities = (thread: ProviderRuntimeTestThread) =>
     thread.activities.filter((activity) => activity.kind === "provider.turn.auto-resume-exhausted");
+  const resumeFailedActivities = (thread: ProviderRuntimeTestThread) =>
+    thread.activities.filter((activity) => activity.kind === "provider.turn.auto-resume-failed");
   const userMessages = (thread: ProviderRuntimeTestThread) =>
     thread.messages.filter((message) => message.role === "user");
 
@@ -3811,6 +3880,73 @@ describe("ProviderRuntimeIngestion", () => {
       .filter((evt) => evt.payload.messageId === "msg-1");
     // Two: the original turn start, plus the resume re-issuing the same message.
     expect(resumeRequests).toHaveLength(2);
+  });
+
+  // `OrchestrationCommandInvariantError` is raised for two very different
+  // things. One is benign — the resume decider produced no events because the
+  // message is gone — and must stay a quiet no-op. The other is a genuine
+  // failure that happens to share the tag: the engine wraps a failed event-id
+  // generation in it, and the decider raises it for a source plan that no
+  // longer resolves. Catching the tag wholesale drops the prompt on those with
+  // a debug log as its only trace, and the session has already stopped — which
+  // is the silent loss this auto-resume exists to prevent. The two tests below
+  // pin both directions apart, with the genuine failure carrying the shape the
+  // empty-decision invariant never has: a different `detail`, and a `cause`.
+  it("reports an auto-resume whose dispatch failed an invariant it did not merely no-op on", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+
+    const engineDispatch = harness.engine.dispatch.bind(harness.engine);
+    vi.spyOn(harness.engine, "dispatch").mockImplementation(
+      (command: Parameters<typeof harness.engine.dispatch>[0]) =>
+        command.type === "thread.turn.resume"
+          ? Effect.fail(
+              new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: "Failed to generate an event identifier.",
+                cause: new Error("crypto unavailable"),
+              }) as never,
+            )
+          : engineDispatch(command),
+    );
+
+    await crashSession(harness, "crash-invariant");
+
+    const thread = await readThread(harness);
+    const failures = resumeFailedActivities(thread);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.tone).toBe("error");
+    expect(failures[0]?.summary).toContain("Not auto-resumed");
+    // The resume never happened, so nothing may claim it did.
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+  });
+
+  it("stays quiet when the auto-resume dispatch merely produced no events", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+
+    const engineDispatch = harness.engine.dispatch.bind(harness.engine);
+    vi.spyOn(harness.engine, "dispatch").mockImplementation(
+      (command: Parameters<typeof harness.engine.dispatch>[0]) =>
+        command.type === "thread.turn.resume"
+          ? Effect.fail(
+              new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: COMMAND_PRODUCED_NO_EVENTS_DETAIL,
+              }) as never,
+            )
+          : engineDispatch(command),
+    );
+
+    await crashSession(harness, "crash-noop");
+
+    const thread = await readThread(harness);
+    // Nothing to resume is not a failure: no report, and no false claim that a
+    // turn was re-issued.
+    expect(resumeFailedActivities(thread)).toHaveLength(0);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
   });
 
   async function runToolItem(harness: AutoResumeHarness, turnId: string) {

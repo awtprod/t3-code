@@ -257,6 +257,10 @@ describe("StalledTurnWatchdog", () => {
       expect(sessionSet.session.status).toBe("error");
       expect(sessionSet.session.activeTurnId).toBe(null);
       expect(sessionSet.session.lastError).toContain("Stalled");
+      // The auto-fail IS this turn's settlement: without the stamp the
+      // escalated-stop re-drive would see an unsettled spared request and
+      // re-run a prompt the watchdog already failed.
+      expect(sessionSet.settledTurnId).toBe(turnId);
     }
 
     expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({ threadId, turnId });
@@ -317,6 +321,7 @@ describe("StalledTurnWatchdog", () => {
     if (sessionSet?.type === "thread.session.set") {
       expect(sessionSet.session.status).toBe("error");
       expect(sessionSet.session.activeTurnId).toBe(null);
+      expect(sessionSet.settledTurnId).toBe(turnId);
     }
   });
 
