@@ -107,6 +107,21 @@ export const ProviderTurnStartResult = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
   resumeCursor: Schema.optional(Schema.Unknown),
+  /**
+   * True when this send was folded into an already-running turn (a "steer")
+   * rather than opening a new one.
+   *
+   * A steer deliberately emits no `turn.started` — the work continues as the
+   * same turn — so nothing downstream ever consumes the
+   * `thread.turn-start-requested` placeholder this send answered. Left
+   * unreported, that stranded row reads as "requested but never started" and
+   * makes recovery re-issue a message the provider already received.
+   *
+   * Only the adapter knows whether a steer happened, so it is reported here and
+   * the reactor folds the placeholder explicitly. Absent/false means a real turn
+   * boundary, where `turn.started` consumes the placeholder as usual.
+   */
+  steered: Schema.optional(Schema.Boolean),
 });
 export type ProviderTurnStartResult = typeof ProviderTurnStartResult.Type;
 

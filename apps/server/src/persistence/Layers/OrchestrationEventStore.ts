@@ -191,7 +191,15 @@ const makeEventStore = Effect.gen(function* () {
   });
 
   // Reads, from one thread's stream above a given sequence: how many later
-  // turn-starts re-requested the same message, and how many interrupts landed.
+  // turn-starts re-requested the same message, and how many stops landed.
+  //
+  // A stop is either kind of stop. `thread.session-stop-requested` ends the
+  // whole session, which is strictly broader than interrupting one turn, so a
+  // guard that counted only turn interrupts let an undriven turn-start slip past
+  // a user who had shut the session down entirely — and `ProviderService.sendTurn`
+  // resolves with `allowRecovery: true`, so that send does not merely fail
+  // harmlessly, it revives the stopped session to deliver a prompt the user had
+  // already abandoned.
   //
   // All of it comes from the append-only event log rather than the single-slot
   // pending projection row, which a turn-start for a different message evicts.
@@ -211,7 +219,13 @@ const makeEventStore = Effect.gen(function* () {
             END
           ), 0) AS "sameMessageRestartCount",
           COALESCE(SUM(
-            CASE WHEN event_type = 'thread.turn-interrupt-requested' THEN 1 ELSE 0 END
+            CASE
+              WHEN event_type IN (
+                'thread.turn-interrupt-requested',
+                'thread.session-stop-requested'
+              )
+              THEN 1 ELSE 0
+            END
           ), 0) AS "interruptCount"
         FROM orchestration_events
         WHERE aggregate_kind = 'thread'

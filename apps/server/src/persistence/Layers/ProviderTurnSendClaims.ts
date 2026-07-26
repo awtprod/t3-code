@@ -10,6 +10,7 @@ import {
   AcquireProviderTurnSendClaimInput,
   CancelProviderTurnSendClaimsInput,
   ProviderTurnSendClaimRepository,
+  type ProviderTurnSendClaimOutcome,
   type ProviderTurnSendClaimRepositoryShape,
 } from "../Services/ProviderTurnSendClaims.ts";
 
@@ -89,6 +90,30 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
       `,
   });
 
+  // Is this request covered by a stop? Asked only when the request did NOT end
+  // up owning the claim, to say WHY.
+  //
+  // The distinction cannot be recovered from `readClaimOwner` alone, because it
+  // filters barrier-covered rows out of its own result: a caller that sees no
+  // owner cannot tell "the user stopped me" from "nothing is claimed". Those two
+  // demand opposite handling in the post-send fence — interrupt the running turn
+  // versus leave it strictly alone — so the ambiguity is resolved here with a
+  // second read rather than guessed at by the caller.
+  const readCancelBarrierCovers = SqlSchema.findOneOption({
+    Request: Schema.Struct({
+      threadId: AcquireProviderTurnSendClaimInput.fields.threadId,
+      requestSequence: AcquireProviderTurnSendClaimInput.fields.requestSequence,
+    }),
+    Result: Schema.Struct({ canceledThroughSequence: NonNegativeInt }),
+    execute: ({ threadId, requestSequence }) =>
+      sql`
+        SELECT canceled_through_sequence AS "canceledThroughSequence"
+        FROM provider_turn_send_barriers
+        WHERE thread_id = ${threadId}
+          AND canceled_through_sequence >= ${requestSequence}
+      `,
+  });
+
   // Monotonic raise. `MAX` in the DO UPDATE keeps an out-of-order interrupt from
   // lowering an existing barrier and thereby un-canceling work.
   const raiseCancelBarrier = SqlSchema.void({
@@ -114,12 +139,38 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
       Effect.flatMap(() =>
         readClaimOwner({ threadId: input.threadId, messageId: input.messageId }),
       ),
-      // The winner is whoever's sequence is on the row — including this request
-      // on a replay of its own successful acquire, which must still be allowed
-      // to send rather than be misread as superseded by itself.
-      Effect.map((owner) =>
-        owner._tag === "Some" ? owner.value.requestSequence === input.requestSequence : false,
-      ),
+      Effect.flatMap((owner) => {
+        // The winner is whoever's sequence is on the row — including this
+        // request on a replay of its own successful acquire, which must still
+        // be allowed to send rather than be misread as superseded by itself.
+        if (owner._tag === "Some" && owner.value.requestSequence === input.requestSequence) {
+          return Effect.succeed<ProviderTurnSendClaimOutcome>({ _tag: "acquired" });
+        }
+        // Some OTHER sequence holds an uncanceled row. That alone settles it —
+        // a barrier covering this request would also have to cover the holder
+        // for the stop to apply to the work now in progress, and it does not,
+        // since the holder survived the same filter. So this is supersession,
+        // not cancellation, whatever the barrier says about us specifically.
+        if (owner._tag === "Some") {
+          return Effect.succeed<ProviderTurnSendClaimOutcome>({
+            _tag: "superseded",
+            heldBySequence: owner.value.requestSequence,
+          });
+        }
+        // No uncanceled owner. Either a stop covers this request, or — the
+        // unreachable case — nothing is claimed at all. Ask the barrier rather
+        // than assume, because assuming "canceled" here would let a fence
+        // interrupt a turn nobody stopped.
+        return readCancelBarrierCovers({
+          threadId: input.threadId,
+          requestSequence: input.requestSequence,
+        }).pipe(
+          Effect.map(
+            (barrier): ProviderTurnSendClaimOutcome =>
+              barrier._tag === "Some" ? { _tag: "canceled" } : { _tag: "superseded" },
+          ),
+        );
+      }),
       Effect.mapError(toPersistenceSqlError("ProviderTurnSendClaimRepository.acquire:query")),
     );
 

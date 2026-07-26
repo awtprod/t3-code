@@ -3748,6 +3748,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.session.resumeCursor !== undefined
         ? { resumeCursor: context.session.resumeCursor }
         : {}),
+      // A steer emitted no `turn.started` above, so nothing downstream will
+      // consume this send's pending turn-start placeholder. Report the fold so
+      // the reactor consumes it explicitly instead of leaving a delivered
+      // message looking like one that was never sent.
+      ...(steeringTurnState === null ? {} : { steered: true }),
     };
   });
 

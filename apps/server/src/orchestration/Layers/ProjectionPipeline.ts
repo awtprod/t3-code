@@ -1206,6 +1206,24 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        case "thread.turn-start-folded": {
+          // A steer: the message reached the provider and was folded into the
+          // running turn, which emits no `turn.started` and so never consumes
+          // this placeholder. Consuming it here is what keeps a delivered
+          // message from reading as "requested but never started" — the premise
+          // auto-resume, the side-effect gate, and orphan reconciliation all
+          // draw their conclusions from.
+          //
+          // The row is deleted rather than turned into a turn of its own: the
+          // steered message has no turn boundary and no distinct turn id, so a
+          // second row for the same running turn would double-count the work.
+          yield* projectionTurnRepository.deletePendingTurnStart({
+            threadId: event.payload.threadId,
+            requestSequence: event.payload.turnRequestSequence,
+          });
+          return;
+        }
+
         case "thread.message-sent": {
           if (event.payload.turnId === null || event.payload.role !== "assistant") {
             return;

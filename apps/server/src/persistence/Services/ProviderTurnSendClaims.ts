@@ -51,16 +51,43 @@ export const CancelProviderTurnSendClaimsInput = Schema.Struct({
 export type CancelProviderTurnSendClaimsInput = typeof CancelProviderTurnSendClaimsInput.Type;
 
 /**
+ * Why a request may not send, or that it may.
+ *
+ * The two refusals are deliberately NOT collapsed into one `false`. They call
+ * for opposite handling in the post-send fence: `canceled` means the user
+ * stopped work that is now running and it must be interrupted, while
+ * `superseded` means a newer request for the same message legitimately took
+ * over — and interrupting on that would kill the turn that replaced us, which
+ * is a worse outcome than the one the fence exists to prevent.
+ */
+export type ProviderTurnSendClaimOutcome =
+  /** This request holds the claim and is the one that may drive the provider. */
+  | { readonly _tag: "acquired" }
+  /** A stop at or above this request's sequence covers it. */
+  | { readonly _tag: "canceled" }
+  /**
+   * Someone other than this request owns the claim.
+   *
+   * `heldBySequence` is absent in the one case where no row names an owner at
+   * all. That should be unreachable — an uncanceled insert either installs this
+   * request or loses to a higher one — but it is bucketed here rather than with
+   * `canceled` on purpose: this tag's handling is "do nothing", so an
+   * unexplained state costs a missed send that the caller logs, never a
+   * spurious interrupt of a turn that is running correctly.
+   */
+  | { readonly _tag: "superseded"; readonly heldBySequence?: number };
+
+/**
  * ProviderTurnSendClaimRepositoryShape - Service API for durable send claims.
  */
 export interface ProviderTurnSendClaimRepositoryShape {
   /**
    * Attempt to claim the right to send this message to the provider.
    *
-   * Returns `true` only for the request holding the claim. Both the
+   * Returns `acquired` only for the request holding the claim. Both the
    * "superseded by a newer request for this message" and the "canceled by a
-   * stop at or above this request" tests are evaluated inside the write, so
-   * there is no window between deciding and claiming.
+   * stop at or above this request" tests are evaluated against the same write,
+   * so there is no window between deciding and claiming.
    *
    * LAST-wins by `requestSequence`, matching the event-log supersession guard
    * this backs: a session-exit auto-resume re-issues the same message at a
@@ -69,11 +96,12 @@ export interface ProviderTurnSendClaimRepositoryShape {
    * is refused.
    *
    * Idempotent for the SAME request: a replay re-reads its own winning row and
-   * still gets `true`, so a retried send is not mistaken for a superseded one.
+   * is still told `acquired`, so a retried send is not mistaken for a
+   * superseded one.
    */
   readonly acquire: (
     input: AcquireProviderTurnSendClaimInput,
-  ) => Effect.Effect<boolean, ProjectionRepositoryError>;
+  ) => Effect.Effect<ProviderTurnSendClaimOutcome, ProjectionRepositoryError>;
 
   /**
    * Raise this thread's cancel barrier to `canceledThroughSequence`.

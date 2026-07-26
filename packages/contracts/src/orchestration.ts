@@ -767,6 +767,35 @@ const ThreadSessionSetCommand = Schema.Struct({
   turnRequestSequence: Schema.optional(NonNegativeInt),
 });
 
+/**
+ * Records that a `thread.turn-start-requested` reached the provider but was
+ * folded into an already-running turn (a "steer") instead of opening a new one.
+ *
+ * Non-Codex adapters deliberately emit no `turn.started` for a steer — the work
+ * continues as the same turn — and `turn.started` is the only thing that
+ * consumes a pending turn-start placeholder. Without this command the steer's
+ * placeholder survives indefinitely, and every consumer that reads "a surviving
+ * pending row means this message was never sent" draws the opposite of the
+ * truth: auto-resume re-issues a prompt the provider already has, the
+ * committed-side-effect gate is bypassed on that false premise, and
+ * reconciliation reports the turn as never started.
+ *
+ * It is a distinct command rather than a synthetic `turn.started` because a
+ * steer is NOT a turn boundary. A fake start would capture a pre-turn git
+ * baseline, re-transition the command-center run to `running`, and settle turns
+ * that are still legitimately running.
+ */
+const ThreadTurnStartFoldCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn-start.fold"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  /** Sequence of the `thread.turn-start-requested` this send answered. */
+  turnRequestSequence: NonNegativeInt,
+  /** The already-running turn the steered message was folded into. */
+  turnId: TurnId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadMessageAssistantDeltaCommand = Schema.Struct({
   type: Schema.Literal("thread.message.assistant.delta"),
   commandId: CommandId,
@@ -827,6 +856,7 @@ const ThreadRevertCompleteCommand = Schema.Struct({
 const InternalOrchestrationCommand = Schema.Union([
   ThreadTurnResumeCommand,
   ThreadSessionSetCommand,
+  ThreadTurnStartFoldCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadProposedPlanUpsertCommand,
@@ -862,6 +892,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.reverted",
   "thread.session-stop-requested",
   "thread.session-set",
+  "thread.turn-start-folded",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
@@ -1020,6 +1051,14 @@ export const ThreadSessionSetPayload = Schema.Struct({
   turnRequestSequence: Schema.optional(NonNegativeInt),
 });
 
+/** See `ThreadTurnStartFoldCommand`. */
+export const ThreadTurnStartFoldedPayload = Schema.Struct({
+  threadId: ThreadId,
+  turnRequestSequence: NonNegativeInt,
+  turnId: TurnId,
+  createdAt: IsoDateTime,
+});
+
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({
   threadId: ThreadId,
   proposedPlan: OrchestrationProposedPlan,
@@ -1157,6 +1196,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.session-set"),
     payload: ThreadSessionSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.turn-start-folded"),
+    payload: ThreadTurnStartFoldedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

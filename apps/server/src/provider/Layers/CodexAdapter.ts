@@ -124,9 +124,18 @@ export interface CodexAdapterLiveOptions {
  *   because Codex's `sendTurn` returns as soon as the RPC responds; the ACP
  *   adapters await the whole turn inside `sendTurn`, where a lock would
  *   deadlock steering.
+ *
+ * `resolvedTurnIds` is what makes the `inFlight` fallback safe to reach. That
+ * fallback assumes "no id-keyed entry" means "the response has not landed yet",
+ * but a turn whose entry was consumed by an earlier notification, or evicted
+ * once `byTurnId` hit its bound, also has no entry — and would then claim the
+ * parked slot of an unrelated send that is genuinely mid-RPC, stamping that
+ * send's placeholder onto the wrong turn. Remembering which ids are already
+ * accounted for keeps the fallback to the one case it was written for.
  */
 interface CodexTurnRequestCorrelation {
   readonly byTurnId: Map<TurnId, number>;
+  readonly resolvedTurnIds: Set<TurnId>;
   inFlight: number | undefined;
 }
 
@@ -148,8 +157,23 @@ interface CodexAdapterSessionContext {
  * behind. The bound keeps that leak from growing without limit over a long
  * session; evicting the oldest is correct because correlations are consumed
  * within milliseconds of being recorded, so anything this old is already dead.
+ *
+ * An evicted id is still recorded in `resolvedTurnIds`, so a late notification
+ * for it reads as "already accounted for" rather than falling through to the
+ * parked slot of whatever send happens to be in flight.
  */
 const CODEX_TURN_REQUEST_CORRELATION_LIMIT = 64;
+
+/**
+ * Upper bound on remembered resolved turn ids.
+ *
+ * These are only needed to distinguish "consumed/evicted" from "response has
+ * not landed yet" for a notification that arrives shortly after its turn was
+ * recorded, so a bound well above the in-flight correlation limit is ample.
+ * Forgetting the oldest can at worst restore the pre-existing behaviour for a
+ * notification that is thousands of turns stale.
+ */
+const CODEX_RESOLVED_TURN_ID_LIMIT = 512;
 
 function mapCodexRuntimeError(
   threadId: ThreadId,
@@ -588,6 +612,7 @@ function recordCodexTurnRequestSequence(
   }
   correlation.inFlight = undefined;
   correlation.byTurnId.set(turnId, requestSequence);
+  rememberResolvedCodexTurnId(correlation, turnId);
   while (correlation.byTurnId.size > CODEX_TURN_REQUEST_CORRELATION_LIMIT) {
     // Map iteration is insertion-ordered, so the first key is the oldest.
     const oldest = correlation.byTurnId.keys().next();
@@ -595,6 +620,25 @@ function recordCodexTurnRequestSequence(
       break;
     }
     correlation.byTurnId.delete(oldest.value);
+  }
+}
+
+/**
+ * Marks a turn id as one the correlation has already answered for, so a later
+ * notification naming it never falls through to the in-flight slot.
+ */
+function rememberResolvedCodexTurnId(
+  correlation: CodexTurnRequestCorrelation,
+  turnId: TurnId,
+): void {
+  correlation.resolvedTurnIds.add(turnId);
+  while (correlation.resolvedTurnIds.size > CODEX_RESOLVED_TURN_ID_LIMIT) {
+    // Set iteration is insertion-ordered, so the first entry is the oldest.
+    const oldest = correlation.resolvedTurnIds.values().next();
+    if (oldest.done === true) {
+      break;
+    }
+    correlation.resolvedTurnIds.delete(oldest.value);
   }
 }
 
@@ -608,10 +652,19 @@ function takeCodexTurnRequestSequence(
     correlation.byTurnId.delete(turnId);
     return recorded;
   }
+  if (correlation.resolvedTurnIds.has(turnId)) {
+    // This turn's correlation was already consumed by an earlier notification,
+    // or evicted once the id-keyed map hit its bound. Either way it is spoken
+    // for, and the parked slot below belongs to a different send.
+    return undefined;
+  }
   // The notification beat the `turn/start` response. `sendLock` guarantees at
   // most one send is mid-RPC, so the parked value belongs to this turn.
   const inFlight = correlation.inFlight;
   correlation.inFlight = undefined;
+  if (inFlight !== undefined) {
+    rememberResolvedCodexTurnId(correlation, turnId);
+  }
   return inFlight;
 }
 
@@ -1707,6 +1760,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         };
         const turnRequestCorrelation: CodexTurnRequestCorrelation = {
           byTurnId: new Map<TurnId, number>(),
+          resolvedTurnIds: new Set<TurnId>(),
           inFlight: undefined,
         };
         const sendLock = yield* Semaphore.make(1);

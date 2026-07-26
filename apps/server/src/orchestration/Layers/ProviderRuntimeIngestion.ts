@@ -1226,12 +1226,39 @@ const make = Effect.gen(function* () {
       ).pipe(Effect.asVoid);
     });
 
+  // Resolves the source plan from the placeholder this `turn.started` actually
+  // answers, selected the same way `ProjectionPipeline` selects the row it
+  // adopts — by `turnRequestSequence`, the request's own event sequence carried
+  // through the send input and echoed back on the event.
+  //
+  // The two selections must agree, because they act on the same decision from
+  // opposite ends: the pipeline copies the placeholder's plan reference onto the
+  // turn row, and this marks that plan implemented. Picking positionally here
+  // while the pipeline correlates means a thread with two queued messages whose
+  // `turn.started` events arrive out of order marks the WRONG plan implemented —
+  // a plan the user never ran disappears from their queue, and the one that did
+  // run still looks outstanding.
+  //
+  // A correlated event whose placeholder is gone resolves to null rather than
+  // falling back to the oldest row, for the same reason the pipeline refuses the
+  // fallback: adopting an unrelated row is the misattribution being fixed, not a
+  // degraded-but-safe default. Absent `turnRequestSequence` — a synthetic or
+  // adapter-internal turn answering no request — oldest-first remains the only
+  // ordering available and stays the behaviour.
   const getSourceProposedPlanReferenceForPendingTurnStart = Effect.fn(
     "getSourceProposedPlanReferenceForPendingTurnStart",
-  )(function* (threadId: ThreadId) {
-    const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-      threadId,
-    });
+  )(function* (threadId: ThreadId, requestSequence: number | undefined) {
+    const pendingTurnStart = yield* (requestSequence === undefined
+      ? projectionTurnRepository.getPendingTurnStartByThreadId({ threadId })
+      : projectionTurnRepository
+          .listPendingTurnStartsByThreadId({ threadId })
+          .pipe(
+            Effect.map((rows) =>
+              Option.fromUndefinedOr(
+                rows.find((row) => row.requestSequence === requestSequence),
+              ),
+            ),
+          ));
     if (Option.isNone(pendingTurnStart)) {
       return null;
     }
@@ -1258,7 +1285,11 @@ const make = Effect.gen(function* () {
 
   const getSourceProposedPlanReferenceForAcceptedTurnStart = Effect.fn(
     "getSourceProposedPlanReferenceForAcceptedTurnStart",
-  )(function* (threadId: ThreadId, eventTurnId: TurnId | undefined) {
+  )(function* (
+    threadId: ThreadId,
+    eventTurnId: TurnId | undefined,
+    requestSequence: number | undefined,
+  ) {
     if (eventTurnId === undefined) {
       return null;
     }
@@ -1268,7 +1299,7 @@ const make = Effect.gen(function* () {
       return null;
     }
 
-    return yield* getSourceProposedPlanReferenceForPendingTurnStart(threadId);
+    return yield* getSourceProposedPlanReferenceForPendingTurnStart(threadId, requestSequence);
   });
 
   const markSourceProposedPlanImplemented = Effect.fn("markSourceProposedPlanImplemented")(
@@ -1439,7 +1470,11 @@ const make = Effect.gen(function* () {
       })();
       const acceptedTurnStartedSourcePlan =
         event.type === "turn.started" && shouldApplyThreadLifecycle
-          ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
+          ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(
+              thread.id,
+              eventTurnId,
+              event.payload?.turnRequestSequence,
+            )
           : null;
 
       if (

@@ -457,6 +457,14 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         },
       });
       NodeAssert.equal(String(steeredTurn.turnId), String(turn.turnId));
+      // The fold is reported back, and only for the send that was folded. The
+      // turn id alone cannot distinguish the two cases from the reactor's side —
+      // a fresh turn also returns a valid id — so without this flag the steer's
+      // pending turn-start placeholder is never consumed by anything (a steer
+      // emits no `turn.started`) and later reads as a message that was requested
+      // but never sent.
+      NodeAssert.equal(turn.steered ?? false, false);
+      NodeAssert.equal(steeredTurn.steered, true);
 
       const sessions = yield* adapter.listSessions();
       const session = sessions.find((entry) => entry.threadId === threadId);

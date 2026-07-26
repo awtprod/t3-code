@@ -310,6 +310,14 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       });
       const firstTurn = yield* Fiber.join(firstTurnFiber);
       assert.equal(String(steeredTurn.turnId), String(firstTurn.turnId));
+      // The fold is reported back, and only for the send that was folded. The
+      // turn id alone cannot distinguish the two cases from the reactor's side —
+      // a fresh turn also returns a valid id — so without this flag the steer's
+      // pending turn-start placeholder is never consumed by anything (the steer
+      // emits no `turn.started`, as asserted below) and later reads as a message
+      // that was requested but never sent.
+      assert.equal(firstTurn.steered ?? false, false);
+      assert.equal(steeredTurn.steered, true);
 
       const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
       const turnStartedEvents = runtimeEvents.filter((event) => event.type === "turn.started");

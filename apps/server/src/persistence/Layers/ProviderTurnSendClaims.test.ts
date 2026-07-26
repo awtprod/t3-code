@@ -3,7 +3,10 @@ import { MessageId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-import { ProviderTurnSendClaimRepository } from "../Services/ProviderTurnSendClaims.ts";
+import {
+  ProviderTurnSendClaimRepository,
+  type ProviderTurnSendClaimOutcome,
+} from "../Services/ProviderTurnSendClaims.ts";
 import { ProviderTurnSendClaimRepositoryLive } from "./ProviderTurnSendClaims.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 
@@ -15,6 +18,13 @@ const layer = it.layer(
 
 const at = (seconds: number) =>
   `2026-01-01T00:00:${String(seconds).padStart(2, "0")}.000Z` as const;
+
+// Assertions read the tag, not a boolean, because the two refusals are not
+// interchangeable to the caller: `canceled` makes the post-send fence interrupt
+// a running turn and `superseded` makes it stand down. A test that only checked
+// "did not acquire" would pass with those two swapped, which is precisely the
+// defect the tagged outcome exists to prevent.
+const tagOf = (outcome: ProviderTurnSendClaimOutcome) => outcome._tag;
 
 layer("ProviderTurnSendClaimRepository", (it) => {
   it.effect("refuses a stale request once a newer one holds the message's claim", () =>
@@ -39,8 +49,10 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         claimedAt: at(1),
       });
 
-      assert.strictEqual(newer, true);
-      assert.strictEqual(stale, false);
+      assert.strictEqual(tagOf(newer), "acquired");
+      // Superseded, NOT canceled — nobody stopped anything here, and the fence
+      // must be able to tell the difference.
+      assert.deepStrictEqual(stale, { _tag: "superseded", heldBySequence: 11 });
     }),
   );
 
@@ -85,9 +97,9 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         claimedAt: at(2),
       });
 
-      assert.strictEqual(original, true);
-      assert.strictEqual(resume, true);
-      assert.strictEqual(originalRetry, false);
+      assert.strictEqual(tagOf(original), "acquired");
+      assert.strictEqual(tagOf(resume), "acquired");
+      assert.deepStrictEqual(originalRetry, { _tag: "superseded", heldBySequence: 21 });
     }),
   );
 
@@ -120,22 +132,32 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         claimedAt: at(1),
       });
 
-      assert.strictEqual(first, true);
-      assert.strictEqual(replay, true);
+      assert.strictEqual(tagOf(first), "acquired");
+      assert.strictEqual(tagOf(replay), "acquired");
     }),
   );
 
-  it.effect("converges on one owner when many requests race for the same message", () =>
+  it.effect("settles on the highest sequence whatever order the writes interleave in", () =>
     Effect.gen(function* () {
       const claims = yield* ProviderTurnSendClaimRepository;
       const threadId = ThreadId.make("thread-race");
       const messageId = MessageId.make("message-race");
 
-      // Every other case here calls `acquire` sequentially, so they establish
-      // the resolution RULE while leaving the actual contention untested: the
-      // production callers are independent fibers, and a rule that only holds
-      // when the writes happen to be ordered is not a claim. Eight fibers race
-      // for one message so the interleaving is the driver's to pick.
+      // Every other case here calls `acquire` in an order this file chose, so
+      // they establish the resolution RULE against a schedule the test author
+      // picked. Here the schedule is the driver's: eight fibers are submitted at
+      // once and land in whatever order it interleaves them.
+      //
+      // This is deliberately NOT billed as a concurrent-writer test, because no
+      // in-process test can be one. `node:sqlite` exposes a SYNCHRONOUS
+      // `DatabaseSync`, so a statement occupies the thread for its whole
+      // duration; two of them cannot overlap in one process no matter how many
+      // clients or fibers are involved. `NodeSqliteClient` additionally funnels
+      // every caller through a one-permit semaphore (NodeSqliteClient.ts:256).
+      // Real overlap needs separate processes, which is an integration test, not
+      // this one. What IS covered here is the property that survives that
+      // limitation and that the sequential cases cannot see: the outcome does
+      // not depend on arrival order.
       const sequences = [100, 101, 102, 103, 104, 105, 106, 107];
       yield* Effect.all(
         sequences.map((requestSequence) =>
@@ -144,21 +166,28 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         { concurrency: "unbounded" },
       );
 
-      // The outcome is asserted after the race rather than from its return
-      // values, because who wins DURING the race is genuinely nondeterministic —
-      // a fiber granted the claim can be superseded a microsecond later, so its
-      // `true` was honest when returned and stale by the time it is read. What
-      // must be deterministic is where the contention settles: last-wins by
-      // sequence, so the highest is the only one that may still send, and every
-      // loser that retries is told so. A repository that dropped writes or
-      // resolved by arrival order would leave a different sequence holding.
-      const winnerRetry = yield* claims.acquire({
-        threadId,
-        messageId,
-        requestSequence: 107,
-        claimedAt: at(1),
-      });
-      const loserRetries = yield* Effect.all(
+      // Asserted from a probe rather than from the acquire return values,
+      // because who holds the claim DURING the interleaving is nondeterministic
+      // by design — a fiber granted it can be superseded immediately after, so
+      // its `true` was honest when returned and stale by the time it is read.
+      //
+      // The probe is every LOSING sequence, and it is chosen so that it cannot
+      // manufacture the answer it checks for. `acquire` only rewrites the row
+      // when the incoming sequence is strictly greater, so a request below the
+      // settled owner is a pure read. That makes the all-`superseded` result
+      // load-bearing in both directions: were the owner some X < 107, probing X
+      // (a replay of the winner) or X + 1 (a supersession) would come back
+      // `acquired` and this assertion would fail. All seven being superseded
+      // therefore pins the owner at 107 exactly.
+      //
+      // `superseded` rather than merely "not acquired" is also load-bearing: no
+      // barrier was ever raised on this thread, so a `canceled` here would mean
+      // the repository invents stops, which would make the fence interrupt
+      // healthy turns.
+      //
+      // Deleting the interleaved block above makes this fail rather than pass:
+      // with no row at all, `acquire(100)` inserts and comes back `acquired`.
+      const loserProbes = yield* Effect.all(
         sequences
           .filter((requestSequence) => requestSequence !== 107)
           .map((requestSequence) =>
@@ -166,8 +195,15 @@ layer("ProviderTurnSendClaimRepository", (it) => {
           ),
       );
 
-      assert.strictEqual(winnerRetry, true);
-      assert.deepStrictEqual(loserRetries, [false, false, false, false, false, false, false]);
+      assert.deepStrictEqual(loserProbes.map(tagOf), [
+        "superseded",
+        "superseded",
+        "superseded",
+        "superseded",
+        "superseded",
+        "superseded",
+        "superseded",
+      ]);
     }),
   );
 
@@ -186,7 +222,7 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         requestSequence: 30,
         claimedAt: at(1),
       });
-      assert.strictEqual(blocked, false);
+      assert.strictEqual(tagOf(blocked), "canceled");
     }),
   );
 
@@ -220,8 +256,8 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         claimedAt: at(2),
       });
 
-      assert.strictEqual(granted, true);
-      assert.strictEqual(afterStop, false);
+      assert.strictEqual(tagOf(granted), "acquired");
+      assert.strictEqual(tagOf(afterStop), "canceled");
     }),
   );
 
@@ -240,7 +276,7 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         requestSequence: 41,
         claimedAt: at(1),
       });
-      assert.strictEqual(allowed, true);
+      assert.strictEqual(tagOf(allowed), "acquired");
     }),
   );
 
@@ -260,7 +296,7 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         requestSequence: 55,
         claimedAt: at(2),
       });
-      assert.strictEqual(stillBlocked, false);
+      assert.strictEqual(tagOf(stillBlocked), "canceled");
     }),
   );
 
@@ -292,8 +328,8 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         claimedAt: at(2),
       });
 
-      assert.strictEqual(blocked, false);
-      assert.strictEqual(unaffected, true);
+      assert.strictEqual(tagOf(blocked), "canceled");
+      assert.strictEqual(tagOf(unaffected), "acquired");
     }),
   );
 });

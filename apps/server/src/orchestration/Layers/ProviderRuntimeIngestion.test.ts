@@ -1242,6 +1242,233 @@ describe("ProviderRuntimeIngestion", () => {
     });
   });
 
+  it("marks the plan belonging to the turn that started, not the oldest queued one", async () => {
+    const harness = await createHarness();
+    const sourceThreadId = asThreadId("thread-plan");
+    const targetThreadId = asThreadId("thread-implement");
+    const sourceTurnId = asTurnId("turn-plan-source");
+    const planTurnId = asTurnId("turn-plan-implement");
+    const plainTurnId = asTurnId("turn-plain");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    // Two turn-starts are queued on the same thread and their `turn.started`
+    // events arrive in the OPPOSITE order: the plan-implementation request is
+    // older, but the unrelated message's turn is reported first. Sends run in
+    // independent fibers and every adapter has a yield point between "is a turn
+    // active?" and recording the new turn, so this ordering is ordinary, not
+    // exotic.
+    //
+    // Selecting the placeholder positionally — oldest wins — then marks the
+    // user's plan implemented on the strength of a turn that has nothing to do
+    // with it. The plan disappears from their queue having never been run, and
+    // when its own turn does start there is no longer anything to mark. The
+    // projector already correlates by `turnRequestSequence`; this asserts the
+    // plan bookkeeping uses the same correlation, because the two act on the
+    // same decision from opposite ends.
+    for (const [threadId, title, interactionMode, commandSuffix] of [
+      [sourceThreadId, "Plan Source", "plan", "plan-source"],
+      [targetThreadId, "Plan Target", DEFAULT_PROVIDER_INTERACTION_MODE, "plan-target"],
+    ] as const) {
+      await harness.run(
+        harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`cmd-thread-create-correlated-${commandSuffix}`),
+          threadId,
+          projectId: asProjectId("project-1"),
+          title,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      await harness.run(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-set-correlated-${commandSuffix}`),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            updatedAt: createdAt,
+            lastError: null,
+          },
+          createdAt,
+        }),
+      );
+    }
+
+    harness.emit({
+      type: "turn.proposed.completed",
+      eventId: asEventId("evt-correlated-plan-source-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId: sourceThreadId,
+      turnId: sourceTurnId,
+      payload: {
+        planMarkdown: "# Source plan",
+      },
+    });
+    const sourceThreadWithPlan = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.proposedPlans.some(
+          (proposedPlan: ProviderRuntimeTestProposedPlan) =>
+            proposedPlan.id === "plan:thread-plan:turn:turn-plan-source" &&
+            proposedPlan.implementedAt === null,
+        ),
+      2_000,
+      sourceThreadId,
+    );
+    const sourcePlan = sourceThreadWithPlan.proposedPlans.find(
+      (entry: ProviderRuntimeTestProposedPlan) =>
+        entry.id === "plan:thread-plan:turn:turn-plan-source",
+    );
+    if (!sourcePlan) {
+      throw new Error("Expected source plan to exist.");
+    }
+
+    // OLDER request: carries the plan. Its placeholder is the one a positional
+    // read would return for either turn.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-correlated-plan"),
+        threadId: targetThreadId,
+        message: {
+          messageId: asMessageId("msg-correlated-plan"),
+          role: "user",
+          text: "PLEASE IMPLEMENT THIS PLAN:\n# Source plan",
+          attachments: [],
+        },
+        sourceProposedPlan: {
+          threadId: sourceThreadId,
+          planId: sourcePlan.id,
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      }),
+    );
+    // NEWER request: an ordinary message with no plan attached.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-correlated-plain"),
+        threadId: targetThreadId,
+        message: {
+          messageId: asMessageId("msg-correlated-plain"),
+          role: "user",
+          text: "unrelated follow-up",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    // Read the durable sequences the correlation must match from the log the
+    // projector itself reads, rather than guessing them.
+    const requests = harness.turnStartRequests();
+    const planRequestSequence = requests.find(
+      (evt) => evt.payload.messageId === "msg-correlated-plan",
+    )?.sequence;
+    const plainRequestSequence = requests.find(
+      (evt) => evt.payload.messageId === "msg-correlated-plain",
+    )?.sequence;
+    expect(planRequestSequence).toBeDefined();
+    expect(plainRequestSequence).toBeDefined();
+    expect(plainRequestSequence!).toBeGreaterThan(planRequestSequence!);
+
+    // The NEWER request's turn is reported first.
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "ready",
+      runtimeMode: "approval-required",
+      threadId: targetThreadId,
+      createdAt,
+      updatedAt: createdAt,
+      activeTurnId: plainTurnId,
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-correlated-plain-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: targetThreadId,
+      turnId: plainTurnId,
+      payload: { turnRequestSequence: plainRequestSequence! },
+    });
+
+    // Settling the session on this turn is the sentinel: ingestion decides
+    // whether to mark the plan BEFORE it dispatches this session-set, so once
+    // the new active turn is visible the decision has already been made. Without
+    // it, "not marked" and "not processed yet" are indistinguishable.
+    await waitForThread(
+      harness.readModel,
+      (thread) => thread.session?.activeTurnId === plainTurnId,
+      2_000,
+      targetThreadId,
+    );
+
+    const sourceAfterPlain = await harness.readModel().then((snapshot) =>
+      snapshot.threads.find((entry) => entry.id === sourceThreadId),
+    );
+    expect(
+      sourceAfterPlain?.proposedPlans.find((entry) => entry.id === sourcePlan.id),
+    ).toMatchObject({
+      implementedAt: null,
+      implementationThreadId: null,
+    });
+
+    // Control in the other direction: when the plan's OWN turn starts, it is
+    // marked. Without this the assertion above would also be satisfied by plan
+    // marking having stopped working altogether.
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "ready",
+      runtimeMode: "approval-required",
+      threadId: targetThreadId,
+      createdAt,
+      updatedAt: createdAt,
+      activeTurnId: planTurnId,
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-correlated-plan-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId: targetThreadId,
+      turnId: planTurnId,
+      payload: { turnRequestSequence: planRequestSequence! },
+    });
+
+    const sourceAfterPlan = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.proposedPlans.some(
+          (proposedPlan: ProviderRuntimeTestProposedPlan) =>
+            proposedPlan.id === sourcePlan.id && proposedPlan.implementedAt !== null,
+        ),
+      2_000,
+      sourceThreadId,
+    );
+    expect(
+      sourceAfterPlan.proposedPlans.find((entry) => entry.id === sourcePlan.id),
+    ).toMatchObject({
+      implementationThreadId: targetThreadId,
+    });
+  });
+
   it("does not mark the source proposed plan implemented for a rejected turn.started event", async () => {
     const harness = await createHarness();
     const sourceThreadId = asThreadId("thread-plan");
@@ -4888,6 +5115,139 @@ describe("ProviderRuntimeIngestion", () => {
     expect(orphanDetail).toContain("not known whether the provider");
     expect(orphanDetail).not.toContain("never sent");
     expect(orphanDetail).not.toContain("Nothing from it reached the provider");
+  });
+
+  // A steer — a send folded into an already-running turn — emits no
+  // `turn.started`, so nothing on the normal path ever consumes the placeholder
+  // that send's `thread.turn-start-requested` wrote. The adapter reports the
+  // fold and the reactor turns it into `thread.turn-start.fold`; these cover the
+  // projection that consumes the row and the consumer that would otherwise
+  // misread it.
+
+  async function foldPendingTurnStart(
+    harness: AutoResumeHarness,
+    input: { tag: string; requestSequence: number; turnId: string },
+  ) {
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn-start.fold",
+        commandId: CommandId.make(`cmd-turn-start-fold-${input.tag}`),
+        threadId: asThreadId("thread-1"),
+        turnRequestSequence: input.requestSequence,
+        turnId: asTurnId(input.turnId),
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+  }
+
+  it("clears the pending turn start when a steered send is folded into a running turn", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a"); // consumes msg-1's placeholder
+
+    // The steer. Its own turn-start-requested writes a second placeholder, and
+    // no `turn.started` will ever arrive for it — the provider folded the
+    // message into turn-a.
+    await seedUserMessage(harness, "msg-2");
+    const pending = await harness.readPendingTurnStart();
+    expect(pending).not.toBeNull();
+    expect(pending?.messageId).toBe("msg-2");
+
+    // Read the durable sequence rather than assert a literal: the fold deletes
+    // by exactly this key, so a fold carrying anything else consumes nothing.
+    await foldPendingTurnStart(harness, {
+      tag: "steer",
+      requestSequence: pending!.requestSequence,
+      turnId: "turn-a",
+    });
+
+    expect(await harness.readPendingTurnStart()).toBeNull();
+    // Consumed, not converted. A steer has no turn boundary and no turn id of
+    // its own, so a second turn row for turn-a would double-count the work — the
+    // session must still report exactly the one turn the provider is running.
+    const shell = await harness.readShell();
+    expect(shell?.session?.activeTurnId).toBe("turn-a");
+    expect(shell?.latestTurn?.turnId).toBe("turn-a");
+    expect(shell?.latestTurn?.state).toBe("running");
+  });
+
+  it("leaves a pending turn start alone when a fold targets a different request", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    const pending = await harness.readPendingTurnStart();
+    expect(pending).not.toBeNull();
+
+    // The keyed-deletion control. Several sends can be queued on one thread,
+    // each with its own placeholder; a fold that deleted by thread — or by
+    // position — would consume a message the provider has not answered and make
+    // it vanish. Only the placeholder the fold names may be cleared.
+    await foldPendingTurnStart(harness, {
+      tag: "mismatched",
+      requestSequence: pending!.requestSequence + 1_000,
+      turnId: "turn-a",
+    });
+
+    expect(await harness.readPendingTurnStart()).not.toBeNull();
+  });
+
+  async function completeTurn(harness: AutoResumeHarness, turnId: string) {
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId(`evt-turn-completed-${turnId}`),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId(turnId),
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+  }
+
+  it("does not report a folded steer as an orphaned turn start", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // The steer, folded into turn-a. No `turn.started` will ever arrive for it.
+    await seedUserMessage(harness, "msg-2");
+    const pending = await harness.readPendingTurnStart();
+    expect(pending).not.toBeNull();
+    expect(pending?.messageId).toBe("msg-2");
+
+    await foldPendingTurnStart(harness, {
+      tag: "reconcile",
+      requestSequence: pending!.requestSequence,
+      turnId: "turn-a",
+    });
+
+    // turn-a finishes, clearing the session's active turn. This is what puts the
+    // thread on reconciliation's pending-only path: no active turn id, no
+    // running latestTurn, so the only thing left to judge it by is whatever
+    // placeholders survive.
+    await completeTurn(harness, "turn-a");
+    const settled = await harness.readShell();
+    expect(settled?.session?.activeTurnId ?? null).toBeNull();
+    expect(settled?.latestTurn?.state).toBe("completed");
+
+    // The consumer half, and the reason the fold exists at all. The sibling test
+    // below ("reports a pending-only orphan in the transcript before clearing
+    // it") is the control: a placeholder that reaches this sweep produces a
+    // `provider.turn.start.orphaned` activity telling the user their message may
+    // never have run. For a steer that reading is simply false — the provider
+    // received the message and folded it into turn-a — and acting on it means
+    // re-sending work the provider already did.
+    harness.removeProviderSession(asThreadId("thread-1"));
+    await harness.reconcile();
+
+    const thread = await readThread(harness);
+    expect(
+      thread.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "provider.turn.start.orphaned",
+      ),
+    ).toBe(false);
+    // Both user messages stay exactly once: nothing was re-issued and nothing
+    // was silently dropped.
+    expect(userMessages(thread)).toHaveLength(2);
   });
 
   it("keeps a pending turn start when the provider session is still running the thread", async () => {

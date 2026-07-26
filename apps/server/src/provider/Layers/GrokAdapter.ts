@@ -1053,6 +1053,12 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 displayModel,
                 promptParts,
                 turnId,
+                // A steer emitted no `turn.started` above, so nothing downstream
+                // will consume this send's pending turn-start placeholder.
+                // Carried onto every result below so the reactor can consume it
+                // explicitly instead of leaving a delivered message looking like
+                // one that was never sent.
+                steered: steeringTurnId !== undefined,
               };
             }).pipe(
               Effect.tapCause(() =>
@@ -1135,6 +1141,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   threadId: input.threadId,
                   turnId: prepared.turnId,
                   resumeCursor: ctx.session.resumeCursor,
+                  ...(prepared.steered ? { steered: true } : {}),
                 };
               }
 
@@ -1148,6 +1155,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   threadId: input.threadId,
                   turnId: prepared.turnId,
                   resumeCursor: ctx.session.resumeCursor,
+                  ...(prepared.steered ? { steered: true } : {}),
                 };
               }
 
@@ -1176,6 +1184,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     threadId: input.threadId,
                     turnId: prepared.turnId,
                     resumeCursor: ctx.session.resumeCursor,
+                    ...(prepared.steered ? { steered: true } : {}),
                   };
                 }
                 const completedAt = yield* nowIso;
@@ -1209,6 +1218,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 threadId: input.threadId,
                 turnId: prepared.turnId,
                 resumeCursor: ctx.session.resumeCursor,
+                ...(prepared.steered ? { steered: true } : {}),
               };
             }),
           );

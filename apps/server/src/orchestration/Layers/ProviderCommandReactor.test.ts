@@ -230,7 +230,12 @@ describe("ProviderCommandReactor", () => {
         turnId: asTurnId("turn-1"),
       }),
     );
-    const interruptTurn = vi.fn((_: unknown) => Effect.void);
+    // Typed to admit a provider failure so tests can exercise the path where a
+    // stop cannot be delivered; `Effect.void` alone would narrow the error
+    // channel to `never` and make that unwritable.
+    const interruptTurn = vi.fn(
+      (_: unknown): Effect.Effect<void, ProviderAdapterRequestError> => Effect.void,
+    );
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
     const stopSession = vi.fn((input: unknown) =>
@@ -403,6 +408,24 @@ describe("ProviderCommandReactor", () => {
           ),
         ),
       );
+    // The payload-carrying counterpart to `readEvents`. Kept separate so the
+    // many existing callers that only need type/sequence stay unchanged, while
+    // tests asserting on what an event CARRIES (e.g. which placeholder a fold
+    // consumed) can read it instead of inferring it from ordering.
+    const readEventsWithPayloads = (): Promise<
+      ReadonlyArray<{ type: string; sequence: number; payload: unknown }>
+    > =>
+      managed.runPromise(
+        Stream.runCollect(engine.readEvents(0, Number.MAX_SAFE_INTEGER)).pipe(
+          Effect.map((events) =>
+            events.map((event) => ({
+              type: event.type,
+              sequence: event.sequence,
+              payload: (event as { payload?: unknown }).payload,
+            })),
+          ),
+        ),
+      );
     const snapshotQuery = await managed.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await managed.runPromise(Effect.service(ProviderCommandReactor));
     const sendClaims = await managed.runPromise(Effect.service(ProviderTurnSendClaimRepository));
@@ -411,6 +434,12 @@ describe("ProviderCommandReactor", () => {
     // manual runner of their own.
     const cancelSendClaims = (input: Parameters<typeof sendClaims.cancel>[0]): Promise<void> =>
       managed.runPromise(sendClaims.cancel(input));
+    // The supersession counterpart to `cancelSendClaims`: lets a test hand the
+    // claim to a newer request for the same message WITHOUT raising a barrier,
+    // which is the state a fence must read as "stand down" rather than "stop
+    // the turn".
+    const acquireSendClaim = (input: Parameters<typeof sendClaims.acquire>[0]): Promise<unknown> =>
+      managed.runPromise(sendClaims.acquire(input));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
@@ -461,7 +490,9 @@ describe("ProviderCommandReactor", () => {
       stateDir,
       drain,
       cancelSendClaims,
+      acquireSendClaim,
       readEvents,
+      readEventsWithPayloads,
     };
   }
 
@@ -2409,9 +2440,316 @@ describe("ProviderCommandReactor", () => {
     // And the turn it started is then stopped.
     await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
 
+    // Addressed to the turn this send started, not merely to the thread. The
+    // fence runs asynchronously with respect to the rest of the thread, so by
+    // the time it fires the session may be running a LATER turn; a
+    // thread-scoped interrupt would then stop whichever turn happens to be
+    // current instead of the one that was stopped.
     expect(harness.interruptTurn.mock.calls[0]?.[0]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
     });
+  });
+
+  it("tells the user when a stop landed during the send and could not be delivered", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    // The fence cannot unsend an RPC that already landed, so when the interrupt
+    // it issues also fails there is no way to honor the stop. What it can do —
+    // and what failing open silently did NOT do — is say so. A user who pressed
+    // stop and watched the turn continue is owed the same interrupt-failure
+    // activity every other unfulfillable stop produces; without it the UI shows
+    // a turn quietly ignoring them, which is indistinguishable from a bug in
+    // the button.
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.promise(async () => {
+        await harness.cancelSendClaims({
+          threadId: ThreadId.make("thread-1"),
+          canceledThroughSequence: 1_000_000,
+          updatedAt: createdAt,
+        });
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        };
+      }),
+    );
+    // Fails every attempt, so the retry is exhausted rather than rescuing it.
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "session/interrupt",
+          detail: "provider socket closed",
+        }),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-interrupt-undeliverable"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "stop me and fail the stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        thread?.activities.some(
+          (activity) => activity.kind === "provider.turn.interrupt.failed",
+        ) ?? false
+      );
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(
+      thread?.activities.find((activity) => activity.kind === "provider.turn.interrupt.failed"),
+    ).toMatchObject({
+      turnId: asTurnId("turn-1"),
+      payload: {
+        detail: expect.stringContaining("provider socket closed"),
+      },
+    });
+    // Retried once before giving up: a transient failure is the likeliest kind
+    // and a duplicate interrupt costs nothing, so one retry is worth having and
+    // its absence would be a silently weaker guarantee.
+    expect(harness.interruptTurn.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  // --- Steered sends (folds) ----------------------------------------------
+  //
+  // Claude/Cursor/Grok/OpenCode fold a send that arrives mid-turn into the
+  // running turn and deliberately emit NO `turn.started` for it, because a
+  // steer is not a turn boundary. Nothing downstream therefore consumes the
+  // `thread.turn-start-requested` placeholder that send answered, and a
+  // surviving placeholder is read everywhere else as "requested but never
+  // started". The adapter is the only party that knows a fold happened, so it
+  // reports `steered` and the reactor consumes the placeholder explicitly.
+
+  const foldedEvents = (events: ReadonlyArray<{ type: string; payload: unknown }>) =>
+    events.filter((event) => event.type === "thread.turn-start-folded");
+
+  it("folds the pending turn-start when the provider steered an already-running turn", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.succeed({
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-running"),
+        steered: true,
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-steered"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-steer"),
+        role: "user",
+        text: "actually, also do this",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await waitFor(async () => foldedEvents(await harness.readEventsWithPayloads()).length === 1);
+    await harness.drain();
+
+    const events = await harness.readEventsWithPayloads();
+    const requested = events.filter((event) => event.type === "thread.turn-start-requested");
+    expect(requested).toHaveLength(1);
+
+    // Read the durable sequence rather than assert a literal: the projector
+    // deletes the placeholder keyed on exactly this value, so a fold carrying
+    // anything else consumes nothing and leaves the defect in place.
+    const folded = foldedEvents(events);
+    expect(folded).toHaveLength(1);
+    expect(folded[0]?.payload).toMatchObject({
+      threadId: ThreadId.make("thread-1"),
+      turnRequestSequence: requested[0]?.sequence,
+      // The turn the message was folded into, not a new one — a steer has no
+      // turn id of its own.
+      turnId: asTurnId("turn-running"),
+    });
+  });
+
+  it("does not fold a send that opened a real turn", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    // The control. The default `sendTurn` mock reports no `steered` flag, which
+    // is the ordinary turn-boundary case: `turn.started` will arrive and consume
+    // the placeholder itself. Folding here would delete a placeholder that a
+    // real start still needs, so the fold must be conditional on the adapter's
+    // report rather than issued for every send.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-unsteered"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-fresh"),
+        role: "user",
+        text: "start a fresh turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    expect(foldedEvents(await harness.readEventsWithPayloads())).toHaveLength(0);
+  });
+
+  it("records the fold even when a stop lands during the steered send", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    // Ordering, not merely presence. The fold records a fact that is already
+    // true — the provider has the message — and the fence that runs after it can
+    // interrupt, which does not make it any less true. Recording the fold only
+    // after a clear fence would strand the placeholder on exactly the paths
+    // (stop mid-send, interrupt failure) where reading it as "never sent" does
+    // the most damage: recovery would re-issue a prompt the provider already
+    // received and acted on.
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.promise(async () => {
+        await harness.cancelSendClaims({
+          threadId: ThreadId.make("thread-1"),
+          canceledThroughSequence: 1_000_000,
+          updatedAt: createdAt,
+        });
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-running"),
+          steered: true,
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-steer-stopped-mid-send"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-steer-stopped"),
+        role: "user",
+        text: "steer me, then stop me",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    // The fence still fires — the user's stop is honored, which is the sibling
+    // behavior this must not regress.
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+    await harness.drain();
+
+    const events = await harness.readEventsWithPayloads();
+    const requested = events.find((event) => event.type === "thread.turn-start-requested");
+    const folded = foldedEvents(events);
+    expect(folded).toHaveLength(1);
+    expect(folded[0]?.payload).toMatchObject({
+      turnRequestSequence: requested?.sequence,
+      turnId: asTurnId("turn-running"),
+    });
+  });
+
+  it("leaves a newer turn alone when an older send loses its claim to it", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    // The sibling test above covers the case the fence exists FOR. This covers
+    // the case it must not create.
+    //
+    // Losing the claim is not evidence of a stop. A session-exit auto-resume
+    // re-issues the same message at a higher sequence and takes the claim by
+    // design, and the turn it starts is work the user wants. If the fence read
+    // "I no longer hold the claim" as "I was stopped", it would interrupt that
+    // replacement — turning a mechanism that recovers a missed stop into one
+    // that kills healthy turns, which is the worse of the two failures.
+    //
+    // The interleaving is scheduled from inside `sendTurn`, the only place it
+    // can be: while the first send is in flight, a newer request for the SAME
+    // message acquires the claim. Nothing raises the barrier, so the correct
+    // reading is "superseded", not "canceled".
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.promise(async () => {
+        await harness.acquireSendClaim({
+          threadId: ThreadId.make("thread-1"),
+          messageId: asMessageId("user-message-1"),
+          requestSequence: 1_000_000,
+          claimedAt: createdAt,
+        });
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-superseded-mid-send"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "supersede me mid-flight",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    // A sentinel turn that must reach the provider, so "no interrupt" is
+    // distinguishable from "the fence has not run yet" — the fence for the
+    // first send is scheduled before this send is even dispatched, so by the
+    // time this one lands the fence has had its chance.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-superseded-sentinel"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-2"),
+        role: "user",
+        text: "supersede sentinel",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "supersede sentinel",
+      ),
+    );
+
+    expect(harness.interruptTurn.mock.calls).toHaveLength(0);
   });
 
   it("sends once when the identical turn-start command is delivered twice", async () => {
@@ -2581,6 +2919,226 @@ describe("ProviderCommandReactor", () => {
     // the control against a claim that refuses everything and would otherwise
     // satisfy the assertion above by breaking the reactor outright.
     expect(drivenInputs).toContain("sentinel turn");
+  });
+
+  it("skips an undriven turn-start below a session stop", async () => {
+    const harness = await createHarness();
+    const blockerCreatedAt = "2026-01-01T00:00:00.000Z";
+    const pendingCreatedAt = "2026-01-01T00:00:01.000Z";
+    const stopCreatedAt = "2026-01-01T00:00:02.000Z";
+    const sentinelCreatedAt = "2026-01-01T00:00:03.000Z";
+
+    // The sibling test above proves this for `thread.turn.interrupt`. Stopping
+    // the whole SESSION is strictly broader than interrupting one turn, so it
+    // must suppress at least as much — but the event-log guard originally
+    // counted only turn interrupts, which let a queued turn-start sail past a
+    // user who had shut the session down entirely.
+    //
+    // The consequence is worse than a stray prompt. `ProviderService.sendTurn`
+    // resolves with `allowRecovery: true`, so the slipped send does not fail
+    // against a dead session — it RESURRECTS it, and the user watches a thread
+    // they stopped come back to life and start working.
+    //
+    // This test isolates the event-log guard specifically. The worker is parked
+    // inside `startSession` when the stop is appended, so the stop is still
+    // behind the queued turn-start in the FIFO queue: the reactor has not
+    // processed it and the durable cancel barrier has therefore NOT been raised
+    // yet. The event log is the only thing that can suppress this send.
+    let releaseWorker: () => void = () => {};
+    const workerGate = new Promise<void>((resolve) => {
+      releaseWorker = resolve;
+    });
+    const originalStartSession = harness.startSession.getMockImplementation();
+    if (!originalStartSession) {
+      throw new Error("startSession mock implementation missing");
+    }
+    harness.startSession.mockImplementationOnce((threadId, sessionInput) =>
+      Effect.promise(() => workerGate).pipe(
+        Effect.flatMap(() => originalStartSession(threadId, sessionInput)),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-session-stop"),
+      threadId: ThreadId.make("thread-2"),
+      projectId: asProjectId("project-1"),
+      title: "Sentinel Thread",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt: blockerCreatedAt,
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-stop-blocker"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-blocker"),
+        role: "user",
+        text: "blocker turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: blockerCreatedAt,
+    });
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-below-session-stop"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "stop the session on me",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: pendingCreatedAt,
+    });
+    await harness.dispatch({
+      type: "thread.session.stop",
+      commandId: CommandId.make("cmd-session-stop-suppresses"),
+      threadId: ThreadId.make("thread-1"),
+      createdAt: stopCreatedAt,
+    });
+    // Sentinel on a second thread proves the suppressed turn-start ahead of it
+    // in the FIFO queue reached a decision, rather than merely never having been
+    // reached.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-session-stop-sentinel"),
+      threadId: ThreadId.make("thread-2"),
+      message: {
+        messageId: asMessageId("user-sentinel"),
+        role: "user",
+        text: "sentinel turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: sentinelCreatedAt,
+    });
+
+    releaseWorker();
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "sentinel turn",
+      ),
+    );
+    await harness.drain();
+
+    const drivenInputs = harness.sendTurn.mock.calls.map(
+      (call) => (call[0] as { input?: string }).input,
+    );
+    expect(drivenInputs).not.toContain("stop the session on me");
+    // The blocker was parked inside `startSession` when the stop landed, so its
+    // prompt had not reached the provider either — undriven in exactly the sense
+    // that matters.
+    expect(drivenInputs).not.toContain("blocker turn");
+    // Control against a reactor that has simply stopped sending, and against a
+    // stop that poisons every thread rather than its own.
+    expect(drivenInputs).toContain("sentinel turn");
+  });
+
+  it("raises the cancel barrier when the session is stopped", async () => {
+    const harness = await createHarness();
+    const stopCreatedAt = "2026-01-01T00:00:00.000Z";
+    const sentinelCreatedAt = "2026-01-01T00:00:01.000Z";
+
+    // The second half of the same defect, and a genuinely separate mechanism
+    // from the test above. The event-log guard is read BEFORE the send; it
+    // cannot help a turn-start that already passed it and is inside `sendTurn`
+    // when the user stops the session. Only the durable barrier can, because the
+    // post-send fence reads it — so `processSessionStopRequested` has to raise
+    // it exactly as the turn-interrupt path does.
+    //
+    // Asserted at the repository, on the state the reactor leaves behind, for
+    // the same reason the barrier's sibling test is: the interleaving that makes
+    // the barrier load-bearing lives strictly between the reactor's own guard
+    // read and its RPC, and cannot be scheduled from outside. The barrier's
+    // post-condition is what the fence actually consumes.
+    await harness.dispatch({
+      type: "thread.session.stop",
+      commandId: CommandId.make("cmd-session-stop-raises-barrier"),
+      threadId: ThreadId.make("thread-1"),
+      createdAt: stopCreatedAt,
+    });
+    // FIFO sentinel on a second thread: once this has driven, the stop ahead of
+    // it has been processed.
+    await harness.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-barrier-sentinel"),
+      threadId: ThreadId.make("thread-2"),
+      projectId: asProjectId("project-1"),
+      title: "Sentinel Thread",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt: sentinelCreatedAt,
+    });
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-barrier-sentinel"),
+      threadId: ThreadId.make("thread-2"),
+      message: {
+        messageId: asMessageId("user-sentinel"),
+        role: "user",
+        text: "sentinel turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: sentinelCreatedAt,
+    });
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "sentinel turn",
+      ),
+    );
+    await harness.drain();
+
+    const events = await harness.readEvents();
+    const stopSequence = events.find(
+      (event) => event.type === "thread.session-stop-requested",
+    )?.sequence;
+    expect(stopSequence).toBeDefined();
+
+    // A send that was in flight across the stop carries a sequence at or below
+    // it, and must come back `canceled` so the fence interrupts the turn it
+    // started.
+    const covered = (await harness.acquireSendClaim({
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-1"),
+      requestSequence: stopSequence!,
+      claimedAt: stopCreatedAt,
+    })) as { _tag: string };
+    expect(covered._tag).toBe("canceled");
+
+    // Bounded by the stop's sequence: work the user requests AFTERWARDS is not
+    // covered. Without this the barrier would poison the thread instead of
+    // fencing the send that crossed the stop.
+    const above = (await harness.acquireSendClaim({
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-2"),
+      requestSequence: stopSequence! + 1,
+      claimedAt: stopCreatedAt,
+    })) as { _tag: string };
+    expect(above._tag).toBe("acquired");
   });
 
   it("skips a turn-start-requested superseded by a newer re-request for the same message", async () => {

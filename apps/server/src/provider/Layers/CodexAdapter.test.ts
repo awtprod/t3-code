@@ -34,6 +34,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
@@ -589,6 +590,414 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         ],
       );
     }).pipe(Effect.provide(correlationLayer));
+  });
+
+  // --- The parked in-flight slot -------------------------------------------
+  //
+  // `turn.started` is built on the event fiber, which never sees the send that
+  // caused it, so a send parks its request sequence in an in-flight slot until
+  // the `turn/start` response names the turn id. A notification that finds no
+  // id-keyed entry claims that parked slot — correct only when the entry is
+  // missing because the response has not landed yet. A turn whose entry was
+  // already consumed, or evicted once the map hit its bound, also has no entry,
+  // and would otherwise take the slot of an unrelated send that is genuinely
+  // mid-RPC, stamping that send's placeholder onto the wrong turn.
+
+  /** Builds a layer + runtime factory for one correlation scenario. */
+  const makeCorrelationScenario = () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        return yield* makeCodexAdapter(decodeCodexSettings({}), {
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return { runtimeFactory, layer };
+  };
+
+  /**
+   * Collects `turn.started` stamps as they are published, so a test can wait
+   * for one to be observed before taking the next step. Ordering between an
+   * emitted notification and a later send response is the whole subject here,
+   * so it cannot be left to a batched read at the end.
+   */
+  const collectTurnStartedStamps = (adapter: CodexAdapterShape) =>
+    Effect.gen(function* () {
+      const stamps: Array<readonly [string, number | undefined]> = [];
+      const fiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          if (event.type === "turn.started") {
+            stamps.push([String(event.turnId), event.payload.turnRequestSequence]);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+      const awaitCount = (count: number) =>
+        Effect.gen(function* () {
+          for (let attempt = 0; attempt < 500; attempt += 1) {
+            if (stamps.length >= count) {
+              return;
+            }
+            yield* Effect.sleep("2 millis");
+          }
+          throw new Error(`Timed out waiting for ${count} turn.started events.`);
+        });
+      return { stamps, fiber, awaitCount };
+    });
+
+  it.effect("does not let a duplicate turn/started claim a live send's parked slot", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-duplicate-started");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      // The second send's RPC is held open so its request sequence sits in the
+      // parked slot for the duration of the duplicate notification below.
+      let releaseSecondSend: ((turnId: TurnId) => void) | undefined;
+      let secondSendEntered = false;
+      runtime.sendTurnImpl.mockImplementation((input) => {
+        if (input.input === "first") {
+          return Promise.resolve({ threadId, turnId: asTurnId("turn-first") });
+        }
+        secondSendEntered = true;
+        return new Promise<ProviderTurnStartResult>((resolve) => {
+          releaseSecondSend = (turnId) => resolve({ threadId, turnId });
+        });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      yield* adapter.sendTurn({ threadId, input: "first", turnRequestSequence: 11 });
+      yield* runtime.emit({
+        id: asEventId("evt-started-first"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-first"),
+      });
+      yield* collector.awaitCount(1);
+
+      const secondSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "second", turnRequestSequence: 22 })
+        .pipe(Effect.forkChild);
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          if (secondSendEntered) {
+            return;
+          }
+          yield* Effect.sleep("2 millis");
+        }
+        throw new Error("Timed out waiting for the second send to reach its RPC.");
+      });
+
+      // A duplicate for a turn already stamped above. Its correlation is spent,
+      // so it must carry no sequence rather than take request 22.
+      yield* runtime.emit({
+        id: asEventId("evt-started-first-duplicate"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-first"),
+      });
+      yield* collector.awaitCount(2);
+
+      NodeAssert.ok(releaseSecondSend);
+      releaseSecondSend(asTurnId("turn-second"));
+      yield* Fiber.join(secondSendFiber);
+      yield* runtime.emit({
+        id: asEventId("evt-started-second"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-second"),
+      });
+      yield* collector.awaitCount(3);
+
+      NodeAssert.deepStrictEqual(collector.stamps, [
+        ["turn-first", 11],
+        ["turn-first", undefined],
+        // Still reaches the turn it was sent for, which is what the duplicate
+        // would otherwise have taken from it.
+        ["turn-second", 22],
+      ]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("does not let an evicted correlation claim a live send's parked slot", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-evicted-correlation");
+    // One more than CODEX_TURN_REQUEST_CORRELATION_LIMIT, so recording the last
+    // send evicts the first — none of them are announced, which is exactly the
+    // leak the bound exists to cap.
+    const unannouncedSendCount = 65;
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      let releaseLiveSend: ((turnId: TurnId) => void) | undefined;
+      let liveSendEntered = false;
+      runtime.sendTurnImpl.mockImplementation((input) => {
+        if (input.input === "live") {
+          liveSendEntered = true;
+          return new Promise<ProviderTurnStartResult>((resolve) => {
+            releaseLiveSend = (turnId) => resolve({ threadId, turnId });
+          });
+        }
+        return Promise.resolve({ threadId, turnId: asTurnId(`turn-${input.input}`) });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      for (let index = 0; index < unannouncedSendCount; index += 1) {
+        yield* adapter.sendTurn({
+          threadId,
+          input: String(index),
+          turnRequestSequence: 100 + index,
+        });
+      }
+
+      const liveSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "live", turnRequestSequence: 999 })
+        .pipe(Effect.forkChild);
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          if (liveSendEntered) {
+            return;
+          }
+          yield* Effect.sleep("2 millis");
+        }
+        throw new Error("Timed out waiting for the live send to reach its RPC.");
+      });
+
+      // turn-0's entry was evicted to make room. It is not "waiting on a
+      // response", so it must not be handed request 999.
+      yield* runtime.emit({
+        id: asEventId("evt-started-evicted"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-0"),
+      });
+      yield* collector.awaitCount(1);
+
+      NodeAssert.ok(releaseLiveSend);
+      releaseLiveSend(asTurnId("turn-live"));
+      yield* Fiber.join(liveSendFiber);
+      yield* runtime.emit({
+        id: asEventId("evt-started-live"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-live"),
+      });
+      yield* collector.awaitCount(2);
+
+      NodeAssert.deepStrictEqual(collector.stamps, [
+        ["turn-0", undefined],
+        ["turn-live", 999],
+      ]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("still stamps a turn/started that genuinely beat its send response", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-notification-first");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      let releaseSend: ((turnId: TurnId) => void) | undefined;
+      let sendEntered = false;
+      runtime.sendTurnImpl.mockImplementation(() => {
+        sendEntered = true;
+        return new Promise<ProviderTurnStartResult>((resolve) => {
+          releaseSend = (turnId) => resolve({ threadId, turnId });
+        });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      const sendFiber = yield* adapter
+        .sendTurn({ threadId, input: "only", turnRequestSequence: 7 })
+        .pipe(Effect.forkChild);
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          if (sendEntered) {
+            return;
+          }
+          yield* Effect.sleep("2 millis");
+        }
+        throw new Error("Timed out waiting for the send to reach its RPC.");
+      });
+
+      // The notification wins the race with the response. This is the one case
+      // the parked slot exists for, and the guards above must not break it.
+      yield* runtime.emit({
+        id: asEventId("evt-started-race"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-raced"),
+      });
+      yield* collector.awaitCount(1);
+
+      NodeAssert.ok(releaseSend);
+      releaseSend(asTurnId("turn-raced"));
+      yield* Fiber.join(sendFiber);
+
+      NodeAssert.deepStrictEqual(collector.stamps, [["turn-raced", 7]]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("does not let a duplicate of a raced turn/started re-claim a parked slot", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-raced-duplicate");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      let releaseFirstSend: ((turnId: TurnId) => void) | undefined;
+      let releaseSecondSend: ((turnId: TurnId) => void) | undefined;
+      let sendsEntered = 0;
+      runtime.sendTurnImpl.mockImplementation((input) => {
+        sendsEntered += 1;
+        return new Promise<ProviderTurnStartResult>((resolve) => {
+          const release = (turnId: TurnId) => resolve({ threadId, turnId });
+          if (input.input === "first") {
+            releaseFirstSend = release;
+          } else {
+            releaseSecondSend = release;
+          }
+        });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+      const awaitSends = (count: number) =>
+        Effect.gen(function* () {
+          for (let attempt = 0; attempt < 500; attempt += 1) {
+            if (sendsEntered >= count) {
+              return;
+            }
+            yield* Effect.sleep("2 millis");
+          }
+          throw new Error(`Timed out waiting for ${count} sends to reach their RPC.`);
+        });
+
+      const firstSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "first", turnRequestSequence: 11 })
+        .pipe(Effect.forkChild);
+      yield* awaitSends(1);
+
+      // The notification wins the race, so this turn takes the parked slot
+      // without ever getting an id-keyed entry — the one path that would leave
+      // it unrecorded as "already answered for".
+      yield* runtime.emit({
+        id: asEventId("evt-started-raced"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-raced"),
+      });
+      yield* collector.awaitCount(1);
+
+      NodeAssert.ok(releaseFirstSend);
+      releaseFirstSend(asTurnId("turn-raced"));
+      yield* Fiber.join(firstSendFiber);
+
+      const secondSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "second", turnRequestSequence: 22 })
+        .pipe(Effect.forkChild);
+      yield* awaitSends(2);
+
+      // A duplicate of the raced turn must not take the second send's slot.
+      yield* runtime.emit({
+        id: asEventId("evt-started-raced-duplicate"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-raced"),
+      });
+      yield* collector.awaitCount(2);
+
+      NodeAssert.ok(releaseSecondSend);
+      releaseSecondSend(asTurnId("turn-second"));
+      yield* Fiber.join(secondSendFiber);
+      yield* runtime.emit({
+        id: asEventId("evt-started-second"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-second"),
+      });
+      yield* collector.awaitCount(3);
+
+      NodeAssert.deepStrictEqual(collector.stamps, [
+        ["turn-raced", 11],
+        ["turn-raced", undefined],
+        ["turn-second", 22],
+      ]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
   });
 });
 
