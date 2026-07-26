@@ -1207,9 +1207,10 @@ const make = Effect.gen(function* () {
         // a supersession by the same message the way the claim can, so an
         // absent interrupt here is not evidence the send is still the live one
         // — it is just an absent interrupt. Mapping that to `acquired` would
-        // manufacture certainty the fallback does not have; mapping it to
-        // `superseded` costs nothing, since both non-canceled tags take the
-        // same do-nothing branch below.
+        // manufacture certainty the fallback does not have; mapping it to a
+        // `superseded` outcome WITHOUT `heldBySequence` keeps it on the safe
+        // do-nothing branch below rather than inventing an owner and stopping a
+        // healthy turn.
         //
         // If this read fails too, the original claim failure is what propagates
         // — it is the one the outer handler reports, and the fallback failing
@@ -1240,7 +1241,11 @@ const make = Effect.gen(function* () {
           ),
         ),
         Effect.flatMap((outcome) => {
-          if (outcome._tag !== "canceled") {
+          const supersededByNewerRequest =
+            outcome._tag === "superseded" &&
+            outcome.heldBySequence !== undefined &&
+            outcome.heldBySequence > event.sequence;
+          if (outcome._tag !== "canceled" && !supersededByNewerRequest) {
             return Effect.logDebug("provider-command-reactor.turn-start.fence-clear", {
               threadId: event.payload.threadId,
               messageId: event.payload.messageId,
@@ -1252,33 +1257,38 @@ const make = Effect.gen(function* () {
                 : {}),
             });
           }
-          return Effect.logDebug("provider-command-reactor.turn-start.stopped-during-send", {
-            threadId: event.payload.threadId,
-            messageId: event.payload.messageId,
-            requestSequence: event.sequence,
-            turnId: turn.turnId,
-          }).pipe(
+          return Effect.logDebug(
+            supersededByNewerRequest
+              ? "provider-command-reactor.turn-start.superseded-during-send"
+              : "provider-command-reactor.turn-start.stopped-during-send",
+            {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+              requestSequence: event.sequence,
+              turnId: turn.turnId,
+              ...(supersededByNewerRequest ? { heldBySequence: outcome.heldBySequence } : {}),
+            },
+          ).pipe(
             // One retry, then escalate to the session — the shared ladder, so
-            // the ordinary interrupt path and this one cannot drift apart.
-            // Only reached when the retried interrupt failed outright, so the
-            // escalation cannot cost a session anyone was still using: the
-            // alternative on this branch is a turn that ignores stop entirely.
+            // the ordinary interrupt path and this one cannot drift apart. The
+            // interrupt is addressed to THIS send's returned turn id: on genuine
+            // supersession the newer request's turn is deliberately left alone.
             Effect.flatMap(() =>
               interruptTurnOrEscalateToSessionStop({
                 threadId: event.payload.threadId,
                 turnId: turn.turnId,
-                // This request's own sequence, which is the weakest cutoff that
-                // still covers what got us here: reaching this branch means the
-                // claim came back `canceled`, i.e. a barrier at or above this
-                // sequence already exists. Re-raising to it is therefore a
-                // no-op against a monotonic barrier, and it deliberately does
-                // NOT re-declare the real stop's cutoff, which is unknown here
-                // and may be higher. Anything the genuine stop covers stays
-                // covered by that stop; the escalation adds nothing of its own.
+                // This request's own sequence is the weakest cutoff that covers
+                // the work being fenced. For a stop, the existing monotonic
+                // barrier is already at or above it. For supersession, raising a
+                // barrier only through the stale request keeps the newer owner
+                // eligible if the turn interrupt has to escalate to the session.
                 canceledThroughSequence: event.sequence,
                 createdAt: event.payload.createdAt,
                 escalationTag: "fence-escalated-session-stop",
-                logContext: { messageId: event.payload.messageId },
+                logContext: {
+                  messageId: event.payload.messageId,
+                  ...(supersededByNewerRequest ? { heldBySequence: outcome.heldBySequence } : {}),
+                },
               }),
             ),
           );

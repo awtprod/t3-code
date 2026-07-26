@@ -53,12 +53,12 @@ export type CancelProviderTurnSendClaimsInput = typeof CancelProviderTurnSendCla
 /**
  * Why a request may not send, or that it may.
  *
- * The two refusals are deliberately NOT collapsed into one `false`. They call
- * for opposite handling in the post-send fence: `canceled` means the user
- * stopped work that is now running and it must be interrupted, while
- * `superseded` means a newer request for the same message legitimately took
- * over — and interrupting on that would kill the turn that replaced us, which
- * is a worse outcome than the one the fence exists to prevent.
+ * The two refusals are deliberately NOT collapsed into one `false`. A
+ * `canceled` result means the user stopped work that is now running and it must
+ * be interrupted. A `superseded` result normally makes the pre-send path stand
+ * down; after a send, a concrete higher `heldBySequence` instead proves this
+ * sender lost ownership while its RPC was in flight, so its own returned turn
+ * is the stale duplicate that must be interrupted.
  */
 export type ProviderTurnSendClaimOutcome =
   /** This request holds the claim and is the one that may drive the provider. */
@@ -71,9 +71,9 @@ export type ProviderTurnSendClaimOutcome =
    * `heldBySequence` is absent in the one case where no row names an owner at
    * all. That should be unreachable — an uncanceled insert either installs this
    * request or loses to a higher one — but it is bucketed here rather than with
-   * `canceled` on purpose: this tag's handling is "do nothing", so an
-   * unexplained state costs a missed send that the caller logs, never a
-   * spurious interrupt of a turn that is running correctly.
+   * `canceled` on purpose: without a concrete owner, the post-send fence does
+   * nothing, so an unexplained state never manufactures an interrupt of a turn
+   * that is running correctly.
    */
   | { readonly _tag: "superseded"; readonly heldBySequence?: number };
 

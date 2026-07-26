@@ -3959,6 +3959,91 @@ describe("ProviderCommandReactor", () => {
     expect(acquireAttempts.filter((entry) => entry >= 0)).toHaveLength(3);
   });
 
+  it("does not manufacture an interrupt when the unreadable-claim fallback finds no stop", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const originalAcquire = harness.sendClaims.acquire;
+    const acquireAttempts: Array<number> = [];
+    let markFallbackRead!: () => void;
+    const fallbackRead = new Promise<void>((resolve) => {
+      markFallbackRead = resolve;
+    });
+
+    const acquireSpy = vi
+      .spyOn(harness.sendClaims, "acquire")
+      .mockImplementation((input: Parameters<typeof harness.sendClaims.acquire>[0]) =>
+        Effect.suspend(() => {
+          if (acquireAttempts.length === 0 && harness.sendTurn.mock.calls.length === 0) {
+            acquireAttempts.push(-1);
+            return originalAcquire(input);
+          }
+          acquireAttempts.push(input.requestSequence);
+          return Effect.fail(
+            new PersistenceSqlError({ operation: "acquire", detail: "claim read failed" }),
+          );
+        }),
+      );
+    const originalClaimRead = harness.eventStore.getThreadTurnStartClaim;
+    const claimReadSpy = vi
+      .spyOn(harness.eventStore, "getThreadTurnStartClaim")
+      .mockImplementation((input: Parameters<typeof originalClaimRead>[0]) =>
+        originalClaimRead(input).pipe(
+          Effect.tap(() =>
+            harness.sendTurn.mock.calls.length > 0 &&
+            acquireAttempts.filter((entry) => entry >= 0).length === 3
+              ? Effect.sync(markFallbackRead)
+              : Effect.void,
+          ),
+        ),
+      );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-unreadable-claim-no-stop"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "leave me running when ownership is unknown",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await fallbackRead;
+    acquireSpy.mockRestore();
+    claimReadSpy.mockRestore();
+
+    // The sentinel is processed after the fallback read has returned. It gives
+    // the old fence's immediate continuation a scheduling turn, so zero
+    // interrupts means the synthetic owner-less `superseded` outcome really was
+    // a no-op rather than merely not having run yet.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-unreadable-claim-no-stop-sentinel"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-2"),
+        role: "user",
+        text: "unreadable claim sentinel",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "unreadable claim sentinel",
+      ),
+    );
+    await harness.drain();
+
+    expect(acquireAttempts.filter((entry) => entry >= 0)).toHaveLength(3);
+    expect(harness.interruptTurn.mock.calls).toHaveLength(0);
+  });
+
   // --- Steered sends (folds) ----------------------------------------------
   //
   // Claude/Cursor/Grok/OpenCode fold a send that arrives mid-turn into the
@@ -4479,35 +4564,44 @@ describe("ProviderCommandReactor", () => {
     expect(activity?.turnId).toBe(asTurnId("turn-running"));
   });
 
-  it("leaves a newer turn alone when an older send loses its claim to it", async () => {
+  it("interrupts an older delivered turn after a newer same-message request steals its claim", async () => {
     const harness = await createHarness();
     const createdAt = "2026-01-01T00:00:00.000Z";
+    let releaseOlderSend!: () => void;
+    const olderSendReleased = new Promise<void>((resolve) => {
+      releaseOlderSend = resolve;
+    });
+    let markOlderSendEntered!: () => void;
+    const olderSendEntered = new Promise<void>((resolve) => {
+      markOlderSendEntered = resolve;
+    });
+    let sameMessageSendCount = 0;
 
-    // The sibling test above covers the case the fence exists FOR. This covers
-    // the case it must not create.
-    //
-    // Losing the claim is not evidence of a stop. A session-exit auto-resume
-    // re-issues the same message at a higher sequence and takes the claim by
-    // design, and the turn it starts is work the user wants. If the fence read
-    // "I no longer hold the claim" as "I was stopped", it would interrupt that
-    // replacement — turning a mechanism that recovers a missed stop into one
-    // that kills healthy turns, which is the worse of the two failures.
-    //
-    // The interleaving is scheduled from inside `sendTurn`, the only place it
-    // can be: while the first send is in flight, a newer request for the SAME
-    // message acquires the claim. Nothing raises the barrier, so the correct
-    // reading is "superseded", not "canceled".
-    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+    // The first request has already acquired the claim when it enters this RPC.
+    // Hold it there while a real higher-sequence resume request acquires the SAME
+    // message's claim and completes its own send. The old request then returns
+    // after ownership has changed — the exact window no database transaction can
+    // span because `sendTurn` crosses the provider RPC boundary.
+    harness.sendTurn.mockImplementation((input: unknown) =>
       Effect.promise(async () => {
-        await harness.acquireSendClaim({
-          threadId: ThreadId.make("thread-1"),
-          messageId: asMessageId("user-message-1"),
-          requestSequence: 1_000_000,
-          claimedAt: createdAt,
-        });
+        if ((input as { input?: string }).input !== "supersede me mid-flight") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sameMessageSendCount += 1;
+        if (sameMessageSendCount === 1) {
+          markOlderSendEntered();
+          await olderSendReleased;
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-older"),
+          };
+        }
         return {
           threadId: ThreadId.make("thread-1"),
-          turnId: asTurnId("turn-1"),
+          turnId: asTurnId("turn-newer"),
         };
       }),
     );
@@ -4526,34 +4620,54 @@ describe("ProviderCommandReactor", () => {
       runtimeMode: "approval-required",
       createdAt,
     });
+    await olderSendEntered;
 
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-
-    // A sentinel turn that must reach the provider, so "no interrupt" is
-    // distinguishable from "the fence has not run yet" — the fence for the
-    // first send is scheduled before this send is even dispatched, so by the
-    // time this one lands the fence has had its chance.
     await harness.dispatch({
-      type: "thread.turn.start",
-      commandId: CommandId.make("cmd-turn-superseded-sentinel"),
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-resume-while-original-sends"),
       threadId: ThreadId.make("thread-1"),
-      message: {
-        messageId: asMessageId("user-message-2"),
-        role: "user",
-        text: "supersede sentinel",
-        attachments: [],
-      },
-      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-      runtimeMode: "approval-required",
-      createdAt: "2026-01-01T00:00:02.000Z",
+      messageId: asMessageId("user-message-1"),
+      createdAt: "2026-01-01T00:00:01.000Z",
     });
+    await waitFor(() => sameMessageSendCount === 2);
+
+    const sameMessageRequests = (await harness.readEventsWithPayloads()).filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === asMessageId("user-message-1"),
+    );
+    expect(sameMessageRequests).toHaveLength(2);
+    expect(sameMessageRequests[1]!.sequence).toBeGreaterThan(sameMessageRequests[0]!.sequence);
+    expect(
+      await harness.acquireSendClaim({
+        threadId: ThreadId.make("thread-1"),
+        messageId: asMessageId("user-message-1"),
+        requestSequence: sameMessageRequests[0]!.sequence,
+        claimedAt: createdAt,
+      }),
+    ).toEqual({
+      _tag: "superseded",
+      heldBySequence: sameMessageRequests[1]!.sequence,
+    });
+
+    releaseOlderSend();
     await waitFor(() =>
-      harness.sendTurn.mock.calls.some(
-        (call) => (call[0] as { input?: string }).input === "supersede sentinel",
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-older"),
       ),
     );
+    await harness.drain();
 
-    expect(harness.interruptTurn.mock.calls).toHaveLength(0);
+    expect(sameMessageSendCount).toBe(2);
+    expect(harness.interruptTurn.mock.calls).toEqual([
+      [
+        {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-older"),
+        },
+      ],
+    ]);
+    expect(harness.stopSession.mock.calls).toHaveLength(0);
   });
 
   it("sends once when the identical turn-start command is delivered twice", async () => {
