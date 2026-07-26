@@ -3295,6 +3295,94 @@ describe("ProviderRuntimeIngestion", () => {
     expect(resumeRequests).toHaveLength(2);
   });
 
+  async function runToolItem(harness: AutoResumeHarness, turnId: string) {
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId(`evt-tool-started-${turnId}`),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId(turnId),
+      payload: {
+        itemType: "command_execution",
+        status: "in_progress",
+        title: "Apply the migration",
+        detail: "pnpm db:migrate",
+      },
+    });
+    await harness.drain();
+  }
+
+  const resumeBlockedActivities = (thread: ProviderRuntimeTestThread) =>
+    thread.activities.filter((activity) => activity.kind === "provider.turn.auto-resume-blocked");
+
+  it("does not auto-resume a turn that had already started running tools", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // The provider began executing a command and then the subprocess died. The
+    // command's effect is now UNKNOWN — it may have run fully, partially, or not
+    // at all. Re-issuing the user's message would ask the provider to do it
+    // again, and no resume cursor makes that idempotent: the cursor restores
+    // conversational context, not execution state.
+    await runToolItem(harness, "turn-a");
+    await crashSession(harness, "crash-after-tool");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    // The marker is not the proof — this layer could append one without any
+    // turn reaching a provider. The hand-off is what matters: exactly one
+    // turn-start-requested for msg-1 (the original), never a second.
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
+    ).toHaveLength(1);
+
+    // And it must not go silent. A turn that simply stops with no explanation is
+    // the same defect as a silently-deleted orphan: the user is left watching a
+    // dead turn with no idea whether anything ran or what to do next.
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.tone).toBe("error");
+    expect(blocked[0]?.turnId).toBe("turn-a");
+    const blockedPayload =
+      blocked[0]?.payload && typeof blocked[0].payload === "object"
+        ? (blocked[0].payload as Record<string, unknown>)
+        : undefined;
+    expect(blockedPayload?.detectedFrom).toBe("tool-activity");
+  });
+
+  it("still auto-resumes a crash whose turn produced only assistant output", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // The control against over-suppression: assistant text is not tool work, so
+    // nothing outside this process was touched and re-issuing is safe. A gate
+    // that also caught this case would silently disable auto-resume for the
+    // most common crash there is.
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-assistant-before-crash"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        text: "Let me think about that.",
+      },
+    });
+    await harness.drain();
+    await crashSession(harness, "crash-after-assistant");
+
+    const thread = await readThread(harness);
+    expect(resumeBlockedActivities(thread)).toHaveLength(0);
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
+    ).toHaveLength(2);
+  });
+
   it("does not auto-resume on a graceful session exit", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");
@@ -4470,7 +4558,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("live runtime fatal error");
   });
 
-  it("clears a pending-only orphan on reconcile, which the activeTurnId sweep cannot see", async () => {
+  it("reports a pending-only orphan in the transcript before clearing it", async () => {
     const harness = await createHarness();
     // A turn-start that never reached `turn.started`: the provider session died
     // before reporting its first turn. All that survives is the pending
@@ -4494,6 +4582,31 @@ describe("ProviderRuntimeIngestion", () => {
 
     // Swept: the thread no longer presents as pending forever.
     expect(await harness.readPendingTurnStart()).toBeNull();
+
+    // ...but NOT silently. Clearing the row alone would erase every trace of an
+    // accepted user message: the reactor replays no historical domain events on
+    // subscribe, so nothing will drive this start again, and with the row gone
+    // the UI shows no turn at all. The user's message would sit in the
+    // transcript with no explanation of why it never ran. The activity is that
+    // explanation, and it is what makes this recovery rather than a delete.
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "provider.turn.start.orphaned",
+      ),
+    );
+    const orphanActivity = thread.activities.find(
+      (entry: ProviderRuntimeTestActivity) => entry.kind === "provider.turn.start.orphaned",
+    );
+    expect(orphanActivity?.tone).toBe("error");
+    // No concrete turn ever existed — the pending row never received an id.
+    expect(orphanActivity?.turnId ?? null).toBeNull();
+    const orphanPayload =
+      orphanActivity?.payload && typeof orphanActivity.payload === "object"
+        ? (orphanActivity.payload as Record<string, unknown>)
+        : undefined;
+    // The detail must tell the user the prompt never reached the provider, so
+    // re-sending is known to be safe rather than a guess.
+    expect(String(orphanPayload?.detail ?? "")).toContain("never sent");
   });
 
   it("keeps a pending turn start when the provider session is still running the thread", async () => {
@@ -4516,5 +4629,16 @@ describe("ProviderRuntimeIngestion", () => {
     await harness.reconcile();
 
     expect(await harness.readPendingTurnStart()).not.toBeNull();
+    // Nor is a live turn reported as orphaned — telling the user their prompt
+    // "was never sent" while the provider is answering it would be worse than
+    // the silence it replaces.
+    const liveThread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === asThreadId("thread-1"),
+    );
+    expect(
+      (liveThread?.activities ?? []).some(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "provider.turn.start.orphaned",
+      ),
+    ).toBe(false);
   });
 });

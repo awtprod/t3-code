@@ -29,14 +29,12 @@ import {
   ThreadTurnStartClaimInput,
 } from "../Services/OrchestrationEventStore.ts";
 
-// `SUM(...)` is non-negative by construction (each CASE contributes 0 or 1).
-// The `MIN(...)` columns are NULL when no such event exists above the cursor —
-// the aggregate always yields exactly one row, so absence shows up as NULL
-// rather than as an empty result.
+// Both counts are non-negative by construction (each CASE contributes 0 or 1)
+// and `COALESCE`d, so an empty tail yields 0 rather than NULL. The aggregate
+// always produces exactly one row, even when no events match.
 const ThreadTurnStartClaimRowSchema = Schema.Struct({
   sameMessageRestartCount: NonNegativeInt,
-  firstInterruptSequence: Schema.NullOr(NonNegativeInt),
-  firstTurnStartSequence: Schema.NullOr(NonNegativeInt),
+  interruptCount: NonNegativeInt,
 });
 
 const decodeEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
@@ -192,9 +190,8 @@ const makeEventStore = Effect.gen(function* () {
       `,
   });
 
-  // Reads, from one thread's stream above a given sequence: whether a later
-  // turn-start re-requested the same message, and the sequences of the first
-  // later interrupt and the first later turn-start of any message.
+  // Reads, from one thread's stream above a given sequence: how many later
+  // turn-starts re-requested the same message, and how many interrupts landed.
   //
   // All of it comes from the append-only event log rather than the single-slot
   // pending projection row, which a turn-start for a different message evicts.
@@ -213,12 +210,9 @@ const makeEventStore = Effect.gen(function* () {
               THEN 1 ELSE 0
             END
           ), 0) AS "sameMessageRestartCount",
-          MIN(
-            CASE WHEN event_type = 'thread.turn-interrupt-requested' THEN sequence END
-          ) AS "firstInterruptSequence",
-          MIN(
-            CASE WHEN event_type = 'thread.turn-start-requested' THEN sequence END
-          ) AS "firstTurnStartSequence"
+          COALESCE(SUM(
+            CASE WHEN event_type = 'thread.turn-interrupt-requested' THEN 1 ELSE 0 END
+          ), 0) AS "interruptCount"
         FROM orchestration_events
         WHERE aggregate_kind = 'thread'
           AND stream_id = ${request.threadId}
@@ -238,16 +232,25 @@ const makeEventStore = Effect.gen(function* () {
       ),
       Effect.map((row) => ({
         supersededBySameMessage: row.sameMessageRestartCount > 0,
-        // An interrupt cancels the turn-start it landed on, which is the most
-        // recent one at the time it was issued — the same binding the pending
-        // projection row expresses by being a single slot. So the interrupt
-        // belongs to THIS request only when no other turn-start intervened
-        // between them; if one did, the interrupt is that later request's and
-        // suppressing this one would cancel a turn the user never stopped.
-        interruptedAfter:
-          row.firstInterruptSequence !== null &&
-          (row.firstTurnStartSequence === null ||
-            row.firstInterruptSequence < row.firstTurnStartSequence),
+        // ANY interrupt above this request's sequence suppresses it. There is no
+        // attempt to bind the interrupt to the "most recent" turn-start, because
+        // the caller's position already supplies the binding this needs: the
+        // reactor asks about a request it has NOT yet sent. A stop the user
+        // issued after that request was accepted, but before its prompt reached
+        // the provider, cancels it — whatever else was queued in between.
+        //
+        // An earlier revision required no intervening turn-start (interrupt
+        // strictly before the next start), reasoning that a later start "owns"
+        // the interrupt. That is wrong for `start A → start B → interrupt`: A
+        // reported `interruptedAfter: false` and could still be driven after the
+        // user pressed stop. Ordering among queued starts does not decide whose
+        // stop it is — an undriven prompt below a stop is stopped.
+        //
+        // This does not over-suppress the turn already in flight: that one was
+        // sent before the interrupt was appended, so its claim was read (and
+        // passed) at a lower sequence and it is settled by the interrupt path,
+        // not by this guard.
+        interruptedAfter: row.interruptCount > 0,
       })),
     );
 

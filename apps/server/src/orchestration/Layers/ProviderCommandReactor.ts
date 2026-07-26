@@ -936,13 +936,33 @@ const make = Effect.gen(function* () {
     // the earlier read only saves work. The session binding is deliberately left
     // in place: a resume will use it, and a stopped session is settled by the
     // interrupt path, not here.
-    const finalTurnStartClaim = yield* readTurnStartClaim;
-    if (finalTurnStartClaim.supersededBySameMessage || finalTurnStartClaim.interruptedAfter) {
-      return;
-    }
-
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
+    //
+    // The read is sequenced INSIDE the fork, immediately upstream of `sendTurn`,
+    // rather than on the worker before forking. Reading on the worker leaves the
+    // fork's own scheduling delay between the decision and the send, and an
+    // interrupt appended in that gap is missed. Running it here shrinks the
+    // window to the read-to-adapter-write span, with nothing suspended in
+    // between. That span is not zero — closing it entirely would need a
+    // transactional claim the provider protocol has no counterpart for — but no
+    // schedulable point remains inside it.
+    //
+    // A failed read is handled as a failed turn start (`recoverTurnStartFailure`
+    // below), not as permission to send: if we cannot tell whether the user
+    // stopped this turn, sending it anyway is the one outcome that cannot be
+    // taken back.
+    yield* readTurnStartClaim
+      .pipe(
+        Effect.flatMap((finalTurnStartClaim) =>
+          finalTurnStartClaim.supersededBySameMessage || finalTurnStartClaim.interruptedAfter
+            ? Effect.logDebug("provider-command-reactor.turn-start.superseded-before-send", {
+                threadId: event.payload.threadId,
+                messageId: event.payload.messageId,
+                supersededBySameMessage: finalTurnStartClaim.supersededBySameMessage,
+                interruptedAfter: finalTurnStartClaim.interruptedAfter,
+              })
+            : providerService.sendTurn(sendTurnRequest.value),
+        ),
+      )
       .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
   });
 

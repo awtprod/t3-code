@@ -36,9 +36,16 @@ export const ThreadTurnStartClaim = Schema.Struct({
    */
   supersededBySameMessage: Schema.Boolean,
   /**
-   * True when a `thread.turn-interrupt-requested` landed on this thread after the
-   * request being judged. The user stopped the thread while this reactor lagged,
-   * so the prompt must not be sent even though no pending row records it anymore.
+   * True when ANY `thread.turn-interrupt-requested` landed on this thread after
+   * the request being judged. The user stopped the thread while this reactor
+   * lagged, so the prompt must not be sent even though no pending row records it
+   * anymore.
+   *
+   * Deliberately not narrowed to "the interrupt that belongs to this request":
+   * the caller asks about a request it has not yet driven, and a stop issued
+   * above an undriven request cancels it regardless of what else was queued in
+   * between. Binding by ordering instead lets `start A → start B → interrupt`
+   * send A after the user pressed stop.
    */
   interruptedAfter: Schema.Boolean,
 });

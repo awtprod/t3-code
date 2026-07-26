@@ -72,6 +72,21 @@ const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFEC
 // turn interrupted with an "auto-resume exhausted" activity.
 const AUTO_RESUME_MAX_ATTEMPTS = 2;
 
+// Activity kinds that record the provider having executed tool work — running a
+// command, changing a file, calling an MCP or dynamic tool. Their presence on a
+// turn is this process's durable proof that side effects may already have
+// landed, which disqualifies that turn from automatic re-issue.
+//
+// These are exactly the kinds `runtimeEventToActivities` emits for the
+// `item.started` / `item.updated` / `item.completed` events whose itemType
+// passes `isToolLifecycleItemType`. Adding a tool-executing activity kind there
+// without adding it here would silently re-open the duplicate-execution hole.
+const TOOL_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
+  "tool.started",
+  "tool.updated",
+  "tool.completed",
+]);
+
 type TurnStartRequestedDomainEvent = Extract<
   OrchestrationEvent,
   { type: "thread.turn-start-requested" }
@@ -1720,29 +1735,46 @@ const make = Effect.gen(function* () {
         // auto-resumed: reissuing the prompt could duplicate work or side effects
         // the provider is telling us are unsafe to retry. Absent/true ⇒ eligible.
         //
-        // This gate is what bounds the duplicate-side-effect risk, so it is worth
-        // stating precisely what auto-resume does and does not guarantee.
+        // This gate is one of two that bound the duplicate-side-effect risk, so
+        // it is worth stating precisely what auto-resume does and does not
+        // guarantee.
         //
         // Re-issuing the user's message is NOT idempotent by itself: if a tool
         // call (a command, an API write) completed before the subprocess died,
-        // nothing in the resume cursor or the activity log prevents the provider
-        // from running it again. What makes a resume safe is the provider seeing
-        // its own prior transcript — `ProviderService.startSession` threads the
-        // persisted `resumeCursor` back in, so a resumed session knows which
-        // tools it already ran and continues rather than restarting.
+        // nothing in the resume cursor prevents the provider from running it
+        // again. The resume cursor restores CONVERSATIONAL context — the
+        // provider sees its own prior transcript and generally continues rather
+        // than restarting — but it is a best-effort behavioral property of the
+        // model, not an execution guarantee, and it is not a durable record that
+        // a given command already ran. A resume must not be justified by it
+        // alone.
         //
-        // That holds only for adapters that implement resume. Verified against
-        // the adapters in this repo: Claude, Codex, Cursor and Grok all accept a
-        // `resumeCursor` on startSession; OpenCode does not implement one. The
-        // reason OpenCode is nonetheless safe today is this gate — both of its
-        // `session.exited` emissions declare `recoverable: false`, so it is never
-        // auto-resumed and never re-runs a completed tool cold.
+        // So the durable record is consulted directly. `hasCommittedSideEffects`
+        // below reads the projected activity log for tool lifecycle work already
+        // attributed to the crashed turn. Those rows are written as the provider
+        // reports each item, before the crash, and they survive it — they are
+        // the only evidence this process has about what actually executed. When
+        // any exists, auto-resume is refused and the turn is surfaced for the
+        // user to decide, because a machine cannot tell a re-runnable `ls` from
+        // a non-re-runnable deploy and must not guess with the user's side
+        // effects.
         //
-        // That coupling is load-bearing but implicit, so treat it as a contract:
-        // an adapter without resume-cursor support MUST declare its exits
-        // non-recoverable. An adapter that gains a recoverable exit path must
-        // gain a resume cursor in the same change, or it will re-execute
-        // completed tool work from a cold session.
+        // The two gates cover different halves: `declaredNonRecoverable` is the
+        // provider's own claim that retrying is unsafe; `hasCommittedSideEffects`
+        // is our observation that work already landed. Neither subsumes the
+        // other — a provider can crash recoverably having already run a
+        // migration.
+        //
+        // The resume-cursor coupling remains load-bearing for the case that
+        // survives both gates (a crash with no committed tool work, where the
+        // provider should pick up its own transcript). Verified against the
+        // adapters in this repo: Claude, Codex, Cursor and Grok all accept a
+        // `resumeCursor` on startSession; OpenCode does not implement one, and
+        // is safe today because both its `session.exited` emissions declare
+        // `recoverable: false`. Treat that as a contract: an adapter without
+        // resume-cursor support MUST declare its exits non-recoverable, and one
+        // that gains a recoverable exit path must gain a resume cursor in the
+        // same change.
         const declaredNonRecoverable = event.payload.recoverable === false;
         const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
         const archived = thread.archivedAt !== null;
@@ -1777,13 +1809,85 @@ const make = Effect.gen(function* () {
         // whose pending row is necessarily for a different message than the
         // started, interrupted turn. The resume targets the newest user message
         // (that orphan), so it re-issues B, not the interrupted A.
-        const baseEligible =
+        // The durable side-effect record for the crashed turn. Every tool
+        // lifecycle item the provider reported was projected into an activity
+        // row tagged with this turn's id (`tool.started` / `tool.updated` /
+        // `tool.completed`, from `runtimeEventToActivities`) as it happened, so
+        // a crash cannot erase it.
+        //
+        // `tool.started` counts, not just `tool.completed`. A subprocess that
+        // dies mid-command leaves a started row and no completion, and that is
+        // precisely the case where the command's effect is UNKNOWN — it may have
+        // written, partially written, or not run at all. Unknown is not a reason
+        // to re-run it; it is the strongest reason not to.
+        //
+        // Read from the loaded thread detail rather than a fresh query, so this
+        // shares the single detail load the resume path already performs.
+        // Read failure is non-fatal but is NOT treated as "no side effects": a
+        // detail we could not load tells us nothing, and the safe reading of
+        // nothing is that work may have landed.
+        const threadDetailForSideEffects = yield* getLoadedThreadDetail().pipe(
+          Effect.orElseSucceed(() => null),
+        );
+        const hasCommittedSideEffects =
+          activeTurnId === null
+            ? false
+            : threadDetailForSideEffects === null
+              ? true
+              : threadDetailForSideEffects.activities.some(
+                  (activity) =>
+                    activity.turnId !== null &&
+                    sameId(activity.turnId, activeTurnId) &&
+                    TOOL_ACTIVITY_KINDS.has(activity.kind),
+                );
+        // Split out so the side-effect refusal can be reported. A crash that
+        // would otherwise have been auto-resumed, and is held back only because
+        // work already landed, is exactly the case the user needs told: the
+        // turn stops here and only they can decide whether re-running is safe.
+        // Silently declining would reproduce the defect this PR fixes
+        // elsewhere — a turn that just stops with no explanation.
+        const eligibleIgnoringSideEffects =
           activeTurnId !== null &&
           !gracefulExit &&
           !declaredNonRecoverable &&
           !parkedOnHuman &&
           !archived &&
           (!userInterruptedActiveTurn || hasOrphanedPendingTurnStart);
+        const baseEligible = eligibleIgnoringSideEffects && !hasCommittedSideEffects;
+
+        if (eligibleIgnoringSideEffects && hasCommittedSideEffects) {
+          const blockedActivityId = yield* crypto.randomUUIDv4.pipe(
+            Effect.map((uuid) => EventId.make(`auto-resume-side-effects:${event.eventId}:${uuid}`)),
+          );
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* providerCommandId(event, "auto-resume-side-effects-activity"),
+            threadId: thread.id,
+            activity: {
+              id: blockedActivityId,
+              tone: "error",
+              kind: "provider.turn.auto-resume-blocked",
+              summary: "Not auto-resumed: this turn had already run tool work",
+              payload: {
+                detail:
+                  `The provider session exited mid-turn, but the turn had already ` +
+                  `started running tools, so re-issuing it could repeat work that ` +
+                  `already took effect. Review what ran above, then re-send the ` +
+                  `message yourself if it is safe to repeat.`,
+                exitReason: event.payload.reason ?? "provider session exited",
+                // Distinguishes "we saw tool rows" from "we could not read the
+                // transcript and refused on that basis" when reading a report.
+                detectedFrom:
+                  threadDetailForSideEffects === null
+                    ? "thread-detail-unavailable"
+                    : "tool-activity",
+              },
+              turnId: activeTurnId,
+              createdAt: now,
+            },
+            createdAt: now,
+          });
+        }
         // Always auto-resume an eligible crash, even when a turn-start is still
         // pending for this thread. A pending row alone cannot prove another
         // worker will drive the turn: the reactor may already have consumed the
@@ -2192,16 +2296,69 @@ const make = Effect.gen(function* () {
         { concurrency: 1 },
       ).pipe(Effect.map((threads) => threads.filter((thread) => thread !== null)));
 
-      // Clear the stranded placeholders so the thread stops presenting as
-      // pending. The session-set dispatched below cannot do this: the pending row
-      // carries no turn id, so the turns projector's settle path (which only
-      // touches rows with a concrete turnId) leaves it untouched.
+      if (orphanedThreads.length === 0 && pendingOnlyOrphans.length === 0) {
+        return;
+      }
+
+      const reconciledAt = DateTime.formatIso(yield* DateTime.now);
+
+      // Report each stranded placeholder in the transcript, THEN clear it. The
+      // session-set dispatched below cannot clear it — the pending row carries
+      // no turn id, so the turns projector's settle path (which only touches
+      // rows with a concrete turnId) leaves it untouched.
+      //
+      // The order is the point. Clearing alone makes an accepted user message
+      // disappear: the reactor does not replay historical domain events when it
+      // subscribes, so nothing will ever drive this start again, and with the
+      // row gone the UI shows no turn at all — not a failed one, not a pending
+      // one. The user's message stays in the transcript (`thread.message-sent`
+      // was appended when it was accepted) with no visible reason why it never
+      // ran. The activity below is that reason, and it is appended FIRST so a
+      // dispatch failure leaves the row in place rather than clearing it
+      // silently — a stuck pending row is recoverable on the next boot; a
+      // vanished one is not.
+      //
+      // The turn is reported, not re-issued. Reconciliation runs on every boot
+      // with no durable attempt budget across restarts, so auto-driving here
+      // would re-send on each boot for as long as the provider keeps dying
+      // before its first turn — the crash loop that `AUTO_RESUME_MAX_ATTEMPTS`
+      // bounds in-process but cannot bound across them. Surfacing the outcome
+      // puts the retry back in the user's hands, one click away, with no loop.
       yield* Effect.forEach(
         pendingOnlyOrphans,
         (thread) =>
-          projectionTurnRepository.deletePendingTurnStartByThreadId({ threadId: thread.id }).pipe(
+          Effect.gen(function* () {
+            const commandUuid = yield* crypto.randomUUIDv4;
+            const activityId = EventId.make(`reconcile-pending-orphan:${thread.id}:${commandUuid}`);
+            yield* orchestrationEngine.dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make(
+                `server:reconcile-pending-orphan-activity:${thread.id}:${commandUuid}`,
+              ),
+              threadId: thread.id,
+              activity: {
+                id: activityId,
+                tone: "error",
+                kind: "provider.turn.start.orphaned",
+                summary: "Turn never started; the provider session ended first",
+                payload: {
+                  detail:
+                    `This turn was accepted but the provider session ended before it ` +
+                    `started running, so it was never sent. Nothing from it reached the ` +
+                    `provider. Re-send the message to try again.`,
+                },
+                // No concrete turn exists — the pending row never got an id.
+                turnId: null,
+                createdAt: reconciledAt,
+              },
+              createdAt: reconciledAt,
+            });
+            yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
+              threadId: thread.id,
+            });
+          }).pipe(
             Effect.catchCause((cause) =>
-              Effect.logWarning("failed to clear orphaned pending turn start", {
+              Effect.logWarning("failed to report and clear orphaned pending turn start", {
                 threadId: thread.id,
                 cause: Cause.pretty(cause),
               }),
@@ -2210,11 +2367,6 @@ const make = Effect.gen(function* () {
         { concurrency: 1 },
       );
 
-      if (orphanedThreads.length === 0 && pendingOnlyOrphans.length === 0) {
-        return;
-      }
-
-      const reconciledAt = DateTime.formatIso(yield* DateTime.now);
       yield* Effect.forEach(
         orphanedThreads,
         (thread) =>

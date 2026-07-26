@@ -2328,19 +2328,27 @@ describe("ProviderCommandReactor", () => {
     expect(inputs).toContain("message b");
   });
 
-  it("skips a turn-start-requested whose pending row the user interrupted", async () => {
+  it("skips every undriven turn-start below an interrupt, and drives one issued above it", async () => {
     const harness = await createHarness();
     const blockerCreatedAt = "2026-01-01T00:00:00.000Z";
     const pendingCreatedAt = "2026-01-01T00:00:01.000Z";
     const interruptCreatedAt = "2026-01-01T00:00:02.000Z";
-    const sentinelCreatedAt = "2026-01-01T00:00:03.000Z";
+    const afterStopCreatedAt = "2026-01-01T00:00:03.000Z";
+    const sentinelCreatedAt = "2026-01-01T00:00:04.000Z";
 
-    // Park the worker on a blocker turn's session start so a user interrupt
-    // marks the queued message's pending turn-start row BEFORE the worker
-    // reaches that turn-start-requested. This reproduces the race the guard
-    // targets: the user stops the thread while the reactor is still lagging
-    // behind the queued start, so the interrupt only flags the pending row
-    // (without bumping its sequence) rather than a running turn.
+    // Park the worker on a blocker turn's session start so the user's stop lands
+    // BEFORE the worker reaches the queued turn-start-requested events behind it.
+    // This reproduces the race the guard targets: the user stops the thread while
+    // the reactor is still lagging behind queued starts that were accepted but
+    // never driven.
+    //
+    // TWO queued starts precede the interrupt, which is the case an earlier
+    // revision got wrong. That version bound the interrupt to the most recent
+    // turn-start below it, so with `start A → start B → interrupt` only B was
+    // suppressed and A was still sent to the provider after the user pressed
+    // stop. Both must be skipped. The start issued ABOVE the interrupt is the
+    // control in the other direction: suppression must not leak past the stop
+    // and swallow work the user requested afterwards.
     let releaseWorker: () => void = () => {};
     const workerGate = new Promise<void>((resolve) => {
       releaseWorker = resolve;
@@ -2391,13 +2399,13 @@ describe("ProviderCommandReactor", () => {
     });
     await waitFor(() => harness.startSession.mock.calls.length === 1);
 
-    // Queue a second message, then interrupt the thread before the parked worker
-    // can drive it. The interrupt (id-less: no active turn yet) marks the
-    // still-pending turn-start row for this message `pendingInterruptRequested`
-    // without bumping its request sequence.
+    // Queue TWO more messages, then interrupt the thread before the parked
+    // worker can drive either. The interrupt is id-less (no active turn yet), so
+    // it flags the single pending row without bumping any request's sequence —
+    // only the event log records that it landed above both.
     await harness.dispatch({
       type: "thread.turn.start",
-      commandId: CommandId.make("cmd-turn-interrupted"),
+      commandId: CommandId.make("cmd-turn-interrupted-a"),
       threadId: ThreadId.make("thread-1"),
       message: {
         messageId: asMessageId("user-message-1"),
@@ -2410,13 +2418,42 @@ describe("ProviderCommandReactor", () => {
       createdAt: pendingCreatedAt,
     });
     await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-interrupted-b"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-2"),
+        role: "user",
+        text: "interrupt me too",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: pendingCreatedAt,
+    });
+    await harness.dispatch({
       type: "thread.turn.interrupt",
       commandId: CommandId.make("cmd-turn-interrupt"),
       threadId: ThreadId.make("thread-1"),
       createdAt: interruptCreatedAt,
     });
-    // Sentinel proves the interrupted turn-start ahead of it in the FIFO queue
-    // has been processed by the time this drives.
+    // Issued AFTER the stop: the user asked for this one, so it must drive.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-after-stop"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-3"),
+        role: "user",
+        text: "after the stop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: afterStopCreatedAt,
+    });
+    // Sentinel proves the interrupted turn-starts ahead of it in the FIFO queue
+    // have been processed by the time this drives.
     await harness.dispatch({
       type: "thread.turn.start",
       commandId: CommandId.make("cmd-turn-sentinel"),
@@ -2439,13 +2476,24 @@ describe("ProviderCommandReactor", () => {
       ),
     );
 
-    const interruptedDrives = harness.sendTurn.mock.calls.filter(
-      (call) => (call[0] as { input?: string }).input === "interrupt me",
+    const drivenInputs = harness.sendTurn.mock.calls.map(
+      (call) => (call[0] as { input?: string }).input,
     );
-    // The interrupted pending start is skipped: it never reaches sendTurn. Total
-    // = blocker + sentinel = 2; without the interrupt guard the stopped message
-    // would also drive, giving 3.
-    expect(interruptedDrives.length).toBe(0);
+    // Every start below the stop is skipped, including the OLDEST — which a
+    // most-recent-start-owns-the-interrupt rule would have let through. The
+    // blocker counts too: parked inside `startSession`, its prompt had not
+    // reached the provider when the user stopped the thread, so it is undriven
+    // in exactly the sense that matters here. Nothing below the stop was sent,
+    // so nothing below the stop survives it.
+    expect(drivenInputs).not.toContain("blocker turn");
+    expect(drivenInputs).not.toContain("interrupt me");
+    expect(drivenInputs).not.toContain("interrupt me too");
+    // The start issued above the stop, on the SAME thread, is untouched — so
+    // suppression is bounded by the interrupt's sequence rather than poisoning
+    // the thread. This is the control against over-suppression.
+    expect(drivenInputs).toContain("after the stop");
+    // Total = after-the-stop + sentinel = 2; without the guard the three starts
+    // below the stop would also drive, giving 5.
     expect(harness.sendTurn.mock.calls.length).toBe(2);
   });
 
