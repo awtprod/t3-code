@@ -3359,6 +3359,15 @@ describe("ProviderRuntimeIngestion", () => {
     // nothing outside this process was touched and re-issuing is safe. A gate
     // that also caught this case would silently disable auto-resume for the
     // most common crash there is.
+    //
+    // This establishes only the non-tool side of the boundary, and only for the
+    // turn the resume would re-run. Where the boundary falls among tool items —
+    // including ones that look read-only — is pinned by the test below. Which
+    // turn the gate is scoped to is pinned separately, in both directions:
+    // "resumes an unstarted pending steer even though the older turn ran tools"
+    // (different message ⇒ bypass) and "refuses a second resume once the
+    // retried turn has run tools" (same message ⇒ no bypass). No single one of
+    // these would catch the line moving.
     harness.emit({
       type: "item.completed",
       eventId: asEventId("evt-assistant-before-crash"),
@@ -3381,6 +3390,150 @@ describe("ProviderRuntimeIngestion", () => {
     expect(
       harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
     ).toHaveLength(2);
+  });
+
+  it("refuses to auto-resume a turn whose only tool work looks read-only", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // `web_search` is in TOOL_LIFECYCLE_ITEM_TYPES, so it produces a `tool.*`
+    // activity and trips the gate exactly like a command execution would. That
+    // is deliberate and worth pinning: the gate is keyed on the ACTIVITY KIND,
+    // not on a per-item-type judgement about whether the tool mutates anything.
+    //
+    // Splitting the set into "safe" and "unsafe" tool types is the tempting
+    // refinement and the wrong one. This process sees a type name, not what the
+    // call did — an `mcp_tool_call` to a search server and one to a deploy
+    // server are the same type, and a crashed `web_search` may have been a
+    // billed, rate-limited, or side-effecting request against someone's API. A
+    // machine cannot tell, so it refuses and lets the user decide.
+    //
+    // Without this case the suite would only ever show the gate reacting to an
+    // obviously-mutating `command_execution`, leaving a reader to assume the
+    // read-only-looking types are exempt.
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-readonly-tool-before-crash"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      payload: {
+        itemType: "web_search",
+        status: "completed",
+        title: "Search the docs",
+        detail: "effect sqlite pragma",
+      },
+    });
+    await harness.drain();
+    await crashSession(harness, "crash-after-readonly-tool");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    // Only the original start — no re-issue.
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
+    ).toHaveLength(1);
+
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.turnId).toBe("turn-a");
+    const blockedPayload =
+      blocked[0]?.payload && typeof blocked[0].payload === "object"
+        ? (blocked[0].payload as Record<string, unknown>)
+        : undefined;
+    expect(blockedPayload?.detectedFrom).toBe("tool-activity");
+  });
+
+  it("does not auto-resume a turn that had already run a hook", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // A hook is a shell command the user configured to run around a turn — it
+    // is not an `item.*` tool call, so nothing in the tool-lifecycle path sees
+    // it, yet it can do everything a command can (write files, push, deploy).
+    // A turn that got as far as running one is exactly as unsafe to re-issue as
+    // one that ran a tool.
+    harness.emit({
+      type: "hook.started",
+      eventId: asEventId("evt-hook-started"),
+      provider: ProviderDriverKind.make("claude"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      payload: {
+        hookId: "hook-1",
+        hookName: "pre-commit",
+        hookEvent: "PreToolUse",
+      },
+    });
+    await harness.drain();
+    await crashSession(harness, "crash-after-hook");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
+    ).toHaveLength(1);
+
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.turnId).toBe("turn-a");
+    const blockedPayload =
+      blocked[0]?.payload && typeof blocked[0].payload === "object"
+        ? (blocked[0].payload as Record<string, unknown>)
+        : undefined;
+    // Named for what actually ran. Reporting "tool work" here would send the
+    // reader hunting the transcript for a tool call that does not exist.
+    expect(blockedPayload?.detectedFrom).toBe("hook-activity");
+    expect(String(blocked[0]?.summary ?? "")).toContain("hook");
+  });
+
+  it("records hook lifecycle as thread activity", async () => {
+    // The gate above can only see hooks because they now produce activity rows
+    // at all. This asserts the row itself — including the turnId binding the
+    // gate matches on, which is the part that silently makes the gate a no-op
+    // if an adapter ever stops stamping it.
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    harness.emit({
+      type: "hook.started",
+      eventId: asEventId("evt-hook-activity-started"),
+      provider: ProviderDriverKind.make("claude"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      payload: { hookId: "hook-1", hookName: "pre-commit", hookEvent: "PreToolUse" },
+    });
+    harness.emit({
+      type: "hook.completed",
+      eventId: asEventId("evt-hook-activity-completed"),
+      provider: ProviderDriverKind.make("claude"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      payload: { hookId: "hook-1", outcome: "error", exitCode: 2, output: "hook blew up" },
+    });
+    await harness.drain();
+
+    const thread = await readThread(harness);
+    const started = thread.activities.find((activity) => activity.kind === "hook.started");
+    expect(started?.turnId).toBe("turn-a");
+    expect(started?.tone).toBe("tool");
+    expect(String(started?.summary ?? "")).toContain("pre-commit");
+
+    const completed = thread.activities.find((activity) => activity.kind === "hook.completed");
+    expect(completed?.turnId).toBe("turn-a");
+    // A failing hook is an error the user should see, not neutral tool chatter.
+    expect(completed?.tone).toBe("error");
+    const completedPayload =
+      completed?.payload && typeof completed.payload === "object"
+        ? (completed.payload as Record<string, unknown>)
+        : undefined;
+    expect(completedPayload?.outcome).toBe("error");
+    expect(completedPayload?.exitCode).toBe(2);
+    expect(completedPayload?.detail).toBe("hook blew up");
   });
 
   it("does not auto-resume on a graceful session exit", async () => {
@@ -3650,6 +3803,60 @@ describe("ProviderRuntimeIngestion", () => {
     expect(exhaustedActivities(thread)).toHaveLength(0);
     // No duplicate user message: the resume re-issues the existing msg-2.
     expect(userMessages(thread)).toHaveLength(2);
+  });
+
+  it("resumes an unstarted pending steer even though the older turn ran tools", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // turn-a executed a command, so re-issuing MSG-1 would be unsafe.
+    await runToolItem(harness, "turn-a");
+    // But the user then steered with msg-2, whose pending turn-start row was
+    // never consumed by a turn.started — no turn for msg-2 ever ran, so nothing
+    // could have executed on its behalf. Scoping the side-effect gate to the
+    // still-active turn-a would refuse the resume and strand msg-2 forever: the
+    // user's newest message would silently never be answered.
+    await seedUserMessage(harness, "msg-2");
+    await crashSession(harness, "steer-crash-after-tools");
+
+    const thread = await readThread(harness);
+    expect(resumeBlockedActivities(thread)).toHaveLength(0);
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+    // And it must re-issue msg-2, not the tool-running msg-1.
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-2"),
+    ).toHaveLength(2);
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
+    ).toHaveLength(1);
+  });
+
+  it("refuses a second resume once the retried turn has run tools", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    // First crash with no tool work: resumed, as ever.
+    await crashSession(harness, "crash-one");
+    expect(autoResumedActivities(await readThread(harness))).toHaveLength(1);
+
+    // The retried session starts its turn (consuming the resume's pending row)
+    // and this time gets as far as running a command before dying. The budget
+    // still has an attempt left, so only the side-effect gate stands between the
+    // user and a duplicate execution — and it has to survive a resume having
+    // already happened, which is the state the steer bypass above operates in.
+    await startTurn(harness, "turn-b");
+    await runToolItem(harness, "turn-b");
+    await crashSession(harness, "crash-two");
+
+    const thread = await readThread(harness);
+    // Still only the first resume; the second crash was refused and explained.
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.turnId).toBe("turn-b");
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
+    ).toHaveLength(2);
   });
 
   it("carries the interrupted turn's model selection (from the session binding) into the resume", async () => {
@@ -4345,6 +4552,16 @@ describe("ProviderRuntimeIngestion", () => {
     // restarted runtime REUSES the same providerInstanceId (the instance id is a
     // routing key, not a per-start identity), so only the per-runtime
     // sessionGeneration nonce distinguishes it from its predecessor.
+    //
+    // Scope note: gen-2 is emitted directly here rather than produced by a real
+    // restart, so this and the generation tests below assert the COMPARISON only
+    // — given a correctly bound generation, which events are dropped. They say
+    // nothing about whether the binding carries the right generation in the
+    // first place, and a broken handoff would leave every one of them green.
+    // That half is asserted against the production path in
+    // ProviderCommandReactor.test.ts, "binds the replacement runtime's own
+    // session generation when restarting", which drives an actual runtime-mode
+    // restart and reads the nonce back off the projection.
     harness.emit({
       type: "turn.started",
       eventId: asEventId("evt-turn-started-gen2"),
@@ -4604,9 +4821,16 @@ describe("ProviderRuntimeIngestion", () => {
       orphanActivity?.payload && typeof orphanActivity.payload === "object"
         ? (orphanActivity.payload as Record<string, unknown>)
         : undefined;
-    // The detail must tell the user the prompt never reached the provider, so
-    // re-sending is known to be safe rather than a guess.
-    expect(String(orphanPayload?.detail ?? "")).toContain("never sent");
+    // The detail must NOT claim the prompt never reached the provider. The
+    // placeholder is cleared by `turn.started` being PROJECTED, not by
+    // `sendTurn` returning, so a surviving row proves only that no start was
+    // reported back — the provider may well have received the turn and begun
+    // work before dying. Advising a re-send on that false certainty is how this
+    // recovery would itself become a duplicate-execution bug.
+    const orphanDetail = String(orphanPayload?.detail ?? "");
+    expect(orphanDetail).toContain("not known whether the provider");
+    expect(orphanDetail).not.toContain("never sent");
+    expect(orphanDetail).not.toContain("Nothing from it reached the provider");
   });
 
   it("keeps a pending turn start when the provider session is still running the thread", async () => {

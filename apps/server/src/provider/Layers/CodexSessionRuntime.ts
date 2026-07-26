@@ -1028,6 +1028,11 @@ export const makeCodexSessionRuntime = (
       ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
       status: "connecting",
       runtimeMode: options.runtimeMode,
+      // Carried on the session, not just on the events, so whoever binds this
+      // session to a thread binds the same generation the events will be
+      // stamped with. Without it the ingestion guard has nothing to compare and
+      // a superseded runtime's exit is indistinguishable from the live one's.
+      sessionGeneration,
       cwd: options.cwd,
       ...(options.model ? { model: options.model } : {}),
       threadId: options.threadId,

@@ -1013,7 +1013,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, _attachmentSideEffects) {
       switch (event.type) {
         case "thread.turn-start-requested": {
-          yield* projectionTurnRepository.replacePendingTurnStart({
+          // Appended, not replaced. Each turn-start-requested gets its own
+          // placeholder keyed by this event's sequence, so a message queued
+          // behind an already-sent turn keeps its own row instead of evicting
+          // (and being evicted by) its neighbours.
+          yield* projectionTurnRepository.appendPendingTurnStart({
             threadId: event.payload.threadId,
             messageId: event.payload.messageId,
             sourceProposedPlanThreadId: event.payload.sourceProposedPlan?.threadId ?? null,
@@ -1159,9 +1163,19 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             });
           }
 
-          yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
-            threadId: event.payload.threadId,
-          });
+          // Consume only the placeholder this turn actually corresponds to —
+          // the oldest one, which is what `getPendingTurnStartByThreadId`
+          // returned above and whose metadata was just copied onto the turn.
+          // Clearing the whole thread here would silently discard messages the
+          // user queued behind this turn, leaving no row for the provider's
+          // next `turn.started` to adopt and nothing for reconciliation to
+          // report if the session dies first.
+          if (Option.isSome(pendingTurnStart)) {
+            yield* projectionTurnRepository.deletePendingTurnStart({
+              threadId: event.payload.threadId,
+              requestSequence: pendingTurnStart.value.requestSequence,
+            });
+          }
           return;
         }
 

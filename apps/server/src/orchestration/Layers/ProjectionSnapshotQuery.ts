@@ -1147,18 +1147,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               for (const row of sessionRows) {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                sessionsByThread.set(row.threadId, {
-                  threadId: row.threadId,
-                  status: row.status,
-                  providerName: row.providerName,
-                  ...(row.providerInstanceId !== null
-                    ? { providerInstanceId: row.providerInstanceId }
-                    : {}),
-                  runtimeMode: row.runtimeMode,
-                  activeTurnId: row.activeTurnId,
-                  lastError: row.lastError,
-                  updatedAt: row.updatedAt,
-                });
+                // Built via the shared mapper rather than inline. This site had
+                // hand-rolled its own copy and silently omitted
+                // `sessionGeneration`, so full snapshots downgraded every
+                // consumer on this path to instance-id-only correlation — which
+                // cannot tell a restarted runtime from its predecessor, because
+                // the instance id is a routing key, not a per-start identity.
+                // One mapper means the next column added to the row cannot go
+                // missing on one path and not the others.
+                sessionsByThread.set(row.threadId, mapSessionRow(row));
               }
 
               const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(

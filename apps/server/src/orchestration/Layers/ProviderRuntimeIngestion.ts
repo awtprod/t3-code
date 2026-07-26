@@ -34,7 +34,10 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
-import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import {
+  ProjectionTurnRepository,
+  type ProjectionPendingTurnStart,
+} from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -72,19 +75,25 @@ const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFEC
 // turn interrupted with an "auto-resume exhausted" activity.
 const AUTO_RESUME_MAX_ATTEMPTS = 2;
 
-// Activity kinds that record the provider having executed tool work — running a
-// command, changing a file, calling an MCP or dynamic tool. Their presence on a
-// turn is this process's durable proof that side effects may already have
-// landed, which disqualifies that turn from automatic re-issue.
+// Activity kinds that record the provider having executed work outside its own
+// head — running a command, changing a file, calling an MCP or dynamic tool, or
+// running a configured hook. Their presence on a turn is this process's durable
+// proof that side effects may already have landed, which disqualifies that turn
+// from automatic re-issue.
 //
-// These are exactly the kinds `runtimeEventToActivities` emits for the
+// The tool.* kinds are exactly what `runtimeEventToActivities` emits for the
 // `item.started` / `item.updated` / `item.completed` events whose itemType
-// passes `isToolLifecycleItemType`. Adding a tool-executing activity kind there
-// without adding it here would silently re-open the duplicate-execution hole.
-const TOOL_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
+// passes `isToolLifecycleItemType`. The hook.* kinds are what it emits for
+// `hook.started` / `hook.completed`; hooks are user-configured shell commands,
+// so they are side-effecting by construction regardless of what the turn's
+// tools did. Adding a kind there that executes anything without adding it here
+// would silently re-open the duplicate-execution hole.
+const SIDE_EFFECT_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
   "tool.started",
   "tool.updated",
   "tool.completed",
+  "hook.started",
+  "hook.completed",
 ]);
 
 type TurnStartRequestedDomainEvent = Extract<
@@ -644,6 +653,54 @@ function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    // Hooks are provider-configured shell commands that run around a turn
+    // (Claude maps `hook_started`/`hook_progress`/`hook_response` here). They
+    // execute on the user's machine and can do anything a command can, so they
+    // are side-effecting work in exactly the sense the auto-resume gate cares
+    // about — but they are NOT `item.*` events and so produced no activity at
+    // all until now. That made them invisible twice over: absent from the
+    // transcript, and absent from the durable record the resume gate reads,
+    // meaning a crash right after a side-effecting hook still looked safe to
+    // re-issue.
+    case "hook.started": {
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "tool",
+          kind: "hook.started",
+          summary: `Hook ${event.payload.hookName} started`,
+          payload: {
+            hookId: event.payload.hookId,
+            hookName: event.payload.hookName,
+            hookEvent: event.payload.hookEvent,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "hook.completed": {
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: event.payload.outcome === "error" ? "error" : "tool",
+          kind: "hook.completed",
+          summary: `Hook finished (${event.payload.outcome})`,
+          payload: {
+            hookId: event.payload.hookId,
+            outcome: event.payload.outcome,
+            ...(event.payload.exitCode !== undefined ? { exitCode: event.payload.exitCode } : {}),
+            ...(event.payload.output ? { detail: truncateDetail(event.payload.output) } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1785,9 +1842,16 @@ const make = Effect.gen(function* () {
         // A and then sends message B, B's turn-start-requested writes a fresh
         // pending row that the crash orphans before it can start. A plain
         // interrupt (no queued message) leaves no pending row.
-        const orphanedPendingTurnStart = yield* projectionTurnRepository
-          .getPendingTurnStartByThreadId({ threadId: thread.id })
-          .pipe(Effect.orElseSucceed(() => Option.none()));
+        //
+        // Reads the whole queue, not its head: with several messages queued,
+        // the head is the OLDEST, and it is the existence of any live queued
+        // message that matters here. Testing only the head would call a thread
+        // ineligible because its oldest queued message was interrupted, even
+        // though a newer, uninterrupted one — the one a resume would actually
+        // target — is still waiting.
+        const orphanedPendingTurnStarts = yield* projectionTurnRepository
+          .listPendingTurnStartsByThreadId({ threadId: thread.id })
+          .pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<ProjectionPendingTurnStart>));
         // The orphan overrides the interrupt suppression only when it is a
         // genuinely live queued message. If the user also interrupted this
         // pending start (its row carries `pendingInterruptRequested`, set by
@@ -1796,9 +1860,9 @@ const make = Effect.gen(function* () {
         // canceled. An interrupted orphan therefore must NOT re-enable
         // eligibility; this mirrors ProjectionPipeline's `bornInterrupted`,
         // which births such a turn `interrupted` rather than `running`.
-        const hasOrphanedPendingTurnStart =
-          Option.isSome(orphanedPendingTurnStart) &&
-          !orphanedPendingTurnStart.value.pendingInterruptRequested;
+        const hasOrphanedPendingTurnStart = orphanedPendingTurnStarts.some(
+          (pending) => !pending.pendingInterruptRequested,
+        );
         // `userInterruptedActiveTurn` is the early projection snapshot, taken
         // before this event's own session-set settled the running turn (see its
         // definition). A user who deliberately interrupted the
@@ -1829,17 +1893,62 @@ const make = Effect.gen(function* () {
         const threadDetailForSideEffects = yield* getLoadedThreadDetail().pipe(
           Effect.orElseSucceed(() => null),
         );
-        const hasCommittedSideEffects =
+        // The message a resume would actually re-issue: the newest user message,
+        // which is NOT necessarily the one the crashed active turn was running.
+        // Computed before the side-effect gate because the gate has to be scoped
+        // to the turn that would be re-run, and that turn is decided here.
+        const resumeTargetMessageId = threadDetailForSideEffects
+          ? (threadDetailForSideEffects.messages
+              .toReversed()
+              .find((message) => message.role === "user")?.id ?? null)
+          : null;
+        // The active turn's originating user message. `pendingMessageId` is
+        // copied onto the concrete turn row when `turn.started` consumes the
+        // pending start, so it survives as that turn's identity here.
+        const activeTurnRowForScope =
           activeTurnId === null
+            ? Option.none()
+            : yield* projectionTurnRepository
+                .getByTurnId({ threadId: thread.id, turnId: activeTurnId })
+                .pipe(Effect.orElseSucceed(() => Option.none()));
+        const activeTurnMessageId = Option.isSome(activeTurnRowForScope)
+          ? activeTurnRowForScope.value.pendingMessageId
+          : null;
+        // A resume aimed at a still-pending steer re-issues a message the
+        // provider was never sent: its pending row (turn_id NULL) is proof that
+        // no turn for it ever started, so nothing could have executed on its
+        // behalf. The older turn's tool work is therefore irrelevant to whether
+        // re-issuing THIS message duplicates anything — scoping the gate to the
+        // old turn would strand the steer permanently, which is the silent-drop
+        // failure this whole path exists to prevent.
+        //
+        // The bypass turns on the messages differing, NOT on a pending row
+        // merely existing: an auto-resume writes a fresh pending row for the
+        // SAME message it is retrying, so existence alone would let a second
+        // crash re-run the very tools the first left in an unknown state. Both
+        // ids must be readable to earn the bypass; an unreadable active-turn row
+        // yields null and keeps the gate closed, which is the safe direction.
+        const resumeTargetsUnstartedSteer =
+          resumeTargetMessageId !== null &&
+          activeTurnMessageId !== null &&
+          !sameId(activeTurnMessageId, resumeTargetMessageId);
+        const sideEffectActivityKind =
+          activeTurnId === null ||
+          resumeTargetsUnstartedSteer ||
+          threadDetailForSideEffects === null
+            ? null
+            : (threadDetailForSideEffects.activities.find(
+                (activity) =>
+                  activity.turnId !== null &&
+                  sameId(activity.turnId, activeTurnId) &&
+                  SIDE_EFFECT_ACTIVITY_KINDS.has(activity.kind),
+              )?.kind ?? null);
+        const hasCommittedSideEffects =
+          activeTurnId === null || resumeTargetsUnstartedSteer
             ? false
             : threadDetailForSideEffects === null
               ? true
-              : threadDetailForSideEffects.activities.some(
-                  (activity) =>
-                    activity.turnId !== null &&
-                    sameId(activity.turnId, activeTurnId) &&
-                    TOOL_ACTIVITY_KINDS.has(activity.kind),
-                );
+              : sideEffectActivityKind !== null;
         // Split out so the side-effect refusal can be reported. A crash that
         // would otherwise have been auto-resumed, and is held back only because
         // work already landed, is exactly the case the user needs told: the
@@ -1859,6 +1968,12 @@ const make = Effect.gen(function* () {
           const blockedActivityId = yield* crypto.randomUUIDv4.pipe(
             Effect.map((uuid) => EventId.make(`auto-resume-side-effects:${event.eventId}:${uuid}`)),
           );
+          // A hook is a shell command the user configured, not something the
+          // model chose to run, so naming it accurately matters: "ran tools"
+          // would send someone looking through the transcript for a tool call
+          // that is not there.
+          const ranHook = sideEffectActivityKind?.startsWith("hook.") === true;
+          const workDescription = ranHook ? "run a configured hook" : "started running tools";
           yield* orchestrationEngine.dispatch({
             type: "thread.activity.append",
             commandId: yield* providerCommandId(event, "auto-resume-side-effects-activity"),
@@ -1867,11 +1982,13 @@ const make = Effect.gen(function* () {
               id: blockedActivityId,
               tone: "error",
               kind: "provider.turn.auto-resume-blocked",
-              summary: "Not auto-resumed: this turn had already run tool work",
+              summary: ranHook
+                ? "Not auto-resumed: this turn had already run a hook"
+                : "Not auto-resumed: this turn had already run tool work",
               payload: {
                 detail:
                   `The provider session exited mid-turn, but the turn had already ` +
-                  `started running tools, so re-issuing it could repeat work that ` +
+                  `${workDescription}, so re-issuing it could repeat work that ` +
                   `already took effect. Review what ran above, then re-send the ` +
                   `message yourself if it is safe to repeat.`,
                 exitReason: event.payload.reason ?? "provider session exited",
@@ -1880,7 +1997,9 @@ const make = Effect.gen(function* () {
                 detectedFrom:
                   threadDetailForSideEffects === null
                     ? "thread-detail-unavailable"
-                    : "tool-activity",
+                    : ranHook
+                      ? "hook-activity"
+                      : "tool-activity",
               },
               turnId: activeTurnId,
               createdAt: now,
@@ -1976,21 +2095,31 @@ const make = Effect.gen(function* () {
               // steer, and carry its source proposed-plan so a resumed
               // plan-implementation turn re-associates with (and can mark
               // implemented) its plan. A read failure is non-fatal.
+              //
+              // Searched by message id across the whole queue rather than taken
+              // from its head. The resume targets the NEWEST user message, but
+              // the head of the queue is the oldest outstanding request; with
+              // more than one message queued those are different rows, and
+              // matching against the head alone would find no match and
+              // silently fall back to the older active turn's model and plan.
               const pendingForResume = yield* projectionTurnRepository
-                .getPendingTurnStartByThreadId({ threadId: thread.id })
-                .pipe(Effect.orElseSucceed(() => Option.none()));
-              // The resume targets the newest user message. When a pending
-              // turn-start row exists for THAT message, it is the authoritative
-              // source for the resume (its own model + source-plan), and the
-              // active-turn fallback below must not override it.
-              const resumingMatchingPendingSteer =
-                Option.isSome(pendingForResume) &&
-                pendingForResume.value.messageId === targetMessageId;
+                .listPendingTurnStartsByThreadId({ threadId: thread.id })
+                .pipe(
+                  Effect.map((rows) =>
+                    rows.find((pending) => pending.messageId === targetMessageId),
+                  ),
+                  Effect.orElseSucceed(() => undefined as ProjectionPendingTurnStart | undefined),
+                );
+              // When a pending turn-start row exists for the targeted message it
+              // is the authoritative source for the resume (its own model +
+              // source-plan), and the active-turn fallback below must not
+              // override it.
+              const resumingMatchingPendingSteer = pendingForResume !== undefined;
               let resumeSourceProposedPlan:
                 | { threadId: ThreadId; planId: OrchestrationProposedPlanId }
                 | undefined;
-              if (resumingMatchingPendingSteer && Option.isSome(pendingForResume)) {
-                const pending = pendingForResume.value;
+              if (pendingForResume !== undefined) {
+                const pending = pendingForResume;
                 // The pending steer's own selection is authoritative for the
                 // message being resumed — the binding above describes the OLDER
                 // turn. A null selection means "thread default": clear the
@@ -2289,12 +2418,17 @@ const make = Effect.gen(function* () {
           (thread) => !orphanedIds.has(thread.id) && !liveTurnsByThreadId.has(thread.id),
         ),
         (thread) =>
-          projectionTurnRepository.getPendingTurnStartByThreadId({ threadId: thread.id }).pipe(
-            Effect.map((pending) => (Option.isSome(pending) ? thread : null)),
+          // The WHOLE queue, not just its head. A thread can strand several
+          // messages at once (each turn-start-requested keeps its own
+          // placeholder), and every one of them is a user message that was
+          // accepted and never ran — reporting only the first would leave the
+          // rest to be cleared below with no transcript entry explaining them.
+          projectionTurnRepository.listPendingTurnStartsByThreadId({ threadId: thread.id }).pipe(
+            Effect.map((pending) => (pending.length > 0 ? { thread, pending } : null)),
             Effect.orElseSucceed(() => null),
           ),
         { concurrency: 1 },
-      ).pipe(Effect.map((threads) => threads.filter((thread) => thread !== null)));
+      ).pipe(Effect.map((entries) => entries.filter((entry) => entry !== null)));
 
       if (orphanedThreads.length === 0 && pendingOnlyOrphans.length === 0) {
         return;
@@ -2325,27 +2459,45 @@ const make = Effect.gen(function* () {
       // bounds in-process but cannot bound across them. Surfacing the outcome
       // puts the retry back in the user's hands, one click away, with no loop.
       yield* Effect.forEach(
-        pendingOnlyOrphans,
-        (thread) =>
+        // Flattened to one entry per stranded placeholder: each queued message
+        // gets its own activity and is cleared only after that activity is
+        // recorded, so a failure part-way through leaves the remaining rows
+        // intact for the next boot rather than dropping them unreported.
+        pendingOnlyOrphans.flatMap((entry) =>
+          entry.pending.map((pending) => ({ thread: entry.thread, pending })),
+        ),
+        ({ thread, pending }) =>
           Effect.gen(function* () {
             const commandUuid = yield* crypto.randomUUIDv4;
-            const activityId = EventId.make(`reconcile-pending-orphan:${thread.id}:${commandUuid}`);
+            const activityId = EventId.make(
+              `reconcile-pending-orphan:${thread.id}:${pending.requestSequence}:${commandUuid}`,
+            );
             yield* orchestrationEngine.dispatch({
               type: "thread.activity.append",
               commandId: CommandId.make(
-                `server:reconcile-pending-orphan-activity:${thread.id}:${commandUuid}`,
+                `server:reconcile-pending-orphan-activity:${thread.id}:${pending.requestSequence}:${commandUuid}`,
               ),
               threadId: thread.id,
               activity: {
                 id: activityId,
                 tone: "error",
                 kind: "provider.turn.start.orphaned",
-                summary: "Turn never started; the provider session ended first",
+                summary: "Turn never reported starting; the provider session ended first",
                 payload: {
+                  // Deliberately does NOT claim the turn was never sent. The
+                  // placeholder is cleared by `turn.started` being PROJECTED,
+                  // not by `sendTurn` returning, so its survival proves only
+                  // that no start was ever reported back. The provider may have
+                  // received the turn and begun work before dying — that window
+                  // is exactly where a crash is most likely. Telling the user
+                  // "nothing reached the provider" and to re-send would be
+                  // asserting more than this process knows, and acting on it
+                  // could duplicate side effects.
                   detail:
-                    `This turn was accepted but the provider session ended before it ` +
-                    `started running, so it was never sent. Nothing from it reached the ` +
-                    `provider. Re-send the message to try again.`,
+                    `This turn was accepted, but the provider session ended before it ` +
+                    `ever reported starting. It is not known whether the provider ` +
+                    `received it — it may have begun work that was never reported ` +
+                    `back. Check for any effects above before re-sending.`,
                 },
                 // No concrete turn exists — the pending row never got an id.
                 turnId: null,
@@ -2353,13 +2505,18 @@ const make = Effect.gen(function* () {
               },
               createdAt: reconciledAt,
             });
-            yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
+            // Clears just the placeholder that was reported. The others in this
+            // thread's queue are reported by their own iterations; clearing by
+            // thread here would delete them before their activity is written.
+            yield* projectionTurnRepository.deletePendingTurnStart({
               threadId: thread.id,
+              requestSequence: pending.requestSequence,
             });
           }).pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("failed to report and clear orphaned pending turn start", {
                 threadId: thread.id,
+                requestSequence: pending.requestSequence,
                 cause: Cause.pretty(cause),
               }),
             ),

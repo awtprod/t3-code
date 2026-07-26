@@ -54,6 +54,8 @@ import {
 } from "./ProviderCommandReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
+import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
+import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
@@ -90,7 +92,10 @@ async function waitFor(
 
 describe("ProviderCommandReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderCommandReactor | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderCommandReactor
+    | ProjectionSnapshotQuery
+    | ProviderTurnSendClaimRepository,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -208,6 +213,10 @@ describe("ProviderCommandReactor", () => {
           ? { model: inputModelSelection?.model ?? modelSelection.model }
           : {}),
         threadId,
+        // A distinct nonce per runtime start, as the real runtimes mint. The
+        // index makes it assertable: a second start must bind a DIFFERENT
+        // generation, which is the whole point of the field.
+        sessionGeneration: `generation-${sessionIndex}`,
         resumeCursor: resumeCursor ?? { opaque: `resume-${sessionIndex}` },
         createdAt: now,
         updatedAt: now,
@@ -346,6 +355,10 @@ describe("ProviderCommandReactor", () => {
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
+      // Exposed to tests so they can drive the send claim the reactor itself
+      // consults. Layer memoization over the shared in-memory DB below means
+      // this reads and writes the same rows the reactor sees, not a copy.
+      Layer.provideMerge(ProviderTurnSendClaimRepositoryLive),
       // Shared in-memory DB (memoized) so the reactor's ProjectionTurnRepository
       // reads the same pending-turn-start rows the engine's projection writes.
       Layer.provideMerge(SqlitePersistenceMemory),
@@ -375,11 +388,18 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(layer);
+    const managed = ManagedRuntime.make(layer);
+    runtime = managed;
 
-    const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
-    const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
-    const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
+    const engine = await managed.runPromise(Effect.service(OrchestrationEngineService));
+    const snapshotQuery = await managed.runPromise(Effect.service(ProjectionSnapshotQuery));
+    const reactor = await managed.runPromise(Effect.service(ProviderCommandReactor));
+    const sendClaims = await managed.runPromise(Effect.service(ProviderTurnSendClaimRepository));
+    // Exposed as a promise, like `dispatch` and `readModel` above, so tests
+    // drive the claim through the harness runtime rather than standing up a
+    // manual runner of their own.
+    const cancelSendClaims = (input: Parameters<typeof sendClaims.cancel>[0]): Promise<void> =>
+      managed.runPromise(sendClaims.cancel(input));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
@@ -429,6 +449,7 @@ describe("ProviderCommandReactor", () => {
       runtimeSessions,
       stateDir,
       drain,
+      cancelSendClaims,
     };
   }
 
@@ -1414,6 +1435,79 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("binds the replacement runtime's own session generation when restarting", async () => {
+    // The ingestion layer drops a lifecycle event whose `sessionGeneration`
+    // disagrees with the bound session's, which is how a superseded runtime's
+    // late exit is kept from clobbering the live one. That guard is only armed
+    // if the binding actually carries the generation the runtime minted — a
+    // binding that omits it leaves the projection holding `undefined`, which
+    // mismatches nothing, so the stale exit is accepted and then suppresses the
+    // LIVE runtime's events as "stale". This exercises the production handoff
+    // end to end: runtime mints it (harness `startSession`) -> reactor binds it
+    // -> projection stores it -> read model exposes it.
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    // Start from full-access so the later switch is a genuine mode CHANGE and
+    // therefore forces a restart, rather than a no-op reuse of the session.
+    await harness.dispatch({
+      type: "thread.runtime-mode.set",
+      commandId: CommandId.make("cmd-runtime-mode-set-generation-initial"),
+      threadId: ThreadId.make("thread-1"),
+      runtimeMode: "full-access",
+      createdAt: now,
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-generation-1"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-generation-1"),
+        role: "user",
+        text: "first",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "full-access",
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    const firstReadModel = await harness.readModel();
+    const firstThread = firstReadModel.threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(firstThread?.session?.sessionGeneration).toBe("generation-1");
+
+    // Restart the runtime. The replacement keeps the same provider identity, so
+    // the generation is the ONLY thing distinguishing its events from its dead
+    // predecessor's — exactly the G1/G2 confusion the guard exists to resolve.
+    await harness.dispatch({
+      type: "thread.runtime-mode.set",
+      commandId: CommandId.make("cmd-runtime-mode-set-generation"),
+      threadId: ThreadId.make("thread-1"),
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return thread?.session?.runtimeMode === "approval-required";
+    });
+
+    const secondReadModel = await harness.readModel();
+    const secondThread = secondReadModel.threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    // Not merely "defined": it must be the NEW runtime's nonce. Leaving
+    // generation-1 in place would make every live event look stale.
+    expect(secondThread?.session?.sessionGeneration).toBe("generation-2");
+  });
+
   it("does not inject derived model options when restarting claude on runtime mode changes", async () => {
     const harness = await createHarness({
       threadModelSelection: {
@@ -2161,6 +2255,157 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.activeTurnId).toBeNull();
   });
 
+  it("re-drives a resumed message whose original turn-start already reached the provider", async () => {
+    const harness = await createHarness();
+    const originalCreatedAt = "2026-01-01T00:00:00.000Z";
+    const resumeCreatedAt = "2026-01-01T00:00:05.000Z";
+
+    // Session-exit auto-resume re-issues the SAME user message at a higher
+    // sequence, and that re-issue MUST reach the provider — it is the recovery
+    // this whole path exists to perform. The durable send-claim is keyed by
+    // message, so it sees the original and the resume as contenders for one
+    // row; if it resolved them first-wins, the stale original would hold the
+    // claim forever and auto-resume would be silently dead while every
+    // supersession test still passed. This is the control in that direction:
+    // last-wins by request sequence, so the newer request takes the claim.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-original"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "resume me",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: originalCreatedAt,
+    });
+    // The original genuinely reaches the provider and claims the message before
+    // the resume is issued — the ordering that makes the claim contended.
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "resume me",
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-resume"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-1"),
+      createdAt: resumeCreatedAt,
+    });
+
+    await waitFor(
+      () =>
+        harness.sendTurn.mock.calls.filter(
+          (call) => (call[0] as { input?: string }).input === "resume me",
+        ).length === 2,
+    );
+
+    const drives = harness.sendTurn.mock.calls.filter(
+      (call) => (call[0] as { input?: string }).input === "resume me",
+    );
+    // Twice: once for the original, once for the resume recovering it. Nothing
+    // superseded the resume and nothing canceled it, so refusing it would be a
+    // lost turn, not a saved duplicate.
+    expect(drives.length).toBe(2);
+  });
+
+  it("refuses to send a turn-start the cancel barrier already covers", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const sentinelCreatedAt = "2026-01-01T00:00:01.000Z";
+
+    // The window the durable send-claim closes is BETWEEN the reactor's final
+    // supersession read and its `sendTurn` — a stop committed there passes a
+    // check that already succeeded. That interleaving cannot be scheduled
+    // reliably from outside the reactor, so this drives the barrier directly to
+    // its post-condition instead: the state the interrupt path leaves behind
+    // when it wins the race. What is under test is the consequence — the
+    // reactor must consult the claim on the send path and honor a refusal — and
+    // that is exactly what a real interrupt landing in the gap would produce.
+    //
+    // The event log is deliberately left clean: no interrupt event exists, so
+    // every event-log guard in `processTurnStartRequested` passes and the claim
+    // is the only thing that can stop this send. If the reactor ever stopped
+    // consulting it, no other check would catch that.
+    await harness.cancelSendClaims({
+      threadId: ThreadId.make("thread-1"),
+      // Above any sequence this thread's turn-start can be appended at, so the
+      // barrier covers it however the surrounding events are ordered.
+      canceledThroughSequence: 1_000_000,
+      updatedAt: createdAt,
+    });
+
+    await harness.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("cmd-thread-create-claim-sentinel"),
+      threadId: ThreadId.make("thread-2"),
+      projectId: asProjectId("project-1"),
+      title: "Sentinel Thread",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-claim-stopped"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-1"),
+        role: "user",
+        text: "stopped before sending",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    // Sentinel on a second thread, dispatched after, proves the stopped
+    // turn-start was processed to a decision rather than merely still queued —
+    // without it, "never sent" and "not sent yet" look identical.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-claim-sentinel"),
+      threadId: ThreadId.make("thread-2"),
+      message: {
+        messageId: asMessageId("user-sentinel"),
+        role: "user",
+        text: "sentinel turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: sentinelCreatedAt,
+    });
+    await waitFor(() =>
+      harness.sendTurn.mock.calls.some(
+        (call) => (call[0] as { input?: string }).input === "sentinel turn",
+      ),
+    );
+    await harness.drain();
+
+    const drivenInputs = harness.sendTurn.mock.calls.map(
+      (call) => (call[0] as { input?: string }).input,
+    );
+    expect(drivenInputs).not.toContain("stopped before sending");
+    // The barrier is thread-scoped, so the other thread is untouched. This is
+    // the control against a claim that refuses everything and would otherwise
+    // satisfy the assertion above by breaking the reactor outright.
+    expect(drivenInputs).toContain("sentinel turn");
+  });
+
   it("skips a turn-start-requested superseded by a newer re-request for the same message", async () => {
     const harness = await createHarness();
     const staleCreatedAt = "2026-01-01T00:00:00.000Z"; // original interrupted turn-start
@@ -2497,22 +2742,24 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn.mock.calls.length).toBe(2);
   });
 
-  it("skips a superseded turn-start even after a DISTINCT message evicts the pending row", async () => {
+  it("skips a superseded turn-start while unrelated messages interleave on the thread", async () => {
     const harness = await createHarness();
     const staleCreatedAt = "2026-01-01T00:00:00.000Z"; // original turn-start for msg-1
     const blockerCreatedAt = "2026-01-01T00:00:01.000Z";
     const resumeCreatedAt = "2026-01-01T00:00:02.000Z"; // auto-resume re-request for msg-1
-    const evictCreatedAt = "2026-01-01T00:00:03.000Z"; // DIFFERENT message, evicts the row
+    const interleavedCreatedAt = "2026-01-01T00:00:03.000Z"; // DIFFERENT message, same thread
     const sentinelCreatedAt = "2026-01-01T00:00:04.000Z";
 
-    // The pending turn-start row is a SINGLE SLOT per thread
-    // (`replacePendingTurnStart` clears then inserts), so a turn-start for a
-    // different message destroys the row that recorded msg-1's re-issue. A guard
-    // reading that row then sees either nothing or a non-matching messageId,
+    // Supersession is judged from the append-only event log, not from the
+    // pending turn-start projection rows, and this case is why. Those rows are
+    // CONSUMED — `turn.started` deletes the placeholder it adopts — so a guard
+    // reading them finds nothing left to compare against once a turn has begun,
     // concludes "not superseded", and drives BOTH the stale original and its
-    // resume — the same prompt sent to the provider twice. Reading the
-    // append-only event log instead is what closes this: the re-request stays
-    // observable at its own sequence no matter what lands after it.
+    // resume: the same prompt sent to the provider twice. Here a third message
+    // lands between the two, so the thread's pending state is churning while
+    // msg-1's re-issue has to stay visible. The event log is never consumed: the
+    // re-request remains observable at its own sequence no matter what arrives
+    // after it.
     let releaseWorker: () => void = () => {};
     const workerGate = new Promise<void>((resolve) => {
       releaseWorker = resolve;
@@ -2584,22 +2831,22 @@ describe("ProviderCommandReactor", () => {
       createdAt: resumeCreatedAt,
     });
 
-    // The eviction: a turn-start for a DIFFERENT message on the SAME thread
-    // replaces the single pending row, erasing every trace of msg-1's re-issue
-    // from the projection.
+    // A turn-start for a DIFFERENT message on the SAME thread, landing between
+    // msg-1's re-issue and the decision about it. Nothing about msg-1 may be
+    // lost because unrelated work arrived after it.
     await harness.dispatch({
       type: "thread.turn.start",
-      commandId: CommandId.make("cmd-turn-evict"),
+      commandId: CommandId.make("cmd-turn-interleaved"),
       threadId: ThreadId.make("thread-1"),
       message: {
         messageId: asMessageId("user-message-2"),
         role: "user",
-        text: "evicting message",
+        text: "interleaved message",
         attachments: [],
       },
       interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
       runtimeMode: "approval-required",
-      createdAt: evictCreatedAt,
+      createdAt: interleavedCreatedAt,
     });
 
     await harness.dispatch({
@@ -2625,13 +2872,14 @@ describe("ProviderCommandReactor", () => {
     );
 
     const inputs = harness.sendTurn.mock.calls.map((call) => (call[0] as { input?: string }).input);
-    // msg-1 drives exactly once (the resume), despite its pending row being gone.
+    // msg-1 drives exactly once — the resume, not the original it supersedes.
     expect(inputs.filter((input) => input === "resume me").length).toBe(1);
-    // The evicting message is a genuinely distinct request and must still drive —
-    // this is what keeps the fix from degenerating into blanket suppression.
-    expect(inputs.filter((input) => input === "evicting message").length).toBe(1);
-    // blocker + resume + evicting + sentinel = 4. Reading the mutable pending row
-    // instead of the event log yields 5: the stale original drives as well.
+    // The interleaved message is a genuinely distinct request and must still
+    // drive — this is what keeps the fix from degenerating into blanket
+    // suppression of anything that follows a re-issue.
+    expect(inputs.filter((input) => input === "interleaved message").length).toBe(1);
+    // blocker + resume + interleaved + sentinel = 4. Reading the mutable pending
+    // rows instead of the event log yields 5: the stale original drives as well.
     expect(harness.sendTurn.mock.calls.length).toBe(4);
   });
 });

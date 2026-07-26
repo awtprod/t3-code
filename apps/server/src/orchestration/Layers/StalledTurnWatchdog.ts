@@ -134,6 +134,13 @@ const makeStalledTurnWatchdog = (options?: StalledTurnWatchdogLiveOptions) =>
             ...(session.providerInstanceId !== undefined
               ? { providerInstanceId: session.providerInstanceId }
               : {}),
+            // Carry the generation forward: this write changes the session's
+            // STATUS, not its identity. Dropping it would blank the value the
+            // ingestion guard compares lifecycle events against, silently
+            // disarming stale-runtime detection for the rest of the binding.
+            ...(session.sessionGeneration !== undefined
+              ? { sessionGeneration: session.sessionGeneration }
+              : {}),
             runtimeMode: session.runtimeMode,
             activeTurnId: null,
             lastError: `Stalled: no provider activity for ${stallMinutes}m; auto-failed by watchdog`,

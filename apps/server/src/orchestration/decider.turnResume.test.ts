@@ -261,7 +261,17 @@ it.layer(NodeServices.layer)("decider thread.turn.resume", (it) => {
     }),
   );
 
-  it.effect("is a no-op when the referenced message does not exist", () =>
+  // The two cases below assert the DECIDER's half of the contract only: it
+  // plans nothing. That is not the same as "the command is a no-op" — the
+  // engine turns an empty plan into an `OrchestrationCommandInvariantError`
+  // ("Command produced no events.", OrchestrationEngine.ts:184), which the
+  // auto-resume caller catches and logs as a benign skip
+  // (ProviderRuntimeIngestion.ts:2192). Naming these "no-op" would describe the
+  // observable behaviour of a layer this file does not exercise. The end-to-end
+  // rejection is covered in OrchestrationEngine.test.ts ("rejects a resume for
+  // a message that no longer exists"), so the two halves are asserted where
+  // each actually lives.
+  it.effect("plans no events when the referenced message does not exist", () =>
     Effect.gen(function* () {
       const readModel = yield* seedReadModel;
       const result = yield* decideOrchestrationCommand({
@@ -273,7 +283,7 @@ it.layer(NodeServices.layer)("decider thread.turn.resume", (it) => {
     }),
   );
 
-  it.effect("is a no-op when the referenced message is not a user message", () =>
+  it.effect("plans no events when the referenced message is not a user message", () =>
     Effect.gen(function* () {
       const readModel = yield* seedReadModel;
       const result = yield* decideOrchestrationCommand({

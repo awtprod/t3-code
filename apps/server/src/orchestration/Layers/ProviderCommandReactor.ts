@@ -35,6 +35,8 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
+import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
@@ -218,6 +220,7 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const orchestrationEventStore = yield* OrchestrationEventStore;
+  const providerTurnSendClaimRepository = yield* ProviderTurnSendClaimRepository;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
@@ -529,6 +532,19 @@ const make = Effect.gen(function* () {
             status: mapProviderSessionStatusToOrchestrationStatus(session.status),
             providerName: session.provider,
             providerInstanceId: session.providerInstanceId,
+            // The replacement runtime's own generation. This is the handoff the
+            // ingestion generation guard depends on: it drops a lifecycle event
+            // whose `sessionGeneration` differs from the bound session's, so a
+            // binding that omitted this left the projection holding `undefined`
+            // — which never mismatches, so a superseded runtime's exit was
+            // accepted, written into the projection as the current identity, and
+            // then caused the LIVE runtime's events to be suppressed as stale.
+            // Omitted (rather than nulled) when the adapter does not mint one,
+            // which keeps the guard's "either side unknown ⇒ don't drop"
+            // behavior for adapters that have not adopted generations.
+            ...(session.sessionGeneration !== undefined
+              ? { sessionGeneration: session.sessionGeneration }
+              : {}),
             runtimeMode: desiredRuntimeMode,
             // Provider turn ids are not orchestration turn ids.
             activeTurnId: null,
@@ -808,17 +824,16 @@ const make = Effect.gen(function* () {
     // thread after it.
     //
     // Both facts come from `orchestration_events`, not from the pending
-    // turn-start projection row, and that distinction is the fix rather than a
-    // refactor. The pending row is a SINGLE SLOT per thread —
-    // `replacePendingTurnStart` clears then inserts — so a turn-start for a
-    // DIFFERENT message evicts the row that recorded the re-issue. A row-based
-    // guard then finds either no row or a non-matching `messageId`, concludes
-    // "not superseded", and sends the stale original AND its resume to the
-    // provider: the same prompt driven twice. The same eviction loses
-    // `pendingInterruptRequested`, so a stop the user issued while this reactor
-    // lagged is silently forgotten and the canceled prompt is sent anyway. The
-    // event log has no slot to evict: a re-request is permanently observable at
-    // its own sequence, whatever arrives afterwards.
+    // turn-start projection rows, and that distinction is the fix rather than a
+    // refactor. Those rows are CONSUMED: `turn.started` deletes the placeholder
+    // it adopts. A row-based guard therefore has nothing left to compare against
+    // once the original turn has begun — it finds no row, concludes "not
+    // superseded", and sends the stale original AND its resume to the provider:
+    // the same prompt driven twice. The consumed row also takes
+    // `pendingInterruptRequested` with it, so a stop the user issued while this
+    // reactor lagged is silently forgotten and the canceled prompt is sent
+    // anyway. The event log is never consumed: a re-request is permanently
+    // observable at its own sequence, whatever arrives afterwards.
     //
     // Scoping is by thread stream and by `sequence > event.sequence`, so a
     // request never supersedes itself (a normal single turn-start sees no later
@@ -940,16 +955,20 @@ const make = Effect.gen(function* () {
     // The read is sequenced INSIDE the fork, immediately upstream of `sendTurn`,
     // rather than on the worker before forking. Reading on the worker leaves the
     // fork's own scheduling delay between the decision and the send, and an
-    // interrupt appended in that gap is missed. Running it here shrinks the
-    // window to the read-to-adapter-write span, with nothing suspended in
-    // between. That span is not zero — closing it entirely would need a
-    // transactional claim the provider protocol has no counterpart for — but no
-    // schedulable point remains inside it.
+    // interrupt appended in that gap is missed.
     //
-    // A failed read is handled as a failed turn start (`recoverTurnStartFailure`
-    // below), not as permission to send: if we cannot tell whether the user
-    // stopped this turn, sending it anyway is the one outcome that cannot be
-    // taken back.
+    // The event-log read alone still cannot close the window: a read followed by
+    // a write is not atomic however little sits between them, so an interrupt
+    // committed in between passes a check that already succeeded. The durable
+    // send-claim below removes that window rather than narrowing it. The log read
+    // is kept as the cheap first test — it is the only one that can see a
+    // supersession by a request that has not itself tried to send yet — and the
+    // claim is the authority.
+    //
+    // A failed read or a failed acquire is handled as a failed turn start
+    // (`recoverTurnStartFailure` below), not as permission to send: if we cannot
+    // tell whether the user stopped this turn, sending it anyway is the one
+    // outcome that cannot be taken back.
     yield* readTurnStartClaim
       .pipe(
         Effect.flatMap((finalTurnStartClaim) =>
@@ -960,7 +979,31 @@ const make = Effect.gen(function* () {
                 supersededBySameMessage: finalTurnStartClaim.supersededBySameMessage,
                 interruptedAfter: finalTurnStartClaim.interruptedAfter,
               })
-            : providerService.sendTurn(sendTurnRequest.value),
+            : // Atomic point of no return. The acquire tests "already claimed by
+              // another request for this message" and "canceled by a stop at or
+              // above my sequence" inside one statement, so nothing can interleave
+              // between the decision and the claim. Only the holder sends.
+              providerTurnSendClaimRepository
+                .acquire({
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  requestSequence: event.sequence,
+                  claimedAt: event.payload.createdAt,
+                })
+                .pipe(
+                  Effect.flatMap((claimed) =>
+                    claimed
+                      ? providerService.sendTurn(sendTurnRequest.value)
+                      : Effect.logDebug(
+                          "provider-command-reactor.turn-start.send-claim-not-acquired",
+                          {
+                            threadId: event.payload.threadId,
+                            messageId: event.payload.messageId,
+                            requestSequence: event.sequence,
+                          },
+                        ),
+                  ),
+                ),
         ),
       )
       .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
@@ -969,6 +1012,45 @@ const make = Effect.gen(function* () {
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-interrupt-requested" }>,
   ) {
+    // Raise the cancel barrier FIRST, before any of the checks below, and on the
+    // worker rather than in a fork.
+    //
+    // This is the half of the send-claim that stops undriven work. A turn-start
+    // being processed concurrently acquires its claim in a statement that tests
+    // this barrier, so SQLite's write serialization decides the outcome: barrier
+    // first and the send never happens, claim first and the turn is genuinely
+    // running by the time we get here — which the `interruptTurn` call below then
+    // handles. There is no third case, which is the point.
+    //
+    // Ordering matters twice over. It precedes the no-session early return
+    // because a turn-start that has not reached the provider yet is exactly the
+    // case with no session bound — returning first would drop the stop for the
+    // only turns this barrier can still save. And it runs unforked so the barrier
+    // is durable before this event is considered handled; a fork could be
+    // scheduled after the send it was meant to cancel.
+    //
+    // A failed write must not be swallowed: if we cannot record the stop, the
+    // turn-start still holds its claim, so this is reported as an interrupt
+    // failure rather than logged and forgotten.
+    yield* providerTurnSendClaimRepository
+      .cancel({
+        threadId: event.payload.threadId,
+        canceledThroughSequence: event.sequence,
+        updatedAt: event.payload.createdAt,
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.interrupt.failed",
+            summary: "Provider turn interrupt failed",
+            detail: `Failed to record the stop before interrupting: ${Cause.pretty(cause)}`,
+            turnId: event.payload.turnId ?? null,
+            createdAt: event.payload.createdAt,
+          }),
+        ),
+      );
+
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
       return;
@@ -1099,6 +1181,13 @@ const make = Effect.gen(function* () {
         ...(thread.session?.providerInstanceId !== undefined
           ? { providerInstanceId: thread.session.providerInstanceId }
           : {}),
+        // Preserved for the same reason as the instance id: this write ends the
+        // session, it does not re-identify it. A stopped binding that has
+        // forgotten its generation cannot recognize the stopped runtime's own
+        // late events as stale.
+        ...(thread.session?.sessionGeneration !== undefined
+          ? { sessionGeneration: thread.session.sessionGeneration }
+          : {}),
         runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
         activeTurnId: null,
         lastError: thread.session?.lastError ?? null,
@@ -1193,4 +1282,5 @@ const make = Effect.gen(function* () {
 
 export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
   Layer.provide(OrchestrationEventStoreLive),
+  Layer.provide(ProviderTurnSendClaimRepositoryLive),
 );

@@ -1131,6 +1131,67 @@ describe("OrchestrationEngine", () => {
     await system.dispose();
   });
 
+  it("rejects a resume for a message that no longer exists", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const createdAt = now();
+
+    await system.run(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-project-resume-missing"),
+        projectId: asProjectId("project-resume-missing"),
+        title: "Resume Missing Project",
+        workspaceRoot: "/tmp/project-resume-missing",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      }),
+    );
+
+    await system.run(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-resume-missing"),
+        threadId: ThreadId.make("thread-resume-missing"),
+        projectId: asProjectId("project-resume-missing"),
+        title: "Resume Missing Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+
+    // The resume decider plans zero events when the target message is gone
+    // (covered directly in decider.turnResume.test.ts). What the auto-resume
+    // caller actually SEES is this: the engine refuses to commit a command that
+    // produced nothing, so the dispatch fails rather than silently succeeding.
+    // ProviderRuntimeIngestion catches exactly this error to skip the marker and
+    // the attempt budget; if the engine ever started accepting empty plans, that
+    // path would record a resume that never happened.
+    await expect(
+      system.run(
+        engine.dispatch({
+          type: "thread.turn.resume",
+          commandId: CommandId.make("cmd-turn-resume-missing"),
+          threadId: ThreadId.make("thread-resume-missing"),
+          messageId: asMessageId("msg-never-sent"),
+          createdAt,
+        }),
+      ),
+    ).rejects.toThrow("Command produced no events");
+
+    await system.dispose();
+  });
+
   it("rejects duplicate thread creation", async () => {
     const system = await createOrchestrationSystem();
     const { engine } = system;

@@ -93,13 +93,13 @@ export interface OrchestrationEventStoreShape {
    * after `afterSequence`, and whether an interrupt landed after it.
    *
    * This exists because the provider-command reactor's supersession guard cannot
-   * rely on the pending turn-start projection row alone. That row is a single
-   * slot per thread (`replacePendingTurnStart` clears then inserts), so a newer
-   * request for a *different* message evicts it — and a stale event for the
-   * older message then finds no row to compare against and drives the provider a
-   * second time. The event log has no such slot: it is append-only, so a
-   * re-request for the same message is permanently observable at its own
-   * sequence regardless of what happened afterwards.
+   * rely on the pending turn-start projection rows alone. Those rows are
+   * consumed: `turn.started` deletes the placeholder it adopts, so once a turn
+   * begins there is no row left to judge a late duplicate of that same request
+   * against, and the reactor would drive the provider a second time. The event
+   * log is never consumed: it is append-only, so a re-request for the same
+   * message is permanently observable at its own sequence regardless of what
+   * happened afterwards.
    *
    * Scoped to the thread stream and to sequences above the request being
    * judged, so the cost is bounded by that thread's recent tail rather than the

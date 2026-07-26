@@ -39,6 +39,17 @@ export const ProviderSession = Schema.Struct({
   providerInstanceId: Schema.optional(ProviderInstanceId),
   status: ProviderSessionStatus,
   runtimeMode: RuntimeMode,
+  /**
+   * Per-runtime-start nonce, minted by the session runtime and stamped on every
+   * event it emits (see `ProviderEvent.sessionGeneration`). It lives here so the
+   * value the orchestration layer binds to a thread is the SAME one the events
+   * carry: a restarted runtime can reuse its `providerInstanceId`, so the
+   * instance id alone cannot distinguish a live runtime from its dead
+   * predecessor. A binding that omits this leaves the ingestion generation guard
+   * comparing against `undefined`, which matches nothing and therefore accepts
+   * the stale runtime's terminal events.
+   */
+  sessionGeneration: Schema.optional(TrimmedNonEmptyString),
   cwd: Schema.optional(TrimmedNonEmptyString),
   model: Schema.optional(TrimmedNonEmptyString),
   threadId: ThreadId,

@@ -2529,6 +2529,145 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
   ),
 );
 
+it.effect("keeps one pending turn-start per request and consumes only the oldest", () =>
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    const projectionLayer = OrchestrationProjectionPipelineLive.pipe(
+      Layer.provideMerge(OrchestrationEventStoreLive),
+      Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
+    );
+
+    const threadId = ThreadId.make("thread-queue");
+    const turnId = TurnId.make("turn-queue-1");
+    const firstMessageId = MessageId.make("message-queue-1");
+    const secondMessageId = MessageId.make("message-queue-2");
+    const firstRequestedAt = "2026-02-26T15:00:00.000Z";
+    const secondRequestedAt = "2026-02-26T15:00:01.000Z";
+    const sessionSetAt = "2026-02-26T15:00:02.000Z";
+
+    const rows = yield* Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const sql = yield* SqlClient.SqlClient;
+
+      // Two turn-starts requested back to back — the user queued a second
+      // message before the provider reported `turn.started` for the first.
+      // Under the old single-slot write path the second request evicted the
+      // first one's row, so the delayed `turn.started` below adopted the
+      // SECOND message's metadata and then deleted it, losing both.
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-queue-1"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: firstRequestedAt,
+        commandId: CommandId.make("cmd-queue-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-queue-1"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: firstMessageId,
+          runtimeMode: "approval-required",
+          createdAt: firstRequestedAt,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-queue-2"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: secondRequestedAt,
+        commandId: CommandId.make("cmd-queue-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-queue-2"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: secondMessageId,
+          runtimeMode: "approval-required",
+          createdAt: secondRequestedAt,
+        },
+      });
+
+      // The provider finally reports the FIRST turn. It must consume the
+      // first request's placeholder and leave the second one queued.
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-queue-3"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: sessionSetAt,
+        commandId: CommandId.make("cmd-queue-3"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-queue-3"),
+        metadata: {},
+        payload: {
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: sessionSetAt,
+          },
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const pendingRows = yield* sql<{ readonly messageId: string | null }>`
+        SELECT pending_message_id AS "messageId"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND turn_id IS NULL
+          AND state = 'pending'
+        ORDER BY request_sequence ASC
+      `;
+
+      const turnRows = yield* sql<{
+        readonly turnId: string;
+        readonly userMessageId: string | null;
+        readonly startedAt: string;
+      }>`
+        SELECT
+          turn_id AS "turnId",
+          pending_message_id AS "userMessageId",
+          started_at AS "startedAt"
+        FROM projection_turns
+        WHERE turn_id = ${turnId}
+      `;
+
+      return { pendingRows, turnRows };
+    }).pipe(Effect.provide(projectionLayer));
+
+    // The born turn carries the FIRST message — the one the provider was
+    // actually asked to run — not the newer queued one.
+    assert.deepEqual(rows.turnRows, [
+      {
+        turnId: "turn-queue-1",
+        userMessageId: "message-queue-1",
+        startedAt: firstRequestedAt,
+      },
+    ]);
+    // And the second request is still outstanding, so the provider's next
+    // `turn.started` has a row to adopt and reconciliation can report it if
+    // the session dies first.
+    assert.deepEqual(rows.pendingRows, [{ messageId: "message-queue-2" }]);
+  }).pipe(
+    Effect.provide(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3-projection-pipeline-pending-queue-",
+        }),
+        NodeServices.layer,
+      ),
+    ),
+  ),
+);
+
 const engineLayer = it.layer(
   OrchestrationEngineLive.pipe(
     Layer.provide(OrchestrationProjectionSnapshotQueryLive),
