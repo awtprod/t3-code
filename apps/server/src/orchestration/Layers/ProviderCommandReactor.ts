@@ -1117,7 +1117,18 @@ const make = Effect.gen(function* () {
    * session instead, and both are outcomes the caller has to report. A failed
    * escalation is logged here and deliberately does not replace that cause.
    */
-  const interruptTurnOrEscalateToSessionStop = (input: {
+  type InterruptTurnEscalationOutcome =
+    | { readonly _tag: "interrupted" }
+    | {
+        readonly _tag: "escalation-dispatched";
+        readonly interruptCause: Cause.Cause<ProviderServiceError>;
+      }
+    | {
+        readonly _tag: "failed";
+        readonly interruptCause: Cause.Cause<ProviderServiceError>;
+      };
+
+  const interruptTurnAndObserveEscalation = (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId | null;
     /**
@@ -1149,6 +1160,7 @@ const make = Effect.gen(function* () {
       ),
     ).pipe(
       Effect.retry({ times: 1, schedule: Schedule.exponential(100) }),
+      Effect.as<InterruptTurnEscalationOutcome>({ _tag: "interrupted" }),
       Effect.catchCause((interruptCause) =>
         Effect.logWarning(
           "provider command reactor escalating an undeliverable interrupt to a session stop",
@@ -1169,6 +1181,10 @@ const make = Effect.gen(function* () {
               createdAt: input.createdAt,
             }),
           ),
+          Effect.as<InterruptTurnEscalationOutcome>({
+            _tag: "escalation-dispatched",
+            interruptCause,
+          }),
           // Dispatch failure must not replace the interrupt failure — the
           // caller reports the original operation the user asked for — but it
           // also must not disappear. Losing this log makes an escalation that
@@ -1181,10 +1197,27 @@ const make = Effect.gen(function* () {
               turnId: input.turnId,
               cause: Cause.pretty(escalationCause),
               originalInterruptCause: Cause.pretty(interruptCause),
-            }),
+            }).pipe(
+              Effect.as<InterruptTurnEscalationOutcome>({
+                _tag: "failed",
+                interruptCause,
+              }),
+            ),
           ),
-          Effect.flatMap(() => Effect.failCause(interruptCause)),
         ),
+      ),
+    );
+
+  // Ordinary user/fence callers intentionally retain the historical contract:
+  // even a successfully dispatched widening reports the original interrupt
+  // failure. Ledger reconciliation uses the observed outcome above because it
+  // must durably retire rows after either kind of successful action.
+  const interruptTurnOrEscalateToSessionStop = (
+    input: Parameters<typeof interruptTurnAndObserveEscalation>[0],
+  ) =>
+    interruptTurnAndObserveEscalation(input).pipe(
+      Effect.flatMap((outcome) =>
+        outcome._tag === "interrupted" ? Effect.void : Effect.failCause(outcome.interruptCause),
       ),
     );
 
@@ -1197,22 +1230,24 @@ const make = Effect.gen(function* () {
    * sequence, not the current claim holder. In A/B/C where C owns but fails, B
    * survives and A is stale.
    *
-   * Delivery evidence is one durable row per request. That is load-bearing for
-   * longer chains: an overwriteable ex-holder slot lets B erase A before C sees
-   * it. Every completion instead reads the whole ordered ledger. SQLite write
-   * serialization means a later completing sender sees all earlier stamps, so
-   * at least one reconciliation pass observes every new stale/survivor pair.
+   * Delivery evidence is one durable row per concrete (request, turn) result.
+   * Rows are ordered by (request sequence, SQLite delivery id), so distinct
+   * equal-sequence replays are retained and the later inserted concrete turn
+   * survives. SQLite write serialization means a later completing sender sees
+   * all earlier stamps, so at least one reconciliation pass observes every new
+   * stale/survivor pair.
    *
    * Shared steers can put the same provider turn id in several rows. The
    * survivor's id is never interrupted, and duplicate stale ids are collapsed
-   * to one attempt per pass. When duplicates carry several request sequences,
-   * the highest stale sequence is retained: it is the strongest cutoff that
-   * still stays strictly below the replacement.
+   * to one external attempt. A successful attempt retires every row for that
+   * concrete turn. Rows sharing the survivor id are retired without an
+   * interrupt because they are duplicate steer evidence, not duplicate work.
    *
-   * Each stale attempt handles its own failure. One bad interrupt must not stop
-   * the remaining stale rows from reconciling, and escalation/reporting must
-   * retain THAT stale row's sequence and turn id rather than borrowing the
-   * caller's (which may be the healthy replacement).
+   * A direct interrupt retires only the concrete rows it reconciled. A
+   * successfully dispatched widened session stop tears down every stale turn in
+   * the session, so it retires every row before the survivor and ends the pass;
+   * siblings do not enqueue redundant stops. If both actions fail, the row
+   * remains live for a later completion to retry.
    */
   const reconcileDeliveredSendAgainstSupersession = (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
@@ -1230,53 +1265,102 @@ const make = Effect.gen(function* () {
         // not optional bookkeeping. A transient SQLite contention should not
         // erase the only side capable of reconciling the pair.
         Effect.retry({ times: 2, schedule: Schedule.exponential(100) }),
-        Effect.flatMap((state) => {
-          if (state._tag === "unowned") {
-            return Effect.logDebug("provider-command-reactor.turn-start.delivery-unowned", {
-              threadId: event.payload.threadId,
-              messageId: event.payload.messageId,
-              requestSequence: event.sequence,
-              turnId: turn.turnId,
-            });
-          }
-
-          const replacement = state.deliveries.at(-1);
-          if (replacement === undefined || state.deliveries.length === 1) {
-            return Effect.logDebug(
-              "provider-command-reactor.turn-start.supersession-not-delivered",
-              {
-                threadId: event.payload.threadId,
-                messageId: event.payload.messageId,
-                requestSequence: event.sequence,
-                turnId: turn.turnId,
-              },
-            );
-          }
-
-          const staleByTurnId = new Map<TurnId, (typeof state.deliveries)[number]>();
-          for (const delivery of state.deliveries.slice(0, -1)) {
-            if (delivery.turnId !== replacement.turnId) {
-              // Rows arrive ascending, so assignment retains the highest stale
-              // sequence when the same concrete turn occurs more than once.
-              staleByTurnId.set(delivery.turnId, delivery);
+        Effect.flatMap((state) =>
+          Effect.gen(function* () {
+            if (state._tag === "unowned") {
+              return yield* Effect.logDebug(
+                "provider-command-reactor.turn-start.delivery-unowned",
+                {
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  requestSequence: event.sequence,
+                  turnId: turn.turnId,
+                },
+              );
             }
-          }
-          const staleDeliveries = [...staleByTurnId.values()];
 
-          if (staleDeliveries.length === 0) {
-            return Effect.logDebug("provider-command-reactor.turn-start.supersession-shared-turn", {
-              threadId: event.payload.threadId,
-              messageId: event.payload.messageId,
-              requestSequence: event.sequence,
-              replacementRequestSequence: replacement.requestSequence,
-              turnId: replacement.turnId,
-            });
-          }
+            const replacement = state.deliveries.at(-1);
+            if (replacement === undefined || state.deliveries.length === 1) {
+              return yield* Effect.logDebug(
+                "provider-command-reactor.turn-start.supersession-not-delivered",
+                {
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  requestSequence: event.sequence,
+                  turnId: turn.turnId,
+                },
+              );
+            }
 
-          return Effect.forEach(
-            staleDeliveries,
-            (stale) =>
-              Effect.logDebug(
+            const staleRows = state.deliveries.slice(0, -1);
+            const teardownCovered = staleRows.filter((delivery) => delivery.teardownDispatched);
+            const actionableStaleRows = staleRows.filter(
+              (delivery) => !delivery.teardownDispatched,
+            );
+            const staleByTurnId = new Map<
+              TurnId,
+              {
+                representative: (typeof state.deliveries)[number];
+                deliveryIds: Array<number>;
+              }
+            >();
+            const sharedWithSurvivor: Array<number> = [];
+            for (const delivery of actionableStaleRows) {
+              if (delivery.turnId === replacement.turnId) {
+                sharedWithSurvivor.push(delivery.deliveryId);
+                continue;
+              }
+              const group = staleByTurnId.get(delivery.turnId);
+              if (group === undefined) {
+                staleByTurnId.set(delivery.turnId, {
+                  representative: delivery,
+                  deliveryIds: [delivery.deliveryId],
+                });
+              } else {
+                // Rows arrive in total order, so the last row supplies the
+                // strongest request-sequence cutoff for this concrete turn.
+                group.representative = delivery;
+                group.deliveryIds.push(delivery.deliveryId);
+              }
+            }
+
+            const retire = (deliveryIds: ReadonlyArray<number>) =>
+              providerTurnSendClaimRepository
+                .retireDeliveries({
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  deliveryIds: [...deliveryIds],
+                  survivorDeliveryId: replacement.deliveryId,
+                  reconciledAt: event.payload.createdAt,
+                })
+                .pipe(Effect.retry({ times: 2, schedule: Schedule.exponential(100) }));
+
+            // The exact-turn target disappeared with an earlier widened
+            // teardown. It stayed live only because it was the survivor then;
+            // this newly inserted survivor now makes guarded retirement legal.
+            if (teardownCovered.length > 0) {
+              yield* retire(teardownCovered.map((delivery) => delivery.deliveryId));
+            }
+
+            if (sharedWithSurvivor.length > 0) {
+              yield* retire(sharedWithSurvivor);
+            }
+
+            if (staleByTurnId.size === 0) {
+              return yield* Effect.logDebug(
+                "provider-command-reactor.turn-start.supersession-shared-turn",
+                {
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  requestSequence: event.sequence,
+                  replacementRequestSequence: replacement.requestSequence,
+                  turnId: replacement.turnId,
+                },
+              );
+            }
+
+            for (const { representative: stale, deliveryIds } of staleByTurnId.values()) {
+              yield* Effect.logDebug(
                 "provider-command-reactor.turn-start.superseded-delivery-reconciled",
                 {
                   threadId: event.payload.threadId,
@@ -1287,66 +1371,83 @@ const make = Effect.gen(function* () {
                   replacementRequestSequence: replacement.requestSequence,
                   replacementTurnId: replacement.turnId,
                 },
-              ).pipe(
-                Effect.flatMap(() =>
-                  interruptTurnOrEscalateToSessionStop({
+              );
+              const outcome = yield* interruptTurnAndObserveEscalation({
+                threadId: event.payload.threadId,
+                turnId: stale.turnId,
+                // This is the stale request's own boundary. For an earlier
+                // equal-sequence delivery the shared sequence is still the only
+                // durable cutoff available; delivery_id orders the concrete
+                // survivor inside the ledger, not the event log.
+                canceledThroughSequence: stale.requestSequence,
+                createdAt: event.payload.createdAt,
+                escalationTag: "supersession-escalated-session-stop",
+                logContext: {
+                  messageId: event.payload.messageId,
+                  staleRequestSequence: stale.requestSequence,
+                  replacementRequestSequence: replacement.requestSequence,
+                  replacementTurnId: replacement.turnId,
+                },
+              });
+
+              if (outcome._tag === "interrupted") {
+                yield* retire(deliveryIds);
+                continue;
+              }
+
+              if (outcome._tag === "escalation-dispatched") {
+                // A session teardown covers every stale concrete turn, regardless
+                // of which row triggered it. Retire all rows the snapshot placed
+                // strictly before this survivor and stop: sibling widened stops
+                // would be redundant and can kill a freshly redriven survivor.
+                yield* providerTurnSendClaimRepository
+                  .markTeardownDispatched({
                     threadId: event.payload.threadId,
-                    turnId: stale.turnId,
-                    // This is the stale request's own boundary. Using the
-                    // newer caller's sequence would put the healthy replacement
-                    // at/below the escalated stop barrier and prevent redrive.
-                    canceledThroughSequence: stale.requestSequence,
-                    createdAt: event.payload.createdAt,
-                    escalationTag: "supersession-escalated-session-stop",
-                    logContext: {
-                      messageId: event.payload.messageId,
-                      staleRequestSequence: stale.requestSequence,
-                      replacementRequestSequence: replacement.requestSequence,
-                      replacementTurnId: replacement.turnId,
-                    },
-                  }),
-                ),
-                Effect.catchCause((cause) =>
-                  Effect.logWarning(
-                    "provider command reactor failed to reconcile stale delivered send",
+                    messageId: event.payload.messageId,
+                    deliveryIds: state.deliveries.map((delivery) => delivery.deliveryId),
+                    dispatchedAt: event.payload.createdAt,
+                  })
+                  .pipe(Effect.retry({ times: 2, schedule: Schedule.exponential(100) }));
+                yield* retire(staleRows.map((delivery) => delivery.deliveryId));
+                return;
+              }
+
+              yield* Effect.logWarning(
+                "provider command reactor failed to reconcile stale delivered send",
+                {
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  staleRequestSequence: stale.requestSequence,
+                  staleTurnId: stale.turnId,
+                  replacementRequestSequence: replacement.requestSequence,
+                  replacementTurnId: replacement.turnId,
+                  cause: Cause.pretty(outcome.interruptCause),
+                },
+              );
+              yield* appendProviderFailureActivity({
+                threadId: event.payload.threadId,
+                kind: "provider.turn.interrupt.failed",
+                summary: "Provider turn interrupt failed",
+                detail: `A delivered turn could not be reconciled with its replacement: ${formatFailureDetail(outcome.interruptCause)}`,
+                turnId: stale.turnId,
+                createdAt: event.payload.createdAt,
+              }).pipe(
+                Effect.catchCause((appendCause) =>
+                  Effect.logError(
+                    "provider command reactor failed to report delivery reconciliation failure",
                     {
                       threadId: event.payload.threadId,
                       messageId: event.payload.messageId,
                       staleRequestSequence: stale.requestSequence,
                       staleTurnId: stale.turnId,
-                      replacementRequestSequence: replacement.requestSequence,
-                      replacementTurnId: replacement.turnId,
-                      cause: Cause.pretty(cause),
+                      cause: Cause.pretty(appendCause),
                     },
-                  ).pipe(
-                    Effect.flatMap(() =>
-                      appendProviderFailureActivity({
-                        threadId: event.payload.threadId,
-                        kind: "provider.turn.interrupt.failed",
-                        summary: "Provider turn interrupt failed",
-                        detail: `A delivered turn could not be reconciled with its replacement: ${formatFailureDetail(cause)}`,
-                        turnId: stale.turnId,
-                        createdAt: event.payload.createdAt,
-                      }),
-                    ),
-                    Effect.catchCause((appendCause) =>
-                      Effect.logError(
-                        "provider command reactor failed to report delivery reconciliation failure",
-                        {
-                          threadId: event.payload.threadId,
-                          messageId: event.payload.messageId,
-                          staleRequestSequence: stale.requestSequence,
-                          staleTurnId: stale.turnId,
-                          cause: Cause.pretty(appendCause),
-                        },
-                      ),
-                    ),
                   ),
                 ),
-              ),
-            { discard: true },
-          );
-        }),
+              );
+            }
+          }),
+        ),
         // This outer failure path is for recording/reading the ledger itself.
         // Stale interrupt failures are caught per row above so they retain their
         // own sequence/turn attribution and do not abort later attempts.

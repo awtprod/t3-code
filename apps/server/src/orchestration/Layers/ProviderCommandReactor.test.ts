@@ -4907,13 +4907,355 @@ describe("ProviderCommandReactor", () => {
         harness.interruptTurn.mock.calls.filter(
           (call) => (call[0] as { turnId?: string }).turnId === staleTurnId,
         ).length,
-      ).toBeGreaterThanOrEqual(1);
+      ).toBe(1);
     }
     expect(
       harness.interruptTurn.mock.calls.some(
         (call) => (call[0] as { turnId?: string }).turnId === turnIds[2],
       ),
     ).toBe(false);
+    expect(harness.stopSession.mock.calls).toHaveLength(0);
+  });
+
+  it("orders distinct equal-sequence delivery replays by insertion and interrupts only the first", async () => {
+    const harness = await createHarness();
+    const releaseA = await harness.makeLatch();
+    const releaseB = await harness.makeLatch();
+    const enteredA = await harness.makeLatch();
+    const enteredB = await harness.makeLatch();
+    const recordedA = await harness.makeLatch();
+    const recordedB = await harness.makeLatch();
+    const messageId = asMessageId("user-message-equal-sequence");
+    const turnA = asTurnId("turn-equal-sequence-a");
+    const turnB = asTurnId("turn-equal-sequence-b");
+    let sendCount = 0;
+    let sharedDeliverySequence: number | undefined;
+    let equalSequenceDeliveries: ReadonlyArray<{
+      readonly requestSequence: number;
+      readonly turnId: TurnId;
+    }> = [];
+
+    const delegatedPreSendAcquires: Array<Parameters<typeof harness.sendClaims.acquire>[0]> = [];
+    const originalAcquire = harness.sendClaims.acquire;
+    const acquireSpy = vi
+      .spyOn(harness.sendClaims, "acquire")
+      .mockImplementation((input: Parameters<typeof originalAcquire>[0]) =>
+        Effect.suspend(() => {
+          const replayInput =
+            input.messageId === messageId && sharedDeliverySequence !== undefined
+              ? {
+                  ...input,
+                  requestSequence: NonNegativeInt.make(sharedDeliverySequence),
+                }
+              : input;
+          if (input.messageId === messageId && harness.sendTurn.mock.calls.length < 2) {
+            delegatedPreSendAcquires.push(replayInput);
+          }
+          return originalAcquire(replayInput);
+        }),
+      );
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) => {
+        const replayInput =
+          input.messageId === messageId && sharedDeliverySequence !== undefined
+            ? {
+                ...input,
+                requestSequence: NonNegativeInt.make(sharedDeliverySequence),
+              }
+            : input;
+        return originalRecordDelivery(replayInput).pipe(
+          Effect.tap((state) => {
+            if (input.turnId === turnB && state._tag === "recorded") {
+              equalSequenceDeliveries = state.deliveries.map(({ requestSequence, turnId }) => ({
+                requestSequence,
+                turnId,
+              }));
+            }
+            return input.turnId === turnA
+              ? Deferred.succeed(recordedA, undefined)
+              : input.turnId === turnB
+                ? Deferred.succeed(recordedB, undefined)
+                : Effect.void;
+          }),
+        );
+      });
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "equal sequence concrete replay") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sendCount += 1;
+        if (sendCount === 1) {
+          yield* Deferred.succeed(enteredA, undefined);
+          yield* Deferred.await(releaseA);
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: turnA,
+          };
+        }
+        yield* Deferred.succeed(enteredB, undefined);
+        yield* Deferred.await(releaseB);
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: turnB,
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-equal-sequence-a"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId,
+        role: "user",
+        text: "equal sequence concrete replay",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.runEffect(Deferred.await(enteredA));
+
+    const firstRequests = (await harness.readEventsWithPayloads()).filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === messageId,
+    );
+    expect(firstRequests).toHaveLength(1);
+    sharedDeliverySequence = firstRequests[0]!.sequence;
+
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-equal-sequence-b"),
+      threadId: ThreadId.make("thread-1"),
+      messageId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.runEffect(Deferred.await(enteredB));
+
+    const requests = (await harness.readEventsWithPayloads()).filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === messageId,
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.sequence).toBeGreaterThan(requests[0]!.sequence);
+    expect(delegatedPreSendAcquires.map((input) => input.requestSequence)).toEqual([
+      sharedDeliverySequence,
+      sharedDeliverySequence,
+    ]);
+
+    await harness.runEffect(Deferred.succeed(releaseA, undefined));
+    await harness.runEffect(Deferred.await(recordedA));
+    await harness.runEffect(Deferred.succeed(releaseB, undefined));
+    await harness.runEffect(Deferred.await(recordedB));
+    await waitFor(() =>
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === turnA,
+      ),
+    );
+    await harness.drain();
+    acquireSpy.mockRestore();
+    recordDeliverySpy.mockRestore();
+
+    expect(sendCount).toBe(2);
+    expect(equalSequenceDeliveries).toEqual([
+      { requestSequence: sharedDeliverySequence, turnId: turnA },
+      { requestSequence: sharedDeliverySequence, turnId: turnB },
+    ]);
+    expect(
+      harness.interruptTurn.mock.calls.filter(
+        (call) => (call[0] as { turnId?: string }).turnId === turnA,
+      ),
+    ).toHaveLength(1);
+    expect(
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === turnB,
+      ),
+    ).toBe(false);
+    expect(harness.stopSession.mock.calls).toHaveLength(0);
+  });
+
+  it("keeps stale and survivor deliveries live when durable reconciliation fails", async () => {
+    const harness = await createHarness();
+    const releaseStale = await harness.makeLatch();
+    const releaseSurvivor = await harness.makeLatch();
+    const staleEntered = await harness.makeLatch();
+    const survivorEntered = await harness.makeLatch();
+    const staleRecorded = await harness.makeLatch();
+    const survivorRecorded = await harness.makeLatch();
+    const messageId = asMessageId("user-message-failed-durable-reconciliation");
+    const staleTurnId = asTurnId("turn-failed-reconciliation-stale");
+    const survivorTurnId = asTurnId("turn-failed-reconciliation-survivor");
+    let sendCount = 0;
+
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          Effect.tap(() =>
+            input.turnId === staleTurnId
+              ? Deferred.succeed(staleRecorded, undefined)
+              : input.turnId === survivorTurnId
+                ? Deferred.succeed(survivorRecorded, undefined)
+                : Effect.void,
+          ),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "fail durable reconciliation") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sendCount += 1;
+        if (sendCount === 1) {
+          yield* Deferred.succeed(staleEntered, undefined);
+          yield* Deferred.await(releaseStale);
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: staleTurnId,
+          };
+        }
+        yield* Deferred.succeed(survivorEntered, undefined);
+        yield* Deferred.await(releaseSurvivor);
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: survivorTurnId,
+        };
+      }),
+    );
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "session/interrupt",
+          detail: "original stale interrupt transport failure",
+        }),
+      ),
+    );
+
+    const escalatedStops: Array<Parameters<typeof harness.engine.dispatch>[0]> = [];
+    const originalDispatch = harness.engine.dispatch;
+    const dispatchSpy = vi
+      .spyOn(harness.engine, "dispatch")
+      .mockImplementation((command: Parameters<typeof originalDispatch>[0]) => {
+        if (command.type === "thread.session.stop") {
+          escalatedStops.push(command);
+          return Effect.fail(
+            new PersistenceSqlError({
+              operation: "dispatch",
+              detail: "reconciliation stop dispatch persistence failure",
+            }) as never,
+          );
+        }
+        return originalDispatch(command);
+      });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-failed-reconciliation-stale"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId,
+        role: "user",
+        text: "fail durable reconciliation",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.runEffect(Deferred.await(staleEntered));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-failed-reconciliation-survivor"),
+      threadId: ThreadId.make("thread-1"),
+      messageId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.runEffect(Deferred.await(survivorEntered));
+
+    const requests = (await harness.readEventsWithPayloads()).filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId === messageId,
+    );
+    expect(requests).toHaveLength(2);
+    const staleSequence = requests[0]!.sequence;
+    const survivorSequence = requests[1]!.sequence;
+    expect(survivorSequence).toBeGreaterThan(staleSequence);
+
+    await harness.runEffect(Deferred.succeed(releaseStale, undefined));
+    await harness.runEffect(Deferred.await(staleRecorded));
+    await harness.runEffect(Deferred.succeed(releaseSurvivor, undefined));
+    await harness.runEffect(Deferred.await(survivorRecorded));
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((thread) => thread.id === ThreadId.make("thread-1"))
+          ?.activities.some((activity) => activity.kind === "provider.turn.interrupt.failed") ===
+        true
+      );
+    });
+    await harness.drain();
+    dispatchSpy.mockRestore();
+    recordDeliverySpy.mockRestore();
+
+    const finalLedger = await harness.runEffect(
+      harness.sendClaims.recordDelivery({
+        threadId: ThreadId.make("thread-1"),
+        messageId,
+        requestSequence: survivorSequence,
+        turnId: survivorTurnId,
+      }),
+    );
+
+    expect(sendCount).toBe(2);
+    expect(harness.interruptTurn.mock.calls).toHaveLength(2);
+    expect(
+      harness.interruptTurn.mock.calls.every(
+        (call) => (call[0] as { turnId?: string }).turnId === staleTurnId,
+      ),
+    ).toBe(true);
+    expect(escalatedStops).toHaveLength(1);
+    expect(escalatedStops[0]).toMatchObject({
+      type: "thread.session.stop",
+      canceledThroughSequence: staleSequence,
+    });
+    expect(finalLedger._tag).toBe("recorded");
+    if (finalLedger._tag === "recorded") {
+      expect(
+        finalLedger.deliveries.map(({ requestSequence, turnId }) => ({ requestSequence, turnId })),
+      ).toEqual([
+        { requestSequence: staleSequence, turnId: staleTurnId },
+        { requestSequence: survivorSequence, turnId: survivorTurnId },
+      ]);
+    }
+    expect(
+      (await harness.readEvents()).filter(
+        (event) => event.type === "thread.session-stop-requested",
+      ),
+    ).toHaveLength(0);
+
+    const activity = (await harness.readModel()).threads
+      .find((thread) => thread.id === ThreadId.make("thread-1"))
+      ?.activities.find((entry) => entry.kind === "provider.turn.interrupt.failed");
+    const detail = (activity?.payload as { detail?: string } | undefined)?.detail;
+    expect(activity?.turnId).toBe(staleTurnId);
+    expect(detail).toContain("original stale interrupt transport failure");
+    expect(detail).not.toContain("reconciliation stop dispatch persistence failure");
   });
 
   it("interrupts a repeated stale turn id only once per reconciliation pass", async () => {
@@ -5135,16 +5477,7 @@ describe("ProviderCommandReactor", () => {
     await harness.runEffect(Deferred.await(olderRecorded));
     expect(harness.interruptTurn.mock.calls).toHaveLength(0);
     await harness.runEffect(Deferred.succeed(releaseNewer, undefined));
-    await waitFor(async () => {
-      const model = await harness.readModel();
-      return (
-        escalatedStops.length === 1 &&
-        model.threads
-          .find((thread) => thread.id === ThreadId.make("thread-1"))
-          ?.activities.some((activity) => activity.kind === "provider.turn.interrupt.failed") ===
-          true
-      );
-    });
+    await waitFor(() => escalatedStops.length === 1);
     await harness.drain();
     dispatchSpy.mockRestore();
     recordDeliverySpy.mockRestore();
@@ -5165,8 +5498,293 @@ describe("ProviderCommandReactor", () => {
     const activity = (await harness.readModel()).threads
       .find((thread) => thread.id === ThreadId.make("thread-1"))
       ?.activities.find((entry) => entry.kind === "provider.turn.interrupt.failed");
-    expect(activity?.turnId).toBe(asTurnId("turn-escalation-stale"));
-    expect(activity?.turnId).not.toBe(asTurnId("turn-escalation-replacement"));
+    // A durably accepted widened stop is a successful ledger reconciliation,
+    // unlike the ordinary user interrupt path which still reports its original
+    // exact-turn failure after widening.
+    expect(activity).toBeUndefined();
+  });
+
+  it("settles a real stale-stop redrive cycle without stopping the replacement again", async () => {
+    const harness = await createHarness();
+    const recordedA = await harness.makeLatch();
+    const recordedRedrive = await harness.makeLatch();
+    let sendCount = 0;
+
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          Effect.tap(() =>
+            input.turnId === asTurnId("turn-loop-1")
+              ? Deferred.succeed(recordedA, undefined)
+              : input.turnId === asTurnId("turn-loop-3")
+                ? Deferred.succeed(recordedRedrive, undefined)
+                : Effect.void,
+          ),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "break stale stop redrive loop") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sendCount += 1;
+        if (sendCount > 3) {
+          return yield* new ProviderAdapterRequestError({
+            provider: ProviderDriverKind.make("codex"),
+            method: "turn/start",
+            detail: "unexpected extra redrive",
+          });
+        }
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId(`turn-loop-${sendCount}`),
+        };
+      }),
+    );
+    // Codex rejects an exact-turn interrupt after that concrete target is no
+    // longer active. Persistently fail the stale target so only the real
+    // session-stop handler and its redrive can settle the cycle.
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "session/interrupt",
+          detail: "exact stale turn is inactive",
+        }),
+      ),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-loop-a"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-loop-breaker"),
+        role: "user",
+        text: "break stale stop redrive loop",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.runEffect(Deferred.await(recordedA));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-loop-b"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-loop-breaker"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.runEffect(Deferred.await(recordedRedrive));
+    await harness.drain();
+
+    const events = await harness.readEventsWithPayloads();
+    const messageStarts = events.filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId ===
+          asMessageId("user-message-loop-breaker"),
+    );
+    const sessionStops = events.filter((event) => event.type === "thread.session-stop-requested");
+    const redriveSequence = messageStarts.at(-1)!.sequence;
+    const finalLedger = await harness.runEffect(
+      harness.sendClaims.recordDelivery({
+        threadId: ThreadId.make("thread-1"),
+        messageId: asMessageId("user-message-loop-breaker"),
+        requestSequence: redriveSequence,
+        turnId: asTurnId("turn-loop-3"),
+      }),
+    );
+
+    expect(harness.interruptTurn.mock.calls).toHaveLength(2);
+    expect(
+      harness.interruptTurn.mock.calls.every(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-loop-1"),
+      ),
+    ).toBe(true);
+    expect(harness.stopSession.mock.calls).toHaveLength(1);
+    expect(sendCount).toBe(3);
+    expect(messageStarts).toHaveLength(3);
+    expect(sessionStops).toHaveLength(1);
+    expect(finalLedger).toMatchObject({
+      _tag: "recorded",
+      deliveries: [{ turnId: asTurnId("turn-loop-3") }],
+    });
+
+    const settledCounts = {
+      interrupts: harness.interruptTurn.mock.calls.length,
+      stops: harness.stopSession.mock.calls.length,
+      sends: sendCount,
+    };
+    await harness.drain();
+    expect({
+      interrupts: harness.interruptTurn.mock.calls.length,
+      stops: harness.stopSession.mock.calls.length,
+      sends: sendCount,
+    }).toEqual(settledCounts);
+    recordDeliverySpy.mockRestore();
+  });
+
+  it("retires every stale sibling after one widened-stop dispatch", async () => {
+    const harness = await createHarness();
+    const releases = [
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+    ] as const;
+    const entered = [
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+    ] as const;
+    const recorded = [
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+    ] as const;
+    const stopDispatched = await harness.makeLatch();
+    const turnIds = [
+      asTurnId("turn-sibling-a"),
+      asTurnId("turn-sibling-b"),
+      asTurnId("turn-sibling-survivor"),
+    ] as const;
+    let sendCount = 0;
+    let completedDeliveryCount = 0;
+
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          // Let A and B stamp the real ledger but withhold their predecessor
+          // snapshots. C's unmodified read then deterministically performs the
+          // one pass that observes both distinct stale siblings together.
+          Effect.map((state) => {
+            completedDeliveryCount += 1;
+            return completedDeliveryCount < 3 && state._tag === "recorded"
+              ? {
+                  ...state,
+                  deliveries: state.deliveries.filter(
+                    (delivery) => delivery.turnId === input.turnId,
+                  ),
+                }
+              : state;
+          }),
+          Effect.tap(() => {
+            const index = turnIds.indexOf(input.turnId);
+            return index >= 0 ? Deferred.succeed(recorded[index]!, undefined) : Effect.void;
+          }),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "one stop covers stale siblings") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        const index = sendCount++;
+        yield* Deferred.succeed(entered[index]!, undefined);
+        yield* Deferred.await(releases[index]!);
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: turnIds[index]!,
+        };
+      }),
+    );
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "session/interrupt",
+          detail: "stale sibling is inactive",
+        }),
+      ),
+    );
+
+    const escalatedStops: Array<Parameters<typeof harness.engine.dispatch>[0]> = [];
+    const originalDispatch = harness.engine.dispatch;
+    const dispatchSpy = vi
+      .spyOn(harness.engine, "dispatch")
+      .mockImplementation((command: Parameters<typeof originalDispatch>[0]) => {
+        if (command.type === "thread.session.stop") {
+          escalatedStops.push(command);
+          return Deferred.succeed(stopDispatched, undefined).pipe(
+            Effect.as({ sequence: NonNegativeInt.make(0) }),
+          );
+        }
+        return originalDispatch(command);
+      });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-sibling-a"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-stale-siblings"),
+        role: "user",
+        text: "one stop covers stale siblings",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.runEffect(Deferred.await(entered[0]));
+    for (const index of [1, 2] as const) {
+      await harness.dispatch({
+        type: "thread.turn.resume",
+        commandId: CommandId.make(`cmd-turn-sibling-${index}`),
+        threadId: ThreadId.make("thread-1"),
+        messageId: asMessageId("user-message-stale-siblings"),
+        createdAt: `2026-01-01T00:00:0${index}.000Z`,
+      });
+      await harness.runEffect(Deferred.await(entered[index]));
+    }
+
+    for (const index of [0, 1, 2] as const) {
+      await harness.runEffect(Deferred.succeed(releases[index], undefined));
+      await harness.runEffect(Deferred.await(recorded[index]));
+    }
+    await harness.runEffect(Deferred.await(stopDispatched));
+    await harness.drain();
+
+    const requests = (await harness.readEventsWithPayloads()).filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId ===
+          asMessageId("user-message-stale-siblings"),
+    );
+    const survivorState = await harness.runEffect(
+      harness.sendClaims.recordDelivery({
+        threadId: ThreadId.make("thread-1"),
+        messageId: asMessageId("user-message-stale-siblings"),
+        requestSequence: requests.at(-1)!.sequence,
+        turnId: turnIds[2],
+      }),
+    );
+
+    expect(escalatedStops).toHaveLength(1);
+    expect(harness.interruptTurn.mock.calls).toHaveLength(2);
+    expect(
+      harness.interruptTurn.mock.calls.every(
+        (call) => (call[0] as { turnId?: string }).turnId === turnIds[0],
+      ),
+    ).toBe(true);
+    expect(survivorState).toMatchObject({
+      _tag: "recorded",
+      deliveries: [{ turnId: turnIds[2] }],
+    });
+    expect(harness.stopSession.mock.calls).toHaveLength(0);
+    dispatchSpy.mockRestore();
+    recordDeliverySpy.mockRestore();
   });
 
   it("keeps the older delivered turn alive when the newer claimant's send fails", async () => {

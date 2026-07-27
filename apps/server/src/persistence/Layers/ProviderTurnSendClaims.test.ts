@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import {
   ProviderTurnSendClaimRepository,
   type ProviderTurnSendClaimOutcome,
+  type ProviderTurnSendDeliveryState,
 } from "../Services/ProviderTurnSendClaims.ts";
 import { ProviderTurnSendClaimRepositoryLive } from "./ProviderTurnSendClaims.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
@@ -25,6 +26,17 @@ const at = (seconds: number) =>
 // "did not acquire" would pass with those two swapped, which is precisely the
 // defect the tagged outcome exists to prevent.
 const tagOf = (outcome: ProviderTurnSendClaimOutcome) => outcome._tag;
+
+const withoutDeliveryIds = (state: ProviderTurnSendDeliveryState) =>
+  state._tag === "unowned"
+    ? state
+    : {
+        ...state,
+        deliveries: state.deliveries.map(({ requestSequence, turnId }) => ({
+          requestSequence,
+          turnId,
+        })),
+      };
 
 layer("ProviderTurnSendClaimRepository", (it) => {
   it.effect("refuses a stale request once a newer one holds the message's claim", () =>
@@ -168,11 +180,11 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         turnId: TurnId.make("turn-newer"),
       });
 
-      assert.deepStrictEqual(older, {
+      assert.deepStrictEqual(withoutDeliveryIds(older), {
         _tag: "recorded",
         deliveries: [{ requestSequence: 40, turnId: TurnId.make("turn-older") }],
       });
-      assert.deepStrictEqual(replacement, {
+      assert.deepStrictEqual(withoutDeliveryIds(replacement), {
         _tag: "recorded",
         deliveries: [
           { requestSequence: 40, turnId: TurnId.make("turn-older") },
@@ -213,11 +225,11 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         turnId: TurnId.make("turn-older"),
       });
 
-      assert.deepStrictEqual(replacementFirst, {
+      assert.deepStrictEqual(withoutDeliveryIds(replacementFirst), {
         _tag: "recorded",
         deliveries: [{ requestSequence: 51, turnId: TurnId.make("turn-newer") }],
       });
-      assert.deepStrictEqual(staleLast, {
+      assert.deepStrictEqual(withoutDeliveryIds(staleLast), {
         _tag: "recorded",
         deliveries: [
           { requestSequence: 50, turnId: TurnId.make("turn-older") },
@@ -264,7 +276,7 @@ layer("ProviderTurnSendClaimRepository", (it) => {
         turnId: TurnId.make("turn-b"),
       });
 
-      assert.deepStrictEqual(all, {
+      assert.deepStrictEqual(withoutDeliveryIds(all), {
         _tag: "recorded",
         deliveries: [
           { requestSequence: 60, turnId: TurnId.make("turn-a") },
@@ -275,42 +287,119 @@ layer("ProviderTurnSendClaimRepository", (it) => {
     }),
   );
 
-  it.effect("upserts one row per request sequence without duplicating replayed evidence", () =>
-    Effect.gen(function* () {
-      const claims = yield* ProviderTurnSendClaimRepository;
-      const threadId = ThreadId.make("thread-delivery-idempotent");
-      const messageId = MessageId.make("message-delivery-idempotent");
+  it.effect(
+    "retains a different turn on equal-sequence replay, keeps exact replay idempotent, and guards the survivor",
+    () =>
+      Effect.gen(function* () {
+        const claims = yield* ProviderTurnSendClaimRepository;
+        const threadId = ThreadId.make("thread-delivery-idempotent");
+        const messageId = MessageId.make("message-delivery-idempotent");
+        const turnA = TurnId.make("turn-a");
+        const turnB = TurnId.make("turn-b");
 
-      yield* claims.acquire({
-        threadId,
-        messageId,
-        requestSequence: 90,
-        claimedAt: at(0),
-      });
-      yield* claims.recordDelivery({
-        threadId,
-        messageId,
-        requestSequence: 90,
-        turnId: TurnId.make("turn-first"),
-      });
-      yield* claims.recordDelivery({
-        threadId,
-        messageId,
-        requestSequence: 90,
-        turnId: TurnId.make("turn-first"),
-      });
-      const updated = yield* claims.recordDelivery({
-        threadId,
-        messageId,
-        requestSequence: 90,
-        turnId: TurnId.make("turn-corrected"),
-      });
+        yield* claims.acquire({
+          threadId,
+          messageId,
+          requestSequence: 90,
+          claimedAt: at(0),
+        });
+        yield* claims.recordDelivery({
+          threadId,
+          messageId,
+          requestSequence: 90,
+          turnId: turnA,
+        });
+        const aReplayBeforeB = yield* claims.recordDelivery({
+          threadId,
+          messageId,
+          requestSequence: 90,
+          turnId: turnA,
+        });
+        // Equal-sequence acquire is deliberately replayable. A different turn B
+        // must append a concrete row rather than overwrite turn A.
+        const reacquired = yield* claims.acquire({
+          threadId,
+          messageId,
+          requestSequence: 90,
+          claimedAt: at(1),
+        });
+        const both = yield* claims.recordDelivery({
+          threadId,
+          messageId,
+          requestSequence: 90,
+          turnId: turnB,
+        });
+        const aReplayAfterB = yield* claims.recordDelivery({
+          threadId,
+          messageId,
+          requestSequence: 90,
+          turnId: turnA,
+        });
+        const bReplay = yield* claims.recordDelivery({
+          threadId,
+          messageId,
+          requestSequence: 90,
+          turnId: turnB,
+        });
 
-      assert.deepStrictEqual(updated, {
-        _tag: "recorded",
-        deliveries: [{ requestSequence: 90, turnId: TurnId.make("turn-corrected") }],
-      });
-    }),
+        assert.strictEqual(tagOf(reacquired), "acquired");
+        assert.deepStrictEqual(withoutDeliveryIds(aReplayBeforeB), {
+          _tag: "recorded",
+          deliveries: [{ requestSequence: 90, turnId: turnA }],
+        });
+        assert.strictEqual(both._tag, "recorded");
+        assert.strictEqual(aReplayAfterB._tag, "recorded");
+        assert.strictEqual(bReplay._tag, "recorded");
+        if (
+          both._tag !== "recorded" ||
+          aReplayAfterB._tag !== "recorded" ||
+          bReplay._tag !== "recorded"
+        ) {
+          return;
+        }
+        assert.deepStrictEqual(
+          both.deliveries.map(({ requestSequence, turnId }) => ({ requestSequence, turnId })),
+          [
+            { requestSequence: 90, turnId: turnA },
+            { requestSequence: 90, turnId: turnB },
+          ],
+        );
+        assert.deepStrictEqual(aReplayAfterB.deliveries, both.deliveries);
+        assert.deepStrictEqual(bReplay.deliveries, both.deliveries);
+        assert.ok(both.deliveries[0]!.deliveryId < both.deliveries[1]!.deliveryId);
+
+        const stale = both.deliveries[0]!;
+        const survivor = both.deliveries[1]!;
+        const protectedSurvivor = yield* claims.retireDeliveries({
+          threadId,
+          messageId,
+          deliveryIds: [survivor.deliveryId],
+          survivorDeliveryId: survivor.deliveryId,
+          reconciledAt: at(2),
+        });
+        const retiredStale = yield* claims.retireDeliveries({
+          threadId,
+          messageId,
+          deliveryIds: [stale.deliveryId],
+          survivorDeliveryId: survivor.deliveryId,
+          reconciledAt: at(3),
+        });
+        const afterRetirement = yield* claims.recordDelivery({
+          threadId,
+          messageId,
+          requestSequence: 90,
+          turnId: turnA,
+        });
+
+        assert.deepStrictEqual(protectedSurvivor, []);
+        assert.deepStrictEqual(retiredStale, [stale.deliveryId]);
+        // Retiring A cannot make its own exact record look unowned, and the
+        // survivor remains live because SQL rejected retiring it against itself.
+        assert.deepStrictEqual(withoutDeliveryIds(afterRetirement), {
+          _tag: "recorded",
+          deliveries: [{ requestSequence: 90, turnId: turnB }],
+        });
+      }),
   );
 
   it.effect("does not invent delivery evidence when no claim row owns the send", () =>

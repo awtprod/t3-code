@@ -52,21 +52,36 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
  * the older request's successful RPC were interrupted merely because it lost
  * ownership, the claim would turn one healthy turn into no turn at all.
  * `provider_turn_send_deliveries` is the second phase of the protocol. It keeps
- * one durable row for EVERY request whose `sendTurn` succeeded instead of one
- * overwriteable "superseded" slot on the claim. That distinction is
- * load-bearing for chains: if A, B, and C overlap, B returning must not erase
- * A's delivery before C can reconcile both.
+ * one durable row for EVERY concrete turn whose `sendTurn` succeeded instead of
+ * one overwriteable "superseded" slot on the claim. That distinction is
+ * load-bearing both for chains and equal-sequence replay: if A, B, and C
+ * overlap, B returning must not erase A's delivery before C can reconcile both;
+ * and if replayed sequence 90 returns turn A and then turn B, both concrete
+ * turns must remain interruptible.
  *
  * Reconciliation is ordered by successful DELIVERY, not current ownership. The
- * highest delivered request sequence survives; every lower delivered request
- * naming a distinct turn is stale. Thus if C owns but fails, B remains the
- * survivor and only A is interrupted. Equal turn ids are shared steers rather
- * than duplicate turns and must never be interrupted.
+ * total order is ascending (request_sequence, delivery_id), where delivery_id
+ * is SQLite's integer insertion order. The final unreconciled row survives;
+ * every earlier row naming a distinct turn is stale. Thus if C owns but fails,
+ * B remains the survivor and only A is interrupted. For two concrete turns
+ * returned by equal-sequence replay, the later inserted turn survives. Equal
+ * turn ids are shared steers rather than duplicate turns and must never be
+ * interrupted.
+ *
+ * A reconciled_at stamp durably retires stale evidence after its interrupt
+ * succeeds or after a widened session-stop command is durably dispatched.
+ * teardown_dispatched_at also remembers every concrete delivery the widened
+ * teardown covered, including the then-current survivor that the survivor guard
+ * correctly forbids retiring. If redrive later inserts a newer delivery, that
+ * durable coverage lets reconciliation retire the old survivor without trying
+ * to interrupt an already-destroyed session and starting another stop cycle.
+ * Rows are retained for auditability, but only unreconciled rows participate in
+ * later reconciliation.
  *
  * Growth: one claim row per user message ever sent, one delivery row per
- * successful request, and one barrier row per thread. These are bounded by the
- * corresponding durable messages/requests that the surrounding event tables
- * already keep, so none needs independent pruning.
+ * distinct successful (request, concrete turn) pair, and one barrier row per
+ * thread. These are bounded by the corresponding durable messages/requests and
+ * provider results that the surrounding event tables already keep.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -83,11 +98,14 @@ export default Effect.gen(function* () {
 
   yield* sql`
     CREATE TABLE IF NOT EXISTS provider_turn_send_deliveries (
+      delivery_id INTEGER PRIMARY KEY,
       thread_id TEXT NOT NULL,
       message_id TEXT NOT NULL,
       request_sequence INTEGER NOT NULL,
       delivered_turn_id TEXT NOT NULL,
-      PRIMARY KEY (thread_id, message_id, request_sequence)
+      reconciled_at TEXT,
+      teardown_dispatched_at TEXT,
+      UNIQUE (thread_id, message_id, request_sequence, delivered_turn_id)
     )
   `;
 

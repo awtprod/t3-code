@@ -1,4 +1,4 @@
-import { NonNegativeInt, TurnId } from "@t3tools/contracts";
+import { IsoDateTime, NonNegativeInt, TurnId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -9,8 +9,10 @@ import { toPersistenceSqlError } from "../Errors.ts";
 import {
   AcquireProviderTurnSendClaimInput,
   CancelProviderTurnSendClaimsInput,
+  MarkProviderTurnSendDeliveriesTeardownDispatchedInput,
   ProviderTurnSendClaimRepository,
   RecordProviderTurnSendDeliveryInput,
+  RetireProviderTurnSendDeliveriesInput,
   type ProviderTurnSendClaimOutcome,
   type ProviderTurnSendClaimRepositoryShape,
   type ProviderTurnSendDeliveryState,
@@ -23,8 +25,15 @@ const ClaimOwnerRowSchema = Schema.Struct({
 });
 
 const DeliveryRowSchema = Schema.Struct({
+  deliveryId: NonNegativeInt,
   requestSequence: NonNegativeInt,
   turnId: TurnId,
+  reconciledAt: Schema.NullOr(IsoDateTime),
+  teardownDispatchedAt: Schema.NullOr(IsoDateTime),
+});
+
+const RetiredDeliveryRowSchema = Schema.Struct({
+  deliveryId: NonNegativeInt,
 });
 
 const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
@@ -193,9 +202,9 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
   // Without that correlation an owner-less fallback could manufacture stale
   // evidence and interrupt an unrelated healthy turn.
   //
-  // The upsert makes retries idempotent for a request sequence and updates its
-  // concrete result if the same successful caller is replayed. It never
-  // overwrites another sequence's evidence.
+  // The per-turn unique key makes exact retries idempotent while preserving a
+  // distinct turn returned by equal-sequence replay. delivery_id is SQLite's
+  // insertion order and completes the total survivor order when sequences tie.
   const stampDeliveredTurn = SqlSchema.void({
     Request: RecordProviderTurnSendDeliveryInput,
     execute: (request) =>
@@ -215,8 +224,8 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
             AND message_id = ${request.messageId}
             AND request_sequence >= ${request.requestSequence}
         )
-        ON CONFLICT (thread_id, message_id, request_sequence)
-        DO UPDATE SET delivered_turn_id = excluded.delivered_turn_id
+        ON CONFLICT (thread_id, message_id, request_sequence, delivered_turn_id)
+        DO NOTHING
       `,
   });
 
@@ -229,22 +238,28 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
     execute: ({ threadId, messageId }) =>
       sql`
         SELECT
+          delivery_id AS "deliveryId",
           request_sequence AS "requestSequence",
-          delivered_turn_id AS "turnId"
+          delivered_turn_id AS "turnId",
+          reconciled_at AS "reconciledAt",
+          teardown_dispatched_at AS "teardownDispatchedAt"
         FROM provider_turn_send_deliveries
         WHERE thread_id = ${threadId}
           AND message_id = ${messageId}
-        ORDER BY request_sequence ASC
+        ORDER BY request_sequence ASC, delivery_id ASC
       `,
   });
 
   // The write and read intentionally remain separate statements. SQLite
-  // serializes the delivery upserts, so whichever completing sender writes
+  // serializes the delivery inserts, so whichever completing sender writes
   // second necessarily reads the first sender's row as well as its own. A third
   // sender can land after that read, but its own later read then sees all three.
   // That "at least the later writer observes the pair/chain" property is the
-  // reconciliation guarantee; a transaction would only hold the write lock
-  // across an ordinary read and is unnecessary.
+  // reconciliation guarantee. The exact pair is searched across ALL rows, not
+  // only live ones: a racing newer completion may retire this caller's row
+  // between the insert and read, but cannot erase the evidence that this insert
+  // was owned. Per-turn uniqueness removes the old equal-sequence
+  // stamp/overwrite race.
   const recordDelivery: ProviderTurnSendClaimRepositoryShape["recordDelivery"] = (input) =>
     stampDeliveredTurn(input).pipe(
       Effect.flatMap(() =>
@@ -253,16 +268,110 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
           messageId: input.messageId,
         }),
       ),
-      Effect.map(
-        (rows): ProviderTurnSendDeliveryState =>
-          rows.some(
-            (row) => row.requestSequence === input.requestSequence && row.turnId === input.turnId,
-          )
-            ? { _tag: "recorded", deliveries: rows }
-            : { _tag: "unowned" },
-      ),
+      Effect.map((rows): ProviderTurnSendDeliveryState => {
+        const recorded = rows.some(
+          (row) => row.requestSequence === input.requestSequence && row.turnId === input.turnId,
+        );
+        if (!recorded) {
+          return { _tag: "unowned" };
+        }
+        return {
+          _tag: "recorded",
+          deliveries: rows
+            .filter((row) => row.reconciledAt === null)
+            .map(({ deliveryId, requestSequence, turnId, teardownDispatchedAt }) => ({
+              deliveryId,
+              requestSequence,
+              turnId,
+              teardownDispatched: teardownDispatchedAt !== null,
+            })),
+        };
+      }),
       Effect.mapError(
         toPersistenceSqlError("ProviderTurnSendClaimRepository.recordDelivery:query"),
+      ),
+    );
+
+  // Guard retirement in SQL rather than trusting a reactor snapshot. Only the
+  // concrete named rows can move, and only when each is strictly earlier than
+  // the named survivor in (request_sequence, delivery_id) order. The update is
+  // monotonic and RETURNING exposes exactly which rows this call newly retired.
+  const retireDeliveryRows = SqlSchema.findAll({
+    Request: RetireProviderTurnSendDeliveriesInput,
+    Result: RetiredDeliveryRowSchema,
+    execute: (request) =>
+      request.deliveryIds.length === 0
+        ? sql`
+            SELECT delivery_id AS "deliveryId"
+            FROM provider_turn_send_deliveries
+            WHERE 0
+          `
+        : sql`
+            UPDATE provider_turn_send_deliveries AS target
+            SET reconciled_at = ${request.reconciledAt}
+            WHERE target.thread_id = ${request.threadId}
+              AND target.message_id = ${request.messageId}
+              AND target.reconciled_at IS NULL
+              AND target.delivery_id IN ${sql.in(request.deliveryIds)}
+              AND EXISTS (
+                SELECT 1
+                FROM provider_turn_send_deliveries AS survivor
+                WHERE survivor.thread_id = target.thread_id
+                  AND survivor.message_id = target.message_id
+                  AND survivor.delivery_id = ${request.survivorDeliveryId}
+                  AND (
+                    target.request_sequence < survivor.request_sequence
+                    OR (
+                      target.request_sequence = survivor.request_sequence
+                      AND target.delivery_id < survivor.delivery_id
+                    )
+                  )
+              )
+            RETURNING delivery_id AS "deliveryId"
+          `,
+  });
+
+  const retireDeliveries: ProviderTurnSendClaimRepositoryShape["retireDeliveries"] = (input) =>
+    retireDeliveryRows(input).pipe(
+      Effect.map((rows) => rows.map((row) => row.deliveryId)),
+      Effect.mapError(
+        toPersistenceSqlError("ProviderTurnSendClaimRepository.retireDeliveries:query"),
+      ),
+    );
+
+  // A widened stop destroys the whole provider session, including the current
+  // survivor that retirement must protect. Remember that coverage separately:
+  // if redrive later appends a newer row, the old survivor can be retired
+  // without sending an exact-turn interrupt to a session already torn down.
+  const markTeardownDispatchedRows = SqlSchema.findAll({
+    Request: MarkProviderTurnSendDeliveriesTeardownDispatchedInput,
+    Result: RetiredDeliveryRowSchema,
+    execute: (request) =>
+      request.deliveryIds.length === 0
+        ? sql`
+            SELECT delivery_id AS "deliveryId"
+            FROM provider_turn_send_deliveries
+            WHERE 0
+          `
+        : sql`
+            UPDATE provider_turn_send_deliveries
+            SET teardown_dispatched_at = ${request.dispatchedAt}
+            WHERE thread_id = ${request.threadId}
+              AND message_id = ${request.messageId}
+              AND reconciled_at IS NULL
+              AND teardown_dispatched_at IS NULL
+              AND delivery_id IN ${sql.in(request.deliveryIds)}
+            RETURNING delivery_id AS "deliveryId"
+          `,
+  });
+
+  const markTeardownDispatched: ProviderTurnSendClaimRepositoryShape["markTeardownDispatched"] = (
+    input,
+  ) =>
+    markTeardownDispatchedRows(input).pipe(
+      Effect.map((rows) => rows.map((row) => row.deliveryId)),
+      Effect.mapError(
+        toPersistenceSqlError("ProviderTurnSendClaimRepository.markTeardownDispatched:query"),
       ),
     );
 
@@ -297,6 +406,8 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
     acquire,
     cancel,
     recordDelivery,
+    retireDeliveries,
+    markTeardownDispatched,
     hasEverClaimed,
   } satisfies ProviderTurnSendClaimRepositoryShape;
 });
