@@ -90,25 +90,28 @@ export type ProviderTurnSendClaimOutcome =
    */
   | { readonly _tag: "superseded"; readonly heldBySequence?: number };
 
+export interface ProviderTurnSendDelivery {
+  readonly requestSequence: number;
+  readonly turnId: TurnId;
+}
+
 /**
- * Delivery evidence after one successful sender has stamped its returned turn.
+ * All durable delivery evidence after one successful sender stamps its result.
  *
- * `deliveredTurnId` is always the CURRENT holder's successful delivery, if it
- * has one. `supersededDeliveredTurnId` is an ex-holder's successful delivery,
- * if one has returned. The repository exposes both rather than deciding what to
- * interrupt: only the reactor knows which side is calling and can address the
- * stale concrete turn while leaving the replacement alone.
+ * Rows are ordered by request sequence so every caller derives the same
+ * survivor: the highest successfully DELIVERED request, regardless of which
+ * request currently owns the claim. Evidence is per request and is never
+ * overwritten by a later request, so an A/B/C chain cannot lose A when B
+ * returns.
  *
- * `unowned` is the safe result when no row can correlate the delivery. Like the
- * owner-less `superseded` acquire fallback, it carries no invented owner or turn
- * and therefore cannot manufacture an interrupt.
+ * `unowned` is the safe result when no claim row can correlate the delivery.
+ * Like the owner-less `superseded` acquire fallback, it carries no invented
+ * owner or turn and therefore cannot manufacture an interrupt.
  */
 export type ProviderTurnSendDeliveryState =
   | {
       readonly _tag: "recorded";
-      readonly heldBySequence: number;
-      readonly deliveredTurnId: TurnId | null;
-      readonly supersededDeliveredTurnId: TurnId | null;
+      readonly deliveries: ReadonlyArray<ProviderTurnSendDelivery>;
     }
   | { readonly _tag: "unowned" };
 
@@ -149,15 +152,14 @@ export interface ProviderTurnSendClaimRepositoryShape {
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
-   * Stamp a successful provider delivery and return the row's reconciliation
-   * evidence.
+   * Idempotently stamp one successful request and return ALL delivery evidence
+   * for its message in ascending request-sequence order.
    *
-   * If this request still owns the claim, its turn becomes
-   * `deliveredTurnId`. If a higher sequence took the claim while the RPC was in
-   * flight, its turn becomes `supersededDeliveredTurnId` instead. A takeover
-   * also moves an already-stamped former holder into that slot. Consequently
-   * either completion order exposes both successful deliveries to at least one
-   * sender, while a holder whose send failed never acquires delivery evidence.
+   * The write is allowed only while a claim row can correlate this request to
+   * the message. Successful ex-holders remain eligible after takeover, but an
+   * owner-less fallback cannot manufacture evidence. No row is removed during
+   * reconciliation: later completions must still be able to observe every
+   * delivered predecessor.
    */
   readonly recordDelivery: (
     input: RecordProviderTurnSendDeliveryInput,

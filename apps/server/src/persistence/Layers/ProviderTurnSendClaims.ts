@@ -22,10 +22,9 @@ const ClaimOwnerRowSchema = Schema.Struct({
   requestSequence: NonNegativeInt,
 });
 
-const ClaimDeliveryRowSchema = Schema.Struct({
+const DeliveryRowSchema = Schema.Struct({
   requestSequence: NonNegativeInt,
-  deliveredTurnId: Schema.NullOr(TurnId),
-  supersededDeliveredTurnId: Schema.NullOr(TurnId),
+  turnId: TurnId,
 });
 
 const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
@@ -46,16 +45,6 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
   // Equal sequences do not update, so a replay of the winner re-reads its own
   // row and is still told it holds the claim.
   //
-  // A higher sequence also advances the DELIVERY state. Ownership alone must
-  // never kill the old sender: the new RPC may fail after stealing the row. If
-  // the old holder already stamped a successful delivery, moving that concrete
-  // id into `superseded_delivered_turn_id` lets the new holder reconcile it
-  // only after the new holder stamps its own successful, distinct replacement.
-  // If the old RPC has not returned yet, `delivered_turn_id` is null and the
-  // late old sender will populate the superseded slot itself. Existing
-  // superseded evidence is preserved when there is no current delivery, so a
-  // chain of ownership changes does not erase the only known successful old
-  // send merely because an intermediate owner failed.
   const upsertClaimIfNotCanceled = SqlSchema.void({
     Request: AcquireProviderTurnSendClaimInput,
     execute: (request) =>
@@ -71,13 +60,7 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
         )
         ON CONFLICT (thread_id, message_id) DO UPDATE SET
           request_sequence = excluded.request_sequence,
-          claimed_at = excluded.claimed_at,
-          delivered_turn_id = NULL,
-          superseded_delivered_turn_id = CASE
-            WHEN provider_turn_send_claims.delivered_turn_id IS NOT NULL
-              THEN provider_turn_send_claims.delivered_turn_id
-            ELSE provider_turn_send_claims.superseded_delivered_turn_id
-          END
+          claimed_at = excluded.claimed_at
         WHERE excluded.request_sequence > provider_turn_send_claims.request_sequence
       `,
   });
@@ -204,78 +187,78 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProviderTurnSendClaimRepository.cancel:query")),
     );
 
-  // Phase two of the claim protocol. A successful CURRENT holder stamps the
-  // current-delivery slot; a successful EX-holder whose RPC crossed a takeover
-  // stamps the superseded slot. The `request_sequence >=` predicate is a safety
-  // fence against impossible/corrupt backwards ownership: without it, a
-  // delivery for a sequence that never owned this row could be recorded as
-  // stale evidence and later used to interrupt an unrelated healthy turn.
+  // Phase two of the claim protocol. Every successful request gets its own
+  // durable row. The claim predicate admits the current holder and ex-holders
+  // whose RPC crossed a later takeover, while an absent claim admits nothing.
+  // Without that correlation an owner-less fallback could manufacture stale
+  // evidence and interrupt an unrelated healthy turn.
   //
-  // This write and the read below intentionally remain separate statements.
-  // SQLite serializes all claim writes. For two completing sends, whichever
-  // stamp runs second necessarily follows the first stamp; its subsequent read
-  // sees both ids. Wrapping each pair in a transaction is unnecessary for that
-  // invariant and would lengthen the write lock around an ordinary read.
+  // The upsert makes retries idempotent for a request sequence and updates its
+  // concrete result if the same successful caller is replayed. It never
+  // overwrites another sequence's evidence.
   const stampDeliveredTurn = SqlSchema.void({
     Request: RecordProviderTurnSendDeliveryInput,
     execute: (request) =>
       sql`
-        UPDATE provider_turn_send_claims
-        SET
-          delivered_turn_id = CASE
-            WHEN request_sequence = ${request.requestSequence}
-              THEN ${request.turnId}
-            ELSE delivered_turn_id
-          END,
-          superseded_delivered_turn_id = CASE
-            WHEN request_sequence > ${request.requestSequence}
-              THEN ${request.turnId}
-            ELSE superseded_delivered_turn_id
-          END
-        WHERE thread_id = ${request.threadId}
-          AND message_id = ${request.messageId}
-          AND request_sequence >= ${request.requestSequence}
+        INSERT INTO provider_turn_send_deliveries (
+          thread_id, message_id, request_sequence, delivered_turn_id
+        )
+        SELECT
+          ${request.threadId},
+          ${request.messageId},
+          ${request.requestSequence},
+          ${request.turnId}
+        WHERE EXISTS (
+          SELECT 1
+          FROM provider_turn_send_claims
+          WHERE thread_id = ${request.threadId}
+            AND message_id = ${request.messageId}
+            AND request_sequence >= ${request.requestSequence}
+        )
+        ON CONFLICT (thread_id, message_id, request_sequence)
+        DO UPDATE SET delivered_turn_id = excluded.delivered_turn_id
       `,
   });
 
-  const readDeliveryState = SqlSchema.findOneOption({
+  const readDeliveryRows = SqlSchema.findAll({
     Request: Schema.Struct({
       threadId: RecordProviderTurnSendDeliveryInput.fields.threadId,
       messageId: RecordProviderTurnSendDeliveryInput.fields.messageId,
-      requestSequence: RecordProviderTurnSendDeliveryInput.fields.requestSequence,
     }),
-    Result: ClaimDeliveryRowSchema,
-    execute: ({ threadId, messageId, requestSequence }) =>
+    Result: DeliveryRowSchema,
+    execute: ({ threadId, messageId }) =>
       sql`
         SELECT
           request_sequence AS "requestSequence",
-          delivered_turn_id AS "deliveredTurnId",
-          superseded_delivered_turn_id AS "supersededDeliveredTurnId"
-        FROM provider_turn_send_claims
+          delivered_turn_id AS "turnId"
+        FROM provider_turn_send_deliveries
         WHERE thread_id = ${threadId}
           AND message_id = ${messageId}
-          AND request_sequence >= ${requestSequence}
+        ORDER BY request_sequence ASC
       `,
   });
 
+  // The write and read intentionally remain separate statements. SQLite
+  // serializes the delivery upserts, so whichever completing sender writes
+  // second necessarily reads the first sender's row as well as its own. A third
+  // sender can land after that read, but its own later read then sees all three.
+  // That "at least the later writer observes the pair/chain" property is the
+  // reconciliation guarantee; a transaction would only hold the write lock
+  // across an ordinary read and is unnecessary.
   const recordDelivery: ProviderTurnSendClaimRepositoryShape["recordDelivery"] = (input) =>
     stampDeliveredTurn(input).pipe(
       Effect.flatMap(() =>
-        readDeliveryState({
+        readDeliveryRows({
           threadId: input.threadId,
           messageId: input.messageId,
-          requestSequence: input.requestSequence,
         }),
       ),
       Effect.map(
-        (row): ProviderTurnSendDeliveryState =>
-          row._tag === "Some"
-            ? {
-                _tag: "recorded",
-                heldBySequence: row.value.requestSequence,
-                deliveredTurnId: row.value.deliveredTurnId,
-                supersededDeliveredTurnId: row.value.supersededDeliveredTurnId,
-              }
+        (rows): ProviderTurnSendDeliveryState =>
+          rows.some(
+            (row) => row.requestSequence === input.requestSequence && row.turnId === input.turnId,
+          )
+            ? { _tag: "recorded", deliveries: rows }
             : { _tag: "unowned" },
       ),
       Effect.mapError(

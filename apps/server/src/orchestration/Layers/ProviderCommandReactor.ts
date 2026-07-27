@@ -1189,24 +1189,30 @@ const make = Effect.gen(function* () {
     );
 
   /**
-   * Reconcile a successful send against another successful claimant.
+   * Reconcile every successful send below the newest successful delivery.
    *
-   * Ownership is intentionally insufficient. A newer request takes the claim
-   * BEFORE calling the provider, so it can own the row and still fail its RPC.
-   * Interrupting an old turn on ownership alone turns a healthy delivery into
-   * no delivery. The repository's second phase records concrete returned turn
-   * ids, and this function interrupts only when it can name BOTH the stale
-   * delivery and a distinct replacement delivery.
+   * Ownership is intentionally absent from this decision. A newer request takes
+   * the claim BEFORE calling the provider, so it can own the row and still fail
+   * its RPC. The survivor is therefore the delivery with the highest REQUEST
+   * sequence, not the current claim holder. In A/B/C where C owns but fails, B
+   * survives and A is stale.
    *
-   * Either completion order works. If the old RPC returns first, takeover moves
-   * its stamped id aside and the new sender sees it after stamping the
-   * replacement. If the new RPC returns and fences first, the old sender writes
-   * itself into the superseded slot when it eventually returns and sees the
-   * replacement already stamped. SQLite write serialization ensures the second
-   * stamp observes the first. Both sides are allowed to interrupt the same
-   * stale turn if they observe it: the call is turn-id scoped and provider
-   * runtimes treat a duplicate interrupt for an already-stopped turn as a
-   * harmless no-op.
+   * Delivery evidence is one durable row per request. That is load-bearing for
+   * longer chains: an overwriteable ex-holder slot lets B erase A before C sees
+   * it. Every completion instead reads the whole ordered ledger. SQLite write
+   * serialization means a later completing sender sees all earlier stamps, so
+   * at least one reconciliation pass observes every new stale/survivor pair.
+   *
+   * Shared steers can put the same provider turn id in several rows. The
+   * survivor's id is never interrupted, and duplicate stale ids are collapsed
+   * to one attempt per pass. When duplicates carry several request sequences,
+   * the highest stale sequence is retained: it is the strongest cutoff that
+   * still stays strictly below the replacement.
+   *
+   * Each stale attempt handles its own failure. One bad interrupt must not stop
+   * the remaining stale rows from reconciling, and escalation/reporting must
+   * retain THAT stale row's sequence and turn id rather than borrowing the
+   * caller's (which may be the healthy replacement).
    */
   const reconcileDeliveredSendAgainstSupersession = (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
@@ -1234,72 +1240,116 @@ const make = Effect.gen(function* () {
             });
           }
 
-          const callerStillOwns = state.heldBySequence === event.sequence;
-          const staleTurnId = callerStillOwns ? state.supersededDeliveredTurnId : turn.turnId;
-          const replacementTurnId = callerStillOwns ? turn.turnId : state.deliveredTurnId;
-
-          // A newer OWNER whose send has not succeeded leaves the current
-          // delivery null. That is the load-bearing failure case: the older
-          // healthy turn stays alive, and the newer send's existing failure
-          // activity is the user-visible signal.
-          if (staleTurnId === null || replacementTurnId === null) {
+          const replacement = state.deliveries.at(-1);
+          if (replacement === undefined || state.deliveries.length === 1) {
             return Effect.logDebug(
               "provider-command-reactor.turn-start.supersession-not-delivered",
               {
                 threadId: event.payload.threadId,
                 messageId: event.payload.messageId,
                 requestSequence: event.sequence,
-                heldBySequence: state.heldBySequence,
                 turnId: turn.turnId,
               },
             );
           }
 
-          // Steer requests can both legitimately return the provider's same
-          // active turn. They are two successful deliveries but not two turns;
-          // interrupting that shared id would kill the replacement itself.
-          if (staleTurnId === replacementTurnId) {
+          const staleByTurnId = new Map<TurnId, (typeof state.deliveries)[number]>();
+          for (const delivery of state.deliveries.slice(0, -1)) {
+            if (delivery.turnId !== replacement.turnId) {
+              // Rows arrive ascending, so assignment retains the highest stale
+              // sequence when the same concrete turn occurs more than once.
+              staleByTurnId.set(delivery.turnId, delivery);
+            }
+          }
+          const staleDeliveries = [...staleByTurnId.values()];
+
+          if (staleDeliveries.length === 0) {
             return Effect.logDebug("provider-command-reactor.turn-start.supersession-shared-turn", {
               threadId: event.payload.threadId,
               messageId: event.payload.messageId,
               requestSequence: event.sequence,
-              heldBySequence: state.heldBySequence,
-              turnId: staleTurnId,
+              replacementRequestSequence: replacement.requestSequence,
+              turnId: replacement.turnId,
             });
           }
 
-          return Effect.logDebug(
-            "provider-command-reactor.turn-start.superseded-delivery-reconciled",
-            {
-              threadId: event.payload.threadId,
-              messageId: event.payload.messageId,
-              requestSequence: event.sequence,
-              heldBySequence: state.heldBySequence,
-              staleTurnId,
-              replacementTurnId,
-            },
-          ).pipe(
-            Effect.flatMap(() =>
-              interruptTurnOrEscalateToSessionStop({
-                threadId: event.payload.threadId,
-                turnId: staleTurnId,
-                // Reconciliation is about this stale request, not a user stop.
-                // If a turn-scoped interrupt cannot land and widens to the
-                // session, preserving this sequence keeps a newer claimant
-                // above the cancel barrier just as the former ownership fence
-                // did.
-                canceledThroughSequence: event.sequence,
-                createdAt: event.payload.createdAt,
-                escalationTag: "supersession-escalated-session-stop",
-                logContext: {
+          return Effect.forEach(
+            staleDeliveries,
+            (stale) =>
+              Effect.logDebug(
+                "provider-command-reactor.turn-start.superseded-delivery-reconciled",
+                {
+                  threadId: event.payload.threadId,
                   messageId: event.payload.messageId,
-                  heldBySequence: state.heldBySequence,
-                  replacementTurnId,
+                  callerRequestSequence: event.sequence,
+                  staleRequestSequence: stale.requestSequence,
+                  staleTurnId: stale.turnId,
+                  replacementRequestSequence: replacement.requestSequence,
+                  replacementTurnId: replacement.turnId,
                 },
-              }),
-            ),
+              ).pipe(
+                Effect.flatMap(() =>
+                  interruptTurnOrEscalateToSessionStop({
+                    threadId: event.payload.threadId,
+                    turnId: stale.turnId,
+                    // This is the stale request's own boundary. Using the
+                    // newer caller's sequence would put the healthy replacement
+                    // at/below the escalated stop barrier and prevent redrive.
+                    canceledThroughSequence: stale.requestSequence,
+                    createdAt: event.payload.createdAt,
+                    escalationTag: "supersession-escalated-session-stop",
+                    logContext: {
+                      messageId: event.payload.messageId,
+                      staleRequestSequence: stale.requestSequence,
+                      replacementRequestSequence: replacement.requestSequence,
+                      replacementTurnId: replacement.turnId,
+                    },
+                  }),
+                ),
+                Effect.catchCause((cause) =>
+                  Effect.logWarning(
+                    "provider command reactor failed to reconcile stale delivered send",
+                    {
+                      threadId: event.payload.threadId,
+                      messageId: event.payload.messageId,
+                      staleRequestSequence: stale.requestSequence,
+                      staleTurnId: stale.turnId,
+                      replacementRequestSequence: replacement.requestSequence,
+                      replacementTurnId: replacement.turnId,
+                      cause: Cause.pretty(cause),
+                    },
+                  ).pipe(
+                    Effect.flatMap(() =>
+                      appendProviderFailureActivity({
+                        threadId: event.payload.threadId,
+                        kind: "provider.turn.interrupt.failed",
+                        summary: "Provider turn interrupt failed",
+                        detail: `A delivered turn could not be reconciled with its replacement: ${formatFailureDetail(cause)}`,
+                        turnId: stale.turnId,
+                        createdAt: event.payload.createdAt,
+                      }),
+                    ),
+                    Effect.catchCause((appendCause) =>
+                      Effect.logError(
+                        "provider command reactor failed to report delivery reconciliation failure",
+                        {
+                          threadId: event.payload.threadId,
+                          messageId: event.payload.messageId,
+                          staleRequestSequence: stale.requestSequence,
+                          staleTurnId: stale.turnId,
+                          cause: Cause.pretty(appendCause),
+                        },
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            { discard: true },
           );
         }),
+        // This outer failure path is for recording/reading the ledger itself.
+        // Stale interrupt failures are caught per row above so they retain their
+        // own sequence/turn attribution and do not abort later attempts.
         Effect.catchCause((cause) =>
           Effect.logWarning(
             "provider command reactor failed to reconcile delivered send supersession",

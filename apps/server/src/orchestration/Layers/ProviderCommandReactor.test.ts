@@ -4784,6 +4784,391 @@ describe("ProviderCommandReactor", () => {
     expect(harness.stopSession.mock.calls).toHaveLength(0);
   });
 
+  it("reconciles every stale turn in a three-request delivery chain", async () => {
+    const harness = await createHarness();
+    const releases = [
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+    ] as const;
+    const entered = [
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+    ] as const;
+    const recorded = [
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+      await harness.makeLatch(),
+    ] as const;
+    const turnIds = [
+      asTurnId("turn-chain-a"),
+      asTurnId("turn-chain-b"),
+      asTurnId("turn-chain-c"),
+    ] as const;
+    let sendCount = 0;
+
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          Effect.tap(() => {
+            const index = turnIds.indexOf(input.turnId);
+            return index >= 0 ? Deferred.succeed(recorded[index]!, undefined) : Effect.void;
+          }),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "deliver an a b c chain") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        const index = sendCount++;
+        yield* Deferred.succeed(entered[index]!, undefined);
+        yield* Deferred.await(releases[index]!);
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: turnIds[index]!,
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-chain-a"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-delivery-chain"),
+        role: "user",
+        text: "deliver an a b c chain",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.runEffect(Deferred.await(entered[0]));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-chain-b"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-delivery-chain"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.runEffect(Deferred.await(entered[1]));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-chain-c"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-delivery-chain"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await harness.runEffect(Deferred.await(entered[2]));
+
+    const requests = (await harness.readEventsWithPayloads()).filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId ===
+          asMessageId("user-message-delivery-chain"),
+    );
+    expect(requests).toHaveLength(3);
+    expect(requests.map((event) => event.sequence)).toEqual(
+      requests.map((event) => event.sequence).sort((a, b) => a - b),
+    );
+
+    // C owns before any send returns. A then B then C complete, reproducing the
+    // overwrite order that lost A when only one superseded slot existed.
+    await harness.runEffect(Deferred.succeed(releases[0], undefined));
+    await harness.runEffect(Deferred.await(recorded[0]));
+    await harness.runEffect(Deferred.succeed(releases[1], undefined));
+    await harness.runEffect(Deferred.await(recorded[1]));
+    await harness.runEffect(Deferred.succeed(releases[2], undefined));
+    await harness.runEffect(Deferred.await(recorded[2]));
+
+    await waitFor(
+      () =>
+        harness.interruptTurn.mock.calls.some(
+          (call) => (call[0] as { turnId?: string }).turnId === turnIds[0],
+        ) &&
+        harness.interruptTurn.mock.calls.some(
+          (call) => (call[0] as { turnId?: string }).turnId === turnIds[1],
+        ),
+    );
+    await harness.drain();
+    recordDeliverySpy.mockRestore();
+
+    expect(sendCount).toBe(3);
+    for (const staleTurnId of turnIds.slice(0, 2)) {
+      expect(
+        harness.interruptTurn.mock.calls.filter(
+          (call) => (call[0] as { turnId?: string }).turnId === staleTurnId,
+        ).length,
+      ).toBeGreaterThanOrEqual(1);
+    }
+    expect(
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === turnIds[2],
+      ),
+    ).toBe(false);
+  });
+
+  it("interrupts a repeated stale turn id only once per reconciliation pass", async () => {
+    const harness = await createHarness();
+    const releaseA = await harness.makeLatch();
+    const releaseB = await harness.makeLatch();
+    const releaseC = await harness.makeLatch();
+    const enteredA = await harness.makeLatch();
+    const enteredB = await harness.makeLatch();
+    const enteredC = await harness.makeLatch();
+    const recordedA = await harness.makeLatch();
+    const recordedB = await harness.makeLatch();
+    let sendCount = 0;
+    let sharedDeliveryCount = 0;
+
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          Effect.tap(() => {
+            if (input.turnId !== asTurnId("turn-repeated-stale")) {
+              return Effect.void;
+            }
+            sharedDeliveryCount += 1;
+            return Deferred.succeed(sharedDeliveryCount === 1 ? recordedA : recordedB, undefined);
+          }),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "dedupe a repeated stale turn") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sendCount += 1;
+        if (sendCount === 1) {
+          yield* Deferred.succeed(enteredA, undefined);
+          yield* Deferred.await(releaseA);
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-repeated-stale"),
+          };
+        }
+        if (sendCount === 2) {
+          yield* Deferred.succeed(enteredB, undefined);
+          yield* Deferred.await(releaseB);
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-repeated-stale"),
+          };
+        }
+        yield* Deferred.succeed(enteredC, undefined);
+        yield* Deferred.await(releaseC);
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-distinct-survivor"),
+        };
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-repeated-stale-a"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-repeated-stale"),
+        role: "user",
+        text: "dedupe a repeated stale turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.runEffect(Deferred.await(enteredA));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-repeated-stale-b"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-repeated-stale"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.runEffect(Deferred.await(enteredB));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-repeated-stale-c"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-repeated-stale"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await harness.runEffect(Deferred.await(enteredC));
+
+    await harness.runEffect(Deferred.succeed(releaseA, undefined));
+    await harness.runEffect(Deferred.await(recordedA));
+    await harness.runEffect(Deferred.succeed(releaseB, undefined));
+    await harness.runEffect(Deferred.await(recordedB));
+    // A and B share one live steer id, so neither delivery alone may stop it.
+    expect(harness.interruptTurn.mock.calls).toHaveLength(0);
+
+    await harness.runEffect(Deferred.succeed(releaseC, undefined));
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+    await harness.drain();
+    recordDeliverySpy.mockRestore();
+
+    expect(harness.interruptTurn.mock.calls).toEqual([
+      [{ threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-repeated-stale") }],
+    ]);
+  });
+
+  it("escalates a newer-side stale interrupt at the stale request sequence", async () => {
+    const harness = await createHarness();
+    const releaseOlder = await harness.makeLatch();
+    const releaseNewer = await harness.makeLatch();
+    const olderEntered = await harness.makeLatch();
+    const newerEntered = await harness.makeLatch();
+    const olderRecorded = await harness.makeLatch();
+    let sendCount = 0;
+
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          Effect.tap(() =>
+            input.turnId === asTurnId("turn-escalation-stale")
+              ? Deferred.succeed(olderRecorded, undefined)
+              : Effect.void,
+          ),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "replacement must survive escalation") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sendCount += 1;
+        if (sendCount === 1) {
+          yield* Deferred.succeed(olderEntered, undefined);
+          yield* Deferred.await(releaseOlder);
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-escalation-stale"),
+          };
+        }
+        yield* Deferred.succeed(newerEntered, undefined);
+        yield* Deferred.await(releaseNewer);
+        return {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-escalation-replacement"),
+        };
+      }),
+    );
+    harness.interruptTurn.mockImplementation((_: unknown) =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "session/interrupt",
+          detail: "stale turn interrupt transport failure",
+        }),
+      ),
+    );
+
+    const escalatedStops: Array<Parameters<typeof harness.engine.dispatch>[0]> = [];
+    const originalDispatch = harness.engine.dispatch;
+    const dispatchSpy = vi
+      .spyOn(harness.engine, "dispatch")
+      .mockImplementation((command: Parameters<typeof originalDispatch>[0]) => {
+        if (command.type === "thread.session.stop") {
+          escalatedStops.push(command);
+          // Capturing the internal command without enqueuing it isolates the
+          // cutoff contract from session-stop redrive and avoids a second
+          // reconciliation cycle obscuring which stale attempt produced it.
+          return Effect.succeed({ sequence: NonNegativeInt.make(0) });
+        }
+        return originalDispatch(command);
+      });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-escalation-stale"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-escalation-sequence"),
+        role: "user",
+        text: "replacement must survive escalation",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.runEffect(Deferred.await(olderEntered));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-escalation-replacement"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-escalation-sequence"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.runEffect(Deferred.await(newerEntered));
+
+    const requests = (await harness.readEventsWithPayloads()).filter(
+      (event) =>
+        event.type === "thread.turn-start-requested" &&
+        (event.payload as { messageId?: string }).messageId ===
+          asMessageId("user-message-escalation-sequence"),
+    );
+    expect(requests).toHaveLength(2);
+    const staleSequence = requests[0]!.sequence;
+    const replacementSequence = requests[1]!.sequence;
+
+    await harness.runEffect(Deferred.succeed(releaseOlder, undefined));
+    await harness.runEffect(Deferred.await(olderRecorded));
+    expect(harness.interruptTurn.mock.calls).toHaveLength(0);
+    await harness.runEffect(Deferred.succeed(releaseNewer, undefined));
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        escalatedStops.length === 1 &&
+        model.threads
+          .find((thread) => thread.id === ThreadId.make("thread-1"))
+          ?.activities.some((activity) => activity.kind === "provider.turn.interrupt.failed") ===
+          true
+      );
+    });
+    await harness.drain();
+    dispatchSpy.mockRestore();
+    recordDeliverySpy.mockRestore();
+
+    expect(replacementSequence).toBeGreaterThan(staleSequence);
+    expect(escalatedStops).toHaveLength(1);
+    expect(escalatedStops[0]).toMatchObject({
+      type: "thread.session.stop",
+      canceledThroughSequence: staleSequence,
+    });
+    expect(staleSequence).toBeLessThan(replacementSequence);
+    expect(
+      harness.interruptTurn.mock.calls.filter(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-escalation-stale"),
+      ),
+    ).toHaveLength(2);
+
+    const activity = (await harness.readModel()).threads
+      .find((thread) => thread.id === ThreadId.make("thread-1"))
+      ?.activities.find((entry) => entry.kind === "provider.turn.interrupt.failed");
+    expect(activity?.turnId).toBe(asTurnId("turn-escalation-stale"));
+    expect(activity?.turnId).not.toBe(asTurnId("turn-escalation-replacement"));
+  });
+
   it("keeps the older delivered turn alive when the newer claimant's send fails", async () => {
     const harness = await createHarness();
     const createdAt = "2026-01-01T00:00:00.000Z";
@@ -4875,6 +5260,152 @@ describe("ProviderCommandReactor", () => {
     expect(sameMessageSendCount).toBe(2);
     expect(harness.interruptTurn.mock.calls).toHaveLength(0);
     expect(harness.stopSession.mock.calls).toHaveLength(0);
+  });
+
+  it("keeps the newest delivered request when a still-newer owner fails", async () => {
+    const harness = await createHarness();
+    const releaseA = await harness.makeLatch();
+    const releaseB = await harness.makeLatch();
+    const releaseCFailure = await harness.makeLatch();
+    const enteredA = await harness.makeLatch();
+    const enteredB = await harness.makeLatch();
+    const enteredC = await harness.makeLatch();
+    const recordedA = await harness.makeLatch();
+    const recordedB = await harness.makeLatch();
+    let sendCount = 0;
+
+    const originalRecordDelivery = harness.sendClaims.recordDelivery;
+    const recordDeliverySpy = vi
+      .spyOn(harness.sendClaims, "recordDelivery")
+      .mockImplementation((input: Parameters<typeof originalRecordDelivery>[0]) =>
+        originalRecordDelivery(input).pipe(
+          Effect.tap(() =>
+            input.turnId === asTurnId("turn-failed-chain-a")
+              ? Deferred.succeed(recordedA, undefined)
+              : input.turnId === asTurnId("turn-failed-chain-b")
+                ? Deferred.succeed(recordedB, undefined)
+                : Effect.void,
+          ),
+        ),
+      );
+    harness.sendTurn.mockImplementation((input: unknown) =>
+      Effect.gen(function* () {
+        if ((input as { input?: string }).input !== "c owns but b delivered last") {
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-unrelated"),
+          };
+        }
+        sendCount += 1;
+        if (sendCount === 1) {
+          yield* Deferred.succeed(enteredA, undefined);
+          yield* Deferred.await(releaseA);
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-failed-chain-a"),
+          };
+        }
+        if (sendCount === 2) {
+          yield* Deferred.succeed(enteredB, undefined);
+          yield* Deferred.await(releaseB);
+          return {
+            threadId: ThreadId.make("thread-1"),
+            turnId: asTurnId("turn-failed-chain-b"),
+          };
+        }
+        yield* Deferred.succeed(enteredC, undefined);
+        yield* Deferred.await(releaseCFailure);
+        return yield* new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "turn/start",
+          detail: "current owner c failed before delivery",
+        });
+      }),
+    );
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-failed-chain-a"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-failed-chain"),
+        role: "user",
+        text: "c owns but b delivered last",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.runEffect(Deferred.await(enteredA));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-failed-chain-b"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-failed-chain"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await harness.runEffect(Deferred.await(enteredB));
+    await harness.dispatch({
+      type: "thread.turn.resume",
+      commandId: CommandId.make("cmd-turn-failed-chain-c"),
+      threadId: ThreadId.make("thread-1"),
+      messageId: asMessageId("user-message-failed-chain"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await harness.runEffect(Deferred.await(enteredC));
+
+    // C owns before either successful RPC returns. Since ownership without a
+    // delivery is not replacement evidence, B becomes the survivor when it
+    // succeeds and A alone becomes stale.
+    await harness.runEffect(Deferred.succeed(releaseA, undefined));
+    await harness.runEffect(Deferred.await(recordedA));
+    await harness.runEffect(Deferred.succeed(releaseB, undefined));
+    await harness.runEffect(Deferred.await(recordedB));
+    await waitFor(() =>
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-failed-chain-a"),
+      ),
+    );
+    await harness.runEffect(Deferred.succeed(releaseCFailure, undefined));
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((thread) => thread.id === ThreadId.make("thread-1"))
+          ?.activities.some(
+            (activity) =>
+              activity.kind === "provider.turn.start.failed" &&
+              (activity.payload as { detail?: string }).detail?.includes(
+                "current owner c failed before delivery",
+              ),
+          ) === true
+      );
+    });
+    await harness.drain();
+    recordDeliverySpy.mockRestore();
+
+    expect(sendCount).toBe(3);
+    expect(
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-failed-chain-b"),
+      ),
+    ).toBe(false);
+    expect(
+      harness.interruptTurn.mock.calls.some(
+        (call) => (call[0] as { turnId?: string }).turnId === asTurnId("turn-failed-chain-c"),
+      ),
+    ).toBe(false);
+    const failure = (await harness.readModel()).threads
+      .find((thread) => thread.id === ThreadId.make("thread-1"))
+      ?.activities.find(
+        (activity) =>
+          activity.kind === "provider.turn.start.failed" &&
+          (activity.payload as { detail?: string }).detail?.includes(
+            "current owner c failed before delivery",
+          ),
+      );
+    expect(failure).toBeDefined();
   });
 
   it("does not interrupt when superseding steers return the same active turn id", async () => {
