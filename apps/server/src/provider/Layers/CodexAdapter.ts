@@ -16,6 +16,7 @@ import {
   ProviderInstanceId,
   type ProviderRuntimeEvent,
   type ProviderRequestKind,
+  type ProviderTurnTargetIdentity,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   RuntimeItemId,
@@ -62,6 +63,7 @@ import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
+  matchesCodexInterruptTarget,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
@@ -78,6 +80,8 @@ import {
 } from "../security/CommandCenterProviderIsolation.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
+const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+const isCodexAppServerProtocolParseError = Schema.is(CodexErrors.CodexAppServerProtocolParseError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
@@ -124,6 +128,13 @@ export interface CodexAdapterLiveOptions {
  *   because Codex's `sendTurn` returns as soon as the RPC responds; the ACP
  *   adapters await the whole turn inside `sendTurn`, where a lock would
  *   deadlock steering.
+ * - `unresolved` covers an ambiguous post-offer/decode failure. It preserves
+ *   the original request sequence until a late notification consumes it, and
+ *   blocks another send from replacing the only safe correlation candidate.
+ *   This state is session-local: replacing a session constructs a fresh
+ *   `CodexTurnRequestCorrelation`, so stopping/restarting the same logical
+ *   thread clears an unresolved slot instead of carrying it into the new
+ *   runtime generation.
  *
  * `resolvedTurnIds` is what makes the `inFlight` fallback safe to reach. That
  * fallback assumes "no id-keyed entry" means "the response has not landed yet",
@@ -152,6 +163,7 @@ interface CodexTurnRequestCorrelation {
   readonly resolvedTurnIds: Set<TurnId>;
   fallbackTrustworthy: boolean;
   inFlight: number | undefined;
+  unresolved: number | undefined;
 }
 
 interface CodexAdapterSessionContext {
@@ -222,6 +234,31 @@ function mapCodexRuntimeError(
     detail: error.message,
     cause: error,
   });
+}
+
+/**
+ * A provider JSON-RPC error is an explicit rejection. Local request validation
+ * and wire encoding also happen before the request is offered. Every other
+ * turn/start failure may have occurred after Codex accepted the request.
+ */
+function isDefiniteCodexTurnStartRejection(error: CodexSessionRuntimeError): boolean {
+  if (isCodexAppServerRequestError(error) || isCodexSessionRuntimeThreadIdMissingError(error)) {
+    return true;
+  }
+  return (
+    isCodexAppServerProtocolParseError(error) &&
+    (error.operation === "decode-request-payload" || error.operation === "encode-wire-message")
+  );
+}
+
+function isCodexTargetGoneInterruptError(error: CodexSessionRuntimeError): boolean {
+  return (
+    isCodexAppServerRequestError(error) &&
+    error.method === "turn/interrupt" &&
+    error.operation === "receive-response" &&
+    error.code === -32600 &&
+    error.errorMessage === "no active turn to interrupt"
+  );
 }
 
 type CodexLifecycleItem =
@@ -643,6 +680,31 @@ function recordCodexTurnRequestSequence(
   }
 }
 
+function clearInFlightCodexTurnRequestSequence(
+  correlation: CodexTurnRequestCorrelation,
+  requestSequence: number | undefined,
+): void {
+  if (correlation.inFlight === requestSequence) {
+    correlation.inFlight = undefined;
+  }
+}
+
+function preserveUnresolvedCodexTurnRequestSequence(
+  correlation: CodexTurnRequestCorrelation,
+  requestSequence: number | undefined,
+): void {
+  if (requestSequence === undefined || correlation.inFlight !== requestSequence) {
+    return;
+  }
+  correlation.inFlight = undefined;
+  // Never replace an older ambiguous request. The send gate below should make
+  // this branch unreachable, but keeping the assignment conditional preserves
+  // the invariant locally if the call order changes.
+  if (correlation.unresolved === undefined) {
+    correlation.unresolved = requestSequence;
+  }
+}
+
 /**
  * Marks a turn id as one the correlation has already answered for, so a later
  * notification naming it never falls through to the in-flight slot.
@@ -688,6 +750,12 @@ function takeCodexTurnRequestSequence(
     // no longer means "never recorded". Declining to stamp costs this turn its
     // correlation; guessing would cost some other turn its correctness.
     return undefined;
+  }
+  const unresolved = correlation.unresolved;
+  if (unresolved !== undefined) {
+    correlation.unresolved = undefined;
+    rememberResolvedCodexTurnId(correlation, turnId);
+    return unresolved;
   }
   // The notification beat the `turn/start` response. `sendLock` guarantees at
   // most one send is mid-RPC, so the parked value belongs to this turn.
@@ -1794,6 +1862,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           resolvedTurnIds: new Set<TurnId>(),
           fallbackTrustworthy: true,
           inFlight: undefined,
+          unresolved: undefined,
         };
         const sendLock = yield* Semaphore.make(1);
         const sessionScope = yield* Scope.make("sequential");
@@ -1922,6 +1991,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // specifically: `sendTurn` returns when the RPC responds, not at turn end.
     return yield* session.sendLock.withPermit(
       Effect.gen(function* () {
+        if (session.turnRequestCorrelation.unresolved !== undefined) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/start",
+            detail:
+              "A prior Codex turn/start has an unresolved outcome; waiting for its turn/started notification.",
+          });
+        }
         recordCodexTurnRequestSequence(
           session.turnRequestCorrelation,
           undefined,
@@ -1945,18 +2022,25 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
           })
           .pipe(
-            Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)),
-            // A failed start never produces a `turn.started`, so its parked
-            // slot would otherwise be claimed by whichever turn announced next.
-            Effect.onError(() =>
+            // Classify while the runtime error still retains its protocol
+            // phase. Mapping first would erase whether Codex explicitly
+            // rejected the request or may already have accepted it.
+            Effect.tapError((cause) =>
               Effect.sync(() => {
-                recordCodexTurnRequestSequence(
-                  session.turnRequestCorrelation,
-                  undefined,
-                  undefined,
-                );
+                if (isDefiniteCodexTurnStartRejection(cause)) {
+                  clearInFlightCodexTurnRequestSequence(
+                    session.turnRequestCorrelation,
+                    input.turnRequestSequence,
+                  );
+                } else {
+                  preserveUnresolvedCodexTurnRequestSequence(
+                    session.turnRequestCorrelation,
+                    input.turnRequestSequence,
+                  );
+                }
               }),
             ),
+            Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)),
           );
         recordCodexTurnRequestSequence(
           session.turnRequestCorrelation,
@@ -1979,15 +2063,42 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return session;
   });
 
-  const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
-    requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
+  const interruptTargetedTurn = (
+    threadId: ThreadId,
+    turnId: TurnId | undefined,
+    target: ProviderTurnTargetIdentity,
+  ): Effect.Effect<void, CodexSessionRuntimeError> => {
+    const session = sessions.get(threadId);
+    if (!session || session.stopped) {
+      return Effect.void;
+    }
+    return session.runtime.getSession.pipe(
+      Effect.flatMap((current) =>
+        matchesCodexInterruptTarget(current, target)
+          ? session.runtime
+              .interruptTurn(turnId, target)
+              .pipe(Effect.catchIf(isCodexTargetGoneInterruptError, () => Effect.void))
+          : Effect.void,
+      ),
+    );
+  };
+
+  const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId, target) => {
+    const interrupt =
+      target === undefined
+        ? requireSession(threadId).pipe(
+            Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
+          )
+        : interruptTargetedTurn(threadId, turnId, target);
+
+    return interrupt.pipe(
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
           : mapCodexRuntimeError(threadId, "turn/interrupt", cause),
       ),
     );
+  };
 
   const readThread: CodexAdapterShape["readThread"] = (threadId) =>
     requireSession(threadId).pipe(

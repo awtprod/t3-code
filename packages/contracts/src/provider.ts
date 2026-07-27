@@ -98,17 +98,40 @@ export const ProviderSendTurnInput = Schema.Struct({
    * model, source plan, and interrupt flag.
    *
    * Optional because not every send originates from a turn-start request —
-   * an adapter-internal or synthetic turn has no requesting event, and those
-   * legitimately fall back to oldest-first adoption.
+   * an adapter-internal or synthetic turn has no requesting event. Absence
+   * explicitly means the resulting turn is uncorrelated: the projector must
+   * not adopt any placeholder for it, including by an oldest-first fallback.
    */
   turnRequestSequence: Schema.optional(NonNegativeInt),
 });
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 
+export const ProviderTurnTargetIdentity = Schema.Struct({
+  /**
+   * Runtime generation that accepted the turn.
+   *
+   * Used when the provider has no native resumable thread identity. Providers
+   * with a resume cursor may match that stronger identity across runtime
+   * generations.
+   */
+  sessionGeneration: TrimmedNonEmptyString,
+  /**
+   * Provider-native resumable thread identity captured by the successful send.
+   */
+  resumeCursor: Schema.optional(Schema.Unknown),
+});
+export type ProviderTurnTargetIdentity = typeof ProviderTurnTargetIdentity.Type;
+
 export const ProviderTurnStartResult = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
   resumeCursor: Schema.optional(Schema.Unknown),
+  /**
+   * Immutable identity of the provider session that accepted this exact turn.
+   * Historical interrupts carry it back so an old turn id is never combined
+   * with an unrelated current provider session.
+   */
+  target: Schema.optional(ProviderTurnTargetIdentity),
   /**
    * True when this send was folded into an already-running turn (a "steer")
    * rather than opening a new one.
@@ -130,6 +153,11 @@ export type ProviderTurnStartResult = typeof ProviderTurnStartResult.Type;
 export const ProviderInterruptTurnInput = Schema.Struct({
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
+  /**
+   * Identity returned by the successful send that created `turnId`.
+   * Absence retains ordinary current-session interrupt behavior.
+   */
+  target: Schema.optional(ProviderTurnTargetIdentity),
 });
 export type ProviderInterruptTurnInput = typeof ProviderInterruptTurnInput.Type;
 

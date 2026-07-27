@@ -10,6 +10,7 @@ import {
   type ProviderInteractionMode,
   type ProviderRequestKind,
   type ProviderSession,
+  type ProviderTurnTargetIdentity,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   RuntimeMode,
@@ -182,7 +183,10 @@ export interface CodexSessionRuntimeShape {
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
-  readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly interruptTurn: (
+    turnId?: TurnId,
+    target?: ProviderTurnTargetIdentity,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
@@ -333,6 +337,27 @@ function readResumeCursorThreadId(
   resumeCursor: ProviderSession["resumeCursor"],
 ): string | undefined {
   return isCodexResumeCursorSchema(resumeCursor) ? resumeCursor.threadId : undefined;
+}
+
+/**
+ * Matches a historical turn target against the currently active Codex runtime.
+ *
+ * Codex's native thread id is stable across resumed runtime generations, so it
+ * is the stronger identity when present. Older/no-cursor targets are confined
+ * to the exact runtime generation that accepted them.
+ */
+export function matchesCodexInterruptTarget(
+  session: ProviderSession,
+  target: ProviderTurnTargetIdentity,
+): boolean {
+  if (target.resumeCursor !== undefined) {
+    const targetThreadId = readResumeCursorThreadId(target.resumeCursor);
+    return (
+      targetThreadId !== undefined &&
+      targetThreadId === readResumeCursorThreadId(session.resumeCursor)
+    );
+  }
+  return session.sessionGeneration === target.sessionGeneration;
 }
 
 function runtimeModeToThreadConfig(input: RuntimeMode): {
@@ -1620,19 +1645,23 @@ export const makeCodexSessionRuntime = (
             activeTurnId: turnId,
             ...(normalizedModel ? { model: normalizedModel } : {}),
           });
-          const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return {
             threadId: options.threadId,
             turnId,
-            ...(resumedProviderThreadId
-              ? { resumeCursor: { threadId: resumedProviderThreadId } }
-              : {}),
+            resumeCursor: { threadId: providerThreadId },
+            target: {
+              sessionGeneration,
+              resumeCursor: { threadId: providerThreadId },
+            },
           } satisfies ProviderTurnStartResult;
         }),
-      interruptTurn: (turnId) =>
+      interruptTurn: (turnId, target) =>
         Effect.gen(function* () {
-          const providerThreadId = yield* readProviderThreadId;
           const session = yield* Ref.get(sessionRef);
+          if (target !== undefined && !matchesCodexInterruptTarget(session, target)) {
+            return;
+          }
+          const providerThreadId = yield* readProviderThreadId;
           const effectiveTurnId = turnId ?? session.activeTurnId;
           if (!effectiveTurnId) {
             return;

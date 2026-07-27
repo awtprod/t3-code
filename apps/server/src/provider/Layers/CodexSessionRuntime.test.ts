@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -15,7 +16,12 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe } from "vite-plus/test";
-import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL,
+  ProviderDriverKind,
+  type ProviderSession,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 
@@ -31,6 +37,7 @@ import {
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   makeCodexSessionRuntime,
+  matchesCodexInterruptTarget,
   openCodexThread,
   verifyCommandCenterCodexIsolation,
 } from "./CodexSessionRuntime.ts";
@@ -38,6 +45,8 @@ import {
 const makeFakeChildHandle = (input: {
   readonly pid: number;
   readonly exitCode: Effect.Effect<ChildProcessSpawner.ExitCode>;
+  readonly stdin?: Sink.Sink<void, Uint8Array>;
+  readonly stdout?: Stream.Stream<Uint8Array>;
 }) =>
   ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(input.pid),
@@ -45,13 +54,61 @@ const makeFakeChildHandle = (input: {
     isRunning: Effect.succeed(true),
     kill: () => Effect.void,
     unref: Effect.succeed(Effect.void),
-    stdin: Sink.drain,
-    stdout: Stream.empty,
+    stdin: input.stdin ?? Sink.drain,
+    stdout: input.stdout ?? Stream.empty,
     stderr: Stream.empty,
     all: Stream.empty,
     getInputFd: () => Sink.drain,
     getOutputFd: () => Stream.empty,
   });
+
+describe("matchesCodexInterruptTarget", () => {
+  const session: ProviderSession = {
+    provider: ProviderDriverKind.make("codex"),
+    status: "running",
+    runtimeMode: "full-access",
+    sessionGeneration: "generation-current",
+    threadId: ThreadId.make("thread-interrupt-target"),
+    resumeCursor: { threadId: "provider-thread-current" },
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("rejects a mismatched native cursor", () => {
+    NodeAssert.equal(
+      matchesCodexInterruptTarget(session, {
+        sessionGeneration: "generation-current",
+        resumeCursor: { threadId: "provider-thread-other" },
+      }),
+      false,
+    );
+  });
+
+  it("accepts the same native cursor across runtime generations", () => {
+    NodeAssert.equal(
+      matchesCodexInterruptTarget(session, {
+        sessionGeneration: "generation-historical",
+        resumeCursor: { threadId: "provider-thread-current" },
+      }),
+      true,
+    );
+  });
+
+  it("requires generation equality when the target has no cursor", () => {
+    NodeAssert.equal(
+      matchesCodexInterruptTarget(session, {
+        sessionGeneration: "generation-current",
+      }),
+      true,
+    );
+    NodeAssert.equal(
+      matchesCodexInterruptTarget(session, {
+        sessionGeneration: "generation-other",
+      }),
+      false,
+    );
+  });
+});
 
 describe("CodexSessionRuntime terminal lifecycle", () => {
   it.effect(
@@ -284,6 +341,96 @@ function makeThreadOpenResponse(
     },
   } as unknown as CodexRpc.ClientRequestResponsesByMethod["thread/start"];
 }
+
+describe("CodexSessionRuntime sendTurn target provenance", () => {
+  it.effect("uses the runtime generation and exact turn/start provider thread", () =>
+    Effect.gen(function* () {
+      const providerThreadId = "provider-thread-from-thread-start";
+      const canonicalThreadId = ThreadId.make("thread-runtime-target-provenance");
+      const inbound = yield* Queue.unbounded<Uint8Array>();
+      const turnStartThreadIds: Array<string> = [];
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      const encodeJsonString = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+      const decodeJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+      const respond = (id: string | number, result: unknown) =>
+        Effect.gen(function* () {
+          const encoded = yield* encodeJsonString({ id, result });
+          yield* Queue.offer(inbound, encoder.encode(`${encoded}\n`));
+        }).pipe(Effect.orDie);
+      const wireHandle = makeFakeChildHandle({
+        pid: 4444,
+        exitCode: Effect.never,
+        stdin: Sink.forEach((chunk: Uint8Array) =>
+          Effect.gen(function* () {
+            const message = (yield* decodeJsonString(decoder.decode(chunk))) as {
+              readonly id?: string | number;
+              readonly method?: string;
+              readonly params?: Record<string, unknown>;
+            };
+            if (message.id === undefined) {
+              return;
+            }
+            switch (message.method) {
+              case "initialize":
+                yield* respond(message.id, {
+                  userAgent: "codex-runtime-target-test",
+                  codexHome: "/tmp/codex-runtime-target-test",
+                  platformFamily: "unix",
+                  platformOs: "linux",
+                });
+                return;
+              case "thread/start":
+                yield* respond(message.id, makeThreadOpenResponse(providerThreadId));
+                return;
+              case "turn/start":
+                turnStartThreadIds.push(String(message.params?.threadId));
+                yield* respond(message.id, {
+                  turn: {
+                    id: "provider-turn-1",
+                    items: [],
+                    status: "inProgress",
+                  },
+                });
+                return;
+              default:
+                throw new Error(`Unexpected Codex request: ${String(message.method)}`);
+            }
+          }).pipe(Effect.orDie),
+        ),
+        stdout: Stream.fromQueue(inbound),
+      });
+      const spawner = ChildProcessSpawner.make(() => Effect.succeed(wireHandle));
+      const runtimeScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: canonicalThreadId,
+        binaryPath: "/usr/bin/codex",
+        cwd: "/tmp/codex-runtime-target-test",
+        runtimeMode: "full-access",
+      }).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+
+      const session = yield* runtime.start();
+      const started = yield* runtime.sendTurn({ input: "prove target provenance" });
+
+      NodeAssert.deepStrictEqual(turnStartThreadIds, [providerThreadId]);
+      NodeAssert.equal(started.threadId, canonicalThreadId);
+      NodeAssert.equal(started.turnId, "provider-turn-1");
+      NodeAssert.deepStrictEqual(started.resumeCursor, { threadId: providerThreadId });
+      NodeAssert.deepStrictEqual(started.target, {
+        sessionGeneration: session.sessionGeneration,
+        resumeCursor: { threadId: providerThreadId },
+      });
+      NodeAssert.equal(started.target?.sessionGeneration, session.sessionGeneration);
+      NodeAssert.deepStrictEqual(started.target?.resumeCursor, started.resumeCursor);
+
+      yield* runtime.close;
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
 
 describe("buildTurnStartParams", () => {
   it("keeps invalid turn values only in the schema cause", () => {

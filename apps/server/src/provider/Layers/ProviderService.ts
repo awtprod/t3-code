@@ -24,10 +24,12 @@ import {
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type ProviderTurnTargetIdentity,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -175,6 +177,18 @@ function readPersistedProjectId(
   const rawProjectId = "projectId" in runtimePayload ? runtimePayload.projectId : undefined;
   if (typeof rawProjectId !== "string" || rawProjectId.trim().length === 0) return undefined;
   return ProjectId.make(rawProjectId.trim());
+}
+
+function providerSessionMatchesTurnTarget(
+  session: ProviderSession,
+  target: ProviderTurnTargetIdentity,
+): boolean {
+  if (target.resumeCursor !== undefined) {
+    return (
+      session.resumeCursor !== undefined && Equal.equals(session.resumeCursor, target.resumeCursor)
+    );
+  }
+  return session.sessionGeneration === target.sessionGeneration;
 }
 
 const dieOnMissingBindingInstanceId = (
@@ -525,6 +539,46 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     } as const;
   });
 
+  const resolveTargetedInterruptSession = Effect.fn("resolveTargetedInterruptSession")(
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly target: ProviderTurnTargetIdentity;
+    }) {
+      const bindingOption = yield* directory.getBinding(input.threadId);
+      const binding = Option.getOrUndefined(bindingOption);
+      if (!binding) {
+        return Option.none();
+      }
+
+      const instanceId = yield* requireBindingInstanceId("ProviderService.interruptTurn", binding);
+      const availableInstanceIds = yield* registry.listInstances();
+      if (!availableInstanceIds.includes(instanceId)) {
+        return Option.none();
+      }
+
+      const adapter = yield* registry.getByInstance(instanceId);
+
+      const hasActiveSession = yield* adapter.hasSession(input.threadId);
+      if (!hasActiveSession) {
+        return Option.none();
+      }
+
+      const activeSession = (yield* adapter.listSessions()).find(
+        (session) => session.threadId === input.threadId,
+      );
+      if (!activeSession || !providerSessionMatchesTurnTarget(activeSession, input.target)) {
+        return Option.none();
+      }
+
+      return Option.some({
+        adapter,
+        instanceId,
+        threadId: input.threadId,
+        isActive: true,
+      } as const);
+    },
+  );
+
   const stopStaleSessionsForThread = Effect.fn("stopStaleSessionsForThread")(function* (input: {
     readonly threadId: ThreadId;
     readonly currentInstanceId: ProviderInstanceId;
@@ -799,11 +853,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
       let metricProvider = "unknown";
       return yield* Effect.gen(function* () {
-        const routed = yield* resolveRoutableSession({
-          threadId: input.threadId,
-          operation: "ProviderService.interruptTurn",
-          allowRecovery: true,
-        });
+        const routed =
+          input.target === undefined
+            ? yield* resolveRoutableSession({
+                threadId: input.threadId,
+                operation: "ProviderService.interruptTurn",
+                allowRecovery: true,
+              })
+            : Option.getOrUndefined(
+                yield* resolveTargetedInterruptSession({
+                  threadId: input.threadId,
+                  target: input.target,
+                }),
+              );
+        if (routed === undefined) {
+          return;
+        }
         metricProvider = routed.adapter.provider;
         yield* Effect.annotateCurrentSpan({
           "provider.operation": "interrupt-turn",
@@ -811,7 +876,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.thread_id": input.threadId,
           "provider.turn_id": input.turnId,
         });
-        yield* routed.adapter.interruptTurn(routed.threadId, input.turnId);
+        yield* input.target === undefined
+          ? routed.adapter.interruptTurn(routed.threadId, input.turnId)
+          : routed.adapter.interruptTurn(routed.threadId, input.turnId, input.target);
         yield* analytics.record("provider.turn.interrupted", {
           provider: routed.adapter.provider,
         });
