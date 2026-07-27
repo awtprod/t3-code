@@ -777,6 +777,21 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isNone(existingRow)) {
             return;
           }
+          const existingTurn = yield* projectionTurnRepository.getByTurnId({
+            threadId: event.payload.threadId,
+            turnId: event.payload.turnId,
+          });
+          if (
+            Option.isSome(existingTurn) &&
+            existingTurn.value.checkpointStatus !== null &&
+            existingTurn.value.checkpointStatus !== "missing" &&
+            event.payload.status === "missing"
+          ) {
+            return;
+          }
+          // The concrete-turn projector repeats this guard before
+          // clearCheckpointTurnConflict so neither projector can perturb ready
+          // checkpoint state for a delayed missing placeholder.
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             latestTurnId: event.payload.turnId,
@@ -968,6 +983,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             activityId: event.payload.activity.id,
             threadId: event.payload.threadId,
             turnId: event.payload.activity.turnId,
+            ...(event.payload.activity.correlatedMessageId !== undefined
+              ? { correlatedMessageId: event.payload.activity.correlatedMessageId }
+              : {}),
             tone: event.payload.activity.tone,
             kind: event.payload.activity.kind,
             summary: event.payload.activity.summary,
@@ -1249,6 +1267,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 (Option.isSome(pendingTurnStart)
                   ? pendingTurnStart.value.requestedAt
                   : event.occurredAt),
+              requestSequence:
+                existingTurn.value.requestSequence ??
+                (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.requestSequence : null),
             });
           } else {
             yield* projectionTurnRepository.upsertByTurnId({
@@ -1269,6 +1290,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               requestedAt: Option.isSome(pendingTurnStart)
                 ? pendingTurnStart.value.requestedAt
                 : event.occurredAt,
+              requestSequence: Option.isSome(pendingTurnStart)
+                ? pendingTurnStart.value.requestSequence
+                : null,
               startedAt: Option.isSome(pendingTurnStart)
                 ? pendingTurnStart.value.requestedAt
                 : event.occurredAt,
@@ -1365,6 +1389,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             assistantMessageId: event.payload.messageId,
             state: settlesTurn ? "completed" : "running",
             requestedAt: event.payload.createdAt,
+            requestSequence: null,
             startedAt: event.payload.createdAt,
             completedAt: settlesTurn ? event.payload.updatedAt : null,
             checkpointTurnCount: null,
@@ -1419,6 +1444,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             assistantMessageId: null,
             state: "interrupted",
             requestedAt: event.payload.createdAt,
+            requestSequence: null,
             startedAt: event.payload.createdAt,
             completedAt: event.payload.createdAt,
             checkpointTurnCount: null,
@@ -1443,6 +1469,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,
           });
+          if (
+            Option.isSome(existingTurn) &&
+            existingTurn.value.checkpointStatus !== null &&
+            existingTurn.value.checkpointStatus !== "missing" &&
+            event.payload.status === "missing"
+          ) {
+            return;
+          }
           const nextState = event.payload.status === "error" ? "error" : "completed";
           yield* projectionTurnRepository.clearCheckpointTurnConflict({
             threadId: event.payload.threadId,
@@ -1474,6 +1508,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             assistantMessageId: event.payload.assistantMessageId,
             state: turnStillRunning ? "running" : nextState,
             requestedAt: event.payload.completedAt,
+            requestSequence: null,
             startedAt: event.payload.completedAt,
             completedAt: event.payload.completedAt,
             checkpointTurnCount: event.payload.checkpointTurnCount,

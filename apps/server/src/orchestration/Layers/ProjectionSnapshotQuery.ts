@@ -83,6 +83,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   Struct.assign({
     payload: Schema.fromJsonString(Schema.Unknown),
+    correlatedMessageId: Schema.NullOr(MessageId),
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
@@ -453,6 +454,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          correlated_message_id AS "correlatedMessageId",
           tone,
           kind,
           summary,
@@ -821,6 +823,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          correlated_message_id AS "correlatedMessageId",
           tone,
           kind,
           summary,
@@ -1088,6 +1091,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   summary: row.summary,
                   payload: row.payload,
                   turnId: row.turnId,
+                  ...(row.correlatedMessageId !== null
+                    ? { correlatedMessageId: row.correlatedMessageId }
+                    : {}),
                   ...(row.sequence !== null ? { sequence: row.sequence } : {}),
                   createdAt: row.createdAt,
                 });
@@ -2010,6 +2016,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             turnId: row.turnId,
             createdAt: row.createdAt,
           };
+          if (row.correlatedMessageId !== null) {
+            Object.assign(activity, { correlatedMessageId: row.correlatedMessageId });
+          }
           if (row.sequence !== null) {
             return Object.assign(activity, { sequence: row.sequence });
           }

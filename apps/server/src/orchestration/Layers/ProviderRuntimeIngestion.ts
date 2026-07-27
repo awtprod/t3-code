@@ -37,6 +37,7 @@ import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessio
 import {
   ProjectionTurnRepository,
   type ProjectionPendingTurnStart,
+  type ProjectionTurnById,
 } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
@@ -99,7 +100,7 @@ const SIDE_EFFECT_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
   "hook.completed",
 ]);
 
-type TurnStartRequestedDomainEvent = Extract<
+type RecoveryBoundaryDomainEvent = Extract<
   OrchestrationEvent,
   { type: "thread.turn-start-requested" }
 >;
@@ -111,8 +112,23 @@ type RuntimeIngestionInput =
     }
   | {
       source: "domain";
-      event: TurnStartRequestedDomainEvent;
+      event: RecoveryBoundaryDomainEvent;
     };
+
+interface ResumeSelection {
+  readonly selected:
+    | { readonly kind: "pending"; readonly row: ProjectionPendingTurnStart }
+    | { readonly kind: "active"; readonly row: ProjectionTurnById };
+  readonly targetMessageId: MessageId;
+  readonly activeTurn: ProjectionTurnById | null;
+  readonly evidenceSince: string;
+  readonly attemptBudgetKey: MessageId;
+  readonly modelSelection: ModelSelection | undefined;
+  readonly sourceProposedPlan:
+    | { readonly threadId: ThreadId; readonly planId: OrchestrationProposedPlanId }
+    | undefined;
+  readonly neverClaimedPendingOrphan: boolean;
+}
 
 function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
   return value === undefined ? undefined : TurnId.make(String(value));
@@ -127,6 +143,15 @@ function sameId(left: string | null | undefined, right: string | null | undefine
     return false;
   }
   return left === right;
+}
+
+function hasRecoveryCheckpointEvidence(turn: ProjectionTurnById): boolean {
+  return (
+    turn.checkpointRef !== null ||
+    turn.checkpointStatus !== null ||
+    turn.checkpointFiles.length > 0 ||
+    turn.checkpointTurnCount !== null
+  );
 }
 
 function hasAssistantMessageForTurn(
@@ -809,6 +834,39 @@ const make = Effect.gen(function* () {
   const autoResumeAttemptsByThreadId = yield* Ref.make(
     new Map<ThreadId, { readonly messageId: MessageId; readonly attempts: number }>(),
   );
+  // Recovery evidence is a worker-lifetime safety invariant. Once any
+  // non-interruption evidence read or write fails, no later runtime event can
+  // prove this worker's recovery history complete, even for another thread.
+  const evidencePersistenceDegraded = yield* Ref.make(false);
+
+  const markRecoveryEvidenceDegraded = Effect.fn("markRecoveryEvidenceDegraded")(function* (
+    threadId: ThreadId,
+    evidenceKind: string,
+    cause: Cause.Cause<unknown>,
+  ) {
+    yield* Ref.set(evidencePersistenceDegraded, true);
+    yield* Effect.logError("provider-runtime.recovery-evidence-state-degraded", {
+      threadId,
+      evidenceKind,
+      cause: Cause.pretty(cause),
+    });
+  });
+
+  const persistRecoveryEvidence = <E, R>(
+    threadId: ThreadId,
+    evidenceKind: string,
+    effect: Effect.Effect<void, E, R>,
+  ): Effect.Effect<void, E, R> =>
+    effect.pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) {
+          return Effect.failCause(cause);
+        }
+        return markRecoveryEvidenceDegraded(threadId, evidenceKind, cause).pipe(
+          Effect.andThen(Effect.failCause(cause)),
+        );
+      }),
+    );
 
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -1400,7 +1458,153 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
+  const resolveActivityCorrelation = Effect.fn("resolveActivityCorrelation")(
+    function* (threadId: ThreadId, runtimeTurnId: TurnId | undefined, activeTurnId: TurnId | null) {
+      if (runtimeTurnId !== undefined) {
+        const runtimeTurn = yield* projectionTurnRepository.getByTurnId({
+          threadId,
+          turnId: runtimeTurnId,
+        });
+        if (Option.isSome(runtimeTurn) && runtimeTurn.value.pendingMessageId !== null) {
+          return runtimeTurn.value.pendingMessageId;
+        }
+        return null;
+      }
+
+      if (activeTurnId !== null && !sameId(activeTurnId, runtimeTurnId)) {
+        const activeTurn = yield* projectionTurnRepository.getByTurnId({
+          threadId,
+          turnId: activeTurnId,
+        });
+        if (Option.isSome(activeTurn) && activeTurn.value.pendingMessageId !== null) {
+          return activeTurn.value.pendingMessageId;
+        }
+      }
+
+      const pendingRows = yield* projectionTurnRepository.listPendingTurnStartsByThreadId({
+        threadId,
+      });
+      return (
+        pendingRows
+          .filter((row) => !row.pendingInterruptRequested)
+          .toSorted((left, right) => right.requestSequence - left.requestSequence)[0]?.messageId ??
+        null
+      );
+    },
+    (effect, threadId, runtimeTurnId, activeTurnId) =>
+      effect.pipe(
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) {
+            return Effect.failCause(cause);
+          }
+          return Effect.logWarning("provider runtime activity correlation read failed", {
+            threadId,
+            runtimeTurnId,
+            activeTurnId,
+            cause: Cause.pretty(cause),
+          }).pipe(
+            Effect.andThen(markRecoveryEvidenceDegraded(threadId, "activity-correlation", cause)),
+            Effect.as(null),
+          );
+        }),
+      ),
+  );
+
+  const computeResumeSelection = Effect.fn("computeResumeSelection")(function* (
+    threadId: ThreadId,
+    activeTurnId: TurnId | null,
+  ) {
+    const pendingRows = yield* projectionTurnRepository.listPendingTurnStartsByThreadId({
+      threadId,
+    });
+    const pendingWinner = pendingRows
+      .filter((row) => !row.pendingInterruptRequested)
+      .toSorted((left, right) => right.requestSequence - left.requestSequence)[0];
+    const activeTurn =
+      activeTurnId === null
+        ? null
+        : Option.getOrNull(
+            yield* projectionTurnRepository.getByTurnId({ threadId, turnId: activeTurnId }),
+          );
+
+    const selected =
+      pendingWinner === undefined
+        ? activeTurn === null || activeTurn.pendingMessageId === null
+          ? null
+          : ({ kind: "active", row: activeTurn } as const)
+        : activeTurn === null
+          ? ({ kind: "pending", row: pendingWinner } as const)
+          : activeTurn.requestSequence === null
+            ? null
+            : pendingWinner.requestSequence > activeTurn.requestSequence
+              ? ({ kind: "pending", row: pendingWinner } as const)
+              : activeTurn.pendingMessageId === null
+                ? null
+                : ({ kind: "active", row: activeTurn } as const);
+
+    if (selected?.kind === "pending") {
+      const selectedPending = selected.row;
+      const hasEverClaimed = yield* providerTurnSendClaimRepository.hasEverClaimed({
+        threadId,
+        messageId: selectedPending.messageId,
+      });
+      return {
+        selected,
+        targetMessageId: selectedPending.messageId,
+        activeTurn,
+        evidenceSince: selectedPending.requestedAt,
+        attemptBudgetKey: selectedPending.messageId,
+        modelSelection: selectedPending.modelSelection ?? undefined,
+        sourceProposedPlan:
+          selectedPending.sourceProposedPlanThreadId !== null &&
+          selectedPending.sourceProposedPlanId !== null
+            ? {
+                threadId: selectedPending.sourceProposedPlanThreadId,
+                planId: selectedPending.sourceProposedPlanId,
+              }
+            : undefined,
+        neverClaimedPendingOrphan: !hasEverClaimed,
+      } satisfies ResumeSelection;
+    }
+
+    if (selected?.kind !== "active") {
+      return null;
+    }
+    const selectedActive = selected.row;
+
+    const binding = yield* providerSessionDirectory.getBinding(threadId);
+    let modelSelection: ModelSelection | undefined;
+    if (Option.isSome(binding)) {
+      const rawModelSelection = (
+        binding.value.runtimePayload as { modelSelection?: unknown } | null | undefined
+      )?.modelSelection;
+      if (rawModelSelection !== undefined && rawModelSelection !== null) {
+        const decoded = decodeModelSelectionExit(rawModelSelection);
+        if (decoded._tag === "Success") {
+          modelSelection = decoded.value;
+        }
+      }
+    }
+    return {
+      selected,
+      targetMessageId: selectedActive.pendingMessageId!,
+      activeTurn,
+      evidenceSince: selectedActive.startedAt ?? selectedActive.requestedAt,
+      attemptBudgetKey: selectedActive.pendingMessageId!,
+      modelSelection,
+      sourceProposedPlan:
+        selectedActive.sourceProposedPlanThreadId !== null &&
+        selectedActive.sourceProposedPlanId !== null
+          ? {
+              threadId: selectedActive.sourceProposedPlanThreadId,
+              planId: selectedActive.sourceProposedPlanId,
+            }
+          : undefined,
+      neverClaimedPendingOrphan: false,
+    } satisfies ResumeSelection;
+  });
+
+  const processRuntimeEventUnprotected = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
@@ -1431,13 +1635,6 @@ const make = Effect.gen(function* () {
       // still-running turn to `interrupted` — so a read taken after that dispatch
       // could not tell a deliberate user interrupt apart from the crash itself.
       // A plain crash's active-turn row is still `running` at this point.
-      const userInterruptedActiveTurn =
-        event.type === "session.exited" && activeTurnId !== null
-          ? yield* projectionTurnRepository
-              .getByTurnId({ threadId: thread.id, turnId: activeTurnId })
-              .pipe(Effect.map((row) => Option.isSome(row) && row.value.state === "interrupted"))
-          : false;
-
       // A turn.started that conflicts with the active turn is legitimate when
       // the server itself has a turn start pending for this thread AND the
       // provider session already tracks the event's turn as its active turn:
@@ -1496,6 +1693,32 @@ const make = Effect.gen(function* () {
           thread.session?.sessionGeneration !== undefined &&
           thread.session.sessionGeneration !== event.sessionGeneration);
       const supersededTerminalEvent = event.type === "session.exited" && supersededEventIdentity;
+      const resumeSelectionRead =
+        event.type === "session.exited" &&
+        !supersededTerminalEvent &&
+        event.payload.exitKind !== "graceful"
+          ? yield* computeResumeSelection(thread.id, activeTurnId).pipe(
+              Effect.map((selection) => ({ _tag: "Success" as const, selection }) as const),
+              Effect.catchCause((cause) => {
+                if (Cause.hasInterruptsOnly(cause)) {
+                  return Effect.failCause(cause);
+                }
+                return markRecoveryEvidenceDegraded(thread.id, "resume-selection", cause).pipe(
+                  Effect.andThen(
+                    Effect.logWarning("provider runtime resume selection read failed", {
+                      threadId: thread.id,
+                      cause: Cause.pretty(cause),
+                    }),
+                  ),
+                  Effect.as({ _tag: "Failure" as const, cause } as const),
+                );
+              }),
+            )
+          : null;
+      const userInterruptedActiveTurn =
+        resumeSelectionRead?._tag === "Success" &&
+        resumeSelectionRead.selection?.selected.kind === "active" &&
+        resumeSelectionRead.selection.selected.row.state === "interrupted";
       // Lifecycle events from a superseded runtime must not touch the projection
       // session at all. Only lifecycle-bearing types are gated: item/content
       // events carry no session identity to clobber, and dropping them would
@@ -2038,9 +2261,9 @@ const make = Effect.gen(function* () {
         // ineligible because its oldest queued message was interrupted, even
         // though a newer, uninterrupted one — the one a resume would actually
         // target — is still waiting.
-        const orphanedPendingTurnStarts = yield* projectionTurnRepository
-          .listPendingTurnStartsByThreadId({ threadId: thread.id })
-          .pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<ProjectionPendingTurnStart>));
+        const resumeSelection =
+          resumeSelectionRead?._tag === "Success" ? resumeSelectionRead.selection : null;
+        const resumeSelectionReadFailed = resumeSelectionRead?._tag === "Failure";
         // The orphan overrides the interrupt suppression only when it is a
         // genuinely live queued message. If the user also interrupted this
         // pending start (its row carries `pendingInterruptRequested`, set by
@@ -2049,9 +2272,6 @@ const make = Effect.gen(function* () {
         // canceled. An interrupted orphan therefore must NOT re-enable
         // eligibility; this mirrors ProjectionPipeline's `bornInterrupted`,
         // which births such a turn `interrupted` rather than `running`.
-        const hasOrphanedPendingTurnStart = orphanedPendingTurnStarts.some(
-          (pending) => !pending.pendingInterruptRequested,
-        );
         // `userInterruptedActiveTurn` is the early projection snapshot, taken
         // before this event's own session-set settled the running turn (see its
         // definition). A user who deliberately interrupted the
@@ -2060,8 +2280,8 @@ const make = Effect.gen(function* () {
         // after the interrupt and orphaned by the crash. The interrupt suppresses
         // the OLD turn (a started row); it must not also drop that newer message,
         // whose pending row is necessarily for a different message than the
-        // started, interrupted turn. The resume targets the newest user message
-        // (that orphan), so it re-issues B, not the interrupted A.
+        // started, interrupted turn. The immutable selection targets the newest
+        // live pending request (that orphan), so it re-issues B, not interrupted A.
         // The durable side-effect record for the crashed turn. Every tool
         // lifecycle item the provider reported was projected into an activity
         // row tagged with this turn's id (`tool.started` / `tool.updated` /
@@ -2080,29 +2300,24 @@ const make = Effect.gen(function* () {
         // detail we could not load tells us nothing, and the safe reading of
         // nothing is that work may have landed.
         const threadDetailForSideEffects = yield* getLoadedThreadDetail().pipe(
-          Effect.orElseSucceed(() => null),
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterruptsOnly(cause)) {
+              return Effect.failCause(cause);
+            }
+            return markRecoveryEvidenceDegraded(thread.id, "exit-snapshot", cause).pipe(
+              Effect.as(null),
+            );
+          }),
         );
-        // The message a resume would actually re-issue: the newest user message,
-        // which is NOT necessarily the one the crashed active turn was running.
+        // The message the immutable selection would actually re-issue. A live
+        // pending request wins by request sequence; otherwise the active turn's
+        // correlated message (or historical latest-message fallback) wins.
         // Computed before the side-effect gate because the gate has to be scoped
         // to the turn that would be re-run, and that turn is decided here.
-        const resumeTargetMessageId = threadDetailForSideEffects
-          ? (threadDetailForSideEffects.messages
-              .toReversed()
-              .find((message) => message.role === "user")?.id ?? null)
-          : null;
+        const resumeTargetMessageId = resumeSelection?.targetMessageId ?? null;
         // The active turn's originating user message. `pendingMessageId` is
         // copied onto the concrete turn row when `turn.started` consumes the
         // pending start, so it survives as that turn's identity here.
-        const activeTurnRowForScope =
-          activeTurnId === null
-            ? Option.none()
-            : yield* projectionTurnRepository
-                .getByTurnId({ threadId: thread.id, turnId: activeTurnId })
-                .pipe(Effect.orElseSucceed(() => Option.none()));
-        const activeTurnMessageId = Option.isSome(activeTurnRowForScope)
-          ? activeTurnRowForScope.value.pendingMessageId
-          : null;
         // A resume aimed at a still-pending steer re-issues a message the
         // provider was never sent: its pending row (turn_id NULL) is proof that
         // no turn for it ever started, so nothing could have executed on its
@@ -2130,11 +2345,7 @@ const make = Effect.gen(function* () {
         // message-differs test alone would call work the provider already ran
         // "unstarted" and re-issue it past both refusal gates — the exact
         // duplicate-side-effect outcome those gates exist to prevent.
-        const resumeTargetHasPendingTurnStart =
-          resumeTargetMessageId !== null &&
-          orphanedPendingTurnStarts.some((pending) =>
-            sameId(pending.messageId, resumeTargetMessageId),
-          );
+        const resumeTargetHasPendingTurnStart = resumeSelection?.selected.kind === "pending";
         // The surviving pending row is necessary but NOT sufficient, and
         // treating it as proof was the remaining hole. It proves only that
         // neither `turn.started` nor the post-return fold was projected — both
@@ -2160,37 +2371,78 @@ const make = Effect.gen(function* () {
         // that it may have been — so the bypass is refused, the ordinary
         // side-effect and non-recoverable gates apply in full, and the worst
         // outcome is a steer the user re-sends by hand.
-        const resumeTargetHasNeverBeenSent =
-          resumeTargetMessageId !== null &&
-          !(yield* providerTurnSendClaimRepository
-            .hasEverClaimed({
-              threadId: thread.id,
-              messageId: resumeTargetMessageId,
-            })
-            .pipe(Effect.orElseSucceed(() => true)));
+        const resumeTargetHasNeverBeenSent = resumeSelection?.neverClaimedPendingOrphan === true;
+        const activeTurnMessageId = resumeSelection?.activeTurn?.pendingMessageId ?? null;
         const resumeTargetsUnstartedSteer =
           resumeTargetMessageId !== null &&
           activeTurnMessageId !== null &&
           !sameId(activeTurnMessageId, resumeTargetMessageId) &&
           resumeTargetHasPendingTurnStart &&
           resumeTargetHasNeverBeenSent;
-        const sideEffectActivityKind =
-          activeTurnId === null ||
-          resumeTargetsUnstartedSteer ||
-          threadDetailForSideEffects === null
-            ? null
-            : (threadDetailForSideEffects.activities.find(
+        const recoveryEvidence =
+          resumeSelection === null || threadDetailForSideEffects === null
+            ? []
+            : threadDetailForSideEffects.activities.filter(
                 (activity) =>
-                  activity.turnId !== null &&
-                  sameId(activity.turnId, activeTurnId) &&
-                  SIDE_EFFECT_ACTIVITY_KINDS.has(activity.kind),
-              )?.kind ?? null);
+                  SIDE_EFFECT_ACTIVITY_KINDS.has(activity.kind) ||
+                  activity.kind === "turn.diff.observed",
+              );
+        const inCandidateWindow = (activity: OrchestrationThreadActivity) =>
+          resumeSelection !== null && activity.createdAt >= resumeSelection.evidenceSince;
+        const onInterruptedActiveTurn = (activity: OrchestrationThreadActivity) =>
+          resumeSelection?.activeTurn !== null &&
+          resumeSelection?.activeTurn !== undefined &&
+          activity.turnId !== null &&
+          sameId(activity.turnId, resumeSelection.activeTurn.turnId);
+        const unattributedEvidence =
+          recoveryEvidence.find(
+            (activity) =>
+              activity.correlatedMessageId === undefined &&
+              (inCandidateWindow(activity) || onInterruptedActiveTurn(activity)),
+          ) ?? null;
+        const selectedEvidence =
+          resumeSelection === null
+            ? null
+            : (recoveryEvidence.find(
+                (activity) =>
+                  inCandidateWindow(activity) &&
+                  sameId(activity.correlatedMessageId, resumeSelection.targetMessageId),
+              ) ?? null);
+        const unrelatedEvidence =
+          resumeSelection === null
+            ? null
+            : (recoveryEvidence.find(
+                (activity) =>
+                  onInterruptedActiveTurn(activity) &&
+                  activity.correlatedMessageId !== undefined &&
+                  !sameId(activity.correlatedMessageId, resumeSelection.targetMessageId),
+              ) ?? null);
+        const checkpointTurn =
+          resumeSelection?.selected.kind === "active"
+            ? resumeSelection.selected.row
+            : resumeSelection?.activeTurn;
+        const checkpointEvidence =
+          checkpointTurn !== null &&
+          checkpointTurn !== undefined &&
+          hasRecoveryCheckpointEvidence(checkpointTurn);
+        const unattributedCheckpoint =
+          checkpointEvidence && checkpointTurn.pendingMessageId === null;
+        const selectedCheckpoint =
+          checkpointEvidence &&
+          sameId(checkpointTurn.pendingMessageId, resumeSelection?.targetMessageId);
+        const unrelatedCheckpoint =
+          checkpointEvidence &&
+          checkpointTurn.pendingMessageId !== null &&
+          !sameId(checkpointTurn.pendingMessageId, resumeSelection?.targetMessageId);
         const hasCommittedSideEffects =
-          activeTurnId === null || resumeTargetsUnstartedSteer
-            ? false
-            : threadDetailForSideEffects === null
-              ? true
-              : sideEffectActivityKind !== null;
+          threadDetailForSideEffects === null ||
+          unattributedEvidence !== null ||
+          selectedEvidence !== null ||
+          unattributedCheckpoint ||
+          selectedCheckpoint ||
+          (!resumeTargetsUnstartedSteer && unrelatedEvidence !== null) ||
+          (!resumeTargetsUnstartedSteer && unrelatedCheckpoint);
+        const evidencePersistenceFailed = yield* Ref.get(evidencePersistenceDegraded);
         // Split out so the side-effect refusal can be reported. A crash that
         // would otherwise have been auto-resumed, and is held back only because
         // work already landed, is exactly the case the user needs told: the
@@ -2214,16 +2466,88 @@ const make = Effect.gen(function* () {
         // Eligible on every ground except the two refusals we report: the
         // provider's non-recoverable claim, and side effects we observed. Split
         // out so each refusal can be explained rather than inferred from silence.
+        const recoveryContextEligible =
+          activeTurnId !== null && !gracefulExit && !parkedOnHuman && !archived;
         const eligibleIgnoringRefusals =
-          activeTurnId !== null &&
-          !gracefulExit &&
-          !parkedOnHuman &&
-          !archived &&
-          (!userInterruptedActiveTurn || hasOrphanedPendingTurnStart);
-        const eligibleIgnoringSideEffects = eligibleIgnoringRefusals && !nonRecoverableBlocksResume;
-        const baseEligible = eligibleIgnoringSideEffects && !hasCommittedSideEffects;
+          recoveryContextEligible &&
+          resumeSelection !== null &&
+          (!userInterruptedActiveTurn || resumeSelection.selected.kind === "pending");
+        const blockingDetectedFrom = !recoveryContextEligible
+          ? null
+          : resumeSelectionReadFailed
+            ? "thread-detail-unavailable"
+            : evidencePersistenceFailed
+              ? "evidence-persistence-failed"
+              : resumeSelection === null
+                ? "resume-target-unresolved"
+                : threadDetailForSideEffects === null
+                  ? "thread-detail-unavailable"
+                  : unattributedEvidence !== null
+                    ? "unattributed-activity"
+                    : unattributedCheckpoint
+                      ? "unattributed-checkpoint"
+                      : selectedCheckpoint || selectedEvidence?.kind === "turn.diff.observed"
+                        ? "turn-diff"
+                        : selectedEvidence?.kind.startsWith("hook.") === true
+                          ? "hook-activity"
+                          : selectedEvidence !== null
+                            ? "tool-activity"
+                            : !resumeTargetsUnstartedSteer &&
+                                (unrelatedEvidence !== null || unrelatedCheckpoint)
+                              ? "unrelated-message-evidence"
+                              : nonRecoverableBlocksResume
+                                ? "provider-non-recoverable-exit"
+                                : null;
+        const blockedSummary =
+          unattributedEvidence?.kind === "turn.diff.observed" ||
+          selectedCheckpoint ||
+          selectedEvidence?.kind === "turn.diff.observed"
+            ? "turn-diff"
+            : unattributedEvidence?.kind.startsWith("hook.") === true ||
+                selectedEvidence?.kind.startsWith("hook.") === true
+              ? "hook-activity"
+              : unattributedEvidence !== null || selectedEvidence !== null
+                ? "tool-activity"
+                : blockingDetectedFrom;
+        const baseEligible = eligibleIgnoringRefusals && blockingDetectedFrom === null;
 
-        if (eligibleIgnoringRefusals && nonRecoverableBlocksResume) {
+        if (
+          recoveryContextEligible &&
+          (resumeSelectionReadFailed || resumeSelection === null || evidencePersistenceFailed)
+        ) {
+          const detectedFrom = blockingDetectedFrom ?? "resume-target-unresolved";
+          const blockedActivityId = yield* crypto.randomUUIDv4.pipe(
+            Effect.map((uuid) => EventId.make(`auto-resume-blocked:${event.eventId}:${uuid}`)),
+          );
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* providerCommandId(event, "auto-resume-blocked-activity"),
+            threadId: thread.id,
+            activity: {
+              id: blockedActivityId,
+              tone: "error",
+              kind: "provider.turn.auto-resume-blocked",
+              summary:
+                detectedFrom === "evidence-persistence-failed"
+                  ? "Not auto-resumed: recovery evidence could not be persisted"
+                  : detectedFrom === "resume-target-unresolved"
+                    ? "Not auto-resumed: no safe resume target could be resolved"
+                    : "Not auto-resumed: recovery safety state could not be read",
+              payload: {
+                detail:
+                  `The provider session exited, but the server could not prove that ` +
+                  `re-issuing a specific message was safe. The message was not sent again.`,
+                exitReason: event.payload.reason ?? "provider session exited",
+                detectedFrom,
+              },
+              turnId: resumeSelection?.activeTurn?.turnId ?? activeTurnId,
+              createdAt: now,
+            },
+            createdAt: now,
+          });
+        }
+
+        if (eligibleIgnoringRefusals && blockingDetectedFrom === "provider-non-recoverable-exit") {
           // A crash the provider itself declared unsafe to retry, on a turn that
           // would otherwise have been resumed. The turn stops here and only the
           // user can decide whether re-sending is safe — but they can only decide
@@ -2259,7 +2583,12 @@ const make = Effect.gen(function* () {
           });
         }
 
-        if (eligibleIgnoringSideEffects && hasCommittedSideEffects) {
+        if (
+          eligibleIgnoringRefusals &&
+          hasCommittedSideEffects &&
+          blockingDetectedFrom !== null &&
+          blockingDetectedFrom !== "provider-non-recoverable-exit"
+        ) {
           const blockedActivityId = yield* crypto.randomUUIDv4.pipe(
             Effect.map((uuid) => EventId.make(`auto-resume-side-effects:${event.eventId}:${uuid}`)),
           );
@@ -2267,8 +2596,13 @@ const make = Effect.gen(function* () {
           // model chose to run, so naming it accurately matters: "ran tools"
           // would send someone looking through the transcript for a tool call
           // that is not there.
-          const ranHook = sideEffectActivityKind?.startsWith("hook.") === true;
-          const workDescription = ranHook ? "run a configured hook" : "started running tools";
+          const ranHook = blockedSummary === "hook-activity";
+          const observedDiff = blockedSummary === "turn-diff";
+          const workDescription = ranHook
+            ? "run a configured hook"
+            : observedDiff
+              ? "observed file changes"
+              : "started running tools";
           yield* orchestrationEngine.dispatch({
             type: "thread.activity.append",
             commandId: yield* providerCommandId(event, "auto-resume-side-effects-activity"),
@@ -2277,9 +2611,11 @@ const make = Effect.gen(function* () {
               id: blockedActivityId,
               tone: "error",
               kind: "provider.turn.auto-resume-blocked",
-              summary: ranHook
-                ? "Not auto-resumed: this turn had already run a hook"
-                : "Not auto-resumed: this turn had already run tool work",
+              summary: observedDiff
+                ? "Not auto-resumed: this turn had already observed file changes"
+                : ranHook
+                  ? "Not auto-resumed: this turn had already run a hook"
+                  : "Not auto-resumed: this turn had already run tool work",
               payload: {
                 detail:
                   `The provider session exited mid-turn, but the turn had already ` +
@@ -2289,12 +2625,7 @@ const make = Effect.gen(function* () {
                 exitReason: event.payload.reason ?? "provider session exited",
                 // Distinguishes "we saw tool rows" from "we could not read the
                 // transcript and refused on that basis" when reading a report.
-                detectedFrom:
-                  threadDetailForSideEffects === null
-                    ? "thread-detail-unavailable"
-                    : ranHook
-                      ? "hook-activity"
-                      : "tool-activity",
+                detectedFrom: blockingDetectedFrom,
               },
               turnId: activeTurnId,
               createdAt: now,
@@ -2312,16 +2643,14 @@ const make = Effect.gen(function* () {
         // guard (skips a turn-start-requested that a newer same-message
         // re-request has superseded), so resuming here is safe.
         if (baseEligible) {
-          const detail = yield* getLoadedThreadDetail();
-          const targetUserMessage = detail
-            ? detail.messages.toReversed().find((message) => message.role === "user")
-            : undefined;
-          if (targetUserMessage) {
-            const targetMessageId = targetUserMessage.id;
+          if (resumeSelection !== null) {
+            const targetMessageId = resumeSelection.targetMessageId;
             const existing = (yield* Ref.get(autoResumeAttemptsByThreadId)).get(thread.id);
             // A different (newer) user message resets the budget to zero.
             const priorAttempts =
-              existing && existing.messageId === targetMessageId ? existing.attempts : 0;
+              existing && existing.messageId === resumeSelection.attemptBudgetKey
+                ? existing.attempts
+                : 0;
             const exitReason = event.payload.reason ?? "provider session exited";
 
             if (priorAttempts >= AUTO_RESUME_MAX_ATTEMPTS) {
@@ -2364,23 +2693,10 @@ const make = Effect.gen(function* () {
               // on the persisted session binding's runtimePayload; when absent
               // we omit it so the reactor falls back to thread.modelSelection
               // (correct for the no-override case, and the binding's instance
-              // still matches so the cursor is recovered either way). A directory
-              // read failure is non-fatal — fall back to the default path.
-              const binding = yield* providerSessionDirectory
-                .getBinding(thread.id)
-                .pipe(Effect.orElseSucceed(() => Option.none()));
-              let resumeModelSelection: ModelSelection | undefined;
-              if (Option.isSome(binding)) {
-                const rawModelSelection = (
-                  binding.value.runtimePayload as { modelSelection?: unknown } | null | undefined
-                )?.modelSelection;
-                if (rawModelSelection !== undefined && rawModelSelection !== null) {
-                  const decoded = decodeModelSelectionExit(rawModelSelection);
-                  if (decoded._tag === "Success") {
-                    resumeModelSelection = decoded.value;
-                  }
-                }
-              }
+              // still matches so the cursor is recovered either way). The
+              // binding was captured with the immutable selection; a failed
+              // directory read fails that selection closed.
+              let resumeModelSelection = resumeSelection.modelSelection;
 
               // When the message being resumed is a still-pending steer (a newer
               // turn-start queued behind the older, already-sent turn), the
@@ -2389,7 +2705,8 @@ const make = Effect.gen(function* () {
               // prefer them: run the resume on the model the user chose for the
               // steer, and carry its source proposed-plan so a resumed
               // plan-implementation turn re-associates with (and can mark
-              // implemented) its plan. A read failure is non-fatal.
+              // implemented) its plan. The row was captured with the immutable
+              // selection.
               //
               // Searched by message id across the whole queue rather than taken
               // from its head. The resume targets the NEWEST user message, but
@@ -2397,22 +2714,16 @@ const make = Effect.gen(function* () {
               // more than one message queued those are different rows, and
               // matching against the head alone would find no match and
               // silently fall back to the older active turn's model and plan.
-              const pendingForResume = yield* projectionTurnRepository
-                .listPendingTurnStartsByThreadId({ threadId: thread.id })
-                .pipe(
-                  Effect.map((rows) =>
-                    rows.find((pending) => pending.messageId === targetMessageId),
-                  ),
-                  Effect.orElseSucceed(() => undefined as ProjectionPendingTurnStart | undefined),
-                );
+              const pendingForResume =
+                resumeSelection.selected.kind === "pending"
+                  ? resumeSelection.selected.row
+                  : undefined;
               // When a pending turn-start row exists for the targeted message it
               // is the authoritative source for the resume (its own model +
               // source-plan), and the active-turn fallback below must not
               // override it.
               const resumingMatchingPendingSteer = pendingForResume !== undefined;
-              let resumeSourceProposedPlan:
-                | { threadId: ThreadId; planId: OrchestrationProposedPlanId }
-                | undefined;
+              let resumeSourceProposedPlan = resumeSelection.sourceProposedPlan;
               if (pendingForResume !== undefined) {
                 const pending = pendingForResume;
                 // The pending steer's own selection is authoritative for the
@@ -2446,8 +2757,8 @@ const make = Effect.gen(function* () {
               // the block above finds nothing; fall
               // back to the interrupted active turn's persisted source-plan so
               // the resumed turn keeps the linkage the UI uses to associate the
-              // turn with (and mark implemented) its plan. Read failure is
-              // non-fatal. Skip this when resuming a matching pending steer: that
+              // turn with (and mark implemented) its plan. Skip this when
+              // resuming a matching pending steer: that
               // newer message intentionally carries no plan of its own, so
               // copying the OLDER active turn's plan onto it would wrongly re-run
               // the steer as an implementation of a plan the user never attached.
@@ -2456,9 +2767,7 @@ const make = Effect.gen(function* () {
                 !resumingMatchingPendingSteer &&
                 activeTurnId !== null
               ) {
-                const activeTurnRow = yield* projectionTurnRepository
-                  .getByTurnId({ threadId: thread.id, turnId: activeTurnId })
-                  .pipe(Effect.orElseSucceed(() => Option.none()));
+                const activeTurnRow = Option.fromNullishOr(resumeSelection.activeTurn);
                 if (
                   Option.isSome(activeTurnRow) &&
                   activeTurnRow.value.sourceProposedPlanThreadId !== null &&
@@ -2595,7 +2904,10 @@ const make = Effect.gen(function* () {
               if (resumeOutcome === "resumed") {
                 yield* Ref.update(autoResumeAttemptsByThreadId, (map) => {
                   const next = new Map(map);
-                  next.set(thread.id, { messageId: targetMessageId, attempts: attempt });
+                  next.set(thread.id, {
+                    messageId: resumeSelection.attemptBudgetKey,
+                    attempts: attempt,
+                  });
                   return next;
                 });
 
@@ -2709,6 +3021,34 @@ const make = Effect.gen(function* () {
 
       if (event.type === "turn.diff.updated") {
         const turnId = toTurnId(event.turnId);
+        const correlatedMessageId = yield* resolveActivityCorrelation(
+          thread.id,
+          turnId,
+          activeTurnId,
+        );
+        const markerScope =
+          correlatedMessageId ?? (turnId !== undefined ? `turn:${turnId}` : "unattributed");
+        const markerActivityId = EventId.make(`turn-diff-observed:${thread.id}:${markerScope}`);
+        yield* orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId: yield* providerCommandId(event, "turn-diff-observed"),
+          threadId: thread.id,
+          activity: {
+            id: markerActivityId,
+            tone: "tool",
+            kind: "turn.diff.observed",
+            summary: "Provider observed file changes",
+            payload: {
+              sourceEventId: event.eventId,
+              observedCharacterCount: event.payload.unifiedDiff.length,
+            },
+            turnId: turnId ?? null,
+            ...(correlatedMessageId !== null ? { correlatedMessageId } : {}),
+            createdAt: now,
+          },
+          createdAt: now,
+        });
+
         const checkpointContext = turnId
           ? yield* projectionSnapshotQuery
               .getThreadCheckpointContext(thread.id)
@@ -2716,51 +3056,69 @@ const make = Effect.gen(function* () {
           : undefined;
         const workspaceCwd =
           checkpointContext?.worktreePath ?? checkpointContext?.workspaceRoot ?? undefined;
-        if (turnId && checkpointContext && workspaceCwd && isGitRepository(workspaceCwd)) {
-          // Skip if a checkpoint already exists for this turn. A real
-          // (non-placeholder) capture from CheckpointReactor should not
-          // be clobbered, and dispatching a duplicate placeholder for the
-          // same turnId would produce an unstable checkpointTurnCount.
-          if (hasCheckpointForTurn(checkpointContext.checkpoints, turnId)) {
-            // Already tracked; no-op.
-          } else {
-            const assistantMessageId = MessageId.make(
-              `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
-            );
-            yield* orchestrationEngine.dispatch({
-              type: "thread.turn.diff.complete",
-              commandId: yield* providerCommandId(event, "thread-turn-diff-complete"),
-              threadId: thread.id,
-              turnId,
-              completedAt: now,
-              checkpointRef: CheckpointRef.make(`provider-diff:${event.eventId}`),
-              status: "missing",
-              files: [],
-              assistantMessageId,
-              checkpointTurnCount: maxCheckpointTurnCount(checkpointContext.checkpoints) + 1,
-              createdAt: now,
-            });
-          }
+        if (
+          turnId &&
+          checkpointContext &&
+          workspaceCwd &&
+          isGitRepository(workspaceCwd) &&
+          !hasCheckpointForTurn(checkpointContext.checkpoints, turnId)
+        ) {
+          const assistantMessageId = MessageId.make(
+            `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
+          );
+          yield* orchestrationEngine.dispatch({
+            type: "thread.turn.diff.complete",
+            commandId: yield* providerCommandId(event, "thread-turn-diff-complete"),
+            threadId: thread.id,
+            turnId,
+            completedAt: now,
+            checkpointRef: CheckpointRef.make(`provider-diff:${event.eventId}`),
+            status: "missing",
+            files: [],
+            assistantMessageId,
+            checkpointTurnCount: maxCheckpointTurnCount(checkpointContext.checkpoints) + 1,
+            createdAt: now,
+          });
         }
       }
 
       const activities = runtimeEventToActivities(event);
       yield* Effect.forEach(activities, (activity) =>
-        providerCommandId(event, "thread-activity-append").pipe(
-          Effect.flatMap((commandId) =>
-            orchestrationEngine.dispatch({
-              type: "thread.activity.append",
-              commandId,
-              threadId: thread.id,
-              activity,
-              createdAt: activity.createdAt,
-            }),
-          ),
-        ),
+        Effect.gen(function* () {
+          const sideEffectEvidence = SIDE_EFFECT_ACTIVITY_KINDS.has(activity.kind);
+          const correlatedMessageId = sideEffectEvidence
+            ? yield* resolveActivityCorrelation(thread.id, eventTurnId, activeTurnId)
+            : null;
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* providerCommandId(event, "thread-activity-append"),
+            threadId: thread.id,
+            activity: {
+              ...activity,
+              ...(correlatedMessageId !== null ? { correlatedMessageId } : {}),
+            },
+            createdAt: activity.createdAt,
+          });
+        }),
       ).pipe(Effect.asVoid);
     });
 
-  const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
+  const processRuntimeEvent = (event: ProviderRuntimeEvent) => {
+    const recoveryEvidenceKind =
+      event.type === "turn.diff.updated"
+        ? "turn.diff.observed"
+        : event.type === "session.exited"
+          ? "exit-recovery-safety"
+          : runtimeEventToActivities(event).find((activity) =>
+              SIDE_EFFECT_ACTIVITY_KINDS.has(activity.kind),
+            )?.kind;
+    const process = processRuntimeEventUnprotected(event);
+    return recoveryEvidenceKind === undefined
+      ? process
+      : persistRecoveryEvidence(event.threadId, recoveryEvidenceKind, process);
+  };
+
+  const processDomainEvent = (_event: RecoveryBoundaryDomainEvent) => Effect.void;
 
   const processInput = (input: RuntimeIngestionInput) =>
     input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);

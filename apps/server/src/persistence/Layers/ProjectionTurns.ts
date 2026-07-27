@@ -1,4 +1,4 @@
-import { ModelSelection, OrchestrationCheckpointFile } from "@t3tools/contracts";
+import { ModelSelection, NonNegativeInt, OrchestrationCheckpointFile } from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
@@ -23,18 +23,6 @@ import {
   type ProjectionTurnRepositoryShape,
 } from "../Services/ProjectionTurns.ts";
 
-const ProjectionTurnDbRowSchema = ProjectionTurn.mapFields(
-  Struct.assign({
-    checkpointFiles: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
-  }),
-);
-
-const ProjectionTurnByIdDbRowSchema = ProjectionTurnById.mapFields(
-  Struct.assign({
-    checkpointFiles: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
-  }),
-);
-
 // Decodes SQLite's 0/1 integer boolean column into a domain boolean and back.
 const BooleanFromSqliteInt = Schema.Number.pipe(
   Schema.decodeTo(
@@ -44,6 +32,33 @@ const BooleanFromSqliteInt = Schema.Number.pipe(
       encode: (value: boolean) => Effect.succeed(value ? 1 : 0),
     }),
   ),
+);
+
+// Migration 043 gave historical rows the sentinel sequence zero. Concrete
+// turns use only real event sequences (> 0), so expose that historical value as
+// nullable while retaining the existing column and migration.
+const NullableConcreteRequestSequenceFromSqlite = Schema.Number.pipe(
+  Schema.decodeTo(
+    Schema.NullOr(NonNegativeInt),
+    SchemaTransformation.transformOrFail({
+      decode: (value: number) => Effect.succeed(value === 0 ? null : value),
+      encode: (value: number | null) => Effect.succeed(value ?? 0),
+    }),
+  ),
+);
+
+const ProjectionTurnDbRowSchema = ProjectionTurn.mapFields(
+  Struct.assign({
+    requestSequence: NullableConcreteRequestSequenceFromSqlite,
+    checkpointFiles: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
+  }),
+);
+
+const ProjectionTurnByIdDbRowSchema = ProjectionTurnById.mapFields(
+  Struct.assign({
+    requestSequence: NullableConcreteRequestSequenceFromSqlite,
+    checkpointFiles: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
+  }),
 );
 
 // Persists `modelSelection` as a nullable JSON text column (`model_selection`)
@@ -78,6 +93,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           assistant_message_id,
           state,
           requested_at,
+          request_sequence,
           started_at,
           completed_at,
           checkpoint_turn_count,
@@ -94,6 +110,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           ${row.assistantMessageId},
           ${row.state},
           ${row.requestedAt},
+          ${row.requestSequence ?? 0},
           ${row.startedAt},
           ${row.completedAt},
           ${row.checkpointTurnCount},
@@ -109,6 +126,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           assistant_message_id = excluded.assistant_message_id,
           state = excluded.state,
           requested_at = excluded.requested_at,
+          request_sequence = excluded.request_sequence,
           started_at = excluded.started_at,
           completed_at = excluded.completed_at,
           checkpoint_turn_count = excluded.checkpoint_turn_count,
@@ -266,6 +284,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           assistant_message_id AS "assistantMessageId",
           state,
           requested_at AS "requestedAt",
+          request_sequence AS "requestSequence",
           started_at AS "startedAt",
           completed_at AS "completedAt",
           checkpoint_turn_count AS "checkpointTurnCount",
@@ -299,6 +318,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           assistant_message_id AS "assistantMessageId",
           state,
           requested_at AS "requestedAt",
+          request_sequence AS "requestSequence",
           started_at AS "startedAt",
           completed_at AS "completedAt",
           checkpoint_turn_count AS "checkpointTurnCount",

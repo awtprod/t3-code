@@ -34,6 +34,7 @@ import {
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
@@ -2888,6 +2889,160 @@ it.effect("rebuilds historical sequence-zero placeholder adoption after restart"
       Layer.provideMerge(
         ServerConfig.layerTest(process.cwd(), {
           prefix: "t3-projection-pipeline-restart-",
+        }),
+        NodeServices.layer,
+      ),
+    ),
+  ),
+);
+
+it.effect("preserves a ready checkpoint across a delayed missing projection and restart", () =>
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig;
+    const makeRuntimeLayer = () => {
+      const persistenceLayer = makeSqlitePersistenceLive(dbPath);
+      const snapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+        Layer.provide(RepositoryIdentityResolver.layer),
+        Layer.provide(persistenceLayer),
+      );
+      const projectionLayer = OrchestrationProjectionPipelineLive.pipe(
+        Layer.provide(OrchestrationEventStoreLive),
+        Layer.provide(persistenceLayer),
+      );
+      const orchestrationLayer = OrchestrationEngineLive.pipe(
+        Layer.provide(snapshotLayer),
+        Layer.provide(projectionLayer),
+        Layer.provide(OrchestrationEventStoreLive),
+        Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+        Layer.provide(RepositoryIdentityResolver.layer),
+        Layer.provide(persistenceLayer),
+      );
+      return Layer.mergeAll(orchestrationLayer, snapshotLayer, persistenceLayer);
+    };
+
+    const threadId = ThreadId.make("thread-delayed-missing-restart");
+    const turnId = TurnId.make("turn-ready");
+    const readyCompletedAt = "2026-02-26T14:30:03.000Z";
+    const readyCheckpoint = {
+      turnId,
+      checkpointTurnCount: 7,
+      checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-delayed-missing/turn/7"),
+      status: "ready" as const,
+      files: [
+        {
+          path: "src/ready.ts",
+          kind: "modified",
+          additions: 12,
+          deletions: 3,
+        },
+      ],
+      assistantMessageId: MessageId.make("assistant-ready"),
+      completedAt: readyCompletedAt,
+    };
+
+    const readCheckpointState = Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      const checkpoint = snapshot.threads
+        .find((thread) => thread.id === threadId)
+        ?.checkpoints.find((entry) => entry.turnId === turnId);
+      const rows = yield* sql<{
+        readonly checkpointStatus: string | null;
+        readonly checkpointRef: string | null;
+        readonly checkpointFilesJson: string;
+        readonly checkpointTurnCount: number | null;
+        readonly assistantMessageId: string | null;
+        readonly completedAt: string | null;
+      }>`
+        SELECT
+          checkpoint_status AS "checkpointStatus",
+          checkpoint_ref AS "checkpointRef",
+          checkpoint_files_json AS "checkpointFilesJson",
+          checkpoint_turn_count AS "checkpointTurnCount",
+          assistant_message_id AS "assistantMessageId",
+          completed_at AS "completedAt"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND turn_id = ${turnId}
+      `;
+      return { checkpoint, rows };
+    });
+
+    const live = yield* Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-delayed-missing-project"),
+        projectId: ProjectId.make("project-delayed-missing"),
+        title: "Delayed missing project",
+        workspaceRoot: "/tmp/project-delayed-missing",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt: "2026-02-26T14:30:00.000Z",
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-delayed-missing-thread"),
+        threadId,
+        projectId: ProjectId.make("project-delayed-missing"),
+        title: "Delayed missing thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: "default",
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: "2026-02-26T14:30:01.000Z",
+      });
+      yield* engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-delayed-missing-ready"),
+        threadId,
+        ...readyCheckpoint,
+        createdAt: readyCompletedAt,
+      });
+      yield* engine.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-delayed-missing-placeholder"),
+        threadId,
+        turnId,
+        checkpointTurnCount: 99,
+        checkpointRef: CheckpointRef.make("provider-diff:delayed"),
+        status: "missing",
+        files: [],
+        assistantMessageId: MessageId.make("assistant-delayed"),
+        completedAt: "2026-02-26T14:30:04.000Z",
+        createdAt: "2026-02-26T14:30:04.000Z",
+      });
+      return yield* readCheckpointState;
+    }).pipe(Effect.provide(makeRuntimeLayer()));
+
+    assert.deepEqual(live.checkpoint, readyCheckpoint);
+    assert.deepEqual(live.rows, [
+      {
+        checkpointStatus: "ready",
+        checkpointRef: readyCheckpoint.checkpointRef,
+        checkpointFilesJson:
+          '[{"path":"src/ready.ts","kind":"modified","additions":12,"deletions":3}]',
+        checkpointTurnCount: readyCheckpoint.checkpointTurnCount,
+        assistantMessageId: readyCheckpoint.assistantMessageId,
+        completedAt: readyCheckpoint.completedAt,
+      },
+    ]);
+
+    const restarted = yield* readCheckpointState.pipe(Effect.provide(makeRuntimeLayer()));
+    assert.deepEqual(restarted.checkpoint, readyCheckpoint);
+    assert.deepEqual(restarted.rows, live.rows);
+  }).pipe(
+    Effect.provide(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3-projection-pipeline-delayed-missing-restart-",
         }),
         NodeServices.layer,
       ),

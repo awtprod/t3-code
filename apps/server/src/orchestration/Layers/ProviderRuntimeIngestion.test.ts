@@ -36,6 +36,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
@@ -44,7 +45,10 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
 import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import {
+  makeSqlitePersistenceLive,
+  SqlitePersistenceMemory,
+} from "../../persistence/Layers/Sqlite.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -227,7 +231,8 @@ describe("ProviderRuntimeIngestion", () => {
     | ProjectionSnapshotQuery
     | ProviderSessionDirectory
     | ProjectionTurnRepository
-    | ProviderTurnSendClaimRepository,
+    | ProviderTurnSendClaimRepository
+    | SqlClient.SqlClient,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -240,6 +245,13 @@ describe("ProviderRuntimeIngestion", () => {
   }
 
   afterEach(async () => {
+    await disposeActiveRuntime();
+    for (const dir of tempDirs.splice(0)) {
+      NodeFS.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  async function disposeActiveRuntime() {
     if (scope) {
       await Effect.runPromise(Scope.close(scope, Exit.void));
     }
@@ -248,29 +260,33 @@ describe("ProviderRuntimeIngestion", () => {
       await runtime.dispose();
     }
     runtime = null;
-    for (const dir of tempDirs.splice(0)) {
-      NodeFS.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  }
 
-  async function createHarness(options?: { serverSettings?: Partial<ServerSettings> }) {
+  async function createHarness(options?: {
+    serverSettings?: Partial<ServerSettings>;
+    dbPath?: string;
+  }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    const persistenceLayer =
+      options?.dbPath === undefined
+        ? SqlitePersistenceMemory
+        : makeSqlitePersistenceLive(options.dbPath);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
       Layer.provide(RepositoryIdentityResolver.layer),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(persistenceLayer),
     );
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(RepositoryIdentityResolver.layer),
-      Layer.provide(SqlitePersistenceMemory),
+      Layer.provide(persistenceLayer),
     );
     const providerSessionDirectoryLayer = ProviderSessionDirectoryLive.pipe(
-      Layer.provide(ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceMemory))),
+      Layer.provide(ProviderSessionRuntime.layer.pipe(Layer.provide(persistenceLayer))),
     );
     const layer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(orchestrationLayer),
@@ -286,7 +302,7 @@ describe("ProviderRuntimeIngestion", () => {
       // and it must be the SAME claim table the ingestion layer reads, which the
       // shared in-memory SqlClient below guarantees.
       Layer.provideMerge(ProviderTurnSendClaimRepositoryLive),
-      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(persistenceLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
@@ -302,6 +318,7 @@ describe("ProviderRuntimeIngestion", () => {
     const sendClaimRepository = await runtime.runPromise(
       Effect.service(ProviderTurnSendClaimRepository),
     );
+    const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(ingestion.drain);
@@ -422,6 +439,7 @@ describe("ProviderRuntimeIngestion", () => {
             evt.type === "thread.turn-start-requested",
         ),
       domainEvents: () => collectedDomainEvents,
+      sql,
     };
   }
 
@@ -4059,12 +4077,16 @@ describe("ProviderRuntimeIngestion", () => {
 
   type AutoResumeHarness = Awaited<ReturnType<typeof createHarness>>;
 
-  async function seedUserMessage(harness: AutoResumeHarness, messageId: string) {
+  async function seedUserMessage(
+    harness: AutoResumeHarness,
+    messageId: string,
+    threadId = "thread-1",
+  ) {
     await harness.run(
       harness.engine.dispatch({
         type: "thread.turn.start",
-        commandId: CommandId.make(`cmd-turn-start-${messageId}`),
-        threadId: asThreadId("thread-1"),
+        commandId: CommandId.make(`cmd-turn-start-${threadId}-${messageId}`),
+        threadId: asThreadId(threadId),
         message: {
           messageId: asMessageId(messageId),
           role: "user",
@@ -4079,12 +4101,12 @@ describe("ProviderRuntimeIngestion", () => {
     await harness.drain();
   }
 
-  async function startTurn(harness: AutoResumeHarness, turnId: string) {
+  async function startTurn(harness: AutoResumeHarness, turnId: string, threadId = "thread-1") {
     harness.setProviderSession({
       provider: ProviderDriverKind.make("codex"),
       status: "running",
       runtimeMode: "approval-required",
-      threadId: asThreadId("thread-1"),
+      threadId: asThreadId(threadId),
       createdAt: AR_NOW,
       updatedAt: AR_NOW,
       activeTurnId: asTurnId(turnId),
@@ -4093,23 +4115,29 @@ describe("ProviderRuntimeIngestion", () => {
       type: "turn.started",
       eventId: asEventId(`evt-turn-started-${turnId}`),
       provider: ProviderDriverKind.make("codex"),
-      threadId: asThreadId("thread-1"),
+      threadId: asThreadId(threadId),
       createdAt: AR_NOW,
       turnId: asTurnId(turnId),
     });
     await harness.drain();
   }
 
-  async function crashSession(harness: AutoResumeHarness, tag: string, exitKind?: "graceful") {
+  async function crashSession(
+    harness: AutoResumeHarness,
+    tag: string,
+    exitKind?: "graceful" | "non-recoverable",
+    threadId = "thread-1",
+  ) {
     harness.emit({
       type: "session.exited",
       eventId: asEventId(`evt-session-exited-${tag}`),
       provider: ProviderDriverKind.make("codex"),
-      threadId: asThreadId("thread-1"),
+      threadId: asThreadId(threadId),
       createdAt: AR_NOW,
       payload: {
         reason: exitKind === "graceful" ? "session closed" : "Codex App Server exited with code 1.",
-        ...(exitKind ? { exitKind } : {}),
+        ...(exitKind === "graceful" ? { exitKind } : {}),
+        ...(exitKind === "non-recoverable" ? { recoverable: false } : {}),
       },
     });
     await harness.drain();
@@ -4124,13 +4152,35 @@ describe("ProviderRuntimeIngestion", () => {
   const userMessages = (thread: ProviderRuntimeTestThread) =>
     thread.messages.filter((message) => message.role === "user");
 
-  async function readThread(harness: AutoResumeHarness) {
+  async function readThread(harness: AutoResumeHarness, threadId = "thread-1") {
     const snapshot = await harness.readModel();
-    const thread = snapshot.threads.find((entry) => entry.id === "thread-1");
+    const thread = snapshot.threads.find((entry) => entry.id === threadId);
     if (!thread) {
-      throw new Error("thread-1 not found in snapshot");
+      throw new Error(`${threadId} not found in snapshot`);
     }
     return thread;
+  }
+
+  async function createAdditionalThread(harness: AutoResumeHarness, threadId: string) {
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`cmd-create-${threadId}`),
+        threadId: asThreadId(threadId),
+        projectId: asProjectId("project-1"),
+        title: threadId,
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
   }
 
   it("auto-resumes a running turn when the provider session exits mid-turn", async () => {
@@ -4161,6 +4211,168 @@ describe("ProviderRuntimeIngestion", () => {
       .filter((evt) => evt.payload.messageId === "msg-1");
     // Two: the original turn start, plus the resume re-issuing the same message.
     expect(resumeRequests).toHaveLength(2);
+  });
+
+  it("does not recover a concrete active turn without a durable pending message binding", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+
+    await harness.run(harness.sql`
+      UPDATE projection_turns
+      SET pending_message_id = NULL
+      WHERE thread_id = 'thread-1'
+        AND turn_id = 'turn-a'
+    `);
+    const corruptedTurn = await harness.readProjectionTurn(
+      asThreadId("thread-1"),
+      asTurnId("turn-a"),
+    );
+    const transcriptRows = await harness.run(
+      harness.sql<{ readonly messageId: string }>`
+        SELECT message_id AS "messageId"
+        FROM projection_thread_messages
+        WHERE thread_id = 'thread-1'
+          AND role = 'user'
+      `,
+    );
+    expect(corruptedTurn?.pendingMessageId).toBeNull();
+    expect(transcriptRows.map((row) => row.messageId)).toEqual(["msg-1"]);
+
+    const requestsBeforeCrash = harness.turnStartRequests().length;
+    await crashSession(harness, "active-turn-without-message-binding");
+
+    const thread = await readThread(harness);
+    const requestsAfterCrash = harness.turnStartRequests().length;
+    expect(requestsAfterCrash - requestsBeforeCrash).toBe(0);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.payload).toMatchObject({
+      detectedFrom: "resume-target-unresolved",
+    });
+  });
+
+  it("does not reissue an older pending request after reverse-order exact adoption", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-a");
+    await seedUserMessage(harness, "msg-b");
+    const pendingRows = await harness.run(
+      harness.sql<{ readonly messageId: string; readonly requestSequence: number }>`
+        SELECT
+          pending_message_id AS "messageId",
+          request_sequence AS "requestSequence"
+        FROM projection_turns
+        WHERE thread_id = 'thread-1'
+          AND turn_id IS NULL
+        ORDER BY request_sequence ASC
+      `,
+    );
+    const pendingB = pendingRows.find((row) => row.messageId === "msg-b");
+    expect(pendingRows.map((row) => row.messageId)).toEqual(["msg-a", "msg-b"]);
+    expect(pendingB).toBeDefined();
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      updatedAt: AR_NOW,
+      activeTurnId: asTurnId("turn-b"),
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-reverse-adopt-b"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-b"),
+      payload: {
+        turnRequestSequence: pendingB!.requestSequence,
+      },
+    });
+    await harness.drain();
+    expect(
+      await harness.readProjectionTurn(asThreadId("thread-1"), asTurnId("turn-b")),
+    ).toMatchObject({
+      pendingMessageId: "msg-b",
+      requestSequence: pendingB?.requestSequence,
+    });
+    expect(await harness.readPendingTurnStart()).toMatchObject({
+      messageId: "msg-a",
+      requestSequence: pendingRows[0]?.requestSequence,
+    });
+
+    await runToolItem(harness, "turn-b");
+    const requestsBeforeExit = harness.turnStartRequests().length;
+    await crashSession(harness, "reverse-adopt-b-nonrecoverable", "non-recoverable");
+
+    const thread = await readThread(harness);
+    expect(harness.turnStartRequests()).toHaveLength(requestsBeforeExit);
+    expect(harness.turnStartRequests()).toHaveLength(2);
+    expect(
+      harness.turnStartRequests().filter((event) => event.payload.messageId === "msg-a"),
+    ).toHaveLength(1);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(userMessages(thread)).toHaveLength(2);
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.payload).toMatchObject({ detectedFrom: "tool-activity" });
+  });
+
+  it("fails closed when an active concrete turn has a historical null request sequence", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-a");
+    await seedUserMessage(harness, "msg-b");
+    const pendingRows = await harness.run(
+      harness.sql<{ readonly messageId: string; readonly requestSequence: number }>`
+        SELECT
+          pending_message_id AS "messageId",
+          request_sequence AS "requestSequence"
+        FROM projection_turns
+        WHERE thread_id = 'thread-1'
+          AND turn_id IS NULL
+        ORDER BY request_sequence ASC
+      `,
+    );
+    const pendingB = pendingRows.find((row) => row.messageId === "msg-b");
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      updatedAt: AR_NOW,
+      activeTurnId: asTurnId("turn-b"),
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-historical-null-sequence"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-b"),
+      payload: { turnRequestSequence: pendingB!.requestSequence },
+    });
+    await harness.drain();
+    await harness.run(harness.sql`
+      UPDATE projection_turns
+      SET request_sequence = 0
+      WHERE thread_id = 'thread-1'
+        AND turn_id = 'turn-b'
+    `);
+
+    const requestsBeforeExit = harness.turnStartRequests().length;
+    await crashSession(harness, "historical-null-request-sequence");
+
+    const thread = await readThread(harness);
+    expect(harness.turnStartRequests()).toHaveLength(requestsBeforeExit);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(resumeBlockedActivities(thread)).toHaveLength(1);
+    expect(resumeBlockedActivities(thread)[0]?.payload).toMatchObject({
+      detectedFrom: "resume-target-unresolved",
+    });
   });
 
   // `OrchestrationCommandInvariantError` is raised for two very different
@@ -4272,12 +4484,12 @@ describe("ProviderRuntimeIngestion", () => {
     expect(autoResumedActivities(thread)).toHaveLength(0);
   });
 
-  async function runToolItem(harness: AutoResumeHarness, turnId: string) {
+  async function runToolItem(harness: AutoResumeHarness, turnId: string, threadId = "thread-1") {
     harness.emit({
       type: "item.started",
-      eventId: asEventId(`evt-tool-started-${turnId}`),
+      eventId: asEventId(`evt-tool-started-${threadId}-${turnId}`),
       provider: ProviderDriverKind.make("codex"),
-      threadId: asThreadId("thread-1"),
+      threadId: asThreadId(threadId),
       createdAt: AR_NOW,
       turnId: asTurnId(turnId),
       payload: {
@@ -4326,6 +4538,454 @@ describe("ProviderRuntimeIngestion", () => {
         ? (blocked[0].payload as Record<string, unknown>)
         : undefined;
     expect(blockedPayload?.detectedFrom).toBe("tool-activity");
+    const evidence = thread.activities.find(
+      (activity) => activity.id === "evt-tool-started-thread-1-turn-a",
+    );
+    expect(evidence?.correlatedMessageId).toBe("msg-1");
+  });
+
+  it("correlates turn-less evidence to the newest uninterrupted pending start", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-interrupted");
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-interrupt-old-pending-correlation-candidate"),
+        threadId: asThreadId("thread-1"),
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
+    await seedUserMessage(harness, "msg-pending-winner");
+
+    await harness.run(harness.sql`
+      INSERT INTO projection_thread_messages (
+        message_id,
+        thread_id,
+        turn_id,
+        role,
+        text,
+        is_streaming,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        'msg-transcript-newest',
+        'thread-1',
+        NULL,
+        'user',
+        'transcript-only row must not authorize correlation',
+        0,
+        '2026-01-02T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z'
+      )
+    `);
+
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-turnless-pending-correlation"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-03T00:00:00.000Z",
+      payload: {
+        itemType: "command_execution",
+        status: "in_progress",
+        title: "Turn-less command",
+        detail: "pwd",
+      },
+    });
+    await harness.drain();
+
+    const persistedActivities = await harness.run(
+      harness.sql<{
+        readonly activityId: string;
+        readonly correlatedMessageId: string | null;
+      }>`
+        SELECT
+          activity_id AS "activityId",
+          correlated_message_id AS "correlatedMessageId"
+        FROM projection_thread_activities
+        WHERE activity_id = 'evt-turnless-pending-correlation'
+      `,
+    );
+    const pendingRows = await harness.run(
+      harness.sql<{
+        readonly messageId: string;
+        readonly requestSequence: number;
+        readonly pendingInterruptRequested: number;
+      }>`
+        SELECT
+          pending_message_id AS "messageId",
+          request_sequence AS "requestSequence",
+          pending_interrupt_requested AS "pendingInterruptRequested"
+        FROM projection_turns
+        WHERE thread_id = 'thread-1'
+          AND turn_id IS NULL
+        ORDER BY request_sequence ASC
+      `,
+    );
+    const newestTranscript = await harness.run(
+      harness.sql<{ readonly messageId: string }>`
+        SELECT message_id AS "messageId"
+        FROM projection_thread_messages
+        WHERE thread_id = 'thread-1'
+          AND role = 'user'
+        ORDER BY created_at DESC, message_id DESC
+        LIMIT 1
+      `,
+    );
+    expect(pendingRows).toEqual([
+      expect.objectContaining({
+        messageId: "msg-interrupted",
+        pendingInterruptRequested: 1,
+      }),
+      expect.objectContaining({
+        messageId: "msg-pending-winner",
+        pendingInterruptRequested: 0,
+      }),
+    ]);
+    expect(persistedActivities).toEqual([
+      {
+        activityId: "evt-turnless-pending-correlation",
+        correlatedMessageId: "msg-pending-winner",
+      },
+    ]);
+    expect(newestTranscript).toEqual([{ messageId: "msg-transcript-newest" }]);
+    expect(persistedActivities[0]?.correlatedMessageId).not.toBe(newestTranscript[0]?.messageId);
+  });
+
+  it("keeps explicit unknown-turn evidence unattributed despite active and pending candidates", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-active");
+    await startTurn(harness, "turn-active");
+    await seedUserMessage(harness, "msg-pending");
+
+    const activeTurn = await harness.readProjectionTurn(
+      asThreadId("thread-1"),
+      asTurnId("turn-active"),
+    );
+    const pendingTurn = await harness.readPendingTurnStart();
+    expect(activeTurn?.pendingMessageId).toBe("msg-active");
+    expect(activeTurn?.requestSequence).not.toBeNull();
+    expect(pendingTurn).toMatchObject({
+      messageId: "msg-pending",
+      pendingInterruptRequested: false,
+    });
+    expect(pendingTurn!.requestSequence).toBeGreaterThan(activeTurn!.requestSequence!);
+
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-tool-unattributed"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-not-projected"),
+      payload: {
+        itemType: "command_execution",
+        status: "in_progress",
+        title: "Unknown command",
+        detail: "unknown",
+      },
+    });
+    await harness.drain();
+
+    expect(
+      await harness.readProjectionTurn(asThreadId("thread-1"), asTurnId("turn-not-projected")),
+    ).toBeNull();
+    const persistedEvidence = await harness.run(
+      harness.sql<{
+        readonly activityId: string;
+        readonly correlatedMessageId: string | null;
+      }>`
+        SELECT
+          activity_id AS "activityId",
+          correlated_message_id AS "correlatedMessageId"
+        FROM projection_thread_activities
+        WHERE activity_id = 'evt-tool-unattributed'
+      `,
+    );
+    expect(persistedEvidence).toEqual([
+      {
+        activityId: "evt-tool-unattributed",
+        correlatedMessageId: null,
+      },
+    ]);
+
+    const beforeCrash = await readThread(harness);
+    const evidence = beforeCrash.activities.find(
+      (activity) => activity.id === "evt-tool-unattributed",
+    );
+    expect(evidence?.kind).toBe("tool.started");
+    expect(evidence).not.toHaveProperty("correlatedMessageId");
+
+    await crashSession(harness, "crash-after-unattributed-tool");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(userMessages(thread)).toHaveLength(2);
+    expect(harness.turnStartRequests()).toHaveLength(2);
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-active"),
+    ).toHaveLength(1);
+    expect(
+      harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-pending"),
+    ).toHaveLength(1);
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.payload).toMatchObject({ detectedFrom: "unattributed-activity" });
+    const durableBlocked = await harness.run(
+      harness.sql<{
+        readonly kind: string;
+        readonly detectedFrom: string | null;
+      }>`
+        SELECT
+          kind,
+          json_extract(payload_json, '$.detectedFrom') AS "detectedFrom"
+        FROM projection_thread_activities
+        WHERE thread_id = 'thread-1'
+          AND kind = 'provider.turn.auto-resume-blocked'
+      `,
+    );
+    expect(durableBlocked).toEqual([
+      {
+        kind: "provider.turn.auto-resume-blocked",
+        detectedFrom: "unattributed-activity",
+      },
+    ]);
+  });
+
+  it("keeps recovery evidence degradation latched after a prerequisite read failure", async () => {
+    const harness = await createHarness();
+    await createAdditionalThread(harness, "thread-2");
+    await seedUserMessage(harness, "msg-a", "thread-1");
+    await startTurn(harness, "turn-a", "thread-1");
+    await seedUserMessage(harness, "msg-b", "thread-2");
+    await startTurn(harness, "turn-b", "thread-2");
+
+    await harness.run(harness.sql`
+      ALTER TABLE projection_threads RENAME TO projection_threads_faulted
+    `);
+    await runToolItem(harness, "turn-a", "thread-1");
+    await harness.run(harness.sql`
+      ALTER TABLE projection_threads_faulted RENAME TO projection_threads
+    `);
+
+    const rowsAfterFailure = await harness.run(
+      harness.sql<{ readonly activityId: string }>`
+        SELECT activity_id AS "activityId"
+        FROM projection_thread_activities
+        WHERE activity_id = 'evt-tool-started-thread-1-turn-a'
+      `,
+    );
+    expect(rowsAfterFailure).toEqual([]);
+
+    const requestsBeforeBlockedCrash = harness.turnStartRequests().length;
+    await crashSession(harness, "later-thread-after-prerequisite-failure", undefined, "thread-2");
+
+    const blockedThread = await readThread(harness, "thread-2");
+    expect(harness.turnStartRequests()).toHaveLength(requestsBeforeBlockedCrash);
+    expect(harness.turnStartRequests()).toHaveLength(2);
+    expect(userMessages(blockedThread)).toHaveLength(1);
+    expect(autoResumedActivities(blockedThread)).toHaveLength(0);
+    const blocked = resumeBlockedActivities(blockedThread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.payload).toMatchObject({
+      detectedFrom: "evidence-persistence-failed",
+    });
+  });
+
+  it("keeps recovery evidence degradation latched after an INSERT failure", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    await harness.run(harness.sql`
+      CREATE TRIGGER fail_recovery_evidence_insert
+      BEFORE INSERT ON projection_thread_activities
+      WHEN NEW.kind = 'tool.started'
+      BEGIN
+        SELECT RAISE(FAIL, 'forced recovery evidence INSERT failure');
+      END
+    `);
+    await runToolItem(harness, "turn-a");
+    await harness.run(harness.sql`DROP TRIGGER fail_recovery_evidence_insert`);
+
+    const requestsBeforeCrash = harness.turnStartRequests().length;
+    await crashSession(harness, "after-insert-failure");
+
+    const thread = await readThread(harness);
+    expect(harness.turnStartRequests()).toHaveLength(requestsBeforeCrash);
+    expect(harness.turnStartRequests()).toHaveLength(1);
+    expect(userMessages(thread)).toHaveLength(1);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    const blocked = resumeBlockedActivities(thread);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.payload).toMatchObject({
+      detectedFrom: "evidence-persistence-failed",
+    });
+  });
+
+  it("keeps recovery evidence degradation latched after a snapshot read failure", async () => {
+    const harness = await createHarness();
+    await createAdditionalThread(harness, "thread-2");
+    await seedUserMessage(harness, "msg-a", "thread-1");
+    await startTurn(harness, "turn-a", "thread-1");
+    await seedUserMessage(harness, "msg-b", "thread-2");
+    await startTurn(harness, "turn-b", "thread-2");
+
+    await harness.run(harness.sql`
+      ALTER TABLE projection_thread_activities
+      RENAME TO projection_thread_activities_faulted
+    `);
+    const requestsBeforeFirstCrash = harness.turnStartRequests().length;
+    await crashSession(harness, "snapshot-read-failure", undefined, "thread-1");
+    expect(harness.turnStartRequests()).toHaveLength(requestsBeforeFirstCrash);
+    await harness.run(harness.sql`
+      ALTER TABLE projection_thread_activities_faulted
+      RENAME TO projection_thread_activities
+    `);
+
+    const requestsBeforeLaterCrash = harness.turnStartRequests().length;
+    await crashSession(harness, "later-thread-after-snapshot-failure", undefined, "thread-2");
+    const threadA = await readThread(harness, "thread-1");
+    const threadB = await readThread(harness, "thread-2");
+    expect(harness.turnStartRequests()).toHaveLength(requestsBeforeLaterCrash);
+    expect(harness.turnStartRequests()).toHaveLength(2);
+    expect(userMessages(threadA)).toHaveLength(1);
+    expect(userMessages(threadB)).toHaveLength(1);
+    expect(autoResumedActivities(threadA)).toHaveLength(0);
+    expect(autoResumedActivities(threadB)).toHaveLength(0);
+    const durableBlocked = [
+      ...resumeBlockedActivities(threadA),
+      ...resumeBlockedActivities(threadB),
+    ];
+    expect(durableBlocked).toHaveLength(1);
+    expect(durableBlocked[0]?.payload).toMatchObject({
+      detectedFrom: "evidence-persistence-failed",
+    });
+  });
+
+  it("loads correlated diff and checkpoint evidence from SQLite after an ingestion restart", async () => {
+    const stateDir = makeTempDir("t3-provider-recovery-restart-");
+    const dbPath = NodePath.join(stateDir, "state.sqlite");
+    const first = await createHarness({ dbPath });
+    await seedUserMessage(first, "msg-1");
+    await startTurn(first, "turn-a");
+
+    first.emit({
+      type: "turn.diff.updated",
+      eventId: asEventId("evt-durable-turn-diff"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      itemId: asItemId("item-durable-turn-diff"),
+      payload: {
+        unifiedDiff: "diff --git a/file.txt b/file.txt\n+durable\n",
+      },
+    });
+    await first.drain();
+
+    const beforeRestart = await readThread(first);
+    const marker = beforeRestart.activities.find(
+      (activity) => activity.kind === "turn.diff.observed",
+    );
+    expect(marker?.correlatedMessageId).toBe("msg-1");
+    expect(beforeRestart.checkpoints).toEqual([
+      expect.objectContaining({
+        turnId: "turn-a",
+        checkpointRef: "provider-diff:evt-durable-turn-diff",
+        status: "missing",
+      }),
+    ]);
+    const persisted = await first.run(
+      first.sql<{ readonly correlatedMessageId: string | null }>`
+        SELECT correlated_message_id AS "correlatedMessageId"
+        FROM projection_thread_activities
+        WHERE kind = 'turn.diff.observed'
+      `,
+    );
+    expect(persisted).toEqual([{ correlatedMessageId: "msg-1" }]);
+
+    await disposeActiveRuntime();
+    const restarted = await createHarness({ dbPath });
+    await crashSession(restarted, "crash-after-restart-durable-diff");
+
+    const afterRestart = await readThread(restarted);
+    expect(autoResumedActivities(afterRestart)).toHaveLength(0);
+    expect(
+      restarted.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
+    ).toHaveLength(0);
+    const blocked = resumeBlockedActivities(afterRestart);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.payload).toMatchObject({ detectedFrom: "turn-diff" });
+  });
+
+  it("keeps a newer recovery candidate when an older turn later records diff evidence", async () => {
+    const harness = await createHarness();
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+
+    // The newer pending request is the immutable recovery candidate. Evidence
+    // that arrives afterward still belongs to turn-a/msg-1 and may neither
+    // switch recovery back to msg-1 nor block the never-sent msg-2.
+    await seedUserMessage(harness, "msg-2");
+    harness.emit({
+      type: "turn.diff.updated",
+      eventId: asEventId("evt-older-turn-diff"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-a"),
+      itemId: asItemId("item-older-turn-diff"),
+      payload: {
+        unifiedDiff: "diff --git a/older.txt b/older.txt\n+older turn\n",
+      },
+    });
+    await harness.drain();
+    const persistedMarkers = await harness.run(
+      harness.sql<{
+        readonly activityId: string;
+        readonly correlatedMessageId: string | null;
+      }>`
+        SELECT
+          activity_id AS "activityId",
+          correlated_message_id AS "correlatedMessageId"
+        FROM projection_thread_activities
+        WHERE activity_id = 'turn-diff-observed:thread-1:msg-1'
+      `,
+    );
+    expect(persistedMarkers).toEqual([
+      {
+        activityId: "turn-diff-observed:thread-1:msg-1",
+        correlatedMessageId: "msg-1",
+      },
+    ]);
+    await crashSession(harness, "crash-after-older-turn-diff");
+
+    const thread = await readThread(harness);
+    const marker = thread.activities.find(
+      (activity) => activity.id === "turn-diff-observed:thread-1:msg-1",
+    );
+    expect(marker).toMatchObject({
+      kind: "turn.diff.observed",
+      turnId: "turn-a",
+      correlatedMessageId: "msg-1",
+    });
+    expect(thread.checkpoints).toEqual([
+      expect.objectContaining({
+        turnId: "turn-a",
+        checkpointRef: "provider-diff:evt-older-turn-diff",
+        status: "missing",
+      }),
+    ]);
+    expect(resumeBlockedActivities(thread)).toHaveLength(0);
+    expect(autoResumedActivities(thread)).toHaveLength(1);
+    expect(
+      harness.turnStartRequests().filter((event) => event.payload.messageId === "msg-1"),
+    ).toHaveLength(1);
+    expect(
+      harness.turnStartRequests().filter((event) => event.payload.messageId === "msg-2"),
+    ).toHaveLength(2);
   });
 
   it("still auto-resumes a crash whose turn produced only assistant output", async () => {
@@ -4809,6 +5469,20 @@ describe("ProviderRuntimeIngestion", () => {
     });
     await harness.drain();
 
+    // Bind the next concrete turn durably to msg-1. A runtime turn.started by
+    // itself has no user-message identity and may no longer recover by guessing
+    // from transcript order.
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.resume",
+        commandId: CommandId.make("cmd-budget-reset-next-turn"),
+        threadId: asThreadId("thread-1"),
+        messageId: asMessageId("msg-1"),
+        reason: "continue after clean completion",
+        createdAt: AR_NOW,
+      }),
+    );
+    await harness.drain();
     await startTurn(harness, "turn-c");
     await crashSession(harness, "crash-2"); // fresh budget → attempt 1/2 again
 
@@ -4851,14 +5525,16 @@ describe("ProviderRuntimeIngestion", () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");
     await startTurn(harness, "turn-a");
-    // turn-a executed a command, so re-issuing MSG-1 would be unsafe.
-    await runToolItem(harness, "turn-a");
     // But the user then steered with msg-2, whose pending turn-start row was
     // never consumed by a turn.started — no turn for msg-2 ever ran, so nothing
     // could have executed on its behalf. Scoping the side-effect gate to the
     // still-active turn-a would refuse the resume and strand msg-2 forever: the
     // user's newest message would silently never be answered.
     await seedUserMessage(harness, "msg-2");
+    // Evidence arrives only after msg-2 became the newest immutable candidate.
+    // Its exact turn correlation still points to msg-1 and may not switch the
+    // selected recovery back to the older message.
+    await runToolItem(harness, "turn-a");
     await crashSession(harness, "steer-crash-after-tools");
 
     const thread = await readThread(harness);
@@ -4871,6 +5547,10 @@ describe("ProviderRuntimeIngestion", () => {
     expect(
       harness.turnStartRequests().filter((evt) => evt.payload.messageId === "msg-1"),
     ).toHaveLength(1);
+    const olderEvidence = thread.activities.find(
+      (activity) => activity.id === "evt-tool-started-thread-1-turn-a",
+    );
+    expect(olderEvidence?.correlatedMessageId).toBe("msg-1");
   });
 
   it("refuses to resume a steer that reached the provider even though its pending row survived", async () => {
@@ -4911,6 +5591,9 @@ describe("ProviderRuntimeIngestion", () => {
     const blocked = resumeBlockedActivities(thread);
     expect(blocked).toHaveLength(1);
     expect(blocked[0]?.tone).toBe("error");
+    expect(blocked[0]?.payload).toMatchObject({
+      detectedFrom: "unrelated-message-evidence",
+    });
   });
 
   it("refuses a second resume once the retried turn has run tools", async () => {
@@ -5652,6 +6335,7 @@ describe("ProviderRuntimeIngestion", () => {
   it("still applies a session.exited whose instance matches the bound instance", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");
+    const pending = await harness.readPendingTurnStart();
 
     harness.emit({
       type: "turn.started",
@@ -5661,6 +6345,7 @@ describe("ProviderRuntimeIngestion", () => {
       threadId: asThreadId("thread-1"),
       createdAt: AR_NOW,
       turnId: asTurnId("turn-a"),
+      payload: { turnRequestSequence: pending!.requestSequence },
     });
     await harness.drain();
 
@@ -5740,6 +6425,7 @@ describe("ProviderRuntimeIngestion", () => {
   it("still applies a session.exited whose generation matches the live runtime", async () => {
     const harness = await createHarness();
     await seedUserMessage(harness, "msg-1");
+    const pending = await harness.readPendingTurnStart();
 
     harness.emit({
       type: "turn.started",
@@ -5750,6 +6436,7 @@ describe("ProviderRuntimeIngestion", () => {
       threadId: asThreadId("thread-1"),
       createdAt: AR_NOW,
       turnId: asTurnId("turn-a"),
+      payload: { turnRequestSequence: pending!.requestSequence },
     });
     await harness.drain();
 

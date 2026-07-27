@@ -1,6 +1,6 @@
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
-import { NonNegativeInt } from "@t3tools/contracts";
+import { MessageId, NonNegativeInt } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -19,6 +19,7 @@ import {
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   Struct.assign({
     payload: Schema.fromJsonString(Schema.Unknown),
+    correlatedMessageId: Schema.NullOr(MessageId),
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
@@ -41,6 +42,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
               activity_id,
               thread_id,
               turn_id,
+              correlated_message_id,
               tone,
               kind,
               summary,
@@ -52,6 +54,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
               ${row.activityId},
               ${row.threadId},
               ${row.turnId},
+              ${row.correlatedMessageId ?? null},
               ${row.tone},
               ${row.kind},
               ${row.summary},
@@ -63,6 +66,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
             DO UPDATE SET
               thread_id = excluded.thread_id,
               turn_id = excluded.turn_id,
+              correlated_message_id = excluded.correlated_message_id,
               tone = excluded.tone,
               kind = excluded.kind,
               summary = excluded.summary,
@@ -81,6 +85,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          correlated_message_id AS "correlatedMessageId",
           tone,
           kind,
           summary,
@@ -129,6 +134,9 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
           activityId: row.activityId,
           threadId: row.threadId,
           turnId: row.turnId,
+          ...(row.correlatedMessageId !== null
+            ? { correlatedMessageId: row.correlatedMessageId }
+            : {}),
           tone: row.tone,
           kind: row.kind,
           summary: row.summary,

@@ -321,6 +321,7 @@ export const OrchestrationThreadActivity = Schema.Struct({
   summary: TrimmedNonEmptyString,
   payload: Schema.Unknown,
   turnId: Schema.NullOr(TurnId),
+  correlatedMessageId: Schema.optional(MessageId),
   sequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
 });
