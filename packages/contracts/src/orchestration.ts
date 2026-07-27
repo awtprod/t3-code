@@ -805,12 +805,32 @@ export const ClientOrchestrationCommand = Schema.Union([
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
+export const ThreadSessionPendingTurnStartAdoption = Schema.Literals([
+  "none",
+  "exact",
+  "oldest-pending",
+]);
+export type ThreadSessionPendingTurnStartAdoption =
+  typeof ThreadSessionPendingTurnStartAdoption.Type;
+
+export const ThreadSessionTerminalTurnTransition = Schema.Struct({
+  turnId: TurnId,
+  state: Schema.Literals(["completed", "interrupted", "error"]),
+});
+export type ThreadSessionTerminalTurnTransition = typeof ThreadSessionTerminalTurnTransition.Type;
+
 const ThreadSessionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.session.set"),
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
   createdAt: IsoDateTime,
+  /**
+   * Explicitly identifies whether this transition may adopt a pending turn-start
+   * placeholder. The decider always persists a value on new events; optionality
+   * exists only so older commands remain decodable while upgrading.
+   */
+  pendingTurnStartAdoption: Schema.optional(ThreadSessionPendingTurnStartAdoption),
   /**
    * Set only when this session-set is driven by a provider `turn.started`, and
    * carries the sequence of the `thread.turn-start-requested` that turn was
@@ -840,6 +860,19 @@ const ThreadSessionSetCommand = Schema.Struct({
    * "this write settles no turn", never "unknown".
    */
   settledTurnId: Schema.optional(TurnId),
+  /**
+   * Exact turn lifecycle transition represented by this session update. Unlike
+   * `settledTurnId`, this also covers crash/exit/orphan cleanup, which must
+   * terminalize the known turn without claiming it settled successfully.
+   */
+  terminalTurnTransition: Schema.optional(ThreadSessionTerminalTurnTransition),
+  /**
+   * Exact turn lifecycle transitions that must be applied atomically with this
+   * session update. The singular field remains for historical events and
+   * existing producers; this array is required when one session transition
+   * terminalizes more than one turn.
+   */
+  terminalTurnTransitions: Schema.optional(Schema.Array(ThreadSessionTerminalTurnTransition)),
 });
 
 /**
@@ -1124,10 +1157,20 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  /**
+   * See `ThreadSessionSetCommand.pendingTurnStartAdoption`. Absent only on
+   * historical events, whose pre-discriminator adoption behavior is preserved
+   * during rebuild.
+   */
+  pendingTurnStartAdoption: Schema.optional(ThreadSessionPendingTurnStartAdoption),
   /** See `ThreadSessionSetCommand.turnRequestSequence`. */
   turnRequestSequence: Schema.optional(NonNegativeInt),
   /** See `ThreadSessionSetCommand.settledTurnId`. */
   settledTurnId: Schema.optional(TurnId),
+  /** See `ThreadSessionSetCommand.terminalTurnTransition`. */
+  terminalTurnTransition: Schema.optional(ThreadSessionTerminalTurnTransition),
+  /** See `ThreadSessionSetCommand.terminalTurnTransitions`. */
+  terminalTurnTransitions: Schema.optional(Schema.Array(ThreadSessionTerminalTurnTransition)),
 });
 
 /** See `ThreadTurnStartFoldCommand`. */

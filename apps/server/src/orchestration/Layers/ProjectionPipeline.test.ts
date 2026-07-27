@@ -1328,7 +1328,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       `;
       assert.deepEqual(runningRows, [{ state: "running", completedAt: null }]);
 
-      // The session leaving "running" is the turn-end signal.
+      // The session update names the exact turn whose lifecycle ended.
       yield* eventStore.append({
         type: "thread.session-set",
         eventId: EventId.make("evt-tl4"),
@@ -1350,6 +1350,9 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
             lastError: null,
             updatedAt: "2026-01-01T00:01:00.000Z",
           },
+          pendingTurnStartAdoption: "none",
+          settledTurnId: turnId,
+          terminalTurnTransition: { turnId, state: "completed" },
         },
       });
 
@@ -1369,30 +1372,30 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
-  it.effect("settles a superseded running turn when a new turn becomes active", () =>
+  it.effect("settles only the named turn and ignores uncorrelated session updates", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const eventStore = yield* OrchestrationEventStore;
       const sql = yield* SqlClient.SqlClient;
       const now = "2026-01-01T00:00:00.000Z";
-      const threadId = ThreadId.make("thread-turn-supersede");
-      const oldTurnId = TurnId.make("turn-superseded");
-      const newTurnId = TurnId.make("turn-steer");
+      const threadId = ThreadId.make("thread-turn-settlement");
+      const oldTurnId = TurnId.make("turn-settlement-old");
+      const currentTurnId = TurnId.make("turn-settlement-current");
 
       yield* eventStore.append({
         type: "thread.created",
-        eventId: EventId.make("evt-ts1"),
+        eventId: EventId.make("evt-settle-1"),
         aggregateKind: "thread",
         aggregateId: threadId,
         occurredAt: now,
-        commandId: CommandId.make("cmd-ts1"),
+        commandId: CommandId.make("cmd-settle-1"),
         causationEventId: null,
-        correlationId: CorrelationId.make("cmd-ts1"),
+        correlationId: CorrelationId.make("cmd-settle-1"),
         metadata: {},
         payload: {
           threadId,
-          projectId: ProjectId.make("project-turn-supersede"),
-          title: "Turn supersede",
+          projectId: ProjectId.make("project-turn-settlement"),
+          title: "Turn settlement",
           modelSelection: {
             instanceId: ProviderInstanceId.make("opencode"),
             model: "big-pickle",
@@ -1405,35 +1408,72 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       });
 
-      const appendRunningSessionSet = (eventId: string, turnId: TurnId, updatedAt: string) =>
+      const appendSessionSet = (input: {
+        eventId: string;
+        status: "running" | "ready";
+        activeTurnId: TurnId | null;
+        updatedAt: string;
+        settledTurnId?: TurnId;
+      }) =>
         eventStore.append({
           type: "thread.session-set",
-          eventId: EventId.make(eventId),
+          eventId: EventId.make(input.eventId),
           aggregateKind: "thread",
           aggregateId: threadId,
-          occurredAt: updatedAt,
-          commandId: CommandId.make(`cmd-${eventId}`),
+          occurredAt: input.updatedAt,
+          commandId: CommandId.make(`cmd-${input.eventId}`),
           causationEventId: null,
-          correlationId: CorrelationId.make(`cmd-${eventId}`),
+          correlationId: CorrelationId.make(`cmd-${input.eventId}`),
           metadata: {},
           payload: {
             threadId,
+            pendingTurnStartAdoption: "none",
+            ...(input.settledTurnId === undefined
+              ? {}
+              : {
+                  settledTurnId: input.settledTurnId,
+                  terminalTurnTransition: {
+                    turnId: input.settledTurnId,
+                    state: "completed" as const,
+                  },
+                }),
             session: {
               threadId,
-              status: "running",
+              status: input.status,
               providerName: "opencode",
               runtimeMode: "full-access",
-              activeTurnId: turnId,
+              activeTurnId: input.activeTurnId,
               lastError: null,
-              updatedAt,
+              updatedAt: input.updatedAt,
             },
           },
         });
 
-      yield* appendRunningSessionSet("evt-ts2", oldTurnId, "2026-01-01T00:00:01.000Z");
-      // A steer: a new turn becomes active without the provider ever
-      // completing the previous one.
-      yield* appendRunningSessionSet("evt-ts3", newTurnId, "2026-01-01T00:00:30.000Z");
+      yield* appendSessionSet({
+        eventId: "evt-settle-2",
+        status: "running",
+        activeTurnId: oldTurnId,
+        updatedAt: "2026-01-01T00:00:01.000Z",
+      });
+      yield* appendSessionSet({
+        eventId: "evt-settle-3",
+        status: "running",
+        activeTurnId: currentTurnId,
+        updatedAt: "2026-01-01T00:00:30.000Z",
+      });
+      yield* appendSessionSet({
+        eventId: "evt-settle-4",
+        status: "ready",
+        activeTurnId: null,
+        updatedAt: "2026-01-01T00:00:40.000Z",
+      });
+      yield* appendSessionSet({
+        eventId: "evt-settle-5",
+        status: "ready",
+        activeTurnId: null,
+        settledTurnId: oldTurnId,
+        updatedAt: "2026-01-01T00:00:50.000Z",
+      });
 
       yield* projectionPipeline.bootstrap;
 
@@ -1448,8 +1488,323 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         ORDER BY requested_at
       `;
       assert.deepEqual(rows, [
-        { turnId: oldTurnId, state: "completed", completedAt: "2026-01-01T00:00:30.000Z" },
-        { turnId: newTurnId, state: "running", completedAt: null },
+        { turnId: oldTurnId, state: "completed", completedAt: "2026-01-01T00:00:50.000Z" },
+        { turnId: currentTurnId, state: "running", completedAt: null },
+      ]);
+    }),
+  );
+
+  it.effect("does not resurrect an interrupted turn from a duplicate running update", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-terminal-running-update");
+      const turnId = TurnId.make("turn-terminal-running-update");
+      const createdAt = "2026-01-01T01:00:00.000Z";
+      const interruptedAt = "2026-01-01T01:00:30.000Z";
+
+      yield* eventStore.append({
+        type: "thread.created",
+        eventId: EventId.make("evt-terminal-1"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: createdAt,
+        commandId: CommandId.make("cmd-terminal-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-terminal-1"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-terminal-running-update"),
+          title: "Terminal running update",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-terminal-2"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-01-01T01:00:05.000Z",
+        commandId: CommandId.make("cmd-terminal-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-terminal-2"),
+        metadata: {},
+        payload: {
+          threadId,
+          pendingTurnStartAdoption: "none",
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: "2026-01-01T01:00:05.000Z",
+          },
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.turn-interrupt-requested",
+        eventId: EventId.make("evt-terminal-3"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: interruptedAt,
+        commandId: CommandId.make("cmd-terminal-3"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-terminal-3"),
+        metadata: {},
+        payload: {
+          threadId,
+          turnId,
+          createdAt: interruptedAt,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-terminal-4"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-01-01T01:00:40.000Z",
+        commandId: CommandId.make("cmd-terminal-4"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-terminal-4"),
+        metadata: {},
+        payload: {
+          threadId,
+          pendingTurnStartAdoption: "none",
+          settledTurnId: turnId,
+          terminalTurnTransition: { turnId, state: "completed" },
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-01-01T01:00:40.000Z",
+          },
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-terminal-5"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-01-01T01:00:45.000Z",
+        commandId: CommandId.make("cmd-terminal-5"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-terminal-5"),
+        metadata: {},
+        payload: {
+          threadId,
+          pendingTurnStartAdoption: "none",
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: turnId,
+            lastError: null,
+            updatedAt: "2026-01-01T01:00:45.000Z",
+          },
+        },
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const rows = yield* sql<{
+        readonly state: string;
+        readonly completedAt: string | null;
+      }>`
+        SELECT state, completed_at AS "completedAt"
+        FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+      `;
+      assert.deepEqual(rows, [{ state: "interrupted", completedAt: interruptedAt }]);
+    }),
+  );
+
+  it.effect("atomically terminalizes a superseded turn and an interrupted adopted turn", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-atomic-terminal-transitions");
+      const supersededTurnId = TurnId.make("turn-atomic-superseded");
+      const adoptedTurnId = TurnId.make("turn-atomic-adopted");
+      const adoptedMessageId = MessageId.make("message-atomic-adopted");
+      const createdAt = "2026-01-01T02:00:00.000Z";
+      const transitionedAt = "2026-01-01T02:00:20.000Z";
+
+      yield* eventStore.append({
+        type: "thread.created",
+        eventId: EventId.make("evt-atomic-terminal-1"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: createdAt,
+        commandId: CommandId.make("cmd-atomic-terminal-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-atomic-terminal-1"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-atomic-terminal"),
+          title: "Atomic terminal transitions",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      yield* eventStore.append({
+        type: "thread.session-set",
+        eventId: EventId.make("evt-atomic-terminal-2"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-01-01T02:00:05.000Z",
+        commandId: CommandId.make("cmd-atomic-terminal-2"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-atomic-terminal-2"),
+        metadata: {},
+        payload: {
+          threadId,
+          pendingTurnStartAdoption: "none",
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: supersededTurnId,
+            lastError: null,
+            updatedAt: "2026-01-01T02:00:05.000Z",
+          },
+        },
+      });
+      const adoptedRequest = yield* eventStore.append({
+        type: "thread.turn-start-requested",
+        eventId: EventId.make("evt-atomic-terminal-3"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-01-01T02:00:10.000Z",
+        commandId: CommandId.make("cmd-atomic-terminal-3"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-atomic-terminal-3"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: adoptedMessageId,
+          runtimeMode: "full-access",
+          createdAt: "2026-01-01T02:00:10.000Z",
+        },
+      });
+      const appendAtomicSessionSet = (input: {
+        eventId: string;
+        updatedAt: string;
+        includeTransitions: boolean;
+      }) =>
+        eventStore.append({
+          type: "thread.session-set",
+          eventId: EventId.make(input.eventId),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: input.updatedAt,
+          commandId: CommandId.make(`cmd-${input.eventId}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`cmd-${input.eventId}`),
+          metadata: {},
+          payload: {
+            threadId,
+            pendingTurnStartAdoption: "exact" as const,
+            turnRequestSequence: adoptedRequest.sequence,
+            ...(input.includeTransitions
+              ? {
+                  terminalTurnTransitions: [
+                    { turnId: supersededTurnId, state: "interrupted" as const },
+                    { turnId: adoptedTurnId, state: "interrupted" as const },
+                  ],
+                  // Existing producers may still populate the singular field.
+                  // Normalization deduplicates it behind the explicit array.
+                  terminalTurnTransition: {
+                    turnId: adoptedTurnId,
+                    state: "interrupted" as const,
+                  },
+                }
+              : {}),
+            session: {
+              threadId,
+              status: "running" as const,
+              providerName: "codex",
+              runtimeMode: "full-access" as const,
+              activeTurnId: adoptedTurnId,
+              lastError: null,
+              updatedAt: input.updatedAt,
+            },
+          },
+        });
+
+      yield* appendAtomicSessionSet({
+        eventId: "evt-atomic-terminal-4",
+        updatedAt: transitionedAt,
+        includeTransitions: true,
+      });
+      // Equivalent replay metadata and then a plain duplicate running update
+      // must preserve both terminal states and their first completedAt.
+      yield* appendAtomicSessionSet({
+        eventId: "evt-atomic-terminal-5",
+        updatedAt: "2026-01-01T02:00:25.000Z",
+        includeTransitions: true,
+      });
+      yield* appendAtomicSessionSet({
+        eventId: "evt-atomic-terminal-6",
+        updatedAt: "2026-01-01T02:00:30.000Z",
+        includeTransitions: false,
+      });
+
+      yield* projectionPipeline.bootstrap;
+
+      const rows = yield* sql<{
+        readonly turnId: string;
+        readonly pendingMessageId: string | null;
+        readonly state: string;
+        readonly completedAt: string | null;
+      }>`
+        SELECT
+          turn_id AS "turnId",
+          pending_message_id AS "pendingMessageId",
+          state,
+          completed_at AS "completedAt"
+        FROM projection_turns
+        WHERE thread_id = ${threadId} AND turn_id IS NOT NULL
+        ORDER BY turn_id ASC
+      `;
+      assert.deepEqual(rows, [
+        {
+          turnId: adoptedTurnId,
+          pendingMessageId: adoptedMessageId,
+          state: "interrupted",
+          completedAt: transitionedAt,
+        },
+        {
+          turnId: supersededTurnId,
+          pendingMessageId: null,
+          state: "interrupted",
+          completedAt: transitionedAt,
+        },
       ]);
     }),
   );
@@ -2401,7 +2756,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   );
 });
 
-it.effect("restores pending turn-start metadata across projection pipeline restart", () =>
+it.effect("rebuilds historical sequence-zero placeholder adoption after restart", () =>
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig;
     const persistenceLayer = makeSqlitePersistenceLive(dbPath);
@@ -2455,6 +2810,16 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
       const eventStore = yield* OrchestrationEventStore;
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const sql = yield* SqlClient.SqlClient;
+
+      // Migration 043 defaulted all pre-correlation rows to sequence zero.
+      // Historical session-set events also lack the adoption discriminator, so
+      // rebuild must retain their oldest-pending fallback rather than strand the
+      // migrated placeholder forever.
+      yield* sql`
+        UPDATE projection_turns
+        SET request_sequence = 0
+        WHERE thread_id = ${threadId} AND turn_id IS NULL
+      `;
 
       yield* eventStore.append({
         type: "thread.session-set",
@@ -2530,7 +2895,7 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
   ),
 );
 
-it.effect("keeps one pending turn-start per request and consumes only the oldest", () =>
+it.effect("leaves queued placeholders untouched for a routine running update", () =>
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig;
     const projectionLayer = OrchestrationProjectionPipelineLive.pipe(
@@ -2551,11 +2916,9 @@ it.effect("keeps one pending turn-start per request and consumes only the oldest
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const sql = yield* SqlClient.SqlClient;
 
-      // Two turn-starts requested back to back — the user queued a second
-      // message before the provider reported `turn.started` for the first.
-      // Under the old single-slot write path the second request evicted the
-      // first one's row, so the delayed `turn.started` below adopted the
-      // SECOND message's metadata and then deleted it, losing both.
+      // Two requests are queued, but the routine lifecycle update below
+      // explicitly adopts none. It may not consume either placeholder merely
+      // because it happens to carry a running session and concrete turn id.
       yield* eventStore.append({
         type: "thread.turn-start-requested",
         eventId: EventId.make("evt-queue-1"),
@@ -2591,8 +2954,8 @@ it.effect("keeps one pending turn-start per request and consumes only the oldest
         },
       });
 
-      // The provider finally reports the FIRST turn. It must consume the
-      // first request's placeholder and leave the second one queued.
+      // A provider notification reports a concrete turn without identifying
+      // either requesting event.
       yield* eventStore.append({
         type: "thread.session-set",
         eventId: EventId.make("evt-queue-3"),
@@ -2605,6 +2968,7 @@ it.effect("keeps one pending turn-start per request and consumes only the oldest
         metadata: {},
         payload: {
           threadId,
+          pendingTurnStartAdoption: "none",
           session: {
             threadId,
             status: "running",
@@ -2644,19 +3008,17 @@ it.effect("keeps one pending turn-start per request and consumes only the oldest
       return { pendingRows, turnRows };
     }).pipe(Effect.provide(projectionLayer));
 
-    // The born turn carries the FIRST message — the one the provider was
-    // actually asked to run — not the newer queued one.
     assert.deepEqual(rows.turnRows, [
       {
         turnId: "turn-queue-1",
-        userMessageId: "message-queue-1",
-        startedAt: firstRequestedAt,
+        userMessageId: null,
+        startedAt: sessionSetAt,
       },
     ]);
-    // And the second request is still outstanding, so the provider's next
-    // `turn.started` has a row to adopt and reconciliation can report it if
-    // the session dies first.
-    assert.deepEqual(rows.pendingRows, [{ messageId: "message-queue-2" }]);
+    assert.deepEqual(rows.pendingRows, [
+      { messageId: "message-queue-1" },
+      { messageId: "message-queue-2" },
+    ]);
   }).pipe(
     Effect.provide(
       Layer.provideMerge(
@@ -2740,6 +3102,7 @@ it.effect("adopts the placeholder a correlated turn.started names, not the oldes
         metadata: {},
         payload: {
           threadId,
+          pendingTurnStartAdoption: "exact",
           turnRequestSequence: secondRequest.sequence,
           session: {
             threadId,
@@ -2868,6 +3231,7 @@ it.effect("warns instead of silently adopting nothing when correlation finds no 
         metadata: {},
         payload: {
           threadId,
+          pendingTurnStartAdoption: "exact",
           // A sequence no pending row carries — the shape a replayed or
           // already-consumed placeholder leaves behind.
           turnRequestSequence: 9999,

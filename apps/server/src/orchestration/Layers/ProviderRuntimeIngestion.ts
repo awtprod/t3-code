@@ -318,6 +318,20 @@ function normalizeRuntimeTurnState(
   }
 }
 
+function terminalTurnStateFromRuntimeTurnState(
+  state: "completed" | "failed" | "interrupted" | "cancelled",
+): "completed" | "interrupted" | "error" {
+  switch (state) {
+    case "completed":
+      return "completed";
+    case "failed":
+      return "error";
+    case "interrupted":
+    case "cancelled":
+      return "interrupted";
+  }
+}
+
 function orchestrationSessionStatusFromRuntimeState(
   state: "starting" | "running" | "waiting" | "ready" | "interrupted" | "stopped" | "error",
 ): "starting" | "running" | "ready" | "interrupted" | "stopped" | "error" {
@@ -1284,51 +1298,28 @@ const make = Effect.gen(function* () {
       ).pipe(Effect.asVoid);
     });
 
-  // Resolves the source plan from the placeholder this `turn.started` actually
-  // answers, selected the same way `ProjectionPipeline` selects the row it
-  // adopts — by `turnRequestSequence`, the request's own event sequence carried
-  // through the send input and echoed back on the event.
-  //
-  // The two selections must agree, because they act on the same decision from
-  // opposite ends: the pipeline copies the placeholder's plan reference onto the
-  // turn row, and this marks that plan implemented. Picking positionally here
-  // while the pipeline correlates means a thread with two queued messages whose
-  // `turn.started` events arrive out of order marks the WRONG plan implemented —
-  // a plan the user never ran disappears from their queue, and the one that did
-  // run still looks outstanding.
-  //
-  // A correlated event whose placeholder is gone resolves to null rather than
-  // falling back to the oldest row, for the same reason the pipeline refuses the
-  // fallback: adopting an unrelated row is the misattribution being fixed, not a
-  // degraded-but-safe default. Absent `turnRequestSequence` — a synthetic or
-  // adapter-internal turn answering no request — oldest-first remains the only
-  // ordering available and stays the behaviour.
-  const getSourceProposedPlanReferenceForPendingTurnStart = Effect.fn(
-    "getSourceProposedPlanReferenceForPendingTurnStart",
-  )(function* (threadId: ThreadId, requestSequence: number | undefined) {
-    const pendingTurnStart = yield* requestSequence === undefined
-      ? projectionTurnRepository.getPendingTurnStartByThreadId({ threadId })
-      : projectionTurnRepository
-          .listPendingTurnStartsByThreadId({ threadId })
-          .pipe(
-            Effect.map((rows) =>
-              Option.fromUndefinedOr(rows.find((row) => row.requestSequence === requestSequence)),
-            ),
-          );
-    if (Option.isNone(pendingTurnStart)) {
+  // Selects the exact placeholder the projector will adopt for this
+  // `turn.started`. Keeping the row, rather than resolving only its source-plan
+  // reference, also carries the pending interrupt flag into the in-memory and
+  // client projectors through the terminal transition on the session-set.
+  const getPendingTurnStartForAdoption = Effect.fn("getPendingTurnStartForAdoption")(function* (
+    threadId: ThreadId,
+    adoption: "none" | "exact" | "oldest-pending",
+    requestSequence: number | undefined,
+  ) {
+    if (adoption === "none") {
       return null;
     }
-
-    const sourceThreadId = pendingTurnStart.value.sourceProposedPlanThreadId;
-    const sourcePlanId = pendingTurnStart.value.sourceProposedPlanId;
-    if (sourceThreadId === null || sourcePlanId === null) {
+    if (adoption === "oldest-pending") {
+      return Option.getOrNull(
+        yield* projectionTurnRepository.getPendingTurnStartByThreadId({ threadId }),
+      );
+    }
+    if (requestSequence === undefined) {
       return null;
     }
-
-    return {
-      sourceThreadId,
-      sourcePlanId,
-    } as const;
+    const rows = yield* projectionTurnRepository.listPendingTurnStartsByThreadId({ threadId });
+    return rows.find((row) => row.requestSequence === requestSequence) ?? null;
   });
 
   const getExpectedProviderTurnIdForThread = Effect.fn("getExpectedProviderTurnIdForThread")(
@@ -1353,35 +1344,29 @@ const make = Effect.gen(function* () {
   // the time the directory catches up. The plan stays actionable in the UI
   // forever and the user can run it a second time.
   //
-  // When `turnRequestSequence` is present the placeholder lookup below is
-  // already an exact correlation — the request's own event sequence, echoed back
-  // by the adapter on the event, matched against the row that carries the plan
-  // reference. That is strictly stronger evidence than "the directory happens to
-  // name this turn", and it is the same key `ProjectionPipeline` uses to adopt
-  // the row. There is no misattribution left for the id check to prevent.
-  //
-  // Absent a request sequence the lookup degrades to oldest-first, which CAN
-  // pick an unrelated row, so the id check is retained there as the only
-  // remaining guard against marking a plan the event does not answer.
-  const getSourceProposedPlanReferenceForAcceptedTurnStart = Effect.fn(
-    "getSourceProposedPlanReferenceForAcceptedTurnStart",
+  // Exact starts are already correlated by the request sequence. A genuine
+  // sequence-less `turn.started` may adopt the oldest placeholder, but retains
+  // the provider directory's active-turn check as its only correlation guard.
+  const getPendingTurnStartForAcceptedTurnStart = Effect.fn(
+    "getPendingTurnStartForAcceptedTurnStart",
   )(function* (
     threadId: ThreadId,
     eventTurnId: TurnId | undefined,
+    adoption: "none" | "exact" | "oldest-pending",
     requestSequence: number | undefined,
   ) {
-    if (eventTurnId === undefined) {
+    if (eventTurnId === undefined || adoption === "none") {
       return null;
     }
 
-    if (requestSequence === undefined) {
+    if (adoption === "oldest-pending") {
       const expectedTurnId = yield* getExpectedProviderTurnIdForThread(threadId);
       if (!sameId(expectedTurnId, eventTurnId)) {
         return null;
       }
     }
 
-    return yield* getSourceProposedPlanReferenceForPendingTurnStart(threadId, requestSequence);
+    return yield* getPendingTurnStartForAdoption(threadId, adoption, requestSequence);
   });
 
   const markSourceProposedPlanImplemented = Effect.fn("markSourceProposedPlanImplemented")(
@@ -1550,14 +1535,26 @@ const make = Effect.gen(function* () {
             return true;
         }
       })();
-      const acceptedTurnStartedSourcePlan =
+      const requestedPendingTurnStartAdoption =
+        event.type !== "turn.started"
+          ? "none"
+          : event.payload?.turnRequestSequence === undefined
+            ? "oldest-pending"
+            : "exact";
+      const acceptedTurnStartedPendingStart =
         event.type === "turn.started" && shouldApplyThreadLifecycle
-          ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(
+          ? yield* getPendingTurnStartForAcceptedTurnStart(
               thread.id,
               eventTurnId,
+              requestedPendingTurnStartAdoption,
               event.payload?.turnRequestSequence,
             )
           : null;
+      const pendingTurnStartAdoption =
+        requestedPendingTurnStartAdoption === "oldest-pending" &&
+        acceptedTurnStartedPendingStart === null
+          ? "none"
+          : requestedPendingTurnStartAdoption;
 
       if (
         event.type === "session.started" ||
@@ -1581,10 +1578,14 @@ const make = Effect.gen(function* () {
               return "running";
             case "session.exited":
               return "stopped";
-            case "turn.completed":
-              return normalizeRuntimeTurnState(event.payload.state) === "failed"
+            case "turn.completed": {
+              const turnState = normalizeRuntimeTurnState(event.payload.state);
+              return turnState === "failed"
                 ? "error"
-                : "ready";
+                : turnState === "interrupted" || turnState === "cancelled"
+                  ? "interrupted"
+                  : "ready";
+            }
             case "session.started":
             case "thread.started":
               // Provider thread/session start notifications can arrive during an
@@ -1607,12 +1608,55 @@ const make = Effect.gen(function* () {
         // side knows a turn, in which case the write settles nothing.
         const settledTurnIdForCompletion =
           event.type === "turn.completed" ? (eventTurnId ?? activeTurnId) : null;
+        const terminalTurnTransition = (() => {
+          if (event.type === "turn.completed" && settledTurnIdForCompletion !== null) {
+            return {
+              turnId: settledTurnIdForCompletion,
+              state: terminalTurnStateFromRuntimeTurnState(
+                normalizeRuntimeTurnState(event.payload.state),
+              ),
+            } as const;
+          }
+          if (event.type === "session.exited" && activeTurnId !== null) {
+            return { turnId: activeTurnId, state: "interrupted" } as const;
+          }
+          if (
+            event.type === "turn.started" &&
+            eventTurnId !== undefined &&
+            acceptedTurnStartedPendingStart?.pendingInterruptRequested === true
+          ) {
+            return { turnId: eventTurnId, state: "interrupted" } as const;
+          }
+          return undefined;
+        })();
+        // A provider can accept a steer by opening B while A is still the
+        // projected active turn. Once the lifecycle guard accepts that boundary,
+        // the same session-set that advances the pointer must terminalize A
+        // exactly. Exact request-sequence adoption may independently decline to
+        // consume a mismatched placeholder; that must not leave accepted A
+        // running. If an adopted placeholder was already interrupted, B is born
+        // interrupted in that same atomic write as well.
+        const terminalTurnTransitions =
+          event.type === "turn.started" &&
+          conflictsWithActiveTurn &&
+          activeTurnId !== null &&
+          shouldApplyThreadLifecycle
+            ? [
+                { turnId: activeTurnId, state: "interrupted" as const },
+                ...(terminalTurnTransition === undefined ? [] : [terminalTurnTransition]),
+              ]
+            : undefined;
 
         if (shouldApplyThreadLifecycle && !supersededLifecycleEvent) {
-          if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
+          if (
+            event.type === "turn.started" &&
+            acceptedTurnStartedPendingStart?.sourceProposedPlanThreadId !== null &&
+            acceptedTurnStartedPendingStart?.sourceProposedPlanThreadId !== undefined &&
+            acceptedTurnStartedPendingStart.sourceProposedPlanId !== null
+          ) {
             yield* markSourceProposedPlanImplemented(
-              acceptedTurnStartedSourcePlan.sourceThreadId,
-              acceptedTurnStartedSourcePlan.sourcePlanId,
+              acceptedTurnStartedPendingStart.sourceProposedPlanThreadId,
+              acceptedTurnStartedPendingStart.sourceProposedPlanId,
               thread.id,
               now,
             ).pipe(
@@ -1650,26 +1694,28 @@ const make = Effect.gen(function* () {
               lastError,
               updatedAt: now,
             },
-            // Only a turn.started answers a specific turn-start request. Every
-            // other lifecycle event that lands here (session state changes,
-            // exits, completions) is about the session, not about which queued
-            // message just began, so stamping them would let an unrelated
-            // transition consume a placeholder.
+            // Every new event explicitly says whether this transition may adopt
+            // a pending turn-start. Routine lifecycle writes adopt none; an
+            // exact start adopts its sequence, while a genuine sequence-less
+            // start may use the historical oldest-pending fallback.
+            pendingTurnStartAdoption,
             ...(event.type === "turn.started" && event.payload?.turnRequestSequence !== undefined
-              ? { turnRequestSequence: event.payload.turnRequestSequence }
+              ? { turnRequestSequence: event.payload?.turnRequestSequence }
               : {}),
             // And only a turn.completed closes a specific turn. This is the
             // write the escalated-stop re-drive reads to decide a spared
             // request already ran to its end, and it must name WHICH turn
             // ended: several other writers produce a session-set with no
             // active turn (teardown, rebind, a different request's failure),
-            // and treating any of those as this turn's settlement silently
-            // drops a prompt from re-drive. A session.exited also clears the
-            // active turn but settles nothing — the turn died with the
-            // session, which is exactly the case re-drive exists for.
+            // and treating any of those as this turn's successful settlement
+            // silently drops a prompt from re-drive. A session.exited instead
+            // uses `terminalTurnTransition` below: it terminalizes the known
+            // active turn without stamping successful-settlement evidence.
             ...(event.type === "turn.completed" && settledTurnIdForCompletion !== null
               ? { settledTurnId: settledTurnIdForCompletion }
               : {}),
+            ...(terminalTurnTransition !== undefined ? { terminalTurnTransition } : {}),
+            ...(terminalTurnTransitions !== undefined ? { terminalTurnTransitions } : {}),
             createdAt: now,
           });
         }
@@ -2638,6 +2684,15 @@ const make = Effect.gen(function* () {
               lastError: runtimeErrorMessage,
               updatedAt: now,
             },
+            pendingTurnStartAdoption: "none",
+            ...(eventTurnId !== undefined
+              ? {
+                  terminalTurnTransition: {
+                    turnId: eventTurnId,
+                    state: "error",
+                  } as const,
+                }
+              : {}),
             createdAt: now,
           });
         }
@@ -2873,6 +2928,12 @@ const make = Effect.gen(function* () {
         (thread) =>
           Effect.gen(function* () {
             const commandUuid = yield* crypto.randomUUIDv4;
+            const orphanedTurnId =
+              thread.session?.activeTurnId ??
+              (thread.latestTurn?.state === "running" ? thread.latestTurn.turnId : null);
+            if (orphanedTurnId === null) {
+              return;
+            }
             yield* orchestrationEngine.dispatch({
               type: "thread.session.set",
               commandId: CommandId.make(
@@ -2893,6 +2954,11 @@ const make = Effect.gen(function* () {
                 activeTurnId: null,
                 lastError: thread.session?.lastError ?? null,
                 updatedAt: reconciledAt,
+              },
+              pendingTurnStartAdoption: "none",
+              terminalTurnTransition: {
+                turnId: orphanedTurnId,
+                state: "interrupted",
               },
               createdAt: reconciledAt,
             });

@@ -339,7 +339,7 @@ describe("applyThreadDetailEvent", () => {
   });
 
   describe("thread.session-set", () => {
-    it("settles a running latestTurn when the session leaves the running status", () => {
+    it("replays historical session-set settlement semantics", () => {
       const threadWithRunningTurn: OrchestrationThread = {
         ...baseThread,
         latestTurn: {
@@ -380,6 +380,266 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("does not settle a running turn for a routine uncorrelated lifecycle update", () => {
+      const threadWithRunningTurn: OrchestrationThread = {
+        ...baseThread,
+        latestTurn: {
+          turnId: TurnId.make("turn-1"),
+          state: "running",
+          requestedAt: "2026-04-01T07:00:00.000Z",
+          startedAt: "2026-04-01T07:00:00.000Z",
+          completedAt: null,
+          assistantMessageId: MessageId.make("msg-3"),
+        },
+      };
+
+      const result = applyThreadDetailEvent(threadWithRunningTurn, {
+        ...baseEventFields,
+        sequence: 9,
+        occurredAt: "2026-04-01T08:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.session-set",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          pendingTurnStartAdoption: "none",
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "ready",
+            providerName: "claude",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-04-01T08:00:00.000Z",
+          },
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.latestTurn).toMatchObject({
+          turnId: "turn-1",
+          state: "running",
+          completedAt: null,
+        });
+      }
+    });
+
+    it("applies only the exact terminal transition and never resurrects it", () => {
+      const interruptedAt = "2026-04-01T08:00:00.000Z";
+      const threadWithRunningTurn: OrchestrationThread = {
+        ...baseThread,
+        latestTurn: {
+          turnId: TurnId.make("turn-current"),
+          state: "running",
+          requestedAt: "2026-04-01T07:00:00.000Z",
+          startedAt: "2026-04-01T07:00:00.000Z",
+          completedAt: null,
+          assistantMessageId: MessageId.make("msg-3"),
+        },
+      };
+      const session = {
+        threadId: ThreadId.make("thread-1"),
+        status: "interrupted" as const,
+        providerName: "claude",
+        runtimeMode: "full-access" as const,
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: interruptedAt,
+      };
+
+      const staleResult = applyThreadDetailEvent(threadWithRunningTurn, {
+        ...baseEventFields,
+        sequence: 9,
+        occurredAt: interruptedAt,
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.session-set",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          pendingTurnStartAdoption: "none",
+          terminalTurnTransition: {
+            turnId: TurnId.make("turn-older"),
+            state: "interrupted",
+          },
+          session,
+        },
+      });
+      expect(staleResult.kind).toBe("updated");
+      if (staleResult.kind !== "updated") return;
+      expect(staleResult.thread.latestTurn).toMatchObject({
+        turnId: "turn-current",
+        state: "running",
+        completedAt: null,
+      });
+
+      const terminalResult = applyThreadDetailEvent(staleResult.thread, {
+        ...baseEventFields,
+        sequence: 10,
+        occurredAt: interruptedAt,
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.session-set",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          pendingTurnStartAdoption: "none",
+          terminalTurnTransition: {
+            turnId: TurnId.make("turn-current"),
+            state: "interrupted",
+          },
+          session,
+        },
+      });
+      expect(terminalResult.kind).toBe("updated");
+      if (terminalResult.kind !== "updated") return;
+
+      const replayResult = applyThreadDetailEvent(terminalResult.thread, {
+        ...baseEventFields,
+        sequence: 11,
+        occurredAt: "2026-04-01T08:00:05.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.session-set",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          pendingTurnStartAdoption: "oldest-pending",
+          session: {
+            ...session,
+            status: "running",
+            activeTurnId: TurnId.make("turn-current"),
+            updatedAt: "2026-04-01T08:00:05.000Z",
+          },
+        },
+      });
+      expect(replayResult.kind).toBe("updated");
+      if (replayResult.kind === "updated") {
+        expect(replayResult.thread.latestTurn).toMatchObject({
+          turnId: "turn-current",
+          state: "interrupted",
+          completedAt: interruptedAt,
+        });
+      }
+    });
+
+    it("births a turn terminal when turn.started carries a pending interrupt", () => {
+      const interruptedAt = "2026-04-01T08:00:00.000Z";
+      const result = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 9,
+        occurredAt: interruptedAt,
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.session-set",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          pendingTurnStartAdoption: "exact",
+          turnRequestSequence: 8,
+          terminalTurnTransition: {
+            turnId: TurnId.make("turn-interrupted-before-start"),
+            state: "interrupted",
+          },
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "claude",
+            runtimeMode: "full-access",
+            activeTurnId: TurnId.make("turn-interrupted-before-start"),
+            lastError: null,
+            updatedAt: interruptedAt,
+          },
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.latestTurn).toMatchObject({
+          turnId: "turn-interrupted-before-start",
+          state: "interrupted",
+          completedAt: interruptedAt,
+        });
+      }
+    });
+
+    it("projects simultaneous superseded and active exact transitions onto the active turn", () => {
+      const transitionedAt = "2026-04-01T08:00:00.000Z";
+      const threadWithSupersededTurn: OrchestrationThread = {
+        ...baseThread,
+        latestTurn: {
+          turnId: TurnId.make("turn-a"),
+          state: "running",
+          requestedAt: "2026-04-01T07:00:00.000Z",
+          startedAt: "2026-04-01T07:00:00.000Z",
+          completedAt: null,
+          assistantMessageId: MessageId.make("msg-3"),
+        },
+      };
+      const atomicResult = applyThreadDetailEvent(threadWithSupersededTurn, {
+        ...baseEventFields,
+        sequence: 9,
+        occurredAt: transitionedAt,
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.session-set",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          pendingTurnStartAdoption: "exact",
+          turnRequestSequence: 8,
+          terminalTurnTransitions: [
+            { turnId: TurnId.make("turn-a"), state: "interrupted" },
+            { turnId: TurnId.make("turn-b"), state: "interrupted" },
+          ],
+          terminalTurnTransition: {
+            turnId: TurnId.make("turn-b"),
+            state: "interrupted",
+          },
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "claude",
+            runtimeMode: "full-access",
+            activeTurnId: TurnId.make("turn-b"),
+            lastError: null,
+            updatedAt: transitionedAt,
+          },
+        },
+      });
+      expect(atomicResult.kind).toBe("updated");
+      if (atomicResult.kind !== "updated") return;
+      expect(atomicResult.thread.latestTurn).toMatchObject({
+        turnId: "turn-b",
+        state: "interrupted",
+        completedAt: transitionedAt,
+      });
+
+      const duplicateRunningResult = applyThreadDetailEvent(atomicResult.thread, {
+        ...baseEventFields,
+        sequence: 10,
+        occurredAt: "2026-04-01T08:00:05.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.session-set",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          pendingTurnStartAdoption: "none",
+          terminalTurnTransitions: [{ turnId: TurnId.make("turn-unrelated"), state: "completed" }],
+          session: {
+            ...atomicResult.thread.session!,
+            status: "running",
+            activeTurnId: TurnId.make("turn-b"),
+            updatedAt: "2026-04-01T08:00:05.000Z",
+          },
+        },
+      });
+      expect(duplicateRunningResult.kind).toBe("updated");
+      if (duplicateRunningResult.kind === "updated") {
+        expect(duplicateRunningResult.thread.latestTurn).toMatchObject({
+          turnId: "turn-b",
+          state: "interrupted",
+          completedAt: transitionedAt,
+        });
+      }
+    });
+
     it("updates session and latestTurn for a running session", () => {
       const result = applyThreadDetailEvent(baseThread, {
         ...baseEventFields,
@@ -390,6 +650,7 @@ describe("applyThreadDetailEvent", () => {
         type: "thread.session-set",
         payload: {
           threadId: ThreadId.make("thread-1"),
+          pendingTurnStartAdoption: "none",
           session: {
             threadId: ThreadId.make("thread-1"),
             status: "running",

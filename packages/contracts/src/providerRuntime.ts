@@ -364,13 +364,14 @@ const TurnStartedPayload = Schema.Struct({
    *
    * This is the correlation the projector needs to adopt the RIGHT pending
    * placeholder. Turn ids are minted by the adapter and mean nothing to the
-   * orchestration layer until this event arrives, so without the echo the only
-   * available association is positional — oldest placeholder wins — which is
-   * wrong exactly when two starts are reported out of order.
+   * orchestration layer until this event arrives, so pending metadata may only
+   * be adopted when this sequence exactly matches its requesting event.
    *
-   * Optional: adapter-internal and synthetic turns have no requesting event,
-   * and a turn reported by a provider notification rather than by the send
-   * itself may not carry one. Absent means "fall back to oldest-first".
+   * Optional: adapter-internal and provider-notification turns may have no
+   * requesting event. A sequence-less `turn.started` requests the legacy
+   * oldest-pending strategy. Ingestion persists and adopts that strategy only
+   * when the provider directory identifies the event turn and an acceptable
+   * pending row exists; otherwise it persists `none`.
    */
   turnRequestSequence: Schema.optional(NonNegativeInt),
 });

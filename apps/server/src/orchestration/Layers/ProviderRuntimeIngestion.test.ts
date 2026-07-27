@@ -398,6 +398,8 @@ describe("ProviderRuntimeIngestion", () => {
             .getPendingTurnStartByThreadId({ threadId })
             .pipe(Effect.map(Option.getOrNull)),
         ),
+      readProjectionTurn: (threadId: ThreadId, turnId: TurnId) =>
+        run(turnRepository.getByTurnId({ threadId, turnId }).pipe(Effect.map(Option.getOrNull))),
       directory,
       seedBinding: (binding: Parameters<typeof directory.upsert>[0]) =>
         run(directory.upsert(binding)),
@@ -475,12 +477,64 @@ describe("ProviderRuntimeIngestion", () => {
       );
     const startedSet = sessionSets.find((evt) => evt.payload.session.activeTurnId === "turn-1");
     expect(startedSet).toBeDefined();
+    expect(startedSet?.payload.pendingTurnStartAdoption).toBe("none");
     expect(startedSet?.payload.settledTurnId).toBeUndefined();
     const completedSet = sessionSets.find((evt) => evt.payload.settledTurnId !== undefined);
     expect(completedSet).toBeDefined();
+    expect(completedSet?.payload.pendingTurnStartAdoption).toBe("none");
     expect(completedSet?.payload.settledTurnId).toBe("turn-1");
+    expect(completedSet?.payload.terminalTurnTransition).toEqual({
+      turnId: "turn-1",
+      state: "error",
+    });
     expect(completedSet?.payload.session.activeTurnId).toBeNull();
+    expect(thread.latestTurn).toMatchObject({ turnId: "turn-1", state: "error" });
   });
+
+  it.each(["interrupted", "cancelled"] as const)(
+    "maps a %s completion to an interrupted terminal turn",
+    async (runtimeState) => {
+      const harness = await createHarness();
+      const turnId = asTurnId(`turn-${runtimeState}`);
+      const now = "2026-01-01T00:00:00.000Z";
+
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId(`evt-${runtimeState}-started`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: now,
+        turnId,
+      });
+      await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId(`evt-${runtimeState}-completed`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:05.000Z",
+        turnId,
+        payload: { state: runtimeState },
+      });
+
+      const thread = await waitForThread(
+        harness.readModel,
+        (entry) => entry.session?.status === "interrupted",
+      );
+      expect(thread.latestTurn).toMatchObject({ turnId, state: "interrupted" });
+      const completionSet = harness
+        .domainEvents()
+        .find(
+          (event): event is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
+            event.type === "thread.session-set" && event.payload.settledTurnId === turnId,
+        );
+      expect(completionSet?.payload.terminalTurnTransition).toEqual({
+        turnId,
+        state: "interrupted",
+      });
+    },
+  );
 
   it("does not stamp a settlement when the session exits under a running turn", async () => {
     const harness = await createHarness();
@@ -518,13 +572,21 @@ describe("ProviderRuntimeIngestion", () => {
       (thread) => thread.session?.status === "stopped" && thread.session?.activeTurnId === null,
     );
 
-    const settledSets = harness
+    const sessionSets = harness
       .domainEvents()
       .filter(
         (evt): evt is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
-          evt.type === "thread.session-set" && evt.payload.settledTurnId !== undefined,
+          evt.type === "thread.session-set",
       );
-    expect(settledSets).toEqual([]);
+    expect(sessionSets.some((evt) => evt.payload.settledTurnId !== undefined)).toBe(false);
+    const exitedSet = sessionSets.find((evt) => evt.payload.session.status === "stopped");
+    expect(exitedSet?.payload.pendingTurnStartAdoption).toBe("none");
+    expect(exitedSet?.payload.terminalTurnTransition).toEqual({
+      turnId: "turn-exit",
+      state: "interrupted",
+    });
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(thread?.latestTurn).toMatchObject({ turnId: "turn-exit", state: "interrupted" });
   });
 
   it("settles a projected active turn when no matching provider turn remains", async () => {
@@ -551,8 +613,19 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (entry) => entry.session?.status === "stopped" && entry.session.activeTurnId === null,
     );
-    expect(thread.latestTurn?.turnId).toBe(turnId);
+    expect(thread.latestTurn).toMatchObject({ turnId, state: "interrupted" });
     expect(thread.latestTurn?.completedAt).not.toBeNull();
+    const reconciliationSet = harness
+      .domainEvents()
+      .find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
+          event.type === "thread.session-set" && event.payload.session.status === "stopped",
+      );
+    expect(reconciliationSet?.payload.settledTurnId).toBeUndefined();
+    expect(reconciliationSet?.payload.terminalTurnTransition).toEqual({
+      turnId,
+      state: "interrupted",
+    });
   });
 
   it("keeps a projected active turn running while the provider still owns it", async () => {
@@ -1445,6 +1518,24 @@ describe("ProviderRuntimeIngestion", () => {
     ).toMatchObject({
       implementationThreadId: "thread-implement",
     });
+
+    await harness.drain();
+
+    const startedSessionSet = harness
+      .domainEvents()
+      .find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
+          event.type === "thread.session-set" &&
+          event.payload.threadId === targetThreadId &&
+          event.payload.session.activeTurnId === targetTurnId,
+      );
+    expect(startedSessionSet?.payload.pendingTurnStartAdoption).toBe("oldest-pending");
+    expect(await harness.readPendingTurnStart(targetThreadId)).toBeNull();
+    expect(await harness.readProjectionTurn(targetThreadId, targetTurnId)).toMatchObject({
+      pendingMessageId: "msg-plan-target",
+      sourceProposedPlanThreadId: sourceThreadId,
+      sourceProposedPlanId: sourcePlan.id,
+    });
   });
 
   it("marks the plan belonging to the turn that started, not the oldest queued one", async () => {
@@ -1995,6 +2086,7 @@ describe("ProviderRuntimeIngestion", () => {
     const oldTurnId = asTurnId("turn-steered-over");
     const newTurnId = asTurnId("turn-from-steer");
     const createdAt = "2026-01-01T00:00:00.000Z";
+    const steerStartedAt = "2026-01-01T00:00:05.000Z";
 
     harness.setProviderSession({
       provider: ProviderDriverKind.make("codex"),
@@ -2022,7 +2114,7 @@ describe("ProviderRuntimeIngestion", () => {
     );
 
     // The steer: a user-requested turn start while the old turn still runs.
-    await Effect.runPromise(
+    await harness.run(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-steer"),
@@ -2038,6 +2130,13 @@ describe("ProviderRuntimeIngestion", () => {
         createdAt,
       }),
     );
+    const pendingSteer = await harness.readPendingTurnStart(threadId);
+    expect(pendingSteer).toMatchObject({
+      messageId: "msg-steer",
+      sourceProposedPlanThreadId: null,
+      sourceProposedPlanId: null,
+      pendingInterruptRequested: false,
+    });
 
     // The provider session tracks the new turn before emitting turn.started
     // (sendTurn updates the session first).
@@ -2047,16 +2146,19 @@ describe("ProviderRuntimeIngestion", () => {
       runtimeMode: "approval-required",
       threadId,
       createdAt,
-      updatedAt: createdAt,
+      updatedAt: steerStartedAt,
       activeTurnId: newTurnId,
     });
     harness.emit({
       type: "turn.started",
       eventId: asEventId("evt-turn-started-from-steer"),
       provider: ProviderDriverKind.make("codex"),
-      createdAt,
+      createdAt: steerStartedAt,
       threadId,
       turnId: newTurnId,
+      payload: {
+        turnRequestSequence: pendingSteer!.requestSequence,
+      },
     });
 
     const threadAfterSteer = await waitForThread(
@@ -2069,6 +2171,151 @@ describe("ProviderRuntimeIngestion", () => {
     expect(threadAfterSteer.session?.activeTurnId).toBe(newTurnId);
     expect(threadAfterSteer.latestTurn?.turnId).toBe(newTurnId);
     expect(threadAfterSteer.latestTurn?.state).toBe("running");
+
+    const supersededTurn = await harness.readProjectionTurn(threadId, oldTurnId);
+    expect(supersededTurn).toMatchObject({
+      state: "interrupted",
+      completedAt: steerStartedAt,
+    });
+    const adoptedTurn = await harness.readProjectionTurn(threadId, newTurnId);
+    expect(adoptedTurn).toMatchObject({
+      pendingMessageId: "msg-steer",
+      sourceProposedPlanThreadId: null,
+      sourceProposedPlanId: null,
+      state: "running",
+      completedAt: null,
+    });
+    expect(await harness.readPendingTurnStart(threadId)).toBeNull();
+
+    const acceptedSteerSet = harness
+      .domainEvents()
+      .find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
+          event.type === "thread.session-set" && event.payload.session.activeTurnId === newTurnId,
+      );
+    expect(acceptedSteerSet?.payload.pendingTurnStartAdoption).toBe("exact");
+    expect(acceptedSteerSet?.payload.turnRequestSequence).toBe(pendingSteer?.requestSequence);
+    expect(acceptedSteerSet?.payload.terminalTurnTransitions).toEqual([
+      { turnId: oldTurnId, state: "interrupted" },
+    ]);
+    expect(acceptedSteerSet?.payload.terminalTurnTransition).toBeUndefined();
+    expect(acceptedSteerSet?.payload.settledTurnId).toBeUndefined();
+  });
+
+  it("terminalizes a superseded turn when exact adoption declines a mismatched sequence", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const oldTurnId = asTurnId("turn-before-mismatched-steer");
+    const newTurnId = asTurnId("turn-from-mismatched-steer");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const steerStartedAt = "2026-01-01T00:00:05.000Z";
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      createdAt,
+      updatedAt: createdAt,
+      activeTurnId: oldTurnId,
+    });
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-before-mismatched-steer"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt,
+      threadId,
+      turnId: oldTurnId,
+    });
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session?.activeTurnId === oldTurnId,
+      2_000,
+      threadId,
+    );
+
+    await harness.run(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-mismatched-steer"),
+        threadId,
+        message: {
+          messageId: asMessageId("msg-mismatched-steer"),
+          role: "user",
+          text: "steer with mismatched correlation",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      }),
+    );
+    const pendingSteer = await harness.readPendingTurnStart(threadId);
+    expect(pendingSteer).toMatchObject({
+      messageId: "msg-mismatched-steer",
+      pendingInterruptRequested: false,
+    });
+
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      createdAt,
+      updatedAt: steerStartedAt,
+      activeTurnId: newTurnId,
+    });
+    const mismatchedRequestSequence = pendingSteer!.requestSequence + 1;
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-from-mismatched-steer"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: steerStartedAt,
+      threadId,
+      turnId: newTurnId,
+      payload: {
+        turnRequestSequence: mismatchedRequestSequence,
+      },
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.status === "running" && thread.session?.activeTurnId === newTurnId,
+      2_000,
+      threadId,
+    );
+    expect(await harness.readProjectionTurn(threadId, oldTurnId)).toMatchObject({
+      state: "interrupted",
+      completedAt: steerStartedAt,
+    });
+    expect(await harness.readProjectionTurn(threadId, newTurnId)).toMatchObject({
+      pendingMessageId: null,
+      sourceProposedPlanThreadId: null,
+      sourceProposedPlanId: null,
+      state: "running",
+      completedAt: null,
+    });
+    expect(await harness.readPendingTurnStart(threadId)).toMatchObject({
+      requestSequence: pendingSteer?.requestSequence,
+      messageId: "msg-mismatched-steer",
+    });
+
+    const mismatchedSteerSet = harness
+      .domainEvents()
+      .find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
+          event.type === "thread.session-set" &&
+          event.payload.session.activeTurnId === newTurnId &&
+          event.payload.turnRequestSequence === mismatchedRequestSequence,
+      );
+    expect(mismatchedSteerSet?.payload.pendingTurnStartAdoption).toBe("exact");
+    expect(mismatchedSteerSet?.payload.terminalTurnTransitions).toEqual([
+      { turnId: oldTurnId, state: "interrupted" },
+    ]);
+    expect(mismatchedSteerSet?.payload.terminalTurnTransition).toBeUndefined();
+    expect(mismatchedSteerSet?.payload.settledTurnId).toBeUndefined();
   });
 
   it("does not mark the source proposed plan implemented for an unrelated turn.started when no thread active turn is tracked", async () => {
@@ -2234,6 +2481,26 @@ describe("ProviderRuntimeIngestion", () => {
     ).toMatchObject({
       implementedAt: null,
       implementationThreadId: null,
+    });
+
+    const unrelatedStartedSessionSet = harness
+      .domainEvents()
+      .find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
+          event.type === "thread.session-set" &&
+          event.payload.threadId === targetThreadId &&
+          event.payload.session.activeTurnId === replayedTurnId,
+      );
+    expect(unrelatedStartedSessionSet?.payload.pendingTurnStartAdoption).toBe("none");
+    expect(await harness.readPendingTurnStart(targetThreadId)).toMatchObject({
+      messageId: "msg-plan-target-unrelated",
+      sourceProposedPlanThreadId: sourceThreadId,
+      sourceProposedPlanId: sourcePlan.id,
+    });
+    expect(await harness.readProjectionTurn(targetThreadId, replayedTurnId)).toMatchObject({
+      pendingMessageId: null,
+      sourceProposedPlanThreadId: null,
+      sourceProposedPlanId: null,
     });
   });
 
@@ -2801,7 +3068,7 @@ describe("ProviderRuntimeIngestion", () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.run(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-streaming-mode"),
@@ -3813,6 +4080,15 @@ describe("ProviderRuntimeIngestion", () => {
   }
 
   async function startTurn(harness: AutoResumeHarness, turnId: string) {
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      updatedAt: AR_NOW,
+      activeTurnId: asTurnId(turnId),
+    });
     harness.emit({
       type: "turn.started",
       eventId: asEventId(`evt-turn-started-${turnId}`),
@@ -4372,6 +4648,13 @@ describe("ProviderRuntimeIngestion", () => {
     // that has NOT yet been consumed by a turn.started. The projection still
     // exposes the OLDER turn-a as its active turn.
     await seedUserMessage(harness, "msg-2");
+    const pendingSteer = await harness.readPendingTurnStart();
+    expect(pendingSteer).toMatchObject({
+      messageId: "msg-2",
+      sourceProposedPlanThreadId: null,
+      sourceProposedPlanId: null,
+      pendingInterruptRequested: false,
+    });
 
     // The user clicks interrupt. Because the newer steer's turn.started has not
     // been projected, the aggregate's active turn is still turn-a, so the decider
@@ -4394,6 +4677,13 @@ describe("ProviderRuntimeIngestion", () => {
     const afterInterrupt = await harness.readShell();
     expect(afterInterrupt?.session?.activeTurnId).toBe("turn-a");
     expect(afterInterrupt?.latestTurn?.state).toBe("interrupted");
+    expect(await harness.readPendingTurnStart()).toMatchObject({
+      requestSequence: pendingSteer?.requestSequence,
+      messageId: "msg-2",
+      sourceProposedPlanThreadId: null,
+      sourceProposedPlanId: null,
+      pendingInterruptRequested: true,
+    });
 
     // The steer's turn.started finally arrives. The provider (opencode-style)
     // opened turn-b as its active turn without completing turn-a, so surface that
@@ -4408,13 +4698,64 @@ describe("ProviderRuntimeIngestion", () => {
       createdAt: AR_NOW,
       updatedAt: AR_NOW,
     });
-    await startTurn(harness, "turn-b");
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-started-interrupted-steer-b"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: AR_NOW,
+      turnId: asTurnId("turn-b"),
+      payload: {
+        turnRequestSequence: pendingSteer!.requestSequence,
+      },
+    });
+    await harness.drain();
     // The flagged pending-start births turn-b `interrupted`, not `running`, and
     // the session advances to turn-b (the bug: a `running` turn-b would auto-resume).
     const started = await readThread(harness);
     expect(started.latestTurn?.state).toBe("interrupted");
     const startedShell = await harness.readShell();
     expect(startedShell?.session?.activeTurnId).toBe("turn-b");
+    const supersededTurn = await harness.readProjectionTurn(
+      asThreadId("thread-1"),
+      asTurnId("turn-a"),
+    );
+    expect(supersededTurn).toMatchObject({
+      state: "interrupted",
+      completedAt: AR_NOW,
+    });
+    const adoptedTurn = await harness.readProjectionTurn(
+      asThreadId("thread-1"),
+      asTurnId("turn-b"),
+    );
+    expect(adoptedTurn).toMatchObject({
+      pendingMessageId: "msg-2",
+      sourceProposedPlanThreadId: null,
+      sourceProposedPlanId: null,
+      state: "interrupted",
+      completedAt: AR_NOW,
+    });
+    expect(await harness.readPendingTurnStart()).toBeNull();
+    const acceptedInterruptedSteerSet = harness
+      .domainEvents()
+      .find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.session-set" }> =>
+          event.type === "thread.session-set" &&
+          event.payload.session.activeTurnId === asTurnId("turn-b"),
+      );
+    expect(acceptedInterruptedSteerSet?.payload.pendingTurnStartAdoption).toBe("exact");
+    expect(acceptedInterruptedSteerSet?.payload.turnRequestSequence).toBe(
+      pendingSteer?.requestSequence,
+    );
+    expect(acceptedInterruptedSteerSet?.payload.terminalTurnTransitions).toEqual([
+      { turnId: "turn-a", state: "interrupted" },
+      { turnId: "turn-b", state: "interrupted" },
+    ]);
+    expect(acceptedInterruptedSteerSet?.payload.terminalTurnTransition).toEqual({
+      turnId: "turn-b",
+      state: "interrupted",
+    });
+    expect(acceptedInterruptedSteerSet?.payload.settledTurnId).toBeUndefined();
 
     // The subprocess then exits before turn.completed. The steer the user stopped
     // must NOT be auto-resumed.

@@ -7,6 +7,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationCommand,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -292,6 +293,112 @@ it.layer(NodeServices.layer)("decider thread.turn.resume", (it) => {
       });
       const events = Array.isArray(result) ? result : [result];
       expect(events).toHaveLength(0);
+    }),
+  );
+
+  it.effect("persists an explicit no-adoption decision for routine session updates", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel;
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.set",
+          commandId: asCommandId("cmd-session-routine"),
+          threadId: THREAD_ID,
+          session: {
+            threadId: THREAD_ID,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: NOW,
+          },
+          createdAt: NOW,
+        },
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events).toHaveLength(1);
+      const [event] = events;
+      expect(event?.type).toBe("thread.session-set");
+      if (event?.type !== "thread.session-set") return;
+      expect(event.payload.pendingTurnStartAdoption).toBe("none");
+      expect(event.payload.terminalTurnTransition).toBeUndefined();
+    }),
+  );
+
+  it.effect("derives exact adoption and terminal transition metadata", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel;
+      const turnId = TurnId.make("turn-terminal");
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.set",
+          commandId: asCommandId("cmd-session-terminal"),
+          threadId: THREAD_ID,
+          session: {
+            threadId: THREAD_ID,
+            status: "error",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: "failed",
+            updatedAt: NOW,
+          },
+          turnRequestSequence: 7,
+          settledTurnId: turnId,
+          createdAt: NOW,
+        },
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events).toHaveLength(1);
+      const [event] = events;
+      expect(event?.type).toBe("thread.session-set");
+      if (event?.type !== "thread.session-set") return;
+      expect(event.payload.pendingTurnStartAdoption).toBe("exact");
+      expect(event.payload.terminalTurnTransition).toEqual({ turnId, state: "error" });
+    }),
+  );
+
+  it.effect("persists explicit atomic terminal turn transitions", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seedReadModel;
+      const supersededTurnId = TurnId.make("turn-superseded");
+      const adoptedTurnId = TurnId.make("turn-adopted-interrupted");
+      const terminalTurnTransitions = [
+        { turnId: supersededTurnId, state: "interrupted" as const },
+        { turnId: adoptedTurnId, state: "interrupted" as const },
+      ];
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.set",
+          commandId: asCommandId("cmd-session-atomic-terminal"),
+          threadId: THREAD_ID,
+          session: {
+            threadId: THREAD_ID,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: adoptedTurnId,
+            lastError: null,
+            updatedAt: NOW,
+          },
+          pendingTurnStartAdoption: "exact",
+          turnRequestSequence: 7,
+          terminalTurnTransitions,
+          createdAt: NOW,
+        },
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events).toHaveLength(1);
+      const [event] = events;
+      expect(event?.type).toBe("thread.session-set");
+      if (event?.type !== "thread.session-set") return;
+      expect(event.payload.terminalTurnTransitions).toEqual(terminalTurnTransitions);
+      expect(event.payload.terminalTurnTransition).toBeUndefined();
+      expect(event.payload.settledTurnId).toBeUndefined();
     }),
   );
 });

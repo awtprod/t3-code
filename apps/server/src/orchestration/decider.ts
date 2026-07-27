@@ -672,6 +672,28 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const pendingTurnStartAdoption =
+        command.pendingTurnStartAdoption ??
+        (command.turnRequestSequence !== undefined ? "exact" : "none");
+      const terminalTurnTransition =
+        command.terminalTurnTransition ??
+        (command.settledTurnId === undefined
+          ? undefined
+          : (() => {
+              switch (command.session.status) {
+                case "idle":
+                case "ready":
+                  return { turnId: command.settledTurnId, state: "completed" } as const;
+                case "error":
+                  return { turnId: command.settledTurnId, state: "error" } as const;
+                case "interrupted":
+                case "stopped":
+                  return { turnId: command.settledTurnId, state: "interrupted" } as const;
+                case "starting":
+                case "running":
+                  return undefined;
+              }
+            })());
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -684,10 +706,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          pendingTurnStartAdoption,
           ...(command.turnRequestSequence !== undefined
             ? { turnRequestSequence: command.turnRequestSequence }
             : {}),
           ...(command.settledTurnId !== undefined ? { settledTurnId: command.settledTurnId } : {}),
+          ...(terminalTurnTransition !== undefined ? { terminalTurnTransition } : {}),
+          ...(command.terminalTurnTransitions !== undefined
+            ? { terminalTurnTransitions: command.terminalTurnTransitions }
+            : {}),
         },
       };
     }
