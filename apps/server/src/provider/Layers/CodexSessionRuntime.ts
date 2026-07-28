@@ -1206,22 +1206,32 @@ export const makeCodexSessionRuntime = (
     );
 
     yield* client.handleServerNotification("turn/completed", (payload) =>
-      currentSessionProviderThreadId.pipe(
-        Effect.flatMap((providerThreadId) => {
-          if (providerThreadId && payload.threadId !== providerThreadId) {
-            return Effect.void;
+      Effect.gen(function* () {
+        const completedTurnId = TurnId.make(payload.turn.id);
+        const lastError =
+          payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
+            ? payload.turn.error.message
+            : undefined;
+        const completionStatus: ProviderSession["status"] =
+          payload.turn.status === "failed" ? "error" : "ready";
+        const updatedAt = yield* nowIso;
+        yield* Ref.update(sessionRef, (session) => {
+          const providerThreadId = currentProviderThreadId(session);
+          if (
+            (providerThreadId && payload.threadId !== providerThreadId) ||
+            session.activeTurnId !== completedTurnId
+          ) {
+            return session;
           }
-          const lastError =
-            payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
-              ? payload.turn.error.message
-              : undefined;
-          return updateSession(sessionRef, {
-            status: payload.turn.status === "failed" ? "error" : "ready",
+          return {
+            ...session,
+            status: completionStatus,
             activeTurnId: undefined,
             ...(lastError ? { lastError } : {}),
-          });
-        }),
-      ),
+            updatedAt,
+          };
+        });
+      }),
     );
 
     yield* client.handleServerNotification("error", (payload) =>

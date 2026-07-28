@@ -4484,13 +4484,18 @@ describe("ProviderRuntimeIngestion", () => {
     expect(autoResumedActivities(thread)).toHaveLength(0);
   });
 
-  async function runToolItem(harness: AutoResumeHarness, turnId: string, threadId = "thread-1") {
+  async function runToolItem(
+    harness: AutoResumeHarness,
+    turnId: string,
+    threadId = "thread-1",
+    createdAt = AR_NOW,
+  ) {
     harness.emit({
       type: "item.started",
       eventId: asEventId(`evt-tool-started-${threadId}-${turnId}`),
       provider: ProviderDriverKind.make("codex"),
       threadId: asThreadId(threadId),
-      createdAt: AR_NOW,
+      createdAt,
       turnId: asTurnId(turnId),
       payload: {
         itemType: "command_execution",
@@ -4542,6 +4547,88 @@ describe("ProviderRuntimeIngestion", () => {
       (activity) => activity.id === "evt-tool-started-thread-1-turn-a",
     );
     expect(evidence?.correlatedMessageId).toBe("msg-1");
+  });
+
+  it("orders persisted recovery evidence chronologically instead of lexically", async () => {
+    const harness = await createHarness();
+    const evidenceSince = AR_NOW;
+    const activityCreatedAt = "2025-12-31T19:00:01.000-05:00";
+    expect(Date.parse(activityCreatedAt)).toBeGreaterThanOrEqual(Date.parse(evidenceSince));
+    expect(activityCreatedAt < evidenceSince).toBe(true);
+
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    await runToolItem(harness, "turn-a", "thread-1", activityCreatedAt);
+    const persistedEvidence = await harness.run(
+      harness.sql<{ readonly createdAt: string }>`
+        SELECT created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE activity_id = 'evt-tool-started-thread-1-turn-a'
+      `,
+    );
+    expect(persistedEvidence).toEqual([{ createdAt: activityCreatedAt }]);
+
+    await crashSession(harness, "crash-after-lexically-inverted-tool");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(
+      harness.turnStartRequests().filter((event) => event.payload.messageId === "msg-1"),
+    ).toHaveLength(1);
+    expect(resumeBlockedActivities(thread)).toHaveLength(1);
+    expect(resumeBlockedActivities(thread)[0]?.payload).toMatchObject({
+      detectedFrom: "tool-activity",
+    });
+    const durableBlocked = await harness.run(
+      harness.sql<{
+        readonly kind: string;
+        readonly detectedFrom: string | null;
+      }>`
+        SELECT
+          kind,
+          json_extract(payload_json, '$.detectedFrom') AS "detectedFrom"
+        FROM projection_thread_activities
+        WHERE thread_id = 'thread-1'
+          AND kind = 'provider.turn.auto-resume-blocked'
+      `,
+    );
+    expect(durableBlocked).toEqual([
+      {
+        kind: "provider.turn.auto-resume-blocked",
+        detectedFrom: "tool-activity",
+      },
+    ]);
+  });
+
+  it("fails safe when persisted recovery evidence has an invalid timestamp", async () => {
+    const harness = await createHarness();
+    const invalidActivityCreatedAt = "!invalid-activity-timestamp";
+    expect(Number.isNaN(Date.parse(invalidActivityCreatedAt))).toBe(true);
+    expect(invalidActivityCreatedAt < AR_NOW).toBe(true);
+
+    await seedUserMessage(harness, "msg-1");
+    await startTurn(harness, "turn-a");
+    await runToolItem(harness, "turn-a", "thread-1", invalidActivityCreatedAt);
+    const persistedEvidence = await harness.run(
+      harness.sql<{ readonly createdAt: string }>`
+        SELECT created_at AS "createdAt"
+        FROM projection_thread_activities
+        WHERE activity_id = 'evt-tool-started-thread-1-turn-a'
+      `,
+    );
+    expect(persistedEvidence).toEqual([{ createdAt: invalidActivityCreatedAt }]);
+
+    await crashSession(harness, "crash-after-invalid-tool-timestamp");
+
+    const thread = await readThread(harness);
+    expect(autoResumedActivities(thread)).toHaveLength(0);
+    expect(
+      harness.turnStartRequests().filter((event) => event.payload.messageId === "msg-1"),
+    ).toHaveLength(1);
+    expect(resumeBlockedActivities(thread)).toHaveLength(1);
+    expect(resumeBlockedActivities(thread)[0]?.payload).toMatchObject({
+      detectedFrom: "tool-activity",
+    });
   });
 
   it("correlates turn-less evidence to the newest uninterrupted pending start", async () => {

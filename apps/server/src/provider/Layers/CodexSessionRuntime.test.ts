@@ -430,6 +430,139 @@ describe("CodexSessionRuntime sendTurn target provenance", () => {
       yield* runtime.close;
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  it.effect("ignores a delayed completion for an interrupted turn after a newer turn starts", () =>
+    Effect.gen(function* () {
+      const providerThreadId = "provider-thread-stale-completion";
+      const canonicalThreadId = ThreadId.make("thread-stale-completion");
+      const inbound = yield* Queue.unbounded<Uint8Array>();
+      const interruptedTurnIds: Array<string> = [];
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      const encodeJsonString = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+      const decodeJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+      const writeInbound = (message: unknown) =>
+        Effect.gen(function* () {
+          const encoded = yield* encodeJsonString(message);
+          yield* Queue.offer(inbound, encoder.encode(`${encoded}\n`));
+        }).pipe(Effect.orDie);
+      const respond = (id: string | number, result: unknown) => writeInbound({ id, result });
+      const notify = (method: string, params: unknown) => writeInbound({ method, params });
+      let turnStartCount = 0;
+      const wireHandle = makeFakeChildHandle({
+        pid: 4555,
+        exitCode: Effect.never,
+        stdin: Sink.forEach((chunk: Uint8Array) =>
+          Effect.gen(function* () {
+            const message = (yield* decodeJsonString(decoder.decode(chunk))) as {
+              readonly id?: string | number;
+              readonly method?: string;
+              readonly params?: Record<string, unknown>;
+            };
+            if (message.id === undefined) {
+              return;
+            }
+            switch (message.method) {
+              case "initialize":
+                yield* respond(message.id, {
+                  userAgent: "codex-stale-completion-test",
+                  codexHome: "/tmp/codex-stale-completion-test",
+                  platformFamily: "unix",
+                  platformOs: "linux",
+                });
+                return;
+              case "thread/start":
+                yield* respond(message.id, makeThreadOpenResponse(providerThreadId));
+                return;
+              case "turn/start": {
+                turnStartCount += 1;
+                yield* respond(message.id, {
+                  turn: {
+                    id: `provider-turn-${turnStartCount}`,
+                    items: [],
+                    status: "inProgress",
+                  },
+                });
+                return;
+              }
+              case "turn/interrupt":
+                interruptedTurnIds.push(String(message.params?.turnId));
+                yield* respond(message.id, {});
+                return;
+              default:
+                throw new Error(`Unexpected Codex request: ${String(message.method)}`);
+            }
+          }).pipe(Effect.orDie),
+        ),
+        stdout: Stream.fromQueue(inbound),
+      });
+      const spawner = ChildProcessSpawner.make(() => Effect.succeed(wireHandle));
+      const runtimeScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: canonicalThreadId,
+        binaryPath: "/usr/bin/codex",
+        cwd: "/tmp/codex-stale-completion-test",
+        runtimeMode: "full-access",
+      }).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      const awaitCompletionNotification = (turnId: string) =>
+        runtime.events.pipe(
+          Stream.filter(
+            (event) =>
+              event.kind === "notification" &&
+              event.method === "turn/completed" &&
+              event.turnId === turnId,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+
+      yield* runtime.start();
+      const turnA = yield* runtime.sendTurn({ input: "turn A" });
+      yield* runtime.interruptTurn();
+      const turnB = yield* runtime.sendTurn({ input: "turn B" });
+      NodeAssert.deepStrictEqual(interruptedTurnIds, ["provider-turn-1"]);
+
+      yield* notify("turn/completed", {
+        threadId: providerThreadId,
+        turn: {
+          id: turnA.turnId,
+          items: [],
+          status: "failed",
+          error: { message: "stale turn A failure" },
+        },
+      });
+      yield* awaitCompletionNotification(turnA.turnId);
+
+      const afterStaleCompletion = yield* runtime.getSession;
+      NodeAssert.equal(afterStaleCompletion.activeTurnId, turnB.turnId);
+      NodeAssert.equal(afterStaleCompletion.status, "running");
+      NodeAssert.equal(afterStaleCompletion.lastError, undefined);
+
+      yield* runtime.interruptTurn();
+      NodeAssert.deepStrictEqual(interruptedTurnIds, ["provider-turn-1", "provider-turn-2"]);
+
+      yield* notify("turn/completed", {
+        threadId: providerThreadId,
+        turn: {
+          id: turnB.turnId,
+          items: [],
+          status: "completed",
+        },
+      });
+      yield* awaitCompletionNotification(turnB.turnId);
+
+      const afterCurrentCompletion = yield* runtime.getSession;
+      NodeAssert.equal(afterCurrentCompletion.activeTurnId, undefined);
+      NodeAssert.equal(afterCurrentCompletion.status, "ready");
+      NodeAssert.equal(afterCurrentCompletion.lastError, undefined);
+
+      yield* runtime.close;
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });
 
 describe("buildTurnStartParams", () => {

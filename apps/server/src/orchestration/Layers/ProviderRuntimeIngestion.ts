@@ -2387,8 +2387,18 @@ const make = Effect.gen(function* () {
                   SIDE_EFFECT_ACTIVITY_KINDS.has(activity.kind) ||
                   activity.kind === "turn.diff.observed",
               );
-        const inCandidateWindow = (activity: OrchestrationThreadActivity) =>
-          resumeSelection !== null && activity.createdAt >= resumeSelection.evidenceSince;
+        const inCandidateWindow = (activity: OrchestrationThreadActivity) => {
+          if (resumeSelection === null) {
+            return false;
+          }
+          const activityCreatedAt = Date.parse(activity.createdAt);
+          const evidenceSince = Date.parse(resumeSelection.evidenceSince);
+          return (
+            Number.isNaN(activityCreatedAt) ||
+            Number.isNaN(evidenceSince) ||
+            activityCreatedAt >= evidenceSince
+          );
+        };
         const onInterruptedActiveTurn = (activity: OrchestrationThreadActivity) =>
           resumeSelection?.activeTurn !== null &&
           resumeSelection?.activeTurn !== undefined &&
