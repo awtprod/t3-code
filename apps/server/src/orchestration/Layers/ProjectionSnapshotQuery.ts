@@ -83,6 +83,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   Struct.assign({
     payload: Schema.fromJsonString(Schema.Unknown),
+    correlatedMessageId: Schema.NullOr(MessageId),
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
@@ -217,6 +218,7 @@ function mapSessionRow(
     status: row.status,
     providerName: row.providerName,
     ...(row.providerInstanceId !== null ? { providerInstanceId: row.providerInstanceId } : {}),
+    ...(row.sessionGeneration !== null ? { sessionGeneration: row.sessionGeneration } : {}),
     runtimeMode: row.runtimeMode,
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
@@ -452,6 +454,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          correlated_message_id AS "correlatedMessageId",
           tone,
           kind,
           summary,
@@ -477,6 +480,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           status,
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
+          session_generation AS "sessionGeneration",
           provider_session_id AS "providerSessionId",
           provider_thread_id AS "providerThreadId",
           runtime_mode AS "runtimeMode",
@@ -498,6 +502,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
+          sessions.session_generation AS "sessionGeneration",
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
@@ -523,6 +528,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
+          sessions.session_generation AS "sessionGeneration",
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
@@ -817,6 +823,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          correlated_message_id AS "correlatedMessageId",
           tone,
           kind,
           summary,
@@ -842,6 +849,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           status,
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
+          session_generation AS "sessionGeneration",
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
@@ -1083,6 +1091,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   summary: row.summary,
                   payload: row.payload,
                   turnId: row.turnId,
+                  ...(row.correlatedMessageId !== null
+                    ? { correlatedMessageId: row.correlatedMessageId }
+                    : {}),
                   ...(row.sequence !== null ? { sequence: row.sequence } : {}),
                   createdAt: row.createdAt,
                 });
@@ -1142,18 +1153,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               for (const row of sessionRows) {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                sessionsByThread.set(row.threadId, {
-                  threadId: row.threadId,
-                  status: row.status,
-                  providerName: row.providerName,
-                  ...(row.providerInstanceId !== null
-                    ? { providerInstanceId: row.providerInstanceId }
-                    : {}),
-                  runtimeMode: row.runtimeMode,
-                  activeTurnId: row.activeTurnId,
-                  lastError: row.lastError,
-                  updatedAt: row.updatedAt,
-                });
+                // Built via the shared mapper rather than inline. This site had
+                // hand-rolled its own copy and silently omitted
+                // `sessionGeneration`, so full snapshots downgraded every
+                // consumer on this path to instance-id-only correlation — which
+                // cannot tell a restarted runtime from its predecessor, because
+                // the instance id is a routing key, not a per-start identity.
+                // One mapper means the next column added to the row cannot go
+                // missing on one path and not the others.
+                sessionsByThread.set(row.threadId, mapSessionRow(row));
               }
 
               const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(
@@ -2008,6 +2016,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             turnId: row.turnId,
             createdAt: row.createdAt,
           };
+          if (row.correlatedMessageId !== null) {
+            Object.assign(activity, { correlatedMessageId: row.correlatedMessageId });
+          }
           if (row.sequence !== null) {
             return Object.assign(activity, { sequence: row.sequence });
           }

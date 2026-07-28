@@ -10,6 +10,7 @@ import {
   type ProviderInteractionMode,
   type ProviderRequestKind,
   type ProviderSession,
+  type ProviderTurnTargetIdentity,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   RuntimeMode,
@@ -18,6 +19,7 @@ import {
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { normalizeModelSlug } from "@t3tools/shared/model";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -27,6 +29,7 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -180,7 +183,10 @@ export interface CodexSessionRuntimeShape {
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
-  readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly interruptTurn: (
+    turnId?: TurnId,
+    target?: ProviderTurnTargetIdentity,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
@@ -331,6 +337,27 @@ function readResumeCursorThreadId(
   resumeCursor: ProviderSession["resumeCursor"],
 ): string | undefined {
   return isCodexResumeCursorSchema(resumeCursor) ? resumeCursor.threadId : undefined;
+}
+
+/**
+ * Matches a historical turn target against the currently active Codex runtime.
+ *
+ * Codex's native thread id is stable across resumed runtime generations, so it
+ * is the stronger identity when present. Older/no-cursor targets are confined
+ * to the exact runtime generation that accepted them.
+ */
+export function matchesCodexInterruptTarget(
+  session: ProviderSession,
+  target: ProviderTurnTargetIdentity,
+): boolean {
+  if (target.resumeCursor !== undefined) {
+    const targetThreadId = readResumeCursorThreadId(target.resumeCursor);
+    return (
+      targetThreadId !== undefined &&
+      targetThreadId === readResumeCursorThreadId(session.resumeCursor)
+    );
+  }
+  return session.sessionGeneration === target.sessionGeneration;
 }
 
 function runtimeModeToThreadConfig(input: RuntimeMode): {
@@ -936,12 +963,21 @@ export const makeCodexSessionRuntime = (
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const crypto = yield* Crypto.Crypto;
-    const events = yield* Queue.unbounded<ProviderEvent>();
+    const events = yield* Queue.unbounded<ProviderEvent, Cause.Done>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const closedRef = yield* Ref.make(false);
+    // Records the single terminal lifecycle emit (`session/exited` from a process
+    // exit XOR `session/closed` from a graceful close). Distinct from
+    // `closedRef`, which guards the one-time close() *cleanup* (scope + queues):
+    // a crash-exit that fires first must commit the emit here WITHOUT short-
+    // circuiting a later close()'s cleanup, so the two concerns need two refs.
+    // The semaphore serializes check -> emit -> commit so a failed claimant leaves
+    // the transition available without letting a concurrent claimant race past it.
+    const terminalEmittedRef = yield* Ref.make(false);
+    const terminalEmissionSemaphore = yield* Semaphore.make(1);
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -1011,11 +1047,21 @@ export const makeCodexSessionRuntime = (
       );
 
     const sessionCreatedAt = yield* nowIso;
+    // Per-runtime-start nonce. Because a restarted runtime can reuse the same
+    // providerInstanceId, terminal events (session.exited) from a superseded
+    // runtime would otherwise be indistinguishable from the live one. Stamping a
+    // fresh generation on every event lets ingestion drop stale terminal events.
+    const sessionGeneration = yield* randomUUIDv4("session-generation");
     const initialSession = {
       provider: PROVIDER,
       ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
       status: "connecting",
       runtimeMode: options.runtimeMode,
+      // Carried on the session, not just on the events, so whoever binds this
+      // session to a thread binds the same generation the events will be
+      // stamped with. Without it the ingestion guard has nothing to compare and
+      // a superseded runtime's exit is indistinguishable from the live one's.
+      sessionGeneration,
       cwd: options.cwd,
       ...(options.model ? { model: options.model } : {}),
       threadId: options.threadId,
@@ -1033,6 +1079,7 @@ export const makeCodexSessionRuntime = (
           id: EventId.make(id),
           provider: PROVIDER,
           ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
+          sessionGeneration,
           createdAt: yield* nowIso,
           ...event,
         });
@@ -1159,22 +1206,32 @@ export const makeCodexSessionRuntime = (
     );
 
     yield* client.handleServerNotification("turn/completed", (payload) =>
-      currentSessionProviderThreadId.pipe(
-        Effect.flatMap((providerThreadId) => {
-          if (providerThreadId && payload.threadId !== providerThreadId) {
-            return Effect.void;
+      Effect.gen(function* () {
+        const completedTurnId = TurnId.make(payload.turn.id);
+        const lastError =
+          payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
+            ? payload.turn.error.message
+            : undefined;
+        const completionStatus: ProviderSession["status"] =
+          payload.turn.status === "failed" ? "error" : "ready";
+        const updatedAt = yield* nowIso;
+        yield* Ref.update(sessionRef, (session) => {
+          const providerThreadId = currentProviderThreadId(session);
+          if (
+            (providerThreadId && payload.threadId !== providerThreadId) ||
+            session.activeTurnId !== completedTurnId
+          ) {
+            return session;
           }
-          const lastError =
-            payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
-              ? payload.turn.error.message
-              : undefined;
-          return updateSession(sessionRef, {
-            status: payload.turn.status === "failed" ? "error" : "ready",
+          return {
+            ...session,
+            status: completionStatus,
             activeTurnId: undefined,
             ...(lastError ? { lastError } : {}),
-          });
-        }),
-      ),
+            updatedAt,
+          };
+        });
+      }),
     );
 
     yield* client.handleServerNotification("error", (payload) =>
@@ -1415,30 +1472,63 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
-    yield* child.exitCode.pipe(
-      Effect.flatMap((exitCode) =>
-        Ref.get(closedRef).pipe(
-          Effect.flatMap((closed) => {
-            if (closed) {
-              return Effect.void;
-            }
-            const nextStatus = exitCode === 0 ? "closed" : "error";
-            return updateSession(sessionRef, {
-              status: nextStatus,
-              activeTurnId: undefined,
-            }).pipe(
-              Effect.andThen(
-                emitSessionEvent(
-                  "session/exited",
-                  exitCode === 0
-                    ? "Codex App Server exited."
-                    : `Codex App Server exited with code ${exitCode}.`,
-                ),
-              ),
-            );
-          }),
+    // Settle the session when the app-server process goes away mid-session.
+    // `child.exitCode` reports the departure on two distinct channels:
+    //   - success with a numeric code (the process called exit(code)); and
+    //   - FAILURE with a PlatformError when the process is terminated by a
+    //     signal (SIGKILL / SIGSEGV / OOM-kill / SIGABRT), where Node surfaces
+    //     `code === null`. A real Codex crash usually lands here.
+    // Both mean "the session is gone", so both must emit `session/exited`;
+    // handling only the success channel (the previous behaviour) left a
+    // signal-killed session stuck `running` until the stall watchdog and never
+    // fired the mid-turn auto-resume. Serialize the terminal transition so
+    // whichever of {process exit, graceful close} successfully emits first
+    // commits exactly one terminal event and the other becomes a no-op emit.
+    // The critical section is uninterruptible: after the queue accepts the event,
+    // the committed flag must be set before another claimant can enter. A failed
+    // emit leaves the flag unset so the other path can still deliver a terminal.
+    // This prevents a graceful `close()` (which signals the child during scope
+    // teardown) from double-emitting `session/closed` on top of a crash's
+    // `session/exited` — a stale second terminal event that, arriving after the
+    // replacement turn has started, would mark the healthy resumed session
+    // stopped and settle the live turn.
+    const emitTerminalOnce = (emit: Effect.Effect<void, CodexErrors.CodexAppServerError>) =>
+      terminalEmissionSemaphore.withPermit(
+        Effect.uninterruptible(
+          Ref.get(terminalEmittedRef).pipe(
+            Effect.flatMap((terminalAlreadyEmitted) => {
+              if (terminalAlreadyEmitted) {
+                return Effect.void;
+              }
+              return emit.pipe(Effect.andThen(Ref.set(terminalEmittedRef, true)));
+            }),
+          ),
         ),
-      ),
+      );
+
+    const settleProcessExit = (nextStatus: "closed" | "error", message: string) =>
+      emitTerminalOnce(
+        updateSession(sessionRef, {
+          status: nextStatus,
+          activeTurnId: undefined,
+        }).pipe(Effect.andThen(emitSessionEvent("session/exited", message))),
+      );
+
+    yield* child.exitCode.pipe(
+      Effect.matchEffect({
+        onSuccess: (exitCode) =>
+          settleProcessExit(
+            exitCode === 0 ? "closed" : "error",
+            exitCode === 0
+              ? "Codex App Server exited."
+              : `Codex App Server exited with code ${exitCode}.`,
+          ),
+        onFailure: (cause) =>
+          settleProcessExit(
+            "error",
+            `Codex App Server terminated: ${cause instanceof Error ? cause.message : String(cause)}`,
+          ),
+      }),
       Effect.forkIn(runtimeScope),
     );
 
@@ -1503,14 +1593,21 @@ export const makeCodexSessionRuntime = (
         status: "closed",
         activeTurnId: undefined,
       });
-      yield* emitSessionEvent("session/closed", "Session stopped").pipe(
+      // Emit the terminal lifecycle event only if a crash-exit has not already
+      // delivered one; the cleanup below still runs unconditionally so the scope
+      // and queues are always torn down exactly once. A failed crash emission
+      // leaves this path able to deliver `session/closed` before ending the queue.
+      yield* emitTerminalOnce(emitSessionEvent("session/closed", "Session stopped")).pipe(
         Effect.catch((cause) =>
           Effect.logError("Failed to emit Codex session closed event.", { cause }),
         ),
       );
       yield* Scope.close(runtimeScope, Exit.void);
       yield* Queue.shutdown(serverNotifications);
-      yield* Queue.shutdown(events);
+      // Gracefully end (rather than hard-shutdown) the outward event queue so a
+      // just-emitted terminal event (session/closed or session/exited) is drained
+      // by the consumer before the stream completes, instead of being discarded.
+      yield* Queue.end(events);
     });
 
     return {
@@ -1558,19 +1655,23 @@ export const makeCodexSessionRuntime = (
             activeTurnId: turnId,
             ...(normalizedModel ? { model: normalizedModel } : {}),
           });
-          const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return {
             threadId: options.threadId,
             turnId,
-            ...(resumedProviderThreadId
-              ? { resumeCursor: { threadId: resumedProviderThreadId } }
-              : {}),
+            resumeCursor: { threadId: providerThreadId },
+            target: {
+              sessionGeneration,
+              resumeCursor: { threadId: providerThreadId },
+            },
           } satisfies ProviderTurnStartResult;
         }),
-      interruptTurn: (turnId) =>
+      interruptTurn: (turnId, target) =>
         Effect.gen(function* () {
-          const providerThreadId = yield* readProviderThreadId;
           const session = yield* Ref.get(sessionRef);
+          if (target !== undefined && !matchesCodexInterruptTarget(session, target)) {
+            return;
+          }
+          const providerThreadId = yield* readProviderThreadId;
           const effectiveTurnId = turnId ?? session.activeTurnId;
           if (!effectiveTurnId) {
             return;

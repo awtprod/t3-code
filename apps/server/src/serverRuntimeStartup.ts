@@ -444,6 +444,8 @@ export const make = Effect.gen(function* () {
           "reactors.start",
           Effect.gen(function* () {
             yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
+            yield* orchestrationReactor.reconcileOrphanedTurns;
+            yield* orchestrationReactor.drain;
             yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
             yield* stalledTurnWatchdog.start().pipe(Scope.provide(reactorScope));
             yield* automationScheduleRunner.start().pipe(Scope.provide(reactorScope));

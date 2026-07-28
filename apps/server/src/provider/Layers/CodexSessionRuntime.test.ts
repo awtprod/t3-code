@@ -1,10 +1,27 @@
 import * as NodeAssert from "node:assert/strict";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe } from "vite-plus/test";
-import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL,
+  ProviderDriverKind,
+  type ProviderSession,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 
@@ -19,9 +36,262 @@ import {
   buildTurnStartParams,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
+  makeCodexSessionRuntime,
+  matchesCodexInterruptTarget,
   openCodexThread,
   verifyCommandCenterCodexIsolation,
 } from "./CodexSessionRuntime.ts";
+
+const makeFakeChildHandle = (input: {
+  readonly pid: number;
+  readonly exitCode: Effect.Effect<ChildProcessSpawner.ExitCode>;
+  readonly stdin?: Sink.Sink<void, Uint8Array>;
+  readonly stdout?: Stream.Stream<Uint8Array>;
+}) =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(input.pid),
+    exitCode: input.exitCode,
+    isRunning: Effect.succeed(true),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: input.stdin ?? Sink.drain,
+    stdout: input.stdout ?? Stream.empty,
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
+describe("matchesCodexInterruptTarget", () => {
+  const session: ProviderSession = {
+    provider: ProviderDriverKind.make("codex"),
+    status: "running",
+    runtimeMode: "full-access",
+    sessionGeneration: "generation-current",
+    threadId: ThreadId.make("thread-interrupt-target"),
+    resumeCursor: { threadId: "provider-thread-current" },
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  it("rejects a mismatched native cursor", () => {
+    NodeAssert.equal(
+      matchesCodexInterruptTarget(session, {
+        sessionGeneration: "generation-current",
+        resumeCursor: { threadId: "provider-thread-other" },
+      }),
+      false,
+    );
+  });
+
+  it("accepts the same native cursor across runtime generations", () => {
+    NodeAssert.equal(
+      matchesCodexInterruptTarget(session, {
+        sessionGeneration: "generation-historical",
+        resumeCursor: { threadId: "provider-thread-current" },
+      }),
+      true,
+    );
+  });
+
+  it("requires generation equality when the target has no cursor", () => {
+    NodeAssert.equal(
+      matchesCodexInterruptTarget(session, {
+        sessionGeneration: "generation-current",
+      }),
+      true,
+    );
+    NodeAssert.equal(
+      matchesCodexInterruptTarget(session, {
+        sessionGeneration: "generation-other",
+      }),
+      false,
+    );
+  });
+});
+
+describe("CodexSessionRuntime terminal lifecycle", () => {
+  it.effect(
+    "emits exactly one terminal event when a process exit races a later graceful close",
+    () =>
+      Effect.gen(function* () {
+        // The child process exits first (claiming the terminal `session/exited`),
+        // then a graceful close() runs afterwards. Regression guard for the
+        // double-terminal-emit race: without the atomic terminal claim, close()
+        // would emit a second `session/closed` that — arriving after a
+        // replacement turn started — marks the healthy resumed session stopped.
+        const exitGate = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+        const spawner = ChildProcessSpawner.make(() =>
+          Effect.succeed(makeFakeChildHandle({ pid: 4242, exitCode: Deferred.await(exitGate) })),
+        );
+
+        // Dedicated scope so close()'s Scope.close tears down the runtime's own
+        // scope, not the ambient test scope.
+        const runtimeScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+        const runtime = yield* makeCodexSessionRuntime({
+          threadId: ThreadId.make("thread-exit-race"),
+          binaryPath: "/usr/bin/codex",
+          cwd: "/tmp/exit-race",
+          runtimeMode: "approval-required",
+        }).pipe(
+          Effect.provideService(Scope.Scope, runtimeScope),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+
+        const methodsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+        const exitedSeen = yield* Deferred.make<void>();
+        const collector = yield* Effect.forkScoped(
+          Stream.runForEach(runtime.events, (event) =>
+            event.kind === "session"
+              ? Ref.update(methodsRef, (methods) => [...methods, event.method]).pipe(
+                  Effect.andThen(
+                    event.method === "session/exited"
+                      ? Deferred.succeed(exitedSeen, undefined).pipe(Effect.asVoid)
+                      : Effect.void,
+                  ),
+                )
+              : Effect.void,
+          ),
+        );
+
+        // Process exits cleanly -> settleProcessExit claims the terminal emit.
+        yield* Deferred.succeed(exitGate, ChildProcessSpawner.ExitCode(0));
+        yield* Deferred.await(exitedSeen);
+
+        // Graceful close must NOT emit a second terminal event. It ends the
+        // events queue with Queue.end (Cause.Done) after the exit already
+        // claimed the terminal, so the collector drains any remaining buffered
+        // events and then completes gracefully; Fiber.await returns the
+        // successful Exit and methodsRef holds every recorded event.
+        yield* runtime.close;
+        yield* Fiber.await(collector);
+
+        const methods = yield* Ref.get(methodsRef);
+        const terminals = methods.filter(
+          (method) => method === "session/exited" || method === "session/closed",
+        );
+        NodeAssert.deepEqual(terminals, ["session/exited"]);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("releases terminal delivery when process-exit emission fails", () =>
+    Effect.gen(function* () {
+      const exitGate = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed(makeFakeChildHandle({ pid: 4299, exitCode: Deferred.await(exitGate) })),
+      );
+      const crypto = yield* Crypto.Crypto;
+      const uuidCalls = yield* Ref.make(0);
+      const exitEmitAttempted = yield* Deferred.make<void>();
+      const uuidError = PlatformError.systemError({
+        _tag: "Unknown",
+        module: "Crypto",
+        method: "randomUUIDv4",
+        description: "terminal event identifier unavailable",
+      });
+      const failingCrypto = {
+        ...crypto,
+        randomUUIDv4: Ref.getAndUpdate(uuidCalls, (calls) => calls + 1).pipe(
+          Effect.flatMap((call) =>
+            call === 1
+              ? Deferred.succeed(exitEmitAttempted, undefined).pipe(
+                  Effect.andThen(Effect.fail(uuidError)),
+                )
+              : crypto.randomUUIDv4,
+          ),
+        ),
+      } satisfies typeof crypto;
+
+      const runtimeScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-exit-emit-failure"),
+        binaryPath: "/usr/bin/codex",
+        cwd: "/tmp/exit-emit-failure",
+        runtimeMode: "approval-required",
+      }).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(Crypto.Crypto, failingCrypto),
+      );
+
+      const methodsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+      const collector = yield* Effect.forkScoped(
+        Stream.runForEach(runtime.events, (event) =>
+          event.kind === "session"
+            ? Ref.update(methodsRef, (methods) => [...methods, event.method])
+            : Effect.void,
+        ),
+      );
+
+      // The process-exit path reaches terminal emission, but UUID generation
+      // fails before the event can be offered. close() must still be allowed to
+      // deliver session/closed rather than trusting the failed claimant's flag.
+      yield* Deferred.succeed(exitGate, ChildProcessSpawner.ExitCode(1));
+      yield* Deferred.await(exitEmitAttempted);
+      yield* runtime.close;
+      yield* Fiber.await(collector);
+
+      const methods = yield* Ref.get(methodsRef);
+      const terminals = methods.filter(
+        (method) => method === "session/exited" || method === "session/closed",
+      );
+      NodeAssert.deepEqual(terminals, ["session/closed"]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("emits a single terminal event when only a graceful close occurs", () =>
+    Effect.gen(function* () {
+      // Control: with no process exit, close() is the sole terminal emitter and
+      // must still produce exactly one `session/closed`.
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.succeed(makeFakeChildHandle({ pid: 4343, exitCode: Effect.never })),
+      );
+      const runtimeScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-close-only"),
+        binaryPath: "/usr/bin/codex",
+        cwd: "/tmp/close-only",
+        runtimeMode: "approval-required",
+      }).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+
+      const methodsRef = yield* Ref.make<ReadonlyArray<string>>([]);
+      // The collector records session-lifecycle methods and self-terminates once
+      // it consumes a terminal event (takeUntil is inclusive, so the terminal is
+      // recorded before the stream ends).
+      const isTerminal = (method: string) =>
+        method === "session/closed" || method === "session/exited";
+      const collector = yield* Effect.forkScoped(
+        Stream.runForEach(
+          runtime.events.pipe(
+            Stream.takeUntil((event) => event.kind === "session" && isTerminal(event.method)),
+          ),
+          (event) =>
+            event.kind === "session"
+              ? Ref.update(methodsRef, (methods) => [...methods, event.method])
+              : Effect.void,
+        ),
+      );
+
+      // close() emits session/closed and then ends the events queue with
+      // Queue.end (Cause.Done). Because end drains buffered items before
+      // signalling Done — rather than discarding them like Queue.shutdown — the
+      // collector deterministically receives the just-emitted terminal even
+      // though it is joined only afterwards.
+      yield* runtime.close;
+      yield* Fiber.join(collector);
+
+      const methods = yield* Ref.get(methodsRef);
+      const terminals = methods.filter((method) => isTerminal(method));
+      NodeAssert.deepEqual(terminals, ["session/closed"]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
@@ -71,6 +341,229 @@ function makeThreadOpenResponse(
     },
   } as unknown as CodexRpc.ClientRequestResponsesByMethod["thread/start"];
 }
+
+describe("CodexSessionRuntime sendTurn target provenance", () => {
+  it.effect("uses the runtime generation and exact turn/start provider thread", () =>
+    Effect.gen(function* () {
+      const providerThreadId = "provider-thread-from-thread-start";
+      const canonicalThreadId = ThreadId.make("thread-runtime-target-provenance");
+      const inbound = yield* Queue.unbounded<Uint8Array>();
+      const turnStartThreadIds: Array<string> = [];
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      const encodeJsonString = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+      const decodeJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+      const respond = (id: string | number, result: unknown) =>
+        Effect.gen(function* () {
+          const encoded = yield* encodeJsonString({ id, result });
+          yield* Queue.offer(inbound, encoder.encode(`${encoded}\n`));
+        }).pipe(Effect.orDie);
+      const wireHandle = makeFakeChildHandle({
+        pid: 4444,
+        exitCode: Effect.never,
+        stdin: Sink.forEach((chunk: Uint8Array) =>
+          Effect.gen(function* () {
+            const message = (yield* decodeJsonString(decoder.decode(chunk))) as {
+              readonly id?: string | number;
+              readonly method?: string;
+              readonly params?: Record<string, unknown>;
+            };
+            if (message.id === undefined) {
+              return;
+            }
+            switch (message.method) {
+              case "initialize":
+                yield* respond(message.id, {
+                  userAgent: "codex-runtime-target-test",
+                  codexHome: "/tmp/codex-runtime-target-test",
+                  platformFamily: "unix",
+                  platformOs: "linux",
+                });
+                return;
+              case "thread/start":
+                yield* respond(message.id, makeThreadOpenResponse(providerThreadId));
+                return;
+              case "turn/start":
+                turnStartThreadIds.push(String(message.params?.threadId));
+                yield* respond(message.id, {
+                  turn: {
+                    id: "provider-turn-1",
+                    items: [],
+                    status: "inProgress",
+                  },
+                });
+                return;
+              default:
+                throw new Error(`Unexpected Codex request: ${String(message.method)}`);
+            }
+          }).pipe(Effect.orDie),
+        ),
+        stdout: Stream.fromQueue(inbound),
+      });
+      const spawner = ChildProcessSpawner.make(() => Effect.succeed(wireHandle));
+      const runtimeScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: canonicalThreadId,
+        binaryPath: "/usr/bin/codex",
+        cwd: "/tmp/codex-runtime-target-test",
+        runtimeMode: "full-access",
+      }).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+
+      const session = yield* runtime.start();
+      const started = yield* runtime.sendTurn({ input: "prove target provenance" });
+
+      NodeAssert.deepStrictEqual(turnStartThreadIds, [providerThreadId]);
+      NodeAssert.equal(started.threadId, canonicalThreadId);
+      NodeAssert.equal(started.turnId, "provider-turn-1");
+      NodeAssert.deepStrictEqual(started.resumeCursor, { threadId: providerThreadId });
+      NodeAssert.deepStrictEqual(started.target, {
+        sessionGeneration: session.sessionGeneration,
+        resumeCursor: { threadId: providerThreadId },
+      });
+      NodeAssert.equal(started.target?.sessionGeneration, session.sessionGeneration);
+      NodeAssert.deepStrictEqual(started.target?.resumeCursor, started.resumeCursor);
+
+      yield* runtime.close;
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("ignores a delayed completion for an interrupted turn after a newer turn starts", () =>
+    Effect.gen(function* () {
+      const providerThreadId = "provider-thread-stale-completion";
+      const canonicalThreadId = ThreadId.make("thread-stale-completion");
+      const inbound = yield* Queue.unbounded<Uint8Array>();
+      const interruptedTurnIds: Array<string> = [];
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      const encodeJsonString = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+      const decodeJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+      const writeInbound = (message: unknown) =>
+        Effect.gen(function* () {
+          const encoded = yield* encodeJsonString(message);
+          yield* Queue.offer(inbound, encoder.encode(`${encoded}\n`));
+        }).pipe(Effect.orDie);
+      const respond = (id: string | number, result: unknown) => writeInbound({ id, result });
+      const notify = (method: string, params: unknown) => writeInbound({ method, params });
+      let turnStartCount = 0;
+      const wireHandle = makeFakeChildHandle({
+        pid: 4555,
+        exitCode: Effect.never,
+        stdin: Sink.forEach((chunk: Uint8Array) =>
+          Effect.gen(function* () {
+            const message = (yield* decodeJsonString(decoder.decode(chunk))) as {
+              readonly id?: string | number;
+              readonly method?: string;
+              readonly params?: Record<string, unknown>;
+            };
+            if (message.id === undefined) {
+              return;
+            }
+            switch (message.method) {
+              case "initialize":
+                yield* respond(message.id, {
+                  userAgent: "codex-stale-completion-test",
+                  codexHome: "/tmp/codex-stale-completion-test",
+                  platformFamily: "unix",
+                  platformOs: "linux",
+                });
+                return;
+              case "thread/start":
+                yield* respond(message.id, makeThreadOpenResponse(providerThreadId));
+                return;
+              case "turn/start": {
+                turnStartCount += 1;
+                yield* respond(message.id, {
+                  turn: {
+                    id: `provider-turn-${turnStartCount}`,
+                    items: [],
+                    status: "inProgress",
+                  },
+                });
+                return;
+              }
+              case "turn/interrupt":
+                interruptedTurnIds.push(String(message.params?.turnId));
+                yield* respond(message.id, {});
+                return;
+              default:
+                throw new Error(`Unexpected Codex request: ${String(message.method)}`);
+            }
+          }).pipe(Effect.orDie),
+        ),
+        stdout: Stream.fromQueue(inbound),
+      });
+      const spawner = ChildProcessSpawner.make(() => Effect.succeed(wireHandle));
+      const runtimeScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: canonicalThreadId,
+        binaryPath: "/usr/bin/codex",
+        cwd: "/tmp/codex-stale-completion-test",
+        runtimeMode: "full-access",
+      }).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      const awaitCompletionNotification = (turnId: string) =>
+        runtime.events.pipe(
+          Stream.filter(
+            (event) =>
+              event.kind === "notification" &&
+              event.method === "turn/completed" &&
+              event.turnId === turnId,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+
+      yield* runtime.start();
+      const turnA = yield* runtime.sendTurn({ input: "turn A" });
+      yield* runtime.interruptTurn();
+      const turnB = yield* runtime.sendTurn({ input: "turn B" });
+      NodeAssert.deepStrictEqual(interruptedTurnIds, ["provider-turn-1"]);
+
+      yield* notify("turn/completed", {
+        threadId: providerThreadId,
+        turn: {
+          id: turnA.turnId,
+          items: [],
+          status: "failed",
+          error: { message: "stale turn A failure" },
+        },
+      });
+      yield* awaitCompletionNotification(turnA.turnId);
+
+      const afterStaleCompletion = yield* runtime.getSession;
+      NodeAssert.equal(afterStaleCompletion.activeTurnId, turnB.turnId);
+      NodeAssert.equal(afterStaleCompletion.status, "running");
+      NodeAssert.equal(afterStaleCompletion.lastError, undefined);
+
+      yield* runtime.interruptTurn();
+      NodeAssert.deepStrictEqual(interruptedTurnIds, ["provider-turn-1", "provider-turn-2"]);
+
+      yield* notify("turn/completed", {
+        threadId: providerThreadId,
+        turn: {
+          id: turnB.turnId,
+          items: [],
+          status: "completed",
+        },
+      });
+      yield* awaitCompletionNotification(turnB.turnId);
+
+      const afterCurrentCompletion = yield* runtime.getSession;
+      NodeAssert.equal(afterCurrentCompletion.activeTurnId, undefined);
+      NodeAssert.equal(afterCurrentCompletion.status, "ready");
+      NodeAssert.equal(afterCurrentCompletion.lastError, undefined);
+
+      yield* runtime.close;
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
 
 describe("buildTurnStartParams", () => {
   it("keeps invalid turn values only in the schema cause", () => {

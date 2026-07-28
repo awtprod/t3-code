@@ -252,6 +252,8 @@ const ProviderRuntimeEventBase = Schema.Struct({
   // for the routing-key-vs-driver-id distinction. Once every emitter
   // populates it (post-slice-4), routing flips to instance-id-only.
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  // Per-runtime-start nonce carried through from ProviderEvent. See provider.ts.
+  sessionGeneration: Schema.optional(Schema.String),
   threadId: ThreadId,
   createdAt: IsoDateTime,
   turnId: Schema.optional(TurnId),
@@ -356,6 +358,22 @@ export type ThreadRealtimeClosedPayload = typeof ThreadRealtimeClosedPayload.Typ
 const TurnStartedPayload = Schema.Struct({
   model: Schema.optional(TrimmedNonEmptyStringSchema),
   effort: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * Sequence of the `thread.turn-start-requested` this turn was started for,
+   * echoed back from `ProviderSendTurnInput.turnRequestSequence`.
+   *
+   * This is the correlation the projector needs to adopt the RIGHT pending
+   * placeholder. Turn ids are minted by the adapter and mean nothing to the
+   * orchestration layer until this event arrives, so pending metadata may only
+   * be adopted when this sequence exactly matches its requesting event.
+   *
+   * Optional: adapter-internal and provider-notification turns may have no
+   * requesting event. A sequence-less `turn.started` requests the legacy
+   * oldest-pending strategy. Ingestion persists and adopts that strategy only
+   * when the provider directory identifies the event turn and an acceptable
+   * pending row exists; otherwise it persists `none`.
+   */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
 });
 export type TurnStartedPayload = typeof TurnStartedPayload.Type;
 

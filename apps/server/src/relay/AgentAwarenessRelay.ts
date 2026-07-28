@@ -78,6 +78,12 @@ export function shouldPublishAgentAwarenessEvent(event: OrchestrationEvent): boo
     case "thread.runtime-mode-set":
     case "thread.interaction-mode-set":
       return false;
+    case "thread.turn-start-folded":
+      // Bookkeeping only. A steer folds into a turn already reported as running,
+      // so the shell state this would publish is the state already published —
+      // republishing it queues a redundant awareness update for a transition the
+      // user cannot observe.
+      return false;
     case "thread.activity-appended":
       return (
         event.payload.activity.kind === "approval.requested" ||

@@ -3716,7 +3716,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         createdAt: turnStartedStamp.createdAt,
         threadId: context.session.threadId,
         turnId,
-        payload: modelSelection?.model ? { model: modelSelection.model } : {},
+        payload: {
+          ...(modelSelection?.model ? { model: modelSelection.model } : {}),
+          // Echo the requesting event's sequence so the projector adopts the
+          // placeholder this turn was started for. Only on a real turn
+          // boundary: a steer folds into a turn whose placeholder was already
+          // consumed, and the synthetic-turn emitter above has no requesting
+          // event at all.
+          ...(input.turnRequestSequence !== undefined
+            ? { turnRequestSequence: input.turnRequestSequence }
+            : {}),
+        },
         providerRefs: {},
       });
     }
@@ -3738,12 +3748,37 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.session.resumeCursor !== undefined
         ? { resumeCursor: context.session.resumeCursor }
         : {}),
+      // A steer emitted no `turn.started` above, so nothing downstream will
+      // consume this send's pending turn-start placeholder. Report the fold so
+      // the reactor consumes it explicitly instead of leaving a delivered
+      // message looking like one that was never sent.
+      ...(steeringTurnState === null ? {} : { steered: true }),
     };
   });
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
-    function* (threadId, _turnId) {
+    function* (threadId, turnId) {
       const context = yield* requireSession(threadId);
+      // Scoped to the named turn when the caller named one. `query.interrupt()`
+      // is thread-wide — it stops whatever the agent is doing now — so calling
+      // it for a turn that has already finished kills the turn that REPLACED
+      // it. That is not hypothetical: the reactor's post-send fence can decide
+      // a stop covered request A, and by the time it says so a later message B
+      // may be the one running. Interrupting on A's behalf then destroys work
+      // the user never asked to stop, which is strictly worse than the missed
+      // stop the fence exists to prevent.
+      //
+      // An undefined `turnId` still means "whatever is running" — that is the
+      // session-stop and watchdog path, where thread-wide is the intent.
+      const activeTurnId = context.turnState?.turnId;
+      if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
+        yield* Effect.logDebug("claude-adapter.interrupt-turn.stale-target", {
+          threadId,
+          requestedTurnId: turnId,
+          activeTurnId,
+        });
+        return;
+      }
       yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),

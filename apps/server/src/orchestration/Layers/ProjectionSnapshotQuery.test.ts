@@ -182,6 +182,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           provider_name,
           provider_session_id,
           provider_thread_id,
+          session_generation,
           runtime_mode,
           active_turn_id,
           last_error,
@@ -193,6 +194,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'codex',
           'provider-session-1',
           'provider-thread-1',
+          'gen-1',
           'approval-required',
           'turn-1',
           NULL,
@@ -357,6 +359,14 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             threadId: ThreadId.make("thread-1"),
             status: "running",
             providerName: "codex",
+            // The per-runtime generation nonce must survive the FULL snapshot,
+            // not just the shell/detail paths. The stale-exit guard compares an
+            // event's generation against the projection's, so a snapshot that
+            // drops it downgrades that consumer to instance-id-only
+            // correlation — which cannot distinguish a restarted runtime from
+            // its predecessor, since the instance id is a routing key rather
+            // than a per-start identity.
+            sessionGeneration: "gen-1",
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
@@ -422,6 +432,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             threadId: ThreadId.make("thread-1"),
             status: "running",
             providerName: "codex",
+            sessionGeneration: "gen-1",
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,

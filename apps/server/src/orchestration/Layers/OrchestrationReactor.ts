@@ -26,8 +26,17 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* agentAwarenessRelay.start();
   });
 
+  const drain: OrchestrationReactorShape["drain"] = Effect.gen(function* () {
+    yield* providerRuntimeIngestion.drain;
+    yield* providerCommandReactor.drain;
+    yield* checkpointReactor.drain;
+    yield* threadDeletionReactor.drain;
+  });
+
   return {
     start,
+    drain,
+    reconcileOrphanedTurns: providerRuntimeIngestion.reconcileOrphanedTurns,
   } satisfies OrchestrationReactorShape;
 });
 

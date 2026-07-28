@@ -252,10 +252,11 @@ export const OrchestrationProposedPlan = Schema.Struct({
 });
 export type OrchestrationProposedPlan = typeof OrchestrationProposedPlan.Type;
 
-const SourceProposedPlanReference = Schema.Struct({
+export const SourceProposedPlanReference = Schema.Struct({
   threadId: ThreadId,
   planId: OrchestrationProposedPlanId,
 });
+export type SourceProposedPlanReference = typeof SourceProposedPlanReference.Type;
 
 export const OrchestrationSessionStatus = Schema.Literals([
   "idle",
@@ -273,6 +274,9 @@ export const OrchestrationSession = Schema.Struct({
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  // Per-runtime-start nonce recorded on session.started. Lets ingestion reject a
+  // terminal event from a superseded runtime generation that reused this instance.
+  sessionGeneration: Schema.optional(Schema.String),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
@@ -317,6 +321,7 @@ export const OrchestrationThreadActivity = Schema.Struct({
   summary: TrimmedNonEmptyString,
   payload: Schema.Unknown,
   turnId: Schema.NullOr(TurnId),
+  correlatedMessageId: Schema.optional(MessageId),
   sequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
 });
@@ -646,6 +651,29 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+// Server-internal only: re-issues an interrupted turn for an existing user message
+// (no duplicate `thread.message-sent`) after a provider session exits mid-turn.
+export const ThreadTurnResumeCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn.resume"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  // The interrupted turn's effective model selection, carried so the restarted
+  // session resolves to the same provider instance/model (and thus recovers the
+  // persisted resume cursor). Omitted when the interrupted turn used the thread
+  // default, in which case the reactor falls back to `thread.modelSelection`.
+  modelSelection: Schema.optional(ModelSelection),
+  // The interrupted turn's source proposed-plan reference, carried so a resumed
+  // plan-implementation turn re-associates with (and can mark implemented) its
+  // originating plan. When the superseded pending start belonged to a plan
+  // implementation, dropping this here leaves the plan permanently unmarked
+  // because the resume replaces the pending row and the reactor skips the
+  // original `thread.turn-start-requested`.
+  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  reason: Schema.optional(Schema.String),
+  createdAt: IsoDateTime,
+});
+
 const ThreadApprovalRespondCommand = Schema.Struct({
   type: Schema.Literal("thread.approval.respond"),
   commandId: CommandId,
@@ -673,6 +701,64 @@ const ThreadCheckpointRevertCommand = Schema.Struct({
 });
 
 const ThreadSessionStopCommand = Schema.Struct({
+  type: Schema.Literal("thread.session.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  /**
+   * Highest request sequence this stop is allowed to cancel.
+   *
+   * Absent for a stop the user pressed, which cancels everything queued at the
+   * moment it is accepted and therefore needs no cutoff beyond its own position
+   * in the log. Present only when the stop is an ESCALATION of an earlier,
+   * narrower cancellation — an interrupt whose delivery failed and had to be
+   * widened to the session — in which case it carries that interrupt's sequence
+   * so the widening does not also swallow work the user submitted in between.
+   *
+   * Without it the escalation dates itself to when it gave up rather than to
+   * what the user actually stopped: a message typed during the interrupt's
+   * retry delay sits at a LOWER sequence than the escalated stop and is
+   * retroactively canceled by it, silently, having been submitted after the
+   * user's stop and therefore explicitly wanted.
+   *
+   * SERVER-ONLY. Absent from `ClientThreadSessionStopCommand`, which is what
+   * the client union admits, so a remote caller cannot choose the cutoff of a
+   * stop it requests. See that schema for what a client-chosen value would buy.
+   */
+  canceledThroughSequence: Schema.optional(NonNegativeInt),
+  createdAt: IsoDateTime,
+});
+
+/**
+ * The stop a client may ask for: everything queued as of the moment the server
+ * accepts it.
+ *
+ * `canceledThroughSequence` is omitted rather than optional, and the omission
+ * is a security boundary, not tidiness. The field is only ever correct when the
+ * reactor derives it from an interrupt it is escalating; a value that arrived
+ * over the wire has no such provenance, and both directions of a wrong one are
+ * durable:
+ *
+ * - A cutoff BELOW the stop's own sequence under-cancels. Requests already
+ *   queued pass both the durable barrier and the event-log guard, and a
+ *   turn-start that survives a stop resurrects the session it was stopping —
+ *   `sendTurn` to a stopped session resolves with `allowRecovery: true`.
+ *   Sending `0` turns any stop into a no-op while the UI reports it as done.
+ * - A cutoff ABOVE it poisons the thread. The barrier raise is monotonic by
+ *   design (an out-of-order interrupt must not un-cancel earlier work), so a
+ *   large value cannot be lowered by anything: every later request is refused
+ *   at the claim until the thread's own sequence climbs past it. The event-log
+ *   guard, which scans only events after a request, never sees that old stop
+ *   for those later requests — so the two gates disagree, one silently
+ *   refusing what the other allows.
+ *
+ * A stop the user pressed needs no cutoff: its position in the log already says
+ * when it happened, and `processSessionStopRequested` falls back to
+ * `event.sequence` for exactly that reason. So nothing is lost by withholding
+ * the field, and the escalation path — the only caller that legitimately sets
+ * it — builds `ThreadSessionStopCommand` inside the server and never crosses
+ * this boundary.
+ */
+const ClientThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -716,15 +802,106 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
-  ThreadSessionStopCommand,
+  ClientThreadSessionStopCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
+
+export const ThreadSessionPendingTurnStartAdoption = Schema.Literals([
+  "none",
+  "exact",
+  "oldest-pending",
+]);
+export type ThreadSessionPendingTurnStartAdoption =
+  typeof ThreadSessionPendingTurnStartAdoption.Type;
+
+export const ThreadSessionTerminalTurnTransition = Schema.Struct({
+  turnId: TurnId,
+  state: Schema.Literals(["completed", "interrupted", "error"]),
+});
+export type ThreadSessionTerminalTurnTransition = typeof ThreadSessionTerminalTurnTransition.Type;
 
 const ThreadSessionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.session.set"),
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  createdAt: IsoDateTime,
+  /**
+   * Explicitly identifies whether this transition may adopt a pending turn-start
+   * placeholder. The decider always persists a value on new events; optionality
+   * exists only so older commands remain decodable while upgrading.
+   */
+  pendingTurnStartAdoption: Schema.optional(ThreadSessionPendingTurnStartAdoption),
+  /**
+   * Set only when this session-set is driven by a provider `turn.started`, and
+   * carries the sequence of the `thread.turn-start-requested` that turn was
+   * started for.
+   *
+   * It rides the command rather than `OrchestrationSession` on purpose: the
+   * session struct is durable state that outlives the turn, while this is a
+   * fact about ONE transition — which request the arriving turn answers. The
+   * projector consumes it to adopt the matching pending placeholder instead of
+   * the oldest one, which is what keeps two out-of-order starts from swapping
+   * each other's message, model, source plan, and interrupt flag.
+   */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
+  /**
+   * Set only when this session-set closes a specific turn — a provider
+   * `turn.completed`, or the stall watchdog failing the turn it timed out —
+   * and names that turn.
+   *
+   * This exists because "the session went quiet" is not evidence that any
+   * particular turn finished. Several writers produce a session-set with no
+   * active turn for reasons that settle nothing: a concurrent turn-start
+   * failure, a session rebind, the stop's own teardown. The escalated-stop
+   * re-drive must distinguish "this spared request's turn ran to its end"
+   * (do not re-send the prompt) from all of those (do re-send it), and the
+   * only way to do that without guessing from status strings is for the one
+   * writer that actually knows a turn ended to say which turn. Absent means
+   * "this write settles no turn", never "unknown".
+   */
+  settledTurnId: Schema.optional(TurnId),
+  /**
+   * Exact turn lifecycle transition represented by this session update. Unlike
+   * `settledTurnId`, this also covers crash/exit/orphan cleanup, which must
+   * terminalize the known turn without claiming it settled successfully.
+   */
+  terminalTurnTransition: Schema.optional(ThreadSessionTerminalTurnTransition),
+  /**
+   * Exact turn lifecycle transitions that must be applied atomically with this
+   * session update. The singular field remains for historical events and
+   * existing producers; this array is required when one session transition
+   * terminalizes more than one turn.
+   */
+  terminalTurnTransitions: Schema.optional(Schema.Array(ThreadSessionTerminalTurnTransition)),
+});
+
+/**
+ * Records that a `thread.turn-start-requested` reached the provider but was
+ * folded into an already-running turn (a "steer") instead of opening a new one.
+ *
+ * Non-Codex adapters deliberately emit no `turn.started` for a steer — the work
+ * continues as the same turn — and `turn.started` is the only thing that
+ * consumes a pending turn-start placeholder. Without this command the steer's
+ * placeholder survives indefinitely, and every consumer that reads "a surviving
+ * pending row means this message was never sent" draws the opposite of the
+ * truth: auto-resume re-issues a prompt the provider already has, the
+ * committed-side-effect gate is bypassed on that false premise, and
+ * reconciliation reports the turn as never started.
+ *
+ * It is a distinct command rather than a synthetic `turn.started` because a
+ * steer is NOT a turn boundary. A fake start would capture a pre-turn git
+ * baseline, re-transition the command-center run to `running`, and settle turns
+ * that are still legitimately running.
+ */
+const ThreadTurnStartFoldCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn-start.fold"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  /** Sequence of the `thread.turn-start-requested` this send answered. */
+  turnRequestSequence: NonNegativeInt,
+  /** The already-running turn the steered message was folded into. */
+  turnId: TurnId,
   createdAt: IsoDateTime,
 });
 
@@ -786,7 +963,9 @@ const ThreadRevertCompleteCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadTurnResumeCommand,
   ThreadSessionSetCommand,
+  ThreadTurnStartFoldCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadProposedPlanUpsertCommand,
@@ -822,6 +1001,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.reverted",
   "thread.session-stop-requested",
   "thread.session-set",
+  "thread.turn-start-folded",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
@@ -970,12 +1150,36 @@ export const ThreadRevertedPayload = Schema.Struct({
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  /** See `ThreadSessionStopCommand.canceledThroughSequence`. */
+  canceledThroughSequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
 });
 
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  /**
+   * See `ThreadSessionSetCommand.pendingTurnStartAdoption`. Absent only on
+   * historical events, whose pre-discriminator adoption behavior is preserved
+   * during rebuild.
+   */
+  pendingTurnStartAdoption: Schema.optional(ThreadSessionPendingTurnStartAdoption),
+  /** See `ThreadSessionSetCommand.turnRequestSequence`. */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
+  /** See `ThreadSessionSetCommand.settledTurnId`. */
+  settledTurnId: Schema.optional(TurnId),
+  /** See `ThreadSessionSetCommand.terminalTurnTransition`. */
+  terminalTurnTransition: Schema.optional(ThreadSessionTerminalTurnTransition),
+  /** See `ThreadSessionSetCommand.terminalTurnTransitions`. */
+  terminalTurnTransitions: Schema.optional(Schema.Array(ThreadSessionTerminalTurnTransition)),
+});
+
+/** See `ThreadTurnStartFoldCommand`. */
+export const ThreadTurnStartFoldedPayload = Schema.Struct({
+  threadId: ThreadId,
+  turnRequestSequence: NonNegativeInt,
+  turnId: TurnId,
+  createdAt: IsoDateTime,
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({
@@ -1115,6 +1319,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.session-set"),
     payload: ThreadSessionSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.turn-start-folded"),
+    payload: ThreadTurnStartFoldedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
