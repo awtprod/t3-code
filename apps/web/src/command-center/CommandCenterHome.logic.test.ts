@@ -16,6 +16,8 @@ import {
   projectBootstrap,
   projectEnvironmentProjects,
   routeReceiptFromResult,
+  routeReceiptFromRoute,
+  routeReceiptFromTimelineEntry,
   routeTimelineMessage,
   timelineMessages,
   waitForRouteReceiptPaint,
@@ -347,6 +349,38 @@ describe("CommandCenterHome projection", () => {
     expect(message).toMatchObject({ linkedRunId: "run-1", linkedThreadId: "thread-1" });
   });
 
+  it("maps authoritative run statuses to honest route receipt states", () => {
+    const projects = projectEnvironmentProjects(PROJECTS, BOOTSTRAP);
+    const options = buildRouteOptions(BOOTSTRAP, projects, PROVIDERS);
+    const display = { projects, options };
+    const route = {
+      ...RESULT.route,
+      status: "ready",
+      risk: "low",
+      approvalRequired: false,
+    } as const;
+
+    expect(routeReceiptFromRoute(route, "succeeded", BOOTSTRAP, display).status).toBe("complete");
+    expect(routeReceiptFromRoute(route, "failed", BOOTSTRAP, display).status).toBe("failed");
+    expect(routeReceiptFromRoute(route, "canceled", BOOTSTRAP, display).status).toBe("failed");
+    expect(routeReceiptFromRoute(route, "waiting", BOOTSTRAP, display).status).toBe(
+      "waiting-approval",
+    );
+    expect(routeReceiptFromRoute(route, "queued", BOOTSTRAP, display).status).toBe("running");
+    expect(routeReceiptFromRoute(route, "running", BOOTSTRAP, display).status).toBe("running");
+
+    const entry = { route } as unknown as CommandCenterTimelineEntry;
+    expect(
+      routeReceiptFromTimelineEntry({ ...entry, status: "succeeded" }, BOOTSTRAP, display).status,
+    ).toBe("complete");
+    expect(
+      routeReceiptFromTimelineEntry({ ...entry, status: "failed" }, BOOTSTRAP, display).status,
+    ).toBe("failed");
+    expect(
+      routeReceiptFromTimelineEntry({ ...entry, status: "running" }, BOOTSTRAP, display).status,
+    ).toBe("running");
+  });
+
   it("waits through a complete browser paint boundary before starting work", async () => {
     const frames: Array<() => void> = [];
     const waiting = waitForRouteReceiptPaint((callback) => frames.push(callback));
@@ -424,6 +458,11 @@ describe("CommandCenterHome projection", () => {
       author: "system",
       authorLabel: "Route receipt",
       linkedThreadId: "thread-durable",
+      receipt: {
+        providerName: "provider-1",
+        modelName: "model-1",
+        status: "running",
+      },
     });
     expect(messages[1]?.body).toContain("Studio App · project-studio");
     expect(messages[1]?.body).toContain("provider-1 · model-1");
