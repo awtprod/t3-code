@@ -32,7 +32,7 @@ export const hostFlag = Flag.string("host").pipe(
 );
 export const baseDirFlag = Flag.string("base-dir").pipe(
   Flag.withDescription(
-    "Explicit T3 Code data directory; runtime state is stored under userdata (equivalent to T3CODE_HOME).",
+    "Explicit Command Center runtime directory; state is stored under userdata (equivalent to COMMAND_CENTER_HOME).",
   ),
   Flag.optional,
 );
@@ -74,6 +74,22 @@ export const tailscaleServePortFlag = Flag.integer("tailscale-serve-port").pipe(
   Flag.withDescription("HTTPS port for Tailscale Serve when --tailscale-serve is enabled."),
   Flag.optional,
 );
+export const previewGatewayFlag = Flag.boolean("preview-gateway").pipe(
+  Flag.withDescription(
+    "Run the authenticated preview gateway, which proxies loopback dev servers behind this environment's session auth.",
+  ),
+  Flag.optional,
+);
+export const previewGatewayPortFlag = Flag.integer("preview-gateway-port").pipe(
+  Flag.withSchema(PortSchema),
+  Flag.withDescription("Loopback port for the preview gateway listener."),
+  Flag.optional,
+);
+export const previewGatewayServePortFlag = Flag.integer("preview-gateway-serve-port").pipe(
+  Flag.withSchema(PortSchema),
+  Flag.withDescription("HTTPS port Tailscale Serve publishes the preview gateway on."),
+  Flag.optional,
+);
 
 const EnvServerConfig = Config.all({
   logLevel: Config.logLevel("T3CODE_LOG_LEVEL").pipe(Config.withDefault("Info")),
@@ -105,6 +121,10 @@ const EnvServerConfig = Config.all({
   port: Config.port("T3CODE_PORT").pipe(Config.option, Config.map(Option.getOrUndefined)),
   host: Config.string("T3CODE_HOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
   t3Home: Config.string("T3CODE_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  commandCenterHome: Config.string("COMMAND_CENTER_HOME").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
   devUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   noBrowser: Config.boolean("T3CODE_NO_BROWSER").pipe(
     Config.option,
@@ -130,6 +150,18 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  previewGatewayEnabled: Config.boolean("T3CODE_PREVIEW_GATEWAY").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  previewGatewayPort: Config.port("T3CODE_PREVIEW_GATEWAY_PORT").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  previewGatewayServePort: Config.port("T3CODE_PREVIEW_GATEWAY_SERVE_PORT").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
 });
 
 export interface CliServerFlags {
@@ -145,6 +177,9 @@ export interface CliServerFlags {
   readonly logWebSocketEvents: Option.Option<boolean>;
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
+  readonly previewGatewayEnabled: Option.Option<boolean>;
+  readonly previewGatewayPort: Option.Option<number>;
+  readonly previewGatewayServePort: Option.Option<number>;
 }
 
 export interface CliAuthLocationFlags {
@@ -179,6 +214,9 @@ export const sharedServerCommandFlags = {
   logWebSocketEvents: logWebSocketEventsFlag,
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
+  previewGatewayEnabled: previewGatewayFlag,
+  previewGatewayPort: previewGatewayPortFlag,
+  previewGatewayServePort: previewGatewayServePortFlag,
 } as const;
 
 export const authLocationFlags = sharedServerLocationFlags;
@@ -224,6 +262,9 @@ export const resolveServerConfig = (
       logWebSocketEvents: flags.logWebSocketEvents ?? Option.none(),
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
+      previewGatewayEnabled: flags.previewGatewayEnabled ?? Option.none(),
+      previewGatewayPort: flags.previewGatewayPort ?? Option.none(),
+      previewGatewayServePort: flags.previewGatewayServePort ?? Option.none(),
     } satisfies CliServerFlags;
     const bootstrapFd = Option.getOrUndefined(normalizedFlags.bootstrapFd) ?? env.bootstrapFd;
     const bootstrapEnvelope =
@@ -263,6 +304,7 @@ export const resolveServerConfig = (
     );
     const explicitBaseDir = resolveOptionPrecedence(
       normalizedFlags.baseDir,
+      Option.fromUndefinedOr(env.commandCenterHome),
       Option.fromUndefinedOr(env.t3Home),
     ).pipe(Option.filter((value) => value.trim().length > 0));
     const baseDir = yield* resolveBaseDir(
@@ -326,6 +368,42 @@ export const resolveServerConfig = (
       ),
       () => 443,
     );
+    const previewGatewayEnabled = Option.getOrElse(
+      resolveOptionPrecedence(
+        normalizedFlags.previewGatewayEnabled,
+        Option.fromUndefinedOr(env.previewGatewayEnabled),
+      ),
+      // The gateway only earns its keep once the environment is reachable from
+      // another machine, and that is exactly what Tailscale Serve means here.
+      () => tailscaleServeEnabled,
+    );
+    const previewGatewayPort = previewGatewayEnabled
+      ? yield* Option.match(
+          resolveOptionPrecedence(
+            normalizedFlags.previewGatewayPort,
+            Option.fromUndefinedOr(env.previewGatewayPort),
+          ),
+          {
+            onSome: (value) => Effect.succeed(value),
+            onNone: () =>
+              findAvailablePort(
+                // Never hand back the port the backend already claimed: the
+                // gateway refuses to forward to its own ports, so a collision
+                // would be a listener conflict rather than a routing loop.
+                port === ServerConfig.DEFAULT_PREVIEW_GATEWAY_PORT
+                  ? ServerConfig.DEFAULT_PREVIEW_GATEWAY_PORT + 1
+                  : ServerConfig.DEFAULT_PREVIEW_GATEWAY_PORT,
+              ),
+          },
+        )
+      : 0;
+    const previewGatewayServePort = Option.getOrElse(
+      resolveOptionPrecedence(
+        normalizedFlags.previewGatewayServePort,
+        Option.fromUndefinedOr(env.previewGatewayServePort),
+      ),
+      () => ServerConfig.DEFAULT_PREVIEW_GATEWAY_SERVE_PORT,
+    );
     const staticDir = devUrl ? undefined : yield* ServerConfig.resolveStaticDir();
     const host = Option.getOrElse(
       resolveOptionPrecedence(
@@ -370,6 +448,9 @@ export const resolveServerConfig = (
       logWebSocketEvents,
       tailscaleServeEnabled,
       tailscaleServePort,
+      previewGatewayEnabled,
+      previewGatewayPort,
+      previewGatewayServePort,
     };
 
     return config;
@@ -393,6 +474,9 @@ export const resolveCliAuthConfig = (
       logWebSocketEvents: Option.none(),
       tailscaleServeEnabled: Option.none(),
       tailscaleServePort: Option.none(),
+      previewGatewayEnabled: Option.none(),
+      previewGatewayPort: Option.none(),
+      previewGatewayServePort: Option.none(),
     },
     cliLogLevel,
   );

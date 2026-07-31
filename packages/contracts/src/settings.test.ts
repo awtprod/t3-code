@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
+import { ProjectId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
@@ -96,6 +97,33 @@ describe("ServerSettings worktree defaults", () => {
     expect(
       decodeServerSettingsPatch({ newWorktreesStartFromOrigin: true }).newWorktreesStartFromOrigin,
     ).toBe(true);
+  });
+});
+
+describe("ServerSettings.databaseConnections", () => {
+  it("defaults legacy settings to no connections", () => {
+    expect(decodeServerSettings({}).databaseConnections).toEqual({});
+  });
+
+  it("decodes and trims a project-scoped Supabase connection", () => {
+    const projectId = ProjectId.make("project-a");
+    const decoded = decodeServerSettings({
+      databaseConnections: {
+        [projectId]: {
+          provider: "supabase",
+          workspaceRoot: "  /work/project-a  ",
+          projectRef: "  abcdefghijk  ",
+          accessToken: "  sbp-token  ",
+        },
+      },
+    });
+    expect(decoded.databaseConnections[projectId]).toEqual({
+      provider: "supabase",
+      workspaceRoot: "/work/project-a",
+      projectRef: "abcdefghijk",
+      readOnly: true,
+      accessToken: "sbp-token",
+    });
   });
 });
 

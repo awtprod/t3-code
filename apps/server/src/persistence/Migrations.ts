@@ -45,6 +45,23 @@ import Migration0029 from "./Migrations/029_ProjectionThreadDetailOrderingIndexe
 import Migration0030 from "./Migrations/030_ProjectionThreadShellArchiveIndexes.ts";
 import Migration0031 from "./Migrations/031_AuthAuthorizationScopes.ts";
 import Migration0032 from "./Migrations/032_AuthPairingProofKeyThumbprint.ts";
+import Migration0033 from "./Migrations/033_CommandCenterCore.ts";
+import Migration0034 from "./Migrations/034_CommandCenterAutomationRuntime.ts";
+import Migration0035 from "./Migrations/035_CommandCenterMemorySearchIndex.ts";
+import Migration0036 from "./Migrations/036_CommandCenterMigrationImports.ts";
+import Migration0037 from "./Migrations/037_CommandCenterAutomationScheduleCursors.ts";
+import Migration0038 from "./Migrations/038_CommandCenterAuditChainHead.ts";
+import Migration0039 from "./Migrations/039_CommandCenterRunExecutionAuthorization.ts";
+import Migration0040 from "./Migrations/040_CommandCenterAuditHashVersion.ts";
+import Migration0041 from "./Migrations/041_CommandCenterScopedShellPolicyDigest.ts";
+import Migration0042 from "./Migrations/042_CommandCenterMemorySearchGeneration.ts";
+import Migration0043 from "./Migrations/043_ProjectionTurnRequestSequence.ts";
+import Migration0044 from "./Migrations/044_ProjectionPendingTurnStartModelSelection.ts";
+import Migration0045 from "./Migrations/045_ProjectionPendingTurnStartInterruptRequested.ts";
+import Migration0046 from "./Migrations/046_ProjectionThreadSessionGeneration.ts";
+import Migration0047 from "./Migrations/047_ProjectionPendingTurnStartMultiSlot.ts";
+import Migration0048 from "./Migrations/048_ProviderTurnSendClaims.ts";
+import Migration0049 from "./Migrations/049_ProjectionThreadActivityCorrelation.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -89,6 +106,23 @@ export const migrationEntries = [
   [30, "ProjectionThreadShellArchiveIndexes", Migration0030],
   [31, "AuthAuthorizationScopes", Migration0031],
   [32, "AuthPairingProofKeyThumbprint", Migration0032],
+  [33, "CommandCenterCore", Migration0033],
+  [34, "CommandCenterAutomationRuntime", Migration0034],
+  [35, "CommandCenterMemorySearchIndex", Migration0035],
+  [36, "CommandCenterMigrationImports", Migration0036],
+  [37, "CommandCenterAutomationScheduleCursors", Migration0037],
+  [38, "CommandCenterAuditChainHead", Migration0038],
+  [39, "CommandCenterRunExecutionAuthorization", Migration0039],
+  [40, "CommandCenterAuditHashVersion", Migration0040],
+  [41, "CommandCenterScopedShellPolicyDigest", Migration0041],
+  [42, "CommandCenterMemorySearchGeneration", Migration0042],
+  [43, "ProjectionTurnRequestSequence", Migration0043],
+  [44, "ProjectionPendingTurnStartModelSelection", Migration0044],
+  [45, "ProjectionPendingTurnStartInterruptRequested", Migration0045],
+  [46, "ProjectionThreadSessionGeneration", Migration0046],
+  [47, "ProjectionPendingTurnStartMultiSlot", Migration0047],
+  [48, "ProviderTurnSendClaims", Migration0048],
+  [49, "ProjectionThreadActivityCorrelation", Migration0049],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

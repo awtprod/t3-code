@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -19,6 +20,8 @@ type ChildProcessCommand = {
   readonly args: ReadonlyArray<string>;
   readonly options: {
     readonly shell?: boolean | string;
+    readonly env?: NodeJS.ProcessEnv;
+    readonly extendEnv?: boolean;
   };
 };
 
@@ -80,6 +83,24 @@ const runWith =
     );
 
 describe("runProcess", () => {
+  it.effect("collects live stdout, stderr, and exit status together", () =>
+    Effect.gen(function* () {
+      const runner = yield* ProcessRunner.ProcessRunner;
+      const result = yield* runner.run({
+        command: "node",
+        args: ["-e", "process.stdout.write('out'); process.stderr.write('err')"],
+      });
+
+      expect(result).toMatchObject({
+        stdout: "out",
+        stderr: "err",
+        code: 0,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      });
+    }).pipe(Effect.provide(ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer)))),
+  );
+
   it.effect("collects stdout through an injected ChildProcessSpawner", () =>
     Effect.gen(function* () {
       const spawner = makeSpawner((command) =>
@@ -122,6 +143,28 @@ describe("runProcess", () => {
 
       expect(result.stdout).toBe("service ok");
     }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("can spawn with an exact scrubbed environment", () => {
+    const env = { HOME: "/isolated", PATH: "/usr/bin:/bin" };
+    const spawner = makeSpawner((command) =>
+      Effect.sync(() => {
+        expect(command.options.env).toEqual(env);
+        expect(command.options.extendEnv).toBe(false);
+        return makeHandle({ stdout: "isolated" });
+      }),
+    );
+
+    return runWith(spawner)({
+      command: "/usr/bin/example",
+      args: [],
+      env,
+      extendEnv: false,
+    }).pipe(
+      Effect.map((result) => {
+        expect(result.stdout).toBe("isolated");
+      }),
+    );
   });
 
   it.effect("resolves and escapes Windows command shims before spawning", () => {

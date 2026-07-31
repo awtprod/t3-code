@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodePath from "node:path";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
@@ -12,6 +15,7 @@ import {
   VcsProcessTimeoutError,
 } from "@t3tools/contracts";
 import * as ProcessRunner from "../processRunner.ts";
+import { HOST_GIT_HARDENED_CONFIG_ARGS } from "./HostGitSecurity.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
 const run = (input: VcsProcess.VcsProcessInput) =>
@@ -45,6 +49,70 @@ const captureProcessResult = (
   );
 
 describe("VcsProcess.run", () => {
+  it.effect("applies the host Git boundary at the generic process sink", () =>
+    Effect.gen(function* () {
+      const calls: ProcessRunner.ProcessRunInput[] = [];
+      const service = yield* VcsProcess.make.pipe(
+        Effect.provideService(
+          ProcessRunner.ProcessRunner,
+          ProcessRunner.ProcessRunner.of({
+            run: (input) => {
+              calls.push(input);
+              return Effect.succeed({
+                stdout: "",
+                stderr: "",
+                code: 0 as ProcessRunner.ProcessRunOutput["code"],
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              });
+            },
+          }),
+        ),
+      );
+
+      yield* service.run({
+        ...baseInput,
+        env: {
+          GIT_CONFIG_COUNT: "1",
+          GIT_DIR: "/tmp/alternate.git",
+          GIT_INDEX_FILE: "/tmp/ordinary-index",
+        },
+      });
+      yield* service.run({
+        ...baseInput,
+        operation: "GitVcsDriver.checkpoints.captureCheckpoint",
+        env: { GIT_INDEX_FILE: "/tmp/checkpoint-index" },
+      });
+      const exactCliEnvironment = { PATH: "/usr/bin", GH_TOKEN: "trusted-token" };
+      yield* service.run({
+        operation: "GitHubCli.execute",
+        command: "gh",
+        args: ["pr", "checkout", "42"],
+        cwd: "/workspace",
+        env: exactCliEnvironment,
+        extendEnv: false,
+      });
+
+      expect(calls[0]?.args).toEqual([...HOST_GIT_HARDENED_CONFIG_ARGS, ...baseInput.args]);
+      expect(calls[0]?.extendEnv).toBe(false);
+      expect(calls[0]?.env).not.toHaveProperty("GIT_CONFIG_COUNT");
+      expect(calls[0]?.env).not.toHaveProperty("GIT_DIR");
+      expect(calls[0]?.env).not.toHaveProperty("GIT_INDEX_FILE");
+      expect(calls[1]?.env?.GIT_INDEX_FILE).toBe("/tmp/checkpoint-index");
+      expect(calls[2]?.args).toEqual(["pr", "checkout", "42"]);
+      expect(calls[2]?.env).toMatchObject({
+        GH_TOKEN: "trusted-token",
+        GIT_CONFIG_COUNT: "8",
+        GIT_TERMINAL_PROMPT: "0",
+      });
+      expect(calls[2]?.env?.PATH?.split(NodePath.delimiter).every(NodePath.isAbsolute)).toBe(true);
+      expect(NodePath.isAbsolute(calls[0]?.command ?? "")).toBe(true);
+      expect(NodePath.isAbsolute(calls[2]?.command ?? "")).toBe(true);
+      expect(calls[2]?.extendEnv).toBe(false);
+    }),
+  );
+
   it.effect("collects stdout", () =>
     Effect.gen(function* () {
       const result = yield* run({

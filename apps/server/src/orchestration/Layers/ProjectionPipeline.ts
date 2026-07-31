@@ -3,6 +3,7 @@ import {
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
+  type ThreadSessionTerminalTurnTransition,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -30,6 +31,7 @@ import {
 } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import {
+  type ProjectionPendingTurnStart,
   type ProjectionTurn,
   ProjectionTurnRepository,
 } from "../../persistence/Services/ProjectionTurns.ts";
@@ -71,9 +73,8 @@ type ProjectorName =
   (typeof ORCHESTRATION_PROJECTOR_NAMES)[keyof typeof ORCHESTRATION_PROJECTOR_NAMES];
 
 /**
- * Turn state to settle still-running turns with when their session leaves the
- * "running" status, or null while the session is (re)starting or running and
- * turns must stay unsettled.
+ * Turn state to apply when a session update explicitly names a still-running
+ * turn to settle, or null while the session is (re)starting or running.
  */
 function settledTurnStateForSessionStatus(
   status: OrchestrationSessionStatus,
@@ -91,6 +92,27 @@ function settledTurnStateForSessionStatus(
     case "running":
       return null;
   }
+}
+
+function normalizeTerminalTurnTransitions(
+  payload: Extract<OrchestrationEvent, { type: "thread.session-set" }>["payload"],
+  legacyTerminalState: "completed" | "interrupted" | "error" | null,
+): ReadonlyArray<ThreadSessionTerminalTurnTransition> {
+  const transitions = [
+    ...(payload.terminalTurnTransitions ?? []),
+    ...(payload.terminalTurnTransition === undefined ? [] : [payload.terminalTurnTransition]),
+    ...(payload.settledTurnId === undefined || legacyTerminalState === null
+      ? []
+      : [{ turnId: payload.settledTurnId, state: legacyTerminalState }]),
+  ];
+  const seenTurnIds = new Set<string>();
+  return transitions.filter((transition) => {
+    if (seenTurnIds.has(transition.turnId)) {
+      return false;
+    }
+    seenTurnIds.add(transition.turnId);
+    return true;
+  });
 }
 
 interface ProjectorDefinition {
@@ -741,7 +763,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
-            latestTurnId: event.payload.session.activeTurnId,
+            latestTurnId: event.payload.session.activeTurnId ?? existingRow.value.latestTurnId,
             updatedAt: event.occurredAt,
           });
           yield* refreshThreadShellSummary(event.payload.threadId);
@@ -755,6 +777,21 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (Option.isNone(existingRow)) {
             return;
           }
+          const existingTurn = yield* projectionTurnRepository.getByTurnId({
+            threadId: event.payload.threadId,
+            turnId: event.payload.turnId,
+          });
+          if (
+            Option.isSome(existingTurn) &&
+            existingTurn.value.checkpointStatus !== null &&
+            existingTurn.value.checkpointStatus !== "missing" &&
+            event.payload.status === "missing"
+          ) {
+            return;
+          }
+          // The concrete-turn projector repeats this guard before
+          // clearCheckpointTurnConflict so neither projector can perturb ready
+          // checkpoint state for a delayed missing placeholder.
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             latestTurnId: event.payload.turnId,
@@ -946,6 +983,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             activityId: event.payload.activity.id,
             threadId: event.payload.threadId,
             turnId: event.payload.activity.turnId,
+            ...(event.payload.activity.correlatedMessageId !== undefined
+              ? { correlatedMessageId: event.payload.activity.correlatedMessageId }
+              : {}),
             tone: event.payload.activity.tone,
             kind: event.payload.activity.kind,
             summary: event.payload.activity.summary,
@@ -1000,6 +1040,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         status: event.payload.session.status,
         providerName: event.payload.session.providerName,
         providerInstanceId: event.payload.session.providerInstanceId ?? null,
+        sessionGeneration: event.payload.session.sessionGeneration ?? null,
         runtimeMode: event.payload.session.runtimeMode,
         activeTurnId: event.payload.session.activeTurnId,
         lastError: event.payload.session.lastError,
@@ -1012,26 +1053,67 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     )(function* (event, _attachmentSideEffects) {
       switch (event.type) {
         case "thread.turn-start-requested": {
-          yield* projectionTurnRepository.replacePendingTurnStart({
+          // Appended, not replaced. Each turn-start-requested gets its own
+          // placeholder keyed by this event's sequence, so a message queued
+          // behind an already-sent turn keeps its own row instead of evicting
+          // (and being evicted by) its neighbours.
+          yield* projectionTurnRepository.appendPendingTurnStart({
             threadId: event.payload.threadId,
             messageId: event.payload.messageId,
             sourceProposedPlanThreadId: event.payload.sourceProposedPlan?.threadId ?? null,
             sourceProposedPlanId: event.payload.sourceProposedPlan?.planId ?? null,
             requestedAt: event.payload.createdAt,
+            requestSequence: event.sequence,
+            modelSelection: event.payload.modelSelection ?? null,
+            pendingInterruptRequested: false,
           });
           return;
         }
 
         case "thread.session-set": {
           const turnId = event.payload.session.activeTurnId;
+          const legacyTerminalState = settledTurnStateForSessionStatus(
+            event.payload.session.status,
+          );
+          const terminalTurnTransitions = normalizeTerminalTurnTransitions(
+            event.payload,
+            legacyTerminalState,
+          );
+          const legacySessionSet =
+            event.payload.pendingTurnStartAdoption === undefined &&
+            event.payload.terminalTurnTransitions === undefined;
+
+          yield* Effect.forEach(
+            terminalTurnTransitions,
+            (terminalTurnTransition) =>
+              Effect.gen(function* () {
+                const settledTurn = yield* projectionTurnRepository.getByTurnId({
+                  threadId: event.payload.threadId,
+                  turnId: terminalTurnTransition.turnId,
+                });
+                if (Option.isSome(settledTurn) && settledTurn.value.state === "running") {
+                  yield* projectionTurnRepository.upsertByTurnId({
+                    ...settledTurn.value,
+                    state: terminalTurnTransition.state,
+                    completedAt: event.payload.session.updatedAt,
+                  });
+                }
+              }),
+            { concurrency: 1 },
+          );
+
           if (turnId === null || event.payload.session.status !== "running") {
-            // Leaving the "running" session status is the turn-end signal:
-            // settle still-running turns so their duration reflects the whole
-            // turn rather than the last assistant message.
-            const settledTurnState = settledTurnStateForSessionStatus(event.payload.session.status);
-            if (settledTurnState === null) {
+            if (terminalTurnTransitions.length > 0) {
               return;
             }
+            if (!legacySessionSet || legacyTerminalState === null) {
+              return;
+            }
+
+            // Historical session-set events predate exact transition metadata.
+            // Rebuild them with their original broad terminalization semantics;
+            // every newly-decided event carries the adoption discriminator above
+            // and therefore cannot enter this compatibility branch.
             const existingTurns = yield* projectionTurnRepository.listByThreadId({
               threadId: event.payload.threadId,
             });
@@ -1043,10 +1125,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                   : projectionTurnRepository.upsertByTurnId({
                       ...turn,
                       turnId: turn.turnId,
-                      state: settledTurnState,
-                      // A running turn's completedAt can only hold a mid-turn
-                      // placeholder checkpoint timestamp — the session leaving
-                      // "running" is the authoritative turn end.
+                      state: legacyTerminalState,
                       completedAt: event.payload.session.updatedAt,
                     }),
               { concurrency: 1 },
@@ -1054,43 +1133,117 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             return;
           }
 
-          // A new active turn supersedes any still-running turn on the same
-          // thread — steering can open a new turn without the provider ever
-          // completing the previous one.
-          const otherRunningTurns = yield* projectionTurnRepository.listByThreadId({
-            threadId: event.payload.threadId,
-          });
-          yield* Effect.forEach(
-            otherRunningTurns.filter(
-              (turn) => turn.turnId !== null && turn.turnId !== turnId && turn.state === "running",
-            ),
-            (turn) =>
-              turn.turnId === null
-                ? Effect.void
-                : projectionTurnRepository.upsertByTurnId({
-                    ...turn,
-                    turnId: turn.turnId,
-                    state: "completed",
-                    completedAt: event.payload.session.updatedAt,
-                  }),
-            { concurrency: 1 },
-          );
+          if (legacySessionSet) {
+            const otherRunningTurns = yield* projectionTurnRepository.listByThreadId({
+              threadId: event.payload.threadId,
+            });
+            yield* Effect.forEach(
+              otherRunningTurns.filter(
+                (turn) =>
+                  turn.turnId !== null && turn.turnId !== turnId && turn.state === "running",
+              ),
+              (turn) =>
+                turn.turnId === null
+                  ? Effect.void
+                  : projectionTurnRepository.upsertByTurnId({
+                      ...turn,
+                      turnId: turn.turnId,
+                      state: "completed",
+                      completedAt: event.payload.session.updatedAt,
+                    }),
+              { concurrency: 1 },
+            );
+          }
 
           const existingTurn = yield* projectionTurnRepository.getByTurnId({
             threadId: event.payload.threadId,
             turnId,
           });
-          const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-            threadId: event.payload.threadId,
-          });
+          // Adopt the placeholder this turn was actually started for, not
+          // whichever one happens to be oldest. Sends run in independent
+          // fibers and every adapter has a yield point between "is a turn
+          // active?" and recording the new turn, so two turn-start requests
+          // can produce `turn.started` events in the opposite order to the
+          // requests. Positional adoption then hands the later turn the
+          // earlier message's model, source plan and interrupt flag.
+          //
+          // `turnRequestSequence` is the request's own event sequence, carried
+          // through the send input and echoed back on `turn.started`. The
+          // adoption discriminator distinguishes exact starts, genuine
+          // sequence-less starts, and routine lifecycle writes that must adopt
+          // nothing. Historical events lack the discriminator and retain their
+          // pre-upgrade exact-or-oldest behavior during rebuild.
+          const pendingTurnStarts = yield* projectionTurnRepository.listPendingTurnStartsByThreadId(
+            { threadId: event.payload.threadId },
+          );
+          const requestSequence = event.payload.turnRequestSequence;
+          const matchedPendingTurnStart =
+            requestSequence === undefined
+              ? undefined
+              : pendingTurnStarts.find((row) => row.requestSequence === requestSequence);
+          const adoptedPendingTurnStart = (() => {
+            switch (event.payload.pendingTurnStartAdoption) {
+              case "none":
+                return undefined;
+              case "exact":
+                return matchedPendingTurnStart;
+              case "oldest-pending":
+                return pendingTurnStarts[0];
+              case undefined:
+                return requestSequence === undefined
+                  ? pendingTurnStarts[0]
+                  : matchedPendingTurnStart;
+            }
+          })();
+          // Adopting nothing is a real outcome with real consequences — the
+          // turn loses its pendingMessageId, its source plan and its
+          // born-interrupted flag — so it must not be silent. On replay the
+          // placeholder is legitimately gone, but rows still WAITING while a
+          // correlated start declines to adopt any of them is the signature
+          // of a correlation bug, and without this line the only evidence is
+          // a turn that quietly forgot which message asked for it.
+          if (
+            requestSequence !== undefined &&
+            event.payload.pendingTurnStartAdoption !== "none" &&
+            matchedPendingTurnStart === undefined
+          ) {
+            yield* Effect.logWarning("projection.turn-start.pending-start-not-correlated", {
+              threadId: event.payload.threadId,
+              turnId,
+              requestSequence,
+              pendingTurnStartCount: pendingTurnStarts.length,
+              pendingRequestSequences: pendingTurnStarts.map((row) => row.requestSequence),
+            });
+          }
+          const pendingTurnStart: Option.Option<ProjectionPendingTurnStart> =
+            adoptedPendingTurnStart === undefined
+              ? Option.none()
+              : Option.some(adoptedPendingTurnStart);
+          // A user interrupt that landed on the pending start before the provider
+          // reported `turn.started` (id-less interrupt) births this turn already
+          // `interrupted`, so the ensuing session exit does not auto-resume it.
+          const bornInterrupted =
+            Option.isSome(pendingTurnStart) && pendingTurnStart.value.pendingInterruptRequested;
+          const matchingTerminalTransition = terminalTurnTransitions.find(
+            (transition) => transition.turnId === turnId,
+          );
           if (Option.isSome(existingTurn)) {
-            const nextState =
-              existingTurn.value.state === "completed" || existingTurn.value.state === "error"
-                ? existingTurn.value.state
-                : "running";
+            const existingTurnIsTerminal =
+              existingTurn.value.state === "completed" ||
+              existingTurn.value.state === "interrupted" ||
+              existingTurn.value.state === "error";
+            const nextState = existingTurnIsTerminal
+              ? existingTurn.value.state
+              : (matchingTerminalTransition?.state ??
+                (bornInterrupted ? "interrupted" : "running"));
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
               state: nextState,
+              completedAt: existingTurnIsTerminal
+                ? existingTurn.value.completedAt
+                : nextState === "running"
+                  ? existingTurn.value.completedAt
+                  : event.payload.session.updatedAt,
               pendingMessageId:
                 existingTurn.value.pendingMessageId ??
                 (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.messageId : null),
@@ -1114,6 +1267,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 (Option.isSome(pendingTurnStart)
                   ? pendingTurnStart.value.requestedAt
                   : event.occurredAt),
+              requestSequence:
+                existingTurn.value.requestSequence ??
+                (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.requestSequence : null),
             });
           } else {
             yield* projectionTurnRepository.upsertByTurnId({
@@ -1129,14 +1285,21 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 ? pendingTurnStart.value.sourceProposedPlanId
                 : null,
               assistantMessageId: null,
-              state: "running",
+              state:
+                matchingTerminalTransition?.state ?? (bornInterrupted ? "interrupted" : "running"),
               requestedAt: Option.isSome(pendingTurnStart)
                 ? pendingTurnStart.value.requestedAt
                 : event.occurredAt,
+              requestSequence: Option.isSome(pendingTurnStart)
+                ? pendingTurnStart.value.requestSequence
+                : null,
               startedAt: Option.isSome(pendingTurnStart)
                 ? pendingTurnStart.value.requestedAt
                 : event.occurredAt,
-              completedAt: null,
+              completedAt:
+                matchingTerminalTransition !== undefined || bornInterrupted
+                  ? event.payload.session.updatedAt
+                  : null,
               checkpointTurnCount: null,
               checkpointRef: null,
               checkpointStatus: null,
@@ -1144,8 +1307,35 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             });
           }
 
-          yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
+          // Consume only the placeholder this turn actually corresponds to —
+          // the correlated one selected above, whose metadata was just copied
+          // onto the turn. Clearing the whole thread here would silently
+          // discard messages the user queued behind this turn, leaving no row
+          // for the provider's next `turn.started` to adopt and nothing for
+          // reconciliation to report if the session dies first.
+          if (Option.isSome(pendingTurnStart)) {
+            yield* projectionTurnRepository.deletePendingTurnStart({
+              threadId: event.payload.threadId,
+              requestSequence: pendingTurnStart.value.requestSequence,
+            });
+          }
+          return;
+        }
+
+        case "thread.turn-start-folded": {
+          // A steer: the message reached the provider and was folded into the
+          // running turn, which emits no `turn.started` and so never consumes
+          // this placeholder. Consuming it here is what keeps a delivered
+          // message from reading as "requested but never started" — the premise
+          // auto-resume, the side-effect gate, and orphan reconciliation all
+          // draw their conclusions from.
+          //
+          // The row is deleted rather than turned into a turn of its own: the
+          // steered message has no turn boundary and no distinct turn id, so a
+          // second row for the same running turn would double-count the work.
+          yield* projectionTurnRepository.deletePendingTurnStart({
             threadId: event.payload.threadId,
+            requestSequence: event.payload.turnRequestSequence,
           });
           return;
         }
@@ -1199,6 +1389,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             assistantMessageId: event.payload.messageId,
             state: settlesTurn ? "completed" : "running",
             requestedAt: event.payload.createdAt,
+            requestSequence: null,
             startedAt: event.payload.createdAt,
             completedAt: settlesTurn ? event.payload.updatedAt : null,
             checkpointTurnCount: null,
@@ -1210,6 +1401,23 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.turn-interrupt-requested": {
+          // The user stopped the thread. The provider interrupts by session, so
+          // any turn-start still pending (a steer whose provider `turn.started`
+          // has not been projected yet) is canceled along with it. Flag its
+          // placeholder — the only row spanning the turn-start-requested ->
+          // session-set(running) window — so the turn is born `interrupted`
+          // rather than `running` when that placeholder is consumed. This runs
+          // unconditionally, regardless of whether the interrupt resolved a
+          // concrete turn id: an id-less interrupt has no turn row to settle,
+          // and an interrupt that resolved the *older* active turn (because the
+          // newer steer's `turn.started` had not landed, so the session still
+          // exposed the previous turn id) would otherwise settle the old turn
+          // yet leave the newer pending steer unmarked — a delayed `turn.started`
+          // would then birth it `running` and a later exit auto-resume work the
+          // user stopped. A no-op when nothing is pending.
+          yield* projectionTurnRepository.markPendingTurnStartInterrupted({
+            threadId: event.payload.threadId,
+          });
           if (event.payload.turnId === undefined) {
             return;
           }
@@ -1236,6 +1444,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             assistantMessageId: null,
             state: "interrupted",
             requestedAt: event.payload.createdAt,
+            requestSequence: null,
             startedAt: event.payload.createdAt,
             completedAt: event.payload.createdAt,
             checkpointTurnCount: null,
@@ -1260,6 +1469,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,
           });
+          if (
+            Option.isSome(existingTurn) &&
+            existingTurn.value.checkpointStatus !== null &&
+            existingTurn.value.checkpointStatus !== "missing" &&
+            event.payload.status === "missing"
+          ) {
+            return;
+          }
           const nextState = event.payload.status === "error" ? "error" : "completed";
           yield* projectionTurnRepository.clearCheckpointTurnConflict({
             threadId: event.payload.threadId,
@@ -1291,6 +1508,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             assistantMessageId: event.payload.assistantMessageId,
             state: turnStillRunning ? "running" : nextState,
             requestedAt: event.payload.completedAt,
+            requestSequence: null,
             startedAt: event.payload.completedAt,
             completedAt: event.payload.completedAt,
             checkpointTurnCount: event.payload.checkpointTurnCount,

@@ -16,6 +16,13 @@ import {
   VcsProcessTimeoutError,
 } from "@t3tools/contracts";
 import * as ProcessRunner from "../processRunner.ts";
+import {
+  type GitSpawningCliKind,
+  hardenedGitSpawningCliEnvironment,
+  hardenedHostGitArguments,
+  hardenedHostGitEnvironment,
+  resolveTrustedHostExecutable,
+} from "./HostGitSecurity.ts";
 
 export interface VcsProcessInput {
   readonly operation: string;
@@ -25,6 +32,8 @@ export interface VcsProcessInput {
   readonly spawnCwd?: string;
   readonly stdin?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** Use `false` only with a complete allowlisted environment. */
+  readonly extendEnv?: boolean;
   readonly allowNonZeroExit?: boolean;
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;
@@ -49,6 +58,28 @@ export class VcsProcess extends Context.Service<
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
 const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
+
+function protectedHostExecutable(
+  command: string,
+):
+  | { readonly name: "git" }
+  | { readonly name: string; readonly connector: GitSpawningCliKind }
+  | null {
+  const basename = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+  const name = basename?.endsWith(".exe") ? basename.slice(0, -4) : basename;
+  switch (name) {
+    case "git":
+      return { name };
+    case "gh":
+      return { name, connector: "github" };
+    case "glab":
+      return { name, connector: "gitlab" };
+    case "az":
+      return { name, connector: "azure-devops" };
+    default:
+      return null;
+  }
+}
 
 const classifyNonZeroExit = (command: string, stderr: string): VcsProcessExitFailureKind => {
   const normalized = stderr.toLowerCase();
@@ -97,14 +128,66 @@ export const make = Effect.gen(function* () {
       argumentCount: input.args.length,
     };
 
+    const protectedExecutable = protectedHostExecutable(input.command);
+    const writableRoots = [input.cwd, ...(input.spawnCwd === undefined ? [] : [input.spawnCwd])];
+    const command =
+      protectedExecutable === null
+        ? input.command
+        : resolveTrustedHostExecutable(protectedExecutable.name, { writableRoots });
+    if (command === undefined) {
+      return yield* new VcsProcessSpawnError({
+        ...baseError,
+        cause: new Error(
+          `Refused to resolve ${input.command} outside the repository-writable command roots.`,
+        ),
+      });
+    }
+    if (
+      protectedExecutable !== null &&
+      "connector" in protectedExecutable &&
+      resolveTrustedHostExecutable("git", { writableRoots }) === undefined
+    ) {
+      return yield* new VcsProcessSpawnError({
+        ...baseError,
+        cause: new Error(
+          `Refused to launch ${input.command} without a trusted Git executable for child operations.`,
+        ),
+      });
+    }
+
+    const protectedEnvironment =
+      protectedExecutable === null
+        ? undefined
+        : "connector" in protectedExecutable
+          ? hardenedGitSpawningCliEnvironment(
+              protectedExecutable.connector,
+              [globalThis.process.env, input.env],
+              { writableRoots },
+            )
+          : hardenedHostGitEnvironment([input.env], {
+              allowIndexFile: input.operation.startsWith("GitVcsDriver.checkpoints."),
+              writableRoots,
+            });
+
     const result = yield* processRunner
       .run({
-        command: input.command,
-        args: input.args,
+        command,
+        args:
+          protectedExecutable?.name === "git" ? hardenedHostGitArguments(input.args) : input.args,
         cwd: input.cwd,
         ...(input.spawnCwd !== undefined ? { spawnCwd: input.spawnCwd } : {}),
         ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
-        ...(input.env !== undefined ? { env: input.env } : {}),
+        ...(protectedEnvironment !== undefined
+          ? {
+              env: protectedEnvironment,
+              extendEnv: false,
+            }
+          : input.env !== undefined
+            ? {
+                env: input.env,
+                ...(input.extendEnv === undefined ? {} : { extendEnv: input.extendEnv }),
+              }
+            : {}),
         timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         maxOutputBytes: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
         outputMode: "truncate",

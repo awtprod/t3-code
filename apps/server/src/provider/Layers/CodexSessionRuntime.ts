@@ -10,6 +10,7 @@ import {
   type ProviderInteractionMode,
   type ProviderRequestKind,
   type ProviderSession,
+  type ProviderTurnTargetIdentity,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   RuntimeMode,
@@ -18,6 +19,7 @@ import {
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { normalizeModelSlug } from "@t3tools/shared/model";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -27,6 +29,7 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -38,7 +41,43 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import {
+  COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE,
+  COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE,
+} from "../security/CommandCenterProviderIsolation.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const decodeV2CommandExecResponse = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2CommandExecResponse,
+);
+// The generated response schemas omit `activePermissionProfile`, so it is
+// reassigned here. The Codex App Server sends `null` when no permission profile
+// is active (older CLIs, or a thread without an isolation profile), so the
+// override must accept `null` as well as the object — matching how every other
+// nullable field in these responses (serviceTier, reasoningEffort, …) is modeled.
+const CodexThreadStartResponseWithPermissionProfile = EffectCodexSchema.V2ThreadStartResponse.pipe(
+  Schema.fieldsAssign({
+    activePermissionProfile: Schema.optionalKey(
+      Schema.Union([EffectCodexSchema.V2ThreadStartResponse__ActivePermissionProfile, Schema.Null]),
+    ),
+  }),
+);
+const CodexThreadResumeResponseWithPermissionProfile =
+  EffectCodexSchema.V2ThreadResumeResponse.pipe(
+    Schema.fieldsAssign({
+      activePermissionProfile: Schema.optionalKey(
+        Schema.Union([
+          EffectCodexSchema.V2ThreadResumeResponse__ActivePermissionProfile,
+          Schema.Null,
+        ]),
+      ),
+    }),
+  );
+const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(
+  CodexThreadStartResponseWithPermissionProfile,
+);
+const decodeV2ThreadResumeResponse = Schema.decodeUnknownEffect(
+  CodexThreadResumeResponseWithPermissionProfile,
+);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -73,10 +112,17 @@ const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 const isCodexUserInputAnswerObject = Schema.is(CodexUserInputAnswerObject);
 
 // TODO: Verify `packages/effect-codex-app-server/scripts/generate.ts` so the generated
-// `V2TurnStartParams` schema includes `collaborationMode` directly.
+// request schemas include `collaborationMode` and `permissions` directly. Codex 0.144
+// advertises both fields, but the checked-in generator currently omits them.
+const CodexThreadStartParamsWithPermissionProfile = EffectCodexSchema.V2ThreadStartParams.pipe(
+  Schema.fieldsAssign({
+    permissions: Schema.optionalKey(Schema.String),
+  }),
+);
 const CodexTurnStartParamsWithCollaborationMode = EffectCodexSchema.V2TurnStartParams.pipe(
   Schema.fieldsAssign({
     collaborationMode: Schema.optionalKey(EffectCodexSchema.V2TurnStartParams__CollaborationMode),
+    permissions: Schema.optionalKey(Schema.String),
   }),
 );
 const decodeCodexTurnStartParamsWithCollaborationMode = Schema.decodeUnknownEffect(
@@ -85,6 +131,8 @@ const decodeCodexTurnStartParamsWithCollaborationMode = Schema.decodeUnknownEffe
 
 export type CodexTurnStartParamsWithCollaborationMode =
   typeof CodexTurnStartParamsWithCollaborationMode.Type;
+export type CodexThreadStartParamsWithPermissionProfile =
+  typeof CodexThreadStartParamsWithPermissionProfile.Type;
 
 export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
 type CodexServiceTier = NonNullable<EffectCodexSchema.V2ThreadStartParams["serviceTier"]>;
@@ -104,6 +152,7 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  readonly permissionProfile?: string;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -134,7 +183,10 @@ export interface CodexSessionRuntimeShape {
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
-  readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly interruptTurn: (
+    turnId?: TurnId,
+    target?: ProviderTurnTargetIdentity,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
@@ -153,10 +205,38 @@ export interface CodexSessionRuntimeShape {
 
 export type CodexSessionRuntimeError =
   | CodexErrors.CodexAppServerError
+  | CodexSessionRuntimeIsolationProbeError
+  | CodexSessionRuntimePermissionProfileMismatchError
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
   | CodexSessionRuntimeThreadIdMissingError;
+
+export class CodexSessionRuntimeIsolationProbeError extends Schema.TaggedErrorClass<CodexSessionRuntimeIsolationProbeError>()(
+  "CodexSessionRuntimeIsolationProbeError",
+  {
+    issue: Schema.String,
+    exitCode: Schema.optional(Schema.Number),
+  },
+) {
+  override get message(): string {
+    return this.issue;
+  }
+}
+
+export class CodexSessionRuntimePermissionProfileMismatchError extends Schema.TaggedErrorClass<CodexSessionRuntimePermissionProfileMismatchError>()(
+  "CodexSessionRuntimePermissionProfileMismatchError",
+  {
+    expected: Schema.String,
+    actual: Schema.optional(Schema.String),
+  },
+) {
+  override get message(): string {
+    return this.actual === undefined
+      ? `Codex did not activate required permission profile '${this.expected}'.`
+      : `Codex activated permission profile '${this.actual}' instead of required profile '${this.expected}'.`;
+  }
+}
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -259,6 +339,27 @@ function readResumeCursorThreadId(
   return isCodexResumeCursorSchema(resumeCursor) ? resumeCursor.threadId : undefined;
 }
 
+/**
+ * Matches a historical turn target against the currently active Codex runtime.
+ *
+ * Codex's native thread id is stable across resumed runtime generations, so it
+ * is the stronger identity when present. Older/no-cursor targets are confined
+ * to the exact runtime generation that accepted them.
+ */
+export function matchesCodexInterruptTarget(
+  session: ProviderSession,
+  target: ProviderTurnTargetIdentity,
+): boolean {
+  if (target.resumeCursor !== undefined) {
+    const targetThreadId = readResumeCursorThreadId(target.resumeCursor);
+    return (
+      targetThreadId !== undefined &&
+      targetThreadId === readResumeCursorThreadId(session.resumeCursor)
+    );
+  }
+  return session.sessionGeneration === target.sessionGeneration;
+}
+
 function runtimeModeToThreadConfig(input: RuntimeMode): {
   readonly approvalPolicy: EffectCodexSchema.V2ThreadStartParams__AskForApproval;
   readonly sandbox: EffectCodexSchema.V2ThreadStartParams__SandboxMode;
@@ -283,17 +384,20 @@ function runtimeModeToThreadConfig(input: RuntimeMode): {
   }
 }
 
-function buildThreadStartParams(input: {
+export function buildThreadStartParams(input: {
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
-}): EffectCodexSchema.V2ThreadStartParams {
+  readonly permissionProfile?: string;
+}): CodexThreadStartParamsWithPermissionProfile {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   return {
     cwd: input.cwd,
-    approvalPolicy: config.approvalPolicy,
-    sandbox: config.sandbox,
+    approvalPolicy: input.permissionProfile ? "never" : config.approvalPolicy,
+    ...(input.permissionProfile
+      ? { permissions: input.permissionProfile }
+      : { sandbox: config.sandbox }),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
   };
@@ -354,6 +458,7 @@ export function buildTurnStartParams(input: {
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly permissionProfile?: string;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -379,8 +484,10 @@ export function buildTurnStartParams(input: {
   return decodeCodexTurnStartParamsWithCollaborationMode({
     threadId: input.threadId,
     input: turnInput,
-    approvalPolicy: config.approvalPolicy,
-    sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
+    approvalPolicy: input.permissionProfile ? "never" : config.approvalPolicy,
+    ...(input.permissionProfile
+      ? { permissions: input.permissionProfile }
+      : { sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode) }),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
@@ -425,17 +532,127 @@ export function isRecoverableThreadResumeError(error: unknown): boolean {
 }
 
 type CodexThreadOpenResponse =
-  | CodexRpc.ClientRequestResponsesByMethod["thread/start"]
-  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
+  | typeof CodexThreadStartResponseWithPermissionProfile.Type
+  | typeof CodexThreadResumeResponseWithPermissionProfile.Type;
 
 type CodexThreadOpenMethod = "thread/start" | "thread/resume";
 
 interface CodexThreadOpenClient {
-  readonly request: <M extends CodexThreadOpenMethod>(
-    method: M,
-    payload: CodexRpc.ClientRequestParamsByMethod[M],
-  ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
+  readonly request: (
+    method: CodexThreadOpenMethod,
+    payload: unknown,
+  ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
 }
+
+interface CodexIsolationProbeClient {
+  readonly request: (
+    method: "command/exec",
+    payload: CodexRpc.ClientRequestParamsByMethod["command/exec"],
+  ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+}
+
+const COMMAND_CENTER_ISOLATION_PROBE_SUCCESS = "command-center-isolation-ok";
+const COMMAND_CENTER_ISOLATION_READ_DENIAL_READY = "command-center-isolation-read-denial-ready";
+
+function isCommandCenterPermissionProfile(
+  permissionProfile: string | undefined,
+): permissionProfile is
+  | typeof COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE
+  | typeof COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE {
+  return (
+    permissionProfile === COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE ||
+    permissionProfile === COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE
+  );
+}
+
+export function buildCommandCenterIsolationProbeScript(writable: boolean): string {
+  const workspaceCheck = writable
+    ? [
+        'probe_path=".cc-provider-isolation-probe.$$"',
+        "trap 'rm -f \"$probe_path\"' EXIT",
+        ': > "$probe_path" || exit 73',
+        'rm -f "$probe_path"',
+        "trap - EXIT",
+      ]
+    : [
+        'probe_path=".cc-provider-isolation-probe.$$"',
+        "trap 'rm -f \"$probe_path\"' EXIT",
+        'if : > "$probe_path" 2>/dev/null; then',
+        '  rm -f "$probe_path"',
+        "  trap - EXIT",
+        "  exit 74",
+        "fi",
+        `printf '${COMMAND_CENTER_ISOLATION_READ_DENIAL_READY}\\n'`,
+        "exit 73",
+      ];
+  return [
+    "set -eu",
+    "for environment_file in /proc/[0-9]*/environ; do",
+    '  if /usr/bin/tr "\\0" "\\n" < "$environment_file" 2>/dev/null | /usr/bin/grep -Eq "^(CC_PROVIDER_ISOLATION_SENTINEL|T3_MCP_BEARER_TOKEN|OPENAI_API_KEY)="; then',
+    "    exit 70",
+    "  fi",
+    "done",
+    'test ! -r "$HOME/auth.json" || exit 71',
+    'test ! -r "/proc/1/root$HOME/auth.json" || exit 72',
+    "if test -e .git; then",
+    "  test ! -w .git || exit 75",
+    "  /usr/bin/git status --porcelain=v1 >/dev/null",
+    "  git_dir=$(/usr/bin/git rev-parse --git-dir 2>/dev/null || true)",
+    '  test -z "$git_dir" || test ! -w "$git_dir" || exit 76',
+    "  common_git_dir=$(/usr/bin/git rev-parse --git-common-dir 2>/dev/null || true)",
+    '  test -z "$common_git_dir" || test ! -w "$common_git_dir" || exit 77',
+    "fi",
+    ...workspaceCheck,
+    `printf '${COMMAND_CENTER_ISOLATION_PROBE_SUCCESS}\\n'`,
+  ].join("\n");
+}
+
+/**
+ * Exercise the admitted profile through the same app-server command path used
+ * by Codex tools before any untrusted model turn can run.
+ */
+export const verifyCommandCenterCodexIsolation = Effect.fn(
+  "CodexSessionRuntime.verifyCommandCenterIsolation",
+)(function* (input: {
+  readonly client: CodexIsolationProbeClient;
+  readonly cwd: string;
+  readonly permissionProfile: string;
+}) {
+  const writable = input.permissionProfile === COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE;
+  if (!writable && input.permissionProfile !== COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE) {
+    return yield* new CodexSessionRuntimeIsolationProbeError({
+      issue: "Command Center received an unknown Codex isolation profile.",
+    });
+  }
+  const result = yield* input.client
+    .request("command/exec", {
+      command: ["/usr/bin/bash", "-c", buildCommandCenterIsolationProbeScript(writable)],
+      cwd: input.cwd,
+      timeoutMs: 10_000,
+    })
+    .pipe(
+      Effect.flatMap(decodeV2CommandExecResponse),
+      Effect.mapError((cause) =>
+        Schema.isSchemaError(cause)
+          ? CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+              "decode-response-payload",
+              cause,
+              { method: "command/exec" },
+            )
+          : cause,
+      ),
+    );
+  const accepted = writable
+    ? result.exitCode === 0 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_PROBE_SUCCESS
+    : result.exitCode === 73 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_READ_DENIAL_READY;
+  if (!accepted) {
+    return yield* new CodexSessionRuntimeIsolationProbeError({
+      issue:
+        "Command Center blocked the Codex session because its live filesystem, process, or environment isolation probe failed.",
+      exitCode: result.exitCode,
+    });
+  }
+});
 
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
@@ -445,35 +662,80 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
-}): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
+  readonly permissionProfile?: string;
+}): Effect.Effect<
+  CodexThreadOpenResponse,
+  CodexErrors.CodexAppServerError | CodexSessionRuntimePermissionProfileMismatchError
+> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
     cwd: input.cwd,
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
     serviceTier: input.serviceTier,
+    ...(input.permissionProfile ? { permissionProfile: input.permissionProfile } : {}),
   });
 
+  const request = (method: CodexThreadOpenMethod, payload: unknown) =>
+    input.client.request(method, payload).pipe(
+      Effect.flatMap((rawResponse) =>
+        (method === "thread/start"
+          ? decodeV2ThreadStartResponse(rawResponse)
+          : decodeV2ThreadResumeResponse(rawResponse)
+        ).pipe(
+          Effect.mapError((cause) =>
+            CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+              "decode-response-payload",
+              cause,
+              { method },
+            ),
+          ),
+        ),
+      ),
+      Effect.flatMap((response) => {
+        // Fail only on a POSITIVE mismatch: Codex reports a *different* active
+        // profile than the one requested. A null/absent `activePermissionProfile`
+        // is not a failure here — Codex 0.144.x does not echo the field on
+        // `thread/start` even when the profile is active, and isolation has
+        // already been proven empirically by `verifyCommandCenterCodexIsolation`
+        // (a live `command/exec` probe) before this thread is ever opened.
+        // Treating a null echo as a mismatch would block a correctly isolated
+        // session on the supported Codex version.
+        const activeProfileId = response.activePermissionProfile?.id;
+        if (
+          input.permissionProfile !== undefined &&
+          activeProfileId !== undefined &&
+          activeProfileId !== input.permissionProfile
+        ) {
+          return Effect.fail(
+            new CodexSessionRuntimePermissionProfileMismatchError({
+              expected: input.permissionProfile,
+              actual: activeProfileId,
+            }),
+          );
+        }
+        return Effect.succeed(response);
+      }),
+    );
+
   if (resumeThreadId === undefined) {
-    return input.client.request("thread/start", startParams);
+    return request("thread/start", startParams);
   }
 
-  return input.client
-    .request("thread/resume", {
-      threadId: resumeThreadId,
-      ...startParams,
-    })
-    .pipe(
-      Effect.catchIf(isRecoverableThreadResumeError, (error) =>
-        Effect.logWarning("codex app-server thread resume fell back to fresh start", {
-          threadId: input.threadId,
-          requestedRuntimeMode: input.runtimeMode,
-          resumeThreadId,
-          recoverable: true,
-          cause: error,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
-      ),
-    );
+  return request("thread/resume", {
+    threadId: resumeThreadId,
+    ...startParams,
+  }).pipe(
+    Effect.catchIf(isRecoverableThreadResumeError, (error) =>
+      Effect.logWarning("codex app-server thread resume fell back to fresh start", {
+        threadId: input.threadId,
+        requestedRuntimeMode: input.runtimeMode,
+        resumeThreadId,
+        recoverable: true,
+        cause: error,
+      }).pipe(Effect.andThen(request("thread/start", startParams))),
+    ),
+  );
 };
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
@@ -701,20 +963,41 @@ export const makeCodexSessionRuntime = (
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const crypto = yield* Crypto.Crypto;
-    const events = yield* Queue.unbounded<ProviderEvent>();
+    const events = yield* Queue.unbounded<ProviderEvent, Cause.Done>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const closedRef = yield* Ref.make(false);
+    // Records the single terminal lifecycle emit (`session/exited` from a process
+    // exit XOR `session/closed` from a graceful close). Distinct from
+    // `closedRef`, which guards the one-time close() *cleanup* (scope + queues):
+    // a crash-exit that fires first must commit the emit here WITHOUT short-
+    // circuiting a later close()'s cleanup, so the two concerns need two refs.
+    // The semaphore serializes check -> emit -> commit so a failed claimant leaves
+    // the transition available without letting a concurrent claimant race past it.
+    const terminalEmittedRef = yield* Ref.make(false);
+    const terminalEmissionSemaphore = yield* Semaphore.make(1);
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
     // `CODEX_HOME=~/.codex_work` reach codex as an absolute path.
     const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
+    const isolationSentinel = isCommandCenterPermissionProfile(options.permissionProfile)
+      ? yield* crypto.randomUUIDv4.pipe(
+          Effect.mapError(
+            (cause) =>
+              new CodexErrors.CodexAppServerIdentifierGenerationError({
+                purpose: "provider-event",
+                cause,
+              }),
+          ),
+        )
+      : undefined;
     const env = {
       ...options.environment,
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+      ...(isolationSentinel ? { CC_PROVIDER_ISOLATION_SENTINEL: isolationSentinel } : {}),
     };
     const extendEnv = options.environment === undefined;
     const spawnCommand = yield* resolveSpawnCommand(
@@ -764,11 +1047,21 @@ export const makeCodexSessionRuntime = (
       );
 
     const sessionCreatedAt = yield* nowIso;
+    // Per-runtime-start nonce. Because a restarted runtime can reuse the same
+    // providerInstanceId, terminal events (session.exited) from a superseded
+    // runtime would otherwise be indistinguishable from the live one. Stamping a
+    // fresh generation on every event lets ingestion drop stale terminal events.
+    const sessionGeneration = yield* randomUUIDv4("session-generation");
     const initialSession = {
       provider: PROVIDER,
       ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
       status: "connecting",
       runtimeMode: options.runtimeMode,
+      // Carried on the session, not just on the events, so whoever binds this
+      // session to a thread binds the same generation the events will be
+      // stamped with. Without it the ingestion guard has nothing to compare and
+      // a superseded runtime's exit is indistinguishable from the live one's.
+      sessionGeneration,
       cwd: options.cwd,
       ...(options.model ? { model: options.model } : {}),
       threadId: options.threadId,
@@ -786,6 +1079,7 @@ export const makeCodexSessionRuntime = (
           id: EventId.make(id),
           provider: PROVIDER,
           ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
+          sessionGeneration,
           createdAt: yield* nowIso,
           ...event,
         });
@@ -912,22 +1206,32 @@ export const makeCodexSessionRuntime = (
     );
 
     yield* client.handleServerNotification("turn/completed", (payload) =>
-      currentSessionProviderThreadId.pipe(
-        Effect.flatMap((providerThreadId) => {
-          if (providerThreadId && payload.threadId !== providerThreadId) {
-            return Effect.void;
+      Effect.gen(function* () {
+        const completedTurnId = TurnId.make(payload.turn.id);
+        const lastError =
+          payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
+            ? payload.turn.error.message
+            : undefined;
+        const completionStatus: ProviderSession["status"] =
+          payload.turn.status === "failed" ? "error" : "ready";
+        const updatedAt = yield* nowIso;
+        yield* Ref.update(sessionRef, (session) => {
+          const providerThreadId = currentProviderThreadId(session);
+          if (
+            (providerThreadId && payload.threadId !== providerThreadId) ||
+            session.activeTurnId !== completedTurnId
+          ) {
+            return session;
           }
-          const lastError =
-            payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
-              ? payload.turn.error.message
-              : undefined;
-          return updateSession(sessionRef, {
-            status: payload.turn.status === "failed" ? "error" : "ready",
+          return {
+            ...session,
+            status: completionStatus,
             activeTurnId: undefined,
             ...(lastError ? { lastError } : {}),
-          });
-        }),
-      ),
+            updatedAt,
+          };
+        });
+      }),
     );
 
     yield* client.handleServerNotification("error", (payload) =>
@@ -1168,30 +1472,63 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
-    yield* child.exitCode.pipe(
-      Effect.flatMap((exitCode) =>
-        Ref.get(closedRef).pipe(
-          Effect.flatMap((closed) => {
-            if (closed) {
-              return Effect.void;
-            }
-            const nextStatus = exitCode === 0 ? "closed" : "error";
-            return updateSession(sessionRef, {
-              status: nextStatus,
-              activeTurnId: undefined,
-            }).pipe(
-              Effect.andThen(
-                emitSessionEvent(
-                  "session/exited",
-                  exitCode === 0
-                    ? "Codex App Server exited."
-                    : `Codex App Server exited with code ${exitCode}.`,
-                ),
-              ),
-            );
-          }),
+    // Settle the session when the app-server process goes away mid-session.
+    // `child.exitCode` reports the departure on two distinct channels:
+    //   - success with a numeric code (the process called exit(code)); and
+    //   - FAILURE with a PlatformError when the process is terminated by a
+    //     signal (SIGKILL / SIGSEGV / OOM-kill / SIGABRT), where Node surfaces
+    //     `code === null`. A real Codex crash usually lands here.
+    // Both mean "the session is gone", so both must emit `session/exited`;
+    // handling only the success channel (the previous behaviour) left a
+    // signal-killed session stuck `running` until the stall watchdog and never
+    // fired the mid-turn auto-resume. Serialize the terminal transition so
+    // whichever of {process exit, graceful close} successfully emits first
+    // commits exactly one terminal event and the other becomes a no-op emit.
+    // The critical section is uninterruptible: after the queue accepts the event,
+    // the committed flag must be set before another claimant can enter. A failed
+    // emit leaves the flag unset so the other path can still deliver a terminal.
+    // This prevents a graceful `close()` (which signals the child during scope
+    // teardown) from double-emitting `session/closed` on top of a crash's
+    // `session/exited` — a stale second terminal event that, arriving after the
+    // replacement turn has started, would mark the healthy resumed session
+    // stopped and settle the live turn.
+    const emitTerminalOnce = (emit: Effect.Effect<void, CodexErrors.CodexAppServerError>) =>
+      terminalEmissionSemaphore.withPermit(
+        Effect.uninterruptible(
+          Ref.get(terminalEmittedRef).pipe(
+            Effect.flatMap((terminalAlreadyEmitted) => {
+              if (terminalAlreadyEmitted) {
+                return Effect.void;
+              }
+              return emit.pipe(Effect.andThen(Ref.set(terminalEmittedRef, true)));
+            }),
+          ),
         ),
-      ),
+      );
+
+    const settleProcessExit = (nextStatus: "closed" | "error", message: string) =>
+      emitTerminalOnce(
+        updateSession(sessionRef, {
+          status: nextStatus,
+          activeTurnId: undefined,
+        }).pipe(Effect.andThen(emitSessionEvent("session/exited", message))),
+      );
+
+    yield* child.exitCode.pipe(
+      Effect.matchEffect({
+        onSuccess: (exitCode) =>
+          settleProcessExit(
+            exitCode === 0 ? "closed" : "error",
+            exitCode === 0
+              ? "Codex App Server exited."
+              : `Codex App Server exited with code ${exitCode}.`,
+          ),
+        onFailure: (cause) =>
+          settleProcessExit(
+            "error",
+            `Codex App Server terminated: ${cause instanceof Error ? cause.message : String(cause)}`,
+          ),
+      }),
       Effect.forkIn(runtimeScope),
     );
 
@@ -1200,16 +1537,25 @@ export const makeCodexSessionRuntime = (
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
 
+      if (isCommandCenterPermissionProfile(options.permissionProfile)) {
+        yield* verifyCommandCenterCodexIsolation({
+          client: client.raw,
+          cwd: options.cwd,
+          permissionProfile: options.permissionProfile,
+        });
+      }
+
       const requestedModel = normalizeCodexModelSlug(options.model);
 
       const opened = yield* openCodexThread({
-        client,
+        client: client.raw,
         threadId: options.threadId,
         runtimeMode: options.runtimeMode,
         cwd: options.cwd,
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
       });
 
       const providerThreadId = opened.thread.id;
@@ -1247,14 +1593,21 @@ export const makeCodexSessionRuntime = (
         status: "closed",
         activeTurnId: undefined,
       });
-      yield* emitSessionEvent("session/closed", "Session stopped").pipe(
+      // Emit the terminal lifecycle event only if a crash-exit has not already
+      // delivered one; the cleanup below still runs unconditionally so the scope
+      // and queues are always torn down exactly once. A failed crash emission
+      // leaves this path able to deliver `session/closed` before ending the queue.
+      yield* emitTerminalOnce(emitSessionEvent("session/closed", "Session stopped")).pipe(
         Effect.catch((cause) =>
           Effect.logError("Failed to emit Codex session closed event.", { cause }),
         ),
       );
       yield* Scope.close(runtimeScope, Exit.void);
       yield* Queue.shutdown(serverNotifications);
-      yield* Queue.shutdown(events);
+      // Gracefully end (rather than hard-shutdown) the outward event queue so a
+      // just-emitted terminal event (session/closed or session/exited) is drained
+      // by the consumer before the stream completes, instead of being discarded.
+      yield* Queue.end(events);
     });
 
     return {
@@ -1284,6 +1637,7 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+            ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
@@ -1301,19 +1655,23 @@ export const makeCodexSessionRuntime = (
             activeTurnId: turnId,
             ...(normalizedModel ? { model: normalizedModel } : {}),
           });
-          const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return {
             threadId: options.threadId,
             turnId,
-            ...(resumedProviderThreadId
-              ? { resumeCursor: { threadId: resumedProviderThreadId } }
-              : {}),
+            resumeCursor: { threadId: providerThreadId },
+            target: {
+              sessionGeneration,
+              resumeCursor: { threadId: providerThreadId },
+            },
           } satisfies ProviderTurnStartResult;
         }),
-      interruptTurn: (turnId) =>
+      interruptTurn: (turnId, target) =>
         Effect.gen(function* () {
-          const providerThreadId = yield* readProviderThreadId;
           const session = yield* Ref.get(sessionRef);
+          if (target !== undefined && !matchesCodexInterruptTarget(session, target)) {
+            return;
+          }
+          const providerThreadId = yield* readProviderThreadId;
           const effectiveTurnId = turnId ?? session.activeTurnId;
           if (!effectiveTurnId) {
             return;

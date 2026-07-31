@@ -13,6 +13,10 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { CommandCenterToolkitHandlersLive } from "./toolkits/command-center/handlers.ts";
+import { CommandCenterToolkit } from "./toolkits/command-center/tools.ts";
+import { SupabaseToolkitHandlersLive } from "./toolkits/supabase/handlers.ts";
+import { SupabaseToolkit } from "./toolkits/supabase/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -208,10 +212,24 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
   PreviewSnapshotRegistrationLive,
 );
 
+export const CommandCenterToolkitRegistrationLive = McpServer.toolkit(CommandCenterToolkit).pipe(
+  Layer.provide(CommandCenterToolkitHandlersLive),
+);
+
+export const SupabaseToolkitRegistrationLive = McpServer.toolkit(SupabaseToolkit).pipe(
+  Layer.provide(SupabaseToolkitHandlersLive),
+);
+
+const ToolkitRegistrationLive = Layer.mergeAll(
+  PreviewToolkitRegistrationLive,
+  CommandCenterToolkitRegistrationLive,
+  SupabaseToolkitRegistrationLive,
+);
+
 const McpTransportLive = McpServer.layerHttp({
-  name: "T3 Code",
+  name: "Command Center",
   version: packageJson.version,
   path: "/mcp",
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
-export const layer = PreviewToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));
+export const layer = ToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));

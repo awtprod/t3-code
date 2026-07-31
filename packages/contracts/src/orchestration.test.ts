@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
+  ClientOrchestrationCommand,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   ModelSelection,
@@ -34,6 +35,7 @@ const decodeThreadTurnStartCommand = Schema.decodeUnknownEffect(ThreadTurnStartC
 const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
   ThreadTurnStartRequestedPayload,
 );
+const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationLatestTurn = Schema.decodeUnknownEffect(OrchestrationLatestTurn);
 const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(OrchestrationProposedPlan);
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
@@ -741,5 +743,57 @@ it.effect("ModelSelection rejects malformed instance ids", () =>
       }),
     );
     assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("a client-dispatched session stop cannot choose its own cancellation cutoff", () =>
+  Effect.gen(function* () {
+    // The wire form a hostile or buggy client would send. `0` is the damaging
+    // direction: it under-cancels, so every request already queued survives a
+    // stop the UI reports as done — and a surviving turn-start resurrects the
+    // very session being stopped, because `sendTurn` to a stopped session
+    // resolves with `allowRecovery: true`.
+    const decoded = yield* decodeClientOrchestrationCommand({
+      type: "thread.session.stop",
+      commandId: "cmd-client-stop",
+      threadId: "thread-1",
+      canceledThroughSequence: 0,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    // Decoded, not rejected — the client schema has no such field, so the value
+    // is dropped rather than made a hard error, and an old client that sends one
+    // still gets its stop honoured at full width. What must not survive is the
+    // value itself: the reactor falls back to `event.sequence` when the field is
+    // absent, which is exactly the stop the user asked for.
+    assert.strictEqual(decoded.type, "thread.session.stop");
+    assert.isFalse(
+      Object.hasOwn(decoded, "canceledThroughSequence"),
+      "client-supplied canceledThroughSequence must not survive decoding",
+    );
+  }),
+);
+
+it.effect("the server-side session stop still carries a cutoff for the escalation path", () =>
+  Effect.gen(function* () {
+    // The other half of the boundary, asserted so that narrowing the CLIENT
+    // schema cannot be mistaken for removing the field. `interruptTurnOrEscalate
+    // ToSessionStop` builds this command inside the server to date an escalated
+    // stop to the interrupt it is widening rather than to the moment the reactor
+    // gave up retrying; without it the escalation silently cancels a replacement
+    // prompt the user typed during the retry window.
+    const decoded = yield* decodeOrchestrationCommand({
+      type: "thread.session.stop",
+      commandId: "cmd-escalated-stop",
+      threadId: "thread-1",
+      canceledThroughSequence: 7,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(decoded.type, "thread.session.stop");
+    assert.strictEqual(
+      (decoded as { canceledThroughSequence?: number }).canceledThroughSequence,
+      7,
+    );
   }),
 );

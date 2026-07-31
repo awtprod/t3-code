@@ -156,6 +156,7 @@ describe("environmentBootstrap", () => {
   });
 
   it("uses the current origin as the descriptor base for local dev environments", async () => {
+    vi.stubEnv("VITE_DEV_SERVER_URL", "http://localhost:5735");
     installTestBrowser("http://localhost:5735/");
     await installDescriptorApi();
 
@@ -163,6 +164,7 @@ describe("environmentBootstrap", () => {
     expect(resolvePrimaryEnvironmentHttpUrl("/.well-known/t3/environment")).toBe(
       "http://localhost:5735/.well-known/t3/environment",
     );
+    expect(getPrimaryKnownEnvironment()?.target.wsBaseUrl).toBe("ws://localhost:5735/");
   });
 
   it("uses the vite proxy for desktop-managed loopback descriptor requests during local dev", async () => {
@@ -190,6 +192,39 @@ describe("environmentBootstrap", () => {
     expect(resolvePrimaryEnvironmentHttpUrl("/.well-known/t3/environment")).toBe(
       "http://127.0.0.1:5733/.well-known/t3/environment",
     );
+    expect(getPrimaryKnownEnvironment()?.target.wsBaseUrl).toBe("ws://127.0.0.1:5733/");
+  });
+
+  it("uses the vite proxy when the dev server is reached by a loopback alias", async () => {
+    // `VITE_DEV_SERVER_URL` is pinned to `localhost` by scripts/dev-runner.ts,
+    // so browsing the same dev server via 127.0.0.1 must not be treated as a
+    // foreign origin — doing so sends discovery cross-origin to the backend,
+    // where CORS blocks it and the bootstrap retries until its budget expires.
+    vi.stubEnv("VITE_DEV_SERVER_URL", "http://localhost:5733");
+    installTestBrowser("http://127.0.0.1:5733/");
+    await installDescriptorApi();
+
+    await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
+    expect(resolvePrimaryEnvironmentHttpUrl("/.well-known/t3/environment")).toBe(
+      "http://127.0.0.1:5733/.well-known/t3/environment",
+    );
+    expect(getPrimaryKnownEnvironment()?.target.wsBaseUrl).toBe("ws://127.0.0.1:5733/");
+  });
+
+  it("uses the vite proxy when the dev server is reached over a non-loopback host", async () => {
+    // Remote access (Tailscale/LAN) serves the dev server under a hostname that
+    // can never string-match the loopback VITE_DEV_SERVER_URL. The proxy is
+    // still the only reachable path to the backend, so keep routing through it.
+    vi.stubEnv("VITE_DEV_SERVER_URL", "http://localhost:5733");
+    vi.stubEnv("VITE_WS_URL", "ws://localhost:13773");
+    installTestBrowser("http://example-tailnet.ts.net/");
+    await installDescriptorApi();
+
+    await expect(resolveInitialPrimaryEnvironmentDescriptor()).resolves.toEqual(BASE_ENVIRONMENT);
+    expect(resolvePrimaryEnvironmentHttpUrl("/.well-known/t3/environment")).toBe(
+      "http://example-tailnet.ts.net/.well-known/t3/environment",
+    );
+    expect(getPrimaryKnownEnvironment()?.target.wsBaseUrl).toBe("ws://example-tailnet.ts.net/");
   });
 
   it("retains the URL parser cause without exposing the configured URL in its message", () => {

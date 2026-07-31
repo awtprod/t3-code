@@ -594,6 +594,78 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
     }).pipe(TestClock.withLive),
   );
 
+  it.effect("reports a mid-prompt sendTurn as a steer of the running turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-steers-running-turn");
+      // A delay rather than a hang: `AcpSessionRuntime.prompt` serializes every
+      // prompt behind one semaphore (AcpSessionRuntime.ts:295), so a prompt that
+      // never returns would also block the steering send from ever reaching the
+      // adapter code under test.
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ T3_ACP_PROMPT_DELAY_MS: "1500" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const firstSendTurnFiber = yield* adapter
+        .sendTurn({ threadId, input: "run 5 commands", attachments: [] })
+        .pipe(Effect.forkChild);
+
+      // Wait until the first prompt is counted in flight — `sendTurn` binds the
+      // active turn id before prompting, and only a send that lands while a
+      // prompt is in flight is folded.
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          const sessions = yield* adapter.listSessions();
+          if (sessions.find((entry) => entry.threadId === threadId)?.activeTurnId !== undefined) {
+            return;
+          }
+          yield* Effect.sleep("10 millis");
+        }
+        throw new Error("Timed out waiting for the first prompt to be in flight.");
+      });
+
+      // The steer: Grok folds this prompt into the ongoing work, reusing the
+      // active turn id instead of opening a new turn.
+      const steeredTurn = yield* adapter
+        .sendTurn({ threadId, input: "actually run 15", attachments: [] })
+        .pipe(Effect.timeout("10 seconds"));
+      const firstTurn = yield* Fiber.join(firstSendTurnFiber).pipe(Effect.timeout("10 seconds"));
+      assert.equal(String(steeredTurn.turnId), String(firstTurn.turnId));
+      // The fold is reported back, and only for the send that was folded. The
+      // turn id alone cannot distinguish the two cases from the reactor's side —
+      // a fresh turn also returns a valid id — so without this flag the steer's
+      // pending turn-start placeholder is never consumed by anything (the steer
+      // emits no `turn.started`, as asserted below) and later reads as a message
+      // that was requested but never sent.
+      assert.equal(firstTurn.steered ?? false, false);
+      assert.equal(steeredTurn.steered, true);
+
+      // One turn boundary for the whole run, which is exactly why the placeholder
+      // needs the flag above to be consumed at all.
+      const startedEvents = runtimeEvents.filter(
+        (event) => event.type === "turn.started" && String(event.threadId) === String(threadId),
+      );
+      assert.lengthOf(startedEvents, 1);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }).pipe(TestClock.withLive),
+  );
+
   it.effect("does not let a cancelled prompt settlement consume the follow-up prompt slot", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-cancelled-settlement-before-follow-up");

@@ -24,6 +24,10 @@ import {
   type UnifiedSettings,
 } from "@t3tools/contracts/settings";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
+import {
+  type AtomCommandResult,
+  isAtomCommandInterrupted,
+} from "@t3tools/client-runtime/state/runtime";
 import { ensureLocalApi } from "~/localApi";
 import * as Struct from "effect/Struct";
 import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
@@ -235,10 +239,27 @@ export function usePrimarySettings<T = UnifiedSettings>(
 }
 
 /**
+ * Whether a server settings write should be treated as persisted for
+ * optimistic-UI purposes.
+ *
+ * A success is obviously persisted. An interrupt-only failure is *not* a
+ * rejection: the write was superseded by a newer one (which reports its own
+ * outcome) or the caller unmounted. Treating an interrupt as failure would roll
+ * back an already-persisted change and surface a false error toast. This mirrors
+ * the framework convention (`reportAtomCommandResult`) and every other
+ * config-command caller (e.g. SettingsPanels refreshProviders / updateProvider).
+ * A genuine (non-interrupt) failure remains a real rejection.
+ */
+export function isSettingsWritePersisted(result: AtomCommandResult<unknown, unknown>): boolean {
+  return result._tag === "Success" || isAtomCommandInterrupted(result);
+}
+
+/**
  * Returns an updater that routes each key to the correct backing store.
  *
- * Server keys are optimistically patched in atom-backed server state, then
- * persisted via RPC. Client keys go through client persistence.
+ * Server keys are persisted via RPC and report whether the write succeeded so
+ * interactive callers can keep a local optimistic value until the config
+ * stream acknowledges it. Client keys go through client persistence.
  */
 function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
   const persistServerSettings = useAtomCommand(
@@ -246,15 +267,19 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
     "server settings update",
   );
   const updateSettings = useCallback(
-    (patch: Partial<UnifiedSettings>) => {
+    async (patch: Partial<UnifiedSettings>): Promise<boolean> => {
       const { serverPatch, clientPatch } = splitPatch(patch);
+      let persisted = true;
 
       if (Object.keys(serverPatch).length > 0) {
         if (environmentId) {
-          void persistServerSettings({
+          const result = await persistServerSettings({
             environmentId,
             input: { patch: serverPatch },
           });
+          persisted = isSettingsWritePersisted(result);
+        } else {
+          persisted = false;
         }
       }
 
@@ -264,6 +289,8 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
           ...clientPatch,
         });
       }
+
+      return persisted;
     },
     [environmentId, persistServerSettings],
   );

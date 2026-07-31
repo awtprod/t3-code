@@ -6,6 +6,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import {
   createContext,
@@ -68,6 +69,7 @@ import { MessageCopyButton } from "./MessageCopyButton";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
+  deriveWorkingIndicatorStatus,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
@@ -75,10 +77,12 @@ import {
   resolveTimelineMinimapHeightStyle,
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapTopPercent,
+  resolveWorkingSilenceStart,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
   TIMELINE_MINIMAP_MIN_ITEMS,
   type TimelineLatestTurn,
+  type WorkingIndicatorStatus,
 } from "./MessagesTimeline.logic";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -156,6 +160,14 @@ interface MessagesTimelineProps {
   isWorking: boolean;
   activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
+  /**
+   * Transport state of the thread's environment, so the working indicator can
+   * stop claiming progress while the socket is down. `null` for a local draft,
+   * which has no environment connection.
+   */
+  connectionPhase?: EnvironmentConnectionPhase | null;
+  /** Thread `updatedAt` — times the "stalled" label from the silence, not the turn. */
+  lastActivityAt?: string | null;
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
   latestTurn: TimelineLatestTurn | null;
@@ -190,6 +202,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   isWorking,
   activeTurnInProgress,
   activeTurnStartedAt,
+  connectionPhase,
+  lastActivityAt,
   listRef,
   timelineEntries,
   latestTurn,
@@ -303,6 +317,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         expandedWorkGroupIds,
         isWorking,
         activeTurnStartedAt,
+        connectionPhase,
+        lastActivityAt,
         turnDiffSummaryByAssistantMessageId,
         revertTurnCountByUserMessageId,
       }),
@@ -314,6 +330,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       expandedWorkGroupIds,
       isWorking,
       activeTurnStartedAt,
+      connectionPhase,
+      lastActivityAt,
       turnDiffSummaryByAssistantMessageId,
       revertTurnCountByUserMessageId,
     ],
@@ -1056,26 +1074,129 @@ function ProposedPlanTimelineRow({
 }
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
+  // The status is derived here rather than in ChatView because it depends on
+  // wall-clock time: a turn crosses into "stalled" purely by the passage of
+  // seconds, with no state change upstream to trigger a re-render. Ticking in
+  // ChatView would re-render the entire view every few seconds; ticking here
+  // re-renders one row, consistent with the self-ticking labels below.
+  const status = useWorkingIndicatorStatus(row.connectionPhase, row.lastActivityAt, row.createdAt);
+  // The same instant the threshold is measured from, so the label and the
+  // status can never disagree about how long the silence has run.
+  const silenceStartedAt = resolveWorkingSilenceStart(row.lastActivityAt, row.createdAt);
+
+  // The dots keep pulsing in every state — the turn genuinely may still be
+  // running server-side — but the label stops claiming we can see progress.
+  const dotClassName =
+    status === "working" ? "bg-muted-foreground/30" : "bg-amber-500/50 dark:bg-amber-400/50";
+
   return (
     <div className="py-0.5 pl-1.5">
-      <div className="flex items-center gap-2 pt-1 text-[11px] text-muted-foreground/70 tabular-nums">
+      <div
+        className="flex items-center gap-2 pt-1 text-[11px] text-muted-foreground/70 tabular-nums"
+        data-working-status={status}
+      >
         <span className="inline-flex items-center gap-[3px]">
-          <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse" />
-          <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:200ms]" />
-          <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:400ms]" />
+          <span className={`h-1 w-1 rounded-full animate-status-pulse ${dotClassName}`} />
+          <span
+            className={`h-1 w-1 rounded-full animate-status-pulse [animation-delay:200ms] ${dotClassName}`}
+          />
+          <span
+            className={`h-1 w-1 rounded-full animate-status-pulse [animation-delay:400ms] ${dotClassName}`}
+          />
         </span>
         <span>
-          {row.createdAt ? (
-            <>
-              Working for <WorkingTimer createdAt={row.createdAt} />
-            </>
-          ) : (
-            "Working..."
-          )}
+          <WorkingRowLabel
+            status={status}
+            createdAt={row.createdAt}
+            silenceStartedAt={silenceStartedAt}
+          />
         </span>
       </div>
     </div>
   );
+}
+
+/**
+ * Re-evaluates the indicator status as silence accumulates.
+ *
+ * Only re-renders on an actual status *change*, not on every tick: the interval
+ * is coarse (the threshold is minutes, so second-level precision buys nothing)
+ * and the setState is a no-op while the status holds steady. The interval is
+ * dropped entirely once "stalled" is reached, since nothing further can change
+ * it without new props.
+ */
+function useWorkingIndicatorStatus(
+  connectionPhase: EnvironmentConnectionPhase | null,
+  lastActivityAt: string | null,
+  workStartedAt: string | null,
+): WorkingIndicatorStatus {
+  const evaluateStatus = useCallback(
+    () =>
+      deriveWorkingIndicatorStatus({
+        connectionPhase,
+        lastActivityAt,
+        workStartedAt,
+        nowMs: Date.now(),
+      }),
+    [connectionPhase, lastActivityAt, workStartedAt],
+  );
+  const [status, setStatus] = useState<WorkingIndicatorStatus>(evaluateStatus);
+
+  useEffect(() => {
+    const evaluate = evaluateStatus;
+
+    // Props changed — resync immediately rather than waiting out the interval,
+    // so a socket drop is reflected at once.
+    const initial = evaluate();
+    setStatus(initial);
+    if (initial === "stalled") return;
+
+    const id = setInterval(() => {
+      const next = evaluate();
+      setStatus(next);
+      if (next === "stalled") clearInterval(id);
+    }, WORKING_STATUS_POLL_MS);
+    return () => clearInterval(id);
+  }, [evaluateStatus]);
+
+  return status;
+}
+
+/** How often the working row re-checks whether silence has crossed the threshold. */
+const WORKING_STATUS_POLL_MS = 5_000;
+
+function WorkingRowLabel({
+  status,
+  createdAt,
+  silenceStartedAt,
+}: {
+  status: WorkingIndicatorStatus;
+  createdAt: string | null;
+  silenceStartedAt: string | null;
+}) {
+  switch (status) {
+    case "reconnecting":
+      // Deliberately not an error: a turn survives a client disconnect, so the
+      // work is probably still happening — we just cannot see it right now.
+      return <>Reconnecting… this turn keeps running on the server</>;
+    case "stalled":
+      // Timed from the last activity, not from the turn start.
+      return silenceStartedAt ? (
+        <>
+          No response for <WorkingTimer createdAt={silenceStartedAt} /> — may be stuck
+        </>
+      ) : (
+        <>No response yet — may be stuck</>
+      );
+    case "working":
+      return createdAt ? (
+        <>
+          Working for <WorkingTimer createdAt={createdAt} />
+        </>
+      ) : (
+        <>Working...</>
+      );
+  }
 }
 
 // ---------------------------------------------------------------------------

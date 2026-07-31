@@ -9,6 +9,7 @@
 import {
   EventId,
   IsoDateTime,
+  MessageId,
   NonNegativeInt,
   OrchestrationThreadActivityTone,
   ThreadId,
@@ -24,6 +25,7 @@ export const ProjectionThreadActivity = Schema.Struct({
   activityId: EventId,
   threadId: ThreadId,
   turnId: Schema.NullOr(TurnId),
+  correlatedMessageId: Schema.optional(MessageId),
   tone: OrchestrationThreadActivityTone,
   kind: Schema.String,
   summary: Schema.String,

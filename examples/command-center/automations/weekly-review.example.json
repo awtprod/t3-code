@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "example-weekly-review",
+  "name": "Weekly review template",
+  "spaceId": "personal",
+  "enabled": false,
+  "trigger": {
+    "kind": "manual"
+  },
+  "nodes": [],
+  "edges": [],
+  "layout": {},
+  "policy": {
+    "requireApprovalForExternalWrites": true
+  }
+}

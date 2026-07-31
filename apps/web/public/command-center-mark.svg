@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Command Center">
+  <defs>
+    <linearGradient id="surface" x1="16" y1="8" x2="112" y2="120" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111827"/>
+      <stop offset="0.55" stop-color="#080A12"/>
+      <stop offset="1" stop-color="#020617"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(64 60) rotate(90) scale(62)">
+      <stop stop-color="#2563EB" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#2563EB" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="14" y1="28" x2="115" y2="100" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.58" stop-color="#E2E8F0"/>
+      <stop offset="1" stop-color="#7DD3FC"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#surface)"/>
+  <rect x="1" y="1" width="126" height="126" rx="27" fill="url(#glow)" stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="2"/>
+  <path d="M55 39C50 32.5 44 29 37 29C22 29 13 44 13 64C13 84 22 99 37 99C44 99 50 95.5 55 89" fill="none" stroke="url(#mark)" stroke-width="12" stroke-linecap="round"/>
+  <path d="M115 39C110 32.5 104 29 97 29C82 29 73 44 73 64C73 84 82 99 97 99C104 99 110 95.5 115 89" fill="none" stroke="url(#mark)" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="64" cy="64" r="4" fill="#38BDF8"/>
+</svg>

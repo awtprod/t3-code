@@ -6,6 +6,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { VcsProcessExitError, VcsProcessSpawnError } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { hardenedGitSpawningCliEnvironment } from "../vcs/HostGitSecurity.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 
 const processOutput = (stdout: string): VcsProcess.VcsProcessOutput => ({
@@ -285,6 +286,25 @@ describe("GitHubCli.layer", () => {
         nameWithOwner: "octocat/codething-mvp",
         url: "https://github.com/octocat/codething-mvp",
         sshUrl: "git@github.com:octocat/codething-mvp.git",
+      });
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("uses an exact child-Git environment when checking out pull requests", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(Effect.succeed(processOutput("")));
+
+      const gh = yield* GitHubCli.GitHubCli;
+      yield* gh.checkoutPullRequest({ cwd: "/repo", reference: "42", force: true });
+
+      expect(mockRun).toHaveBeenCalledWith({
+        operation: "GitHubCli.execute",
+        command: "gh",
+        args: ["pr", "checkout", "42", "--force"],
+        cwd: "/repo",
+        env: hardenedGitSpawningCliEnvironment("github"),
+        extendEnv: false,
+        timeoutMs: 30_000,
       });
     }).pipe(Effect.provide(layer)),
   );

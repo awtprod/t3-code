@@ -9,13 +9,13 @@ import * as DesktopConfig from "./DesktopConfig.ts";
 
 const defaultInput = {
   dirname: "/repo/apps/desktop/dist-electron",
-  homeDirectory: "/Users/alice",
+  homeDirectory: "/user-home",
   platform: "darwin",
   processArch: "arm64",
   appVersion: "0.0.22",
-  appPath: "/Applications/T3 Code.app/Contents/Resources/app.asar",
+  appPath: "/Applications/Command Center.app/Contents/Resources/app.asar",
   isPackaged: false,
-  resourcesPath: "/Applications/T3 Code.app/Contents/Resources",
+  resourcesPath: "/Applications/Command Center.app/Contents/Resources",
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
@@ -51,7 +51,7 @@ describe("DesktopEnvironment", () => {
       );
 
       assert.equal(environment.isDevelopment, true);
-      assert.equal(environment.appDataDirectory, "/Users/alice/Library/Application Support");
+      assert.equal(environment.appDataDirectory, "/user-home/Library/Application Support");
       assert.equal(environment.baseDir, "/tmp/t3");
       assert.equal(environment.stateDir, "/tmp/t3/userdata");
       assert.equal(environment.desktopSettingsPath, "/tmp/t3/userdata/desktop-settings.json");
@@ -106,8 +106,23 @@ describe("DesktopEnvironment", () => {
       );
       const production = yield* makeEnvironment();
 
-      assert.equal(development.stateDir, "/Users/alice/.t3/dev");
-      assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
+      assert.equal(development.stateDir, "/user-home/.command-center/dev");
+      assert.equal(production.stateDir, "/user-home/.command-center/userdata");
+    }),
+  );
+
+  it.effect("prefers the Command Center runtime directory over the legacy override", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment(
+        {},
+        {
+          COMMAND_CENTER_HOME: "/tmp/command-center",
+          T3CODE_HOME: "/tmp/legacy-t3",
+        },
+      );
+
+      assert.equal(environment.baseDir, "/tmp/command-center");
+      assert.equal(environment.stateDir, "/tmp/command-center/userdata");
     }),
   );
 
@@ -136,11 +151,11 @@ describe("DesktopEnvironment", () => {
       );
       assert.deepEqual(
         environment.resolvePickFolderDefaultPath({ initialPath: "~" }),
-        Option.some("/Users/alice"),
+        Option.some("/user-home"),
       );
       assert.deepEqual(
         environment.resolvePickFolderDefaultPath({ initialPath: "~/project" }),
-        Option.some("/Users/alice/project"),
+        Option.some("/user-home/project"),
       );
     }),
   );

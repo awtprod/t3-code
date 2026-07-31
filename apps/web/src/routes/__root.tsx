@@ -115,13 +115,12 @@ function RootRouteView() {
     );
   }
 
-  const appShell = (
-    <CommandPalette>
-      <AppSidebarLayout>
-        <Outlet />
-      </AppSidebarLayout>
-    </CommandPalette>
+  const routedContent = (
+    <AppSidebarLayout>
+      <Outlet />
+    </AppSidebarLayout>
   );
+  const appShell = <CommandPalette>{routedContent}</CommandPalette>;
 
   return (
     <ToastProvider>

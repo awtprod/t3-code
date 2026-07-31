@@ -23,6 +23,12 @@ export interface ProcessRunInput {
   readonly spawnCwd?: string | undefined;
   readonly timeout?: Duration.Input | undefined;
   readonly env?: NodeJS.ProcessEnv | undefined;
+  /**
+   * Whether `env` is merged over the host environment. The historical default
+   * remains `true` whenever `env` is supplied; security-sensitive callers can
+   * opt into an exact, scrubbed environment with `false`.
+   */
+  readonly extendEnv?: boolean | undefined;
   readonly stdin?: string | undefined;
   readonly maxOutputBytes?: number | undefined;
   readonly outputMode?: "error" | "truncate" | undefined;
@@ -290,7 +296,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
   const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const outputMode = input.outputMode ?? "error";
   const truncatedMarker = input.truncatedMarker ?? "";
-  const extendEnv = input.env !== undefined;
+  const extendEnv = input.env !== undefined && (input.extendEnv ?? true);
   const spawnCommand = yield* resolveSpawnCommand(
     input.command,
     input.args,
@@ -344,7 +350,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
           ),
         );
 
-  const [stdout, stderr] = yield* Effect.all(
+  const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectText({
         command: input.command,
@@ -369,23 +375,22 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
         truncatedMarker,
       }),
       writeStdin,
+      child.exitCode.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProcessReadError({
+              command: input.command,
+              argumentCount: input.args.length,
+              cwd: input.cwd,
+              spawnCwd: input.spawnCwd,
+              stream: "exitCode",
+              cause,
+            }),
+        ),
+      ),
     ],
     { concurrency: "unbounded" },
-  );
-
-  const exitCode = yield* child.exitCode.pipe(
-    Effect.mapError(
-      (cause) =>
-        new ProcessReadError({
-          command: input.command,
-          argumentCount: input.args.length,
-          cwd: input.cwd,
-          spawnCwd: input.spawnCwd,
-          stream: "exitCode",
-          cause,
-        }),
-    ),
-  );
+  ).pipe(Effect.map(([stdout, stderr, _stdin, exitCode]) => [stdout, stderr, exitCode] as const));
 
   return {
     stdout: stdout.text,

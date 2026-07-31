@@ -1,5 +1,3 @@
-import * as Cause from "effect/Cause";
-import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -9,6 +7,14 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import {
+  ProjectId as CommandCenterProjectId,
+  RepositoryId as CommandCenterRepositoryId,
+  RunId as CommandCenterRunId,
+  SpaceId as CommandCenterSpaceId,
+  type SpaceId as CommandCenterSpaceIdType,
+  ThreadId as CommandCenterThreadId,
+} from "@command-center/core";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   AuthOrchestrationOperateScope,
@@ -22,8 +28,10 @@ import {
   type AuthEnvironmentScope,
   AuthSessionId,
   CommandId,
+  COMMAND_CENTER_WS_METHODS,
+  CommandCenterError,
+  CommandCenterEventStreamError,
   type DiscoveredLocalServerList,
-  EventId,
   type OrchestrationCommand,
   type GitActionProgressEvent,
   type GitManagerServiceError,
@@ -60,7 +68,12 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { clamp } from "effect/Number";
-import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
+import {
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerRespondable,
+  HttpServerResponse,
+} from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -68,6 +81,7 @@ import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { normalizeDispatchCommand } from "./orchestration/Normalizer.ts";
+import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -92,7 +106,6 @@ import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
-import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
@@ -113,26 +126,31 @@ import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
+import { decideWebSocketOrigin } from "./auth/websocketOrigin.ts";
+import { DESKTOP_RENDERER_ORIGINS } from "./httpCors.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import { refreshCommandCenterConnection } from "./command-center/ConnectionRefresh.ts";
+import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
+import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
+import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
+import * as RunDispatcher from "./command-center/RunDispatcher.ts";
+import * as ReadinessGate from "./command-center/ReadinessGate.ts";
+import { commandCenterProviderAvailability } from "./command-center/ProviderAvailability.ts";
+import {
+  COMMAND_CENTER_RPC_SCOPE_ENTRIES,
+  commandCenterRpcRequiresReadiness,
+} from "./command-center/RpcAuthorization.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 function unexpectedCompatibilityError(error: never): never {
   throw new Error(`Unhandled compatibility error: ${String(error)}`);
-}
-
-/** Preserve the setup runner's broader pre-refactor message normalization. */
-function legacySetupFailureDescription(cause: unknown): string {
-  if (
-    typeof cause === "object" &&
-    cause !== null &&
-    "message" in cause &&
-    typeof cause.message === "string"
-  ) {
-    return cause.message;
-  }
-  return String(cause);
 }
 
 function projectEntriesFailureContext(error: WorkspaceEntries.WorkspaceEntriesError): {
@@ -239,19 +257,6 @@ function projectFileFailureContext(
   }
 }
 
-function projectSetupScriptCompatibilityDetail(
-  error: ProjectSetupScriptRunner.ProjectSetupScriptRunnerError,
-): string {
-  switch (error._tag) {
-    case "ProjectSetupScriptOperationError":
-      return legacySetupFailureDescription(error.cause);
-    case "ProjectSetupScriptProjectNotFoundError":
-      return "Project was not found for setup script execution.";
-    default:
-      return unexpectedCompatibilityError(error);
-  }
-}
-
 function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
   OrchestrationEvent,
   {
@@ -277,6 +282,7 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
+  ...COMMAND_CENTER_RPC_SCOPE_ENTRIES,
   [ORCHESTRATION_WS_METHODS.dispatchCommand, AuthOrchestrationOperateScope],
   [ORCHESTRATION_WS_METHODS.getTurnDiff, AuthOrchestrationReadScope],
   [ORCHESTRATION_WS_METHODS.getFullThreadDiff, AuthOrchestrationReadScope],
@@ -394,9 +400,10 @@ const makeWsRpcLayer = (
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
-      const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const orchestrationCommandDispatcher =
+        yield* OrchestrationCommandDispatcher.OrchestrationCommandDispatcher;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
@@ -415,7 +422,6 @@ const makeWsRpcLayer = (
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
-      const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
@@ -436,6 +442,27 @@ const makeWsRpcLayer = (
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const relayClient = yield* RelayClient.RelayClient;
+      const commandCenter = yield* CommandCenterService.CommandCenterService;
+      const commandCenterEvents = yield* CommandCenterEventStream.CommandCenterEventStream;
+      const automationDefinitionConfig =
+        yield* AutomationDefinitionConfig.AutomationDefinitionConfig;
+      const commandCenterAutomationRuns = yield* AutomationRuns.AutomationRuns;
+      const commandCenterAutomationTriggers = yield* AutomationTriggerCoordinator.make;
+      const commandCenterMemorySearch = yield* MemorySearchIndex.MemorySearchIndex;
+      const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
+      const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
+      const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
+        commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
+          Effect.asVoid,
+          Effect.mapError(
+            (cause) =>
+              new CommandCenterEventStreamError({
+                reason: "query",
+                message: "Private configuration could not be verified for this event query.",
+                cause,
+              }),
+          ),
+        );
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
           message: `The authenticated token is missing required scope: ${requiredScope}.`,
@@ -462,6 +489,40 @@ const makeWsRpcLayer = (
         }
         return requiredScope;
       };
+      const commandCenterUnavailable = (method: string) =>
+        method === COMMAND_CENTER_WS_METHODS.eventsReplay ||
+        method === COMMAND_CENTER_WS_METHODS.eventsSubscribe ||
+        method === COMMAND_CENTER_WS_METHODS.timelineQuery
+          ? new CommandCenterEventStreamError({
+              reason: "query",
+              message: "Command Center is temporarily unavailable.",
+            })
+          : new CommandCenterError({
+              reason: "config",
+              message: "Command Center is temporarily unavailable.",
+            });
+      const gateCommandCenterEffect = <A, E, R>(
+        method: string,
+        effect: Effect.Effect<A, E, R>,
+      ): Effect.Effect<A, E, R> =>
+        commandCenterRpcRequiresReadiness(method)
+          ? commandCenterReadiness.requireReady.pipe(
+              Effect.mapError(() => commandCenterUnavailable(method) as E),
+              Effect.andThen(effect),
+            )
+          : effect;
+      const gateCommandCenterStream = <A, E, R>(
+        method: string,
+        stream: Stream.Stream<A, E, R>,
+      ): Stream.Stream<A, E, R> =>
+        commandCenterRpcRequiresReadiness(method)
+          ? Stream.unwrap(
+              commandCenterReadiness.requireReady.pipe(
+                Effect.mapError(() => commandCenterUnavailable(method) as E),
+                Effect.as(stream),
+              ),
+            )
+          : stream;
       const observeRpcEffect = <A, E, R>(
         method: string,
         effect: Effect.Effect<A, E, R>,
@@ -469,7 +530,7 @@ const makeWsRpcLayer = (
       ) =>
         instrumentRpcEffect(
           method,
-          authorizeEffect(requiredScopeForMethod(method), effect),
+          authorizeEffect(requiredScopeForMethod(method), gateCommandCenterEffect(method, effect)),
           traceAttributes,
         );
       const observeRpcStream = <A, E, R>(
@@ -479,7 +540,7 @@ const makeWsRpcLayer = (
       ) =>
         instrumentRpcStream(
           method,
-          authorizeStream(requiredScopeForMethod(method), stream),
+          authorizeStream(requiredScopeForMethod(method), gateCommandCenterStream(method, stream)),
           traceAttributes,
         );
       const observeRpcStreamEffect = <A, StreamError, StreamContext, EffectError, EffectContext>(
@@ -493,25 +554,9 @@ const makeWsRpcLayer = (
       ) =>
         instrumentRpcStreamEffect(
           method,
-          authorizeEffect(requiredScopeForMethod(method), effect),
+          authorizeEffect(requiredScopeForMethod(method), gateCommandCenterEffect(method, effect)),
           traceAttributes,
         );
-      const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
-        isOrchestrationDispatchCommandError(cause)
-          ? cause
-          : new OrchestrationDispatchCommandError({
-              message: cause instanceof Error ? cause.message : fallbackMessage,
-              cause,
-            });
-      const randomUUID = crypto.randomUUIDv4.pipe(
-        Effect.mapError((cause) =>
-          toDispatchCommandError(cause, "Failed to generate orchestration command identifier."),
-        ),
-      );
-      const serverEventId = randomUUID.pipe(Effect.map(EventId.make));
-      const serverCommandId = (tag: string) =>
-        randomUUID.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
-
       const loadAuthAccessSnapshot = () =>
         Effect.all({
           pairingLinks: serverAuth.listPairingLinks(),
@@ -524,48 +569,6 @@ const makeWsRpcLayer = (
               }),
           ),
         );
-
-      const appendSetupScriptActivity = (input: {
-        readonly threadId: ThreadId;
-        readonly kind: "setup-script.requested" | "setup-script.started" | "setup-script.failed";
-        readonly summary: string;
-        readonly createdAt: string;
-        readonly payload: Record<string, unknown>;
-        readonly tone: "info" | "error";
-      }) =>
-        Effect.all({
-          commandId: serverCommandId("setup-script-activity"),
-          activityId: serverEventId,
-        }).pipe(
-          Effect.flatMap(({ commandId, activityId }) =>
-            orchestrationEngine.dispatch({
-              type: "thread.activity.append",
-              commandId,
-              threadId: input.threadId,
-              activity: {
-                id: activityId,
-                tone: input.tone,
-                kind: input.kind,
-                summary: input.summary,
-                payload: input.payload,
-                turnId: null,
-                createdAt: input.createdAt,
-              },
-              createdAt: input.createdAt,
-            }),
-          ),
-        );
-
-      const toBootstrapDispatchCommandCauseError = (cause: Cause.Cause<unknown>) => {
-        const error = Cause.squash(cause);
-        return isOrchestrationDispatchCommandError(error)
-          ? error
-          : new OrchestrationDispatchCommandError({
-              message:
-                error instanceof Error ? error.message : "Failed to bootstrap thread turn start.",
-              cause,
-            });
-      };
 
       const enrichProjectEvent = (
         event: OrchestrationEvent,
@@ -677,234 +680,31 @@ const makeWsRpcLayer = (
         }
       };
 
-      const dispatchBootstrapTurnStart = (
-        command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
-      ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> =>
-        Effect.gen(function* () {
-          const bootstrap = command.bootstrap;
-          const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
-          let createdThread = false;
-          let targetProjectId = bootstrap?.createThread?.projectId;
-          let targetProjectCwd = bootstrap?.prepareWorktree?.projectCwd;
-          let targetWorktreePath = bootstrap?.createThread?.worktreePath ?? null;
+      const dispatchNormalizedCommand = (normalizedCommand: OrchestrationCommand) =>
+        startup.enqueueCommand(
+          orchestrationCommandDispatcher.dispatchNormalized(normalizedCommand),
+        );
 
-          const cleanupCreatedThread = () =>
-            createdThread
-              ? serverCommandId("bootstrap-thread-delete").pipe(
-                  Effect.flatMap((commandId) =>
-                    orchestrationEngine.dispatch({
-                      type: "thread.delete",
-                      commandId,
-                      threadId: command.threadId,
-                    }),
-                  ),
-                  Effect.ignoreCause({ log: true }),
-                )
-              : Effect.void;
-
-          const recordSetupScriptLaunchFailure = (input: {
-            readonly error: ProjectSetupScriptRunner.ProjectSetupScriptRunnerError;
-            readonly requestedAt: string;
-            readonly worktreePath: string;
-          }) => {
-            const detail = projectSetupScriptCompatibilityDetail(input.error);
-            return appendSetupScriptActivity({
-              threadId: command.threadId,
-              kind: "setup-script.failed",
-              summary: "Setup script failed to start",
-              createdAt: input.requestedAt,
-              payload: {
-                detail,
-                worktreePath: input.worktreePath,
-              },
-              tone: "error",
-            }).pipe(
-              Effect.ignoreCause({ log: false }),
-              Effect.flatMap(() =>
-                Effect.logWarning("bootstrap turn start failed to launch setup script", {
-                  threadId: command.threadId,
-                  worktreePath: input.worktreePath,
-                  detail,
-                }),
-              ),
-            );
-          };
-
-          const recordSetupScriptStarted = (input: {
-            readonly requestedAt: string;
-            readonly worktreePath: string;
-            readonly scriptId: string;
-            readonly scriptName: string;
-            readonly terminalId: string;
-          }) =>
-            Effect.gen(function* () {
-              const startedAt = yield* nowIso;
-              const payload = {
-                scriptId: input.scriptId,
-                scriptName: input.scriptName,
-                terminalId: input.terminalId,
-                worktreePath: input.worktreePath,
-              };
-              yield* Effect.all([
-                appendSetupScriptActivity({
-                  threadId: command.threadId,
-                  kind: "setup-script.requested",
-                  summary: "Starting setup script",
-                  createdAt: input.requestedAt,
-                  payload,
-                  tone: "info",
-                }),
-                appendSetupScriptActivity({
-                  threadId: command.threadId,
-                  kind: "setup-script.started",
-                  summary: "Setup script started",
-                  createdAt: startedAt,
-                  payload,
-                  tone: "info",
-                }),
-              ]).pipe(
-                Effect.asVoid,
-                Effect.catch((error) =>
-                  Effect.logWarning(
-                    "bootstrap turn start launched setup script but failed to record setup activity",
-                    {
-                      threadId: command.threadId,
-                      worktreePath: input.worktreePath,
-                      scriptId: input.scriptId,
-                      terminalId: input.terminalId,
-                      detail: error.message,
-                    },
-                  ),
-                ),
-              );
-            });
-
-          const runSetupProgram = () =>
-            Effect.gen(function* () {
-              if (!bootstrap?.runSetupScript || !targetWorktreePath) {
-                return;
-              }
-              const worktreePath = targetWorktreePath;
-              const requestedAt = yield* nowIso;
-              yield* projectSetupScriptRunner
-                .runForThread({
-                  threadId: command.threadId,
-                  ...(targetProjectId ? { projectId: targetProjectId } : {}),
-                  ...(targetProjectCwd ? { projectCwd: targetProjectCwd } : {}),
-                  worktreePath,
-                })
-                .pipe(
-                  Effect.matchEffect({
-                    onFailure: (error) =>
-                      recordSetupScriptLaunchFailure({
-                        error,
-                        requestedAt,
-                        worktreePath,
-                      }),
-                    onSuccess: (setupResult) => {
-                      if (setupResult.status !== "started") {
-                        return Effect.void;
-                      }
-                      return recordSetupScriptStarted({
-                        requestedAt,
-                        worktreePath,
-                        scriptId: setupResult.scriptId,
-                        scriptName: setupResult.scriptName,
-                        terminalId: setupResult.terminalId,
-                      });
-                    },
-                  }),
-                );
-            });
-
-          const bootstrapProgram = Effect.gen(function* () {
-            if (bootstrap?.createThread) {
-              yield* orchestrationEngine.dispatch({
-                type: "thread.create",
-                commandId: yield* serverCommandId("bootstrap-thread-create"),
-                threadId: command.threadId,
-                projectId: bootstrap.createThread.projectId,
-                title: bootstrap.createThread.title,
-                modelSelection: bootstrap.createThread.modelSelection,
-                runtimeMode: bootstrap.createThread.runtimeMode,
-                interactionMode: bootstrap.createThread.interactionMode,
-                branch: bootstrap.createThread.branch,
-                worktreePath: bootstrap.createThread.worktreePath,
-                createdAt: bootstrap.createThread.createdAt,
-              });
-              createdThread = true;
-            }
-
-            if (bootstrap?.prepareWorktree) {
-              let worktreeBaseRef = bootstrap.prepareWorktree.baseBranch;
-              if (bootstrap.prepareWorktree.startFromOrigin) {
-                yield* gitWorkflow.fetchRemote({
-                  cwd: bootstrap.prepareWorktree.projectCwd,
-                  remoteName: "origin",
-                });
-                const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
-                  cwd: bootstrap.prepareWorktree.projectCwd,
-                  refName: bootstrap.prepareWorktree.baseBranch,
-                  fallbackRemoteName: "origin",
-                });
-                worktreeBaseRef = resolvedRemoteBase.commitSha;
-              }
-              const worktree = yield* gitWorkflow.createWorktree({
-                cwd: bootstrap.prepareWorktree.projectCwd,
-                refName: worktreeBaseRef,
-                newRefName: bootstrap.prepareWorktree.branch,
-                baseRefName: bootstrap.prepareWorktree.baseBranch,
-                path: null,
-              });
-              targetWorktreePath = worktree.worktree.path;
-              yield* orchestrationEngine.dispatch({
-                type: "thread.meta.update",
-                commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
-                threadId: command.threadId,
-                branch: worktree.worktree.refName,
-                worktreePath: targetWorktreePath,
-              });
-              yield* refreshGitStatus(targetWorktreePath);
-            }
-
-            yield* runSetupProgram();
-
-            return yield* orchestrationEngine.dispatch(finalTurnStartCommand);
-          });
-
-          return yield* bootstrapProgram.pipe(
-            Effect.catchCause((cause) => {
-              const dispatchError = toBootstrapDispatchCommandCauseError(cause);
-              if (Cause.hasInterruptsOnly(cause)) {
-                return Effect.fail(dispatchError);
-              }
-              return cleanupCreatedThread().pipe(Effect.flatMap(() => Effect.fail(dispatchError)));
-            }),
-          );
-        });
-
-      const dispatchNormalizedCommand = (
-        normalizedCommand: OrchestrationCommand,
-      ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
-        const dispatchEffect =
-          normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-            ? dispatchBootstrapTurnStart(normalizedCommand)
-            : orchestrationEngine
-                .dispatch(normalizedCommand)
-                .pipe(
-                  Effect.mapError((cause) =>
-                    toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-                  ),
-                );
-
-        return startup
-          .enqueueCommand(dispatchEffect)
-          .pipe(
-            Effect.mapError((cause) =>
-              toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-            ),
-          );
-      };
+      const dispatchCommandCenterRun = (runId: CommandCenterRunId) =>
+        RunDispatcher.dispatchActiveRun({
+          runId,
+          dispatchCommand: (command) =>
+            normalizeDispatchCommand(command).pipe(Effect.flatMap(dispatchNormalizedCommand)),
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new CommandCenterError({
+                reason:
+                  cause.reason === "not-found"
+                    ? "not_found"
+                    : cause.reason === "persistence-failed"
+                      ? "persistence"
+                      : "routing",
+                message: cause.message,
+                cause,
+              }),
+          ),
+        );
 
       const loadServerConfig = Effect.gen(function* () {
         const keybindingsConfig = yield* keybindings.loadConfigState;
@@ -934,6 +734,21 @@ const makeWsRpcLayer = (
               : {}),
             otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
           },
+          // Only advertised once the gateway is actually listening; a client
+          // that sees this field will route previews through it, so announcing
+          // a port nothing answers would break previews that work today.
+          ...(config.previewGatewayEnabled && config.previewGatewayPort > 0
+            ? {
+                previewGateway: {
+                  loopbackPort: config.previewGatewayPort,
+                  // Tailscale Serve is what makes the gateway reachable from
+                  // another machine; without it there is no public port to name.
+                  ...(config.tailscaleServeEnabled
+                    ? { publicHttpsPort: config.previewGatewayServePort }
+                    : {}),
+                },
+              }
+            : {}),
           settings,
         };
       });
@@ -944,6 +759,347 @@ const makeWsRpcLayer = (
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
       return WsRpcGroup.of({
+        [COMMAND_CENTER_WS_METHODS.bootstrap]: (_input) =>
+          observeRpcEffect(COMMAND_CENTER_WS_METHODS.bootstrap, commandCenter.bootstrap, {
+            "rpc.aggregate": "command-center",
+          }),
+        [COMMAND_CENTER_WS_METHODS.commandSubmit]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.commandSubmit,
+            providerRegistry.getProviders.pipe(
+              Effect.map(commandCenterProviderAvailability),
+              Effect.flatMap((providers) => commandCenter.submitCommand(input, providers)),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.runStart]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.runStart,
+            commandCenter.authorizeRunExecution({ runId: input.runId, actorKind: "user" }).pipe(
+              Effect.andThen(dispatchCommandCenterRun(input.runId)),
+              Effect.map((dispatched) => ({
+                runId: dispatched.runId,
+                projectId: CommandCenterProjectId.make(dispatched.projectId),
+                threadId: CommandCenterThreadId.make(dispatched.threadId),
+                status: dispatched.state,
+                duplicate: dispatched.duplicate,
+              })),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.eventsReplay]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.eventsReplay,
+            refreshCommandCenterSpaceProjection(input.spaceId).pipe(
+              Effect.andThen(commandCenterEvents.replay(input)),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.eventsSubscribe]: (input) =>
+          observeRpcStream(
+            COMMAND_CENTER_WS_METHODS.eventsSubscribe,
+            Stream.unwrap(
+              refreshCommandCenterSpaceProjection(input.spaceId).pipe(
+                Effect.as(commandCenterEvents.changes(input)),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.timelineQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.timelineQuery,
+            refreshCommandCenterSpaceProjection(input.spaceId).pipe(
+              Effect.andThen(commandCenterEvents.timeline(input)),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.spacesQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.spacesQuery,
+            commandCenter.querySpaces(input),
+            {
+              "rpc.aggregate": "command-center",
+            },
+          ),
+        [COMMAND_CENTER_WS_METHODS.spacesSync]: (_input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.spacesSync,
+            commandCenter.syncConfiguration({ force: true }).pipe(
+              Effect.andThen(commandCenter.bootstrap),
+              Effect.map((snapshot) => ({
+                timezone: snapshot.timezone,
+                spaces: snapshot.spaces,
+                automations: snapshot.automations,
+                connections: snapshot.connections,
+                configHealth: snapshot.configHealth,
+              })),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.itemsQuery]: (input) =>
+          observeRpcEffect(COMMAND_CENTER_WS_METHODS.itemsQuery, commandCenter.queryItems(input), {
+            "rpc.aggregate": "command-center",
+          }),
+        [COMMAND_CENTER_WS_METHODS.runsQuery]: (input) =>
+          observeRpcEffect(COMMAND_CENTER_WS_METHODS.runsQuery, commandCenter.queryRuns(input), {
+            "rpc.aggregate": "command-center",
+          }),
+        [COMMAND_CENTER_WS_METHODS.automationsQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.automationsQuery,
+            commandCenter.queryAutomations(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.automationDefinitionGet]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.automationDefinitionGet,
+            automationDefinitionConfig.get(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.automationDefinitionCreate]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.automationDefinitionCreate,
+            commandCenter
+              .querySpaces({ spaceId: input.spaceId })
+              .pipe(
+                Effect.flatMap(() =>
+                  automationDefinitionConfig.create(
+                    input,
+                    commandCenter.recordAutomationDefinitionCommit,
+                  ),
+                ),
+              ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.automationDefinitionSave]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.automationDefinitionSave,
+            commandCenter
+              .querySpaces({ spaceId: input.spaceId })
+              .pipe(
+                Effect.flatMap(() =>
+                  automationDefinitionConfig.save(
+                    input,
+                    commandCenter.recordAutomationDefinitionCommit,
+                  ),
+                ),
+              ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.approvalsQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.approvalsQuery,
+            commandCenter.queryApprovals(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.artifactsQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.artifactsQuery,
+            commandCenter.queryArtifacts(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.connectionsQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.connectionsQuery,
+            commandCenter.queryConnections(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.connectionsRefresh]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.connectionsRefresh,
+            refreshCommandCenterConnection(
+              {
+                queryConnections: commandCenter.queryConnections,
+                verifyGoogle: googleReadConnector.verify,
+              },
+              input,
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.memoryQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.memoryQuery,
+            commandCenter.queryMemories(input),
+            {
+              "rpc.aggregate": "command-center",
+            },
+          ),
+        [COMMAND_CENTER_WS_METHODS.memorySearch]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.memorySearch,
+            commandCenter.querySpaces({ spaceId: input.spaceId }).pipe(
+              Effect.andThen(
+                commandCenterMemorySearch.search({
+                  query: input.query,
+                  spaceId: input.spaceId,
+                  ...(input.repositoryId === undefined
+                    ? {}
+                    : { repositoryRef: input.repositoryId }),
+                  ...(input.includeArchives === undefined
+                    ? {}
+                    : { includeArchives: input.includeArchives }),
+                  ...(input.limit === undefined ? {} : { limit: input.limit }),
+                }),
+              ),
+              Effect.map((results) => ({
+                results: results.map(({ repositoryRef, ...result }) => ({
+                  ...result,
+                  spaceId: CommandCenterSpaceId.make(result.spaceId),
+                  ...(repositoryRef === undefined
+                    ? {}
+                    : { repositoryId: CommandCenterRepositoryId.make(repositoryRef) }),
+                })),
+              })),
+              Effect.mapError(
+                (cause) =>
+                  new CommandCenterError({
+                    reason: cause.reason === "invalid-query" ? "validation" : "persistence",
+                    message: cause.message,
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.itemCreate]: (input) =>
+          observeRpcEffect(COMMAND_CENTER_WS_METHODS.itemCreate, commandCenter.createItem(input), {
+            "rpc.aggregate": "command-center",
+          }),
+        [COMMAND_CENTER_WS_METHODS.itemUpdate]: (input) =>
+          observeRpcEffect(COMMAND_CENTER_WS_METHODS.itemUpdate, commandCenter.updateItem(input), {
+            "rpc.aggregate": "command-center",
+          }),
+        [COMMAND_CENTER_WS_METHODS.memoryRemember]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.memoryRemember,
+            commandCenter.remember(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.memoryPropose]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.memoryPropose,
+            commandCenter.proposeMemory(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.memoryReview]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.memoryReview,
+            commandCenter.reviewMemory(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.approvalDecide]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.approvalDecide,
+            commandCenterAutomationRuns.decideApproval(input).pipe(
+              Effect.flatMap(({ approval, automation }) =>
+                !automation && approval.status === "approved"
+                  ? commandCenter
+                      .authorizeRunExecution({
+                        runId: approval.runId,
+                        actorKind: "user",
+                      })
+                      .pipe(
+                        Effect.andThen(dispatchCommandCenterRun(approval.runId)),
+                        Effect.as(approval),
+                      )
+                  : Effect.succeed(approval),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.automationRunStart]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.automationRunStart,
+            commandCenterAutomationRuns.start(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.automationRunGet]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.automationRunGet,
+            commandCenterAutomationRuns.get(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.automationWebhookAdmit]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.automationWebhookAdmit,
+            commandCenterAutomationTriggers
+              .admitWebhook({
+                admissionSource: "paired-rpc",
+                spaceId: input.spaceId,
+                route: input.route,
+                deliveryId: input.deliveryId,
+                ...(input.payload === undefined ? {} : { payload: input.payload }),
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new CommandCenterError({
+                      reason:
+                        cause.reason === "not-found"
+                          ? "not_found"
+                          : cause.reason === "ambiguous-webhook"
+                            ? "conflict"
+                            : cause.reason === "start-failed"
+                              ? "persistence"
+                              : "validation",
+                      message: cause.message,
+                      cause,
+                    }),
+                ),
+              ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.googleRead]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.googleRead,
+            Effect.gen(function* () {
+              const requiredCapability = googleCapabilityForOperation(input.operation);
+              const connections = (yield* commandCenter.queryConnections({})).connections;
+              const accountIsConfigured = connections.some(
+                (connection) =>
+                  connection.kind === "google" &&
+                  connection.id === input.connectionId &&
+                  connection.spaceId === input.spaceId &&
+                  connection.capabilities.includes(requiredCapability),
+              );
+              if (!accountIsConfigured) {
+                return yield* new CommandCenterError({
+                  reason: "validation",
+                  message: "The requested Google connection is not available in this Space.",
+                });
+              }
+
+              const toConnectorError = (cause: GoogleReadConnector.GoogleReadConnectorError) =>
+                new CommandCenterError({
+                  reason: "connector" as const,
+                  message: cause.message,
+                  cause,
+                });
+              if (input.operation !== "drive.export") {
+                return yield* googleReadConnector
+                  .read(input)
+                  .pipe(Effect.mapError(toConnectorError));
+              }
+
+              const exported = yield* googleReadConnector
+                .exportDrive(input)
+                .pipe(Effect.mapError(toConnectorError));
+              const artifact = yield* commandCenter
+                .recordArtifact({
+                  artifact: exported.artifact,
+                  sizeBytes: exported.sizeBytes,
+                  format: exported.format,
+                })
+                .pipe(Effect.tapError(() => googleReadConnector.discardExport(exported)));
+              return {
+                operation: "drive.export" as const,
+                contentTrust: "untrusted-external" as const,
+                artifact,
+                sizeBytes: exported.sizeBytes,
+              };
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -1862,6 +2018,14 @@ const makeWsRpcLayer = (
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const config = yield* ServerConfig.ServerConfig;
+    // Origins no `Host` header can produce: the Vite dev server (the document
+    // is served there and proxied here, so the browser reports the dev origin)
+    // and the Electron renderer's custom scheme.
+    const allowedWebSocketOrigins = [
+      ...(config.devUrl ? [config.devUrl.origin] : []),
+      ...DESKTOP_RENDERER_ORIGINS,
+    ];
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -1869,6 +2033,28 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         const request = yield* HttpServerRequest.HttpServerRequest;
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
         const sessions = yield* SessionStore.SessionStore;
+
+        // Checked before authentication, not after: the session cookie is
+        // ambient, so a hostile page reaching this route arrives *already*
+        // authenticated. Rejecting on origin first also keeps a cross-origin
+        // probe from learning whether a valid session exists.
+        // `request.headers` is already lowercase-keyed by the platform's header
+        // parsing, so these lookups need no case folding of their own.
+        const originDecision = decideWebSocketOrigin({
+          origin: request.headers.origin,
+          host: request.headers.host,
+          allowedOrigins: allowedWebSocketOrigins,
+        });
+        if (!originDecision.allowed) {
+          yield* Effect.logWarning("Rejected WebSocket upgrade from a foreign origin", {
+            origin: originDecision.origin,
+          });
+          // 403, not 401: the credential is not the problem and re-authenticating
+          // would not help. The body stays generic — the caller is hostile by
+          // assumption and the allowed origins are not its business.
+          return HttpServerResponse.text("Forbidden WebSocket origin.", { status: 403 });
+        }
+
         const session = yield* serverAuth.authenticateWebSocketUpgrade(request).pipe(
           Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
             failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),

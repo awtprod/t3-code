@@ -1,6 +1,6 @@
 import { ArchiveIcon, ArchiveX, LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { Link } from "@tanstack/react-router";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAtomValue } from "@effect/atom-react";
 import {
   defaultInstanceIdForDriver,
@@ -8,7 +8,7 @@ import {
   PROVIDER_DISPLAY_NAMES,
   ProviderDriverKind,
   type ProviderInstanceConfig,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -528,7 +528,7 @@ export function GeneralSettingsPanel() {
       <SettingsSection title="General">
         <SettingsRow
           title="Theme"
-          description="Choose how T3 Code looks across the app."
+          description="Choose how Command Center looks across the app."
           resetAction={
             theme !== "system" ? (
               <SettingResetButton label="theme" onClick={() => setTheme("system")} />
@@ -1002,7 +1002,29 @@ export function ProviderSettingsPanel() {
     ReadonlySet<ProviderDriverKind>
   >(() => new Set());
   const [openInstanceDetails, setOpenInstanceDetails] = useState<Record<string, boolean>>({});
+  const [pendingProviderInstances, setPendingProviderInstances] = useState<
+    Readonly<Record<string, ProviderInstanceConfig>>
+  >({});
   const refreshingRef = useRef(false);
+
+  useEffect(() => {
+    setPendingProviderInstances((pending) => {
+      let changed = false;
+      const next = { ...pending };
+      for (const [instanceId, pendingInstance] of Object.entries(pending)) {
+        if (
+          Equal.equals(
+            settings.providerInstances?.[ProviderInstanceId.make(instanceId)],
+            pendingInstance,
+          )
+        ) {
+          delete next[instanceId];
+          changed = true;
+        }
+      }
+      return changed ? next : pending;
+    });
+  }, [settings.providerInstances]);
 
   const providerUpdateCandidates = useMemo(
     () => collectProviderUpdateCandidates(serverProviders),
@@ -1052,9 +1074,23 @@ export function ProviderSettingsPanel() {
           environmentId: primaryEnvironment.environmentId,
           ...safeErrorLogAttributes(squashAtomCommandFailure(result)),
         });
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not refresh providers",
+            description:
+              "The provider status service is unavailable. Check the server connection and try again.",
+          }),
+        );
       }
     })();
   }, [primaryEnvironment, refreshServerProviders]);
+
+  useEffect(() => {
+    if (primaryEnvironment && serverProviders.length === 0) {
+      refreshProviders();
+    }
+  }, [primaryEnvironment, refreshProviders, serverProviders.length]);
 
   const runProviderUpdate = useCallback(
     async (candidate: ProviderUpdateCandidate) => {
@@ -1148,6 +1184,7 @@ export function ProviderSettingsPanel() {
     const legacyConfig = legacyProviders[providerSettings.provider]!;
     const defaultLegacyConfig = defaultLegacyProviders[providerSettings.provider]!;
     const effectiveInstance: ProviderInstanceConfig =
+      pendingProviderInstances[defaultInstanceId] ??
       explicitInstance ??
       ({
         driver,
@@ -1165,7 +1202,12 @@ export function ProviderSettingsPanel() {
     });
     for (const [id, instance] of instancesByDriver.get(providerSettings.provider) ?? []) {
       if (id === defaultInstanceId) continue;
-      rows.push({ instanceId: id, instance, driver: instance.driver, isDefault: false });
+      rows.push({
+        instanceId: id,
+        instance: pendingProviderInstances[id] ?? instance,
+        driver: instance.driver,
+        isDefault: false,
+      });
     }
   }
   for (const [driver, list] of instancesByDriver) {
@@ -1173,14 +1215,14 @@ export function ProviderSettingsPanel() {
     for (const [id, instance] of list) {
       rows.push({
         instanceId: id,
-        instance,
+        instance: pendingProviderInstances[id] ?? instance,
         driver: instance.driver,
         isDefault: defaultSlotIdsBySource.has(String(id)),
       });
     }
   }
 
-  const updateProviderInstance = (
+  const updateProviderInstance = async (
     row: InstanceRow,
     next: ProviderInstanceConfig,
     options?: {
@@ -1188,8 +1230,12 @@ export function ProviderSettingsPanel() {
         typeof buildProviderInstanceUpdatePatch
       >[0]["textGenerationModelSelection"];
     },
-  ) => {
-    updateSettings(
+  ): Promise<void> => {
+    setPendingProviderInstances((pending) => ({
+      ...pending,
+      [row.instanceId]: next,
+    }));
+    const persisted = await updateSettings(
       buildProviderInstanceUpdatePatch({
         settings,
         instanceId: row.instanceId,
@@ -1197,6 +1243,26 @@ export function ProviderSettingsPanel() {
         driver: row.driver,
         isDefault: row.isDefault,
         textGenerationModelSelection: options?.textGenerationModelSelection,
+      }),
+    );
+    if (persisted) {
+      return;
+    }
+
+    setPendingProviderInstances((pending) => {
+      if (!Equal.equals(pending[row.instanceId], next)) {
+        return pending;
+      }
+      const rollback = { ...pending };
+      delete rollback[row.instanceId];
+      return rollback;
+    });
+    const providerName = getDriverOption(row.driver)?.label ?? String(row.driver);
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: `Could not update ${providerName}`,
+        description: "The setting was restored because the server did not accept the change.",
       }),
     );
   };

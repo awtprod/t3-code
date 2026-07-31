@@ -237,10 +237,18 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         yield* applyItem({ kind: "snapshot", snapshot: base.value });
       }
 
-      const subscribeInput = Option.match(base, {
-        onNone: () => ({ threadId }),
-        onSome: (snapshot) => ({ threadId, afterSequence: snapshot.snapshotSequence }),
-      });
+      // Re-read the cursor on every subscribe attempt rather than capturing it
+      // once. `subscribe` re-issues this input after each reconnect, so a fixed
+      // `afterSequence` would replay from the *base* snapshot every time and the
+      // replay would grow for the whole life of the session. `lastSequence`
+      // already tracks what we have actually applied (set from the snapshot and
+      // from each event), so reading it here means each reconnect asks only for
+      // what it missed. Zero means "nothing applied yet" — omit `afterSequence`
+      // so the server sends a full snapshot, which is the cold-cache path.
+      const subscribeInput = () => {
+        const afterSequence = SubscriptionRef.getUnsafe(lastSequence);
+        return afterSequence > 0 ? { threadId, afterSequence } : { threadId };
+      };
 
       yield* subscribe(ORCHESTRATION_WS_METHODS.subscribeThread, subscribeInput, {
         onExpectedFailure: setStreamError,

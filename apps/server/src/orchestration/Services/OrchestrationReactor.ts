@@ -21,6 +21,12 @@ export interface OrchestrationReactorShape {
    * finalized on shutdown.
    */
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
+
+  /** Drain orchestration workers while their subscriptions are still live. */
+  readonly drain: Effect.Effect<void>;
+
+  /** Settle projected active turns that have no matching live provider turn. */
+  readonly reconcileOrphanedTurns: Effect.Effect<void>;
 }
 
 /**

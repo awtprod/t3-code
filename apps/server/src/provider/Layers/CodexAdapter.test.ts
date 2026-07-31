@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -13,6 +14,7 @@ import {
   type ProviderApprovalDecision,
   type ProviderEvent,
   type ProviderSession,
+  type ProviderTurnTargetIdentity,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
   ThreadId,
@@ -22,6 +24,7 @@ import { createModelSelection } from "@t3tools/shared/model";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -32,15 +35,19 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
+import { clearMcpProviderSession, setMcpProviderSession } from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
+  CodexSessionRuntimeThreadIdMissingError,
   type CodexSessionRuntimeOptions,
+  type CodexSessionRuntimeError,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
@@ -59,17 +66,31 @@ const asEventId = (value: string): EventId => EventId.make(value);
 const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
 
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
-  private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
+  private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent, Cause.Done>());
   private readonly now = "2026-01-01T00:00:00.000Z";
+
+  // When set, close() emits this terminal event and ENDS the event queue before
+  // resolving, mirroring the real CodexSessionRuntime.close (emit session/closed
+  // → Queue.end). Used to exercise the adapter's stop-path drain-sync.
+  public closeEmits: ProviderEvent | undefined = undefined;
+  public currentSession: ProviderSession | undefined;
+  public interruptTurnFailure: CodexSessionRuntimeError | undefined;
+  public sendTurnFailure: CodexSessionRuntimeError | undefined;
+  public readonly interruptTurnCalls: Array<
+    readonly [TurnId | undefined, ProviderTurnTargetIdentity | undefined]
+  > = [];
+  public readonly sendTurnCalls: Array<CodexSessionRuntimeSendTurnInput> = [];
 
   public readonly startImpl = vi.fn(() =>
     Promise.resolve({
       provider: ProviderDriverKind.make("codex"),
       status: "ready" as const,
       runtimeMode: this.options.runtimeMode,
+      sessionGeneration: "generation-current",
       threadId: this.options.threadId,
       cwd: this.options.cwd,
       ...(this.options.model ? { model: this.options.model } : {}),
+      resumeCursor: this.options.resumeCursor ?? { threadId: "provider-thread-1" },
       createdAt: this.now,
       updatedAt: this.now,
     } satisfies ProviderSession),
@@ -84,7 +105,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   );
 
   public readonly interruptTurnImpl = vi.fn(
-    (_turnId?: TurnId): Promise<void> => Promise.resolve(undefined),
+    (_turnId?: TurnId, _target?: ProviderTurnTargetIdentity): Promise<void> =>
+      Promise.resolve(undefined),
   );
 
   public readonly readThreadImpl = vi.fn(
@@ -122,17 +144,35 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   start() {
-    return Effect.promise(() => this.startImpl());
+    return Effect.promise(() => this.startImpl()).pipe(
+      Effect.tap((session) =>
+        Effect.sync(() => {
+          this.currentSession = session;
+        }),
+      ),
+    );
   }
 
-  getSession = Effect.promise(() => this.startImpl());
+  get getSession() {
+    return this.currentSession
+      ? Effect.succeed(this.currentSession)
+      : Effect.promise(() => this.startImpl());
+  }
 
   sendTurn(input: CodexSessionRuntimeSendTurnInput) {
+    this.sendTurnCalls.push(input);
+    if (this.sendTurnFailure !== undefined) {
+      return Effect.fail(this.sendTurnFailure);
+    }
     return Effect.promise(() => this.sendTurnImpl(input));
   }
 
-  interruptTurn(turnId?: TurnId) {
-    return Effect.promise(() => this.interruptTurnImpl(turnId));
+  interruptTurn(turnId?: TurnId, target?: ProviderTurnTargetIdentity) {
+    this.interruptTurnCalls.push([turnId, target]);
+    if (this.interruptTurnFailure !== undefined) {
+      return Effect.fail(this.interruptTurnFailure);
+    }
+    return Effect.promise(() => this.interruptTurnImpl(turnId, target));
   }
 
   readThread = Effect.promise(() => this.readThreadImpl());
@@ -153,7 +193,21 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Stream.fromQueue(this.eventQueue);
   }
 
-  close = Effect.promise(() => this.closeImpl());
+  close = Effect.suspend(() => {
+    const queue = this.eventQueue;
+    const terminal = this.closeEmits;
+    const impl = this.closeImpl;
+    return Effect.gen(function* () {
+      if (terminal) {
+        yield* Queue.offer(queue, terminal);
+      }
+      // The real CodexSessionRuntime.close ALWAYS ends the outward event queue
+      // (Queue.end) after emitting any terminal, so the adapter's event fiber
+      // completes and the stop path's drain-join returns deterministically.
+      yield* Queue.end(queue);
+      yield* Effect.promise(() => impl());
+    });
+  });
 
   emit(event: ProviderEvent) {
     return Queue.offer(this.eventQueue, event).pipe(Effect.asVoid);
@@ -228,10 +282,14 @@ const validationLayer = it.layer(
       const codexConfig = decodeCodexSettings({});
       return yield* makeCodexAdapter(codexConfig, {
         makeRuntime: validationRuntimeFactory.factory,
+        commandCenterSourceHomePath: NodePath.join(process.cwd(), ".missing-command-center-auth"),
+        commandCenterRuntimeExecutablePath: process.execPath,
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "codex-adapter-validation-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -260,6 +318,86 @@ validationLayer("CodexAdapterLive validation", (it) => {
         }),
       );
       NodeAssert.equal(validationRuntimeFactory.factory.mock.calls.length, 0);
+    }),
+  );
+  it.effect("rejects full-access Command Center sessions before spawning Codex", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+      const result = yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("cc:thread-full-access"),
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.equal(result.failure._tag, "ProviderAdapterValidationError");
+      NodeAssert.match(result.failure.issue, /cannot use full-access/u);
+      NodeAssert.equal(validationRuntimeFactory.factory.mock.calls.length, 0);
+    }),
+  );
+  it.effect("injects the admitted profile and scrubbed helper into Command Center Codex", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("cc:thread-isolated"),
+        runtimeMode: "auto-accept-edits",
+      });
+
+      const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      NodeAssert.equal(runtimeOptions?.permissionProfile, "command-center-isolated-write-v1");
+      NodeAssert.ok(runtimeOptions?.appServerArgs?.includes("--strict-config"));
+      NodeAssert.match(runtimeOptions?.appServerArgs?.join(" ") ?? "", /":root"="deny"/u);
+      NodeAssert.match(
+        runtimeOptions?.appServerArgs?.join(" ") ?? "",
+        /":workspace_roots"=\{"\."="write"\}/u,
+      );
+      NodeAssert.match(
+        runtimeOptions?.appServerArgs?.join(" ") ?? "",
+        /network=\{enabled=false\}/u,
+      );
+      NodeAssert.ok(runtimeOptions?.homePath?.includes("provider-homes/codex-command-center"));
+      NodeAssert.match(runtimeOptions?.environment?.PATH ?? "", /provider-bin/u);
+      NodeAssert.equal("OPENAI_API_KEY" in (runtimeOptions?.environment ?? {}), false);
+    }),
+  );
+  it.effect("delivers scoped MCP auth only to the parent behind the scrubbed helper", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("cc:thread-scoped-mcp");
+      setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-test"),
+        threadId,
+        providerSessionId: "provider-session-test",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:3773/api/mcp/session-test",
+        authorizationHeader: "Bearer scoped-test-token",
+      });
+
+      yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "approval-required",
+        })
+        .pipe(Effect.ensuring(Effect.sync(() => clearMcpProviderSession(threadId))));
+
+      const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      const args = runtimeOptions?.appServerArgs ?? [];
+      const resetIndex = args.indexOf("mcp_servers={}");
+      const scopedIndex = args.findIndex((argument) =>
+        argument.startsWith("mcp_servers.t3-code.url="),
+      );
+      NodeAssert.ok(resetIndex >= 0);
+      NodeAssert.ok(scopedIndex > resetIndex);
+      NodeAssert.equal(runtimeOptions?.environment?.T3_MCP_BEARER_TOKEN, "scoped-test-token");
+      NodeAssert.equal("OPENAI_API_KEY" in (runtimeOptions?.environment ?? {}), false);
     }),
   );
   it.effect("maps codex model options before starting a session", () =>
@@ -359,6 +497,228 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }),
   );
 
+  it.effect(
+    "matches targeted interrupts by Codex cursor, falling back to runtime generation without one",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("sess-targeted-interrupt");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const runtime = sessionRuntimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+        runtime.interruptTurnImpl.mockClear();
+
+        const mismatchedCursorTarget: ProviderTurnTargetIdentity = {
+          sessionGeneration: "generation-current",
+          resumeCursor: { threadId: "provider-thread-other" },
+        };
+        yield* adapter.interruptTurn(
+          threadId,
+          asTurnId("turn-cursor-mismatch"),
+          mismatchedCursorTarget,
+        );
+        NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 0);
+
+        const matchingCursorAcrossGeneration: ProviderTurnTargetIdentity = {
+          sessionGeneration: "generation-historical",
+          resumeCursor: { threadId: "provider-thread-1" },
+        };
+        const historicalTurnId = asTurnId("turn-historical");
+        yield* adapter.interruptTurn(threadId, historicalTurnId, matchingCursorAcrossGeneration);
+        NodeAssert.deepStrictEqual(runtime.interruptTurnImpl.mock.calls, [
+          [historicalTurnId, matchingCursorAcrossGeneration],
+        ]);
+
+        const matchingGenerationWithoutCursor: ProviderTurnTargetIdentity = {
+          sessionGeneration: "generation-current",
+        };
+        const generationTurnId = asTurnId("turn-generation-match");
+        yield* adapter.interruptTurn(threadId, generationTurnId, matchingGenerationWithoutCursor);
+        NodeAssert.deepStrictEqual(runtime.interruptTurnImpl.mock.calls.at(-1), [
+          generationTurnId,
+          matchingGenerationWithoutCursor,
+        ]);
+
+        yield* adapter.interruptTurn(threadId, asTurnId("turn-generation-mismatch"), {
+          sessionGeneration: "generation-other",
+        });
+        NodeAssert.equal(runtime.interruptTurnImpl.mock.calls.length, 2);
+      }),
+  );
+
+  it.effect("succeeds when a matching targeted interrupt's target is gone", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-target-gone-interrupt");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.interruptTurnFailure = new CodexErrors.CodexAppServerRequestError({
+        code: -32600,
+        errorMessage: "no active turn to interrupt",
+        method: "turn/interrupt",
+        operation: "receive-response",
+      });
+      const turnId = asTurnId("turn-completed");
+      const target: ProviderTurnTargetIdentity = {
+        sessionGeneration: "generation-current",
+        resumeCursor: { threadId: "provider-thread-1" },
+      };
+
+      const result = yield* adapter.interruptTurn(threadId, turnId, target).pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Success");
+      NodeAssert.deepStrictEqual(runtime.interruptTurnCalls, [[turnId, target]]);
+    }),
+  );
+
+  it.effect("maps an unrelated targeted interrupt request error instead of swallowing it", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-targeted-interrupt-request-error");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.interruptTurnFailure = new CodexErrors.CodexAppServerRequestError({
+        code: -32603,
+        errorMessage: "internal error while interrupting turn",
+        method: "turn/interrupt",
+        operation: "receive-response",
+      });
+      const target: ProviderTurnTargetIdentity = {
+        sessionGeneration: "generation-current",
+        resumeCursor: { threadId: "provider-thread-1" },
+      };
+
+      const result = yield* adapter
+        .interruptTurn(threadId, asTurnId("turn-historical"), target)
+        .pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        NodeAssert.equal(result.failure._tag, "ProviderAdapterRequestError");
+        NodeAssert.equal(result.failure.method, "turn/interrupt");
+        NodeAssert.strictEqual(result.failure.cause, runtime.interruptTurnFailure);
+      }
+    }),
+  );
+
+  it.effect("keeps a request rejection as a failure for an ordinary interrupt", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-ordinary-interrupt");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.interruptTurnFailure = new CodexErrors.CodexAppServerRequestError({
+        code: -32602,
+        errorMessage: "turn cannot be interrupted",
+        method: "turn/interrupt",
+        operation: "receive-response",
+      });
+
+      const result = yield* adapter
+        .interruptTurn(threadId, asTurnId("turn-current"))
+        .pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        NodeAssert.equal(result.failure._tag, "ProviderAdapterRequestError");
+      }
+    }),
+  );
+
+  it.effect(
+    "propagates a missing provider thread id for both targeted and ordinary interrupts",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("sess-thread-id-missing-interrupt");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const runtime = sessionRuntimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+        runtime.interruptTurnFailure = new CodexSessionRuntimeThreadIdMissingError({
+          threadId,
+        });
+
+        const targeted = yield* adapter
+          .interruptTurn(threadId, asTurnId("turn-historical"), {
+            sessionGeneration: "generation-current",
+            resumeCursor: { threadId: "provider-thread-1" },
+          })
+          .pipe(Effect.result);
+        NodeAssert.equal(targeted._tag, "Failure");
+        if (targeted._tag === "Failure") {
+          NodeAssert.equal(targeted.failure._tag, "ProviderAdapterSessionNotFoundError");
+        }
+
+        const ordinary = yield* adapter
+          .interruptTurn(threadId, asTurnId("turn-current"))
+          .pipe(Effect.result);
+        NodeAssert.equal(ordinary._tag, "Failure");
+        if (ordinary._tag === "Failure") {
+          NodeAssert.equal(ordinary.failure._tag, "ProviderAdapterSessionNotFoundError");
+        }
+      }),
+  );
+
+  it.effect("returns the immutable interrupt target captured by the successful runtime send", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-send-target");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const target: ProviderTurnTargetIdentity = {
+        sessionGeneration: "generation-at-send",
+        resumeCursor: { threadId: "provider-thread-at-send" },
+      };
+      runtime.sendTurnImpl.mockResolvedValue({
+        threadId,
+        turnId: asTurnId("turn-with-target"),
+        resumeCursor: { threadId: "provider-thread-at-send" },
+        target,
+      });
+      runtime.currentSession = {
+        ...(runtime.currentSession as ProviderSession),
+        sessionGeneration: "generation-replaced-after-send",
+        resumeCursor: { threadId: "provider-thread-replaced-after-send" },
+      };
+
+      const started = yield* adapter.sendTurn({
+        threadId,
+        input: "capture target",
+        turnRequestSequence: 51,
+      });
+
+      NodeAssert.deepStrictEqual(started.target, target);
+    }),
+  );
+
   it.effect("maps codex model options for the adapter's bound custom instance id", () => {
     const customInstanceId = ProviderInstanceId.make("codex_personal");
     const customRuntimeFactory = makeRuntimeFactory();
@@ -412,6 +772,801 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         serviceTier: "flex",
       });
     }).pipe(Effect.provide(customLayer));
+  });
+
+  it.effect("stamps each turn.started with the request its own send named", () => {
+    const correlationRuntimeFactory = makeRuntimeFactory();
+    const correlationLayer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          makeRuntime: correlationRuntimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    const threadId = asThreadId("sess-correlate");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = correlationRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.sendTurnImpl.mockImplementation((input) =>
+        Promise.resolve({
+          threadId,
+          turnId: asTurnId(input.input === "first" ? "turn-first" : "turn-second"),
+        }),
+      );
+
+      yield* adapter.sendTurn({ threadId, input: "first", turnRequestSequence: 11 });
+      yield* adapter.sendTurn({ threadId, input: "second", turnRequestSequence: 22 });
+
+      const startedFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      // The provider announces the SECOND turn first. Positional correlation
+      // would hand it request 11; only the id-keyed association gets it right.
+      for (const turnId of ["turn-second", "turn-first"]) {
+        yield* runtime.emit({
+          id: asEventId(`evt-started-${turnId}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "turn/started",
+          threadId,
+          turnId: asTurnId(turnId),
+        });
+      }
+
+      const started = yield* Fiber.join(startedFiber);
+      NodeAssert.deepStrictEqual(
+        started.map((event) => [
+          event.turnId,
+          event.type === "turn.started" ? event.payload.turnRequestSequence : undefined,
+        ]),
+        [
+          ["turn-second", 22],
+          ["turn-first", 11],
+        ],
+      );
+    }).pipe(Effect.provide(correlationLayer));
+  });
+
+  // --- The parked in-flight slot -------------------------------------------
+  //
+  // `turn.started` is built on the event fiber, which never sees the send that
+  // caused it, so a send parks its request sequence in an in-flight slot until
+  // the `turn/start` response names the turn id. A notification that finds no
+  // id-keyed entry claims that parked slot — correct only when the entry is
+  // missing because the response has not landed yet. A turn whose entry was
+  // already consumed, or evicted once the map hit its bound, also has no entry,
+  // and would otherwise take the slot of an unrelated send that is genuinely
+  // mid-RPC, stamping that send's placeholder onto the wrong turn.
+
+  /** Builds a layer + runtime factory for one correlation scenario. */
+  const makeCorrelationScenario = () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      makeCodexAdapter(decodeCodexSettings({}), { makeRuntime: runtimeFactory.factory }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return { runtimeFactory, layer };
+  };
+
+  /**
+   * Collects `turn.started` stamps as they are published, so a test can wait
+   * for one to be observed before taking the next step. Ordering between an
+   * emitted notification and a later send response is the whole subject here,
+   * so it cannot be left to a batched read at the end.
+   */
+  const collectTurnStartedStamps = (adapter: CodexAdapterShape) =>
+    Effect.gen(function* () {
+      const stamps: Array<readonly [string, number | undefined]> = [];
+      const fiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          if (event.type === "turn.started") {
+            stamps.push([String(event.turnId), event.payload.turnRequestSequence]);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+      const awaitCount = (count: number) =>
+        Effect.gen(function* () {
+          for (let attempt = 0; attempt < 500; attempt += 1) {
+            if (stamps.length >= count) {
+              return;
+            }
+            yield* Effect.sleep("2 millis");
+          }
+          throw new Error(`Timed out waiting for ${count} turn.started events.`);
+        });
+      return { stamps, fiber, awaitCount };
+    });
+
+  it.effect(
+    "preserves an ambiguous turn/start correlation until its late notification unblocks sends",
+    () => {
+      const { runtimeFactory, layer } = makeCorrelationScenario();
+      const threadId = asThreadId("sess-ambiguous-turn-start");
+
+      return Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const runtime = runtimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+        const collector = yield* collectTurnStartedStamps(adapter);
+
+        runtime.sendTurnFailure = new CodexErrors.CodexAppServerProtocolParseError({
+          operation: "decode-response-payload",
+          method: "turn/start",
+        });
+        const ambiguous = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "ambiguous",
+            turnRequestSequence: 101,
+          })
+          .pipe(Effect.result);
+        NodeAssert.equal(ambiguous._tag, "Failure");
+        NodeAssert.equal(runtime.sendTurnCalls.length, 1);
+
+        runtime.sendTurnFailure = undefined;
+        const blocked = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "must-not-overwrite",
+            turnRequestSequence: 202,
+          })
+          .pipe(Effect.result);
+        NodeAssert.equal(blocked._tag, "Failure");
+        if (blocked._tag === "Failure") {
+          NodeAssert.equal(blocked.failure._tag, "ProviderAdapterRequestError");
+        }
+        NodeAssert.equal(runtime.sendTurnCalls.length, 1);
+
+        yield* runtime.emit({
+          id: asEventId("evt-started-after-ambiguous-failure"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "turn/started",
+          threadId,
+          turnId: asTurnId("turn-original"),
+        });
+        yield* collector.awaitCount(1);
+        NodeAssert.deepStrictEqual(collector.stamps, [["turn-original", 101]]);
+
+        runtime.sendTurnImpl.mockResolvedValue({
+          threadId,
+          turnId: asTurnId("turn-later"),
+        });
+        yield* adapter.sendTurn({
+          threadId,
+          input: "now-unblocked",
+          turnRequestSequence: 202,
+        });
+        NodeAssert.equal(runtime.sendTurnCalls.length, 2);
+        yield* runtime.emit({
+          id: asEventId("evt-started-after-unblock"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          method: "turn/started",
+          threadId,
+          turnId: asTurnId("turn-later"),
+        });
+        yield* collector.awaitCount(2);
+        NodeAssert.deepStrictEqual(collector.stamps, [
+          ["turn-original", 101],
+          ["turn-later", 202],
+        ]);
+
+        yield* Fiber.interrupt(collector.fiber);
+      }).pipe(Effect.provide(layer), TestClock.withLive);
+    },
+  );
+
+  it.effect("clears an unresolved correlation when the session is replaced", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-replaced-ambiguous-turn-start");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const originalRuntime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(originalRuntime);
+      originalRuntime.sendTurnFailure = new CodexErrors.CodexAppServerProtocolParseError({
+        operation: "decode-response-payload",
+        method: "turn/start",
+      });
+
+      const ambiguous = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "ambiguous",
+          turnRequestSequence: 101,
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(ambiguous._tag, "Failure");
+
+      originalRuntime.sendTurnFailure = undefined;
+      const blocked = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "blocked-on-original",
+          turnRequestSequence: 202,
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(blocked._tag, "Failure");
+      NodeAssert.equal(originalRuntime.sendTurnCalls.length, 1);
+
+      yield* adapter.stopSession(threadId);
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const replacementRuntime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(replacementRuntime);
+      NodeAssert.notStrictEqual(replacementRuntime, originalRuntime);
+      replacementRuntime.sendTurnImpl.mockResolvedValue({
+        threadId,
+        turnId: asTurnId("turn-replacement"),
+      });
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "replacement-send",
+        turnRequestSequence: 303,
+      });
+      NodeAssert.equal(replacementRuntime.sendTurnCalls.length, 1);
+      yield* replacementRuntime.emit({
+        id: asEventId("evt-started-replacement"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-replacement"),
+      });
+      yield* collector.awaitCount(1);
+      NodeAssert.deepStrictEqual(collector.stamps, [["turn-replacement", 303]]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("clears correlation immediately when Codex explicitly rejects turn/start", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-explicit-turn-start-rejection");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      runtime.sendTurnFailure = new CodexErrors.CodexAppServerRequestError({
+        code: -32602,
+        errorMessage: "turn rejected",
+        method: "turn/start",
+        operation: "receive-response",
+      });
+      const rejected = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "rejected",
+          turnRequestSequence: 303,
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(rejected._tag, "Failure");
+
+      runtime.sendTurnFailure = undefined;
+      runtime.sendTurnImpl.mockResolvedValue({
+        threadId,
+        turnId: asTurnId("turn-after-rejection"),
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "accepted",
+        turnRequestSequence: 404,
+      });
+      NodeAssert.equal(runtime.sendTurnCalls.length, 2);
+      yield* runtime.emit({
+        id: asEventId("evt-started-after-explicit-rejection"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-after-rejection"),
+      });
+      yield* collector.awaitCount(1);
+      NodeAssert.deepStrictEqual(collector.stamps, [["turn-after-rejection", 404]]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("does not let a duplicate turn/started claim a live send's parked slot", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-duplicate-started");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      // The second send's RPC is held open so its request sequence sits in the
+      // parked slot for the duration of the duplicate notification below.
+      let releaseSecondSend: ((turnId: TurnId) => void) | undefined;
+      let secondSendEntered = false;
+      runtime.sendTurnImpl.mockImplementation((input) => {
+        if (input.input === "first") {
+          return Promise.resolve({ threadId, turnId: asTurnId("turn-first") });
+        }
+        secondSendEntered = true;
+        return new Promise<ProviderTurnStartResult>((resolve) => {
+          releaseSecondSend = (turnId) => resolve({ threadId, turnId });
+        });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      yield* adapter.sendTurn({ threadId, input: "first", turnRequestSequence: 11 });
+      yield* runtime.emit({
+        id: asEventId("evt-started-first"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-first"),
+      });
+      yield* collector.awaitCount(1);
+
+      const secondSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "second", turnRequestSequence: 22 })
+        .pipe(Effect.forkChild);
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          if (secondSendEntered) {
+            return;
+          }
+          yield* Effect.sleep("2 millis");
+        }
+        throw new Error("Timed out waiting for the second send to reach its RPC.");
+      });
+
+      // A duplicate for a turn already stamped above. Its correlation is spent,
+      // so it must carry no sequence rather than take request 22.
+      yield* runtime.emit({
+        id: asEventId("evt-started-first-duplicate"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-first"),
+      });
+      yield* collector.awaitCount(2);
+
+      NodeAssert.ok(releaseSecondSend);
+      releaseSecondSend(asTurnId("turn-second"));
+      yield* Fiber.join(secondSendFiber);
+      yield* runtime.emit({
+        id: asEventId("evt-started-second"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-second"),
+      });
+      yield* collector.awaitCount(3);
+
+      NodeAssert.deepStrictEqual(collector.stamps, [
+        ["turn-first", 11],
+        ["turn-first", undefined],
+        // Still reaches the turn it was sent for, which is what the duplicate
+        // would otherwise have taken from it.
+        ["turn-second", 22],
+      ]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("does not let an evicted correlation claim a live send's parked slot", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-evicted-correlation");
+    // One more than CODEX_TURN_REQUEST_CORRELATION_LIMIT, so recording the last
+    // send evicts the first — none of them are announced, which is exactly the
+    // leak the bound exists to cap.
+    const unannouncedSendCount = 65;
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      let releaseLiveSend: ((turnId: TurnId) => void) | undefined;
+      let liveSendEntered = false;
+      runtime.sendTurnImpl.mockImplementation((input) => {
+        if (input.input === "live") {
+          liveSendEntered = true;
+          return new Promise<ProviderTurnStartResult>((resolve) => {
+            releaseLiveSend = (turnId) => resolve({ threadId, turnId });
+          });
+        }
+        return Promise.resolve({ threadId, turnId: asTurnId(`turn-${input.input}`) });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      for (let index = 0; index < unannouncedSendCount; index += 1) {
+        yield* adapter.sendTurn({
+          threadId,
+          input: String(index),
+          turnRequestSequence: 100 + index,
+        });
+      }
+
+      const liveSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "live", turnRequestSequence: 999 })
+        .pipe(Effect.forkChild);
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          if (liveSendEntered) {
+            return;
+          }
+          yield* Effect.sleep("2 millis");
+        }
+        throw new Error("Timed out waiting for the live send to reach its RPC.");
+      });
+
+      // turn-0's entry was evicted to make room. It is not "waiting on a
+      // response", so it must not be handed request 999.
+      yield* runtime.emit({
+        id: asEventId("evt-started-evicted"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-0"),
+      });
+      yield* collector.awaitCount(1);
+
+      NodeAssert.ok(releaseLiveSend);
+      releaseLiveSend(asTurnId("turn-live"));
+      yield* Fiber.join(liveSendFiber);
+      yield* runtime.emit({
+        id: asEventId("evt-started-live"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-live"),
+      });
+      yield* collector.awaitCount(2);
+
+      NodeAssert.deepStrictEqual(collector.stamps, [
+        ["turn-0", undefined],
+        ["turn-live", 999],
+      ]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("stops stamping from the parked slot once a resolved id is forgotten", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-resolved-set-overflow");
+    // One more than CODEX_RESOLVED_TURN_ID_LIMIT, so the oldest resolved id is
+    // evicted. The sibling test above stays under the bound and shows the
+    // fallback still working; this one crosses it.
+    //
+    // Past that point the set can no longer answer "was this turn already
+    // spoken for?", which is the only question that makes the parked slot safe
+    // to hand out. So the fallback retires rather than guessing — a turn that
+    // genuinely raced loses its stamp, instead of taking a stamp that belongs
+    // to a live unrelated send.
+    const resolvedSendCount = 513;
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      let releaseLiveSend: ((turnId: TurnId) => void) | undefined;
+      let liveSendEntered = false;
+      runtime.sendTurnImpl.mockImplementation((input) => {
+        if (input.input === "live") {
+          liveSendEntered = true;
+          return new Promise<ProviderTurnStartResult>((resolve) => {
+            releaseLiveSend = (turnId) => resolve({ threadId, turnId });
+          });
+        }
+        return Promise.resolve({ threadId, turnId: asTurnId(`turn-${input.input}`) });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      // Every one of these resolves its turn id, so each lands in the
+      // resolved-id set and the last pushes it over the bound.
+      for (let index = 0; index < resolvedSendCount; index += 1) {
+        yield* adapter.sendTurn({
+          threadId,
+          input: String(index),
+          turnRequestSequence: 100 + index,
+        });
+      }
+
+      const liveSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "live", turnRequestSequence: 999 })
+        .pipe(Effect.forkChild);
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          if (liveSendEntered) {
+            return;
+          }
+          yield* Effect.sleep("2 millis");
+        }
+        throw new Error("Timed out waiting for the live send to reach its RPC.");
+      });
+
+      // A notification for a turn the set has forgotten. Before the trust flag
+      // this reached the parked slot and walked off with request 999 — the live
+      // send's sequence, stamped onto an unrelated turn.
+      yield* runtime.emit({
+        id: asEventId("evt-started-forgotten"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-0"),
+      });
+      yield* collector.awaitCount(1);
+
+      NodeAssert.ok(releaseLiveSend);
+      releaseLiveSend(asTurnId("turn-live"));
+      yield* Fiber.join(liveSendFiber);
+      yield* runtime.emit({
+        id: asEventId("evt-started-live-after-overflow"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-live"),
+      });
+      yield* collector.awaitCount(2);
+
+      // The live send keeps its own sequence: retiring the fallback costs a
+      // raced stamp, never a correct one, because the id-keyed path is
+      // untouched.
+      NodeAssert.deepStrictEqual(collector.stamps, [
+        ["turn-0", undefined],
+        ["turn-live", 999],
+      ]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("still stamps a turn/started that genuinely beat its send response", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-notification-first");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      let releaseSend: ((turnId: TurnId) => void) | undefined;
+      let sendEntered = false;
+      runtime.sendTurnImpl.mockImplementation(() => {
+        sendEntered = true;
+        return new Promise<ProviderTurnStartResult>((resolve) => {
+          releaseSend = (turnId) => resolve({ threadId, turnId });
+        });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+
+      const sendFiber = yield* adapter
+        .sendTurn({ threadId, input: "only", turnRequestSequence: 7 })
+        .pipe(Effect.forkChild);
+      yield* Effect.gen(function* () {
+        for (let attempt = 0; attempt < 500; attempt += 1) {
+          if (sendEntered) {
+            return;
+          }
+          yield* Effect.sleep("2 millis");
+        }
+        throw new Error("Timed out waiting for the send to reach its RPC.");
+      });
+
+      // The notification wins the race with the response. This is the one case
+      // the parked slot exists for, and the guards above must not break it.
+      yield* runtime.emit({
+        id: asEventId("evt-started-race"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-raced"),
+      });
+      yield* collector.awaitCount(1);
+
+      NodeAssert.ok(releaseSend);
+      releaseSend(asTurnId("turn-raced"));
+      yield* Fiber.join(sendFiber);
+
+      NodeAssert.deepStrictEqual(collector.stamps, [["turn-raced", 7]]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
+  });
+
+  it.effect("does not let a duplicate of a raced turn/started re-claim a parked slot", () => {
+    const { runtimeFactory, layer } = makeCorrelationScenario();
+    const threadId = asThreadId("sess-raced-duplicate");
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      let releaseFirstSend: ((turnId: TurnId) => void) | undefined;
+      let releaseSecondSend: ((turnId: TurnId) => void) | undefined;
+      let sendsEntered = 0;
+      runtime.sendTurnImpl.mockImplementation((input) => {
+        sendsEntered += 1;
+        return new Promise<ProviderTurnStartResult>((resolve) => {
+          const release = (turnId: TurnId) => resolve({ threadId, turnId });
+          if (input.input === "first") {
+            releaseFirstSend = release;
+          } else {
+            releaseSecondSend = release;
+          }
+        });
+      });
+
+      const collector = yield* collectTurnStartedStamps(adapter);
+      const awaitSends = (count: number) =>
+        Effect.gen(function* () {
+          for (let attempt = 0; attempt < 500; attempt += 1) {
+            if (sendsEntered >= count) {
+              return;
+            }
+            yield* Effect.sleep("2 millis");
+          }
+          throw new Error(`Timed out waiting for ${count} sends to reach their RPC.`);
+        });
+
+      const firstSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "first", turnRequestSequence: 11 })
+        .pipe(Effect.forkChild);
+      yield* awaitSends(1);
+
+      // The notification wins the race, so this turn takes the parked slot
+      // without ever getting an id-keyed entry — the one path that would leave
+      // it unrecorded as "already answered for".
+      yield* runtime.emit({
+        id: asEventId("evt-started-raced"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-raced"),
+      });
+      yield* collector.awaitCount(1);
+
+      NodeAssert.ok(releaseFirstSend);
+      releaseFirstSend(asTurnId("turn-raced"));
+      yield* Fiber.join(firstSendFiber);
+
+      const secondSendFiber = yield* adapter
+        .sendTurn({ threadId, input: "second", turnRequestSequence: 22 })
+        .pipe(Effect.forkChild);
+      yield* awaitSends(2);
+
+      // A duplicate of the raced turn must not take the second send's slot.
+      yield* runtime.emit({
+        id: asEventId("evt-started-raced-duplicate"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-raced"),
+      });
+      yield* collector.awaitCount(2);
+
+      NodeAssert.ok(releaseSecondSend);
+      releaseSecondSend(asTurnId("turn-second"));
+      yield* Fiber.join(secondSendFiber);
+      yield* runtime.emit({
+        id: asEventId("evt-started-second"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        method: "turn/started",
+        threadId,
+        turnId: asTurnId("turn-second"),
+      });
+      yield* collector.awaitCount(3);
+
+      NodeAssert.deepStrictEqual(collector.stamps, [
+        ["turn-raced", 11],
+        ["turn-raced", undefined],
+        ["turn-second", 22],
+      ]);
+
+      yield* Fiber.interrupt(collector.fiber);
+    }).pipe(Effect.provide(layer), TestClock.withLive);
   });
 });
 
@@ -657,6 +1812,46 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       NodeAssert.equal(firstEvent.value.threadId, "thread-1");
       NodeAssert.equal(firstEvent.value.payload.reason, "Session stopped");
     }),
+  );
+
+  it.effect(
+    "drains a terminal event emitted during close before stopSession tears down the event fiber",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+
+        // The runtime emits its terminal session/closed AS PART of close() and
+        // then ends its event queue — exactly the real ordering. The adapter's
+        // event fiber (forked into the session scope that stopSession tears down)
+        // must drain that final event into the outward stream BEFORE it is
+        // interrupted, or the canonical session.exited is silently dropped.
+        runtime.closeEmits = {
+          id: asEventId("evt-session-closed-drain"),
+          kind: "session",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "session/closed",
+          message: "Session stopped",
+        };
+
+        // Subscribe before stopping so a miss is due to drop, not late subscription.
+        const terminalFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+        yield* adapter.stopSession(asThreadId("thread-1"));
+
+        // With the drain-sync, stopSession awaits the event fiber draining the
+        // ended queue, so the terminal is delivered and runHead resolves. Without
+        // it, the fiber is interrupted mid-drain, the event is dropped, and this
+        // join never resolves (the negative control surfaces as a test timeout).
+        const terminal = yield* Fiber.join(terminalFiber);
+
+        NodeAssert.equal(terminal._tag, "Some");
+        if (terminal._tag !== "Some") {
+          return;
+        }
+        NodeAssert.equal(terminal.value.type, "session.exited");
+      }),
   );
 
   it.effect("maps retryable Codex error notifications to runtime.warning", () =>

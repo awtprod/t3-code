@@ -5265,6 +5265,10 @@ function ChatViewContent(props: ChatViewProps) {
                 isWorking={isWorking}
                 activeTurnInProgress={isWorking || !latestTurnSettled}
                 activeTurnStartedAt={activeWorkStartedAt}
+                connectionPhase={
+                  activeEnvironment === null ? null : activeEnvironmentConnectionPhase
+                }
+                lastActivityAt={activeThread.updatedAt}
                 listRef={legendListRef}
                 timelineEntries={timelineEntries}
                 latestTurn={activeLatestTurn}

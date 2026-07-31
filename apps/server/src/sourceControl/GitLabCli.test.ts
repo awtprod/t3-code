@@ -6,6 +6,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { VcsProcessExitError } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { hardenedGitSpawningCliEnvironment } from "../vcs/HostGitSecurity.ts";
 import * as GitLabCli from "./GitLabCli.ts";
 
 const mockedRun = vi.fn<VcsProcess.VcsProcess["Service"]["run"]>();
@@ -301,13 +302,15 @@ layer("GitLabCli.layer", (it) => {
         force: true,
       });
 
-      expect(mockedRun).toHaveBeenCalledWith(
-        expect.objectContaining({
-          command: "glab",
-          cwd: "/repo",
-          args: ["mr", "checkout", "42"],
-        }),
-      );
+      expect(mockedRun).toHaveBeenCalledWith({
+        operation: "GitLabCli.execute",
+        command: "glab",
+        cwd: "/repo",
+        args: ["mr", "checkout", "42"],
+        env: hardenedGitSpawningCliEnvironment("gitlab"),
+        extendEnv: false,
+        timeoutMs: 30_000,
+      });
     }),
   );
 

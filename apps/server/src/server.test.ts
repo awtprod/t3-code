@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
+  AuthAdministrativeScopes,
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
@@ -85,6 +86,7 @@ import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as CommandCenterReadiness from "./command-center/ReadinessGate.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -112,6 +114,13 @@ import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
+import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
+import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as Data from "effect/Data";
 
 const defaultProjectId = ProjectId.make("project-default");
@@ -381,6 +390,9 @@ const buildAppUnderTest = (options?: {
       logWebSocketEvents: false,
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      previewGatewayEnabled: false,
+      previewGatewayPort: 0,
+      previewGatewayServePort: 8445,
       ...options?.config,
     };
     const layerConfig = ServerConfig.layer(config);
@@ -519,6 +531,25 @@ const buildAppUnderTest = (options?: {
           ...options.layers.vcsStatusBroadcaster,
         })
       : VcsStatusBroadcaster.layer.pipe(Layer.provide(gitWorkflowLayer));
+    const projectSetupScriptRunnerLayer = Layer.mock(
+      ProjectSetupScriptRunner.ProjectSetupScriptRunner,
+    )({
+      runForThread: () => Effect.succeed({ status: "no-script" as const }),
+      ...options?.layers?.projectSetupScriptRunner,
+    });
+    const orchestrationEngineLayer = Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
+      readEvents: () => Stream.empty,
+      dispatch: () => Effect.succeed({ sequence: 0 }),
+      streamDomainEvents: Stream.empty,
+      ...options?.layers?.orchestrationEngine,
+    });
+    const orchestrationCommandDispatcherLayer = OrchestrationCommandDispatcher.layer.pipe(
+      Layer.provide(gitWorkflowLayer),
+      Layer.provide(projectSetupScriptRunnerLayer),
+      Layer.provide(vcsStatusBroadcasterLayer),
+      Layer.provide(orchestrationEngineLayer),
+      Layer.provide(WorkspacePaths.layer),
+    );
 
     const servedRoutesLayer = HttpRouter.serve(makeRoutesLayer, {
       disableListenLog: true,
@@ -637,12 +668,7 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
-      Layer.provide(
-        Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
-          runForThread: () => Effect.succeed({ status: "no-script" as const }),
-          ...options?.layers?.projectSetupScriptRunner,
-        }),
-      ),
+      Layer.provide(projectSetupScriptRunnerLayer),
       Layer.provide(
         Layer.mock(TerminalManager.TerminalManager)({
           ...options?.layers?.terminalManager,
@@ -670,16 +696,29 @@ const buildAppUnderTest = (options?: {
             registerTerminalProcesses: () => Effect.void,
             unregisterTerminal: () => Effect.void,
           }),
+          Layer.mock(CommandCenterService.CommandCenterService)({}),
+          Layer.mock(CommandCenterEventStream.CommandCenterEventStream)({
+            replay: () => Effect.succeed({ events: [], nextSequence: 0 }),
+            changes: () => Stream.empty,
+            timeline: () => Effect.succeed({ entries: [], nextSequence: 0 }),
+          }),
+          Layer.mock(AutomationRuns.AutomationRuns)({}),
+          Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+          Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+          Layer.mock(AutomationDefinitionConfig.AutomationDefinitionConfig)({}),
+          Layer.succeed(
+            CommandCenterReadiness.CommandCenterReadinessGate,
+            CommandCenterReadiness.CommandCenterReadinessGate.of({
+              state: Effect.succeed("ready"),
+              requireReady: Effect.void,
+              markReady: Effect.void,
+              markFailed: Effect.void,
+            }),
+          ),
+          orchestrationCommandDispatcherLayer,
         ),
       ),
-      Layer.provide(
-        Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
-          readEvents: () => Stream.empty,
-          dispatch: () => Effect.succeed({ sequence: 0 }),
-          streamDomainEvents: Stream.empty,
-          ...options?.layers?.orchestrationEngine,
-        }),
-      ),
+      Layer.provide(orchestrationEngineLayer),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
           getCommandReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
@@ -842,6 +881,36 @@ const wsRpcProtocolLayer = (wsUrl: string) => {
   );
 };
 
+/**
+ * Open a raw WebSocket to `wsUrl` with an explicit `Origin`, and report whether
+ * the server completed the upgrade.
+ *
+ * The RPC client helpers cannot express this: they build the socket internally
+ * and set no `Origin`, which is exactly the case the origin check lets through.
+ * A browser is the only client that sends the header, so proving a foreign
+ * origin is refused means sending it the way a browser would.
+ */
+const attemptWsUpgradeWithOrigin = (
+  wsUrl: string,
+  origin: string,
+): Effect.Effect<"opened" | "rejected"> =>
+  Effect.callback<"opened" | "rejected">((resume) => {
+    const { cookie, url } = parseSessionCookieFromWsUrl(wsUrl);
+    const socket = new NodeSocket.NodeWS.WebSocket(url, undefined, {
+      headers: { origin, ...(cookie ? { cookie } : {}) },
+    });
+    socket.on("open", () => {
+      socket.close();
+      resume(Effect.succeed("opened"));
+    });
+    socket.on("error", () => {
+      resume(Effect.succeed("rejected"));
+    });
+    return Effect.sync(() => {
+      socket.terminate();
+    });
+  });
+
 const makeWsRpcClient = RpcClient.make(WsRpcGroup);
 type WsRpcClient =
   typeof makeWsRpcClient extends Effect.Effect<infer Client, any, any> ? Client : never;
@@ -920,9 +989,7 @@ const exchangeAccessToken = (
         subject_token: credential,
         subject_token_type: AuthEnvironmentBootstrapTokenType,
         requested_token_type: AuthAccessTokenType,
-        scope:
-          options?.scope ??
-          "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
+        scope: options?.scope ?? AuthAdministrativeScopes.join(" "),
         ...(options?.clientMetadata?.label ? { client_label: options.clientMetadata.label } : {}),
         ...(options?.clientMetadata?.deviceType
           ? { client_device_type: options.clientMetadata.deviceType }
@@ -1364,10 +1431,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(tokenResponse.status, 200);
       assert.equal(tokenBody.issued_token_type, AuthAccessTokenType);
       assert.equal(tokenBody.token_type, "Bearer");
-      assert.equal(
-        tokenBody.scope,
-        "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
-      );
+      assert.equal(tokenBody.scope, AuthAdministrativeScopes.join(" "));
       assert.equal(typeof tokenBody.access_token, "string");
 
       const sessionUrl = yield* getHttpServerUrl("/api/auth/session");
@@ -1385,16 +1449,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(sessionResponse.status, 200);
       assert.equal(sessionBody.authenticated, true);
       assert.equal(sessionBody.sessionMethod, "bearer-access-token");
-      assert.deepEqual(sessionBody.scopes, [
-        "orchestration:read",
-        "orchestration:operate",
-        "terminal:operate",
-        "review:write",
-        "relay:read",
-        "access:read",
-        "access:write",
-        "relay:write",
-      ]);
+      assert.deepEqual(sessionBody.scopes, AuthAdministrativeScopes);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -1423,7 +1478,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         },
         scope: "orchestration:read orchestration:operate terminal:operate review:write",
         clientMetadata: {
-          label: "T3 Code Mobile",
+          label: "Command Center Mobile",
           deviceType: "mobile",
           os: "iOS",
         },
@@ -1450,7 +1505,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 200);
       assert.equal(clientsResponse.status, 200);
       assert.deepInclude(mobileClient?.client, {
-        label: "T3 Code Mobile",
+        label: "Command Center Mobile",
         deviceType: "mobile",
         os: "iOS",
         ipAddress: "127.0.0.1",
@@ -4201,6 +4256,55 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         failureMessage.includes("Unauthorized") ||
           failureMessage.includes("An error occurred during Open"),
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // The gateway serves previews on a different port of the same host, and
+  // cookies are scoped by host rather than by port — so a preview page's
+  // JavaScript can open /ws and the session cookie rides along ambiently.
+  // Every assertion below carries a *valid* session cookie, so auth is not what
+  // rejects the connection; the origin is.
+  it.effect("refuses a websocket upgrade from a foreign origin with a valid session", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const server = yield* HttpServer.HttpServer;
+      const address = server.address as HttpServer.TcpAddress;
+      const wsUrl = yield* getWsServerUrl("/ws");
+
+      // A preview served through the gateway: same host, different port.
+      const previewOrigin = `http://127.0.0.1:${address.port + 1}`;
+      assert.equal(yield* attemptWsUpgradeWithOrigin(wsUrl, previewOrigin), "rejected");
+
+      // An ordinary hostile page.
+      assert.equal(
+        yield* attemptWsUpgradeWithOrigin(wsUrl, "https://evil.example.com"),
+        "rejected",
+      );
+
+      // Control: the same credential and the same code path succeed when the
+      // origin matches the authority the request was addressed to. Without this
+      // the assertions above would also pass if the upgrade were simply broken.
+      assert.equal(
+        yield* attemptWsUpgradeWithOrigin(wsUrl, `http://127.0.0.1:${address.port}`),
+        "opened",
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // Desktop and mobile connect through Socket.layerWebSocket, which sends no
+  // Origin at all. Enforcement must not lock them out — and every other
+  // websocket test in this file relies on that, since none of them send one.
+  it.effect("allows a websocket upgrade from a client that sends no origin", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({})),
+      );
+
+      assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { hardenedGitSpawningCliEnvironment } from "../vcs/HostGitSecurity.ts";
 import {
   decodeGitLabMergeRequestJson,
   decodeGitLabMergeRequestListJson,
@@ -393,16 +394,26 @@ export const make = Effect.gen(function* () {
   const run = (
     input: Parameters<GitLabCli["Service"]["execute"]>[0],
     mapError: (error: VcsError) => GitLabCliError,
-  ) =>
-    process
+  ) => {
+    const launchesGit = input.args[0] === "mr" && input.args[1] === "checkout";
+    return process
       .run({
         operation: "GitLabCli.execute",
         command: "glab",
         args: input.args,
         cwd: input.cwd,
+        ...(launchesGit
+          ? {
+              env: hardenedGitSpawningCliEnvironment("gitlab", [globalThis.process.env], {
+                writableRoots: [input.cwd],
+              }),
+              extendEnv: false,
+            }
+          : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       })
       .pipe(Effect.mapError(mapError));
+  };
 
   const execute: GitLabCli["Service"]["execute"] = (input) =>
     run(input, (error) =>

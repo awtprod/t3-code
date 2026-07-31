@@ -1,6 +1,9 @@
 import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
+  AuthCommandCenterApproveScope,
+  AuthCommandCenterOperateScope,
+  AuthCommandCenterReadScope,
   AuthStandardClientScopes,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -271,6 +274,9 @@ export const authHttpApiLayer = HttpApiBuilder.group(
                       AuthAccessWriteScope,
                       AuthRelayReadScope,
                       AuthRelayWriteScope,
+                      AuthCommandCenterReadScope,
+                      AuthCommandCenterOperateScope,
+                      AuthCommandCenterApproveScope,
                     ]),
                   });
             if (requestedScopes === null) {

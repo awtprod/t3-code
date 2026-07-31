@@ -36,6 +36,11 @@ import {
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
 import { ServerConfig } from "../config.ts";
+import {
+  hardenedHostGitArguments,
+  hardenedHostGitEnvironment,
+  resolveTrustedHostExecutable,
+} from "./HostGitSecurity.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
@@ -660,6 +665,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       const appendTruncationMarker = input.appendTruncationMarker ?? false;
 
       const runGitCommand = Effect.fn("runGitCommand")(function* () {
+        const writableRoots = [commandInput.cwd, worktreesDir];
+        const gitExecutable = resolveTrustedHostExecutable("git", { writableRoots });
+        if (gitExecutable === undefined) {
+          return yield* new GitCommandError({
+            ...gitCommandContext(commandInput),
+            detail: "Refused to resolve Git outside repository-writable command roots.",
+          });
+        }
         const trace2Monitor = yield* createTrace2Monitor(commandInput, input.progress).pipe(
           Effect.provideService(Path.Path, path),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -674,13 +687,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         );
         const child = yield* commandSpawner
           .spawn(
-            ChildProcess.make("git", commandInput.args, {
+            ChildProcess.make(gitExecutable, hardenedHostGitArguments(commandInput.args), {
               cwd: commandInput.cwd,
-              env: {
-                ...process.env,
-                ...input.env,
-                ...trace2Monitor.env,
-              },
+              env: hardenedHostGitEnvironment([input.env, trace2Monitor.env], {
+                allowIndexFile: input.operation.startsWith("GitVcsDriver.checkpoints."),
+                writableRoots,
+              }),
+              extendEnv: false,
             }),
           )
           .pipe(

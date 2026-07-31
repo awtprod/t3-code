@@ -3335,14 +3335,15 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
-  it.effect("emits ordered progress events for commit hooks", () =>
+  it.effect("does not execute repository-configured commit hooks", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
       NodeFS.writeFileSync(NodePath.join(repoDir, "hooked.txt"), "hooked\n");
+      const hookMarkerPath = NodePath.join(repoDir, ".git", "pre-commit-marker");
       NodeFS.writeFileSync(
         NodePath.join(repoDir, ".git", "hooks", "pre-commit"),
-        '#!/bin/sh\necho "hook: start" >&2\nsleep 0.05\necho "hook: end" >&2\n',
+        '#!/bin/sh\nprintf ran > .git/pre-commit-marker\necho "hook: configured callback" >&2\n',
         { mode: 0o755 },
       );
 
@@ -3367,6 +3368,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       );
 
       expect(result.commit.status).toBe("created");
+      expect(NodeFS.existsSync(hookMarkerPath)).toBe(false);
       expect(events.map((event) => event.kind)).toContain("action_started");
       expect(events).toEqual(
         expect.arrayContaining([
@@ -3375,44 +3377,36 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
             phase: "commit",
           }),
           expect.objectContaining({
-            kind: "hook_started",
-            hookName: "pre-commit",
-          }),
-          expect.objectContaining({
-            kind: "hook_output",
-            text: "hook: start",
-          }),
-          expect.objectContaining({
-            kind: "hook_output",
-            text: "hook: end",
-          }),
-          expect.objectContaining({
-            kind: "hook_finished",
-            hookName: "pre-commit",
-          }),
-          expect.objectContaining({
             kind: "action_finished",
           }),
         ]),
       );
+      expect(events.some((event) => event.kind === "hook_started")).toBe(false);
+      expect(events.some((event) => event.kind === "hook_finished")).toBe(false);
+      expect(
+        events.some(
+          (event) => event.kind === "hook_output" && event.text === "hook: configured callback",
+        ),
+      ).toBe(false);
     }),
   );
 
-  it.effect("emits action_failed when a commit hook rejects", () =>
+  it.effect("does not let a repository-configured rejecting hook block commits", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
       NodeFS.writeFileSync(NodePath.join(repoDir, "hook-failure.txt"), "broken\n");
+      const hookMarkerPath = NodePath.join(repoDir, ".git", "pre-commit-rejection-marker");
       NodeFS.writeFileSync(
         NodePath.join(repoDir, ".git", "hooks", "pre-commit"),
-        '#!/bin/sh\necho "hook: fail" >&2\nexit 1\n',
+        '#!/bin/sh\nprintf ran > .git/pre-commit-rejection-marker\necho "hook: reject" >&2\nexit 1\n',
         { mode: 0o755 },
       );
 
       const { manager } = yield* makeManager();
       const events: GitActionProgressEvent[] = [];
 
-      const errorMessage = yield* runStackedAction(
+      const result = yield* runStackedAction(
         manager,
         {
           cwd: repoDir,
@@ -3427,29 +3421,16 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
               }),
           },
         },
-      ).pipe(
-        Effect.flip,
-        Effect.map((error) => error.message),
       );
 
-      expect(errorMessage).toContain("Git command failed in GitVcsDriver.commit.commit");
-      expect(errorMessage).not.toContain("hook: fail");
-      expect(events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            kind: "hook_started",
-            hookName: "pre-commit",
-          }),
-          expect.objectContaining({
-            kind: "hook_output",
-            text: "hook: fail",
-          }),
-          expect.objectContaining({
-            kind: "action_failed",
-            phase: "commit",
-          }),
-        ]),
-      );
+      expect(result.commit.status).toBe("created");
+      expect(NodeFS.existsSync(hookMarkerPath)).toBe(false);
+      expect(events.some((event) => event.kind === "hook_started")).toBe(false);
+      expect(events.some((event) => event.kind === "hook_finished")).toBe(false);
+      expect(events.some((event) => event.kind === "action_failed")).toBe(false);
+      expect(
+        events.some((event) => event.kind === "hook_output" && event.text === "hook: reject"),
+      ).toBe(false);
     }),
   );
 

@@ -25,6 +25,7 @@
     "test": "vp test run"
   },
   "dependencies": {
+    "@command-center/core": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

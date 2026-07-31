@@ -14,6 +14,7 @@ import { GitCommandError } from "@t3tools/contracts";
 import { ServerConfig } from "../config.ts";
 import { splitNullSeparatedGitStdoutPaths } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
+import { HOST_GIT_HARDENED_CONFIG_ARGS } from "./HostGitSecurity.ts";
 
 const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-git-vcs-driver-test-",
@@ -127,9 +128,18 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
     yield* driver.listRefs({ cwd });
 
     assert.deepStrictEqual(commands, [
-      { args: ["status", "--porcelain=2", "--branch"], lcAll: "C" },
-      { args: ["rev-parse", "--abbrev-ref", "HEAD"], lcAll: "C" },
-      { args: ["branch", "--no-color", "--no-column"], lcAll: "C" },
+      {
+        args: [...HOST_GIT_HARDENED_CONFIG_ARGS, "status", "--porcelain=2", "--branch"],
+        lcAll: "C",
+      },
+      {
+        args: [...HOST_GIT_HARDENED_CONFIG_ARGS, "rev-parse", "--abbrev-ref", "HEAD"],
+        lcAll: "C",
+      },
+      {
+        args: [...HOST_GIT_HARDENED_CONFIG_ARGS, "branch", "--no-color", "--no-column"],
+        lcAll: "C",
+      },
     ]);
   }).pipe(Effect.provide(layer));
 });
@@ -461,7 +471,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("makes background upstream status fetches non-interactive", () =>
+    it.effect("ignores ambient Git callback configuration during status refresh", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
         const tempDir = yield* makeTmpDir("git-vcs-driver-ssh-env-");
@@ -508,15 +518,9 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           process.env.SSH_ASKPASS_REQUIRE = "force";
           process.env.T3_TEST_SSH_ASKPASS_LOG = sshLogPath;
 
-          yield* (yield* GitVcsDriver.GitVcsDriver).statusDetails(cwd);
-
-          assert.deepEqual((yield* fileSystem.readFileString(sshLogPath)).trim().split(/\r?\n/), [
-            "GCM_INTERACTIVE=never",
-            "GIT_ASKPASS=",
-            "GIT_TERMINAL_PROMPT=0",
-            "SSH_ASKPASS=",
-            "SSH_ASKPASS_REQUIRE=never",
-          ]);
+          const status = yield* (yield* GitVcsDriver.GitVcsDriver).statusDetails(cwd);
+          assert.equal(status.isRepo, true);
+          assert.equal(yield* fileSystem.exists(sshLogPath), false);
         }).pipe(
           Effect.ensuring(
             Effect.sync(() => {
@@ -666,6 +670,50 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         yield* driver.removeWorktree({ cwd, path: worktreePath });
         const fileSystem = yield* FileSystem.FileSystem;
         assert.equal(yield* fileSystem.exists(worktreePath), false);
+      }),
+    );
+
+    it.effect("keeps configured fsmonitor and checkout callbacks inactive", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const outside = yield* makeTmpDir("git-host-exec-markers-");
+        const fsmonitorMarker = pathService.join(outside, "fsmonitor-executed");
+        const checkoutMarker = pathService.join(outside, "post-checkout-executed");
+        const fsmonitor = pathService.join(cwd, ".git", "configured-fsmonitor");
+        const checkoutHook = pathService.join(cwd, ".git", "hooks", "post-checkout");
+        yield* fileSystem.writeFileString(
+          fsmonitor,
+          `#!/bin/sh\nprintf called > '${fsmonitorMarker}'\nprintf '2\\n'\n`,
+        );
+        yield* fileSystem.writeFileString(
+          checkoutHook,
+          `#!/bin/sh\nprintf called > '${checkoutMarker}'\n`,
+        );
+        yield* fileSystem.chmod(fsmonitor, 0o700);
+        yield* fileSystem.chmod(checkoutHook, 0o700);
+        yield* git(cwd, ["config", "core.fsmonitor", fsmonitor]);
+        yield* git(cwd, ["config", "core.hooksPath", pathService.dirname(checkoutHook)]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const status = yield* driver.statusDetails(cwd);
+        assert.equal(status.isRepo, true);
+        assert.equal(yield* fileSystem.exists(fsmonitorMarker), false);
+
+        const worktreePath = pathService.join(
+          yield* makeTmpDir("git-safe-worktrees-"),
+          "safe-worktree",
+        );
+        yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/safe-worktree",
+        });
+        assert.equal(yield* fileSystem.exists(checkoutMarker), false);
+        assert.equal(yield* fileSystem.exists(fsmonitorMarker), false);
       }),
     );
   });
