@@ -39,6 +39,7 @@ export interface CommandCenterMessage {
   readonly authorLabel?: string | undefined;
   readonly linkedRunId?: string | undefined;
   readonly linkedThreadId?: string | undefined;
+  readonly receipt?: CommandCenterRouteReceipt | undefined;
 }
 
 export type CommandCenterRisk = "low" | "reversible" | "approval-required" | "blocked";
@@ -47,6 +48,7 @@ export type CommandCenterRouteStatus =
   | "running"
   | "waiting-approval"
   | "complete"
+  | "failed"
   | "blocked";
 
 export type CommandCenterRouteSource =

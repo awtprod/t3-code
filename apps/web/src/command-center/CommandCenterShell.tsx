@@ -128,9 +128,11 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
               ? "Waiting for approval"
               : receipt.status === "complete"
                 ? "Work complete"
-                : receipt.status === "running"
-                  ? "Working"
-                  : "Route ready"}
+                : receipt.status === "failed"
+                  ? "Run failed"
+                  : receipt.status === "running"
+                    ? "Working"
+                    : "Route ready"}
         </span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground">
           {receipt.spaceName}
@@ -143,7 +145,7 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
               "size-1.5 rounded-full",
               isActive ? "animate-pulse bg-info" : "bg-success",
               receipt.status === "waiting-approval" && "bg-warning",
-              receipt.status === "blocked" && "bg-destructive",
+              (receipt.status === "blocked" || receipt.status === "failed") && "bg-destructive",
             )}
           />
           {receipt.status === "blocked"
@@ -152,9 +154,11 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
               ? "Approval"
               : receipt.status === "complete"
                 ? "Complete"
-                : receipt.status === "running"
-                  ? "Running"
-                  : "Ready"}
+                : receipt.status === "failed"
+                  ? "Failed"
+                  : receipt.status === "running"
+                    ? "Running"
+                    : "Ready"}
         </span>
         <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
       </summary>
@@ -207,7 +211,7 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
   );
 }
 
-function Messages({
+export function Messages({
   messages,
   receipt,
   onOpenLinkedThread,
@@ -250,7 +254,7 @@ function Messages({
           if (message.authorLabel === "Route receipt") {
             return (
               <div className="mb-8" key={message.id}>
-                <RouteReceipt receipt={receipt} />
+                <RouteReceipt receipt={message.receipt ?? receipt} />
               </div>
             );
           }

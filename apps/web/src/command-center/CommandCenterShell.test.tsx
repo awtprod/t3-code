@@ -1,8 +1,16 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { CommandCenterShell, shouldSubmitCommandComposerOnKeyDown } from "./CommandCenterShell";
-import type { CommandCenterShellProps } from "./types";
+import {
+  CommandCenterShell,
+  Messages,
+  shouldSubmitCommandComposerOnKeyDown,
+} from "./CommandCenterShell";
+import type {
+  CommandCenterMessage,
+  CommandCenterRouteReceipt,
+  CommandCenterShellProps,
+} from "./types";
 
 const FIXTURE: CommandCenterShellProps = {
   activeConversationId: "conversation-1",
@@ -175,6 +183,82 @@ describe("CommandCenterShell", () => {
         isComposing: false,
       }),
     ).toBe(false);
+  });
+
+  it("renders each historical route receipt from its own message state", () => {
+    const completeReceipt: CommandCenterRouteReceipt = {
+      ...FIXTURE.routeReceipt,
+      spaceName: "Completed Space",
+      status: "complete",
+      summary: "The completed run settled successfully.",
+    };
+    const runningReceipt: CommandCenterRouteReceipt = {
+      ...FIXTURE.routeReceipt,
+      spaceName: "Running Space",
+      status: "running",
+      summary: "The current run is still active.",
+    };
+    const messages: readonly CommandCenterMessage[] = [
+      {
+        id: "completed-route",
+        author: "system",
+        authorLabel: "Route receipt",
+        body: "The run completed.",
+        createdAtLabel: "10:30 AM",
+        receipt: completeReceipt,
+      },
+      {
+        id: "running-route",
+        author: "system",
+        authorLabel: "Route receipt",
+        body: "The route is active.",
+        createdAtLabel: "10:31 AM",
+        receipt: runningReceipt,
+      },
+    ];
+
+    const html = renderToStaticMarkup(<Messages messages={messages} receipt={runningReceipt} />);
+    const runningRowStart = html.indexOf(">Working<");
+    const completedRow = html.slice(0, runningRowStart);
+    const runningRow = html.slice(runningRowStart);
+
+    expect(runningRowStart).toBeGreaterThan(-1);
+    expect(completedRow).toContain(">Work complete<");
+    expect(completedRow).toContain(">Complete<");
+    expect(completedRow).toContain("Completed Space");
+    expect(completedRow).not.toContain(">Working<");
+    expect(completedRow).not.toContain(">Running<");
+    expect(runningRow).toContain(">Working<");
+    expect(runningRow).toContain(">Running<");
+    expect(runningRow).toContain("Running Space");
+  });
+
+  it("renders failed route receipts as destructive and inactive", () => {
+    const failedReceipt: CommandCenterRouteReceipt = {
+      ...FIXTURE.routeReceipt,
+      status: "failed",
+      summary: "The run stopped with an error.",
+    };
+    const html = renderToStaticMarkup(
+      <Messages
+        messages={[
+          {
+            id: "failed-route",
+            author: "system",
+            authorLabel: "Route receipt",
+            body: "The run failed.",
+            createdAtLabel: "10:30 AM",
+            receipt: failedReceipt,
+          },
+        ]}
+        receipt={FIXTURE.routeReceipt}
+      />,
+    );
+
+    expect(html).toContain(">Run failed<");
+    expect(html).toContain(">Failed<");
+    expect(html).toContain("bg-destructive");
+    expect(html).not.toContain("animate-pulse");
   });
 
   it("renders the T3 command surface and visible route receipt", () => {

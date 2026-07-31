@@ -25,6 +25,7 @@ import {
   projectBootstrap,
   projectEnvironmentProjects,
   routeReceiptFromResult,
+  routeReceiptFromTimelineEntry,
   routeTimelineMessage,
   timelineMessages,
   waitForRouteReceiptPaint,
@@ -82,6 +83,11 @@ function failureMessage(failure: unknown): string {
     : "Command Center could not submit the command.";
 }
 
+interface LastRouteReceipt {
+  readonly receipt: CommandCenterRouteReceipt;
+  readonly runId?: string | undefined;
+}
+
 export function CommandCenterHome() {
   const navigate = useNavigate();
   const environmentId = usePrimaryEnvironmentId();
@@ -93,7 +99,7 @@ export function CommandCenterHome() {
   const [draft, setDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [resolvingNeedsYouId, setResolvingNeedsYouId] = useState<string>();
-  const [lastReceipt, setLastReceipt] = useState<CommandCenterRouteReceipt | null>(null);
+  const [lastReceipt, setLastReceipt] = useState<LastRouteReceipt | null>(null);
   const selectedSpaceId =
     routeSelection.spaceId === undefined ? undefined : SpaceId.make(routeSelection.spaceId);
   const bootstrapQuery = useEnvironmentQuery(
@@ -181,7 +187,15 @@ export function CommandCenterHome() {
     [authoritativeMessages, optimisticMessages],
   );
   const routeReceipt = useMemo(() => {
-    if (lastReceipt !== null) return lastReceipt;
+    if (lastReceipt !== null) {
+      const timelineEntry =
+        lastReceipt.runId === undefined
+          ? undefined
+          : timelineQuery.data?.entries.find((entry) => entry.runId === lastReceipt.runId);
+      return timelineEntry === undefined
+        ? lastReceipt.receipt
+        : routeReceiptFromTimelineEntry(timelineEntry, bootstrap, routeDisplay);
+    }
     if (timelineQuery.error !== null || eventQuery.error !== null) {
       return blockedReceipt("The durable Command timeline is not available right now.");
     }
@@ -200,6 +214,7 @@ export function CommandCenterHome() {
     lastReceipt,
     routeDisplay,
     routeSelection,
+    timelineQuery.data?.entries,
     timelineQuery.error,
   ]);
 
@@ -421,7 +436,7 @@ export function CommandCenterHome() {
 
       if (result._tag === "Success") {
         const receipt = routeReceiptFromResult(result.value, bootstrap, routeDisplay);
-        setLastReceipt(receipt);
+        setLastReceipt({ receipt, runId: result.value.run.id });
         setActiveConversationId(result.value.run.id);
         setOptimisticMessages((current) => [
           ...current,
@@ -454,7 +469,7 @@ export function CommandCenterHome() {
         }
       } else {
         const message = failureMessage(squashAtomCommandFailure(result));
-        setLastReceipt(blockedReceipt(message));
+        setLastReceipt({ receipt: blockedReceipt(message) });
         setOptimisticMessages((current) => [
           ...current,
           {

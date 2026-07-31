@@ -510,7 +510,25 @@ export function waitForRouteReceiptPaint(
   });
 }
 
-function routeReceiptFromRoute(
+function routeStatusFromRunStatus(runStatus: RunStatus): CommandCenterRouteReceipt["status"] {
+  switch (runStatus) {
+    case "succeeded":
+      return "complete";
+    case "failed":
+    case "canceled":
+      return "failed";
+    case "waiting":
+    case "waiting_approval":
+      return "waiting-approval";
+    case "queued":
+    case "running":
+      return "running";
+  }
+  runStatus satisfies never;
+  throw new Error("Unsupported run status");
+}
+
+export function routeReceiptFromRoute(
   route: RouteDecision,
   runStatus: RunStatus,
   bootstrap: CommandCenterBootstrap | null,
@@ -525,14 +543,8 @@ function routeReceiptFromRoute(
     (provider) => provider.id === route.providerId,
   );
   const routedModel = display.options.models.find((model) => model.id === route.modelId);
-  const status =
-    route.status === "blocked"
-      ? ("blocked" as const)
-      : route.approvalRequired || runStatus === "waiting_approval"
-        ? ("waiting-approval" as const)
-        : runStatus === "succeeded"
-          ? ("complete" as const)
-          : ("running" as const);
+  const status: CommandCenterRouteReceipt["status"] =
+    route.status === "blocked" ? "blocked" : routeStatusFromRunStatus(runStatus);
   const reasonSummary =
     route.reasons.length > 0
       ? route.reasons.join(" ")
@@ -642,7 +654,11 @@ export function routeTimelineMessage(
       ? "The route was blocked."
       : receipt.status === "waiting-approval"
         ? "The route is waiting for approval."
-        : "The route is active.";
+        : receipt.status === "complete"
+          ? "The run completed."
+          : receipt.status === "failed"
+            ? "The run failed."
+            : "The route is active.";
   const linkedContext = [receipt.repositoryName, receipt.projectName]
     .filter((value): value is string => value !== undefined)
     .join(" · ");
@@ -657,6 +673,7 @@ export function routeTimelineMessage(
     body: `${routeState} ${receipt.spaceName}${linkedContext ? ` · ${linkedContext}` : ""} · ${receipt.providerName} · ${receipt.modelName}. ${receipt.summary} ${capabilitySummary}`,
     createdAtLabel,
     linkedRunId: result.run.id,
+    receipt,
     ...(result.run.threadId === undefined ? {} : { linkedThreadId: result.run.threadId }),
   };
 }
