@@ -544,11 +544,7 @@ export function routeReceiptFromRoute(
   );
   const routedModel = display.options.models.find((model) => model.id === route.modelId);
   const status: CommandCenterRouteReceipt["status"] =
-    route.status === "blocked"
-      ? "blocked"
-      : route.approvalRequired
-        ? "waiting-approval"
-        : routeStatusFromRunStatus(runStatus);
+    route.status === "blocked" ? "blocked" : routeStatusFromRunStatus(runStatus);
   const reasonSummary =
     route.reasons.length > 0
       ? route.reasons.join(" ")

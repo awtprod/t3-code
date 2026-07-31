@@ -349,17 +349,17 @@ describe("CommandCenterHome projection", () => {
     expect(message).toMatchObject({ linkedRunId: "run-1", linkedThreadId: "thread-1" });
   });
 
-  it("maps authoritative run statuses to honest route receipt states", () => {
+  it("maps a persisted approval-required route from its authoritative run status", () => {
     const projects = projectEnvironmentProjects(PROJECTS, BOOTSTRAP);
     const options = buildRouteOptions(BOOTSTRAP, projects, PROVIDERS);
     const display = { projects, options };
-    const route = {
-      ...RESULT.route,
-      status: "ready",
-      risk: "low",
-      approvalRequired: false,
-    } as const;
+    const route = RESULT.route;
 
+    expect(route.approvalRequired).toBe(true);
+    expect(routeReceiptFromRoute(route, "waiting_approval", BOOTSTRAP, display).status).toBe(
+      "waiting-approval",
+    );
+    expect(routeReceiptFromRoute(route, "running", BOOTSTRAP, display).status).toBe("running");
     expect(routeReceiptFromRoute(route, "succeeded", BOOTSTRAP, display).status).toBe("complete");
     expect(routeReceiptFromRoute(route, "failed", BOOTSTRAP, display).status).toBe("failed");
     expect(routeReceiptFromRoute(route, "canceled", BOOTSTRAP, display).status).toBe("failed");
@@ -367,7 +367,6 @@ describe("CommandCenterHome projection", () => {
       "waiting-approval",
     );
     expect(routeReceiptFromRoute(route, "queued", BOOTSTRAP, display).status).toBe("running");
-    expect(routeReceiptFromRoute(route, "running", BOOTSTRAP, display).status).toBe("running");
 
     const entry = { route } as unknown as CommandCenterTimelineEntry;
     expect(
