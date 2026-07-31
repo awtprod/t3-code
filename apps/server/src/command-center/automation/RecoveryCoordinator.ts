@@ -20,7 +20,9 @@ export interface AutomationRecoveryCoordinatorShape {
 export class AutomationRecoveryCoordinator extends Context.Service<
   AutomationRecoveryCoordinator,
   AutomationRecoveryCoordinatorShape
->()("t3/command-center/automation/RecoveryCoordinator/AutomationRecoveryCoordinator") {}
+>()(
+  "@awtprod/command-center/command-center/automation/RecoveryCoordinator/AutomationRecoveryCoordinator",
+) {}
 
 export const make = Effect.gen(function* () {
   const runs = yield* AutomationRuns.AutomationRuns;

@@ -73,7 +73,7 @@ export function quoteSystemdValue(value: string): string {
 export interface BootServicePlan {
   /** Absolute path of the node binary running this CLI. */
   readonly nodePath: string;
-  /** Absolute path of the pinned t3 entry point the unit will run. */
+  /** Absolute path of the pinned Command Center entry point the unit will run. */
   readonly t3EntryPath: string;
   readonly baseDir: string;
   readonly logPath: string;
@@ -176,7 +176,7 @@ export class BootService extends Context.Service<
     readonly uninstall: Effect.Effect<boolean, BootServiceError>;
     readonly status: Effect.Effect<BootServiceStatus, BootServiceError>;
   }
->()("t3/cloud/bootService") {}
+>()("@awtprod/command-center/cloud/bootService") {}
 
 export interface BootServiceHost {
   readonly execPath: string;
@@ -212,7 +212,14 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     "versions",
     input.cliVersion,
   );
-  const runtimeEntryPath = path.join(runtimeVersionDir, "node_modules", "t3", "dist", "bin.mjs");
+  const runtimeEntryPath = path.join(
+    runtimeVersionDir,
+    "node_modules",
+    "@awtprod",
+    "command-center",
+    "dist",
+    "bin.mjs",
+  );
   const runtimeSentinelPath = path.join(runtimeVersionDir, ".install-complete");
 
   const requireSystemdLinux = Effect.gen(function* () {
@@ -257,7 +264,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
    * install (global bin, repo checkout) is used as-is; an ephemeral cache
    * entry is replaced by `npm install --prefix`-ing the exact running
    * version into <baseDir>/runtime/versions/<v>. A real install (not a copy
-   * of bin.mjs) because t3 ships native deps like node-pty.
+   * of bin.mjs) because Command Center ships native deps like node-pty.
    */
   const ensurePinnedRuntime = Effect.gen(function* () {
     if (!isEphemeralCacheEntry(host.cliEntryPath)) {
@@ -282,7 +289,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       Effect.mapError((cause) => new BootServiceInstallError({ cause })),
     );
     yield* runStep(
-      "installing the pinned t3 runtime (this can take a few minutes)",
+      "installing the pinned Command Center runtime (this can take a few minutes)",
       "npm",
       [
         "install",
@@ -290,7 +297,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
         runtimeVersionDir,
         "--no-fund",
         "--no-audit",
-        `t3@${input.cliVersion}`,
+        `@awtprod/command-center@${input.cliVersion}`,
       ],
       // Native deps (node-pty) can compile from source on slow boxes; the
       // ProcessRunner default of 60s would kill a healthy install.

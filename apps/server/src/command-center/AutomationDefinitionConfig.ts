@@ -140,7 +140,7 @@ export interface AutomationDefinitionConfigShape {
 export class AutomationDefinitionConfig extends Context.Service<
   AutomationDefinitionConfig,
   AutomationDefinitionConfigShape
->()("t3/command-center/AutomationDefinitionConfig") {}
+>()("@awtprod/command-center/command-center/AutomationDefinitionConfig") {}
 
 interface LoadedSource {
   readonly configDirectory: string;

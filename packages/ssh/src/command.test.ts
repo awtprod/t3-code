@@ -99,39 +99,41 @@ describe("ssh command", () => {
     }),
   );
 
-  it.effect("resolves the remote t3 package spec from the desktop release channel", () =>
-    Effect.sync(() => {
-      assert.equal(
-        resolveRemoteT3CliPackageSpec({
-          appVersion: "0.0.17",
-          updateChannel: "latest",
-        }),
-        "t3@0.0.17",
-      );
-      assert.equal(
-        resolveRemoteT3CliPackageSpec({
-          appVersion: "0.0.17-nightly.20260415.44",
-          updateChannel: "nightly",
-        }),
-        "t3@0.0.17-nightly.20260415.44",
-      );
-      assert.equal(
-        resolveRemoteT3CliPackageSpec({
-          appVersion: "0.0.0-dev",
-          updateChannel: "nightly",
-          isDevelopment: true,
-        }),
-        "t3@nightly",
-      );
-      assert.equal(
-        resolveRemoteT3CliPackageSpec({
-          appVersion: "0.0.0-dev",
-          updateChannel: "latest",
-          isDevelopment: true,
-        }),
-        "t3@nightly",
-      );
-    }),
+  it.effect(
+    "resolves the remote Command Center package spec from the desktop release channel",
+    () =>
+      Effect.sync(() => {
+        assert.equal(
+          resolveRemoteT3CliPackageSpec({
+            appVersion: "0.0.17",
+            updateChannel: "latest",
+          }),
+          "@awtprod/command-center@0.0.17",
+        );
+        assert.equal(
+          resolveRemoteT3CliPackageSpec({
+            appVersion: "0.0.17-nightly.20260415.44",
+            updateChannel: "nightly",
+          }),
+          "@awtprod/command-center@0.0.17-nightly.20260415.44",
+        );
+        assert.equal(
+          resolveRemoteT3CliPackageSpec({
+            appVersion: "0.0.0-dev",
+            updateChannel: "nightly",
+            isDevelopment: true,
+          }),
+          "@awtprod/command-center@nightly",
+        );
+        assert.equal(
+          resolveRemoteT3CliPackageSpec({
+            appVersion: "0.0.0-dev",
+            updateChannel: "latest",
+            isDevelopment: true,
+          }),
+          "@awtprod/command-center@nightly",
+        );
+      }),
   );
 
   it.effect("reads the last non-empty ssh output line", () =>

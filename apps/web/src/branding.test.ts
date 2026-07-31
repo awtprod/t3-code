@@ -69,6 +69,18 @@ describe("branding", () => {
     expect(branding.HOSTED_APP_CHANNEL).toBeNull();
     expect(branding.HOSTED_APP_CHANNEL_LABEL).toBeNull();
   });
+
+  it("keeps hosted channel switching disabled unless explicitly configured", async () => {
+    vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "nightly");
+
+    let branding = await import("./branding");
+    expect(branding.HOSTED_APP_CHANNEL_SWITCHING_ENABLED).toBe(false);
+
+    vi.resetModules();
+    vi.stubEnv("VITE_HOSTED_APP_CHANNEL_SWITCHING", "1");
+    branding = await import("./branding");
+    expect(branding.HOSTED_APP_CHANNEL_SWITCHING_ENABLED).toBe(true);
+  });
 });
 
 describe("branding logic", () => {
@@ -85,7 +97,7 @@ describe("branding logic", () => {
     expect(
       resolveServerBackedAppDisplayName({
         baseName: "Command Center",
-        fallbackDisplayName: "Command Center (Alpha)",
+        fallbackDisplayName: "Command Center",
         fallbackStageLabel: "Alpha",
         primaryServerVersion: "0.0.28-nightly.20260616.12",
       }),
@@ -96,21 +108,21 @@ describe("branding logic", () => {
     expect(
       resolveServerBackedAppDisplayName({
         baseName: "Command Center",
-        fallbackDisplayName: "Command Center (Alpha)",
+        fallbackDisplayName: "Command Center",
         fallbackStageLabel: "Alpha",
         primaryServerVersion: "0.0.27",
       }),
-    ).toBe("Command Center (Alpha)");
+    ).toBe("Command Center");
   });
 
   it("keeps the fallback display name for malformed nightly primary server versions", () => {
     expect(
       resolveServerBackedAppDisplayName({
         baseName: "Command Center",
-        fallbackDisplayName: "Command Center (Alpha)",
+        fallbackDisplayName: "Command Center",
         fallbackStageLabel: "Alpha",
         primaryServerVersion: "0.0.28-nightly.20260616",
       }),
-    ).toBe("Command Center (Alpha)");
+    ).toBe("Command Center");
   });
 });

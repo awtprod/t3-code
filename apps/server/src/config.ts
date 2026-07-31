@@ -97,7 +97,7 @@ export class ServerConfig extends Context.Service<
     /** HTTPS port Tailscale Serve publishes the gateway on, when Serve is enabled. */
     readonly previewGatewayServePort: number;
   }
->()("t3/config/ServerConfig") {
+>()("@awtprod/command-center/config/ServerConfig") {
   /** @deprecated Import and use `layerTest` from this module. */
   static readonly layerTest = (
     cwd: string,

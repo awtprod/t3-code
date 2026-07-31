@@ -35,14 +35,14 @@
  * 3. **Extra origins are allowed explicitly.** In dev the document is served by
  *    Vite on another port and proxied, so the browser's `Origin` is the Vite
  *    origin while `Host` is the backend's — `config.devUrl` closes that gap. The
- *    Electron renderer loads a custom scheme (`t3code://app`), which matches no
+ *    Electron renderer loads a custom scheme (`commandcenter://app`), which matches no
  *    `Host` by construction; those two origins are already enumerated in
  *    `../http.ts` as `DESKTOP_RENDERER_ORIGINS` for the CORS layer. That entry
  *    only works because the desktop app registers its scheme as *standard*
  *    (`registerDesktopSchemesAsPrivileged` in `apps/desktop`) — a non-standard
  *    custom scheme gets an opaque origin from Chromium and would arrive here as
  *    `null`, which rule 4 refuses. Measured in a real renderer: without that
- *    registration the upgrade carries `Origin: null`; with it, `t3code://app`.
+ *    registration the upgrade carries `Origin: null`; with it, `commandcenter://app`.
  * 4. **The literal `null` is refused.** It is what Chromium and Firefox send for
  *    an opaque origin — a sandboxed iframe, a `data:` document — which is
  *    exactly the shape hostile embedded content takes. It cannot be
@@ -162,7 +162,7 @@ function originsEqual(left: string, right: string): boolean {
   const leftUrl = parseOrigin(left);
   const rightUrl = parseOrigin(right);
   if (leftUrl === undefined || rightUrl === undefined) {
-    // Custom schemes (`t3code://app`) do not always expose a hostname through
+    // Custom schemes (`commandcenter://app`) do not always expose a hostname through
     // `URL`, so fall back to an exact match on the serialised value.
     return left === right;
   }
@@ -176,7 +176,7 @@ function originsEqual(left: string, right: string): boolean {
 function parseOrigin(value: string): URL | undefined {
   try {
     const url = new URL(value);
-    // A custom-scheme URL like `t3code://app` parses but exposes no hostname;
+    // A custom-scheme URL like `commandcenter://app` parses but exposes no hostname;
     // treat it as unparseable so callers fall back to exact comparison.
     return url.hostname === "" ? undefined : url;
   } catch {

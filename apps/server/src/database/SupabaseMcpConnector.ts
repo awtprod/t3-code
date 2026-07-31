@@ -173,7 +173,7 @@ export function makeSupabaseMcpConnector(input: {
 export class SupabaseMcpConnector extends Context.Service<
   SupabaseMcpConnector,
   SupabaseMcpConnectorShape
->()("t3/database/SupabaseMcpConnector") {}
+>()("@awtprod/command-center/database/SupabaseMcpConnector") {}
 
 const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettingsModule.ServerSettingsService;

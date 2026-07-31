@@ -613,7 +613,7 @@ export interface CommandCenterServiceShape {
 export class CommandCenterService extends Context.Service<
   CommandCenterService,
   CommandCenterServiceShape
->()("t3/command-center/Service/CommandCenterService") {}
+>()("@awtprod/command-center/command-center/Service/CommandCenterService") {}
 
 export function itemNeedsYou(item: Pick<ItemType, "kind" | "status" | "priority">): boolean {
   return (

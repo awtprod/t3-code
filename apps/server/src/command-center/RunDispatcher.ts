@@ -120,7 +120,7 @@ export interface RunDispatcherShape {
 }
 
 export class RunDispatcher extends Context.Service<RunDispatcher, RunDispatcherShape>()(
-  "t3/command-center/RunDispatcher",
+  "@awtprod/command-center/command-center/RunDispatcher",
 ) {}
 
 export interface StoredRun {

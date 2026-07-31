@@ -39,17 +39,17 @@ const MODE_ARGS = {
     "run",
     "--filter=@t3tools/contracts",
     "--filter=@t3tools/web",
-    "--filter=t3",
+    "--filter=@awtprod/command-center",
     "--parallel",
     "dev",
   ],
-  "dev:server": ["run", "--filter=t3", "dev"],
+  "dev:server": ["run", "--filter=@awtprod/command-center", "dev"],
   "dev:web": ["run", "--filter=@t3tools/web", "dev"],
   "dev:desktop": ["run", "--filter=@t3tools/desktop", "--filter=@t3tools/web", "dev"],
   // Production-build daily driver: no Vite dev server at all. The backend
   // serves apps/web/dist itself (see resolveStaticDir/staticAndDevRouteLayer),
   // so app, /api, and /ws share one origin.
-  serve: ["run", "--filter=t3", "dev"],
+  serve: ["run", "--filter=@awtprod/command-center", "dev"],
 } as const satisfies Record<string, ReadonlyArray<string>>;
 
 /** Web build that `serve` mode runs before starting the backend. */

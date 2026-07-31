@@ -58,7 +58,7 @@ export class ProcessResourceMonitor extends Context.Service<
       input: ServerProcessResourceHistoryInput,
     ) => Effect.Effect<ServerProcessResourceHistoryResult>;
   }
->()("t3/diagnostics/ProcessResourceMonitor") {}
+>()("@awtprod/command-center/diagnostics/ProcessResourceMonitor") {}
 
 function dateTimeFromMillis(ms: number): DateTime.Utc {
   return DateTime.makeUnsafe(ms);

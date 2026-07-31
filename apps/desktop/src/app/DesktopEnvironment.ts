@@ -86,7 +86,7 @@ function resolveDesktopAppStageLabel(input: {
     return "Dev";
   }
 
-  return isNightlyDesktopVersion(input.appVersion) ? "Nightly" : "Alpha";
+  return isNightlyDesktopVersion(input.appVersion) ? "Nightly" : "Latest";
 }
 
 function resolveDesktopAppBranding(input: {
@@ -97,7 +97,7 @@ function resolveDesktopAppBranding(input: {
   return {
     baseName: APP_BASE_NAME,
     stageLabel,
-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
+    displayName: stageLabel === "Latest" ? APP_BASE_NAME : `${APP_BASE_NAME} (${stageLabel})`,
   };
 }
 
@@ -167,7 +167,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const userDataDirName = isDevelopment ? "command-center-dev" : "command-center";
   const legacyUserDataDirNames = isDevelopment
     ? ["t3code-dev", "T3 Code (Dev)"]
-    : ["t3code", "T3 Code (Alpha)"];
+    : ["t3code", "T3 Code (Alpha)", "Command Center (Alpha)"];
   const resourcesPath = input.resourcesPath;
 
   return DesktopEnvironment.of({
@@ -207,10 +207,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
+      isDevelopment ? "com.awtprod.commandcenter.dev" : "com.awtprod.commandcenter",
     ),
-    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code.desktop",
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    linuxDesktopEntryName: isDevelopment ? "commandcenter-dev.desktop" : "command-center.desktop",
+    linuxWmClass: isDevelopment ? "commandcenter-dev" : "command-center",
     userDataDirName,
     legacyUserDataDirNames,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

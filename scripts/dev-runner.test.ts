@@ -109,7 +109,11 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
     it.effect("runs only the backend in serve mode — no Vite dev server", () =>
       Effect.sync(() => {
-        assert.deepStrictEqual(getDevRunnerModeArgs("serve"), ["run", "--filter=t3", "dev"]);
+        assert.deepStrictEqual(getDevRunnerModeArgs("serve"), [
+          "run",
+          "--filter=@awtprod/command-center",
+          "dev",
+        ]);
       }),
     );
 
@@ -119,7 +123,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           "run",
           "--filter=@t3tools/contracts",
           "--filter=@t3tools/web",
-          "--filter=t3",
+          "--filter=@awtprod/command-center",
           "--parallel",
           "dev",
         ]);

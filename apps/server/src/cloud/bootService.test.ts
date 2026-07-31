@@ -233,11 +233,18 @@ it.layer(NodeServices.layer)("BootService", (it) => {
       const runtimeDir = path.join(dirs.baseDir, "runtime", "versions", "0.0.27");
       assert.equal(
         plan.t3EntryPath,
-        path.join(runtimeDir, "node_modules", "t3", "dist", "bin.mjs"),
+        path.join(runtimeDir, "node_modules", "@awtprod", "command-center", "dist", "bin.mjs"),
       );
       assert.deepEqual(commands[0], {
         command: "npm",
-        args: ["install", "--prefix", runtimeDir, "--no-fund", "--no-audit", "t3@0.0.27"],
+        args: [
+          "install",
+          "--prefix",
+          runtimeDir,
+          "--no-fund",
+          "--no-audit",
+          "@awtprod/command-center@0.0.27",
+        ],
       });
       // Success is recorded via a sentinel so interrupted installs re-run.
       assert.isTrue(yield* fs.exists(path.join(runtimeDir, ".install-complete")));

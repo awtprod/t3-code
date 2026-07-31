@@ -34,7 +34,7 @@ export interface McpInvocationScope {
 export class McpInvocationContext extends Context.Service<
   McpInvocationContext,
   McpInvocationScope
->()("t3/mcp/McpInvocationContext") {}
+>()("@awtprod/command-center/mcp/McpInvocationContext") {}
 
 export const requirePreviewCapability = Effect.fn("mcp.requirePreviewCapability")(function* () {
   const invocation = yield* McpInvocationContext;

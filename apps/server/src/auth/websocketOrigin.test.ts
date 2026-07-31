@@ -120,12 +120,18 @@ describe("decideWebSocketOrigin", () => {
     // The Electron renderer loads a custom scheme, which matches no Host by
     // construction and only ever compares equal as an exact string.
     it("allows the desktop renderer custom-scheme origins", () => {
-      for (const origin of ["t3code://app", "t3code-dev://app"]) {
+      const allowedOrigins = [
+        "commandcenter://app",
+        "commandcenter-dev://app",
+        "t3code://app",
+        "t3code-dev://app",
+      ];
+      for (const origin of allowedOrigins) {
         assert.deepEqual(
           decide({
             origin,
             host: "127.0.0.1:13773",
-            allowedOrigins: ["t3code://app", "t3code-dev://app"],
+            allowedOrigins,
           }),
           { allowed: true, reason: "allow-listed" },
         );

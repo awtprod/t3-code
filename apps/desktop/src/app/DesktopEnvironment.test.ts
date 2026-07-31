@@ -67,8 +67,8 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.appRoot, "/repo");
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
-      assert.equal(environment.appUserModelId, "com.t3tools.t3code.dev");
-      assert.equal(environment.linuxWmClass, "t3code-dev");
+      assert.equal(environment.appUserModelId, "com.awtprod.commandcenter.dev");
+      assert.equal(environment.linuxWmClass, "commandcenter-dev");
       assert.deepEqual(
         Option.map(environment.devServerUrl, (url) => url.href),
         Option.some("http://localhost:5173/"),
@@ -108,6 +108,11 @@ describe("DesktopEnvironment", () => {
 
       assert.equal(development.stateDir, "/user-home/.command-center/dev");
       assert.equal(production.stateDir, "/user-home/.command-center/userdata");
+      assert.equal(production.displayName, "Command Center");
+      assert.equal(production.branding.stageLabel, "Latest");
+      assert.equal(production.appUserModelId, "com.awtprod.commandcenter");
+      assert.equal(production.linuxDesktopEntryName, "command-center.desktop");
+      assert.equal(production.linuxWmClass, "command-center");
     }),
   );
 
@@ -131,12 +136,12 @@ describe("DesktopEnvironment", () => {
       const environment = yield* makeEnvironment(
         {},
         {
-          T3CODE_DESKTOP_APP_USER_MODEL_ID: " com.t3tools.t3code.dev.local ",
+          T3CODE_DESKTOP_APP_USER_MODEL_ID: " com.awtprod.commandcenter.dev.local ",
           VITE_DEV_SERVER_URL: "http://localhost:5173",
         },
       );
 
-      assert.equal(environment.appUserModelId, "com.t3tools.t3code.dev.local");
+      assert.equal(environment.appUserModelId, "com.awtprod.commandcenter.dev.local");
     }),
   );
 

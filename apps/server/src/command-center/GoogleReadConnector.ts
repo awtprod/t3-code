@@ -182,7 +182,7 @@ export interface GoogleReadConnectorShape {
 export class GoogleReadConnector extends Context.Service<
   GoogleReadConnector,
   GoogleReadConnectorShape
->()("t3/command-center/GoogleReadConnector") {}
+>()("@awtprod/command-center/command-center/GoogleReadConnector") {}
 
 const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
 const decodeArtifact = Schema.decodeUnknownEffect(Artifact);

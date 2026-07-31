@@ -1,13 +1,14 @@
 {
-  "name": "t3",
+  "name": "@awtprod/command-center",
   "version": "0.0.28",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pingdotgg/t3code",
+    "url": "https://github.com/awtprod/t3-code",
     "directory": "apps/server"
   },
   "bin": {
+    "command-center": "./dist/bin.mjs",
     "t3": "./dist/bin.mjs"
   },
   "files": [

@@ -209,8 +209,8 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         yield* identity.configure;
 
-        assert.deepEqual(calls.setName, ["Command Center (Alpha)"]);
-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "Command Center (Alpha)");
+        assert.deepEqual(calls.setName, ["Command Center"]);
+        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "Command Center");
         assert.equal(calls.setAboutPanelOptions[0]?.applicationVersion, "1.2.3");
         assert.equal(calls.setAboutPanelOptions[0]?.version, "0123456789ab");
         assert.deepEqual(calls.setDockIcon, ["/icon.png"]);

@@ -7,7 +7,13 @@
  * check (`./ws.ts`) so the two cannot drift into disagreeing about which
  * clients are legitimate.
  */
-export const DESKTOP_RENDERER_ORIGINS = ["t3code://app", "t3code-dev://app"] as const;
+export const DESKTOP_RENDERER_ORIGINS = [
+  "commandcenter://app",
+  "commandcenter-dev://app",
+  // Retained for the existing T3 mobile clients and upstream-compatible builds.
+  "t3code://app",
+  "t3code-dev://app",
+] as const;
 
 export const browserApiCorsAllowedMethods = ["GET", "POST", "OPTIONS"] as const;
 export const browserApiCorsAllowedHeaders = [

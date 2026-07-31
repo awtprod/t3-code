@@ -30,7 +30,7 @@ export interface CommandCenterReadinessGateShape {
 export class CommandCenterReadinessGate extends Context.Service<
   CommandCenterReadinessGate,
   CommandCenterReadinessGateShape
->()("t3/command-center/ReadinessGate/CommandCenterReadinessGate") {}
+>()("@awtprod/command-center/command-center/ReadinessGate/CommandCenterReadinessGate") {}
 
 export const makeCommandCenterReadinessGate = Effect.gen(function* () {
   const state = yield* Ref.make<CommandCenterReadinessState>("pending");

@@ -224,7 +224,9 @@ export function webhookIdempotencyKey(input: {
 export class AutomationTriggerCoordinator extends Context.Service<
   AutomationTriggerCoordinator,
   AutomationTriggerCoordinatorShape
->()("t3/command-center/automation/TriggerCoordinator/AutomationTriggerCoordinator") {}
+>()(
+  "@awtprod/command-center/command-center/automation/TriggerCoordinator/AutomationTriggerCoordinator",
+) {}
 
 export const make = Effect.gen(function* () {
   const commandCenter = yield* CommandCenterService.CommandCenterService;

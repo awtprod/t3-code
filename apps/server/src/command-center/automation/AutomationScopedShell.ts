@@ -111,7 +111,7 @@ export class AutomationScopedShell extends Context.Service<
       input: AutomationScopedShellRequest,
     ) => Effect.Effect<AutomationScopedShellResult, AutomationScopedShellError>;
   }
->()("t3/command-center/automation/AutomationScopedShell") {}
+>()("@awtprod/command-center/command-center/automation/AutomationScopedShell") {}
 
 interface SecureFileIdentity {
   readonly type: FileSystem.File.Type;

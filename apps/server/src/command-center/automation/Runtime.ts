@@ -238,7 +238,7 @@ export interface AutomationRuntimeShape {
 }
 
 export class AutomationRuntime extends Context.Service<AutomationRuntime, AutomationRuntimeShape>()(
-  "t3/command-center/automation/Runtime/AutomationRuntime",
+  "@awtprod/command-center/command-center/automation/Runtime/AutomationRuntime",
 ) {}
 
 interface StoredAutomationRow {

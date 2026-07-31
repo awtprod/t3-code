@@ -39,7 +39,7 @@ export interface ConnectionHealthShape {
 }
 
 export class ConnectionHealth extends Context.Service<ConnectionHealth, ConnectionHealthShape>()(
-  "t3/command-center/ConnectionHealth",
+  "@awtprod/command-center/command-center/ConnectionHealth",
 ) {}
 
 const persistenceError = (cause: unknown) =>
