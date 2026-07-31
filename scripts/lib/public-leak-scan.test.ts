@@ -233,6 +233,26 @@ describe("public leak scan", () => {
     expect(findings[0]?.rule).toBe("private-denylist");
   });
 
+  it("excludes only the approved public release identity from a private denylist", () => {
+    const denylist = parsePrivateDenylist("AWTPROD, private label");
+
+    expect(denylist).toEqual(["private label"]);
+    expect(
+      scanPublicText({
+        path: "package.json",
+        text: "@awtprod/command-center",
+        denylist,
+      }),
+    ).toEqual([]);
+    expect(
+      scanPublicText({
+        path: "config.json",
+        text: "private label",
+        denylist,
+      })[0]?.rule,
+    ).toBe("private-denylist");
+  });
+
   it("detects private denylist terms in normalized repository paths", () => {
     const privateLabel = "private label";
     const findings = scanPublicPath("docs/private-label/guide.md", [privateLabel]);

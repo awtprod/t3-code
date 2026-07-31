@@ -157,6 +157,11 @@ const FORBIDDEN_FILE_PATTERNS: readonly RegExp[] = [
 const RESERVED_EMAIL_SUFFIXES = ["@example.com", "@example.net", "@example.org", "@example.test"];
 const PUBLIC_GIT_SSH_USERS = new Set(["git@bitbucket.org", "git@github.com", "git@gitlab.com"]);
 
+// These exact identifiers are an intentional part of Command Center's public release identity.
+// Keeping the exception here makes a private-to-public identity transition reviewable in Git while
+// leaving every other operator-supplied denylist term fail-closed.
+const PUBLIC_RELEASE_IDENTIFIERS = new Set(["awtprod"]);
+
 export function parsePrivateDenylist(value: string | undefined): readonly string[] {
   if (!value) return [];
   return [
@@ -164,7 +169,8 @@ export function parsePrivateDenylist(value: string | undefined): readonly string
       value
         .split(/[\n,]/u)
         .map((term) => term.trim())
-        .filter((term) => term.length >= 3),
+        .filter((term) => term.length >= 3)
+        .filter((term) => !PUBLIC_RELEASE_IDENTIFIERS.has(term.toLocaleLowerCase("en-US"))),
     ),
   ];
 }

@@ -49,6 +49,9 @@ configure the scanner. Supply them privately in either of these ways:
 - Put one term per line in `.command-center-private-denylist`. This filename is ignored by Git.
 
 The scanner reports only the rule, file, and location. It does not print the matched value.
+The exact `awtprod` identifier is excluded during parsing because it is the reviewed, deliberately
+public publisher identity for Command Center. Public identity exceptions live in source control so
+that adding or changing one requires code review; all other private terms continue to fail closed.
 Repository maintainers must configure the `COMMAND_CENTER_PUBLIC_DENYLIST` Actions secret before
 publishing or running an upstream sync. Trusted CI changes fail when that secret is absent. Fork pull
 requests receive the generic safety checks without exposing the private denylist; maintainers must
