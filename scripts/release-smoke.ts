@@ -194,6 +194,7 @@ function assertNoCaseInsensitiveTrackedPathCollisions(): void {
     .split("\0")
     .filter(Boolean);
   const canonicalPaths = new Map<string, string>();
+  const canonicalModulePaths = new Map<string, string>();
   const collisions: string[] = [];
 
   for (const trackedPath of trackedPaths) {
@@ -204,6 +205,19 @@ function assertNoCaseInsensitiveTrackedPathCollisions(): void {
       continue;
     }
     canonicalPaths.set(canonicalPath, trackedPath);
+
+    if (/\.[cm]?[jt]sx?$/u.test(trackedPath)) {
+      const canonicalModulePath = trackedPath
+        .replace(/\.[cm]?[jt]sx?$/u, "")
+        .normalize("NFC")
+        .toLocaleLowerCase("en-US");
+      const existingModulePath = canonicalModulePaths.get(canonicalModulePath);
+      if (existingModulePath !== undefined && existingModulePath !== trackedPath) {
+        collisions.push(`${existingModulePath} <> ${trackedPath} (module resolution)`);
+        continue;
+      }
+      canonicalModulePaths.set(canonicalModulePath, trackedPath);
+    }
   }
 
   if (collisions.length > 0) {
