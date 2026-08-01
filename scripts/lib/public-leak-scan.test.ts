@@ -12,6 +12,15 @@ import {
 
 const joinUrl = (...segments: readonly string[]) => segments.join("");
 
+function pngWithChunk(type: string, payload: Uint8Array): Uint8Array {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const chunk = Buffer.alloc(12 + payload.length);
+  chunk.writeUInt32BE(payload.length, 0);
+  chunk.write(type, 4, 4, "ascii");
+  Buffer.from(payload).copy(chunk, 8);
+  return Buffer.concat([signature, chunk]);
+}
+
 describe("public leak scan", () => {
   it("accepts a generic public-safe configuration", () => {
     const findings = scanPublicText({
@@ -295,6 +304,20 @@ describe("public leak scan", () => {
     );
     expect(
       scanPublicText({ path: "icon.png", text: metadata, denylist: ["private label"] })[0]?.rule,
+    ).toBe("private-denylist");
+
+    const compressedPixels = extractPublicBinaryMetadata(
+      pngWithChunk("IDAT", new TextEncoder().encode("private label")),
+    );
+    expect(
+      scanPublicText({ path: "icon.png", text: compressedPixels, denylist: ["private label"] }),
+    ).toEqual([]);
+
+    const pngMetadata = extractPublicBinaryMetadata(
+      pngWithChunk("tEXt", new TextEncoder().encode("Comment\0private label")),
+    );
+    expect(
+      scanPublicText({ path: "icon.png", text: pngMetadata, denylist: ["private label"] })[0]?.rule,
     ).toBe("private-denylist");
   });
 

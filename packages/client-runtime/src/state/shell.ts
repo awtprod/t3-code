@@ -210,7 +210,13 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
           };
         }
 
-        return supportsCompletionMarker ? { requestCompletionMarker: true as const } : {};
+        const currentSnapshot = (yield* SubscriptionRef.get(state)).snapshot;
+        return {
+          ...(Option.isSome(currentSnapshot)
+            ? { afterSequence: currentSnapshot.value.snapshotSequence }
+            : {}),
+          ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+        };
       }),
       {
         onExpectedFailure: (cause) => setStreamError(Cause.squash(cause)),

@@ -212,6 +212,7 @@ export function scanPublicPath(
 }
 
 const REVIEWABLE_BINARY_FILE_PATTERN = /\.(?:avif|gif|icns|ico|jpe?g|otf|png|ttf|webp|woff2?)$/iu;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const REVIEWED_WASM_ASSETS = new Set([
   "apps/web/src/terminal/ghostty/vendor/ghostty-vt.wasm",
   "apps/web/src/terminal/ghostty/vendor/ghostty-write-pty.wasm",
@@ -226,9 +227,31 @@ export function isReviewablePublicBinary(path: string): boolean {
 
 /** Extract human-readable metadata without treating compressed payload bytes as trusted text. */
 export function extractPublicBinaryMetadata(bytes: Uint8Array): string {
-  return Buffer.from(bytes)
-    .toString("utf8")
-    .replace(/[^\p{L}\p{N}\p{P}\p{Z}\t\r\n]+/gu, "\n");
+  const buffer = Buffer.from(bytes);
+  const metadata = buffer.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
+    ? extractPngTextMetadata(buffer)
+    : buffer;
+  return metadata.toString("utf8").replace(/[^\p{L}\p{N}\p{P}\p{Z}\t\r\n]+/gu, "\n");
+}
+
+function extractPngTextMetadata(bytes: Buffer): Buffer {
+  const chunks: Buffer[] = [];
+  let offset = PNG_SIGNATURE.length;
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset);
+    const typeStart = offset + 4;
+    const dataStart = typeStart + 4;
+    const dataEnd = dataStart + length;
+    const chunkEnd = dataEnd + 4;
+    if (dataEnd < dataStart || chunkEnd > bytes.length) break;
+
+    const type = bytes.subarray(typeStart, dataStart).toString("ascii");
+    if (type === "tEXt" || type === "zTXt" || type === "iTXt") {
+      chunks.push(bytes.subarray(dataStart, dataEnd));
+    }
+    offset = chunkEnd;
+  }
+  return Buffer.concat(chunks);
 }
 
 export function makePublicBlobFinding(input: {

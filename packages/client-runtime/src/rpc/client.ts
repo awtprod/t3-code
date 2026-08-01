@@ -247,7 +247,7 @@ export function subscribeDynamic<TTag extends EnvironmentSubscriptionRpcTag>(
                                   method: tag,
                                   environmentId: supervisor.target.environmentId,
                                 },
-                              ),
+                              ).pipe(Effect.andThen(supervisor.retryNow)),
                             ).pipe(Stream.drain);
                           }
                           if (hasOnlyExpectedFailures && options?.onExpectedFailure !== undefined) {
