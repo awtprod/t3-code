@@ -12,7 +12,7 @@ import { useCallback, useRef } from "react";
 import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
 
-import { resolveWebPreviewFrameState } from "./webPreviewFrame";
+import { resolveWebPreviewFrameState } from "./webPreviewFrameState";
 
 /**
  * The preview surface for a plain browser, where there is no Electron

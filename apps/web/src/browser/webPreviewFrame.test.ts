@@ -1,6 +1,6 @@
 import { assert, describe, it } from "vite-plus/test";
 
-import { resolveWebPreviewFrameState } from "./webPreviewFrame";
+import { resolveWebPreviewFrameState } from "./webPreviewFrameState";
 
 describe("resolveWebPreviewFrameState", () => {
   it("frames the URL a loading session is navigating to", () => {

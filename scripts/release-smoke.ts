@@ -186,9 +186,37 @@ function assertMissing(path: string, message: string): void {
   }
 }
 
+function assertNoCaseInsensitiveTrackedPathCollisions(): void {
+  const trackedPaths = NodeChildProcess.execFileSync("git", ["ls-files", "-z"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  })
+    .split("\0")
+    .filter(Boolean);
+  const canonicalPaths = new Map<string, string>();
+  const collisions: string[] = [];
+
+  for (const trackedPath of trackedPaths) {
+    const canonicalPath = trackedPath.normalize("NFC").toLocaleLowerCase("en-US");
+    const existingPath = canonicalPaths.get(canonicalPath);
+    if (existingPath !== undefined && existingPath !== trackedPath) {
+      collisions.push(`${existingPath} <> ${trackedPath}`);
+      continue;
+    }
+    canonicalPaths.set(canonicalPath, trackedPath);
+  }
+
+  if (collisions.length > 0) {
+    throw new Error(
+      `Tracked paths collide on case-insensitive filesystems:\n${collisions.join("\n")}`,
+    );
+  }
+}
+
 const tempRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-release-smoke-"));
 
 try {
+  assertNoCaseInsensitiveTrackedPathCollisions();
   copyWorkspaceManifestFixture(tempRoot);
 
   NodeChildProcess.execFileSync(
