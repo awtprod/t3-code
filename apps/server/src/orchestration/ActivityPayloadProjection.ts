@@ -160,7 +160,12 @@ export function projectActivityPayload(
 ): OrchestrationThreadActivity {
   const payload = asRecord(activity.payload);
   const data = asRecord(payload?.data);
-  if (!payload || !data || payload.itemType === "mcp_tool_call") {
+  if (
+    !payload ||
+    !data ||
+    payload.itemType === "mcp_tool_call" ||
+    payload.itemType === "collab_agent_tool_call"
+  ) {
     return activity;
   }
 

@@ -1160,6 +1160,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const legacySessionSet =
             event.payload.pendingTurnStartAdoption === undefined &&
             event.payload.terminalTurnTransitions === undefined;
+          const terminalSession =
+            event.payload.session.status === "interrupted" ||
+            event.payload.session.status === "stopped" ||
+            event.payload.session.status === "error";
 
           yield* Effect.forEach(
             terminalTurnTransitions,
@@ -1182,9 +1186,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
           if (turnId === null || event.payload.session.status !== "running") {
             // Once the provider session is terminal, no queued start can still
-            // be adopted by that session. Remove every placeholder so failed
-            // startup, interruption, and stop cannot leave phantom active work.
-            if (event.payload.session.status !== "running") {
+            // be adopted by that session. Starting and ready states can still
+            // be reconnecting with a queued turn, so preserve their placeholder.
+            if (terminalSession) {
               yield* projectionTurnRepository.deletePendingTurnStartByThreadId({
                 threadId: event.payload.threadId,
               });

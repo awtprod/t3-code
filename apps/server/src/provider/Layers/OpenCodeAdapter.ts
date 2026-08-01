@@ -1230,18 +1230,6 @@ export function makeOpenCodeAdapter(
                   }),
                 );
               }
-              const openCodeSession = yield* runOpenCodeSdk("session.create", () =>
-                client.session.create({
-                  title: `Command Center ${input.threadId}`,
-                  permission: buildOpenCodePermissionRules(input.runtimeMode),
-                }),
-              );
-              if (!openCodeSession.data) {
-                return yield* new OpenCodeRuntimeError({
-                  operation: "session.create",
-                  detail: "OpenCode session.create returned no session payload.",
-                });
-              }
               // Resume: re-adopt the session named by the durable cursor —
               // OpenCode scopes history by session id. The probe recovers only
               // a confirmed not-found (start fresh); transport/auth/server

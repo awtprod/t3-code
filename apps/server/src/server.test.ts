@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
+  AuthAdministrativeScopes,
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
@@ -560,6 +561,27 @@ const buildAppUnderTest = (options?: {
         ),
       ),
     );
+    const orchestrationEngineLayer = Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
+      readEvents: () => Stream.empty,
+      dispatch: () => Effect.succeed({ sequence: 0 }),
+      streamDomainEvents: Stream.empty,
+      latestSequence: Effect.succeed(0),
+      ...options?.layers?.orchestrationEngine,
+    });
+    const projectSetupScriptRunnerLayer = Layer.mock(
+      ProjectSetupScriptRunner.ProjectSetupScriptRunner,
+    )({
+      runForThread: () => Effect.succeed({ status: "no-script" as const }),
+      ...options?.layers?.projectSetupScriptRunner,
+    });
+    const orchestrationCommandDispatcherLayer = OrchestrationCommandDispatcher.layer.pipe(
+      Layer.provide(orchestrationEngineLayer),
+      Layer.provide(gitWorkflowLayer),
+      Layer.provide(projectSetupScriptRunnerLayer),
+      Layer.provide(vcsStatusBroadcasterLayer),
+      Layer.provide(WorkspacePaths.layer),
+      Layer.provide(layerConfig),
+    );
 
     const servedRoutesLayer = HttpRouter.serve(makeRoutesLayer, {
       disableListenLog: true,
@@ -678,12 +700,7 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
-      Layer.provide(
-        Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
-          runForThread: () => Effect.succeed({ status: "no-script" as const }),
-          ...options?.layers?.projectSetupScriptRunner,
-        }),
-      ),
+      Layer.provide(projectSetupScriptRunnerLayer),
       Layer.provide(
         Layer.mock(TerminalManager.TerminalManager)({
           ...options?.layers?.terminalManager,
@@ -713,15 +730,7 @@ const buildAppUnderTest = (options?: {
           }),
         ),
       ),
-      Layer.provide(
-        Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
-          readEvents: () => Stream.empty,
-          dispatch: () => Effect.succeed({ sequence: 0 }),
-          streamDomainEvents: Stream.empty,
-          latestSequence: Effect.succeed(0),
-          ...options?.layers?.orchestrationEngine,
-        }),
-      ),
+      Layer.provide(orchestrationEngineLayer),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
           getCommandReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
@@ -779,7 +788,7 @@ const buildAppUnderTest = (options?: {
           Layer.mock(AutomationRuns.AutomationRuns)({}),
           Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
           Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
-          Layer.mock(OrchestrationCommandDispatcher.OrchestrationCommandDispatcher)({}),
+          orchestrationCommandDispatcherLayer,
         ),
       ),
     );
@@ -1027,9 +1036,7 @@ const exchangeAccessToken = (
         subject_token: credential,
         subject_token_type: AuthEnvironmentBootstrapTokenType,
         requested_token_type: AuthAccessTokenType,
-        scope:
-          options?.scope ??
-          "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
+        scope: options?.scope ?? AuthAdministrativeScopes.join(" "),
         ...(options?.clientMetadata?.label ? { client_label: options.clientMetadata.label } : {}),
         ...(options?.clientMetadata?.deviceType
           ? { client_device_type: options.clientMetadata.deviceType }
@@ -1502,10 +1509,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(tokenResponse.status, 200);
       assert.equal(tokenBody.issued_token_type, AuthAccessTokenType);
       assert.equal(tokenBody.token_type, "Bearer");
-      assert.equal(
-        tokenBody.scope,
-        "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
-      );
+      assert.equal(tokenBody.scope, AuthAdministrativeScopes.join(" "));
       assert.equal(typeof tokenBody.access_token, "string");
 
       const sessionUrl = yield* getHttpServerUrl("/api/auth/session");
@@ -1523,16 +1527,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(sessionResponse.status, 200);
       assert.equal(sessionBody.authenticated, true);
       assert.equal(sessionBody.sessionMethod, "bearer-access-token");
-      assert.deepEqual(sessionBody.scopes, [
-        "orchestration:read",
-        "orchestration:operate",
-        "terminal:operate",
-        "review:write",
-        "relay:read",
-        "access:read",
-        "access:write",
-        "relay:write",
-      ]);
+      assert.deepEqual(sessionBody.scopes, AuthAdministrativeScopes);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
