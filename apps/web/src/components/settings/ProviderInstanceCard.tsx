@@ -774,6 +774,40 @@ export function ProviderInstanceCard({
               />
             ) : null}
 
+            {driverOption !== undefined && liveProvider?.capabilities ? (
+              <div className="rounded-lg border border-border/70 bg-muted/25 p-3 text-xs">
+                <div className="font-medium text-foreground">Runtime capabilities</div>
+                <div className="mt-1.5 grid gap-1 text-muted-foreground sm:grid-cols-3">
+                  <span>
+                    Prompt cache:{" "}
+                    {liveProvider.capabilities.cacheTelemetry === "read-write"
+                      ? "reads and writes"
+                      : liveProvider.capabilities.cacheTelemetry === "read"
+                        ? "reads"
+                        : "telemetry unavailable"}
+                  </span>
+                  <span>
+                    Native subagents:{" "}
+                    {liveProvider.capabilities.nativeSubagents ? "available" : "unavailable"}
+                  </span>
+                  <span>
+                    Usage analytics:{" "}
+                    {liveProvider.capabilities.usageTelemetry
+                      ? "available when reported"
+                      : "unavailable"}
+                  </span>
+                  {liveProvider.capabilities.commandCenterAutomation !== undefined ? (
+                    <span>
+                      Command Center:{" "}
+                      {liveProvider.capabilities.commandCenterAutomation
+                        ? "qualified"
+                        : "interactive only"}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+
             {driverOption !== undefined ? (
               <ProviderModelsSection
                 instanceId={instanceId}

@@ -2040,6 +2040,53 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
   return capitalizePhrase(normalizeCompactToolLabel(workEntry.toolTitle));
 }
 
+function SubagentWorkEntryRow({ workEntry }: { workEntry: TimelineWorkEntry }) {
+  const data =
+    workEntry.toolData && typeof workEntry.toolData === "object"
+      ? (workEntry.toolData as Record<string, unknown>)
+      : null;
+  const state = typeof data?.state === "string" ? data.state : "running";
+  const name =
+    (typeof data?.name === "string" && data.name) ||
+    (typeof data?.agentType === "string" && data.agentType) ||
+    "Subagent";
+  const provider = typeof data?.provider === "string" ? data.provider : "provider";
+  const summary =
+    (typeof data?.resultSummary === "string" && data.resultSummary) ||
+    (typeof data?.errorSummary === "string" && data.errorSummary) ||
+    (typeof data?.description === "string" && data.description) ||
+    workEntry.detail;
+  const statusClass =
+    state === "failed"
+      ? "text-destructive"
+      : state === "completed"
+        ? "text-emerald-600 dark:text-emerald-400"
+        : state === "suspended"
+          ? "text-amber-600 dark:text-amber-400"
+          : "text-sky-600 dark:text-sky-400";
+  return (
+    <div className="my-1 flex gap-2 rounded-lg border border-border/55 bg-muted/20 px-2.5 py-2">
+      <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-accent/55">
+        <BotIcon className="size-3.5" aria-hidden />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="truncate font-medium text-foreground/90">{name}</span>
+          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {provider}
+          </span>
+          <span className={cn("ms-auto text-[10px] font-medium capitalize", statusClass)}>
+            {state}
+          </span>
+        </div>
+        {summary ? (
+          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{summary}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 const stopRowToggle = (e: { stopPropagation: () => void }) => e.stopPropagation();
 
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
@@ -2049,6 +2096,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const { workEntry, workspaceRoot } = props;
   const activity = use(TimelineRowActivityCtx);
   const [expanded, setExpanded] = useState(false);
+  if (workEntry.itemType === "collab_agent_tool_call") {
+    return <SubagentWorkEntryRow workEntry={workEntry} />;
+  }
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);

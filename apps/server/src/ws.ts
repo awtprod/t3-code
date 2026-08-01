@@ -65,6 +65,7 @@ import {
   type TerminalMetadataStreamEvent,
   WS_METHODS,
   WsRpcGroup,
+  UsageQueryError,
 } from "@t3tools/contracts";
 import { clamp } from "effect/Number";
 import {
@@ -150,6 +151,9 @@ import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import { commandCenterProviderAvailability } from "./command-center/ProviderAvailability.ts";
 import { commandCenterRpcRequiresReadiness } from "./command-center/RpcAuthorization.ts";
+import { ProjectionTurnUsageRepository } from "./persistence/Services/ProjectionTurnUsage.ts";
+import { ProjectionTurnUsageRepositoryLive } from "./persistence/Layers/ProjectionTurnUsage.ts";
+import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -376,6 +380,7 @@ const makeWsRpcLayer = (
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
+      const turnUsage = yield* ProjectionTurnUsageRepository;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
       yield* Effect.addFinalizer(() =>
         Ref.get(rpcClientIds).pipe(
@@ -1727,6 +1732,19 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetBackgroundPolicy, backgroundPolicy.snapshot, {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.usageQuery]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.usageQuery,
+            turnUsage.query(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new UsageQueryError({
+                    message: `Unable to read usage analytics: ${cause.message}`,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "usage" },
+          ),
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) =>
           observeRpcEffect(WS_METHODS.cloudGetRelayClientStatus, relayClient.resolve, {
             "rpc.aggregate": "cloud",
@@ -2346,6 +2364,9 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           Effect.provide(
             makeWsRpcLayer(session, previewAutomationBroker).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
+              Layer.provide(
+                ProjectionTurnUsageRepositoryLive.pipe(Layer.provide(SqlitePersistenceLayerLive)),
+              ),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               Layer.provide(

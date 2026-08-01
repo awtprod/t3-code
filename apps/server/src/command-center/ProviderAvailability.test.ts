@@ -4,7 +4,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { commandCenterProviderAvailability } from "./ProviderAvailability.ts";
 
 function provider(
-  driver: "codex" | "claudeAgent",
+  driver: "codex" | "claudeAgent" | "kimi",
   overrides: Partial<ServerProvider> = {},
 ): ServerProvider {
   return {
@@ -46,4 +46,27 @@ describe("Command Center provider availability", () => {
     expect(availability).toHaveLength(1);
     expect(availability[0]?.healthy).toBe(false);
   });
+
+  it("offers Kimi to Command Center routing on Linux", () => {
+    const availability = commandCenterProviderAvailability([
+      provider("kimi", {
+        capabilities: {
+          cacheTelemetry: "read-write",
+          nativeSubagents: true,
+          usageTelemetry: true,
+          commandCenterAutomation: true,
+        },
+      }),
+    ]);
+
+    expect(availability).toHaveLength(NodeProcess.platform === "linux" ? 1 : 0);
+    if (NodeProcess.platform === "linux") {
+      expect(availability[0]).toMatchObject({ providerId: "kimi-primary", healthy: true });
+    }
+  });
+
+  it("keeps interactive-only Kimi installs out of automation routing", () => {
+    expect(commandCenterProviderAvailability([provider("kimi")])).toHaveLength(0);
+  });
 });
+import * as NodeProcess from "node:process";

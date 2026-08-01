@@ -21,6 +21,7 @@ import { EditorId } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerSettings } from "./settings.ts";
+import { CacheTelemetryCapability } from "./providerRuntime.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
   kind: Schema.Literal("keybindings.malformed-config"),
@@ -170,6 +171,14 @@ export const ServerProvider = Schema.Struct({
   continuation: Schema.optional(ServerProviderContinuation),
   showInteractionModeToggle: Schema.optional(Schema.Boolean),
   requiresNewThreadForModelChange: Schema.optional(Schema.Boolean),
+  capabilities: Schema.optional(
+    Schema.Struct({
+      cacheTelemetry: CacheTelemetryCapability,
+      nativeSubagents: Schema.Boolean,
+      usageTelemetry: Schema.Boolean,
+      commandCenterAutomation: Schema.optional(Schema.Boolean),
+    }),
+  ),
   enabled: Schema.Boolean,
   installed: Schema.Boolean,
   version: Schema.NullOr(TrimmedNonEmptyString),

@@ -24,6 +24,16 @@ export function ContextWindowMeter(props: {
   const dashOffset = circumference - (normalizedPercentage / 100) * circumference;
   const totalProcessedTokens = usage.totalProcessedTokens ?? null;
   const showTotalProcessed = totalProcessedTokens !== null && totalProcessedTokens > 0;
+  const latestInput = usage.lastInputTokens ?? usage.inputTokens ?? null;
+  const latestCacheRead = usage.lastCachedInputTokens ?? usage.cachedInputTokens ?? null;
+  const latestCacheWrite = usage.lastCacheWriteInputTokens ?? usage.cacheWriteInputTokens ?? null;
+  const latestOutput = usage.lastOutputTokens ?? usage.outputTokens ?? null;
+  const cacheInputTotal =
+    latestInput === null
+      ? null
+      : Math.max(latestInput, (latestCacheRead ?? 0) + (latestCacheWrite ?? 0));
+  const cacheUtilization =
+    cacheInputTotal && latestCacheRead !== null ? (latestCacheRead / cacheInputTotal) * 100 : null;
   const isOverloaded = normalizedPercentage > 90;
   const usageColor = isOverloaded
     ? "var(--color-red-500)"
@@ -127,6 +137,42 @@ export function ContextWindowMeter(props: {
               </span>
             </div>
           ) : null}
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] leading-4">
+            <span className="text-muted-foreground/60">Uncached input</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {latestInput === null
+                ? "Unavailable"
+                : formatContextWindowTokens(
+                    Math.max(0, latestInput - (latestCacheRead ?? 0) - (latestCacheWrite ?? 0)),
+                  )}
+            </span>
+            <span className="text-muted-foreground/60">Cache read</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {latestCacheRead === null
+                ? "Unavailable"
+                : formatContextWindowTokens(latestCacheRead)}
+            </span>
+            <span className="text-muted-foreground/60">Cache write</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {latestCacheWrite === null
+                ? "Unavailable"
+                : formatContextWindowTokens(latestCacheWrite)}
+            </span>
+            <span className="text-muted-foreground/60">Output</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {latestOutput === null ? "Unavailable" : formatContextWindowTokens(latestOutput)}
+            </span>
+            <span className="text-muted-foreground/60">Cache utilization</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {formatPercentage(cacheUtilization) ?? "Unavailable"}
+            </span>
+            <span className="text-muted-foreground/60">Cost</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {usage.costUsd == null
+                ? "Unavailable"
+                : `$${usage.costUsd.toFixed(4)}${usage.costKind === "reported" ? " reported" : " est."}`}
+            </span>
+          </div>
           {usage.compactsAutomatically ? (
             <div className="mt-1 text-pretty text-[11px] font-medium text-muted-foreground/70">
               {providerDisplayName ?? "It"} automatically compacts its context when needed.

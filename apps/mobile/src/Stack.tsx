@@ -48,6 +48,7 @@ import { SettingsAuthRouteScreen } from "./features/settings/SettingsAuthRouteSc
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
 import { SettingsLegalRouteScreen } from "./features/settings/SettingsLegalRouteScreen";
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
+import { SettingsUsageRouteScreen } from "./features/settings/SettingsUsageRouteScreen";
 import { ShowcaseCaptureCoordinator } from "./features/showcase/ShowcaseCaptureCoordinator";
 import {
   SettingsLegalDocumentCloseHeaderButton,
@@ -166,6 +167,13 @@ const SettingsSheetStack = createNativeStackNavigator({
       linking: "archive",
       options: {
         title: "Archived Threads",
+      },
+    }),
+    SettingsUsage: createNativeStackScreen({
+      screen: SettingsUsageRouteScreen,
+      linking: "usage",
+      options: {
+        title: "Usage",
       },
     }),
     SettingsAppearance: createNativeStackScreen({

@@ -322,10 +322,35 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (title) {
     entry.toolTitle = title;
   }
-  if (itemType === "mcp_tool_call") {
+  if (itemType === "mcp_tool_call" || itemType === "collab_agent_tool_call") {
     const data = asRecord(payload?.data);
-    if (data?.item !== undefined) {
-      entry.toolData = data.item;
+    if (data !== null) {
+      entry.toolData = itemType === "mcp_tool_call" && data.item !== undefined ? data.item : data;
+    }
+    if (itemType === "collab_agent_tool_call" && data !== null) {
+      const provider = typeof data.provider === "string" ? data.provider : "Agent";
+      const name = typeof data.name === "string" ? data.name : "Subagent";
+      const state = typeof data.state === "string" ? data.state : "running";
+      const result =
+        typeof data.resultSummary === "string"
+          ? data.resultSummary
+          : typeof data.errorSummary === "string"
+            ? data.errorSummary
+            : null;
+      const usage = asRecord(data.usage);
+      const tokens = [
+        usage?.uncachedInputTokens,
+        usage?.cacheReadInputTokens,
+        usage?.cacheWriteInputTokens,
+        usage?.outputTokens,
+      ].reduce<number>(
+        (sum, value) => sum + (typeof value === "number" && value >= 0 ? value : 0),
+        0,
+      );
+      entry.label = `${name} · ${provider}`;
+      entry.detail = [state, result, tokens > 0 ? `${tokens.toLocaleString()} tokens` : null]
+        .filter((value): value is string => Boolean(value))
+        .join(" · ");
     }
   }
   if (itemType) {
@@ -525,7 +550,8 @@ function workEntryIcon(entry: DerivedWorkLogEntry): ThreadFeedActivity["icon"] {
   if (entry.itemType === "web_search") return "globe";
   if (entry.itemType === "image_view") return "eye";
   if (entry.itemType === "mcp_tool_call") return "wrench";
-  if (entry.itemType === "dynamic_tool_call" || entry.itemType === "collab_agent_tool_call") {
+  if (entry.itemType === "collab_agent_tool_call") return "agent";
+  if (entry.itemType === "dynamic_tool_call") {
     return "hammer";
   }
   if (entry.tone === "error") return "alert";
@@ -543,8 +569,13 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
     }
   };
 
-  if (entry.itemType === "mcp_tool_call" && entry.toolData !== undefined) {
-    appendUniqueBlock(`MCP call\n${JSON.stringify(entry.toolData, null, 2)}`);
+  if (
+    (entry.itemType === "mcp_tool_call" || entry.itemType === "collab_agent_tool_call") &&
+    entry.toolData !== undefined
+  ) {
+    appendUniqueBlock(
+      `${entry.itemType === "collab_agent_tool_call" ? "Native subagent" : "MCP call"}\n${JSON.stringify(entry.toolData, null, 2)}`,
+    );
   }
   appendUniqueBlock(entry.rawCommand ?? entry.command);
   appendUniqueBlock(entry.detail);
@@ -557,7 +588,8 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
 
 function workEntryHasExpandedBody(entry: WorkLogEntry): boolean {
   return (
-    (entry.itemType === "mcp_tool_call" && entry.toolData !== undefined) ||
+    ((entry.itemType === "mcp_tool_call" || entry.itemType === "collab_agent_tool_call") &&
+      entry.toolData !== undefined) ||
     Boolean((entry.rawCommand ?? entry.command)?.trim()) ||
     Boolean(entry.detail?.trim()) ||
     (entry.changedFiles?.some((path) => path.trim().length > 0) ?? false)

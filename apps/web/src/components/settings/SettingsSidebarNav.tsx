@@ -4,6 +4,7 @@ import {
   ArrowLeftIcon,
   BotIcon,
   DatabaseIcon,
+  ChartNoAxesCombinedIcon,
   FlaskConicalIcon,
   GitBranchIcon,
   KeyboardIcon,
@@ -29,6 +30,7 @@ export type SettingsSectionPath =
   | "/settings/appearance"
   | "/settings/keybindings"
   | "/settings/providers"
+  | "/settings/usage"
   | "/settings/source-control"
   | "/settings/databases"
   | "/settings/connections"
@@ -44,6 +46,7 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   { label: "Appearance", to: "/settings/appearance", icon: PaletteIcon },
   { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
   { label: "Providers", to: "/settings/providers", icon: BotIcon },
+  { label: "Usage", to: "/settings/usage", icon: ChartNoAxesCombinedIcon },
   { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
   { label: "Databases", to: "/settings/databases", icon: DatabaseIcon },
   { label: "Connections", to: "/settings/connections", icon: Link2Icon },

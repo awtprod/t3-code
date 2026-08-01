@@ -38,6 +38,8 @@ export function formatProviderDisplayName(provider: string | null | undefined): 
       return "Cursor";
     case "opencode":
       return "OpenCode";
+    case "kimi":
+      return "Kimi";
     default: {
       // Title-case unknown driver kinds so they read reasonably.
       const trimmed = provider.replace(/Agent$/i, "").trim();
@@ -78,15 +80,24 @@ export function deriveLatestContextWindowSnapshot(
       remainingPercentage,
       inputTokens: asFiniteNumber(payload?.inputTokens),
       cachedInputTokens: asFiniteNumber(payload?.cachedInputTokens),
+      cacheWriteInputTokens: asFiniteNumber(payload?.cacheWriteInputTokens),
       outputTokens: asFiniteNumber(payload?.outputTokens),
       reasoningOutputTokens: asFiniteNumber(payload?.reasoningOutputTokens),
       lastUsedTokens: asFiniteNumber(payload?.lastUsedTokens),
       lastInputTokens: asFiniteNumber(payload?.lastInputTokens),
       lastCachedInputTokens: asFiniteNumber(payload?.lastCachedInputTokens),
+      lastCacheWriteInputTokens: asFiniteNumber(payload?.lastCacheWriteInputTokens),
       lastOutputTokens: asFiniteNumber(payload?.lastOutputTokens),
       lastReasoningOutputTokens: asFiniteNumber(payload?.lastReasoningOutputTokens),
       toolUses: asFiniteNumber(payload?.toolUses),
       durationMs: asFiniteNumber(payload?.durationMs),
+      costUsd: asFiniteNumber(payload?.costUsd),
+      costKind:
+        payload?.costKind === "reported" ||
+        payload?.costKind === "estimated" ||
+        payload?.costKind === "api-equivalent-estimate"
+          ? payload.costKind
+          : null,
       compactsAutomatically: asBoolean(payload?.compactsAutomatically) ?? false,
       updatedAt: activity.createdAt,
     };
