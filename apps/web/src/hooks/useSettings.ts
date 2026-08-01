@@ -21,6 +21,7 @@ import {
   type ClientSettingsPatch,
   type ClientSettings,
   DEFAULT_CLIENT_SETTINGS,
+  type EnvironmentIdentificationMode,
   type UnifiedSettings,
 } from "@t3tools/contracts/settings";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
@@ -28,6 +29,8 @@ import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
 } from "@t3tools/client-runtime/state/runtime";
+import { APP_STAGE_LABEL } from "~/branding";
+import { resolveSidebarV2Enabled } from "~/branding.logic";
 import { ensureLocalApi } from "~/localApi";
 import * as Struct from "effect/Struct";
 import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
@@ -35,6 +38,8 @@ import { usePrimaryEnvironment } from "~/state/environments";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
+
+type UnifiedSettingsPatch = ServerSettingsPatch & ClientSettingsPatch;
 
 const clientSettingsListeners = new Set<() => void>();
 const clientSettingsHydrationListeners = new Set<() => void>();
@@ -148,7 +153,7 @@ function persistClientSettings(settings: ClientSettings): void {
 
 const SERVER_SETTINGS_KEYS = new Set<string>(Struct.keys(ServerSettings.fields));
 
-function splitPatch(patch: Partial<UnifiedSettings>): {
+function splitPatch(patch: UnifiedSettingsPatch): {
   serverPatch: ServerSettingsPatch;
   clientPatch: ClientSettingsPatch;
 } {
@@ -222,6 +227,46 @@ export function useClientSettings<T = ClientSettings>(
   return useMemo(() => (selector ? selector(settings) : (settings as T)), [selector, settings]);
 }
 
+export function resolveEnvironmentIdentificationMode(input: {
+  mode: EnvironmentIdentificationMode;
+  settingsHydrated: boolean;
+}): EnvironmentIdentificationMode {
+  // Avoid briefly rendering the default artwork before a persisted pill/none choice loads.
+  return input.settingsHydrated ? input.mode : "none";
+}
+
+export function useEnvironmentIdentificationMode(): EnvironmentIdentificationMode {
+  const settingsHydrated = useClientSettingsHydrated();
+  const mode = useClientSettingsValue().environmentIdentificationMode;
+  return resolveEnvironmentIdentificationMode({ mode, settingsHydrated });
+}
+
+/**
+ * Resolved sidebar v2 state: an explicit choice in Settings → Beta if the user
+ * has made one, otherwise the default for this build stage (on for nightly and
+ * dev, off for production). Every consumer must read through this rather than
+ * `settings.sidebarV2Enabled`, which is only meaningful alongside
+ * `sidebarV2ConfiguredByUser`.
+ *
+ * Held at v1 until client settings hydrate. The pre-hydration snapshot is just
+ * the schema defaults, so resolving against it would mount one sidebar and then
+ * swap it out once persisted settings land — remounting the whole tree.
+ */
+export function useSidebarV2Enabled(): boolean {
+  const settingsHydrated = useClientSettingsHydrated();
+  const settings = useClientSettingsValue();
+  return useMemo(
+    () =>
+      resolveSidebarV2Enabled({
+        enabled: settings.sidebarV2Enabled,
+        configuredByUser: settings.sidebarV2ConfiguredByUser,
+        settingsHydrated,
+        stageLabel: APP_STAGE_LABEL,
+      }),
+    [settings.sidebarV2Enabled, settings.sidebarV2ConfiguredByUser, settingsHydrated],
+  );
+}
+
 /** Read current settings for one environment, merged with client-local preferences. */
 export function useEnvironmentSettings<T = UnifiedSettings>(
   environmentId: EnvironmentId,
@@ -238,18 +283,6 @@ export function usePrimarySettings<T = UnifiedSettings>(
   return useMergedSettings(useAtomValue(primaryServerSettingsAtom), selector);
 }
 
-/**
- * Whether a server settings write should be treated as persisted for
- * optimistic-UI purposes.
- *
- * A success is obviously persisted. An interrupt-only failure is *not* a
- * rejection: the write was superseded by a newer one (which reports its own
- * outcome) or the caller unmounted. Treating an interrupt as failure would roll
- * back an already-persisted change and surface a false error toast. This mirrors
- * the framework convention (`reportAtomCommandResult`) and every other
- * config-command caller (e.g. SettingsPanels refreshProviders / updateProvider).
- * A genuine (non-interrupt) failure remains a real rejection.
- */
 export function isSettingsWritePersisted(result: AtomCommandResult<unknown, unknown>): boolean {
   return result._tag === "Success" || isAtomCommandInterrupted(result);
 }
@@ -257,9 +290,8 @@ export function isSettingsWritePersisted(result: AtomCommandResult<unknown, unkn
 /**
  * Returns an updater that routes each key to the correct backing store.
  *
- * Server keys are persisted via RPC and report whether the write succeeded so
- * interactive callers can keep a local optimistic value until the config
- * stream acknowledges it. Client keys go through client persistence.
+ * Server keys report whether persistence succeeded so optimistic callers can
+ * retain or roll back their local value. Client keys use local persistence.
  */
 function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
   const persistServerSettings = useAtomCommand(
@@ -267,7 +299,7 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
     "server settings update",
   );
   const updateSettings = useCallback(
-    async (patch: Partial<UnifiedSettings>): Promise<boolean> => {
+    async (patch: UnifiedSettingsPatch): Promise<boolean> => {
       const { serverPatch, clientPatch } = splitPatch(patch);
       let persisted = true;
 
@@ -283,14 +315,13 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
         }
       }
 
+      return persisted;
       if (Object.keys(clientPatch).length > 0) {
         persistClientSettings({
           ...getClientSettingsSnapshot(),
           ...clientPatch,
         });
       }
-
-      return persisted;
     },
     [environmentId, persistServerSettings],
   );

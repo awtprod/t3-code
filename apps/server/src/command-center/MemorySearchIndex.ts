@@ -64,7 +64,7 @@ export interface MemorySearchIndexShape {
 }
 
 export class MemorySearchIndex extends Context.Service<MemorySearchIndex, MemorySearchIndexShape>()(
-  "t3/command-center/MemorySearchIndex",
+  "@awtprod/command-center/command-center/MemorySearchIndex",
 ) {}
 
 interface SourceMemoryRow {

@@ -87,6 +87,11 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       tag: COMMAND_CENTER_WS_METHODS.artifactsQuery,
       staleTimeMs: 2_000,
     }),
+    memorySearch: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:memory-search",
+      tag: COMMAND_CENTER_WS_METHODS.memorySearch,
+      staleTimeMs: 1_000,
+    }),
     automationDefinition: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:automation-definition",
       tag: COMMAND_CENTER_WS_METHODS.automationDefinitionGet,

@@ -245,8 +245,8 @@ export function commandCenterProviderIsolationIssue(input: {
   readonly runtimeMode: RuntimeMode;
 }): string | undefined {
   if (!isCommandCenterThreadId(input.threadId)) return undefined;
-  if (String(input.provider) !== "codex") {
-    return "Command Center runs require the Codex provider because the selected provider does not expose a verified host-filesystem isolation profile.";
+  if (String(input.provider) !== "codex" && String(input.provider) !== "kimi") {
+    return "Command Center runs require Codex or a verified native Kimi provider because the selected provider does not expose a host-filesystem isolation profile.";
   }
   if (input.runtimeMode === "full-access") {
     return "Command Center runs cannot use full-access provider sessions.";
@@ -989,7 +989,7 @@ export function commandCenterCodexIsolation(
   ) {
     return undefined;
   }
-  const writable = runtimeMode === "auto-accept-edits";
+  const writable = runtimeMode === "auto-accept-edits" || runtimeMode === "auto";
   const permissionProfile = writable
     ? COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE
     : COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE;

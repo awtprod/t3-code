@@ -40,7 +40,7 @@ describe("CommandCenterProviderIsolation", () => {
         provider: "claude-code",
         runtimeMode: "approval-required",
       }) ?? "",
-      /require the Codex provider/u,
+      /require Codex or a verified native Kimi provider/u,
     );
     NodeAssert.match(
       commandCenterProviderIsolationIssue({
@@ -55,6 +55,14 @@ describe("CommandCenterProviderIsolation", () => {
         threadId: "thread-1",
         provider: "claude-code",
         runtimeMode: "full-access",
+      }),
+      undefined,
+    );
+    NodeAssert.equal(
+      commandCenterProviderIsolationIssue({
+        threadId: "cc:run-1",
+        provider: "kimi",
+        runtimeMode: "approval-required",
       }),
       undefined,
     );
@@ -87,9 +95,12 @@ describe("CommandCenterProviderIsolation", () => {
     );
     NodeAssert.ok(read);
     NodeAssert.ok(write);
+    const auto = commandCenterCodexIsolation("auto", undefined, "/runtime/codex", codexHome);
+    NodeAssert.ok(auto);
 
     NodeAssert.equal(read.permissionProfile, COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE);
     NodeAssert.equal(write.permissionProfile, COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE);
+    NodeAssert.equal(auto.permissionProfile, COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE);
 
     const readConfig = read.appServerArgs.join(" ");
     NodeAssert.match(readConfig, /--strict-config/u);

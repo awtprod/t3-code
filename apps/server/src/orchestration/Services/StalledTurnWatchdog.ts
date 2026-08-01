@@ -17,4 +17,4 @@ export interface StalledTurnWatchdogShape {
 export class StalledTurnWatchdog extends Context.Service<
   StalledTurnWatchdog,
   StalledTurnWatchdogShape
->()("t3/orchestration/Services/StalledTurnWatchdog") {}
+>()("@awtprod/command-center/orchestration/Services/StalledTurnWatchdog") {}

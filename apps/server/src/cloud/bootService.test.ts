@@ -14,6 +14,7 @@ import {
   HostProcessPlatform,
 } from "@t3tools/shared/hostProcess";
 
+import { reconcileService } from "../cli/service.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as BootService from "./bootService.ts";
 
@@ -90,29 +91,31 @@ const makeTestContext = Effect.fn("test.makeTestContext")(function* () {
 it("renders a systemd unit with absolute paths and append-mode logging", () => {
   const unit = BootService.renderBootServiceUnit({
     nodePath: "/usr/local/bin/node",
-    t3EntryPath: "/home/theo/.t3/runtime/versions/0.0.27/node_modules/t3/dist/bin.mjs",
-    baseDir: "/home/theo/.t3",
-    logPath: "/home/theo/.t3/userdata/logs/boot-service.log",
-    unitPath: "/home/theo/.config/systemd/user/t3code.service",
+    t3EntryPath:
+      "/opt/example/.t3/runtime/versions/0.0.27/node_modules/@awtprod/command-center/dist/bin.mjs",
+    baseDir: "/opt/example/.t3",
+    logPath: "/opt/example/.t3/userdata/logs/boot-service.log",
+    unitPath: "/opt/example/.config/systemd/user/t3code.service",
   });
 
   assert.equal(
     unit,
     [
       "[Unit]",
-      "Description=Command Center server (T3 Connect)",
+      "Description=Command Center server",
       "StartLimitIntervalSec=300",
       "StartLimitBurst=5",
       "",
       "[Service]",
       "Type=simple",
       "WorkingDirectory=%h",
-      "Environment=T3CODE_HOME=/home/theo/.t3",
-      "ExecStart=/usr/local/bin/node /home/theo/.t3/runtime/versions/0.0.27/node_modules/t3/dist/bin.mjs serve",
+      "Environment=T3CODE_HOME=/opt/example/.t3",
+      "Environment=T3_BOOT_SERVICE_UNIT=t3code.service",
+      "ExecStart=/usr/local/bin/node /opt/example/.t3/runtime/versions/0.0.27/node_modules/@awtprod/command-center/dist/bin.mjs serve",
       "Restart=always",
       "RestartSec=5",
-      "StandardOutput=append:/home/theo/.t3/userdata/logs/boot-service.log",
-      "StandardError=append:/home/theo/.t3/userdata/logs/boot-service.log",
+      "StandardOutput=append:/opt/example/.t3/userdata/logs/boot-service.log",
+      "StandardError=append:/opt/example/.t3/userdata/logs/boot-service.log",
       "",
       "[Install]",
       "WantedBy=default.target",
@@ -123,53 +126,83 @@ it("renders a systemd unit with absolute paths and append-mode logging", () => {
 
 it("quotes systemd values containing spaces and escapes percent specifiers", () => {
   assert.equal(BootService.quoteSystemdValue("/plain/path"), "/plain/path");
-  assert.equal(BootService.quoteSystemdValue("/home/me/T3 Data"), '"/home/me/T3 Data"');
+  assert.equal(BootService.quoteSystemdValue("/opt/example/T3 Data"), '"/opt/example/T3 Data"');
   assert.equal(BootService.quoteSystemdValue("/opt/100%cpu"), "/opt/100%%cpu");
 
   const unit = BootService.renderBootServiceUnit({
-    nodePath: "/home/me/my tools/node",
-    t3EntryPath: "/home/me/T3 Data/bin.mjs",
-    baseDir: "/home/me/T3 Data",
-    logPath: "/home/me/100%logs/boot.log",
-    unitPath: "/home/me/.config/systemd/user/t3code.service",
+    nodePath: "/opt/example/my tools/node",
+    t3EntryPath: "/opt/example/T3 Data/bin.mjs",
+    baseDir: "/opt/example/T3 Data",
+    logPath: "/opt/example/100%logs/boot.log",
+    unitPath: "/opt/example/.config/systemd/user/t3code.service",
   });
-  assert.include(unit, 'ExecStart="/home/me/my tools/node" "/home/me/T3 Data/bin.mjs" serve');
-  assert.include(unit, 'Environment=T3CODE_HOME="/home/me/T3 Data"');
+  assert.include(
+    unit,
+    'ExecStart="/opt/example/my tools/node" "/opt/example/T3 Data/bin.mjs" serve',
+  );
+  assert.include(unit, 'Environment=T3CODE_HOME="/opt/example/T3 Data"');
   // append: paths take the rest of the line literally (spaces are fine,
   // quoting is not), but % still goes through specifier expansion.
-  assert.include(unit, "StandardOutput=append:/home/me/100%%logs/boot.log");
-  assert.include(unit, "StandardError=append:/home/me/100%%logs/boot.log");
+  assert.include(unit, "StandardOutput=append:/opt/example/100%%logs/boot.log");
+  assert.include(unit, "StandardError=append:/opt/example/100%%logs/boot.log");
 });
 
 it("flags package-manager cache entry points as ephemeral", () => {
   assert.isTrue(
-    BootService.isEphemeralCacheEntry("/home/theo/.npm/_npx/abc123/node_modules/t3/dist/bin.mjs"),
+    BootService.isEphemeralCacheEntry("/opt/example/.npm/_npx/abc123/node_modules/t3/dist/bin.mjs"),
   );
   assert.isTrue(
     BootService.isEphemeralCacheEntry("C:\\Users\\theo\\AppData\\npm-cache\\_npx\\abc\\bin.mjs"),
   );
   assert.isTrue(
     BootService.isEphemeralCacheEntry(
-      "/home/theo/.cache/pnpm/dlx/abc/node_modules/t3/dist/bin.mjs",
+      "/opt/example/.cache/pnpm/dlx/abc/node_modules/t3/dist/bin.mjs",
     ),
   );
   assert.isTrue(
-    BootService.isEphemeralCacheEntry("/home/theo/.bun/install/cache/t3@0.0.27/dist/bin.mjs"),
+    BootService.isEphemeralCacheEntry("/opt/example/.bun/install/cache/t3@0.0.27/dist/bin.mjs"),
   );
   assert.isFalse(BootService.isEphemeralCacheEntry("/usr/local/lib/node_modules/t3/dist/bin.mjs"));
   assert.isFalse(
     BootService.isEphemeralCacheEntry(
-      "/home/theo/dev/pnpm/dlx-tools/t3/node_modules/t3/dist/bin.mjs",
+      "/opt/example/dev/pnpm/dlx-tools/t3/node_modules/t3/dist/bin.mjs",
     ),
   );
   assert.isFalse(
     BootService.isEphemeralCacheEntry(
-      "/home/theo/.t3/runtime/versions/0.0.27/node_modules/t3/dist/bin.mjs",
+      "/opt/example/.t3/runtime/versions/0.0.27/node_modules/t3/dist/bin.mjs",
     ),
   );
 });
 
 it.layer(NodeServices.layer)("BootService", (it) => {
+  it.effect("reconciles the standalone service once and is then idempotent", () =>
+    Effect.gen(function* () {
+      const { dirs } = yield* makeTestContext();
+      const commands: Array<RecordedCommand> = [];
+      const service = yield* BootService.make({
+        baseDir: dirs.baseDir,
+        logsDir: dirs.logsDir,
+        cliVersion: "0.0.27",
+        host: makeHost(dirs.stableEntry),
+      }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(dirs.home));
+
+      const first = yield* reconcileService().pipe(
+        Effect.provideService(BootService.BootService, service),
+      );
+      assert.isTrue(first.changed);
+      if (!first.changed) return;
+      assert.isFalse(first.previouslyInstalled);
+
+      const commandCount = commands.length;
+      const second = yield* reconcileService().pipe(
+        Effect.provideService(BootService.BootService, service),
+      );
+      assert.isFalse(second.changed);
+      assert.lengthOf(commands, commandCount);
+    }),
+  );
+
   it.effect("installs the unit, enables the service, and enables linger", () =>
     Effect.gen(function* () {
       const { dirs, fs, path } = yield* makeTestContext();
@@ -225,7 +258,7 @@ it.layer(NodeServices.layer)("BootService", (it) => {
         baseDir: dirs.baseDir,
         logsDir: dirs.logsDir,
         cliVersion: "0.0.27",
-        host: makeHost("/home/theo/.npm/_npx/abc/node_modules/t3/dist/bin.mjs"),
+        host: makeHost("/opt/example/.npm/_npx/abc/node_modules/t3/dist/bin.mjs"),
       }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(dirs.home));
 
       const plan = yield* service.install;
@@ -233,11 +266,18 @@ it.layer(NodeServices.layer)("BootService", (it) => {
       const runtimeDir = path.join(dirs.baseDir, "runtime", "versions", "0.0.27");
       assert.equal(
         plan.t3EntryPath,
-        path.join(runtimeDir, "node_modules", "t3", "dist", "bin.mjs"),
+        path.join(runtimeDir, "node_modules", "@awtprod", "command-center", "dist", "bin.mjs"),
       );
       assert.deepEqual(commands[0], {
         command: "npm",
-        args: ["install", "--prefix", runtimeDir, "--no-fund", "--no-audit", "t3@0.0.27"],
+        args: [
+          "install",
+          "--prefix",
+          runtimeDir,
+          "--no-fund",
+          "--no-audit",
+          "@awtprod/command-center@0.0.27",
+        ],
       });
       // Success is recorded via a sentinel so interrupted installs re-run.
       assert.isTrue(yield* fs.exists(path.join(runtimeDir, ".install-complete")));
@@ -252,7 +292,7 @@ it.layer(NodeServices.layer)("BootService", (it) => {
         baseDir: dirs.baseDir,
         logsDir: dirs.logsDir,
         cliVersion: "0.0.27",
-        host: makeHost("/home/theo/.npm/_npx/abc/node_modules/t3/dist/bin.mjs"),
+        host: makeHost("/opt/example/.npm/_npx/abc/node_modules/t3/dist/bin.mjs"),
       }).pipe(Effect.provide(makeRecordingRunnerLayer(commands)), provideHostRefs(dirs.home));
 
       const plan = yield* service.install;
@@ -296,7 +336,7 @@ it.layer(NodeServices.layer)("BootService", (it) => {
         baseDir: dirs.baseDir,
         logsDir: dirs.logsDir,
         cliVersion: "0.0.27",
-        host: makeHost("/home/theo/.npm/_npx/abc/node_modules/t3/dist/bin.mjs"),
+        host: makeHost("/opt/example/.npm/_npx/abc/node_modules/t3/dist/bin.mjs"),
       }).pipe(
         Effect.provide(makeRecordingRunnerLayer(commands, { failCommand: "npm" })),
         provideHostRefs(dirs.home),
@@ -311,7 +351,7 @@ it.layer(NodeServices.layer)("BootService", (it) => {
     }),
   );
 
-  it.effect("reports an installed-but-stale unit so connect can offer a repair", () =>
+  it.effect("reports an installed-but-stale unit so the lifecycle can offer a repair", () =>
     Effect.gen(function* () {
       const { dirs, fs, path } = yield* makeTestContext();
       const commands: Array<RecordedCommand> = [];
@@ -402,8 +442,8 @@ it.layer(NodeServices.layer)("BootService", (it) => {
 
       const error = yield* service.install.pipe(Effect.flip);
       assert.isTrue(isCommandError(error));
-      // A leftover unit would make the next connect report "already set up"
-      // even though linger never happened.
+      // A leftover unit would make status report "installed" even though
+      // linger never happened.
       assert.isFalse(
         yield* fs.exists(path.join(dirs.home, ".config", "systemd", "user", "t3code.service")),
       );

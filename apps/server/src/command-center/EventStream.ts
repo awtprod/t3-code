@@ -388,7 +388,7 @@ export interface CommandCenterEventStreamShape {
 export class CommandCenterEventStream extends Context.Service<
   CommandCenterEventStream,
   CommandCenterEventStreamShape
->()("t3/command-center/EventStream/CommandCenterEventStream") {}
+>()("@awtprod/command-center/command-center/EventStream/CommandCenterEventStream") {}
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;

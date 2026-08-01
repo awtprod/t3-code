@@ -186,9 +186,65 @@ function assertMissing(path: string, message: string): void {
   }
 }
 
+async function assertNoCaseInsensitiveTrackedPathCollisions(): Promise<void> {
+  // Stream rather than execFileSync: the pinned upstream tree includes the
+  // large tracked .repos fixture, which exceeds Node's default output buffer.
+  const git = NodeChildProcess.spawn("git", ["ls-files", "-z"], {
+    cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  git.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+  git.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    git.once("error", reject);
+    git.once("close", (code) => resolve(code ?? 1));
+  });
+  if (exitCode !== 0) {
+    throw new Error(
+      `Could not enumerate tracked paths (git exit ${exitCode}): ${Buffer.concat(stderrChunks).toString("utf8")}`,
+    );
+  }
+  const trackedPaths = Buffer.concat(stdoutChunks).toString("utf8").split("\0").filter(Boolean);
+  const canonicalPaths = new Map<string, string>();
+  const canonicalModulePaths = new Map<string, string>();
+  const collisions: string[] = [];
+
+  for (const trackedPath of trackedPaths) {
+    const canonicalPath = trackedPath.normalize("NFC").toLocaleLowerCase("en-US");
+    const existingPath = canonicalPaths.get(canonicalPath);
+    if (existingPath !== undefined && existingPath !== trackedPath) {
+      collisions.push(`${existingPath} <> ${trackedPath}`);
+      continue;
+    }
+    canonicalPaths.set(canonicalPath, trackedPath);
+
+    if (/\.[cm]?[jt]sx?$/u.test(trackedPath)) {
+      const canonicalModulePath = trackedPath
+        .replace(/\.[cm]?[jt]sx?$/u, "")
+        .normalize("NFC")
+        .toLocaleLowerCase("en-US");
+      const existingModulePath = canonicalModulePaths.get(canonicalModulePath);
+      if (existingModulePath !== undefined && existingModulePath !== trackedPath) {
+        collisions.push(`${existingModulePath} <> ${trackedPath} (module resolution)`);
+        continue;
+      }
+      canonicalModulePaths.set(canonicalModulePath, trackedPath);
+    }
+  }
+
+  if (collisions.length > 0) {
+    throw new Error(
+      `Tracked paths collide on case-insensitive filesystems:\n${collisions.join("\n")}`,
+    );
+  }
+}
+
 const tempRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-release-smoke-"));
 
 try {
+  await assertNoCaseInsensitiveTrackedPathCollisions();
   copyWorkspaceManifestFixture(tempRoot);
 
   NodeChildProcess.execFileSync(
@@ -254,7 +310,7 @@ try {
   );
   assertContains(
     nightlyReleaseMetadata,
-    "name=T3 Code Nightly 9.9.10-nightly.20260413.321 (abcdef123456)",
+    "name=Command Center Nightly 9.9.10-nightly.20260413.321 (abcdef123456)",
     "Expected nightly metadata to include the short commit SHA in the release name.",
   );
 

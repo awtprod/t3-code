@@ -397,7 +397,7 @@ export class SessionStore extends Context.Service<
     readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
     readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
   }
->()("t3/auth/SessionStore") {}
+>()("@awtprod/command-center/auth/SessionStore") {}
 
 const SIGNING_SECRET_NAME = "server-signing-key";
 const DEFAULT_SESSION_TTL = Duration.days(30);
@@ -470,6 +470,9 @@ export const make = Effect.gen(function* () {
   const cookieName = resolveSessionCookieName({
     mode: serverConfig.mode,
     port: serverConfig.port,
+    host: serverConfig.host,
+    instanceKey: serverConfig.stateDir,
+    development: serverConfig.devUrl !== undefined,
   });
 
   const emitUpsert = (clientSession: AuthClientSession) =>

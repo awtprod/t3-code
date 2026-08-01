@@ -187,6 +187,7 @@ const buildGatewayUnderTest = Effect.fnUntraced(function* (options?: {
     ...derivedPaths,
     staticDir: undefined,
     devUrl: undefined,
+    devAllowedOrigins: [],
     noBrowser: true,
     startupPresentation: "browser",
     desktopBootstrapToken: undefined,

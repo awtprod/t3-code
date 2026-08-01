@@ -401,7 +401,7 @@ export interface RunLifecycleShape {
 }
 
 export class RunLifecycle extends Context.Service<RunLifecycle, RunLifecycleShape>()(
-  "t3/command-center/RunLifecycle",
+  "@awtprod/command-center/command-center/RunLifecycle",
 ) {}
 
 interface RuntimeDependencies {

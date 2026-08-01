@@ -650,7 +650,9 @@ export class VerifiedLinuxScopedShell extends Context.Service<
       input: VerifiedScopedShellExecuteInput,
     ) => Effect.Effect<VerifiedScopedShellExecutionResult, VerifiedScopedShellError>;
   }
->()("t3/command-center/automation/VerifiedScopedShell/VerifiedLinuxScopedShell") {}
+>()(
+  "@awtprod/command-center/command-center/automation/VerifiedScopedShell/VerifiedLinuxScopedShell",
+) {}
 
 interface VerifiedLinuxScopedShellTestingOptions {
   readonly spawnSettlementDelayMs: number;

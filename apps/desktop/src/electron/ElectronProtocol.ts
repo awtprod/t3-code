@@ -9,8 +9,8 @@ import * as Scope from "effect/Scope";
 import * as Electron from "electron";
 
 export const DESKTOP_HOST = "app";
-export const DESKTOP_PRODUCTION_SCHEME = "t3code";
-export const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
+export const DESKTOP_PRODUCTION_SCHEME = "commandcenter";
+export const DESKTOP_DEVELOPMENT_SCHEME = "commandcenter-dev";
 
 export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
@@ -21,15 +21,15 @@ export function getDesktopScheme(isDevelopment: boolean): string {
  *
  * Custom schemes are non-standard by default, and Chromium gives a
  * non-standard scheme an **opaque** origin — every request the renderer makes
- * carries `Origin: null` rather than `t3code://app`. That matters beyond
+ * carries `Origin: null` rather than `commandcenter://app`. That matters beyond
  * tidiness: the server rejects `null` on the control-plane WebSocket upgrade
  * (`apps/server/src/auth/websocketOrigin.ts`), because `null` is also what a
  * sandboxed hostile iframe sends, so it cannot be allow-listed. Without this
  * call the renderer is indistinguishable from that attacker and is refused.
  *
- * Measured with a real Electron renderer on `t3code://app`: with
+ * Measured with a real Electron renderer on `commandcenter://app`: with
  * `protocol.handle` alone the upgrade arrives as `Origin: null`; adding this
- * registration makes it arrive as `Origin: t3code://app`.
+ * registration makes it arrive as `Origin: commandcenter://app`.
  *
  * Must be called at module scope — Electron requires it before the `ready`
  * event, and it throws if called afterwards. Measured on Electron 41.5.0:
@@ -120,6 +120,7 @@ export function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrat
   const scriptSources = [
     "'self'",
     "'unsafe-inline'",
+    "'wasm-unsafe-eval'",
     ...(clerkOrigin ? [clerkOrigin] : []),
     "https://challenges.cloudflare.com",
   ];

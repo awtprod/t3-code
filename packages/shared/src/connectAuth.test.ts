@@ -12,13 +12,13 @@ import {
 describe("connectAuth", () => {
   it("round-trips state and challenge through the authorize URL fragment", () => {
     const url = buildConnectAuthorizeRequestUrl({
-      hostedAppUrl: "https://app.t3.codes",
+      hostedAppUrl: "https://awtprod-command-center.vercel.app",
       state: "q7mK9xV2pL4nR8sT6wYzAQ",
       challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
     });
     const parsed = new URL(url);
 
-    expect(parsed.origin).toBe("https://app.t3.codes");
+    expect(parsed.origin).toBe("https://awtprod-command-center.vercel.app");
     expect(parsed.pathname).toBe("/connect");
     expect(parsed.search).toBe("");
     expect(readConnectAuthorizeRequest(parsed)).toEqual({

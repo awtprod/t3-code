@@ -199,7 +199,7 @@ export interface WebhookAdmissionShape {
 }
 
 export class WebhookAdmission extends Context.Service<WebhookAdmission, WebhookAdmissionShape>()(
-  "t3/command-center/WebhookAdmission",
+  "@awtprod/command-center/command-center/WebhookAdmission",
 ) {}
 
 export function makeWebhookAdmission(dependencies: {

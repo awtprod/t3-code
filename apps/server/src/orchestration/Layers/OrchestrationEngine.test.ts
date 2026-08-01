@@ -149,6 +149,8 @@ describe("OrchestrationEngine", () => {
           createdAt: "2026-03-03T00:00:02.000Z",
           updatedAt: "2026-03-03T00:00:03.000Z",
           archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
           deletedAt: null,
           messages: [],
           proposedPlans: [],
@@ -204,6 +206,7 @@ describe("OrchestrationEngine", () => {
           getThreadShellById: () => Effect.succeed(Option.none()),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+          searchThreads: () => Effect.succeed({ matches: [] }),
         }),
       ),
       Layer.provide(
@@ -221,6 +224,7 @@ describe("OrchestrationEngine", () => {
     const runtime = ManagedRuntime.make(layer);
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
+    expect(await runtime.runPromise(engine.latestSequence)).toBe(7);
     const result = await runtime.runPromise(
       engine.dispatch({
         type: "thread.meta.update",
@@ -231,6 +235,7 @@ describe("OrchestrationEngine", () => {
     );
 
     expect(result.sequence).toBe(8);
+    expect(await runtime.runPromise(engine.latestSequence)).toBe(8);
     expect(fullSnapshotReadCount).toBe(0);
 
     await runtime.dispose();
@@ -336,6 +341,14 @@ describe("OrchestrationEngine", () => {
 
     await system.run(
       engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-archive-title-regeneration"),
+        threadId: ThreadId.make("thread-archive"),
+        regenerateTitle: true,
+      }),
+    );
+    await system.run(
+      engine.dispatch({
         type: "thread.archive",
         commandId: CommandId.make("cmd-thread-archive"),
         threadId: ThreadId.make("thread-archive"),
@@ -345,6 +358,10 @@ describe("OrchestrationEngine", () => {
       (await system.readModel()).threads.find((thread) => thread.id === "thread-archive")
         ?.archivedAt,
     ).not.toBeNull();
+    expect(
+      (await system.readModel()).threads.find((thread) => thread.id === "thread-archive")
+        ?.titleRegeneration,
+    ).toBeNull();
 
     await system.run(
       engine.dispatch({
@@ -357,6 +374,22 @@ describe("OrchestrationEngine", () => {
       (await system.readModel()).threads.find((thread) => thread.id === "thread-archive")
         ?.archivedAt,
     ).toBeNull();
+    expect(
+      (await system.readModel()).threads.find((thread) => thread.id === "thread-archive")
+        ?.titleRegeneration,
+    ).toBeNull();
+    await system.run(
+      engine.dispatch({
+        type: "thread.title.regeneration.complete",
+        commandId: CommandId.make("cmd-thread-archive-stale-title-completion"),
+        threadId: ThreadId.make("thread-archive"),
+        requestId: CommandId.make("cmd-thread-archive-title-regeneration"),
+        title: "Stale generated title",
+      }),
+    );
+    expect(
+      (await system.readModel()).threads.find((thread) => thread.id === "thread-archive")?.title,
+    ).toBe("Archive me");
 
     await system.dispose();
   });

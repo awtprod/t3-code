@@ -96,7 +96,7 @@ export interface AutomationRecoveryReport {
 }
 
 export class AutomationRuns extends Context.Service<AutomationRuns, AutomationRunsShape>()(
-  "t3/command-center/AutomationRuns",
+  "@awtprod/command-center/command-center/AutomationRuns",
 ) {}
 
 export const layer = Layer.effect(

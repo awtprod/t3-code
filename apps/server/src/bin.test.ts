@@ -6,10 +6,16 @@ import * as NodePath from "node:path";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentOrchestrationHttpApi } from "@t3tools/contracts";
+import {
+  CommandId,
+  EnvironmentOrchestrationHttpApi,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServer from "effect/unstable/http/HttpServer";
@@ -22,6 +28,7 @@ import { Command } from "effect/unstable/cli";
 import { cli, makeCli } from "./bin.ts";
 import * as ServerConfig from "./config.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -77,6 +84,7 @@ const makeCliTestServerConfig = (baseDir: string) =>
       ...derivedPaths,
       staticDir: undefined,
       devUrl: undefined,
+      devAllowedOrigins: [],
       noBrowser: true,
       startupPresentation: "browser",
       desktopBootstrapToken: undefined,
@@ -189,13 +197,25 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       if (error._tag !== "ShowHelp") {
         assert.fail(`Expected ShowHelp, got ${error._tag}`);
       }
-      assert.deepEqual(error.commandPath, ["t3", "connect"]);
+      assert.deepEqual(error.commandPath, ["command-center", "connect"]);
       assert.include(error.errors[0]?.message ?? "", "missing T3 Connect public configuration");
 
       const output = (yield* TestConsole.errorLines).join("\n");
       assert.include(output, "ERROR");
       assert.include(output, "missing T3 Connect public configuration");
     }).pipe(Effect.provide(Layer.mergeAll(CliRuntimeLayer, TestConsole.layer))),
+  );
+
+  it.effect("exposes service lifecycle commands without T3 Connect configuration", () =>
+    Effect.gen(function* () {
+      const { output } = yield* captureStdout(runCli(["service", "--help"], noConnectCli));
+
+      assert.include(output, "Manage the T3 Code background service.");
+      assert.include(output, "install");
+      assert.include(output, "uninstall");
+      assert.include(output, "update");
+      assert.include(output, "status");
+    }),
   );
 
   it.effect("reports fresh headless connect state without requiring local configuration", () =>
@@ -301,7 +321,10 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         runConnectCli(["connect", "logout", "--base-dir", baseDir]),
       );
 
-      assert.equal(output, "Signed out of T3 Connect locally.");
+      assert.equal(
+        output,
+        "Signed out of T3 Connect locally.\nThe background service is managed separately with `t3 service`.",
+      );
       assert.isFalse(NodeFS.existsSync(tokenPath));
     }),
   );
@@ -409,7 +432,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       if (error._tag !== "ShowHelp") {
         assert.fail(`Expected ShowHelp, got ${error._tag}`);
       }
-      assert.deepEqual(error.commandPath, ["t3", "auth", "pairing", "create"]);
+      assert.deepEqual(error.commandPath, ["command-center", "auth", "pairing", "create"]);
       const ttlError = error.errors[0] as CliError.CliError | undefined;
       if (!ttlError || ttlError._tag !== "InvalidValue") {
         assert.fail(`Expected InvalidValue, got ${String(ttlError?._tag)}`);
@@ -469,6 +492,63 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
     }),
   );
 
+  it.effect("force removes projects that still contain threads", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-projects-force-remove-test-"),
+      );
+      const workspaceRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-cli-projects-force-remove-workspace-"),
+      );
+
+      yield* runCliWithRuntime(["project", "add", workspaceRoot, "--base-dir", baseDir]);
+      const afterAdd = yield* readPersistedSnapshot(baseDir);
+      const project = afterAdd.projects.find(
+        (candidate) => candidate.workspaceRoot === workspaceRoot && candidate.deletedAt === null,
+      );
+      assert.isTrue(project !== undefined);
+
+      const config = yield* makeCliTestServerConfig(baseDir);
+      yield* Effect.gen(function* () {
+        const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-cli-force-remove-thread"),
+          threadId: ThreadId.make("thread-cli-force-remove"),
+          projectId: project!.id,
+          title: "Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+      }).pipe(Effect.provide(makeProjectPersistenceLayer(config)));
+
+      yield* runCliWithRuntime([
+        "project",
+        "remove",
+        project!.id,
+        "--force",
+        "--base-dir",
+        baseDir,
+      ]);
+      const afterRemove = yield* readPersistedSnapshot(baseDir);
+      assert.isTrue(
+        (afterRemove.projects.find((candidate) => candidate.id === project!.id)?.deletedAt ??
+          null) !== null,
+      );
+      assert.isTrue(
+        (afterRemove.threads.find((thread) => thread.id === "thread-cli-force-remove")?.deletedAt ??
+          null) !== null,
+      );
+    }),
+  );
+
   it.effect("routes project commands through a running server when runtime state is present", () =>
     Effect.gen(function* () {
       const baseDir = NodeFS.mkdtempSync(
@@ -520,7 +600,7 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       if (error._tag !== "ShowHelp") {
         assert.fail(`Expected ShowHelp, got ${error._tag}`);
       }
-      assert.deepEqual(error.commandPath, ["t3", "project", "add"]);
+      assert.deepEqual(error.commandPath, ["command-center", "project", "add"]);
       const optionError = error.errors[0] as CliError.CliError | undefined;
       if (!optionError || optionError._tag !== "UnrecognizedOption") {
         assert.fail(`Expected UnrecognizedOption, got ${String(optionError?._tag)}`);

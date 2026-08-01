@@ -61,7 +61,7 @@ export interface AutomationScheduleRunnerShape {
 export class AutomationScheduleRunner extends Context.Service<
   AutomationScheduleRunner,
   AutomationScheduleRunnerShape
->()("t3/command-center/automation/ScheduleRunner/AutomationScheduleRunner") {}
+>()("@awtprod/command-center/command-center/automation/ScheduleRunner/AutomationScheduleRunner") {}
 
 function occurrenceMinute(source: string) {
   const parsed = DateTime.make(source);

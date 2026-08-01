@@ -45,7 +45,7 @@ export interface RunRecoveryCoordinatorShape {
 export class RunRecoveryCoordinator extends Context.Service<
   RunRecoveryCoordinator,
   RunRecoveryCoordinatorShape
->()("t3/command-center/RunRecoveryCoordinator") {}
+>()("@awtprod/command-center/command-center/RunRecoveryCoordinator") {}
 
 export interface RunRecoveryDependencies {
   readonly syncConfiguration: Effect.Effect<void, Error>;

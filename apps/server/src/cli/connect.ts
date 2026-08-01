@@ -6,7 +6,6 @@ import {
 } from "@t3tools/contracts";
 import { RelayOkResponse } from "@t3tools/contracts/relay";
 import * as RelayClient from "@t3tools/shared/relayClient";
-import * as Terminal from "effect/Terminal";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
 import * as Cause from "effect/Cause";
 import * as Config from "effect/Config";
@@ -20,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
+import * as Terminal from "effect/Terminal";
 import { Command, Flag, GlobalFlag, Prompt } from "effect/unstable/cli";
 import {
   FetchHttpClient,
@@ -29,7 +29,6 @@ import {
 } from "effect/unstable/http";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 
-import packageJson from "../../package.json" with { type: "json" };
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as BootService from "../cloud/bootService.ts";
@@ -45,9 +44,14 @@ import { headlessRelayClientTracingLayer } from "../cloud/relayTracing.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
-import * as ProcessRunner from "../processRunner.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import { resolveCliCommand } from "./invocation.ts";
+import {
+  bootServiceLayer,
+  offerServiceDuringOnboarding,
+  recoverServiceOnboardingOffer,
+} from "./service.ts";
 
 const jsonFlag = Flag.boolean("json").pipe(
   Flag.withDescription("Emit JSON instead of human-readable output."),
@@ -420,7 +424,9 @@ const disconnectCloud = Effect.fn("cloud.cli.disconnect")(function* (options: {
   });
 
   if (options.clearAuthorization) {
-    yield* Console.log("Signed out of T3 Connect locally.");
+    yield* Console.log(
+      "Signed out of T3 Connect locally.\nThe background service is managed separately with `t3 service`.",
+    );
   }
 });
 
@@ -457,11 +463,7 @@ const runCloudCommand = Effect.fn("cloud.cli.run_cloud_command")(function* <A, E
     RelayClient.layerCloudflared({ baseDir: config.baseDir }),
     EnvironmentAuth.runtimeLayer,
     ServerEnvironment.layer,
-    BootService.layer({
-      baseDir: config.baseDir,
-      logsDir: config.logsDir,
-      cliVersion: packageJson.version,
-    }).pipe(Layer.provide(ProcessRunner.layer)),
+    bootServiceLayer(config),
     headlessRelayClientTracingLayer,
   ).pipe(
     Layer.provideMerge(FetchHttpClient.layer),
@@ -540,10 +542,11 @@ const connectLinkCommand = Command.make("link", {
         yield* Console.log("T3 Connect\n");
         const linked = yield* linkEnvironmentForConnect(flags);
         if (linked) {
+          const serveCommand = yield* resolveCliCommand("serve");
           yield* Console.log(
             flags.publishOnly
               ? `✓ Authorized${connectedAs(linked.identity)}\n\nNext\n  Start T3 to publish agent activity (no managed tunnel).`
-              : `✓ Authorized${connectedAs(linked.identity)}\n\nNext\n  Start the server with \`t3 serve\` to make this machine reachable.`,
+              : `✓ Authorized${connectedAs(linked.identity)}\n\nNext\n  Start the server with \`${serveCommand}\` to make this machine reachable.`,
           );
         }
       }),
@@ -750,11 +753,19 @@ export const connectCommand = Command.make("connect", {
 
         // Connect itself already succeeded; a boot-service failure must not
         // fail the command, just tell the user what happened and move on.
-        const background = yield* recoverBootServiceOffer(offerBootService);
+        const background = yield* recoverServiceOnboardingOffer(offerServiceDuringOnboarding);
+        if (background) {
+          yield* Console.log(
+            "\n✓ Background service ready\n\nT3 Code will stay reachable after you log out.",
+          );
+          return;
+        }
+        const serveCommand = yield* resolveCliCommand("serve");
         yield* Console.log(
           background
             ? "\n✓ Background service ready\n\nCommand Center will stay reachable after you log out."
             : "\nNext\n  Start the server with `t3 serve` to make this machine reachable.",
+          `\nNext\n  Start the server with \`${serveCommand}\` to make this machine reachable.`,
         );
       }),
     ),

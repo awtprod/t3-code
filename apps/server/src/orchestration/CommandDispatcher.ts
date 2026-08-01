@@ -86,7 +86,7 @@ export interface OrchestrationCommandDispatcherShape {
 export class OrchestrationCommandDispatcher extends Context.Service<
   OrchestrationCommandDispatcher,
   OrchestrationCommandDispatcherShape
->()("t3/orchestration/CommandDispatcher/OrchestrationCommandDispatcher") {}
+>()("@awtprod/command-center/orchestration/CommandDispatcher/OrchestrationCommandDispatcher") {}
 
 export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;

@@ -21,8 +21,11 @@ export default defineConfig({
     testTimeout: 60_000,
   },
   staged: {
-    // Formatter only for now — no lint or typecheck on commit.
-    "*": "vp fmt",
+    // Formatter only for now — no lint or typecheck on commit. Reference repositories preserve
+    // their pinned upstream bytes and are already excluded from the formatter itself; exclude
+    // them at the staged-file matcher too so large subtree syncs do not create empty formatter
+    // invocations.
+    "{*,!(.repos)/**}": "vp fmt",
   },
   fmt: {
     ignorePatterns: [

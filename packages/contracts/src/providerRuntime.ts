@@ -4,6 +4,7 @@ import {
   EventId,
   IsoDateTime,
   NonNegativeInt,
+  ProjectId,
   ProviderItemId,
   PositiveInt,
   RuntimeItemId,
@@ -26,6 +27,7 @@ const RuntimeEventRawSource = Schema.Union([
   Schema.Literal("claude.sdk.permission"),
   Schema.Literal("codex.sdk.thread-event"),
   Schema.Literal("opencode.sdk.event"),
+  Schema.Literal("kimi.web.event"),
   Schema.Literal("acp.jsonrpc"),
   Schema.TemplateLiteral(["acp.", Schema.String, ".extension"]),
 ]);
@@ -154,6 +156,7 @@ const ProviderRuntimeEventType = Schema.Literals([
   "thread.state.changed",
   "thread.metadata.updated",
   "thread.token-usage.updated",
+  "turn.usage.recorded",
   "thread.realtime.started",
   "thread.realtime.item-added",
   "thread.realtime.audio.delta",
@@ -204,6 +207,7 @@ const ThreadStartedType = Schema.Literal("thread.started");
 const ThreadStateChangedType = Schema.Literal("thread.state.changed");
 const ThreadMetadataUpdatedType = Schema.Literal("thread.metadata.updated");
 const ThreadTokenUsageUpdatedType = Schema.Literal("thread.token-usage.updated");
+const TurnUsageRecordedType = Schema.Literal("turn.usage.recorded");
 const ThreadRealtimeStartedType = Schema.Literal("thread.realtime.started");
 const ThreadRealtimeItemAddedType = Schema.Literal("thread.realtime.item-added");
 const ThreadRealtimeAudioDeltaType = Schema.Literal("thread.realtime.audio.delta");
@@ -312,23 +316,108 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   maxTokens: Schema.optional(PositiveInt),
   inputTokens: Schema.optional(NonNegativeInt),
   cachedInputTokens: Schema.optional(NonNegativeInt),
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
   outputTokens: Schema.optional(NonNegativeInt),
   reasoningOutputTokens: Schema.optional(NonNegativeInt),
   lastUsedTokens: Schema.optional(NonNegativeInt),
   lastInputTokens: Schema.optional(NonNegativeInt),
   lastCachedInputTokens: Schema.optional(NonNegativeInt),
+  lastCacheWriteInputTokens: Schema.optional(NonNegativeInt),
   lastOutputTokens: Schema.optional(NonNegativeInt),
   lastReasoningOutputTokens: Schema.optional(NonNegativeInt),
   toolUses: Schema.optional(NonNegativeInt),
   durationMs: Schema.optional(NonNegativeInt),
+  costUsd: Schema.optional(Schema.Number),
+  costKind: Schema.optional(Schema.Literals(["reported", "estimated", "api-equivalent-estimate"])),
   compactsAutomatically: Schema.optional(Schema.Boolean),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
+
+export const CacheTelemetryCapability = Schema.Literals(["none", "read", "read-write"]);
+export type CacheTelemetryCapability = typeof CacheTelemetryCapability.Type;
+
+export const SubagentLifecycleState = Schema.Literals([
+  "spawned",
+  "running",
+  "suspended",
+  "completed",
+  "failed",
+]);
+export type SubagentLifecycleState = typeof SubagentLifecycleState.Type;
+
+export const SubagentUsage = Schema.Struct({
+  uncachedInputTokens: Schema.optional(NonNegativeInt),
+  cacheReadInputTokens: Schema.optional(NonNegativeInt),
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
+  outputTokens: Schema.optional(NonNegativeInt),
+  reasoningOutputTokens: Schema.optional(NonNegativeInt),
+  durationMs: Schema.optional(NonNegativeInt),
+  costUsd: Schema.optional(Schema.Number),
+});
+export type SubagentUsage = typeof SubagentUsage.Type;
+
+/** Provider-neutral data carried by collab_agent_tool_call activities. */
+export const SubagentActivityData = Schema.Struct({
+  provider: ProviderDriverKind,
+  providerAgentId: TrimmedNonEmptyStringSchema,
+  name: Schema.optional(TrimmedNonEmptyStringSchema),
+  agentType: Schema.optional(TrimmedNonEmptyStringSchema),
+  description: Schema.optional(TrimmedNonEmptyStringSchema),
+  parentToolCallId: Schema.optional(TrimmedNonEmptyStringSchema),
+  swarmIndex: Schema.optional(NonNegativeInt),
+  swarmSize: Schema.optional(PositiveInt),
+  mode: Schema.Literals(["foreground", "background"]),
+  state: SubagentLifecycleState,
+  resultSummary: Schema.optional(TrimmedNonEmptyStringSchema),
+  errorSummary: Schema.optional(TrimmedNonEmptyStringSchema),
+  usage: Schema.optional(SubagentUsage),
+});
+export type SubagentActivityData = typeof SubagentActivityData.Type;
+
+export const TurnUsageComponent = Schema.Struct({
+  kind: Schema.Literals(["main", "subagent"]),
+  id: TrimmedNonEmptyStringSchema,
+  name: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type TurnUsageComponent = typeof TurnUsageComponent.Type;
+
+export const TurnUsageQuality = Schema.Literals(["reported", "derived", "partial"]);
+export type TurnUsageQuality = typeof TurnUsageQuality.Type;
+
+export const TurnUsageWorkload = Schema.Literals(["interactive", "automation"]);
+export type TurnUsageWorkload = typeof TurnUsageWorkload.Type;
+
+export const TurnUsageRecord = Schema.Struct({
+  component: TurnUsageComponent,
+  projectId: Schema.optional(ProjectId),
+  model: Schema.optional(TrimmedNonEmptyStringSchema),
+  workload: TurnUsageWorkload,
+  quality: TurnUsageQuality,
+  uncachedInputTokens: Schema.optional(NonNegativeInt),
+  cacheReadInputTokens: Schema.optional(NonNegativeInt),
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
+  outputTokens: Schema.optional(NonNegativeInt),
+  /** Subset of outputTokens; never add this field to output when totaling. */
+  reasoningOutputTokens: Schema.optional(NonNegativeInt),
+  contextUsedTokens: Schema.optional(NonNegativeInt),
+  contextLimitTokens: Schema.optional(PositiveInt),
+  durationMs: Schema.optional(NonNegativeInt),
+  toolUses: Schema.optional(NonNegativeInt),
+  providerReportedCostUsd: Schema.optional(Schema.Number),
+  billingMode: Schema.optional(Schema.Literals(["api", "subscription", "unknown"])),
+  completedAt: IsoDateTime,
+});
+export type TurnUsageRecord = typeof TurnUsageRecord.Type;
 
 const ThreadTokenUsageUpdatedPayload = Schema.Struct({
   usage: ThreadTokenUsageSnapshot,
 });
 export type ThreadTokenUsageUpdatedPayload = typeof ThreadTokenUsageUpdatedPayload.Type;
+
+const TurnUsageRecordedPayload = Schema.Struct({
+  usage: TurnUsageRecord,
+});
+export type TurnUsageRecordedPayload = typeof TurnUsageRecordedPayload.Type;
 
 const ThreadRealtimeStartedPayload = Schema.Struct({
   realtimeSessionId: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -690,6 +779,15 @@ const ProviderRuntimeThreadTokenUsageUpdatedEvent = Schema.Struct({
 export type ProviderRuntimeThreadTokenUsageUpdatedEvent =
   typeof ProviderRuntimeThreadTokenUsageUpdatedEvent.Type;
 
+const ProviderRuntimeTurnUsageRecordedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: TurnUsageRecordedType,
+  turnId: TurnId,
+  payload: TurnUsageRecordedPayload,
+});
+export type ProviderRuntimeTurnUsageRecordedEvent =
+  typeof ProviderRuntimeTurnUsageRecordedEvent.Type;
+
 const ProviderRuntimeThreadRealtimeStartedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: ThreadRealtimeStartedType,
@@ -991,6 +1089,7 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeThreadStateChangedEvent,
   ProviderRuntimeThreadMetadataUpdatedEvent,
   ProviderRuntimeThreadTokenUsageUpdatedEvent,
+  ProviderRuntimeTurnUsageRecordedEvent,
   ProviderRuntimeThreadRealtimeStartedEvent,
   ProviderRuntimeThreadRealtimeItemAddedEvent,
   ProviderRuntimeThreadRealtimeAudioDeltaEvent,

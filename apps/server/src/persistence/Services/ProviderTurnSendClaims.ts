@@ -276,4 +276,6 @@ export interface ProviderTurnSendClaimRepositoryShape {
 export class ProviderTurnSendClaimRepository extends Context.Service<
   ProviderTurnSendClaimRepository,
   ProviderTurnSendClaimRepositoryShape
->()("t3/persistence/Services/ProviderTurnSendClaims/ProviderTurnSendClaimRepository") {}
+>()(
+  "@awtprod/command-center/persistence/Services/ProviderTurnSendClaims/ProviderTurnSendClaimRepository",
+) {}

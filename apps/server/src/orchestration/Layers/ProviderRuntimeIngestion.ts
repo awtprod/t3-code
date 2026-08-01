@@ -18,6 +18,7 @@ import {
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
   ModelSelection,
+  ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -51,8 +52,47 @@ import {
   type ProviderRuntimeIngestionShape,
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { ProjectionTurnUsageRepository } from "../../persistence/Services/ProjectionTurnUsage.ts";
+import { ProjectionTurnUsageRepositoryLive } from "../../persistence/Layers/ProjectionTurnUsage.ts";
+import { isCommandCenterThreadId } from "../../provider/security/CommandCenterProviderIsolation.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
+const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
+
+// Fallback when the in-memory description cache no longer has the task name
+// (server restart, session-exit sweep, TTL/capacity eviction): earlier
+// task.started/task.progress activities for the task are persisted with it.
+function findTaskTitleInActivities(
+  activities: ReadonlyArray<OrchestrationThreadActivity> | undefined,
+  taskId: string,
+): string | undefined {
+  if (!activities) {
+    return undefined;
+  }
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const activity = activities[index];
+    if (!activity || (activity.kind !== "task.started" && activity.kind !== "task.progress")) {
+      continue;
+    }
+    const payload =
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as { taskId?: unknown; title?: unknown; detail?: unknown })
+        : undefined;
+    if (payload?.taskId !== taskId) {
+      continue;
+    }
+    const title =
+      typeof payload.title === "string"
+        ? payload.title
+        : activity.kind === "task.started" && typeof payload.detail === "string"
+          ? payload.detail
+          : undefined;
+    if (title && title.trim().length > 0) {
+      return title;
+    }
+  }
+  return undefined;
+}
 
 // Decode a persisted session binding's stored model selection. The binding's
 // `runtimePayload` is opaque (`unknown | null`); the interrupted turn's
@@ -71,6 +111,8 @@ const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
 const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL = Duration.minutes(120);
 const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
+const TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY = 10_000;
+const TASK_DESCRIPTION_BY_TASK_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
@@ -284,6 +326,172 @@ function truncateActivityData(value: unknown, depth = 0): unknown {
   return result;
 }
 
+function readActivityString(record: Record<string, unknown>, ...keys: ReadonlyArray<string>) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
+function readActivityNumber(record: Record<string, unknown>, ...keys: ReadonlyArray<string>) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      return Math.floor(value);
+    }
+  }
+  return undefined;
+}
+
+function normalizeSubagentActivityData(
+  event: Extract<
+    ProviderRuntimeEvent,
+    { type: "item.started" | "item.updated" | "item.completed" }
+  >,
+) {
+  if (event.payload.itemType !== "collab_agent_tool_call") return undefined;
+  const raw =
+    event.payload.data &&
+    typeof event.payload.data === "object" &&
+    !Array.isArray(event.payload.data)
+      ? (event.payload.data as Record<string, unknown>)
+      : {};
+  const input =
+    raw.input && typeof raw.input === "object" && !Array.isArray(raw.input)
+      ? (raw.input as Record<string, unknown>)
+      : raw;
+  const providerAgentId =
+    readActivityString(raw, "providerAgentId", "agentId", "taskId", "subagentId", "toolUseId") ??
+    readActivityString(input, "agent_id", "agentId", "task_id", "taskId") ??
+    event.providerRefs?.providerItemId ??
+    event.itemId;
+  if (!providerAgentId) return undefined;
+  const explicitState = readActivityString(raw, "state", "status");
+  const state =
+    explicitState === "suspended"
+      ? "suspended"
+      : explicitState === "failed" || event.payload.status === "failed"
+        ? "failed"
+        : event.type === "item.completed"
+          ? "completed"
+          : event.type === "item.started"
+            ? "spawned"
+            : "running";
+  const background =
+    raw.background === true ||
+    input.background === true ||
+    readActivityString(raw, "mode") === "background";
+  const rawUsage =
+    raw.usage && typeof raw.usage === "object" && !Array.isArray(raw.usage)
+      ? (raw.usage as Record<string, unknown>)
+      : undefined;
+  const usage = rawUsage
+    ? {
+        ...(readActivityNumber(rawUsage, "uncachedInputTokens", "inputOther") === undefined
+          ? {}
+          : {
+              uncachedInputTokens: readActivityNumber(
+                rawUsage,
+                "uncachedInputTokens",
+                "inputOther",
+              ),
+            }),
+        ...(readActivityNumber(rawUsage, "cacheReadInputTokens", "inputCacheRead") === undefined
+          ? {}
+          : {
+              cacheReadInputTokens: readActivityNumber(
+                rawUsage,
+                "cacheReadInputTokens",
+                "inputCacheRead",
+              ),
+            }),
+        ...(readActivityNumber(rawUsage, "cacheWriteInputTokens", "inputCacheCreation") ===
+        undefined
+          ? {}
+          : {
+              cacheWriteInputTokens: readActivityNumber(
+                rawUsage,
+                "cacheWriteInputTokens",
+                "inputCacheCreation",
+              ),
+            }),
+        ...(readActivityNumber(rawUsage, "outputTokens", "output") === undefined
+          ? {}
+          : { outputTokens: readActivityNumber(rawUsage, "outputTokens", "output") }),
+        ...(readActivityNumber(rawUsage, "reasoningOutputTokens") === undefined
+          ? {}
+          : {
+              reasoningOutputTokens: readActivityNumber(rawUsage, "reasoningOutputTokens"),
+            }),
+        ...(readActivityNumber(rawUsage, "durationMs") === undefined
+          ? {}
+          : { durationMs: readActivityNumber(rawUsage, "durationMs") }),
+        ...(typeof rawUsage.costUsd === "number" && Number.isFinite(rawUsage.costUsd)
+          ? { costUsd: Math.max(0, rawUsage.costUsd) }
+          : {}),
+      }
+    : undefined;
+  return {
+    provider: event.provider,
+    providerAgentId,
+    ...((readActivityString(raw, "name", "agentName") ??
+    readActivityString(input, "name", "agent_name"))
+      ? {
+          name:
+            readActivityString(raw, "name", "agentName") ??
+            readActivityString(input, "name", "agent_name"),
+        }
+      : {}),
+    ...((readActivityString(raw, "agentType", "type", "subagentType") ??
+    readActivityString(input, "subagent_type", "agent_type"))
+      ? {
+          agentType:
+            readActivityString(raw, "agentType", "type", "subagentType") ??
+            readActivityString(input, "subagent_type", "agent_type"),
+        }
+      : {}),
+    ...((readActivityString(raw, "description", "prompt") ??
+    readActivityString(input, "description", "prompt"))
+      ? {
+          description:
+            readActivityString(raw, "description", "prompt") ??
+            readActivityString(input, "description", "prompt"),
+        }
+      : {}),
+    ...(readActivityString(raw, "parentToolCallId", "parentId")
+      ? { parentToolCallId: readActivityString(raw, "parentToolCallId", "parentId") }
+      : {}),
+    ...(readActivityNumber(raw, "swarmIndex", "swarmPosition") === undefined
+      ? {}
+      : { swarmIndex: readActivityNumber(raw, "swarmIndex", "swarmPosition") }),
+    ...(readActivityNumber(raw, "swarmSize") === undefined
+      ? {}
+      : { swarmSize: readActivityNumber(raw, "swarmSize") }),
+    mode: background ? ("background" as const) : ("foreground" as const),
+    state,
+    ...(readActivityString(raw, "resultSummary", "summary", "result")
+      ? { resultSummary: readActivityString(raw, "resultSummary", "summary", "result") }
+      : {}),
+    ...(readActivityString(raw, "errorSummary", "error")
+      ? { errorSummary: readActivityString(raw, "errorSummary", "error") }
+      : {}),
+    ...(usage !== undefined && Object.keys(usage).length > 0 ? { usage } : {}),
+  };
+}
+
+function toolActivityId(
+  event: Extract<
+    ProviderRuntimeEvent,
+    { type: "item.started" | "item.updated" | "item.completed" }
+  >,
+) {
+  const subagent = normalizeSubagentActivityData(event);
+  return subagent
+    ? EventId.make(`subagent:${event.provider}:${subagent.providerAgentId}`)
+    : event.eventId;
+}
+
 function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string | undefined {
   const trimmed = planMarkdown?.trim();
   if (!trimmed) {
@@ -327,6 +535,118 @@ function buildContextWindowActivityPayload(
     return undefined;
   }
   return event.payload.usage;
+}
+
+function finiteUsageInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : undefined;
+}
+
+function usageRecordFromTokenSnapshot(
+  event: Extract<ProviderRuntimeEvent, { type: "thread.token-usage.updated" }>,
+  model: string | undefined,
+  workload: "interactive" | "automation",
+) {
+  if (!event.turnId) return undefined;
+  const usage = event.payload.usage;
+  const input = usage.lastInputTokens ?? usage.inputTokens;
+  const cacheRead = usage.lastCachedInputTokens ?? usage.cachedInputTokens;
+  const cacheWrite = usage.lastCacheWriteInputTokens ?? usage.cacheWriteInputTokens;
+  const output = usage.lastOutputTokens ?? usage.outputTokens;
+  const uncached =
+    input === undefined ? undefined : Math.max(0, input - (cacheRead ?? 0) - (cacheWrite ?? 0));
+  if (
+    uncached === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined &&
+    output === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    component: { kind: "main" as const, id: "main" },
+    ...(model ? { model } : {}),
+    workload,
+    quality: "derived" as const,
+    ...(uncached !== undefined ? { uncachedInputTokens: uncached } : {}),
+    ...(cacheRead !== undefined ? { cacheReadInputTokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined ? { cacheWriteInputTokens: cacheWrite } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    ...((usage.lastReasoningOutputTokens ?? usage.reasoningOutputTokens) !== undefined
+      ? {
+          reasoningOutputTokens:
+            usage.lastReasoningOutputTokens ?? usage.reasoningOutputTokens ?? 0,
+        }
+      : {}),
+    contextUsedTokens: usage.usedTokens,
+    ...(usage.maxTokens !== undefined ? { contextLimitTokens: usage.maxTokens } : {}),
+    ...(usage.durationMs !== undefined ? { durationMs: usage.durationMs } : {}),
+    ...(usage.toolUses !== undefined ? { toolUses: usage.toolUses } : {}),
+    completedAt: event.createdAt,
+  };
+}
+
+function usageRecordFromTurnCompletion(
+  event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>,
+  model: string | undefined,
+  workload: "interactive" | "automation",
+) {
+  if (!event.turnId) return undefined;
+  const raw =
+    event.payload.usage &&
+    typeof event.payload.usage === "object" &&
+    !Array.isArray(event.payload.usage)
+      ? (event.payload.usage as Record<string, unknown>)
+      : undefined;
+  const iterations = Array.isArray(raw?.iterations) ? raw.iterations : [];
+  const lastIteration = iterations.findLast(
+    (value): value is Record<string, unknown> =>
+      value !== null && typeof value === "object" && !Array.isArray(value),
+  );
+  const usage = lastIteration ?? raw;
+  const uncached = finiteUsageInteger(usage?.input_tokens ?? usage?.inputTokens);
+  const cacheRead = finiteUsageInteger(usage?.cache_read_input_tokens ?? usage?.cachedInputTokens);
+  const cacheWrite = finiteUsageInteger(
+    usage?.cache_creation_input_tokens ?? usage?.cacheWriteInputTokens,
+  );
+  const output = finiteUsageInteger(usage?.output_tokens ?? usage?.outputTokens);
+  const reasoning = finiteUsageInteger(
+    usage?.reasoning_output_tokens ?? usage?.reasoningOutputTokens,
+  );
+  if (
+    uncached === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined &&
+    output === undefined &&
+    event.payload.totalCostUsd === undefined
+  ) {
+    // Codex records the authoritative per-turn counters on its token snapshot,
+    // and Kimi emits an explicit canonical usage event before completion. Do
+    // not replace either richer row with an empty terminal marker.
+    if (event.provider === "codex" || event.provider === "kimi") return undefined;
+  }
+  const hasReportedMetrics =
+    uncached !== undefined ||
+    cacheRead !== undefined ||
+    cacheWrite !== undefined ||
+    output !== undefined ||
+    event.payload.totalCostUsd !== undefined;
+  return {
+    component: { kind: "main" as const, id: "main" },
+    ...(model ? { model } : {}),
+    workload,
+    quality: hasReportedMetrics ? ("reported" as const) : ("partial" as const),
+    ...(uncached !== undefined ? { uncachedInputTokens: uncached } : {}),
+    ...(cacheRead !== undefined ? { cacheReadInputTokens: cacheRead } : {}),
+    ...(cacheWrite !== undefined ? { cacheWriteInputTokens: cacheWrite } : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    ...(reasoning !== undefined ? { reasoningOutputTokens: reasoning } : {}),
+    ...(event.payload.totalCostUsd !== undefined
+      ? { providerReportedCostUsd: event.payload.totalCostUsd }
+      : {}),
+    completedAt: event.createdAt,
+  };
 }
 
 function normalizeRuntimeTurnState(
@@ -377,6 +697,12 @@ function orchestrationSessionStatusFromRuntimeState(
   }
 }
 
+function sessionStatusAllowsActiveTurn(
+  status: ReturnType<typeof orchestrationSessionStatusFromRuntimeState>,
+): boolean {
+  return status === "starting" || status === "running";
+}
+
 function requestKindFromCanonicalRequestType(
   requestType: string | undefined,
 ): "command" | "file-read" | "file-change" | undefined {
@@ -394,8 +720,9 @@ function requestKindFromCanonicalRequestType(
   }
 }
 
-function runtimeEventToActivities(
+export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
+  taskTitle?: string,
 ): ReadonlyArray<OrchestrationThreadActivity> {
   const maybeSequence = (() => {
     const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
@@ -427,7 +754,7 @@ function runtimeEventToActivities(
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
-            ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(event.payload.detail ? { detail: event.payload.detail } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -605,9 +932,15 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "task.progress",
-          summary: "Reasoning update",
+          summary:
+            event.payload.description.trim().length > 0
+              ? truncateDetail(event.payload.description, 120)
+              : "Reasoning update",
           payload: {
             taskId: event.payload.taskId,
+            ...(event.payload.description.trim().length > 0
+              ? { title: truncateDetail(event.payload.description, 120) }
+              : {}),
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
             ...(event.payload.summary ? { summary: truncateDetail(event.payload.summary) } : {}),
             ...(event.payload.lastToolName ? { lastToolName: event.payload.lastToolName } : {}),
@@ -635,7 +968,15 @@ function runtimeEventToActivities(
           payload: {
             taskId: event.payload.taskId,
             status: event.payload.status,
-            ...(event.payload.summary ? { detail: truncateDetail(event.payload.summary) } : {}),
+            ...(taskTitle ? { title: truncateDetail(taskTitle, 120) } : {}),
+            // summary + detail mirror task.progress: clients label the row from
+            // summary and keep detail for the preview/expanded body.
+            ...(event.payload.summary
+              ? {
+                  summary: truncateDetail(event.payload.summary),
+                  detail: truncateDetail(event.payload.summary),
+                }
+              : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
@@ -692,7 +1033,7 @@ function runtimeEventToActivities(
       }
       return [
         {
-          id: event.eventId,
+          id: toolActivityId(event),
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.updated",
@@ -701,9 +1042,11 @@ function runtimeEventToActivities(
             itemType: event.payload.itemType,
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
-            ...(event.payload.data !== undefined
-              ? { data: truncateActivityData(event.payload.data) }
-              : {}),
+            ...(normalizeSubagentActivityData(event)
+              ? { data: normalizeSubagentActivityData(event) }
+              : event.payload.data !== undefined
+                ? { data: truncateActivityData(event.payload.data) }
+                : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -717,7 +1060,7 @@ function runtimeEventToActivities(
       }
       return [
         {
-          id: event.eventId,
+          id: toolActivityId(event),
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.completed",
@@ -725,9 +1068,11 @@ function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
-            ...(event.payload.data !== undefined
-              ? { data: truncateActivityData(event.payload.data) }
-              : {}),
+            ...(normalizeSubagentActivityData(event)
+              ? { data: normalizeSubagentActivityData(event) }
+              : event.payload.data !== undefined
+                ? { data: truncateActivityData(event.payload.data) }
+                : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -741,7 +1086,7 @@ function runtimeEventToActivities(
       }
       return [
         {
-          id: event.eventId,
+          id: toolActivityId(event),
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.started",
@@ -749,6 +1094,11 @@ function runtimeEventToActivities(
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
+            ...(normalizeSubagentActivityData(event)
+              ? { data: normalizeSubagentActivityData(event) }
+              : event.payload.data !== undefined
+                ? { data: truncateActivityData(event.payload.data) }
+                : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -820,6 +1170,7 @@ const make = Effect.gen(function* () {
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerTurnSendClaimRepository = yield* ProviderTurnSendClaimRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const projectionTurnUsageRepository = yield* ProjectionTurnUsageRepository;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
@@ -894,6 +1245,27 @@ const make = Effect.gen(function* () {
     timeToLive: BUFFERED_PROPOSED_PLAN_BY_ID_TTL,
     lookup: () => Effect.succeed({ text: "", createdAt: "" }),
   });
+
+  // Task names arrive on task.started/task.progress but not on task.completed,
+  // so remember them per task to title the completion activity.
+  const taskDescriptionByTaskKey = yield* Cache.make<string, string>({
+    capacity: TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY,
+    timeToLive: TASK_DESCRIPTION_BY_TASK_TTL,
+    lookup: () => Effect.succeed(""),
+  });
+
+  const rememberTaskDescription = (threadId: ThreadId, taskId: string, description: string) =>
+    Cache.set(taskDescriptionByTaskKey, providerTaskKey(threadId, taskId), description);
+
+  // Entries are left in place after completion so replayed or duplicate
+  // terminal events stay titled; TTL, capacity, and the session-exit sweep
+  // bound the cache.
+  const lookupTaskDescription = (threadId: ThreadId, taskId: string) =>
+    Cache.getOption(taskDescriptionByTaskKey, providerTaskKey(threadId, taskId)).pipe(
+      Effect.map((description) =>
+        Option.filter(description, (value) => value.length > 0).pipe(Option.getOrUndefined),
+      ),
+    );
 
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
     return yield* projectionSnapshotQuery
@@ -1319,6 +1691,7 @@ const make = Effect.gen(function* () {
       const turnKeys = Array.from(yield* Cache.keys(turnMessageIdsByTurnKey));
       const assistantSegmentKeys = Array.from(yield* Cache.keys(assistantSegmentStateByTurnKey));
       const proposedPlanKeys = Array.from(yield* Cache.keys(bufferedProposedPlanById));
+      const taskDescriptionKeys = Array.from(yield* Cache.keys(taskDescriptionByTaskKey));
       yield* Effect.forEach(
         turnKeys,
         (key) =>
@@ -1352,6 +1725,12 @@ const make = Effect.gen(function* () {
           key.startsWith(proposedPlanPrefix)
             ? Cache.invalidate(bufferedProposedPlanById, key)
             : Effect.void,
+        { concurrency: 1 },
+      ).pipe(Effect.asVoid);
+      yield* Effect.forEach(
+        taskDescriptionKeys,
+        (key) =>
+          key.startsWith(prefix) ? Cache.invalidate(taskDescriptionByTaskKey, key) : Effect.void,
         { concurrency: 1 },
       ).pipe(Effect.asVoid);
     });
@@ -1622,6 +2001,11 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
+      const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+        threadId: thread.id,
+      });
+      const hasPendingTurnStart =
+        Option.isSome(pendingTurnStart) && thread.session?.status === "starting";
 
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
@@ -1644,11 +2028,7 @@ const make = Effect.gen(function* () {
       const conflictingTurnStartIsPendingTurnStart =
         event.type === "turn.started" && conflictsWithActiveTurn
           ? sameId(yield* getExpectedProviderTurnIdForThread(thread.id), eventTurnId) &&
-            Option.isSome(
-              yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-                threadId: thread.id,
-              }),
-            )
+            Option.isSome(pendingTurnStart)
           : false;
 
       // A terminal event (session.exited) stamped with a provider instance that
@@ -1787,16 +2167,12 @@ const make = Effect.gen(function* () {
         event.type === "turn.started" ||
         event.type === "turn.completed"
       ) {
-        const nextActiveTurnId =
-          event.type === "turn.started"
-            ? (eventTurnId ?? null)
-            : event.type === "turn.completed" || event.type === "session.exited"
-              ? null
-              : activeTurnId;
         const status = (() => {
           switch (event.type) {
-            case "session.state.changed":
-              return orchestrationSessionStatusFromRuntimeState(event.payload.state);
+            case "session.state.changed": {
+              const runtimeStatus = orchestrationSessionStatusFromRuntimeState(event.payload.state);
+              return hasPendingTurnStart && runtimeStatus === "ready" ? "starting" : runtimeStatus;
+            }
             case "turn.started":
               return "running";
             case "session.exited":
@@ -1812,10 +2188,21 @@ const make = Effect.gen(function* () {
             case "session.started":
             case "thread.started":
               // Provider thread/session start notifications can arrive during an
-              // active turn; preserve turn-running state in that case.
-              return activeTurnId !== null ? "running" : "ready";
+              // active or pending turn; preserve that lifecycle state.
+              return activeTurnId !== null ? "running" : hasPendingTurnStart ? "starting" : "ready";
           }
         })();
+        const nextActiveTurnId =
+          event.type === "turn.started"
+            ? (eventTurnId ?? null)
+            : event.type === "turn.completed" || event.type === "session.exited"
+              ? null
+              : event.type === "session.state.changed" &&
+                  !sessionStatusAllowsActiveTurn(
+                    orchestrationSessionStatusFromRuntimeState(event.payload.state),
+                  )
+                ? null
+                : activeTurnId;
         const lastError =
           event.type === "session.state.changed" && event.payload.state === "error"
             ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
@@ -3092,7 +3479,60 @@ const make = Effect.gen(function* () {
         }
       }
 
-      const activities = runtimeEventToActivities(event);
+      if (event.type === "task.started" || event.type === "task.progress") {
+        const description = event.payload.description?.trim();
+        if (description) {
+          yield* rememberTaskDescription(thread.id, event.payload.taskId, description);
+        }
+      }
+
+      if (event.type === "turn.usage.recorded") {
+        const threadDetail = yield* getLoadedThreadDetail();
+        yield* projectionTurnUsageRepository.record({
+          threadId: thread.id,
+          turnId: event.turnId,
+          projectId: event.payload.usage.projectId ?? threadDetail?.projectId ?? null,
+          providerInstanceId:
+            event.providerInstanceId ?? ProviderInstanceId.make(String(event.provider)),
+          provider: event.provider,
+          usage: event.payload.usage,
+        });
+      } else if (event.type === "thread.token-usage.updated" || event.type === "turn.completed") {
+        const threadDetail = yield* getLoadedThreadDetail();
+        const usage =
+          event.type === "thread.token-usage.updated"
+            ? usageRecordFromTokenSnapshot(
+                event,
+                threadDetail?.modelSelection.model,
+                isCommandCenterThreadId(thread.id) ? "automation" : "interactive",
+              )
+            : usageRecordFromTurnCompletion(
+                event,
+                threadDetail?.modelSelection.model,
+                isCommandCenterThreadId(thread.id) ? "automation" : "interactive",
+              );
+        if (usage && event.turnId) {
+          yield* projectionTurnUsageRepository.record({
+            threadId: thread.id,
+            turnId: event.turnId,
+            projectId: threadDetail?.projectId ?? null,
+            providerInstanceId:
+              event.providerInstanceId ?? ProviderInstanceId.make(String(event.provider)),
+            provider: event.provider,
+            usage,
+          });
+        }
+      }
+      let taskTitle: string | undefined;
+      if (event.type === "task.completed") {
+        taskTitle = yield* lookupTaskDescription(thread.id, event.payload.taskId);
+        if (!taskTitle) {
+          const threadDetail = yield* getLoadedThreadDetail();
+          taskTitle = findTaskTitleInActivities(threadDetail?.activities, event.payload.taskId);
+        }
+      }
+
+      const activities = runtimeEventToActivities(event, taskTitle);
       yield* Effect.forEach(activities, (activity) =>
         Effect.gen(function* () {
           const sideEffectEvidence = SIDE_EFFECT_ACTIVITY_KINDS.has(activity.kind);
@@ -3373,5 +3813,11 @@ export const ProviderRuntimeIngestionLive = Layer.effect(
   ProviderRuntimeIngestionService,
   make,
 ).pipe(
-  Layer.provide(Layer.mergeAll(ProjectionTurnRepositoryLive, ProviderTurnSendClaimRepositoryLive)),
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionTurnRepositoryLive,
+      ProviderTurnSendClaimRepositoryLive,
+      ProjectionTurnUsageRepositoryLive,
+    ),
+  ),
 );

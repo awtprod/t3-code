@@ -3,6 +3,16 @@ import { cn } from "~/lib/utils";
 
 export type Icon = React.FC<SVGProps<SVGSVGElement>>;
 
+/** Kimi Code's compact two-eye mark, rendered without external image assets. */
+export const KimiIcon: Icon = (props) => (
+  <svg {...props} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <rect x="2" y="3" width="20" height="18" rx="6" fill="currentColor" opacity="0.16" />
+    <path d="M6 8h4v8H6zm8 0h4v8h-4z" fill="currentColor" />
+    <circle cx="8" cy="11" r="1" fill="white" />
+    <circle cx="16" cy="11" r="1" fill="white" />
+  </svg>
+);
+
 export const GitHubIcon: Icon = (props) => (
   <svg {...props} viewBox="0 0 1024 1024" fill="none">
     <path

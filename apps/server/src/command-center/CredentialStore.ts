@@ -157,7 +157,7 @@ export interface CommandCenterCredentialStoreShape {
 export class CommandCenterCredentialStore extends Context.Service<
   CommandCenterCredentialStore,
   CommandCenterCredentialStoreShape
->()("t3/command-center/CredentialStore/CommandCenterCredentialStore") {}
+>()("@awtprod/command-center/command-center/CredentialStore/CommandCenterCredentialStore") {}
 
 const isCredentialStoreError = Schema.is(CommandCenterCredentialStoreError);
 

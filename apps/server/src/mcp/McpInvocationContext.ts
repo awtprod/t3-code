@@ -28,13 +28,12 @@ export interface McpInvocationScope {
   /** Server-issued policy. Tool input cannot promote proposal-only credentials. */
   readonly memoryWriteMode?: McpMemoryWriteMode;
   readonly issuedAt: number;
-  readonly expiresAt: number;
 }
 
 export class McpInvocationContext extends Context.Service<
   McpInvocationContext,
   McpInvocationScope
->()("t3/mcp/McpInvocationContext") {}
+>()("@awtprod/command-center/mcp/McpInvocationContext") {}
 
 export const requirePreviewCapability = Effect.fn("mcp.requirePreviewCapability")(function* () {
   const invocation = yield* McpInvocationContext;

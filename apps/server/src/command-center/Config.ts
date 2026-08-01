@@ -109,7 +109,7 @@ export interface CommandCenterConfigShape {
 export class CommandCenterConfig extends Context.Service<
   CommandCenterConfig,
   CommandCenterConfigShape
->()("t3/command-center/Config/CommandCenterConfig") {}
+>()("@awtprod/command-center/command-center/Config/CommandCenterConfig") {}
 
 const decodeRoot = Schema.decodeUnknownEffect(RootConfigFile);
 const decodeSpace = Schema.decodeUnknownEffect(SpaceConfigFile);

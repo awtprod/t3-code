@@ -56,6 +56,13 @@ export interface OrchestrationEngineShape {
    * This is a hot runtime stream (new events only), not a historical replay.
    */
   readonly streamDomainEvents: Stream.Stream<OrchestrationEvent>;
+
+  /**
+   * The latest sequence reflected in the engine's authoritative command read
+   * model (0 if none). Used to gauge how far behind a resuming client is before
+   * choosing between an incremental replay and a fresh projected snapshot.
+   */
+  readonly latestSequence: Effect.Effect<number, never, never>;
 }
 
 /**
@@ -72,4 +79,6 @@ export interface OrchestrationEngineShape {
 export class OrchestrationEngineService extends Context.Service<
   OrchestrationEngineService,
   OrchestrationEngineShape
->()("t3/orchestration/Services/OrchestrationEngine/OrchestrationEngineService") {}
+>()(
+  "@awtprod/command-center/orchestration/Services/OrchestrationEngine/OrchestrationEngineService",
+) {}

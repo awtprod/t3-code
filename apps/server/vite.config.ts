@@ -6,6 +6,7 @@ import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 import packageJson from "./package.json" with { type: "json" };
 
 const bundledPackagePrefixes = [
+  "@command-center/",
   "@pierre/diffs",
   "@t3tools/",
   "effect-acp",
