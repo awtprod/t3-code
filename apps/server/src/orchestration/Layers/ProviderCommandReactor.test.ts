@@ -718,7 +718,6 @@ describe("ProviderCommandReactor", () => {
       expect(thread?.session?.lastError).not.toContain(" at ");
     }),
   );
-
   it("generates a thread title on the first turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
