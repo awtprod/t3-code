@@ -173,6 +173,8 @@ describe("public leak scan", () => {
       "https://service.example.test/",
       "https://example.ts.net/",
       "https://example-tailnet.ts.net/",
+      "https://host.example.ts.net/",
+      "http://10.0.2.2:3773/",
       "http://192.0.2.10/",
       "http://198.51.100.20/",
       "http://203.0.113.30/",
@@ -222,6 +224,24 @@ describe("public leak scan", () => {
     expect(scanPublicText({ path: "scripts/assets.mjs", text: source })).toEqual([]);
   });
 
+  it("does not treat package versions or SSH Git URL users as account addresses", () => {
+    expect(
+      scanPublicText({
+        path: "pnpm-workspace.yaml",
+        text: [
+          "effect@4.0.0-beta.102: patches/effect@4.0.0-beta.102.patch",
+          "patch: effect__platform-bun@4.0.0-beta.102.patch",
+        ].join("\n"),
+      }),
+    ).toEqual([]);
+    expect(
+      scanPublicText({
+        path: "fixture.ts",
+        text: "ssh://git@github.com:22/example/repository.git",
+      }),
+    ).toEqual([]);
+  });
+
   it("detects private denylist terms case-insensitively", () => {
     const findings = scanPublicText({
       path: "spaces.json",
@@ -264,6 +284,10 @@ describe("public leak scan", () => {
 
   it("allows only reviewable public binary formats and exposes printable metadata", () => {
     expect(isReviewablePublicBinary("apps/web/public/icon.png")).toBe(true);
+    expect(isReviewablePublicBinary("apps/web/src/terminal/ghostty/vendor/ghostty-vt.wasm")).toBe(
+      true,
+    );
+    expect(isReviewablePublicBinary("apps/web/src/terminal/unreviewed.wasm")).toBe(false);
     expect(isReviewablePublicBinary("runtime/archive.bin")).toBe(false);
 
     const metadata = extractPublicBinaryMetadata(

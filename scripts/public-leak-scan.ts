@@ -11,6 +11,7 @@ import {
   parsePrivateDenylist,
   scanPublicAddedText,
   scanPublicPath,
+  scanPrivateDenylistText,
   scanPublicText,
   type PublicLeakFinding,
 } from "./lib/public-leak-scan.ts";
@@ -25,6 +26,7 @@ const GENERATED_LOCKFILES = new Set([
   "pnpm-lock.yaml",
   "yarn.lock",
 ]);
+const VENDORED_PUBLIC_REFERENCE_PREFIX = ".repos/";
 
 const args = new Set(process.argv.slice(2));
 const repoRoot = NodeChildProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -38,9 +40,27 @@ const denylist = loadDenylist();
 const findings: PublicLeakFinding[] = [];
 
 for (const relativePath of paths) {
-  findings.push(...scanPublicPath(relativePath, denylist));
+  const isVendoredPublicReference = relativePath.startsWith(VENDORED_PUBLIC_REFERENCE_PREFIX);
+  const pathFindings = scanPublicPath(relativePath, denylist);
+  findings.push(
+    ...(isVendoredPublicReference
+      ? pathFindings.filter((finding) => finding.rule === "private-denylist")
+      : pathFindings),
+  );
   const candidate = readCandidate(relativePath);
   if (candidate._tag === "Missing") continue;
+  // `.repos/` contains immutable public upstream repositories used as integration fixtures. Their
+  // own examples intentionally include private-network and credential-shaped test values, so the
+  // generic heuristics are not meaningful there. Keep scanning their paths and printable content
+  // against Command Center's operator-provided denylist so private identity boundaries still hold.
+  if (isVendoredPublicReference) {
+    if (candidate._tag === "Oversized") continue;
+    const text = candidate.bytes.includes(0)
+      ? extractPublicBinaryMetadata(candidate.bytes)
+      : candidate.bytes.toString("utf8");
+    findings.push(...scanPrivateDenylistText({ path: relativePath, text, denylist }));
+    continue;
+  }
   if (candidate._tag === "Oversized") {
     findings.push(
       makePublicBlobFinding({
@@ -185,8 +205,13 @@ function scanHistoricalRevisions() {
     );
 
     for (const relativePath of changedPaths) {
+      const isVendoredPublicReference = relativePath.startsWith(VENDORED_PUBLIC_REFERENCE_PREFIX);
+      const pathFindings = scanPublicPath(relativePath, denylist);
       historicalFindings.push(
-        ...scanPublicPath(relativePath, denylist).map((finding) => ({ ...finding, revision })),
+        ...(isVendoredPublicReference
+          ? pathFindings.filter((finding) => finding.rule === "private-denylist")
+          : pathFindings
+        ).map((finding) => ({ ...finding, revision })),
       );
 
       const object = `${commit}:${relativePath}`;
@@ -205,6 +230,18 @@ function scanHistoricalRevisions() {
         continue;
       }
       const bytes = gitBytes(["cat-file", "blob", object]);
+      if (isVendoredPublicReference) {
+        const text = bytes.includes(0)
+          ? extractPublicBinaryMetadata(bytes)
+          : bytes.toString("utf8");
+        historicalFindings.push(
+          ...scanPrivateDenylistText({ path: relativePath, text, denylist }).map((finding) => ({
+            ...finding,
+            revision,
+          })),
+        );
+        continue;
+      }
       if (bytes.includes(0)) {
         if (!isReviewablePublicBinary(relativePath)) {
           historicalFindings.push(

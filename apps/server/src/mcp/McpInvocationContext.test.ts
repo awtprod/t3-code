@@ -18,7 +18,6 @@ it.effect("reports the scoped credential context when preview capability is unav
     providerInstanceId: ProviderInstanceId.make("codex"),
     capabilities: new Set(),
     issuedAt: 1,
-    expiresAt: 2,
   };
 
   return Effect.gen(function* () {
@@ -47,7 +46,6 @@ it.effect("denies automation runs without the exact scoped capability", () => {
     providerInstanceId: ProviderInstanceId.make("codex"),
     capabilities: new Set(["cc.automations.read"]),
     issuedAt: 1,
-    expiresAt: 2,
   };
 
   return Effect.gen(function* () {
@@ -74,7 +72,6 @@ it.effect("does not let a Gmail-only credential cross into Calendar or Drive", (
     providerInstanceId: ProviderInstanceId.make("codex"),
     capabilities: new Set(["cc.connections.google.gmail.read"]),
     issuedAt: 1,
-    expiresAt: 2,
   };
 
   return Effect.gen(function* () {

@@ -42,7 +42,6 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
     cwd: "/work/project-a-worktree",
     capabilities: new Set(["preview"]),
     issuedAt: 1,
-    expiresAt: Number.MAX_SAFE_INTEGER,
   });
   const client = McpSchema.McpServerClient.of({
     clientId: 1,

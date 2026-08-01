@@ -186,13 +186,27 @@ function assertMissing(path: string, message: string): void {
   }
 }
 
-function assertNoCaseInsensitiveTrackedPathCollisions(): void {
-  const trackedPaths = NodeChildProcess.execFileSync("git", ["ls-files", "-z"], {
+async function assertNoCaseInsensitiveTrackedPathCollisions(): Promise<void> {
+  // Stream rather than execFileSync: the pinned upstream tree includes the
+  // large tracked .repos fixture, which exceeds Node's default output buffer.
+  const git = NodeChildProcess.spawn("git", ["ls-files", "-z"], {
     cwd: repoRoot,
-    encoding: "utf8",
-  })
-    .split("\0")
-    .filter(Boolean);
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  git.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+  git.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    git.once("error", reject);
+    git.once("close", (code) => resolve(code ?? 1));
+  });
+  if (exitCode !== 0) {
+    throw new Error(
+      `Could not enumerate tracked paths (git exit ${exitCode}): ${Buffer.concat(stderrChunks).toString("utf8")}`,
+    );
+  }
+  const trackedPaths = Buffer.concat(stdoutChunks).toString("utf8").split("\0").filter(Boolean);
   const canonicalPaths = new Map<string, string>();
   const canonicalModulePaths = new Map<string, string>();
   const collisions: string[] = [];
@@ -230,7 +244,7 @@ function assertNoCaseInsensitiveTrackedPathCollisions(): void {
 const tempRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-release-smoke-"));
 
 try {
-  assertNoCaseInsensitiveTrackedPathCollisions();
+  await assertNoCaseInsensitiveTrackedPathCollisions();
   copyWorkspaceManifestFixture(tempRoot);
 
   NodeChildProcess.execFileSync(

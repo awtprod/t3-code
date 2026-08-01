@@ -28,7 +28,6 @@ export interface McpInvocationScope {
   /** Server-issued policy. Tool input cannot promote proposal-only credentials. */
   readonly memoryWriteMode?: McpMemoryWriteMode;
   readonly issuedAt: number;
-  readonly expiresAt: number;
 }
 
 export class McpInvocationContext extends Context.Service<

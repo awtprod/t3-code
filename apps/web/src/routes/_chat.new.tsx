@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { PlusIcon, RotateCcwIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { useOpenAddProjectCommandPalette } from "../commandPaletteContext";
+import { openCommandPalette } from "../commandPaletteBus";
 import { sortScopedProjectsForSidebar } from "../components/Sidebar.logic";
 import { Button } from "../components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
@@ -77,7 +77,7 @@ function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
 }
 
 function NoProjectsHero() {
-  const openAddProject = useOpenAddProjectCommandPalette();
+  const openAddProject = () => openCommandPalette({ open: "add-project" });
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <Empty className="flex-1">

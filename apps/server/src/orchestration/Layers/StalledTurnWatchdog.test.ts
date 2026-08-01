@@ -111,6 +111,8 @@ function makeShell(
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
     ...overrides,
+    settledOverride: overrides.settledOverride ?? null,
+    settledAt: overrides.settledAt ?? null,
   };
 }
 
@@ -192,6 +194,7 @@ describe("StalledTurnWatchdog", () => {
           readEvents: () => Stream.empty,
           dispatch,
           streamDomainEvents: Stream.empty,
+          latestSequence: Effect.succeed(0),
         }),
       ),
       Layer.provideMerge(
@@ -210,6 +213,7 @@ describe("StalledTurnWatchdog", () => {
           getThreadShellById: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.die("unused"),
           getThreadDetailSnapshot: () => Effect.die("unused"),
+          searchThreads: () => Effect.succeed({ matches: [] }),
         }),
       ),
       Layer.provideMerge(NodeServices.layer),

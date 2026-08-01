@@ -87,9 +87,12 @@ describe("CommandCenterProviderIsolation", () => {
     );
     NodeAssert.ok(read);
     NodeAssert.ok(write);
+    const auto = commandCenterCodexIsolation("auto", undefined, "/runtime/codex", codexHome);
+    NodeAssert.ok(auto);
 
     NodeAssert.equal(read.permissionProfile, COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE);
     NodeAssert.equal(write.permissionProfile, COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE);
+    NodeAssert.equal(auto.permissionProfile, COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE);
 
     const readConfig = read.appServerArgs.join(" ");
     NodeAssert.match(readConfig, /--strict-config/u);

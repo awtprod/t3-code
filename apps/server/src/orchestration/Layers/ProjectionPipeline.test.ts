@@ -14,7 +14,6 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -34,7 +33,6 @@ import {
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
-import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
@@ -173,6 +171,70 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       for (const row of stateRows) {
         assert.equal(row.lastAppliedSequence, 3);
       }
+
+      // Settled lifecycle through the DB pipeline: thread.settled writes the
+      // override + timestamp, thread.unsettled(user) flips to the active pin.
+      yield* eventStore.append({
+        type: "thread.settled",
+        eventId: EventId.make("evt-settle-1"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: "2026-01-01T00:00:01.000Z",
+        commandId: CommandId.make("cmd-settle-1"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-settle-1"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          settledAt: "2026-01-01T00:00:01.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        },
+      });
+      yield* projectionPipeline.bootstrap;
+
+      const settledRows = yield* sql<{
+        readonly settledOverride: string | null;
+        readonly settledAt: string | null;
+      }>`
+        SELECT
+          settled_override AS "settledOverride",
+          settled_at AS "settledAt"
+        FROM projection_threads
+        WHERE thread_id = 'thread-1'
+      `;
+      assert.deepEqual(settledRows, [
+        { settledOverride: "settled", settledAt: "2026-01-01T00:00:01.000Z" },
+      ]);
+
+      yield* eventStore.append({
+        type: "thread.unsettled",
+        eventId: EventId.make("evt-unsettle-1"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        occurredAt: "2026-01-01T00:00:02.000Z",
+        commandId: CommandId.make("cmd-unsettle-1"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-unsettle-1"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          reason: "user",
+          updatedAt: "2026-01-01T00:00:02.000Z",
+        },
+      });
+      yield* projectionPipeline.bootstrap;
+
+      const unsettledRows = yield* sql<{
+        readonly settledOverride: string | null;
+        readonly settledAt: string | null;
+      }>`
+        SELECT
+          settled_override AS "settledOverride",
+          settled_at AS "settledAt"
+        FROM projection_threads
+        WHERE thread_id = 'thread-1'
+      `;
+      assert.deepEqual(unsettledRows, [{ settledOverride: "active", settledAt: null }]);
     }),
   );
 });
@@ -1329,7 +1391,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       `;
       assert.deepEqual(runningRows, [{ state: "running", completedAt: null }]);
 
-      // The session update names the exact turn whose lifecycle ended.
+      // The session leaving "running" is the turn-end signal.
       yield* eventStore.append({
         type: "thread.session-set",
         eventId: EventId.make("evt-tl4"),
@@ -1351,9 +1413,6 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
             lastError: null,
             updatedAt: "2026-01-01T00:01:00.000Z",
           },
-          pendingTurnStartAdoption: "none",
-          settledTurnId: turnId,
-          terminalTurnTransition: { turnId, state: "completed" },
         },
       });
 
@@ -1373,30 +1432,30 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
-  it.effect("settles only the named turn and ignores uncorrelated session updates", () =>
+  it.effect("settles a superseded running turn when a new turn becomes active", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const eventStore = yield* OrchestrationEventStore;
       const sql = yield* SqlClient.SqlClient;
       const now = "2026-01-01T00:00:00.000Z";
-      const threadId = ThreadId.make("thread-turn-settlement");
-      const oldTurnId = TurnId.make("turn-settlement-old");
-      const currentTurnId = TurnId.make("turn-settlement-current");
+      const threadId = ThreadId.make("thread-turn-supersede");
+      const oldTurnId = TurnId.make("turn-superseded");
+      const newTurnId = TurnId.make("turn-steer");
 
       yield* eventStore.append({
         type: "thread.created",
-        eventId: EventId.make("evt-settle-1"),
+        eventId: EventId.make("evt-ts1"),
         aggregateKind: "thread",
         aggregateId: threadId,
         occurredAt: now,
-        commandId: CommandId.make("cmd-settle-1"),
+        commandId: CommandId.make("cmd-ts1"),
         causationEventId: null,
-        correlationId: CorrelationId.make("cmd-settle-1"),
+        correlationId: CorrelationId.make("cmd-ts1"),
         metadata: {},
         payload: {
           threadId,
-          projectId: ProjectId.make("project-turn-settlement"),
-          title: "Turn settlement",
+          projectId: ProjectId.make("project-turn-supersede"),
+          title: "Turn supersede",
           modelSelection: {
             instanceId: ProviderInstanceId.make("opencode"),
             model: "big-pickle",
@@ -1409,72 +1468,35 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       });
 
-      const appendSessionSet = (input: {
-        eventId: string;
-        status: "running" | "ready";
-        activeTurnId: TurnId | null;
-        updatedAt: string;
-        settledTurnId?: TurnId;
-      }) =>
+      const appendRunningSessionSet = (eventId: string, turnId: TurnId, updatedAt: string) =>
         eventStore.append({
           type: "thread.session-set",
-          eventId: EventId.make(input.eventId),
+          eventId: EventId.make(eventId),
           aggregateKind: "thread",
           aggregateId: threadId,
-          occurredAt: input.updatedAt,
-          commandId: CommandId.make(`cmd-${input.eventId}`),
+          occurredAt: updatedAt,
+          commandId: CommandId.make(`cmd-${eventId}`),
           causationEventId: null,
-          correlationId: CorrelationId.make(`cmd-${input.eventId}`),
+          correlationId: CorrelationId.make(`cmd-${eventId}`),
           metadata: {},
           payload: {
             threadId,
-            pendingTurnStartAdoption: "none",
-            ...(input.settledTurnId === undefined
-              ? {}
-              : {
-                  settledTurnId: input.settledTurnId,
-                  terminalTurnTransition: {
-                    turnId: input.settledTurnId,
-                    state: "completed" as const,
-                  },
-                }),
             session: {
               threadId,
-              status: input.status,
+              status: "running",
               providerName: "opencode",
               runtimeMode: "full-access",
-              activeTurnId: input.activeTurnId,
+              activeTurnId: turnId,
               lastError: null,
-              updatedAt: input.updatedAt,
+              updatedAt,
             },
           },
         });
 
-      yield* appendSessionSet({
-        eventId: "evt-settle-2",
-        status: "running",
-        activeTurnId: oldTurnId,
-        updatedAt: "2026-01-01T00:00:01.000Z",
-      });
-      yield* appendSessionSet({
-        eventId: "evt-settle-3",
-        status: "running",
-        activeTurnId: currentTurnId,
-        updatedAt: "2026-01-01T00:00:30.000Z",
-      });
-      yield* appendSessionSet({
-        eventId: "evt-settle-4",
-        status: "ready",
-        activeTurnId: null,
-        updatedAt: "2026-01-01T00:00:40.000Z",
-      });
-      yield* appendSessionSet({
-        eventId: "evt-settle-5",
-        status: "ready",
-        activeTurnId: null,
-        settledTurnId: oldTurnId,
-        updatedAt: "2026-01-01T00:00:50.000Z",
-      });
+      yield* appendRunningSessionSet("evt-ts2", oldTurnId, "2026-01-01T00:00:01.000Z");
+      // A steer: a new turn becomes active without the provider ever
+      // completing the previous one.
+      yield* appendRunningSessionSet("evt-ts3", newTurnId, "2026-01-01T00:00:30.000Z");
 
       yield* projectionPipeline.bootstrap;
 
@@ -1489,323 +1511,8 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         ORDER BY requested_at
       `;
       assert.deepEqual(rows, [
-        { turnId: oldTurnId, state: "completed", completedAt: "2026-01-01T00:00:50.000Z" },
-        { turnId: currentTurnId, state: "running", completedAt: null },
-      ]);
-    }),
-  );
-
-  it.effect("does not resurrect an interrupted turn from a duplicate running update", () =>
-    Effect.gen(function* () {
-      const projectionPipeline = yield* OrchestrationProjectionPipeline;
-      const eventStore = yield* OrchestrationEventStore;
-      const sql = yield* SqlClient.SqlClient;
-      const threadId = ThreadId.make("thread-terminal-running-update");
-      const turnId = TurnId.make("turn-terminal-running-update");
-      const createdAt = "2026-01-01T01:00:00.000Z";
-      const interruptedAt = "2026-01-01T01:00:30.000Z";
-
-      yield* eventStore.append({
-        type: "thread.created",
-        eventId: EventId.make("evt-terminal-1"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: createdAt,
-        commandId: CommandId.make("cmd-terminal-1"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-terminal-1"),
-        metadata: {},
-        payload: {
-          threadId,
-          projectId: ProjectId.make("project-terminal-running-update"),
-          title: "Terminal running update",
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: "gpt-5-codex",
-          },
-          runtimeMode: "full-access",
-          branch: null,
-          worktreePath: null,
-          createdAt,
-          updatedAt: createdAt,
-        },
-      });
-      yield* eventStore.append({
-        type: "thread.session-set",
-        eventId: EventId.make("evt-terminal-2"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: "2026-01-01T01:00:05.000Z",
-        commandId: CommandId.make("cmd-terminal-2"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-terminal-2"),
-        metadata: {},
-        payload: {
-          threadId,
-          pendingTurnStartAdoption: "none",
-          session: {
-            threadId,
-            status: "running",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            activeTurnId: turnId,
-            lastError: null,
-            updatedAt: "2026-01-01T01:00:05.000Z",
-          },
-        },
-      });
-      yield* eventStore.append({
-        type: "thread.turn-interrupt-requested",
-        eventId: EventId.make("evt-terminal-3"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: interruptedAt,
-        commandId: CommandId.make("cmd-terminal-3"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-terminal-3"),
-        metadata: {},
-        payload: {
-          threadId,
-          turnId,
-          createdAt: interruptedAt,
-        },
-      });
-      yield* eventStore.append({
-        type: "thread.session-set",
-        eventId: EventId.make("evt-terminal-4"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: "2026-01-01T01:00:40.000Z",
-        commandId: CommandId.make("cmd-terminal-4"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-terminal-4"),
-        metadata: {},
-        payload: {
-          threadId,
-          pendingTurnStartAdoption: "none",
-          settledTurnId: turnId,
-          terminalTurnTransition: { turnId, state: "completed" },
-          session: {
-            threadId,
-            status: "ready",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            activeTurnId: null,
-            lastError: null,
-            updatedAt: "2026-01-01T01:00:40.000Z",
-          },
-        },
-      });
-      yield* eventStore.append({
-        type: "thread.session-set",
-        eventId: EventId.make("evt-terminal-5"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: "2026-01-01T01:00:45.000Z",
-        commandId: CommandId.make("cmd-terminal-5"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-terminal-5"),
-        metadata: {},
-        payload: {
-          threadId,
-          pendingTurnStartAdoption: "none",
-          session: {
-            threadId,
-            status: "running",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            activeTurnId: turnId,
-            lastError: null,
-            updatedAt: "2026-01-01T01:00:45.000Z",
-          },
-        },
-      });
-
-      yield* projectionPipeline.bootstrap;
-
-      const rows = yield* sql<{
-        readonly state: string;
-        readonly completedAt: string | null;
-      }>`
-        SELECT state, completed_at AS "completedAt"
-        FROM projection_turns
-        WHERE thread_id = ${threadId} AND turn_id = ${turnId}
-      `;
-      assert.deepEqual(rows, [{ state: "interrupted", completedAt: interruptedAt }]);
-    }),
-  );
-
-  it.effect("atomically terminalizes a superseded turn and an interrupted adopted turn", () =>
-    Effect.gen(function* () {
-      const projectionPipeline = yield* OrchestrationProjectionPipeline;
-      const eventStore = yield* OrchestrationEventStore;
-      const sql = yield* SqlClient.SqlClient;
-      const threadId = ThreadId.make("thread-atomic-terminal-transitions");
-      const supersededTurnId = TurnId.make("turn-atomic-superseded");
-      const adoptedTurnId = TurnId.make("turn-atomic-adopted");
-      const adoptedMessageId = MessageId.make("message-atomic-adopted");
-      const createdAt = "2026-01-01T02:00:00.000Z";
-      const transitionedAt = "2026-01-01T02:00:20.000Z";
-
-      yield* eventStore.append({
-        type: "thread.created",
-        eventId: EventId.make("evt-atomic-terminal-1"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: createdAt,
-        commandId: CommandId.make("cmd-atomic-terminal-1"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-atomic-terminal-1"),
-        metadata: {},
-        payload: {
-          threadId,
-          projectId: ProjectId.make("project-atomic-terminal"),
-          title: "Atomic terminal transitions",
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: "gpt-5-codex",
-          },
-          runtimeMode: "full-access",
-          branch: null,
-          worktreePath: null,
-          createdAt,
-          updatedAt: createdAt,
-        },
-      });
-      yield* eventStore.append({
-        type: "thread.session-set",
-        eventId: EventId.make("evt-atomic-terminal-2"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: "2026-01-01T02:00:05.000Z",
-        commandId: CommandId.make("cmd-atomic-terminal-2"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-atomic-terminal-2"),
-        metadata: {},
-        payload: {
-          threadId,
-          pendingTurnStartAdoption: "none",
-          session: {
-            threadId,
-            status: "running",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            activeTurnId: supersededTurnId,
-            lastError: null,
-            updatedAt: "2026-01-01T02:00:05.000Z",
-          },
-        },
-      });
-      const adoptedRequest = yield* eventStore.append({
-        type: "thread.turn-start-requested",
-        eventId: EventId.make("evt-atomic-terminal-3"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: "2026-01-01T02:00:10.000Z",
-        commandId: CommandId.make("cmd-atomic-terminal-3"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-atomic-terminal-3"),
-        metadata: {},
-        payload: {
-          threadId,
-          messageId: adoptedMessageId,
-          runtimeMode: "full-access",
-          createdAt: "2026-01-01T02:00:10.000Z",
-        },
-      });
-      const appendAtomicSessionSet = (input: {
-        eventId: string;
-        updatedAt: string;
-        includeTransitions: boolean;
-      }) =>
-        eventStore.append({
-          type: "thread.session-set",
-          eventId: EventId.make(input.eventId),
-          aggregateKind: "thread",
-          aggregateId: threadId,
-          occurredAt: input.updatedAt,
-          commandId: CommandId.make(`cmd-${input.eventId}`),
-          causationEventId: null,
-          correlationId: CorrelationId.make(`cmd-${input.eventId}`),
-          metadata: {},
-          payload: {
-            threadId,
-            pendingTurnStartAdoption: "exact" as const,
-            turnRequestSequence: adoptedRequest.sequence,
-            ...(input.includeTransitions
-              ? {
-                  terminalTurnTransitions: [
-                    { turnId: supersededTurnId, state: "interrupted" as const },
-                    { turnId: adoptedTurnId, state: "interrupted" as const },
-                  ],
-                  // Existing producers may still populate the singular field.
-                  // Normalization deduplicates it behind the explicit array.
-                  terminalTurnTransition: {
-                    turnId: adoptedTurnId,
-                    state: "interrupted" as const,
-                  },
-                }
-              : {}),
-            session: {
-              threadId,
-              status: "running" as const,
-              providerName: "codex",
-              runtimeMode: "full-access" as const,
-              activeTurnId: adoptedTurnId,
-              lastError: null,
-              updatedAt: input.updatedAt,
-            },
-          },
-        });
-
-      yield* appendAtomicSessionSet({
-        eventId: "evt-atomic-terminal-4",
-        updatedAt: transitionedAt,
-        includeTransitions: true,
-      });
-      // Equivalent replay metadata and then a plain duplicate running update
-      // must preserve both terminal states and their first completedAt.
-      yield* appendAtomicSessionSet({
-        eventId: "evt-atomic-terminal-5",
-        updatedAt: "2026-01-01T02:00:25.000Z",
-        includeTransitions: true,
-      });
-      yield* appendAtomicSessionSet({
-        eventId: "evt-atomic-terminal-6",
-        updatedAt: "2026-01-01T02:00:30.000Z",
-        includeTransitions: false,
-      });
-
-      yield* projectionPipeline.bootstrap;
-
-      const rows = yield* sql<{
-        readonly turnId: string;
-        readonly pendingMessageId: string | null;
-        readonly state: string;
-        readonly completedAt: string | null;
-      }>`
-        SELECT
-          turn_id AS "turnId",
-          pending_message_id AS "pendingMessageId",
-          state,
-          completed_at AS "completedAt"
-        FROM projection_turns
-        WHERE thread_id = ${threadId} AND turn_id IS NOT NULL
-        ORDER BY turn_id ASC
-      `;
-      assert.deepEqual(rows, [
-        {
-          turnId: adoptedTurnId,
-          pendingMessageId: adoptedMessageId,
-          state: "interrupted",
-          completedAt: transitionedAt,
-        },
-        {
-          turnId: supersededTurnId,
-          pendingMessageId: null,
-          state: "interrupted",
-          completedAt: transitionedAt,
-        },
+        { turnId: oldTurnId, state: "completed", completedAt: "2026-01-01T00:00:30.000Z" },
+        { turnId: newTurnId, state: "running", completedAt: null },
       ]);
     }),
   );
@@ -2757,7 +2464,75 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   );
 });
 
-it.effect("rebuilds historical sequence-zero placeholder adoption after restart", () =>
+it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-"))(
+  "OrchestrationProjectionPipeline pending turn cleanup",
+  (it) => {
+    it.effect("clears pending turn starts when startup reaches a terminal session state", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+
+        for (const [index, status] of (["error", "interrupted", "stopped"] as const).entries()) {
+          const threadId = ThreadId.make(`thread-terminal-${status}`);
+          const requestedAt = `2026-02-26T14:00:0${index}.000Z`;
+          yield* eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.make(`evt-terminal-pending-${status}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: requestedAt,
+            commandId: CommandId.make(`cmd-terminal-pending-${status}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-terminal-pending-${status}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.make(`message-terminal-${status}`),
+              runtimeMode: "approval-required",
+              createdAt: requestedAt,
+            },
+          });
+          yield* eventStore.append({
+            type: "thread.session-set",
+            eventId: EventId.make(`evt-terminal-session-${status}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: requestedAt,
+            commandId: CommandId.make(`cmd-terminal-session-${status}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-terminal-session-${status}`),
+            metadata: {},
+            payload: {
+              threadId,
+              session: {
+                threadId,
+                status,
+                providerName: "codex",
+                runtimeMode: "approval-required",
+                activeTurnId: null,
+                lastError: status === "error" ? "startup failed" : null,
+                updatedAt: requestedAt,
+              },
+            },
+          });
+        }
+
+        yield* projectionPipeline.bootstrap;
+
+        const pendingRows = yield* sql<{ readonly threadId: string }>`
+          SELECT thread_id AS "threadId"
+          FROM projection_turns
+          WHERE turn_id IS NULL
+            AND state = 'pending'
+        `;
+        assert.deepEqual(pendingRows, []);
+      }),
+    );
+  },
+);
+
+it.effect("restores pending turn-start metadata across projection pipeline restart", () =>
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig;
     const persistenceLayer = makeSqlitePersistenceLive(dbPath);
@@ -2811,16 +2586,6 @@ it.effect("rebuilds historical sequence-zero placeholder adoption after restart"
       const eventStore = yield* OrchestrationEventStore;
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const sql = yield* SqlClient.SqlClient;
-
-      // Migration 043 defaulted all pre-correlation rows to sequence zero.
-      // Historical session-set events also lack the adoption discriminator, so
-      // rebuild must retain their oldest-pending fallback rather than strand the
-      // migrated placeholder forever.
-      yield* sql`
-        UPDATE projection_turns
-        SET request_sequence = 0
-        WHERE thread_id = ${threadId} AND turn_id IS NULL
-      `;
 
       yield* eventStore.append({
         type: "thread.session-set",
@@ -2889,554 +2654,6 @@ it.effect("rebuilds historical sequence-zero placeholder adoption after restart"
       Layer.provideMerge(
         ServerConfig.layerTest(process.cwd(), {
           prefix: "t3-projection-pipeline-restart-",
-        }),
-        NodeServices.layer,
-      ),
-    ),
-  ),
-);
-
-it.effect("preserves a ready checkpoint across a delayed missing projection and restart", () =>
-  Effect.gen(function* () {
-    const { dbPath } = yield* ServerConfig;
-    const makeRuntimeLayer = () => {
-      const persistenceLayer = makeSqlitePersistenceLive(dbPath);
-      const snapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
-        Layer.provide(RepositoryIdentityResolver.layer),
-        Layer.provide(persistenceLayer),
-      );
-      const projectionLayer = OrchestrationProjectionPipelineLive.pipe(
-        Layer.provide(OrchestrationEventStoreLive),
-        Layer.provide(persistenceLayer),
-      );
-      const orchestrationLayer = OrchestrationEngineLive.pipe(
-        Layer.provide(snapshotLayer),
-        Layer.provide(projectionLayer),
-        Layer.provide(OrchestrationEventStoreLive),
-        Layer.provide(OrchestrationCommandReceiptRepositoryLive),
-        Layer.provide(RepositoryIdentityResolver.layer),
-        Layer.provide(persistenceLayer),
-      );
-      return Layer.mergeAll(orchestrationLayer, snapshotLayer, persistenceLayer);
-    };
-
-    const threadId = ThreadId.make("thread-delayed-missing-restart");
-    const turnId = TurnId.make("turn-ready");
-    const readyCompletedAt = "2026-02-26T14:30:03.000Z";
-    const readyCheckpoint = {
-      turnId,
-      checkpointTurnCount: 7,
-      checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-delayed-missing/turn/7"),
-      status: "ready" as const,
-      files: [
-        {
-          path: "src/ready.ts",
-          kind: "modified",
-          additions: 12,
-          deletions: 3,
-        },
-      ],
-      assistantMessageId: MessageId.make("assistant-ready"),
-      completedAt: readyCompletedAt,
-    };
-
-    const readCheckpointState = Effect.gen(function* () {
-      const snapshotQuery = yield* ProjectionSnapshotQuery;
-      const sql = yield* SqlClient.SqlClient;
-      const snapshot = yield* snapshotQuery.getSnapshot();
-      const checkpoint = snapshot.threads
-        .find((thread) => thread.id === threadId)
-        ?.checkpoints.find((entry) => entry.turnId === turnId);
-      const rows = yield* sql<{
-        readonly checkpointStatus: string | null;
-        readonly checkpointRef: string | null;
-        readonly checkpointFilesJson: string;
-        readonly checkpointTurnCount: number | null;
-        readonly assistantMessageId: string | null;
-        readonly completedAt: string | null;
-      }>`
-        SELECT
-          checkpoint_status AS "checkpointStatus",
-          checkpoint_ref AS "checkpointRef",
-          checkpoint_files_json AS "checkpointFilesJson",
-          checkpoint_turn_count AS "checkpointTurnCount",
-          assistant_message_id AS "assistantMessageId",
-          completed_at AS "completedAt"
-        FROM projection_turns
-        WHERE thread_id = ${threadId}
-          AND turn_id = ${turnId}
-      `;
-      return { checkpoint, rows };
-    });
-
-    const live = yield* Effect.gen(function* () {
-      const engine = yield* OrchestrationEngineService;
-      yield* engine.dispatch({
-        type: "project.create",
-        commandId: CommandId.make("cmd-delayed-missing-project"),
-        projectId: ProjectId.make("project-delayed-missing"),
-        title: "Delayed missing project",
-        workspaceRoot: "/tmp/project-delayed-missing",
-        defaultModelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
-        createdAt: "2026-02-26T14:30:00.000Z",
-      });
-      yield* engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("cmd-delayed-missing-thread"),
-        threadId,
-        projectId: ProjectId.make("project-delayed-missing"),
-        title: "Delayed missing thread",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5-codex",
-        },
-        interactionMode: "default",
-        runtimeMode: "approval-required",
-        branch: null,
-        worktreePath: null,
-        createdAt: "2026-02-26T14:30:01.000Z",
-      });
-      yield* engine.dispatch({
-        type: "thread.turn.diff.complete",
-        commandId: CommandId.make("cmd-delayed-missing-ready"),
-        threadId,
-        ...readyCheckpoint,
-        createdAt: readyCompletedAt,
-      });
-      yield* engine.dispatch({
-        type: "thread.turn.diff.complete",
-        commandId: CommandId.make("cmd-delayed-missing-placeholder"),
-        threadId,
-        turnId,
-        checkpointTurnCount: 99,
-        checkpointRef: CheckpointRef.make("provider-diff:delayed"),
-        status: "missing",
-        files: [],
-        assistantMessageId: MessageId.make("assistant-delayed"),
-        completedAt: "2026-02-26T14:30:04.000Z",
-        createdAt: "2026-02-26T14:30:04.000Z",
-      });
-      return yield* readCheckpointState;
-    }).pipe(Effect.provide(makeRuntimeLayer()));
-
-    assert.deepEqual(live.checkpoint, readyCheckpoint);
-    assert.deepEqual(live.rows, [
-      {
-        checkpointStatus: "ready",
-        checkpointRef: readyCheckpoint.checkpointRef,
-        checkpointFilesJson:
-          '[{"path":"src/ready.ts","kind":"modified","additions":12,"deletions":3}]',
-        checkpointTurnCount: readyCheckpoint.checkpointTurnCount,
-        assistantMessageId: readyCheckpoint.assistantMessageId,
-        completedAt: readyCheckpoint.completedAt,
-      },
-    ]);
-
-    const restarted = yield* readCheckpointState.pipe(Effect.provide(makeRuntimeLayer()));
-    assert.deepEqual(restarted.checkpoint, readyCheckpoint);
-    assert.deepEqual(restarted.rows, live.rows);
-  }).pipe(
-    Effect.provide(
-      Layer.provideMerge(
-        ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3-projection-pipeline-delayed-missing-restart-",
-        }),
-        NodeServices.layer,
-      ),
-    ),
-  ),
-);
-
-it.effect("leaves queued placeholders untouched for a routine running update", () =>
-  Effect.gen(function* () {
-    const { dbPath } = yield* ServerConfig;
-    const projectionLayer = OrchestrationProjectionPipelineLive.pipe(
-      Layer.provideMerge(OrchestrationEventStoreLive),
-      Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
-    );
-
-    const threadId = ThreadId.make("thread-queue");
-    const turnId = TurnId.make("turn-queue-1");
-    const firstMessageId = MessageId.make("message-queue-1");
-    const secondMessageId = MessageId.make("message-queue-2");
-    const firstRequestedAt = "2026-02-26T15:00:00.000Z";
-    const secondRequestedAt = "2026-02-26T15:00:01.000Z";
-    const sessionSetAt = "2026-02-26T15:00:02.000Z";
-
-    const rows = yield* Effect.gen(function* () {
-      const eventStore = yield* OrchestrationEventStore;
-      const projectionPipeline = yield* OrchestrationProjectionPipeline;
-      const sql = yield* SqlClient.SqlClient;
-
-      // Two requests are queued, but the routine lifecycle update below
-      // explicitly adopts none. It may not consume either placeholder merely
-      // because it happens to carry a running session and concrete turn id.
-      yield* eventStore.append({
-        type: "thread.turn-start-requested",
-        eventId: EventId.make("evt-queue-1"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: firstRequestedAt,
-        commandId: CommandId.make("cmd-queue-1"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-queue-1"),
-        metadata: {},
-        payload: {
-          threadId,
-          messageId: firstMessageId,
-          runtimeMode: "approval-required",
-          createdAt: firstRequestedAt,
-        },
-      });
-      yield* eventStore.append({
-        type: "thread.turn-start-requested",
-        eventId: EventId.make("evt-queue-2"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: secondRequestedAt,
-        commandId: CommandId.make("cmd-queue-2"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-queue-2"),
-        metadata: {},
-        payload: {
-          threadId,
-          messageId: secondMessageId,
-          runtimeMode: "approval-required",
-          createdAt: secondRequestedAt,
-        },
-      });
-
-      // A provider notification reports a concrete turn without identifying
-      // either requesting event.
-      yield* eventStore.append({
-        type: "thread.session-set",
-        eventId: EventId.make("evt-queue-3"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: sessionSetAt,
-        commandId: CommandId.make("cmd-queue-3"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-queue-3"),
-        metadata: {},
-        payload: {
-          threadId,
-          pendingTurnStartAdoption: "none",
-          session: {
-            threadId,
-            status: "running",
-            providerName: "codex",
-            runtimeMode: "approval-required",
-            activeTurnId: turnId,
-            lastError: null,
-            updatedAt: sessionSetAt,
-          },
-        },
-      });
-
-      yield* projectionPipeline.bootstrap;
-
-      const pendingRows = yield* sql<{ readonly messageId: string | null }>`
-        SELECT pending_message_id AS "messageId"
-        FROM projection_turns
-        WHERE thread_id = ${threadId}
-          AND turn_id IS NULL
-          AND state = 'pending'
-        ORDER BY request_sequence ASC
-      `;
-
-      const turnRows = yield* sql<{
-        readonly turnId: string;
-        readonly userMessageId: string | null;
-        readonly startedAt: string;
-      }>`
-        SELECT
-          turn_id AS "turnId",
-          pending_message_id AS "userMessageId",
-          started_at AS "startedAt"
-        FROM projection_turns
-        WHERE turn_id = ${turnId}
-      `;
-
-      return { pendingRows, turnRows };
-    }).pipe(Effect.provide(projectionLayer));
-
-    assert.deepEqual(rows.turnRows, [
-      {
-        turnId: "turn-queue-1",
-        userMessageId: null,
-        startedAt: sessionSetAt,
-      },
-    ]);
-    assert.deepEqual(rows.pendingRows, [
-      { messageId: "message-queue-1" },
-      { messageId: "message-queue-2" },
-    ]);
-  }).pipe(
-    Effect.provide(
-      Layer.provideMerge(
-        ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3-projection-pipeline-pending-queue-",
-        }),
-        NodeServices.layer,
-      ),
-    ),
-  ),
-);
-
-it.effect("adopts the placeholder a correlated turn.started names, not the oldest", () =>
-  Effect.gen(function* () {
-    const { dbPath } = yield* ServerConfig;
-    const projectionLayer = OrchestrationProjectionPipelineLive.pipe(
-      Layer.provideMerge(OrchestrationEventStoreLive),
-      Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
-    );
-
-    const threadId = ThreadId.make("thread-correlated");
-    const secondTurnId = TurnId.make("turn-correlated-2");
-    const firstMessageId = MessageId.make("message-correlated-1");
-    const secondMessageId = MessageId.make("message-correlated-2");
-    const firstRequestedAt = "2026-03-04T09:00:00.000Z";
-    const secondRequestedAt = "2026-03-04T09:00:01.000Z";
-    const sessionSetAt = "2026-03-04T09:00:02.000Z";
-
-    const rows = yield* Effect.gen(function* () {
-      const eventStore = yield* OrchestrationEventStore;
-      const projectionPipeline = yield* OrchestrationProjectionPipeline;
-      const sql = yield* SqlClient.SqlClient;
-
-      yield* eventStore.append({
-        type: "thread.turn-start-requested",
-        eventId: EventId.make("evt-correlated-1"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: firstRequestedAt,
-        commandId: CommandId.make("cmd-correlated-1"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-correlated-1"),
-        metadata: {},
-        payload: {
-          threadId,
-          messageId: firstMessageId,
-          runtimeMode: "approval-required",
-          createdAt: firstRequestedAt,
-        },
-      });
-      // Sends run in independent fibers, so the SECOND request's turn can be
-      // the first one the provider announces. Its `turn.started` carries the
-      // request sequence it was started for.
-      const secondRequest = yield* eventStore.append({
-        type: "thread.turn-start-requested",
-        eventId: EventId.make("evt-correlated-2"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: secondRequestedAt,
-        commandId: CommandId.make("cmd-correlated-2"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-correlated-2"),
-        metadata: {},
-        payload: {
-          threadId,
-          messageId: secondMessageId,
-          runtimeMode: "approval-required",
-          createdAt: secondRequestedAt,
-        },
-      });
-
-      yield* eventStore.append({
-        type: "thread.session-set",
-        eventId: EventId.make("evt-correlated-3"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: sessionSetAt,
-        commandId: CommandId.make("cmd-correlated-3"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-correlated-3"),
-        metadata: {},
-        payload: {
-          threadId,
-          pendingTurnStartAdoption: "exact",
-          turnRequestSequence: secondRequest.sequence,
-          session: {
-            threadId,
-            status: "running",
-            providerName: "codex",
-            runtimeMode: "approval-required",
-            activeTurnId: secondTurnId,
-            lastError: null,
-            updatedAt: sessionSetAt,
-          },
-        },
-      });
-
-      yield* projectionPipeline.bootstrap;
-
-      const pendingRows = yield* sql<{ readonly messageId: string | null }>`
-        SELECT pending_message_id AS "messageId"
-        FROM projection_turns
-        WHERE thread_id = ${threadId}
-          AND turn_id IS NULL
-          AND state = 'pending'
-        ORDER BY request_sequence ASC
-      `;
-
-      const turnRows = yield* sql<{
-        readonly turnId: string;
-        readonly userMessageId: string | null;
-        readonly startedAt: string;
-      }>`
-        SELECT
-          turn_id AS "turnId",
-          pending_message_id AS "userMessageId",
-          started_at AS "startedAt"
-        FROM projection_turns
-        WHERE turn_id = ${secondTurnId}
-      `;
-
-      return { pendingRows, turnRows };
-    }).pipe(Effect.provide(projectionLayer));
-
-    // The turn carries the SECOND message and the SECOND request's timestamp,
-    // because that is the request it names. Oldest-first adoption would hand
-    // it `message-correlated-1` and the earlier `startedAt`.
-    assert.deepEqual(rows.turnRows, [
-      {
-        turnId: "turn-correlated-2",
-        userMessageId: "message-correlated-2",
-        startedAt: secondRequestedAt,
-      },
-    ]);
-    // And the first request is untouched, still waiting for its own turn.
-    assert.deepEqual(rows.pendingRows, [{ messageId: "message-correlated-1" }]);
-  }).pipe(
-    Effect.provide(
-      Layer.provideMerge(
-        ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3-projection-pipeline-correlated-turn-",
-        }),
-        NodeServices.layer,
-      ),
-    ),
-  ),
-);
-
-it.effect("warns instead of silently adopting nothing when correlation finds no placeholder", () =>
-  Effect.gen(function* () {
-    const { dbPath } = yield* ServerConfig;
-    const logMessages: Array<string> = [];
-    // Merged into the projection layer rather than chained after it: a second
-    // `Effect.provide` would build the pipeline's services under a different
-    // lifecycle than the logger they log through.
-    const projectionLayer = Layer.mergeAll(
-      OrchestrationProjectionPipelineLive.pipe(
-        Layer.provideMerge(OrchestrationEventStoreLive),
-        Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
-      ),
-      Logger.layer([
-        Logger.make<unknown, void>((options) => {
-          logMessages.push(String(options.message));
-        }),
-      ]),
-    );
-
-    const threadId = ThreadId.make("thread-uncorrelated");
-    const turnId = TurnId.make("turn-uncorrelated");
-    const messageId = MessageId.make("message-uncorrelated");
-    const requestedAt = "2026-03-05T09:00:00.000Z";
-    const sessionSetAt = "2026-03-05T09:00:02.000Z";
-
-    const rows = yield* Effect.gen(function* () {
-      const eventStore = yield* OrchestrationEventStore;
-      const projectionPipeline = yield* OrchestrationProjectionPipeline;
-      const sql = yield* SqlClient.SqlClient;
-
-      // One placeholder IS waiting — it just isn't the one the turn names.
-      // That combination is the interesting one: falling back to the oldest
-      // row here is the misattribution bug, and adopting nothing is correct
-      // but lossy, so it has to leave a trace.
-      yield* eventStore.append({
-        type: "thread.turn-start-requested",
-        eventId: EventId.make("evt-uncorrelated-1"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: requestedAt,
-        commandId: CommandId.make("cmd-uncorrelated-1"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-uncorrelated-1"),
-        metadata: {},
-        payload: {
-          threadId,
-          messageId,
-          runtimeMode: "approval-required",
-          createdAt: requestedAt,
-        },
-      });
-
-      yield* eventStore.append({
-        type: "thread.session-set",
-        eventId: EventId.make("evt-uncorrelated-2"),
-        aggregateKind: "thread",
-        aggregateId: threadId,
-        occurredAt: sessionSetAt,
-        commandId: CommandId.make("cmd-uncorrelated-2"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-uncorrelated-2"),
-        metadata: {},
-        payload: {
-          threadId,
-          pendingTurnStartAdoption: "exact",
-          // A sequence no pending row carries — the shape a replayed or
-          // already-consumed placeholder leaves behind.
-          turnRequestSequence: 9999,
-          session: {
-            threadId,
-            status: "running",
-            providerName: "codex",
-            runtimeMode: "approval-required",
-            activeTurnId: turnId,
-            lastError: null,
-            updatedAt: sessionSetAt,
-          },
-        },
-      });
-
-      yield* projectionPipeline.bootstrap;
-
-      const pendingRows = yield* sql<{ readonly messageId: string | null }>`
-        SELECT pending_message_id AS "messageId"
-        FROM projection_turns
-        WHERE thread_id = ${threadId}
-          AND turn_id IS NULL
-          AND state = 'pending'
-        ORDER BY request_sequence ASC
-      `;
-
-      const turnRows = yield* sql<{
-        readonly turnId: string;
-        readonly userMessageId: string | null;
-      }>`
-        SELECT turn_id AS "turnId", pending_message_id AS "userMessageId"
-        FROM projection_turns
-        WHERE turn_id = ${turnId}
-      `;
-
-      return { pendingRows, turnRows };
-    }).pipe(Effect.provide(projectionLayer));
-
-    // Adopting nothing is still the right call — the unrelated placeholder
-    // keeps its message and stays outstanding.
-    assert.deepEqual(rows.turnRows, [{ turnId: "turn-uncorrelated", userMessageId: null }]);
-    assert.deepEqual(rows.pendingRows, [{ messageId: "message-uncorrelated" }]);
-    // But it is no longer silent. Without the warning the only symptom is a
-    // turn that quietly forgot which message asked for it.
-    assert.include(logMessages.join("\n"), "projection.turn-start.pending-start-not-correlated");
-  }).pipe(
-    Effect.provide(
-      Layer.provideMerge(
-        ServerConfig.layerTest(process.cwd(), {
-          prefix: "t3-projection-pipeline-uncorrelated-turn-",
         }),
         NodeServices.layer,
       ),

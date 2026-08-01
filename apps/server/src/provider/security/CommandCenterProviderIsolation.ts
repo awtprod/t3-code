@@ -989,7 +989,7 @@ export function commandCenterCodexIsolation(
   ) {
     return undefined;
   }
-  const writable = runtimeMode === "auto-accept-edits";
+  const writable = runtimeMode === "auto-accept-edits" || runtimeMode === "auto";
   const permissionProfile = writable
     ? COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE
     : COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE;
