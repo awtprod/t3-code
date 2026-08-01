@@ -15,12 +15,74 @@ import {
 } from "../CodexDeveloperInstructions.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
+  buildCommandCenterDarwinIsolationProbeScript,
+  buildCommandCenterWindowsIsolationProbeScript,
   buildTurnStartParams,
+  ensureCommandCenterWindowsSandbox,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("Command Center native sandbox admission", () => {
+  it.effect("skips Windows setup when Codex reports the sandbox ready", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      yield* ensureCommandCenterWindowsSandbox({
+        client: {
+          request: (method) =>
+            Effect.sync(() => {
+              calls.push(method);
+              return { status: "ready" };
+            }),
+        },
+        cwd: "C:\\workspace",
+        mode: "elevated",
+        setupCompleted: Effect.never,
+      });
+
+      NodeAssert.deepStrictEqual(calls, ["windowsSandbox/readiness"]);
+    }),
+  );
+
+  it.effect("marks failed elevated setup as eligible for verified unelevated fallback", () =>
+    Effect.gen(function* () {
+      const error = yield* ensureCommandCenterWindowsSandbox({
+        client: {
+          request: (method) =>
+            Effect.succeed(
+              method === "windowsSandbox/readiness"
+                ? { status: "notConfigured" }
+                : { started: true },
+            ),
+        },
+        cwd: "C:\\workspace",
+        mode: "elevated",
+        setupCompleted: Effect.succeed({
+          mode: "elevated",
+          success: false,
+          error: "administrator approval was unavailable",
+        }),
+      }).pipe(Effect.flip);
+
+      NodeAssert.equal(error.mode, "elevated");
+      NodeAssert.equal(error.allowUnelevatedFallback, true);
+      NodeAssert.equal(error.issue, "administrator approval was unavailable");
+    }),
+  );
+
+  it("builds native probes without Linux-only process assumptions", () => {
+    const darwin = buildCommandCenterDarwinIsolationProbeScript(true);
+    const windows = buildCommandCenterWindowsIsolationProbeScript(false);
+
+    NodeAssert.doesNotMatch(darwin, /\/proc\//u);
+    NodeAssert.match(darwin, /HOME\/auth\.json/u);
+    NodeAssert.match(windows, /USERPROFILE/u);
+    NodeAssert.match(windows, /WriteAllText/u);
+    NodeAssert.match(windows, /exit 73/u);
+  });
+});
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {

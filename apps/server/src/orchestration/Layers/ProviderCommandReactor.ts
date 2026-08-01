@@ -31,7 +31,11 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterProcessError,
+  ProviderAdapterRequestError,
+  ProviderAdapterValidationError,
+} from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
@@ -60,6 +64,8 @@ import {
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
+const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
+const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
 // Structural (by value) comparison of two model selections. `ModelSelection`
@@ -416,13 +422,13 @@ const make = Effect.gen(function* () {
 
   const formatFailureDetail = (cause: Cause.Cause<unknown>): string => {
     const failReason = cause.reasons.find(Cause.isFailReason);
-    const providerError = isProviderAdapterRequestError(failReason?.error)
-      ? failReason.error
-      : undefined;
-    if (providerError) {
-      return providerError.detail;
+    const failure = failReason?.error;
+    if (isProviderAdapterValidationError(failure)) return failure.issue;
+    if (isProviderAdapterRequestError(failure) || isProviderAdapterProcessError(failure)) {
+      return failure.detail;
     }
-    return Cause.pretty(cause);
+    if (failure instanceof Error && failure.message.trim().length > 0) return failure.message;
+    return "The provider operation failed. Check the server logs for technical details.";
   };
 
   const setThreadSession = (input: {
@@ -2000,11 +2006,14 @@ const make = Effect.gen(function* () {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
-      return setThreadSessionErrorOnTurnStartFailure({
-        threadId: event.payload.threadId,
-        detail,
-        createdAt: event.payload.createdAt,
-      }).pipe(
+      return Effect.logError("Provider turn start failed.", { cause }).pipe(
+        Effect.andThen(
+          setThreadSessionErrorOnTurnStartFailure({
+            threadId: event.payload.threadId,
+            detail,
+            createdAt: event.payload.createdAt,
+          }),
+        ),
         Effect.flatMap(() =>
           appendProviderFailureActivity({
             threadId: event.payload.threadId,

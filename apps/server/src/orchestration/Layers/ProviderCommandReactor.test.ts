@@ -34,7 +34,10 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterValidationError,
+} from "../../provider/Errors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -150,7 +153,10 @@ describe("ProviderCommandReactor", () => {
     readonly titleRegenerationBeforeStart?: "one" | "two";
     readonly startSessionEffect?: (
       session: ProviderSession,
-    ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
+    ) => Effect.Effect<
+      ProviderSession,
+      ProviderAdapterRequestError | ProviderAdapterValidationError
+    >;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -623,8 +629,10 @@ describe("ProviderCommandReactor", () => {
         waitFor(async () => {
           const readModel = await harness.readModel();
           return (
-            readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.session
-              ?.status === "error"
+            readModel.threads
+              .find((entry) => entry.id === ThreadId.make("thread-1"))
+              ?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+            false
           );
         }),
       );
@@ -654,6 +662,60 @@ describe("ProviderCommandReactor", () => {
       thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
       expect(thread?.session?.status).toBe("starting");
       expect(thread?.session?.lastError).toBeNull();
+    }),
+  );
+
+  effectIt.effect("shows validation issues without exposing provider stack traces", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          startSessionEffect: () =>
+            Effect.fail(
+              new ProviderAdapterValidationError({
+                provider: "codex",
+                operation: "startSession",
+                issue: "Native Windows sandbox setup is required.",
+              }),
+            ),
+        }),
+      );
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-validation-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-validation-failure"),
+          role: "user",
+          text: "start",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      yield* Effect.promise(() =>
+        waitFor(async () => {
+          const readModel = await harness.readModel();
+          return (
+            readModel.threads
+              .find((entry) => entry.id === ThreadId.make("thread-1"))
+              ?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+            false
+          );
+        }),
+      );
+      const readModel = yield* Effect.promise(() => harness.readModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      const failureActivity = thread?.activities.find(
+        (activity) => activity.kind === "provider.turn.start.failed",
+      );
+      expect(failureActivity).toMatchObject({
+        payload: { detail: "Native Windows sandbox setup is required." },
+      });
+      expect(thread?.session?.lastError).toBe("Native Windows sandbox setup is required.");
+      expect(thread?.session?.lastError).not.toContain("ProviderAdapterValidationError");
+      expect(thread?.session?.lastError).not.toContain(" at ");
     }),
   );
 

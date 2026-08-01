@@ -45,6 +45,7 @@ import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
+  CodexSessionRuntimeIsolationProbeError,
   CodexSessionRuntimeThreadIdMissingError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeError,
@@ -76,6 +77,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   public currentSession: ProviderSession | undefined;
   public interruptTurnFailure: CodexSessionRuntimeError | undefined;
   public sendTurnFailure: CodexSessionRuntimeError | undefined;
+  public startFailure: CodexSessionRuntimeError | undefined;
   public readonly interruptTurnCalls: Array<
     readonly [TurnId | undefined, ProviderTurnTargetIdentity | undefined]
   > = [];
@@ -144,6 +146,9 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   start() {
+    if (this.startFailure !== undefined) {
+      return Effect.fail(this.startFailure);
+    }
     return Effect.promise(() => this.startImpl()).pipe(
       Effect.tap((session) =>
         Effect.sync(() => {
@@ -214,16 +219,22 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 }
 
-function makeRuntimeFactory() {
+function makeRuntimeFactory(input?: {
+  readonly startFailures?: ReadonlyArray<CodexSessionRuntimeError | undefined>;
+}) {
   const runtimes: Array<FakeCodexRuntime> = [];
-  const factory = vi.fn((options: CodexSessionRuntimeOptions) => {
-    const runtime = new FakeCodexRuntime(options);
+  const factory = vi.fn((runtimeOptions: CodexSessionRuntimeOptions) => {
+    const runtime = new FakeCodexRuntime(runtimeOptions);
+    runtime.startFailure = input?.startFailures?.[runtimes.length];
     runtimes.push(runtime);
     return Effect.succeed(runtime);
   });
 
   return {
     factory,
+    get runtimes(): ReadonlyArray<FakeCodexRuntime> {
+      return runtimes;
+    },
     get lastRuntime(): FakeCodexRuntime | undefined {
       return runtimes.at(-1);
     },
@@ -427,6 +438,66 @@ validationLayer("CodexAdapterLive validation", (it) => {
     }),
   );
 });
+
+it.effect(
+  "retries Windows Command Center isolation unelevated after the elevated probe fails",
+  () => {
+    const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cc-windows-fallback-"));
+    const runtimePath = NodePath.join(tempDir, "codex.exe");
+    const sourceHomePath = NodePath.join(tempDir, "codex-home");
+    NodeFS.mkdirSync(sourceHomePath, { recursive: true });
+    NodeFS.writeFileSync(runtimePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
+
+    const runtimeFactory = makeRuntimeFactory({
+      startFailures: [
+        new CodexSessionRuntimeIsolationProbeError({
+          issue: "The elevated live isolation probe failed.",
+          exitCode: 79,
+        }),
+      ],
+    });
+    const layer = Layer.effect(
+      CodexAdapter,
+      makeCodexAdapter(decodeCodexSettings({}), {
+        makeRuntime: runtimeFactory.factory,
+        commandCenterSourceHomePath: sourceHomePath,
+        commandCenterRuntimeExecutablePath: runtimePath,
+        commandCenterPlatform: "win32",
+        commandCenterArchitecture: "x64",
+      }),
+    ).pipe(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "codex-adapter-windows-fallback-" }),
+      ),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("cc:interactive:windows-fallback");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "approval-required",
+      });
+
+      NodeAssert.equal(runtimeFactory.runtimes.length, 2);
+      NodeAssert.equal(runtimeFactory.runtimes[0]?.options.windowsSandboxMode, "elevated");
+      NodeAssert.equal(runtimeFactory.runtimes[0]?.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(runtimeFactory.runtimes[1]?.options.windowsSandboxMode, "unelevated");
+      NodeAssert.match(
+        runtimeFactory.runtimes[1]?.options.appServerArgs?.join(" ") ?? "",
+        /windows\.sandbox="unelevated"/u,
+      );
+      yield* adapter.stopSession(threadId);
+    }).pipe(
+      Effect.provide(layer),
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+    );
+  },
+);
 
 const sessionRuntimeFactory = makeRuntimeFactory();
 const sessionErrorLayer = it.layer(

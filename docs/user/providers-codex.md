@@ -28,6 +28,20 @@ Log in with Codex normally:
 codex login
 ```
 
+## Command Center Chats
+
+User-started Command Center chats run directly on Linux, macOS, and Windows. Windows does not
+require WSL. The first native Windows chat may ask for administrator approval while Codex prepares
+its stronger sandbox. If that setup is unavailable, T3 Code tries Codex's non-administrator sandbox
+and continues only when the same filesystem, secret, Git, and network checks pass.
+
+Keep Codex current if Command Center reports that native sandbox setup or packaged helper files are
+missing. T3 Code blocks the chat when the installed runtime cannot prove the required isolation and
+shows the setup problem without a diagnostic stack trace.
+
+Scheduled and unattended Command Center automation still requires a Linux host. This limitation
+does not apply to a chat you start yourself on macOS or Windows.
+
 ## I Want Work And Personal Codex Accounts
 
 Use one real Codex home and one shadow home.

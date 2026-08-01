@@ -120,6 +120,36 @@ jobs:
       - name: Test resource monitor
         run: cargo test --locked --manifest-path native/resource-monitor/Cargo.toml
 
+  command_center_native_isolation:
+    name: Command Center Native Isolation (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS
+            os: macos-26
+          - label: Windows
+            os: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Test native Command Center isolation
+        run: >-
+          vp test run
+          apps/server/src/provider/security/CommandCenterProviderIsolation.test.ts
+          apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
+          apps/server/src/command-center/RunDispatcher.test.ts
+
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis
     runs-on: macos-26
