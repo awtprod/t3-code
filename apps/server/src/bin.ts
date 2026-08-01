@@ -31,7 +31,7 @@ const connectUnavailableCommand = Command.make("connect").pipe(
   Command.withHandler(() =>
     Effect.fail(
       new CliError.ShowHelp({
-        commandPath: ["t3", "connect"],
+        commandPath: ["command-center", "connect"],
         errors: [new ConnectPublicConfigMissingError({ cause: connectPublicConfigMissingMessage })],
       }),
     ),
@@ -39,7 +39,7 @@ const connectUnavailableCommand = Command.make("connect").pipe(
 );
 
 export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
-  Command.make("t3", { ...sharedServerCommandFlags }).pipe(
+  Command.make("command-center", { ...sharedServerCommandFlags }).pipe(
     Command.withDescription("Run the Command Center server."),
     Command.withHandler((flags) => runServerCommand(flags)),
     Command.withSubcommands([
