@@ -181,7 +181,12 @@ function readCandidate(relativePath: string): Candidate {
 }
 
 function scanHistoricalRevisions() {
-  const commits = git(["rev-list", "--reverse", "--topo-order", `${baseline}..HEAD`])
+  // Audit Command Center's release lineage and each integration merge as a complete delta from its
+  // first parent. Preserved upstream ancestry may contain hundreds of intermediate public commits;
+  // scanning those separately creates findings for transient fixtures that are absent from the
+  // pinned merge result. The merge commit itself remains fully scanned below against the release
+  // parent, so every byte entering Command Center is still covered.
+  const commits = git(["rev-list", "--first-parent", "--reverse", `${baseline}..HEAD`])
     .trim()
     .split("\n")
     .filter(Boolean);
