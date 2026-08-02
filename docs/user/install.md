@@ -53,9 +53,14 @@ to use, then authenticate it.
 | Cursor     | [Cursor CLI](https://cursor.com/cli)                  | `cursor-agent` | `agent login`         |
 | Grok Build | [Grok Build CLI](https://x.ai/cli)                    | `grok`         | `grok login`          |
 | OpenCode   | [OpenCode](https://opencode.ai)                       | `opencode`     | `opencode auth login` |
+| Kimi K3    | [Kimi Code](https://github.com/MoonshotAI/kimi-code)  | `kimi`         | `/login` inside Kimi  |
 
 Cursor is the one to watch: install Cursor CLI, which provides the `cursor-agent` binary that
 T3 Code looks for, but authenticate with `agent login`, not `cursor-agent login`.
+
+Kimi requires Kimi Code `0.31.1` or newer and defaults to `kimi-code/k3`. Install
+`@moonshot-ai/kimi-code`, start `kimi`, and run `/login` at its interactive prompt before enabling
+the provider. See [Kimi](./providers-kimi.md) for platform and automation-isolation requirements.
 
 Run the login command on the machine running the T3 Code server, not on the device you browse
 from.
