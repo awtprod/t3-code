@@ -46,7 +46,7 @@ describe("Command Center native sandbox admission", () => {
     }),
   );
 
-  it.effect("marks failed elevated setup as eligible for verified unelevated fallback", () =>
+  it.effect("reports failed elevated setup without offering an unsafe fallback", () =>
     Effect.gen(function* () {
       const error = yield* ensureCommandCenterWindowsSandbox({
         client: {
@@ -67,8 +67,8 @@ describe("Command Center native sandbox admission", () => {
       }).pipe(Effect.flip);
 
       NodeAssert.equal(error.mode, "elevated");
-      NodeAssert.equal(error.allowUnelevatedFallback, true);
-      NodeAssert.equal(error.issue, "administrator approval was unavailable");
+      NodeAssert.match(error.issue, /administrator-approved Windows sandbox/u);
+      NodeAssert.match(error.issue, /administrator approval was unavailable/u);
     }),
   );
 

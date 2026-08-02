@@ -165,7 +165,7 @@ export interface CodexSessionRuntimeOptions {
   readonly appServerArgs?: ReadonlyArray<string>;
   readonly permissionProfile?: string;
   readonly commandCenterPlatform?: NodeJS.Platform;
-  readonly windowsSandboxMode?: "elevated" | "unelevated";
+  readonly windowsSandboxMode?: "elevated";
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -243,7 +243,6 @@ export class CodexSessionRuntimeWindowsSandboxSetupError extends Schema.TaggedEr
   {
     issue: Schema.String,
     mode: Schema.Literals(["elevated", "unelevated"]),
-    allowUnelevatedFallback: Schema.Boolean,
   },
 ) {
   override get message(): string {
@@ -879,24 +878,22 @@ export const ensureCommandCenterWindowsSandbox = Effect.fn(
 )(function* (input: {
   readonly client: CodexWindowsSandboxSetupClient;
   readonly cwd: string;
-  readonly mode: "elevated" | "unelevated";
+  readonly mode: "elevated";
   readonly setupCompleted: Effect.Effect<
     EffectCodexSchema.V2WindowsSandboxSetupCompletedNotification,
     never
   >;
 }) {
-  const setupError = (issue: string, allowUnelevatedFallback = input.mode === "elevated") =>
+  const setupError = (issue: string) =>
     new CodexSessionRuntimeWindowsSandboxSetupError({
       issue,
       mode: input.mode,
-      allowUnelevatedFallback,
     });
   const readiness = yield* input.client.request("windowsSandbox/readiness", undefined).pipe(
     Effect.flatMap(decodeV2WindowsSandboxReadinessResponse),
     Effect.mapError((cause) =>
       setupError(
         `Command Center requires a Codex installation with native Windows sandbox setup support: ${cause instanceof Error ? cause.message : String(cause)}`,
-        false,
       ),
     ),
   );
@@ -925,12 +922,13 @@ export const ensureCommandCenterWindowsSandbox = Effect.fn(
   if (completed.mode !== input.mode) {
     return yield* setupError(
       `Codex completed '${completed.mode}' Windows sandbox setup while '${input.mode}' was required.`,
-      false,
     );
   }
   if (!completed.success) {
     const safeError = completed.error?.split(/\r?\n/u)[0]?.trim();
-    return yield* setupError(safeError || `Codex ${input.mode} Windows sandbox setup failed.`);
+    return yield* setupError(
+      `Command Center requires Codex's administrator-approved Windows sandbox to enforce workspace-only filesystem access. Approve the administrator prompt and try again.${safeError ? ` Codex reported: ${safeError}` : ""}`,
+    );
   }
 });
 
@@ -1828,7 +1826,6 @@ export const makeCodexSessionRuntime = (
             return yield* new CodexSessionRuntimeWindowsSandboxSetupError({
               issue: "Command Center did not select a native Windows sandbox mode.",
               mode: "elevated",
-              allowUnelevatedFallback: false,
             });
           }
           yield* ensureCommandCenterWindowsSandbox({

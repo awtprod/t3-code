@@ -439,65 +439,61 @@ validationLayer("CodexAdapterLive validation", (it) => {
   );
 });
 
-it.effect(
-  "retries Windows Command Center isolation unelevated after the elevated probe fails",
-  () => {
-    const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cc-windows-fallback-"));
-    const runtimePath = NodePath.join(tempDir, "codex.exe");
-    const sourceHomePath = NodePath.join(tempDir, "codex-home");
-    NodeFS.mkdirSync(sourceHomePath, { recursive: true });
-    NodeFS.writeFileSync(runtimePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
+it.effect("fails closed when elevated Windows Command Center isolation cannot be verified", () => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cc-windows-fallback-"));
+  const runtimePath = NodePath.join(tempDir, "codex.exe");
+  const sourceHomePath = NodePath.join(tempDir, "codex-home");
+  NodeFS.mkdirSync(sourceHomePath, { recursive: true });
+  NodeFS.writeFileSync(runtimePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
 
-    const runtimeFactory = makeRuntimeFactory({
-      startFailures: [
-        new CodexSessionRuntimeIsolationProbeError({
-          issue: "The elevated live isolation probe failed.",
-          exitCode: 79,
-        }),
-      ],
-    });
-    const layer = Layer.effect(
-      CodexAdapter,
-      makeCodexAdapter(decodeCodexSettings({}), {
-        makeRuntime: runtimeFactory.factory,
-        commandCenterSourceHomePath: sourceHomePath,
-        commandCenterRuntimeExecutablePath: runtimePath,
-        commandCenterPlatform: "win32",
-        commandCenterArchitecture: "x64",
+  const runtimeFactory = makeRuntimeFactory({
+    startFailures: [
+      new CodexSessionRuntimeIsolationProbeError({
+        issue: "The elevated live isolation probe failed.",
+        exitCode: 79,
       }),
-    ).pipe(
-      Layer.provideMerge(
-        ServerConfig.layerTest(process.cwd(), { prefix: "codex-adapter-windows-fallback-" }),
-      ),
-      Layer.provideMerge(ServerSettingsService.layerTest()),
-      Layer.provideMerge(providerSessionDirectoryTestLayer),
-      Layer.provideMerge(NodeServices.layer),
-    );
+    ],
+  });
+  const layer = Layer.effect(
+    CodexAdapter,
+    makeCodexAdapter(decodeCodexSettings({}), {
+      makeRuntime: runtimeFactory.factory,
+      commandCenterSourceHomePath: sourceHomePath,
+      commandCenterRuntimeExecutablePath: runtimePath,
+      commandCenterPlatform: "win32",
+      commandCenterArchitecture: "x64",
+    }),
+  ).pipe(
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "codex-adapter-windows-fallback-" }),
+    ),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
 
-    return Effect.gen(function* () {
-      const adapter = yield* CodexAdapter;
-      const threadId = asThreadId("cc:interactive:windows-fallback");
-      yield* adapter.startSession({
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const threadId = asThreadId("cc:interactive:windows-fallback");
+    const result = yield* adapter
+      .startSession({
         provider: ProviderDriverKind.make("codex"),
         threadId,
         runtimeMode: "approval-required",
-      });
+      })
+      .pipe(Effect.result);
 
-      NodeAssert.equal(runtimeFactory.runtimes.length, 2);
-      NodeAssert.equal(runtimeFactory.runtimes[0]?.options.windowsSandboxMode, "elevated");
-      NodeAssert.equal(runtimeFactory.runtimes[0]?.closeImpl.mock.calls.length, 1);
-      NodeAssert.equal(runtimeFactory.runtimes[1]?.options.windowsSandboxMode, "unelevated");
-      NodeAssert.match(
-        runtimeFactory.runtimes[1]?.options.appServerArgs?.join(" ") ?? "",
-        /windows\.sandbox="unelevated"/u,
-      );
-      yield* adapter.stopSession(threadId);
-    }).pipe(
-      Effect.provide(layer),
-      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
-    );
-  },
-);
+    NodeAssert.equal(result._tag, "Failure");
+    NodeAssert.equal(result.failure._tag, "ProviderAdapterProcessError");
+    NodeAssert.match(result.failure.message, /elevated live isolation probe failed/u);
+    NodeAssert.equal(runtimeFactory.runtimes.length, 1);
+    NodeAssert.equal(runtimeFactory.runtimes[0]?.options.windowsSandboxMode, "elevated");
+    NodeAssert.equal(runtimeFactory.runtimes[0]?.closeImpl.mock.calls.length, 1);
+  }).pipe(
+    Effect.provide(layer),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
 
 const sessionRuntimeFactory = makeRuntimeFactory();
 const sessionErrorLayer = it.layer(
