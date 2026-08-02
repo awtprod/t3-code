@@ -3,6 +3,9 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  CommandId,
+  EventId,
+  type OrchestrationEvent,
   ProviderRuntimeEvent,
   type OrchestrationThreadShell,
   type ProviderSession,
@@ -115,6 +118,36 @@ const startedEvent = (input: { readonly eventId: string; readonly threadId: stri
     payload: { model: "example-model" },
     createdAt: fixtureTime,
   });
+
+const failedSessionEvent = (input: {
+  readonly eventId: string;
+  readonly threadId: string;
+  readonly errorMessage: string;
+}): OrchestrationEvent => ({
+  sequence: 1,
+  eventId: EventId.make(input.eventId),
+  type: "thread.session-set",
+  aggregateKind: "thread",
+  aggregateId: ThreadId.make(input.threadId),
+  occurredAt: fixtureTime,
+  commandId: CommandId.make(`command-${input.eventId}`),
+  causationEventId: null,
+  correlationId: null,
+  metadata: {},
+  payload: {
+    threadId: ThreadId.make(input.threadId),
+    session: {
+      threadId: ThreadId.make(input.threadId),
+      status: "error",
+      providerName: "codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "approval-required",
+      activeTurnId: null,
+      lastError: input.errorMessage,
+      updatedAt: fixtureTime,
+    },
+  },
+});
 
 it.effect("projects provider completion, preserves the audit chain, and revokes MCP scope", () =>
   Effect.gen(function* () {
@@ -246,6 +279,46 @@ it.effect("records one actionable failure and one urgent Needs You alert under r
       payload: { kind: "alert", status: "review", change: "created" },
     });
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "fails a running command-center run when provider startup sets the session to error",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const persistence = yield* makeRunLifecyclePersistence;
+      yield* insertRun(sql, { id: "run-startup-error", threadId: "thread-startup-error" });
+
+      const revoked: Array<string> = [];
+      const lifecycle = makeWithDependencies({
+        persistence,
+        getThread: () => Effect.sync((): OrchestrationThreadShell | undefined => undefined),
+        listProviderSessions: Effect.succeed([]),
+        revokeThread: (threadId) =>
+          Effect.sync(() => {
+            revoked.push(threadId);
+          }),
+      });
+      const event = failedSessionEvent({
+        eventId: "session-startup-error",
+        threadId: "thread-startup-error",
+        errorMessage: "The Windows sandbox could not be initialized.",
+      });
+
+      const first = yield* lifecycle.handleOrchestrationEvent(event);
+      const duplicate = yield* lifecycle.handleOrchestrationEvent(event);
+      const rows = yield* sql<{ readonly state: string; readonly error: string | null }>`
+      SELECT state, error FROM command_center_runs WHERE id = 'run-startup-error'
+    `;
+
+      expect(first?.status).toBe("failed");
+      expect(duplicate).toBeUndefined();
+      expect(rows[0]).toEqual({
+        state: "failed",
+        error: "The Windows sandbox could not be initialized.",
+      });
+      expect(revoked).toEqual(["thread-startup-error"]);
+    }).pipe(Effect.provide(testLayer)),
 );
 
 const threadShell = (input: {
