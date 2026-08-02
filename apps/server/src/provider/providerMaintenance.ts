@@ -245,7 +245,10 @@ function isNpmGlobalCommandPath(commandPath: string): boolean {
   return (
     normalized.includes("/node_modules/.bin/") ||
     normalized.includes("/lib/node_modules/") ||
-    normalized.includes("/npm/node_modules/")
+    normalized.includes("/npm/node_modules/") ||
+    normalized.includes("/appdata/roaming/npm/") ||
+    normalized.includes("/.npm-global/") ||
+    normalized.includes("/npm-global/")
   );
 }
 

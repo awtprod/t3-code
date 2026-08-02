@@ -496,7 +496,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
     }),
   );
 
-  it.effect("resolves the native executable behind an official Windows npm launcher", () =>
+  it.effect("resolves current and legacy native executables behind a Windows npm launcher", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -509,21 +509,19 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
         "@openai",
         "codex-win32-x64",
       );
-      const nativePath = path.join(
-        platformPackageRoot,
-        "vendor",
-        "x86_64-pc-windows-msvc",
-        "codex",
-        "codex.exe",
-      );
+      const platformVendorRoot = path.join(platformPackageRoot, "vendor", "x86_64-pc-windows-msvc");
+      const currentNativePath = path.join(platformVendorRoot, "bin", "codex.exe");
+      const legacyNativePath = path.join(platformVendorRoot, "codex", "codex.exe");
       yield* writeFile(commandPath, "@echo off\r\n");
       yield* writeFile(path.join(packageRoot, "bin", "codex.js"), "// launcher\n");
       yield* writeFile(
         path.join(platformPackageRoot, "package.json"),
         '{"name":"@openai/codex-win32-x64","version":"0.0.0"}\n',
       );
-      yield* fileSystem.makeDirectory(path.dirname(nativePath), { recursive: true });
-      yield* fileSystem.writeFile(nativePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
+      yield* fileSystem.makeDirectory(path.dirname(currentNativePath), { recursive: true });
+      yield* fileSystem.makeDirectory(path.dirname(legacyNativePath), { recursive: true });
+      yield* fileSystem.writeFile(currentNativePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
+      yield* fileSystem.writeFile(legacyNativePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
 
       NodeAssert.equal(
         yield* resolveCommandCenterCodexRuntimeExecutable({
@@ -533,7 +531,19 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
           fileSystem,
           path,
         }),
-        yield* fileSystem.realPath(nativePath),
+        yield* fileSystem.realPath(currentNativePath),
+      );
+
+      yield* fileSystem.remove(currentNativePath);
+      NodeAssert.equal(
+        yield* resolveCommandCenterCodexRuntimeExecutable({
+          commandPath,
+          platform: "win32",
+          architecture: "x64",
+          fileSystem,
+          path,
+        }),
+        yield* fileSystem.realPath(legacyNativePath),
       );
     }),
   );

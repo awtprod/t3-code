@@ -331,6 +331,26 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     });
   });
 
+  it("recognizes absolute Windows npm shims as one-click updatable installs", () => {
+    const commandPath = "C:\\Users\\example\\AppData\\Roaming\\npm\\package-tool.cmd";
+    expect(
+      packageToolUpdate.resolve({
+        binaryPath: commandPath,
+        resolvedCommandPath: commandPath,
+        realCommandPath: commandPath,
+      }),
+    ).toEqual({
+      provider: driver("packageTool"),
+      packageName: "@example/package-tool",
+      update: {
+        command: "npm install -g @example/package-tool@latest",
+        executable: "npm",
+        args: ["install", "-g", "@example/package-tool@latest"],
+        lockKey: "npm-global",
+      },
+    });
+  });
+
   it.effect(
     "switches native-package-tool to native updates when the binary resolves through the native installer",
     () =>
