@@ -150,5 +150,59 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       scheduler: commandScheduler,
       concurrency: { mode: "parallel" },
     }),
+    salesProspects: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:sales-prospects",
+      tag: COMMAND_CENTER_WS_METHODS.salesProspectsQuery,
+      staleTimeMs: 2_000,
+    }),
+    proposeSalesProspect: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:propose-sales-prospect",
+      tag: COMMAND_CENTER_WS_METHODS.salesProspectPropose,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.spaceId]),
+      },
+    }),
+    updateSalesProspect: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:update-sales-prospect",
+      tag: COMMAND_CENTER_WS_METHODS.salesProspectUpdate,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.prospectId]),
+      },
+    }),
+    requestSalesDraft: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:request-sales-draft",
+      tag: COMMAND_CENTER_WS_METHODS.salesDraftRequest,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.prospectId]),
+      },
+    }),
+    decideSalesDraft: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:decide-sales-draft",
+      tag: COMMAND_CENTER_WS_METHODS.salesDraftDecision,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.requestId]),
+      },
+    }),
+    createSalesDraft: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:create-sales-draft",
+      tag: COMMAND_CENTER_WS_METHODS.salesDraftCreate,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.requestId]),
+      },
+    }),
   };
 }

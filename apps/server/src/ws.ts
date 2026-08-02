@@ -146,6 +146,8 @@ import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as GoogleDraftConnector from "./command-center/GoogleDraftConnector.ts";
+import * as SalesPipeline from "./command-center/SalesPipeline.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
@@ -424,6 +426,10 @@ const makeWsRpcLayer = (
       const commandCenterAutomationTriggers = yield* AutomationTriggerCoordinator.make;
       const commandCenterMemorySearch = yield* MemorySearchIndex.MemorySearchIndex;
       const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
+      const googleDraftConnector = yield* Effect.serviceOption(
+        GoogleDraftConnector.GoogleDraftConnector,
+      );
+      const salesPipeline = yield* Effect.serviceOption(SalesPipeline.SalesPipeline);
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1218,6 +1224,161 @@ const makeWsRpcLayer = (
                 artifact,
                 sizeBytes: exported.sizeBytes,
               };
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.salesProspectsQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.salesProspectsQuery,
+            Option.match(salesPipeline, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "persistence",
+                    message: "The sales pipeline is unavailable.",
+                  }),
+                ),
+              onSome: (service) => service.query(input),
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.salesProspectPropose]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.salesProspectPropose,
+            Option.match(salesPipeline, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "persistence",
+                    message: "The sales pipeline is unavailable.",
+                  }),
+                ),
+              onSome: (service) => service.propose(input),
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.salesProspectUpdate]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.salesProspectUpdate,
+            Option.match(salesPipeline, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "persistence",
+                    message: "The sales pipeline is unavailable.",
+                  }),
+                ),
+              onSome: (service) => service.update(input),
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.salesDraftRequest]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.salesDraftRequest,
+            Option.match(salesPipeline, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "persistence",
+                    message: "The sales pipeline is unavailable.",
+                  }),
+                ),
+              onSome: (service) => service.requestDraft(input),
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.salesDraftDecision]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.salesDraftDecision,
+            Option.match(salesPipeline, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "persistence",
+                    message: "The sales pipeline is unavailable.",
+                  }),
+                ),
+              onSome: (service) => service.decideDraft(input),
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.salesDraftCreate]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.salesDraftCreate,
+            Option.match(salesPipeline, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "persistence",
+                    message: "The sales pipeline is unavailable.",
+                  }),
+                ),
+              onSome: (sales) =>
+                Option.match(googleDraftConnector, {
+                  onNone: () =>
+                    Effect.fail(
+                      new CommandCenterError({
+                        reason: "connector",
+                        message: "The Gmail draft connector is unavailable.",
+                      }),
+                    ),
+                  onSome: (draftConnector) =>
+                    Effect.gen(function* () {
+                      const claimed = yield* sales.claimDraftCreate(input);
+                      if (claimed.request.status === "created") return claimed;
+                      const connection = (yield* commandCenter.queryConnections({
+                        spaceId: input.spaceId,
+                      })).connections.find(
+                        (candidate) =>
+                          candidate.id === claimed.request.connectionId &&
+                          candidate.capabilities.includes(
+                            "cc.connections.google.gmail.drafts.create",
+                          ),
+                      );
+                      if (connection === undefined) {
+                        return yield* new CommandCenterError({
+                          reason: "validation",
+                          message:
+                            "The dedicated Gmail draft connection is not enabled for this Space.",
+                        });
+                      }
+                      const toConnectorError = (
+                        cause: GoogleDraftConnector.GoogleDraftConnectorError,
+                      ) =>
+                        new CommandCenterError({
+                          reason: "connector" as const,
+                          message: cause.message,
+                          cause,
+                        });
+                      const existing = yield* draftConnector
+                        .findExisting(claimed.request)
+                        .pipe(Effect.mapError(toConnectorError));
+                      const result =
+                        existing === undefined
+                          ? yield* draftConnector
+                              .create(claimed.request)
+                              .pipe(Effect.mapError(toConnectorError))
+                          : { draftId: existing };
+                      return yield* sales.completeDraftCreate({
+                        requestId: input.requestId,
+                        spaceId: input.spaceId,
+                        payloadDigest: input.payloadDigest,
+                        draftId: result.draftId,
+                        reconciled: existing !== undefined,
+                      });
+                    }).pipe(
+                      Effect.tapError((cause) =>
+                        sales
+                          .failDraftCreate({
+                            requestId: input.requestId,
+                            spaceId: input.spaceId,
+                            payloadDigest: input.payloadDigest,
+                            message: cause.message,
+                          })
+                          .pipe(Effect.ignore),
+                      ),
+                    ),
+                }),
             }),
             { "rpc.aggregate": "command-center" },
           ),

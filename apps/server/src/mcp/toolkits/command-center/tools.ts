@@ -24,6 +24,10 @@ import {
   CommandCenterMemorySearchResults,
   GoogleReadRequest,
   GoogleReadResult,
+  CommandCenterSalesProspectProposeInput,
+  CommandCenterSalesProspectProposeResult,
+  CommandCenterSalesProspectsQueryInput,
+  CommandCenterSalesProspectsQueryResult,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/unstable/ai";
@@ -34,6 +38,7 @@ import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
 import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
+import * as SalesPipeline from "../../../command-center/SalesPipeline.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -52,6 +57,23 @@ const RunListResult = Schema.Struct({ runs: Schema.Array(Run), approvals: Schema
 const SpaceListResult = Schema.Struct({
   spaces: Schema.Array(Space),
   connections: Schema.Array(Connection),
+});
+const SalesProspectListResult = CommandCenterSalesProspectsQueryResult;
+const {
+  provenanceKind: _salesProvenanceKind,
+  provenanceRef: _salesProvenanceRef,
+  ...SalesProspectProposalFields
+} = CommandCenterSalesProspectProposeInput.fields;
+const AgentSalesProspectProposalInput = Schema.Struct(SalesProspectProposalFields);
+const SalesGmailReconcileInput = Schema.Struct({
+  spaceId: SpaceId,
+  connectionId: Schema.String.check(Schema.isNonEmpty()),
+});
+const SalesGmailReconcileResult = Schema.Struct({
+  inspected: Schema.Int,
+  contacted: Schema.Int,
+  replied: Schema.Int,
+  followUpsPrepared: Schema.Int,
 });
 
 const dependencies = [
@@ -225,6 +247,43 @@ export const CommandCenterGoogleReadTool = readonlyTool(
   }).annotate(Tool.Title, "Read Google workspace data"),
 );
 
+export const CommandCenterSalesProspectsListTool = readonlyTool(
+  Tool.make("cc_sales_prospects_list", {
+    description:
+      "List sales prospects in this credential's exact opt-in Space. Prospect data is private runtime state, not a generic Item or repository file.",
+    parameters: CommandCenterSalesProspectsQueryInput,
+    success: SalesProspectListResult,
+    failure,
+    dependencies,
+  }).annotate(Tool.Title, "List sales prospects"),
+);
+
+export const CommandCenterSalesProspectProposeTool = Tool.make("cc_sales_prospects_propose", {
+  description:
+    "Propose one researched prospect in this credential's exact opt-in Space. This tool can only create Researched records; it cannot approve outreach, create Gmail drafts, mark a deal won, or contact anyone.",
+  parameters: AgentSalesProspectProposalInput,
+  success: CommandCenterSalesProspectProposeResult,
+  failure,
+  dependencies,
+})
+  .annotate(Tool.Title, "Propose a researched sales prospect")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+export const CommandCenterSalesGmailReconcileTool = Tool.make("cc_sales_gmail_reconcile", {
+  description:
+    "Run deterministic, read-only Gmail reconciliation for this opt-in sales Space. It may mark an approved draft as Contacted when a matching sent message exists, mark Contacted as Replied when a matching inbound message exists, and prepare internal 3-day or 7-day follow-up previews. It cannot send email, approve a preview, create a Gmail draft, or mark a deal won.",
+  parameters: SalesGmailReconcileInput,
+  success: SalesGmailReconcileResult,
+  failure,
+  dependencies,
+})
+  .annotate(Tool.Title, "Reconcile sales Gmail activity")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const CommandCenterToolkit = Toolkit.make(
   CommandCenterSpacesListTool,
   CommandCenterItemsListTool,
@@ -239,4 +298,7 @@ export const CommandCenterToolkit = Toolkit.make(
   CommandCenterRunStartTool,
   CommandCenterAutomationRunTool,
   CommandCenterGoogleReadTool,
+  CommandCenterSalesProspectsListTool,
+  CommandCenterSalesProspectProposeTool,
+  CommandCenterSalesGmailReconcileTool,
 );

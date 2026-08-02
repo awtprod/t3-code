@@ -185,6 +185,7 @@ interface SpaceRow {
   readonly kind: string;
   readonly instructions: string | null;
   readonly policyJson: string;
+  readonly featuresJson: string;
   readonly modelDefaultsJson: string;
   readonly connectionsJson: string;
   readonly repositoriesJson: string;
@@ -337,6 +338,8 @@ const decodeSpaceRow = Effect.fn("CommandCenter.decodeSpaceRow")(function* (row:
     kind: row.kind,
     instructions: row.instructions ?? "",
     policy: yield* parseJson(row.policyJson, "Space policy"),
+    features:
+      row.featuresJson === "{}" ? undefined : yield* parseJson(row.featuresJson, "Space features"),
     modelDefaults:
       row.modelDefaultsJson === "{}"
         ? undefined
@@ -846,12 +849,13 @@ export const layer = Layer.effect(
               yield* sql`
                 INSERT INTO command_center_spaces (
                   id, slug, name, kind, instructions, policy_json, model_defaults_json,
-                  connections_json, repositories_json, aliases_json, lifecycle, created_at,
+                  features_json, connections_json, repositories_json, aliases_json, lifecycle, created_at,
                   updated_at
                 ) VALUES (
                   ${space.id}, ${space.slug}, ${space.displayName}, ${space.kind},
                   ${space.instructions}, ${stringify(space.policy)},
-                  ${stringify(space.modelDefaults ?? {})}, ${stringify(space.connectionIds)},
+                  ${stringify(space.modelDefaults ?? {})}, ${stringify(space.features ?? {})},
+                  ${stringify(space.connectionIds)},
                   ${stringify(space.repositories)}, ${stringify(space.aliases)},
                   ${space.lifecycle}, ${space.createdAt}, ${space.updatedAt}
                 )
@@ -862,6 +866,7 @@ export const layer = Layer.effect(
                   instructions = excluded.instructions,
                   policy_json = excluded.policy_json,
                   model_defaults_json = excluded.model_defaults_json,
+                  features_json = excluded.features_json,
                   connections_json = excluded.connections_json,
                   repositories_json = excluded.repositories_json,
                   aliases_json = excluded.aliases_json,
@@ -1000,6 +1005,7 @@ export const layer = Layer.effect(
       const rows = yield* sql<SpaceRow>`
         SELECT id, slug, name, kind, instructions,
           policy_json AS "policyJson", model_defaults_json AS "modelDefaultsJson",
+          features_json AS "featuresJson",
           connections_json AS "connectionsJson", repositories_json AS "repositoriesJson",
           aliases_json AS "aliasesJson", lifecycle,
           created_at AS "createdAt", updated_at AS "updatedAt"

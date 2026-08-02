@@ -65,6 +65,10 @@ export const CapabilityName = Schema.Literals([
   "cc.connections.google.gmail.read",
   "cc.connections.google.calendar.read",
   "cc.connections.google.drive.read",
+  "cc.connections.google.gmail.drafts.create",
+  "cc.sales.read",
+  "cc.sales.propose",
+  "cc.sales.write",
   "cc.runs.start",
 ]);
 export type CapabilityName = typeof CapabilityName.Type;
@@ -81,12 +85,21 @@ export const CAPABILITY_NAMES: ReadonlyArray<CapabilityName> = [
   "cc.connections.google.gmail.read",
   "cc.connections.google.calendar.read",
   "cc.connections.google.drive.read",
+  "cc.connections.google.gmail.drafts.create",
+  "cc.sales.read",
+  "cc.sales.propose",
+  "cc.sales.write",
   "cc.runs.start",
 ];
 
 /** Capabilities that may be issued for new routes and credentials. */
 export const ACTIVE_CAPABILITY_NAMES: ReadonlyArray<CapabilityName> = CAPABILITY_NAMES.filter(
-  (capability) => capability !== "cc.connections.google.read",
+  (capability) =>
+    capability !== "cc.connections.google.read" &&
+    capability !== "cc.connections.google.gmail.drafts.create" &&
+    capability !== "cc.sales.read" &&
+    capability !== "cc.sales.propose" &&
+    capability !== "cc.sales.write",
 );
 
 export const RiskLevel = Schema.Literals(["low", "reversible", "approval-required", "blocked"]);
@@ -155,6 +168,11 @@ export const SpacePolicy = Schema.Struct({
 });
 export type SpacePolicy = typeof SpacePolicy.Type;
 
+export const SpaceFeatures = Schema.Struct({
+  salesPipeline: Schema.optional(Schema.Boolean),
+});
+export type SpaceFeatures = typeof SpaceFeatures.Type;
+
 export const Space = Schema.Struct({
   id: SpaceId,
   slug: TrimmedNonEmptyString,
@@ -162,6 +180,7 @@ export const Space = Schema.Struct({
   kind: SpaceKind,
   instructions: TrimmedString,
   policy: SpacePolicy,
+  features: Schema.optional(SpaceFeatures),
   modelDefaults: Schema.optional(ModelSelection),
   connectionIds: Schema.Array(ConnectionId),
   repositories: Schema.Array(RepositoryBinding),

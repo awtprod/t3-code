@@ -27,6 +27,14 @@ import {
   RunStatus,
   Space,
   SpaceId,
+  SalesActivity,
+  SalesContactProvenance,
+  SalesDraftRequest,
+  SalesDraftRequestId,
+  SalesFitAnalysis,
+  SalesProspect,
+  SalesProspectId,
+  SalesProspectStage,
   ThreadId,
   Timestamp,
   TrimmedNonEmptyString,
@@ -65,6 +73,12 @@ export const COMMAND_CENTER_WS_METHODS = {
   automationRunGet: "cc.automations.run.get",
   automationWebhookAdmit: "cc.automations.webhook.admit",
   googleRead: "cc.connections.google.read",
+  salesProspectsQuery: "cc.sales.prospects.query",
+  salesProspectPropose: "cc.sales.prospects.propose",
+  salesProspectUpdate: "cc.sales.prospects.update",
+  salesDraftRequest: "cc.sales.drafts.request",
+  salesDraftDecision: "cc.sales.drafts.decide",
+  salesDraftCreate: "cc.sales.drafts.create",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
@@ -688,3 +702,93 @@ export const GoogleReadResult = Schema.Union([
   }),
 ]);
 export type GoogleReadResult = typeof GoogleReadResult.Type;
+
+export const CommandCenterSalesProspectsQueryInput = Schema.Struct({
+  spaceId: SpaceId,
+  stages: Schema.optional(Schema.Array(SalesProspectStage)),
+  limit: QueryLimit,
+});
+export type CommandCenterSalesProspectsQueryInput =
+  typeof CommandCenterSalesProspectsQueryInput.Type;
+
+export const CommandCenterSalesProspectsQueryResult = Schema.Struct({
+  prospects: Schema.Array(SalesProspect),
+  draftRequests: Schema.Array(SalesDraftRequest),
+});
+export type CommandCenterSalesProspectsQueryResult =
+  typeof CommandCenterSalesProspectsQueryResult.Type;
+
+export const CommandCenterSalesProspectProposeInput = Schema.Struct({
+  requestId: TrimmedNonEmptyString,
+  spaceId: SpaceId,
+  channelId: Schema.optional(TrimmedNonEmptyString),
+  channelName: TrimmedNonEmptyString,
+  channelUrl: TrimmedNonEmptyString,
+  contactName: Schema.optional(TrimmedNonEmptyString),
+  contactEmail: Schema.optional(TrimmedNonEmptyString),
+  contactProvenance: SalesContactProvenance,
+  subscriberCount: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  language: TrimmedNonEmptyString,
+  niche: TrimmedNonEmptyString,
+  fit: SalesFitAnalysis,
+  nextAction: Schema.optional(TrimmedString),
+  nextActionAt: Schema.optional(Timestamp),
+  provenanceKind: Schema.Literals(["user", "agent", "automation"]),
+  provenanceRef: Schema.optional(TrimmedNonEmptyString),
+});
+export type CommandCenterSalesProspectProposeInput =
+  typeof CommandCenterSalesProspectProposeInput.Type;
+
+export const CommandCenterSalesProspectProposeResult = Schema.Struct({
+  prospect: SalesProspect,
+  duplicate: Schema.Boolean,
+});
+export type CommandCenterSalesProspectProposeResult =
+  typeof CommandCenterSalesProspectProposeResult.Type;
+
+export const CommandCenterSalesProspectUpdateInput = Schema.Struct({
+  prospectId: SalesProspectId,
+  spaceId: SpaceId,
+  expectedUpdatedAt: Timestamp,
+  stage: Schema.optional(SalesProspectStage),
+  nextAction: Schema.optional(Schema.NullOr(TrimmedString)),
+  nextActionAt: Schema.optional(Schema.NullOr(Timestamp)),
+});
+export type CommandCenterSalesProspectUpdateInput =
+  typeof CommandCenterSalesProspectUpdateInput.Type;
+
+export const CommandCenterSalesProspectDetail = Schema.Struct({
+  prospect: SalesProspect,
+  activities: Schema.Array(SalesActivity),
+});
+export type CommandCenterSalesProspectDetail = typeof CommandCenterSalesProspectDetail.Type;
+
+export const CommandCenterSalesDraftRequestInput = Schema.Struct({
+  requestId: SalesDraftRequestId,
+  prospectId: SalesProspectId,
+  spaceId: SpaceId,
+  connectionId: ConnectionId,
+  expectedUpdatedAt: Timestamp,
+});
+export type CommandCenterSalesDraftRequestInput = typeof CommandCenterSalesDraftRequestInput.Type;
+
+export const CommandCenterSalesDraftDecisionInput = Schema.Struct({
+  requestId: SalesDraftRequestId,
+  spaceId: SpaceId,
+  payloadDigest: TrimmedNonEmptyString,
+  decision: Schema.Literals(["approved", "declined"]),
+});
+export type CommandCenterSalesDraftDecisionInput = typeof CommandCenterSalesDraftDecisionInput.Type;
+
+export const CommandCenterSalesDraftCreateInput = Schema.Struct({
+  requestId: SalesDraftRequestId,
+  spaceId: SpaceId,
+  payloadDigest: TrimmedNonEmptyString,
+});
+export type CommandCenterSalesDraftCreateInput = typeof CommandCenterSalesDraftCreateInput.Type;
+
+export const CommandCenterSalesDraftResult = Schema.Struct({
+  request: SalesDraftRequest,
+  prospect: SalesProspect,
+});
+export type CommandCenterSalesDraftResult = typeof CommandCenterSalesDraftResult.Type;

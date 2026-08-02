@@ -6,23 +6,28 @@ export type GoogleReadCapability =
   | "cc.connections.google.calendar.read"
   | "cc.connections.google.drive.read";
 
+export type GoogleConfiguredCapability =
+  | GoogleReadCapability
+  | "cc.connections.google.gmail.drafts.create";
+
 export const GOOGLE_READ_CAPABILITIES: ReadonlyArray<GoogleReadCapability> = [
   "cc.connections.google.gmail.read",
   "cc.connections.google.calendar.read",
   "cc.connections.google.drive.read",
 ];
 
-const CONFIG_CAPABILITIES: Readonly<Record<string, GoogleReadCapability>> = {
+const CONFIG_CAPABILITIES: Readonly<Record<string, GoogleConfiguredCapability>> = {
   "gmail.read": "cc.connections.google.gmail.read",
+  "gmail.drafts.create": "cc.connections.google.gmail.drafts.create",
   "calendar.read": "cc.connections.google.calendar.read",
   "drive.read": "cc.connections.google.drive.read",
 };
 
 export const googleCapabilitiesFromConfig = (
   capabilities: ReadonlyArray<string>,
-): ReadonlyArray<GoogleReadCapability> =>
+): ReadonlyArray<GoogleConfiguredCapability> =>
   [...new Set(capabilities.map((capability) => CONFIG_CAPABILITIES[capability]))].filter(
-    (capability): capability is GoogleReadCapability => capability !== undefined,
+    (capability): capability is GoogleConfiguredCapability => capability !== undefined,
   );
 
 export const expandLegacyGoogleCapabilities = (
