@@ -440,23 +440,25 @@ export const resolveCommandCenterCodexRuntimeExecutable = Effect.fn(
         cause,
       ),
   });
-  const nativeExecutablePath = path.join(
-    path.dirname(packageJsonPath),
-    "vendor",
-    target.triple,
-    "codex",
-    "codex.exe",
+  const platformVendorRoot = path.join(path.dirname(packageJsonPath), "vendor", target.triple);
+  const nativeExecutableCandidates = [
+    path.join(platformVendorRoot, "bin", "codex.exe"),
+    path.join(platformVendorRoot, "codex", "codex.exe"),
+  ];
+  for (const candidate of nativeExecutableCandidates) {
+    if (yield* fileSystem.exists(candidate)) {
+      return yield* fileSystem
+        .realPath(candidate)
+        .pipe(
+          Effect.mapError((cause) =>
+            codexHomeError("Command Center could not canonicalize the native codex.exe.", cause),
+          ),
+        );
+    }
+  }
+  return yield* codexHomeError(
+    "Command Center found the Windows Codex package but not its native codex.exe. Reinstall @openai/codex with optional dependencies enabled.",
   );
-  return yield* fileSystem
-    .realPath(nativeExecutablePath)
-    .pipe(
-      Effect.mapError((cause) =>
-        codexHomeError(
-          "Command Center could not locate the native codex.exe and its Windows sandbox resources. Reinstall or update @openai/codex.",
-          cause,
-        ),
-      ),
-    );
 });
 
 function isNotSymlink(error: PlatformError.PlatformError): boolean {
