@@ -32,11 +32,14 @@ codex login
 
 User-started Command Center chats run directly on Linux, macOS, and Windows. Windows does not
 require WSL. The first native Windows chat may ask for administrator approval while Codex prepares
-its stronger sandbox. If that setup is unavailable, T3 Code tries Codex's non-administrator sandbox
-and continues only when the same filesystem, secret, Git, and network checks pass.
+its stronger sandbox. Approve that prompt: the non-administrator Windows sandbox cannot enforce the
+workspace-only filesystem policy Command Center requires, so T3 Code will not fall back to it or run
+the provider without isolation.
 
 Keep Codex current if Command Center reports that native sandbox setup or packaged helper files are
-missing. T3 Code blocks the chat when the installed runtime cannot prove the required isolation and
+missing. Expand the Codex provider in Settings and choose **Update or reinstall**; the action remains
+available even when the installed version number is already current so it can repair missing native
+files. T3 Code blocks the chat when the installed runtime cannot prove the required isolation and
 shows the setup problem without a diagnostic stack trace.
 
 Scheduled and unattended Command Center automation still requires a Linux host. This limitation

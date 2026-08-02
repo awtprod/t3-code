@@ -116,3 +116,12 @@ export function getProviderVersionAdvisoryPresentation(
     emphasis: "normal" as const,
   };
 }
+
+export function getProviderMaintenancePresentation(
+  advisory: ServerProviderVersionAdvisory | undefined,
+): { readonly updateCommand: string } | null {
+  if (advisory?.canUpdate !== true || advisory.updateCommand === null) {
+    return null;
+  }
+  return { updateCommand: advisory.updateCommand };
+}
