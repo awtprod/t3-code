@@ -115,7 +115,10 @@ export function SalesPipelineBoard(props: SalesPipelineBoardProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background" data-slot="sales-pipeline">
-      <header className="flex h-16 shrink-0 items-center justify-between border-b px-4 sm:px-6">
+      <header
+        className="flex h-16 shrink-0 items-center justify-between border-b pl-4 pr-[calc(var(--workspace-native-controls-inset)+1rem)] sm:pl-6 sm:pr-[calc(var(--workspace-native-controls-inset)+1.5rem)]"
+        data-slot="sales-pipeline-header"
+      >
         <div>
           <h1 className="font-heading font-semibold text-lg">Sales pipeline</h1>
           <p className="text-muted-foreground text-xs">
