@@ -37,9 +37,32 @@ credentials. Install and sign in to one or more providers before starting your f
 | [Cursor CLI](https://cursor.com/cli)                  | `cursor-agent` | `agent login`         |
 | [Grok Build](https://x.ai/cli)                        | `grok`         | `grok login`          |
 | [OpenCode](https://opencode.ai)                       | `opencode`     | `opencode auth login` |
+| [Kimi K3](https://github.com/MoonshotAI/kimi-code)    | `kimi`         | `/login` inside Kimi  |
 
 See [provider setup](./docs/user/install.md#providers) for binary discovery and multi-account
 guidance.
+
+#### Kimi K3 setup
+
+Command Center supports Kimi K3 through Kimi Code `0.31.1` or newer. Because Node.js is already a
+prerequisite for this repository, the npm installation is the shortest setup path:
+
+```bash
+npm install --global @moonshot-ai/kimi-code@latest
+kimi --version
+kimi
+```
+
+At the Kimi prompt, run `/login` and choose Kimi Code OAuth or a Kimi Platform API key. Then open
+**Settings** → **Providers** in Command Center, enable Kimi, and verify that the `kimi` binary is
+detected. New Kimi threads default to the `kimi-code/k3` model.
+
+Set a separate `KIMI_CODE_HOME` on each provider instance when using multiple Kimi accounts.
+Interactive Kimi sessions can use the npm installation. Scheduled or unattended Command Center
+automation requires Linux, Kimi Code `0.31.1` or newer as a native non-writable ELF executable, and
+Bubblewrap at `/usr/bin/bwrap`; npm and script launchers remain interactive-only. See
+[Kimi provider details](./docs/user/providers-kimi.md) for session, caching, subagent, and isolation
+behavior.
 
 ### 2. Clone and install
 
@@ -92,6 +115,107 @@ the server process's `PATH`, set its absolute binary path in the provider settin
 Add the repository or workspace you want the agent to use. Projects always refer to paths on the
 server machine, not paths on the phone or browser running the client. For more detail, see the
 [installation guide](./docs/user/install.md).
+
+## Build the desktop app
+
+`pnpm build:desktop` compiles the web client, server, and Electron application but does not create an
+installer. The `dist:desktop:*` commands compile those inputs, stage the production dependencies,
+build the native resource monitor, and package an installable artifact in `release/`.
+
+Build each installer on its matching operating system. The packages contain native Electron,
+terminal, passkey, and Rust components; the release workflow therefore uses macOS for DMG, Linux for
+AppImage, and Windows for NSIS rather than relying on cross-compilation.
+
+All desktop builds require the prerequisites above plus the stable
+[Rust toolchain](https://rustup.rs/). Builds are unsigned by default, which is appropriate for local
+testing.
+
+### macOS: DMG
+
+Install Xcode Command Line Tools and the Rust target for the architecture you are building:
+
+```bash
+xcode-select --install
+rustup target add aarch64-apple-darwin
+```
+
+Build for Apple Silicon or Intel:
+
+```bash
+pnpm dist:desktop:dmg:arm64
+pnpm dist:desktop:dmg:x64
+```
+
+For one universal package, install both Rust targets and use the generic builder:
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+pnpm dist:desktop:artifact -- --platform mac --target dmg --arch universal
+```
+
+Unsigned local builds may require right-clicking the app and choosing **Open** on first launch.
+
+### Linux: AppImage
+
+On Debian or Ubuntu, install the native compiler and ImageMagick used to generate the icon set:
+
+```bash
+sudo apt-get update
+sudo apt-get install --yes build-essential imagemagick
+rustup target add x86_64-unknown-linux-gnu
+```
+
+Build the x64 AppImage:
+
+```bash
+pnpm dist:desktop:linux
+```
+
+For Linux ARM64, use an ARM64 Linux host with the matching Rust target:
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+pnpm dist:desktop:artifact -- --platform linux --target AppImage --arch arm64
+```
+
+### Windows: NSIS installer
+
+Install Visual Studio 2022 Build Tools with **Desktop development with C++**, Python 3, and Rust's
+MSVC toolchain. In PowerShell, add the desired Rust target and build the installer:
+
+```powershell
+rustup target add x86_64-pc-windows-msvc
+pnpm dist:desktop:win:x64
+```
+
+Windows ARM64 is also supported when the ARM64 MSVC toolchain is installed:
+
+```powershell
+rustup target add aarch64-pc-windows-msvc
+pnpm dist:desktop:win:arm64
+```
+
+An unsigned installer can trigger Windows SmartScreen. Production Windows packages use Azure
+Trusted Signing.
+
+### Builder options and signed releases
+
+The generic form supports all targets and architectures:
+
+```bash
+pnpm dist:desktop:artifact -- \
+  --platform <mac|linux|win> \
+  --target <dmg|AppImage|nsis> \
+  --arch <arm64|x64|universal>
+```
+
+`universal` is macOS-only. Useful optional flags include `--output-dir`, `--keep-stage`, `--verbose`,
+and `--skip-build`. The last option reuses existing output from `pnpm build:desktop`.
+
+Pass `--signed` only after configuring the signing credentials described in
+[release operations](./docs/operations/release.md). Signed macOS builds require an Apple Developer
+team, provisioning profile, certificate, and notarization credentials; signed Windows builds require
+the Azure Trusted Signing variables used by the release workflow.
 
 ## Run the server on another machine
 
