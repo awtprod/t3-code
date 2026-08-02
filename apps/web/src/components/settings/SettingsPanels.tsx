@@ -20,6 +20,7 @@ import {
   ProviderDriverKind,
   type ProviderInstanceConfig,
   ProviderInstanceId,
+  type ServerProvider,
   type ScopedThreadRef,
   type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
@@ -119,10 +120,10 @@ import {
   collectProviderUpdateCandidates,
   hasOneClickUpdateProviderCandidate,
   isProviderUpdateActive,
-  type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
+import { getProviderMaintenancePresentation } from "./providerStatus";
 import {
   backgroundActivitySharedPolicySettings,
   buildProviderInstanceUpdatePatch,
@@ -1811,7 +1812,7 @@ export function ProviderSettingsPanel() {
   }, [primaryEnvironment, refreshProviders, serverProviders.length]);
 
   const runProviderUpdate = useCallback(
-    async (candidate: ProviderUpdateCandidate) => {
+    async (candidate: Pick<ServerProvider, "driver" | "instanceId">) => {
       if (!primaryEnvironment) return;
       let started = false;
       setUpdatingProviderDrivers((previous) => {
@@ -2178,12 +2179,15 @@ export function ProviderSettingsPanel() {
           const updateCandidate = liveProvider
             ? providerUpdateCandidateByInstanceId.get(liveProvider.instanceId)
             : undefined;
+          const providerMaintenance = getProviderMaintenancePresentation(
+            liveProvider?.versionAdvisory,
+          );
           const isDriverUpdateRunning =
-            updateCandidate !== undefined &&
-            (updatingProviderDrivers.has(updateCandidate.driver) ||
+            liveProvider !== undefined &&
+            (updatingProviderDrivers.has(liveProvider.driver) ||
               serverProviders.some(
                 (provider) =>
-                  provider.driver === updateCandidate.driver && isProviderUpdateActive(provider),
+                  provider.driver === liveProvider.driver && isProviderUpdateActive(provider),
               ));
           const showInlineUpdateButton =
             updateCandidate !== undefined &&
@@ -2192,6 +2196,15 @@ export function ProviderSettingsPanel() {
             updateCandidate !== undefined &&
             canOneClickUpdateProviderCandidate(updateCandidate, serverProviders) &&
             !updatingProviderDrivers.has(updateCandidate.driver);
+          const showProviderMaintenanceButton =
+            liveProvider !== undefined &&
+            providerMaintenance !== null &&
+            (updateCandidate === undefined || showInlineUpdateButton);
+          const canRunProviderMaintenance =
+            showProviderMaintenanceButton &&
+            !updatingProviderDrivers.has(liveProvider.driver) &&
+            !isProviderUpdateActive(liveProvider) &&
+            (updateCandidate === undefined || canRunInlineUpdate);
           const modelPreferences = settings.providerModelPreferences?.[row.instanceId] ?? {
             hiddenModels: [],
             modelOrder: [],
@@ -2255,16 +2268,14 @@ export function ProviderSettingsPanel() {
                 })
               }
               onRunUpdate={
-                showInlineUpdateButton && updateCandidate
+                showProviderMaintenanceButton && liveProvider
                   ? () => {
-                      if (!canRunInlineUpdate) {
-                        return;
-                      }
-                      void runProviderUpdate(updateCandidate);
+                      if (!canRunProviderMaintenance) return;
+                      void runProviderUpdate(liveProvider);
                     }
                   : undefined
               }
-              isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
+              isUpdating={showProviderMaintenanceButton ? isDriverUpdateRunning : undefined}
             />
           );
         })}

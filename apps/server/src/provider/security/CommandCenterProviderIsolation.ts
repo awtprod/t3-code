@@ -80,7 +80,7 @@ function sameControlFileIdentity(
 export interface CommandCenterCodexIsolation {
   readonly permissionProfile: string;
   readonly appServerArgs: ReadonlyArray<string>;
-  readonly windowsSandboxMode?: "elevated" | "unelevated";
+  readonly windowsSandboxMode?: "elevated";
 }
 
 export interface CommandCenterManagedGitMetadata {
@@ -1176,7 +1176,6 @@ export function commandCenterCodexIsolation(
   runtimeExecutablePath?: string,
   codexHome?: Pick<CommandCenterCodexHomeLayout, "homePath" | "helperBinPath">,
   platform: NodeJS.Platform = "linux",
-  windowsSandboxMode: "elevated" | "unelevated" = "elevated",
 ): CommandCenterCodexIsolation | undefined {
   if (
     runtimeMode === "full-access" ||
@@ -1200,7 +1199,7 @@ export function commandCenterCodexIsolation(
   });
   return {
     permissionProfile,
-    ...(platform === "win32" ? { windowsSandboxMode } : {}),
+    ...(platform === "win32" ? { windowsSandboxMode: "elevated" as const } : {}),
     appServerArgs: [
       "--strict-config",
       "-c",
@@ -1239,9 +1238,7 @@ export function commandCenterCodexIsolation(
       `default_permissions=${JSON.stringify(permissionProfile)}`,
       "-c",
       `permissions.${permissionProfile}=${profile}`,
-      ...(platform === "win32"
-        ? ["-c", `windows.sandbox=${JSON.stringify(windowsSandboxMode)}`]
-        : []),
+      ...(platform === "win32" ? ["-c", 'windows.sandbox="elevated"'] : []),
     ],
   };
 }

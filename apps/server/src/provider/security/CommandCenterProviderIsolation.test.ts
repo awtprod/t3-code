@@ -123,19 +123,9 @@ describe("CommandCenterProviderIsolation", () => {
       "C:\\runtime\\codex.exe",
       codexHome,
       "win32",
-      "elevated",
-    );
-    const windowsUnelevated = commandCenterCodexIsolation(
-      "approval-required",
-      undefined,
-      "C:\\runtime\\codex.exe",
-      codexHome,
-      "win32",
-      "unelevated",
     );
     NodeAssert.ok(auto);
     NodeAssert.ok(windowsElevated);
-    NodeAssert.ok(windowsUnelevated);
 
     NodeAssert.equal(read.permissionProfile, COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE);
     NodeAssert.equal(write.permissionProfile, COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE);
@@ -168,7 +158,7 @@ describe("CommandCenterProviderIsolation", () => {
     NodeAssert.match(writeConfig, /":workspace_roots"=\{"\."="write"\}/u);
     NodeAssert.doesNotMatch(writeConfig, /network=\{enabled=true\}/u);
     NodeAssert.match(windowsElevated.appServerArgs.join(" "), /windows\.sandbox="elevated"/u);
-    NodeAssert.match(windowsUnelevated.appServerArgs.join(" "), /windows\.sandbox="unelevated"/u);
+    NodeAssert.doesNotMatch(windowsElevated.appServerArgs.join(" "), /unelevated/u);
   });
 
   it.runIf(NodeProcess.platform === "linux")(

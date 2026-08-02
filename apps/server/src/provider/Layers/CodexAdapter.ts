@@ -61,8 +61,6 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
-  CodexSessionRuntimeIsolationProbeError,
-  CodexSessionRuntimeWindowsSandboxSetupError,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
   matchesCodexInterruptTarget,
@@ -90,10 +88,6 @@ const isCodexAppServerProtocolParseError = Schema.is(CodexErrors.CodexAppServerP
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
-const isCodexSessionRuntimeWindowsSandboxSetupError = Schema.is(
-  CodexSessionRuntimeWindowsSandboxSetupError,
-);
-const isCodexSessionRuntimeIsolationProbeError = Schema.is(CodexSessionRuntimeIsolationProbeError);
 const isCommandCenterCodexHomeIsolationError = Schema.is(CommandCenterCodexHomeIsolationError);
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
@@ -1967,38 +1961,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         });
 
         const attempt = yield* startRuntimeAttempt(runtimeInput).pipe(
-          Effect.catch((cause) => {
-            const canTryUnelevated =
-              isCodexSessionRuntimeIsolationProbeError(cause) ||
-              (isCodexSessionRuntimeWindowsSandboxSetupError(cause) &&
-                cause.allowUnelevatedFallback);
-            if (
-              hostPlatform !== "win32" ||
-              !commandCenterThread ||
-              !canTryUnelevated ||
-              commandCenterRuntimeExecutable === undefined ||
-              commandCenterHome === undefined
-            ) {
-              return Effect.fail(cause);
-            }
-            const fallbackIsolation = commandCenterCodexIsolation(
-              input.runtimeMode,
-              managedGitMetadata,
-              commandCenterRuntimeExecutable,
-              commandCenterHome,
-              hostPlatform,
-              "unelevated",
-            );
-            if (fallbackIsolation === undefined) return Effect.fail(cause);
-            const fallbackInput: CodexSessionRuntimeOptions = {
-              ...runtimeInput,
-              permissionProfile: fallbackIsolation.permissionProfile,
-              commandCenterPlatform: "win32",
-              windowsSandboxMode: "unelevated",
-              appServerArgs: [...fallbackIsolation.appServerArgs, ...mcpAppServerArgs],
-            };
-            return startRuntimeAttempt(fallbackInput);
-          }),
           Effect.mapError(
             (cause) =>
               new ProviderAdapterProcessError({
