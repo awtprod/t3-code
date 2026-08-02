@@ -1,5 +1,6 @@
 import {
   COMMAND_CENTER_EVENT_ACTIONS,
+  type OrchestrationEvent,
   type OrchestrationThreadShell,
   type ProviderRuntimeEvent,
   type ProviderSession,
@@ -15,6 +16,7 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ProviderService from "../provider/Services/ProviderService.ts";
 import { makeCommandCenterAuditLog } from "./AuditLog.ts";
@@ -390,6 +392,9 @@ export interface RunLifecycleShape {
   readonly handleProviderEvent: (
     event: ProviderRuntimeEvent,
   ) => Effect.Effect<RunTransition | undefined, RunLifecycleError>;
+  readonly handleOrchestrationEvent: (
+    event: OrchestrationEvent,
+  ) => Effect.Effect<RunTransition | undefined, RunLifecycleError>;
   readonly reconcile: Effect.Effect<ReadonlyArray<RunTransition>, RunLifecycleError>;
   readonly failRun: (input: {
     readonly runId: string;
@@ -452,6 +457,33 @@ export const makeWithDependencies = (deps: RuntimeDependencies): RunLifecycleSha
       occurredAt: event.createdAt,
       ...(selected.error === undefined ? {} : { error: selected.error }),
       ...(selected.failure === undefined ? {} : { failure: selected.failure }),
+    });
+    return yield* revokeTerminal(transition);
+  });
+
+  const handleOrchestrationEvent = Effect.fn("RunLifecycle.handleOrchestrationEvent")(function* (
+    event: OrchestrationEvent,
+  ) {
+    if (event.type !== "thread.session-set" || event.payload.session.status !== "error") {
+      return undefined;
+    }
+    const message = nonEmptyMessage(
+      event.payload.session.lastError,
+      "The provider session failed to start.",
+    );
+    const transition = yield* deps.persistence.transition({
+      threadId: event.payload.threadId,
+      sourceEventId: event.eventId,
+      status: "failed",
+      actorKind: "agent",
+      occurredAt: event.occurredAt,
+      error: message,
+      failure: {
+        reason: "provider-session-error",
+        message,
+        retryable: true,
+      },
+      allowedPreviousStates: ["queued", "running"],
     });
     return yield* revokeTerminal(transition);
   });
@@ -572,13 +604,14 @@ export const makeWithDependencies = (deps: RuntimeDependencies): RunLifecycleSha
     return transitions;
   });
 
-  return RunLifecycle.of({ handleProviderEvent, reconcile, failRun });
+  return RunLifecycle.of({ handleProviderEvent, handleOrchestrationEvent, reconcile, failRun });
 };
 
 const make = Effect.gen(function* () {
   const persistence = yield* makeRunLifecyclePersistence;
   const projection = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const provider = yield* ProviderService.ProviderService;
+  const orchestration = yield* OrchestrationEngine.OrchestrationEngineService;
   const service = makeWithDependencies({
     persistence,
     getThread: (threadId) =>
@@ -598,6 +631,18 @@ const make = Effect.gen(function* () {
         Effect.logError("command-center.run-lifecycle.provider-event-failed", {
           eventId: event.eventId,
           threadId: event.threadId,
+          reason: error.reason,
+        }),
+      ),
+    ),
+  ).pipe(Effect.forkScoped);
+
+  yield* Stream.runForEach(orchestration.streamDomainEvents, (event) =>
+    service.handleOrchestrationEvent(event).pipe(
+      Effect.catch((error) =>
+        Effect.logError("command-center.run-lifecycle.orchestration-event-failed", {
+          eventId: event.eventId,
+          threadId: event.aggregateKind === "thread" ? event.aggregateId : undefined,
           reason: error.reason,
         }),
       ),
