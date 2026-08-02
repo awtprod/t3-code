@@ -215,6 +215,8 @@ import {
   CommandCenterSalesDraftRequestInput,
   CommandCenterSalesDraftResult,
   CommandCenterSalesProspectDetail,
+  CommandCenterSalesProspectorImportInput,
+  CommandCenterSalesProspectorImportResult,
   CommandCenterSalesProspectProposeInput,
   CommandCenterSalesProspectProposeResult,
   CommandCenterSalesProspectsQueryInput,
@@ -549,6 +551,15 @@ export const WsCommandCenterSalesProspectsQueryRpc = Rpc.make(
   {
     payload: CommandCenterSalesProspectsQueryInput,
     success: CommandCenterSalesProspectsQueryResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSalesProspectorImportRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.salesProspectorImport,
+  {
+    payload: CommandCenterSalesProspectorImportInput,
+    success: CommandCenterSalesProspectorImportResult,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
@@ -1156,6 +1167,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterAutomationWebhookAdmitRpc,
   WsCommandCenterGoogleReadRpc,
   WsCommandCenterSalesProspectsQueryRpc,
+  WsCommandCenterSalesProspectorImportRpc,
   WsCommandCenterSalesProspectProposeRpc,
   WsCommandCenterSalesProspectUpdateRpc,
   WsCommandCenterSalesDraftRequestRpc,

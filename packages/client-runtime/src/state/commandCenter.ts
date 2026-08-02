@@ -155,6 +155,15 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       tag: COMMAND_CENTER_WS_METHODS.salesProspectsQuery,
       staleTimeMs: 2_000,
     }),
+    importSalesProspects: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:import-sales-prospects",
+      tag: COMMAND_CENTER_WS_METHODS.salesProspectorImport,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.spaceId]),
+      },
+    }),
     proposeSalesProspect: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:propose-sales-prospect",
       tag: COMMAND_CENTER_WS_METHODS.salesProspectPropose,

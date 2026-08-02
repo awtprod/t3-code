@@ -148,6 +148,7 @@ import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as GoogleDraftConnector from "./command-center/GoogleDraftConnector.ts";
 import * as SalesPipeline from "./command-center/SalesPipeline.ts";
+import * as ExternalProspectorConnector from "./command-center/ExternalProspectorConnector.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
@@ -430,6 +431,9 @@ const makeWsRpcLayer = (
         GoogleDraftConnector.GoogleDraftConnector,
       );
       const salesPipeline = yield* Effect.serviceOption(SalesPipeline.SalesPipeline);
+      const externalProspectorConnector = yield* Effect.serviceOption(
+        ExternalProspectorConnector.ExternalProspectorConnector,
+      );
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1239,6 +1243,32 @@ const makeWsRpcLayer = (
                   }),
                 ),
               onSome: (service) => service.query(input),
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.salesProspectorImport]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.salesProspectorImport,
+            Option.match(salesPipeline, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "persistence",
+                    message: "The sales pipeline is unavailable.",
+                  }),
+                ),
+              onSome: (sales) =>
+                Option.match(externalProspectorConnector, {
+                  onNone: () =>
+                    Effect.fail(
+                      new CommandCenterError({
+                        reason: "config",
+                        message: "The external prospecting source connector is unavailable.",
+                      }),
+                    ),
+                  onSome: (connector) =>
+                    ExternalProspectorConnector.importReadyProspects(connector, sales, input),
+                }),
             }),
             { "rpc.aggregate": "command-center" },
           ),

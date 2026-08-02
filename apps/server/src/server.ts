@@ -127,6 +127,7 @@ import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as GoogleDraftConnector from "./command-center/GoogleDraftConnector.ts";
 import * as SalesPipeline from "./command-center/SalesPipeline.ts";
+import * as ExternalProspectorConnector from "./command-center/ExternalProspectorConnector.ts";
 import * as CommandCenterConfig from "./command-center/Config.ts";
 import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
@@ -391,6 +392,7 @@ const CommandCenterBaseLayerLive = Layer.mergeAll(
   MemorySearchIndex.layer,
   GoogleReadConnectorLayerLive,
   GoogleDraftConnectorLayerLive,
+  ExternalProspectorConnector.layer,
   SalesPipeline.layer.pipe(Layer.provide(PersistenceLayerLive)),
   AutomationDefinitionConfigLayerLive,
   AutomationScopedShellLayerLive,

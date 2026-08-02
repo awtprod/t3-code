@@ -38,6 +38,7 @@ export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.automationWebhookAdmit, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.googleRead, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.salesProspectsQuery, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.salesProspectorImport, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.salesProspectPropose, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.salesProspectUpdate, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.salesDraftRequest, AuthCommandCenterOperateScope],

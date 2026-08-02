@@ -6,7 +6,7 @@ import {
   type SalesProspect,
   type SalesProspectStage,
 } from "@command-center/core";
-import { ArrowRightIcon, MailIcon, RefreshCwIcon } from "lucide-react";
+import { ArrowRightIcon, DatabaseIcon, MailIcon, RefreshCwIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
@@ -51,6 +51,8 @@ export interface SalesPipelineBoardProps {
   readonly loading?: boolean | undefined;
   readonly busy?: boolean | undefined;
   readonly error?: string | null | undefined;
+  readonly status?: string | null | undefined;
+  readonly onImport: () => void;
   readonly onRefresh: () => void;
   readonly onStageChange: (prospect: SalesProspect, stage: SalesProspectStage) => void;
   readonly onRequestDraft: (prospect: SalesProspect) => Promise<SalesDraftRequest | undefined>;
@@ -126,19 +128,37 @@ export function SalesPipelineBoard(props: SalesPipelineBoardProps) {
             potential
           </p>
         </div>
-        <Button
-          aria-label="Refresh prospects"
-          onClick={props.onRefresh}
-          size="icon-sm"
-          variant="ghost"
-        >
-          <RefreshCwIcon />
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            disabled={props.busy || props.loading}
+            onClick={props.onImport}
+            size="sm"
+            variant="outline"
+          >
+            <DatabaseIcon />
+            Import ready
+          </Button>
+          <Button
+            aria-label="Refresh prospects"
+            disabled={props.busy || props.loading}
+            onClick={props.onRefresh}
+            size="icon-sm"
+            variant="ghost"
+          >
+            <RefreshCwIcon />
+          </Button>
+        </div>
       </header>
 
       {props.error ? (
         <div className="border-b bg-destructive/8 px-4 py-2 text-destructive text-sm">
           {props.error}
+        </div>
+      ) : null}
+
+      {props.status ? (
+        <div className="border-b bg-muted/40 px-4 py-2 text-muted-foreground text-sm">
+          {props.status}
         </div>
       ) : null}
 

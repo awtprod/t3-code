@@ -26,6 +26,8 @@ import {
   GoogleReadResult,
   CommandCenterSalesProspectProposeInput,
   CommandCenterSalesProspectProposeResult,
+  CommandCenterSalesProspectorImportInput,
+  CommandCenterSalesProspectorImportResult,
   CommandCenterSalesProspectsQueryInput,
   CommandCenterSalesProspectsQueryResult,
 } from "@t3tools/contracts";
@@ -38,7 +40,6 @@ import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
 import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
-import * as SalesPipeline from "../../../command-center/SalesPipeline.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -271,6 +272,19 @@ export const CommandCenterSalesProspectProposeTool = Tool.make("cc_sales_prospec
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
+export const CommandCenterSalesProspectorImportTool = Tool.make("cc_sales_prospector_import", {
+  description:
+    "Import already-vetted ready prospects from the configured external prospecting SQLite database into this credential's exact opt-in Space. The database is opened read-only, suppressed contacts and non-public contact sources are excluded, and every imported record remains Researched. This tool cannot approve outreach, create Gmail drafts, send email, or change source data.",
+  parameters: CommandCenterSalesProspectorImportInput,
+  success: CommandCenterSalesProspectorImportResult,
+  failure,
+  dependencies,
+})
+  .annotate(Tool.Title, "Import ready prospecting candidates")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const CommandCenterSalesGmailReconcileTool = Tool.make("cc_sales_gmail_reconcile", {
   description:
     "Run deterministic, read-only Gmail reconciliation for this opt-in sales Space. It may mark an approved draft as Contacted when a matching sent message exists, mark Contacted as Replied when a matching inbound message exists, and prepare internal 3-day or 7-day follow-up previews. It cannot send email, approve a preview, create a Gmail draft, or mark a deal won.",
@@ -300,5 +314,6 @@ export const CommandCenterToolkit = Toolkit.make(
   CommandCenterGoogleReadTool,
   CommandCenterSalesProspectsListTool,
   CommandCenterSalesProspectProposeTool,
+  CommandCenterSalesProspectorImportTool,
   CommandCenterSalesGmailReconcileTool,
 );

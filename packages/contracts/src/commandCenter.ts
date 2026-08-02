@@ -74,6 +74,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   automationWebhookAdmit: "cc.automations.webhook.admit",
   googleRead: "cc.connections.google.read",
   salesProspectsQuery: "cc.sales.prospects.query",
+  salesProspectorImport: "cc.sales.prospector.import",
   salesProspectPropose: "cc.sales.prospects.propose",
   salesProspectUpdate: "cc.sales.prospects.update",
   salesDraftRequest: "cc.sales.drafts.request",
@@ -717,6 +718,21 @@ export const CommandCenterSalesProspectsQueryResult = Schema.Struct({
 });
 export type CommandCenterSalesProspectsQueryResult =
   typeof CommandCenterSalesProspectsQueryResult.Type;
+
+export const CommandCenterSalesProspectorImportInput = Schema.Struct({
+  spaceId: SpaceId,
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 }))),
+});
+export type CommandCenterSalesProspectorImportInput =
+  typeof CommandCenterSalesProspectorImportInput.Type;
+
+export const CommandCenterSalesProspectorImportResult = Schema.Struct({
+  inspected: Schema.Int,
+  proposed: Schema.Int,
+  duplicates: Schema.Int,
+});
+export type CommandCenterSalesProspectorImportResult =
+  typeof CommandCenterSalesProspectorImportResult.Type;
 
 export const CommandCenterSalesProspectProposeInput = Schema.Struct({
   requestId: TrimmedNonEmptyString,

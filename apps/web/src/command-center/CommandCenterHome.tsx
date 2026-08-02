@@ -114,6 +114,7 @@ export function CommandCenterHome() {
   const [destination, setDestination] = useState<"command" | "pipeline">("command");
   const [salesBusy, setSalesBusy] = useState(false);
   const [salesError, setSalesError] = useState<string>();
+  const [salesStatus, setSalesStatus] = useState<string>();
   const selectedSpaceId =
     routeSelection.spaceId === undefined ? undefined : SpaceId.make(routeSelection.spaceId);
   const bootstrapQuery = useEnvironmentQuery(
@@ -167,6 +168,9 @@ export function CommandCenterHome() {
     reportFailure: false,
   });
   const updateSalesProspect = useAtomCommand(commandCenterEnvironment.updateSalesProspect, {
+    reportFailure: false,
+  });
+  const importSalesProspects = useAtomCommand(commandCenterEnvironment.importSalesProspects, {
     reportFailure: false,
   });
   const requestSalesDraft = useAtomCommand(commandCenterEnvironment.requestSalesDraft, {
@@ -580,6 +584,31 @@ export function CommandCenterHome() {
     [environmentId, salesBusy, salesQuery, updateSalesProspect],
   );
 
+  const importReadySalesProspects = useCallback(async () => {
+    if (environmentId === null || selectedSpaceId === undefined || salesBusy) return;
+    setSalesBusy(true);
+    setSalesError(undefined);
+    setSalesStatus(undefined);
+    const result = await importSalesProspects({
+      environmentId,
+      input: { spaceId: selectedSpaceId, limit: 10 },
+    });
+    setSalesBusy(false);
+    if (result._tag === "Success") {
+      const { inspected, proposed, duplicates } = result.value;
+      setSalesStatus(
+        proposed > 0
+          ? `Imported ${proposed} ready prospect${proposed === 1 ? "" : "s"}.`
+          : inspected === 0
+            ? "No importable ready records have complete public-contact provenance yet."
+            : `No new prospects imported; ${duplicates} already ${duplicates === 1 ? "exists" : "exist"}.`,
+      );
+      salesQuery.refresh();
+      return;
+    }
+    setSalesError(failureMessage(squashAtomCommandFailure(result)));
+  }, [environmentId, importSalesProspects, salesBusy, salesQuery, selectedSpaceId]);
+
   const prepareSalesDraft = useCallback(
     async (prospect: SalesProspect): Promise<SalesDraftRequest | undefined> => {
       if (environmentId === null || salesBusy || bootstrap === null) return undefined;
@@ -692,12 +721,16 @@ export function CommandCenterHome() {
           loading={salesQuery.isPending}
           onCreateDraft={createDraft}
           onDecideDraft={decideDraft}
+          onImport={() => {
+            void importReadySalesProspects();
+          }}
           onRefresh={salesQuery.refresh}
           onRequestDraft={prepareSalesDraft}
           onStageChange={(prospect, stage) => {
             void changeSalesStage(prospect, stage);
           }}
           prospects={salesQuery.data?.prospects ?? []}
+          status={salesStatus}
           draftRequests={salesQuery.data?.draftRequests ?? []}
         />
       ) : (

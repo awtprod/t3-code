@@ -13,6 +13,7 @@ import * as GoogleReadConnector from "../../../command-center/GoogleReadConnecto
 import { googleCapabilityForOperation } from "../../../command-center/GoogleCapabilities.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
 import * as SalesPipeline from "../../../command-center/SalesPipeline.ts";
+import * as ExternalProspectorConnector from "../../../command-center/ExternalProspectorConnector.ts";
 import { commandCenterProviderAvailability } from "../../../command-center/ProviderAvailability.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -350,6 +351,31 @@ const handlers = {
         provenanceKind: "agent",
         provenanceRef: scope.threadId,
       });
+    }),
+  cc_sales_prospector_import: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.sales.propose", input.spaceId);
+      const salesOption = yield* Effect.serviceOption(SalesPipeline.SalesPipeline);
+      if (Option.isNone(salesOption)) {
+        return yield* new CommandCenterError({
+          reason: "persistence",
+          message: "The sales pipeline is unavailable.",
+        });
+      }
+      const connectorOption = yield* Effect.serviceOption(
+        ExternalProspectorConnector.ExternalProspectorConnector,
+      );
+      if (Option.isNone(connectorOption)) {
+        return yield* new CommandCenterError({
+          reason: "config",
+          message: "The external prospecting source connector is unavailable.",
+        });
+      }
+      return yield* ExternalProspectorConnector.importReadyProspects(
+        connectorOption.value,
+        salesOption.value,
+        { ...input, spaceId: SpaceId.make(scope.spaceId) },
+      );
     }),
   cc_sales_gmail_reconcile: (input) =>
     Effect.gen(function* () {

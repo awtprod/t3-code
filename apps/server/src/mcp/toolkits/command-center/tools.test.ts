@@ -23,3 +23,22 @@ it("exposes scoped automation create/save tools without any publication tool", (
     expect(tool.description).toContain("never pushes");
   }
 });
+
+it("exposes a path-free, idempotent Prospector proposal boundary", () => {
+  const tool = Object.values(CommandCenterToolkit.tools).find(
+    (candidate) => candidate.name === "cc_sales_prospector_import",
+  )!;
+  const schema = Tool.getJsonSchema(tool) as {
+    readonly type?: string;
+    readonly properties?: Readonly<Record<string, unknown>>;
+  };
+
+  expect(schema.type).toBe("object");
+  expect(schema.properties?.spaceId).toBeDefined();
+  expect(schema.properties?.limit).toBeDefined();
+  expect(schema.properties).not.toHaveProperty("path");
+  expect(schema.properties).not.toHaveProperty("database");
+  expect(tool.description).toContain("opened read-only");
+  expect(tool.description).toContain("cannot approve outreach");
+  expect(tool.description).toContain("send email");
+});
