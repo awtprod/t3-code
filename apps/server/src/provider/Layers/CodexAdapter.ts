@@ -42,7 +42,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
@@ -61,6 +61,8 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
+  CodexSessionRuntimeIsolationProbeError,
+  CodexSessionRuntimeWindowsSandboxSetupError,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
   matchesCodexInterruptTarget,
@@ -70,12 +72,14 @@ import {
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
+  CommandCenterCodexHomeIsolationError,
   commandCenterCodexIsolation,
   commandCenterProviderEnvironment,
   commandCenterProviderIsolationIssue,
   commandCenterProviderPlatformIssue,
   isCommandCenterThreadId,
   prepareCommandCenterCodexHome,
+  resolveCommandCenterCodexRuntimeExecutable,
   resolveCommandCenterManagedGitMetadata,
 } from "../security/CommandCenterProviderIsolation.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
@@ -86,6 +90,11 @@ const isCodexAppServerProtocolParseError = Schema.is(CodexErrors.CodexAppServerP
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
+const isCodexSessionRuntimeWindowsSandboxSetupError = Schema.is(
+  CodexSessionRuntimeWindowsSandboxSetupError,
+);
+const isCodexSessionRuntimeIsolationProbeError = Schema.is(CodexSessionRuntimeIsolationProbeError);
+const isCommandCenterCodexHomeIsolationError = Schema.is(CommandCenterCodexHomeIsolationError);
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -106,8 +115,10 @@ export interface CodexAdapterLiveOptions {
   readonly commandCenterSourceHomePath?: string;
   /** Test/embedding override for the exact executable admitted to the isolated runtime. */
   readonly commandCenterRuntimeExecutablePath?: string;
-  /** Trusted test override; production Command Center isolation is Linux-only. */
+  /** Trusted test override for native Command Center platform admission. */
   readonly commandCenterPlatform?: NodeJS.Platform;
+  /** Trusted test override for native package selection. */
+  readonly commandCenterArchitecture?: NodeJS.Architecture;
 }
 
 /**
@@ -1594,6 +1605,9 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "windowsSandbox/setupCompleted") {
+    if (isCommandCenterThreadId(canonicalThreadId)) {
+      return [];
+    }
     const payload = readPayload(
       EffectCodexSchema.V2WindowsSandboxSetupCompletedNotification,
       event.payload,
@@ -1651,6 +1665,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
   const hostPlatform = options?.commandCenterPlatform ?? (yield* HostProcessPlatform);
+  const hostArchitecture = options?.commandCenterArchitecture ?? (yield* HostProcessArchitecture);
   const serverConfig = yield* Effect.service(ServerConfig);
   const nativeEventLogger =
     options?.nativeEventLogger ??
@@ -1699,7 +1714,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           });
         }
         const platformIssue = commandCenterThread
-          ? commandCenterProviderPlatformIssue(hostPlatform)
+          ? commandCenterProviderPlatformIssue(hostPlatform, input.threadId)
           : undefined;
         if (platformIssue !== undefined) {
           return yield* new ProviderAdapterValidationError({
@@ -1740,14 +1755,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                     Effect.provideService(Path.Path, path),
                   )
             ).pipe(
-              Effect.flatMap((executablePath) => fileSystem.realPath(executablePath)),
+              Effect.flatMap((executablePath) =>
+                resolveCommandCenterCodexRuntimeExecutable({
+                  commandPath: executablePath,
+                  platform: hostPlatform,
+                  architecture: hostArchitecture,
+                  fileSystem,
+                  path,
+                }),
+              ),
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapterValidationError({
                     provider: PROVIDER,
                     operation: "startSession",
-                    issue:
-                      "Command Center could not resolve the Codex runtime executable for its isolated permission profile.",
+                    issue: isCommandCenterCodexHomeIsolationError(cause)
+                      ? cause.issue
+                      : "Command Center could not resolve the Codex runtime executable for its isolated permission profile.",
                     cause,
                   }),
               ),
@@ -1783,6 +1807,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               path,
               crypto,
               runtimeExecutablePath: commandCenterRuntimeExecutable ?? codexConfig.binaryPath,
+              platform: hostPlatform,
               writableRoots: [cwd, serverConfig.worktreesDir],
             }).pipe(
               Effect.mapError(
@@ -1803,6 +1828,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 managedGitMetadata,
                 commandCenterRuntimeExecutable,
                 commandCenterHome,
+                hostPlatform,
               )
             : undefined;
         if (commandCenterThread && commandCenterIsolation === undefined) {
@@ -1816,6 +1842,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ? commandCenterProviderEnvironment({
               source: sourceEnvironment,
               ...commandCenterHome,
+              ...(hostPlatform === "win32" && commandCenterRuntimeExecutable !== undefined
+                ? {
+                    runtimeSupportPath: path.join(
+                      path.dirname(path.dirname(commandCenterRuntimeExecutable)),
+                      "path",
+                    ),
+                  }
+                : {}),
               writableRoots: [cwd, serverConfig.worktreesDir],
               ...(mcpSession
                 ? {
@@ -1864,6 +1898,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(commandCenterIsolation
             ? { permissionProfile: commandCenterIsolation.permissionProfile }
             : {}),
+          ...(commandCenterIsolation?.windowsSandboxMode
+            ? {
+                commandCenterPlatform: hostPlatform,
+                windowsSandboxMode: commandCenterIsolation.windowsSandboxMode,
+              }
+            : commandCenterThread
+              ? { commandCenterPlatform: hostPlatform }
+              : {}),
           ...(appServerArgs.length > 0 ? { appServerArgs } : {}),
         };
         const turnRequestCorrelation: CodexTurnRequestCorrelation = {
@@ -1874,45 +1916,89 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           unresolved: undefined,
         };
         const sendLock = yield* Semaphore.make(1);
-        const sessionScope = yield* Scope.make("sequential");
-        let sessionScopeTransferred = false;
-        yield* Effect.addFinalizer(() =>
-          sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
-        );
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
-        const runtime = yield* createRuntime(runtimeInput).pipe(
-          Effect.provideService(Scope.Scope, sessionScope),
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-          Effect.provideService(Crypto.Crypto, crypto),
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterProcessError({
-                provider: PROVIDER,
-                threadId: input.threadId,
-                detail: cause.message,
-                cause,
-              }),
-          ),
-        );
+        const startRuntimeAttempt = Effect.fn("CodexAdapter.startRuntimeAttempt")(function* (
+          attemptInput: CodexSessionRuntimeOptions,
+        ) {
+          const sessionScope = yield* Scope.make("sequential");
+          let sessionScopeTransferred = false;
+          yield* Effect.addFinalizer(() =>
+            sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
+          );
+          const runtime = yield* createRuntime(attemptInput).pipe(
+            Effect.provideService(Scope.Scope, sessionScope),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+            Effect.provideService(Crypto.Crypto, crypto),
+          );
+          const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
+            Effect.gen(function* () {
+              yield* writeNativeEvent(event);
+              const runtimeEvents = mapToRuntimeEvents(
+                event,
+                event.threadId,
+                turnRequestCorrelation,
+              );
+              if (runtimeEvents.length === 0) {
+                yield* Effect.logDebug("ignoring unhandled Codex provider event", {
+                  method: event.method,
+                  threadId: event.threadId,
+                  turnId: event.turnId,
+                  itemId: event.itemId,
+                });
+                return;
+              }
+              yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            }),
+          ).pipe(Effect.forkChild);
+          const started = yield* runtime
+            .start()
+            .pipe(
+              Effect.onError(() =>
+                runtime.close.pipe(
+                  Effect.andThen(drainOutwardEventFiber(eventFiber)),
+                  Effect.andThen(Effect.ignore(Scope.close(sessionScope, Exit.void))),
+                  Effect.andThen(Fiber.interrupt(eventFiber)),
+                  Effect.ignore,
+                ),
+              ),
+            );
+          sessionScopeTransferred = true;
+          return { eventFiber, runtime, sessionScope, started } as const;
+        });
 
-        const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
-          Effect.gen(function* () {
-            yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId, turnRequestCorrelation);
-            if (runtimeEvents.length === 0) {
-              yield* Effect.logDebug("ignoring unhandled Codex provider event", {
-                method: event.method,
-                threadId: event.threadId,
-                turnId: event.turnId,
-                itemId: event.itemId,
-              });
-              return;
+        const attempt = yield* startRuntimeAttempt(runtimeInput).pipe(
+          Effect.catch((cause) => {
+            const canTryUnelevated =
+              isCodexSessionRuntimeIsolationProbeError(cause) ||
+              (isCodexSessionRuntimeWindowsSandboxSetupError(cause) &&
+                cause.allowUnelevatedFallback);
+            if (
+              hostPlatform !== "win32" ||
+              !commandCenterThread ||
+              !canTryUnelevated ||
+              commandCenterRuntimeExecutable === undefined ||
+              commandCenterHome === undefined
+            ) {
+              return Effect.fail(cause);
             }
-            yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            const fallbackIsolation = commandCenterCodexIsolation(
+              input.runtimeMode,
+              managedGitMetadata,
+              commandCenterRuntimeExecutable,
+              commandCenterHome,
+              hostPlatform,
+              "unelevated",
+            );
+            if (fallbackIsolation === undefined) return Effect.fail(cause);
+            const fallbackInput: CodexSessionRuntimeOptions = {
+              ...runtimeInput,
+              permissionProfile: fallbackIsolation.permissionProfile,
+              commandCenterPlatform: "win32",
+              windowsSandboxMode: "unelevated",
+              appServerArgs: [...fallbackIsolation.appServerArgs, ...mcpAppServerArgs],
+            };
+            return startRuntimeAttempt(fallbackInput);
           }),
-        ).pipe(Effect.forkChild);
-
-        const started = yield* runtime.start().pipe(
           Effect.mapError(
             (cause) =>
               new ProviderAdapterProcessError({
@@ -1922,15 +2008,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 cause,
               }),
           ),
-          Effect.onError(() =>
-            runtime.close.pipe(
-              Effect.andThen(drainOutwardEventFiber(eventFiber)),
-              Effect.andThen(Effect.ignore(Scope.close(sessionScope, Exit.void))),
-              Effect.andThen(Fiber.interrupt(eventFiber)),
-              Effect.ignore,
-            ),
-          ),
         );
+        const { eventFiber, runtime, sessionScope, started } = attempt;
 
         sessions.set(input.threadId, {
           threadId: input.threadId,
@@ -1941,7 +2020,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           sendLock,
           stopped: false,
         });
-        sessionScopeTransferred = true;
 
         return started;
       }),

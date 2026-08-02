@@ -48,6 +48,10 @@ import {
   isProvisionableRepositoryRemote,
 } from "./RepositoryProvisioningPolicy.ts";
 import { makeRunLifecyclePersistence } from "./RunLifecycle.ts";
+import {
+  COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX,
+  COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX,
+} from "../provider/security/CommandCenterProviderIsolation.ts";
 
 export {
   isManagedRepositoryWorkspacePath,
@@ -130,6 +134,7 @@ export interface StoredRun {
   readonly projectId: string | null;
   readonly threadId: string | null;
   readonly executionAuthorizedAt: string | null;
+  readonly parentRunId: string | null;
   readonly state:
     | "queued"
     | "running"
@@ -840,7 +845,11 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
                     cause,
                   ),
           });
-          const threadId = ThreadId.make(`cc:${yield* deps.randomUUID}`);
+          const threadPrefix =
+            run.parentRunId === null
+              ? COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX
+              : COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX;
+          const threadId = ThreadId.make(`${threadPrefix}${yield* deps.randomUUID}`);
           const claimed = yield* deps.claim({ runId: run.id, projectId: project.id, threadId });
           if (!claimed) {
             const current = yield* deps.loadRun(run.id);
@@ -976,6 +985,7 @@ interface RunRow {
   readonly projectId: string | null;
   readonly threadId: string | null;
   readonly executionAuthorizedAt: string | null;
+  readonly parentRunId: string | null;
   readonly state: StoredRun["state"];
   readonly routeJson: string;
   readonly inputJson: string;
@@ -1027,6 +1037,7 @@ const make = Effect.gen(function* () {
           SELECT id, command_id AS "commandId", space_id AS "spaceId",
             project_id AS "projectId", thread_id AS "threadId", state,
             execution_authorized_at AS "executionAuthorizedAt",
+            parent_run_id AS "parentRunId",
             route_json AS "routeJson", input_json AS "inputJson"
           FROM command_center_runs
           WHERE id = ${runId}
@@ -1058,6 +1069,7 @@ const make = Effect.gen(function* () {
         projectId: row.projectId,
         threadId: row.threadId,
         executionAuthorizedAt: row.executionAuthorizedAt,
+        parentRunId: row.parentRunId,
         state: row.state,
         route,
         command,
