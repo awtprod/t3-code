@@ -513,7 +513,7 @@ export const BackgroundActivitySettings = Schema.Struct({
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
 export const ServerSettings = Schema.Struct({
-  efficiency: EfficiencySettings,
+  efficiency: EfficiencySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,

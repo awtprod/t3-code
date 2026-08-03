@@ -32,7 +32,7 @@ import {
   workEntryIndicatesToolSuccess,
   workLogEntryIsToolLike,
 } from "../../session-logic";
-import { type TurnDiffSummary } from "../../types";
+import { type ChatImageAttachment, type TurnDiffSummary } from "../../types";
 import {
   getRenderablePatch,
   resolveDiffThemeName,
@@ -136,7 +136,11 @@ interface TimelineRowSharedState {
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
-  onPrepareTierRetry: (text: string, turnId: TurnId) => void;
+  onPrepareTierRetry: (input: {
+    readonly text: string;
+    readonly turnId: TurnId;
+    readonly attachments: ReadonlyArray<ChatImageAttachment>;
+  }) => void | Promise<void>;
   canRetryOneTierHigher: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
@@ -157,7 +161,11 @@ const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FADE_HEADER = <div className="h-10 sm:h-12" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
-const NOOP_PREPARE_TIER_RETRY = (_text: string, _turnId: TurnId) => {};
+const NOOP_PREPARE_TIER_RETRY = (_input: {
+  readonly text: string;
+  readonly turnId: TurnId;
+  readonly attachments: ReadonlyArray<ChatImageAttachment>;
+}) => {};
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -184,7 +192,11 @@ interface MessagesTimelineProps {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
-  onPrepareTierRetry?: (text: string, turnId: TurnId) => void;
+  onPrepareTierRetry?: (input: {
+    readonly text: string;
+    readonly turnId: TurnId;
+    readonly attachments: ReadonlyArray<ChatImageAttachment>;
+  }) => void | Promise<void>;
   canRetryOneTierHigher?: boolean;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
@@ -1001,7 +1013,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                       variant="ghost"
                       disabled={activity.isWorking}
                       onClick={() =>
-                        ctx.onPrepareTierRetry(elementContextState.promptText, row.message.turnId!)
+                        void ctx.onPrepareTierRetry({
+                          text: displayedUserMessage.copyText ?? row.message.text,
+                          turnId: row.message.turnId!,
+                          attachments: userImages,
+                        })
                       }
                       aria-label="Retry one tier higher"
                     />

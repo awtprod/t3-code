@@ -116,10 +116,10 @@ function selectedTier(input: InteractiveEfficiencyInput): {
     }),
   );
   const tier =
+    rule?.tier ??
     input.command.efficiencyTier ??
     input.command.bootstrap?.createThread?.efficiencyTier ??
     input.thread?.efficiencyTier ??
-    rule?.tier ??
     input.settings.defaultTier;
   return rule === undefined ? { tier } : { tier, matchedRuleId: rule.id };
 }

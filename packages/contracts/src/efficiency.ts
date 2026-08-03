@@ -111,7 +111,7 @@ export const EfficiencySettings = Schema.Struct({
   experiments: Schema.Array(EfficiencyExperiment).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
-}).pipe(Schema.withDecodingDefault(Effect.succeed({})));
+});
 export type EfficiencySettings = typeof EfficiencySettings.Type;
 
 export const EfficiencyModelSelection = Schema.Struct({

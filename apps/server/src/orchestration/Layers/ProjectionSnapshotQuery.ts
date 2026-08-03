@@ -2087,6 +2087,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
+        routingMode: threadRow.value.routingMode ?? "manual",
+        ...(threadRow.value.efficiencyTier == null
+          ? {}
+          : { efficiencyTier: threadRow.value.efficiencyTier }),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
@@ -2186,6 +2190,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
+        routingMode: threadRow.value.routingMode ?? "manual",
+        ...(threadRow.value.efficiencyTier == null
+          ? {}
+          : { efficiencyTier: threadRow.value.efficiencyTier }),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,

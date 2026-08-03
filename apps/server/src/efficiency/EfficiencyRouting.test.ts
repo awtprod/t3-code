@@ -114,4 +114,31 @@ describe("interactive efficiency routing", () => {
     expect(result.decision?.source).toBe("fallback");
     expect(result.decision?.fallbackReason).toContain("No enabled economy candidate");
   });
+
+  it("applies a matching metadata rule ahead of the client fallback tier", () => {
+    const result = resolveInteractiveEfficiency({
+      command: { ...command, efficiencyTier: "economy" },
+      projectIdOverride: ProjectId.make("project-routed"),
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS.efficiency,
+        enabled: true,
+        rules: [
+          {
+            id: "quality-for-project",
+            projectId: ProjectId.make("project-routed"),
+            tier: "quality",
+          },
+        ],
+      },
+      providers: [codex],
+    });
+
+    expect(result.command.modelSelection).toEqual({
+      instanceId: "codex",
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    });
+    expect(result.decision?.tier).toBe("quality");
+    expect(result.decision?.matchedRuleId).toBe("quality-for-project");
+  });
 });

@@ -106,6 +106,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   DEFAULT_THREAD_TERMINAL_ID,
   MAX_TERMINALS_PER_GROUP,
+  type ChatImageAttachment,
   type ChatMessage,
   type SessionPhase,
   type Thread,
@@ -267,6 +268,7 @@ import {
   type LocalDispatchSnapshot,
   PullRequestDialogState,
   cloneComposerImageForRetry,
+  loadComposerImagesForRetry,
   deriveLockedProvider,
   readFileAsDataUrl,
   reconcileMountedTerminalThreadIds,
@@ -2654,7 +2656,11 @@ function ChatViewContent(props: ChatViewProps) {
     });
   }, [focusComposer]);
   const prepareRetryOneTierHigher = useCallback(
-    (text: string, turnId: TurnId) => {
+    async (input: {
+      readonly text: string;
+      readonly turnId: TurnId;
+      readonly attachments: ReadonlyArray<ChatImageAttachment>;
+    }) => {
       const nextTier =
         composerEfficiencyTier === "economy"
           ? "balanced"
@@ -2662,18 +2668,31 @@ function ChatViewContent(props: ChatViewProps) {
             ? "quality"
             : null;
       if (nextTier === null) return;
-      retryOfTurnIdRef.current = turnId;
+      let images: ComposerImageAttachment[];
+      try {
+        images = await loadComposerImagesForRetry(input.attachments);
+      } catch (error) {
+        toastManager.add({
+          title: "Could not prepare the retry",
+          description: error instanceof Error ? error.message : String(error),
+          type: "error",
+        });
+        return;
+      }
+      retryOfTurnIdRef.current = input.turnId;
       setEfficiencyRoutingOverride({ mode: "auto", tier: nextTier });
       clearComposerDraftContent(composerDraftTarget);
-      promptRef.current = text;
-      composerImagesRef.current = [];
+      promptRef.current = input.text;
+      composerImagesRef.current = images;
       composerTerminalContextsRef.current = [];
       composerElementContextsRef.current = [];
-      setComposerDraftPrompt(composerDraftTarget, text);
-      composerRef.current?.resetCursorState({ cursor: text.length, prompt: text });
+      setComposerDraftPrompt(composerDraftTarget, input.text);
+      addComposerDraftImages(composerDraftTarget, images);
+      composerRef.current?.resetCursorState({ cursor: input.text.length, prompt: input.text });
       scheduleComposerFocus();
     },
     [
+      addComposerDraftImages,
       clearComposerDraftContent,
       composerDraftTarget,
       composerEfficiencyTier,
