@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
+  type InternalGenerationUsageBreakdown,
   type UsageBreakdown,
   type UsagePricingOverride,
   type UsageSummary,
@@ -71,6 +72,34 @@ function Breakdown({ title, rows }: { title: string; rows: ReadonlyArray<UsageBr
               <span className="truncate text-muted-foreground">{row.label}</span>
               <span className="shrink-0 font-medium tabular-nums">
                 {number(tokenTotal(row.summary.tokens))}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function InternalGenerationBreakdown({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: ReadonlyArray<InternalGenerationUsageBreakdown>;
+}) {
+  return (
+    <div className="rounded-xl border border-border/60 bg-card/35 p-4">
+      <h3 className="mb-3 text-sm font-medium">{title}</h3>
+      {rows.length === 0 ? (
+        <div className="text-xs text-muted-foreground">No internal jobs in this range.</div>
+      ) : (
+        <div className="space-y-2">
+          {rows.slice(0, 8).map((row) => (
+            <div key={row.key} className="flex items-center justify-between gap-4 text-xs">
+              <span className="truncate text-muted-foreground">{row.label}</span>
+              <span className="shrink-0 font-medium tabular-nums">
+                {number(row.summary.invocationCount)} jobs
               </span>
             </div>
           ))}
@@ -266,6 +295,60 @@ export function UsageSettingsPanel() {
             <Breakdown title="Projects" rows={result?.byProject ?? []} />
             <Breakdown title="Workload" rows={result?.byWorkload ?? []} />
             <Breakdown title="Main vs. subagents" rows={result?.byComponent ?? []} />
+            <Breakdown title="Efficiency tiers" rows={result?.byTier ?? []} />
+            <Breakdown title="Efficiency rules" rows={result?.byRule ?? []} />
+            <Breakdown title="Routing sources" rows={result?.byEfficiencySource ?? []} />
+            <Breakdown title="Routing fallbacks" rows={result?.byFallback ?? []} />
+            <Breakdown title="Experiment arms" rows={result?.byExperimentArm ?? []} />
+          </div>
+
+          <div className="rounded-xl border border-border/60 bg-card/25 p-4">
+            <h3 className="text-sm font-medium">Internal text generation</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Titles, branches, commits, and pull request drafts are tracked separately from task
+              turns. Metrics unavailable from ephemeral provider processes remain unknown.
+            </p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <Metric
+                label="Invocations"
+                value={number(result?.internalGeneration.summary.invocationCount ?? null)}
+              />
+              <Metric
+                label="Succeeded"
+                value={number(result?.internalGeneration.summary.successCount ?? null)}
+              />
+              <Metric
+                label="Failed"
+                value={number(result?.internalGeneration.summary.errorCount ?? null)}
+              />
+              <Metric
+                label="Tokens"
+                value={number(
+                  result?.internalGeneration.summary.inputTokens === null ||
+                    result?.internalGeneration.summary.inputTokens === undefined ||
+                    result?.internalGeneration.summary.outputTokens === null ||
+                    result?.internalGeneration.summary.outputTokens === undefined
+                    ? null
+                    : result.internalGeneration.summary.inputTokens +
+                        result.internalGeneration.summary.outputTokens,
+                )}
+                note="Unavailable unless reported upstream"
+              />
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              <InternalGenerationBreakdown
+                title="Operations"
+                rows={result?.internalGeneration.byOperation ?? []}
+              />
+              <InternalGenerationBreakdown
+                title="Providers"
+                rows={result?.internalGeneration.byProvider ?? []}
+              />
+              <InternalGenerationBreakdown
+                title="Models"
+                rows={result?.internalGeneration.byModel ?? []}
+              />
+            </div>
           </div>
 
           <div className="rounded-xl border border-border/60 bg-card/35 p-4">

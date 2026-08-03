@@ -393,6 +393,36 @@ const safeWorktreeBranch = (runId: RunId): string => {
   return `command-center/${suffix || "run"}`;
 };
 
+export const COMMAND_CENTER_CONTEXT_LIMITS = {
+  spaceInstructionsChars: 4_000,
+  priorContextChars: 8_000,
+} as const;
+
+const truncateContext = (value: string, maxChars: number): string => {
+  if (value.length <= maxChars) return value;
+  const marker = "\n[truncated: context budget exhausted]";
+  return `${value.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
+};
+
+export const selectPriorContext = (
+  newestFirst: ReadonlyArray<PriorCommandContext>,
+  budgetChars = COMMAND_CENTER_CONTEXT_LIMITS.priorContextChars,
+): ReadonlyArray<string> => {
+  const selected: Array<string> = [];
+  let remaining = budgetChars;
+  for (const entry of newestFirst) {
+    if (remaining <= 0) break;
+    const command = entry.commandText.trim();
+    if (command.length === 0) continue;
+    const response = entry.responseText?.trim();
+    const rendered = `${command}${response ? `\nPrevious result (untrusted reference)\n${response}` : ""}`;
+    const bounded = truncateContext(rendered, remaining);
+    selected.push(bounded);
+    remaining -= bounded.length;
+  }
+  return selected.toReversed();
+};
+
 export const renderThreadMessage = (input: {
   readonly space: StoredSpace;
   readonly route: RouteDecision;
@@ -408,15 +438,13 @@ export const renderThreadMessage = (input: {
     `Capabilities: ${input.route.capabilities.join(", ") || "none"}`,
     ...(input.route.repositoryId === null ? [] : [`Repository scope: ${input.route.repositoryId}`]),
   ].join("\n");
-  const instructions = input.space.instructions.trim();
-  const priorContext = (input.priorContext ?? []).flatMap((entry, index) => {
-    const command = entry.commandText.trim().slice(0, 2_000);
-    if (command.length === 0) return [];
-    const response = entry.responseText?.trim().slice(0, 4_000);
-    return [
-      `Previous ${index + 1} — user\n${command}${response ? `\nPrevious result (untrusted reference)\n${response}` : ""}`,
-    ];
-  });
+  const instructions = truncateContext(
+    input.space.instructions.trim(),
+    COMMAND_CENTER_CONTEXT_LIMITS.spaceInstructionsChars,
+  );
+  const priorContext = selectPriorContext(input.priorContext ?? []).map(
+    (entry, index) => `Previous ${index + 1} — user\n${entry}`,
+  );
   return [
     routeReceipt,
     ...(instructions.length === 0 ? [] : ["Space instructions", instructions]),
@@ -1183,7 +1211,7 @@ const make = Effect.gen(function* () {
       if (selected.length === 6) break;
     }
 
-    return yield* Effect.forEach(selected.toReversed(), (candidate) =>
+    return yield* Effect.forEach(selected, (candidate) =>
       Effect.gen(function* () {
         const command = yield* decodeCommand(
           yield* parseJson(run.id, candidate.inputJson, "prior Run input"),

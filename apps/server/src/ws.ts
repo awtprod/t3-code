@@ -22,6 +22,7 @@ import {
   type AuthEnvironmentScope,
   AuthSessionId,
   CommandId,
+  MessageId,
   COMMAND_CENTER_WS_METHODS,
   CommandCenterError,
   CommandCenterEventStreamError,
@@ -100,6 +101,7 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import { resolveInteractiveEfficiency } from "./efficiency/EfficiencyRouting.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -1656,6 +1658,53 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [WS_METHODS.efficiencyPreviewDecision]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.efficiencyPreviewDecision,
+            Effect.gen(function* () {
+              const threadId = ThreadId.make(input.threadId ?? "efficiency-preview-thread");
+              const thread = input.threadId
+                ? Option.getOrUndefined(
+                    yield* projectionSnapshotQuery
+                      .getThreadShellById(threadId)
+                      .pipe(Effect.orElseSucceed(() => Option.none())),
+                  )
+                : undefined;
+              const [settings, providers] = yield* Effect.all([
+                serverSettings.getSettings,
+                providerRegistry.getProviders,
+              ]);
+              const resolution = resolveInteractiveEfficiency({
+                command: {
+                  type: "thread.turn.start",
+                  commandId: CommandId.make("efficiency-preview-command"),
+                  threadId,
+                  message: {
+                    messageId: MessageId.make("efficiency-preview-message"),
+                    role: "user",
+                    text: "",
+                    attachments: [],
+                  },
+                  modelSelection: input.modelSelection,
+                  routingMode: "auto",
+                  ...(input.tier === undefined ? {} : { efficiencyTier: input.tier }),
+                  runtimeMode: "approval-required",
+                  interactionMode: input.interactionMode,
+                  createdAt: "1970-01-01T00:00:00.000Z",
+                },
+                ...(thread === undefined ? {} : { thread }),
+                settings: settings.efficiency,
+                providers,
+                ...(input.projectId === undefined ? {} : { projectIdOverride: input.projectId }),
+                attachmentCountOverride: input.attachmentCount,
+              });
+              return {
+                modelSelection: resolution.command.modelSelection ?? input.modelSelection,
+                decision: resolution.decision ?? null,
+              };
+            }),
+            { "rpc.aggregate": "efficiency" },
           ),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) =>
           observeRpcEffect(

@@ -15,8 +15,10 @@ function formatPercentage(value: number | null): string | null {
 export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot;
   providerDisplayName?: string | null;
+  adviceThresholdPercent?: number | null;
+  toolWarningThreshold?: number | null;
 }) {
-  const { usage, providerDisplayName } = props;
+  const { usage, providerDisplayName, adviceThresholdPercent, toolWarningThreshold } = props;
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -34,7 +36,12 @@ export function ContextWindowMeter(props: {
       : Math.max(latestInput, (latestCacheRead ?? 0) + (latestCacheWrite ?? 0));
   const cacheUtilization =
     cacheInputTotal && latestCacheRead !== null ? (latestCacheRead / cacheInputTotal) * 100 : null;
-  const isOverloaded = normalizedPercentage > 90;
+  const isOverloaded =
+    normalizedPercentage >= (adviceThresholdPercent ?? 90) ||
+    (toolWarningThreshold !== null &&
+      toolWarningThreshold !== undefined &&
+      usage.toolUses != null &&
+      usage.toolUses >= toolWarningThreshold);
   const usageColor = isOverloaded
     ? "var(--color-red-500)"
     : "color-mix(in oklab, var(--color-muted-foreground) 72%, transparent)";
@@ -176,6 +183,23 @@ export function ContextWindowMeter(props: {
           {usage.compactsAutomatically ? (
             <div className="mt-1 text-pretty text-[11px] font-medium text-muted-foreground/70">
               {providerDisplayName ?? "It"} automatically compacts its context when needed.
+            </div>
+          ) : null}
+          {adviceThresholdPercent !== null &&
+          adviceThresholdPercent !== undefined &&
+          normalizedPercentage >= adviceThresholdPercent ? (
+            <div className="mt-1 text-pretty text-[11px] font-medium text-amber-600 dark:text-amber-400">
+              This task has reached its {adviceThresholdPercent}% context guide. Compact it if the
+              provider supports that, or start a new task to keep token use predictable.
+            </div>
+          ) : null}
+          {toolWarningThreshold !== null &&
+          toolWarningThreshold !== undefined &&
+          usage.toolUses != null &&
+          usage.toolUses >= toolWarningThreshold ? (
+            <div className="text-pretty text-[11px] font-medium text-amber-600 dark:text-amber-400">
+              This turn has used {usage.toolUses} tools. Consider narrowing the next request or
+              starting a focused task.
             </div>
           ) : null}
         </div>

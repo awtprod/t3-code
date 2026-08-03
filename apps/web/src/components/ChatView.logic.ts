@@ -43,8 +43,14 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
   nextModelSelection?: ModelSelection;
   currentBranch: string | null;
   nextBranch?: string;
+  currentRoutingMode?: "manual" | "auto";
+  nextRoutingMode?: "manual" | "auto";
+  currentEfficiencyTier?: "economy" | "balanced" | "quality";
+  nextEfficiencyTier?: "economy" | "balanced" | "quality";
 }): {
   modelSelection?: ModelSelection;
+  routingMode?: "manual" | "auto";
+  efficiencyTier?: "economy" | "balanced" | "quality";
   branch?: string;
   worktreePath?: null;
 } | null {
@@ -56,11 +62,18 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
       JSON.stringify(nextModelSelection.options ?? null) !==
         JSON.stringify(input.currentModelSelection.options ?? null));
   const branchChanged = input.nextBranch !== undefined && input.nextBranch !== input.currentBranch;
-  if (!modelSelectionChanged && !branchChanged) {
+  const routingModeChanged =
+    input.nextRoutingMode !== undefined && input.nextRoutingMode !== input.currentRoutingMode;
+  const efficiencyTierChanged =
+    input.nextEfficiencyTier !== undefined &&
+    input.nextEfficiencyTier !== input.currentEfficiencyTier;
+  if (!modelSelectionChanged && !branchChanged && !routingModeChanged && !efficiencyTierChanged) {
     return null;
   }
   return {
     ...(modelSelectionChanged ? { modelSelection: nextModelSelection } : {}),
+    ...(routingModeChanged ? { routingMode: input.nextRoutingMode } : {}),
+    ...(efficiencyTierChanged ? { efficiencyTier: input.nextEfficiencyTier } : {}),
     ...(branchChanged ? { branch: input.nextBranch, worktreePath: null } : {}),
   };
 }

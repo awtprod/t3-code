@@ -6,6 +6,7 @@ import {
   CapabilityName as CapabilityNameSchema,
   CommandId,
   CommandSubmission,
+  EfficiencyCandidateId,
   IntentKind,
   ModelId,
   ProjectId,
@@ -20,6 +21,7 @@ import { classifyActionRisk } from "./risk.ts";
 export const RouteSelectionSource = Schema.Literals([
   "explicit",
   "policy",
+  "tier-policy",
   "classifier",
   "fallback",
   "provider-default",
@@ -35,6 +37,13 @@ export const RouteSelection = Schema.Struct({
   modelId: Schema.optional(ModelId),
 });
 export type RouteSelection = typeof RouteSelection.Type;
+
+export const ProviderModelCandidate = Schema.Struct({
+  candidateId: EfficiencyCandidateId,
+  providerId: ProviderId,
+  modelId: ModelId,
+});
+export type ProviderModelCandidate = typeof ProviderModelCandidate.Type;
 
 export const ClassifiedRoute = Schema.Struct({
   intent: IntentKind,
@@ -62,6 +71,7 @@ export const RouteResolutionInput = Schema.Struct({
   command: CommandSubmission,
   policy: Schema.optional(RouteSelection),
   classifier: ClassifiedRoute,
+  tierCandidates: Schema.optional(Schema.Array(ProviderModelCandidate)),
   providers: Schema.Array(ProviderAvailability),
 });
 export type RouteResolutionInput = typeof RouteResolutionInput.Type;
@@ -240,11 +250,12 @@ interface SelectedProvider {
   readonly providerSource: RouteSelectionSource;
   readonly modelId: ModelId;
   readonly modelSource: RouteSelectionSource;
+  readonly candidateId?: EfficiencyCandidateId;
 }
 
 function selectPreferredProvider(
   selection: RouteSelection | undefined,
-  source: "policy" | "classifier",
+  source: "policy" | "classifier" | "fallback",
   providers: ReadonlyArray<ProviderAvailability>,
   capabilities: ReadonlyArray<CapabilityName>,
   explicitModelId: ModelId | undefined,
@@ -283,16 +294,41 @@ function selectPreferredProvider(
   return undefined;
 }
 
+function selectTierCandidate(
+  candidates: ReadonlyArray<ProviderModelCandidate>,
+  providers: ReadonlyArray<ProviderAvailability>,
+  capabilities: ReadonlyArray<CapabilityName>,
+  explicitModelId: ModelId | undefined,
+): SelectedProvider | undefined {
+  for (const candidate of candidates) {
+    const provider = providers.find((entry) => entry.providerId === candidate.providerId);
+    const modelId = explicitModelId ?? candidate.modelId;
+    if (provider === undefined || !providerSupports(provider, capabilities, modelId)) continue;
+    return {
+      provider,
+      providerSource: "tier-policy",
+      modelId,
+      modelSource: explicitModelId === undefined ? "tier-policy" : "explicit",
+      candidateId: candidate.candidateId,
+    };
+  }
+  return undefined;
+}
+
 function blockedExplicitProvider(
-  input: RouteResolutionInput,
+  input: {
+    readonly providerId?: ProviderId;
+    readonly modelId?: ModelId;
+    readonly providers: ReadonlyArray<ProviderAvailability>;
+  },
   capabilities: ReadonlyArray<CapabilityName>,
 ): { readonly selected: SelectedProvider | undefined; readonly reasons: Array<string> } {
-  const explicitProviderId = input.command.providerId;
+  const explicitProviderId = input.providerId;
   if (explicitProviderId === undefined) return { selected: undefined, reasons: [] };
   const provider = input.providers.find((candidate) => candidate.providerId === explicitProviderId);
   if (provider === undefined)
     return { selected: undefined, reasons: ["Explicit provider is unavailable"] };
-  const modelId = input.command.modelId ?? provider.defaultModelId;
+  const modelId = input.modelId ?? provider.defaultModelId;
   const reasons: Array<string> = [];
   if (!provider.healthy) reasons.push("Explicit provider is unhealthy");
   if (!capabilities.every((capability) => provider.capabilities.includes(capability))) {
@@ -305,8 +341,107 @@ function blockedExplicitProvider(
       provider,
       providerSource: "explicit",
       modelId,
-      modelSource: input.command.modelId === undefined ? "provider-default" : "explicit",
+      modelSource: input.modelId === undefined ? "provider-default" : "explicit",
     },
+    reasons,
+  };
+}
+
+export interface ProviderModelSelectionInput {
+  readonly explicit?: RouteSelection;
+  readonly policy?: RouteSelection;
+  readonly tierCandidates?: ReadonlyArray<ProviderModelCandidate>;
+  readonly classifier?: RouteSelection;
+  readonly fallback?: RouteSelection;
+  readonly providers: ReadonlyArray<ProviderAvailability>;
+  readonly capabilities?: ReadonlyArray<CapabilityName>;
+}
+
+export interface ProviderModelSelectionDecision {
+  readonly providerId: ProviderId | null;
+  readonly modelId: ModelId | null;
+  readonly providerSource: RouteSelectionSource;
+  readonly modelSource: RouteSelectionSource;
+  readonly candidateId?: EfficiencyCandidateId;
+  readonly reasons: ReadonlyArray<string>;
+}
+
+export function resolveProviderModelSelection(
+  input: ProviderModelSelectionInput,
+): ProviderModelSelectionDecision {
+  const capabilities = uniqueCapabilities(input.capabilities ?? []);
+  const sortedProviders = [...input.providers].sort(compareProviders);
+  const reasons: Array<string> = [];
+  let selectedProvider: SelectedProvider | undefined;
+  if (input.explicit?.providerId !== undefined) {
+    const explicit = blockedExplicitProvider(
+      {
+        providerId: input.explicit.providerId,
+        ...(input.explicit.modelId === undefined ? {} : { modelId: input.explicit.modelId }),
+        providers: input.providers,
+      },
+      capabilities,
+    );
+    selectedProvider = explicit.selected;
+    reasons.push(...explicit.reasons);
+  } else {
+    selectedProvider = selectPreferredProvider(
+      input.policy,
+      "policy",
+      sortedProviders,
+      capabilities,
+      input.explicit?.modelId,
+    );
+    selectedProvider ??= selectTierCandidate(
+      input.tierCandidates ?? [],
+      sortedProviders,
+      capabilities,
+      input.explicit?.modelId,
+    );
+    selectedProvider ??= selectPreferredProvider(
+      input.classifier,
+      "classifier",
+      sortedProviders,
+      capabilities,
+      input.explicit?.modelId,
+    );
+    selectedProvider ??= selectPreferredProvider(
+      input.fallback,
+      "fallback",
+      sortedProviders,
+      capabilities,
+      input.explicit?.modelId,
+    );
+    if (selectedProvider === undefined) {
+      const fallback = sortedProviders.find((provider) =>
+        providerSupports(provider, capabilities, input.explicit?.modelId),
+      );
+      if (fallback !== undefined) {
+        selectedProvider = {
+          provider: fallback,
+          providerSource: "fallback",
+          modelId: input.explicit?.modelId ?? fallback.defaultModelId,
+          modelSource: input.explicit?.modelId === undefined ? "provider-default" : "explicit",
+        };
+      }
+    }
+  }
+
+  if (selectedProvider === undefined && reasons.length === 0) {
+    reasons.push("No healthy compatible provider is available");
+  }
+  return {
+    providerId: selectedProvider?.provider.providerId ?? input.explicit?.providerId ?? null,
+    modelId: selectedProvider?.modelId ?? input.explicit?.modelId ?? null,
+    providerSource:
+      selectedProvider?.providerSource ??
+      (input.explicit?.providerId === undefined ? "unresolved" : "explicit"),
+    modelSource:
+      selectedProvider?.modelSource ??
+      (input.explicit?.modelId === undefined ? "unresolved" : "explicit"),
+    ...(selectedProvider?.candidateId === undefined
+      ? {}
+      : { candidateId: selectedProvider.candidateId }),
     reasons,
   };
 }
@@ -324,7 +459,6 @@ function firstSelection<T>(
 
 export function resolveRoute(input: RouteResolutionInput): RouteDecision {
   const capabilities = uniqueCapabilities(input.classifier.capabilities);
-  const sortedProviders = [...input.providers].sort(compareProviders);
   const space = firstSelection(
     input.command.spaceId,
     input.policy?.spaceId,
@@ -343,44 +477,18 @@ export function resolveRoute(input: RouteResolutionInput): RouteDecision {
   const risk = classifyActionRisk(input.classifier.actionKind);
   const reasons: Array<string> = [];
 
-  let selectedProvider: SelectedProvider | undefined;
-  if (input.command.providerId !== undefined) {
-    const explicit = blockedExplicitProvider(input, capabilities);
-    selectedProvider = explicit.selected;
-    reasons.push(...explicit.reasons);
-  } else {
-    selectedProvider = selectPreferredProvider(
-      input.policy,
-      "policy",
-      sortedProviders,
-      capabilities,
-      input.command.modelId,
-    );
-    selectedProvider ??= selectPreferredProvider(
-      input.classifier,
-      "classifier",
-      sortedProviders,
-      capabilities,
-      input.command.modelId,
-    );
-    if (selectedProvider === undefined) {
-      const fallback = sortedProviders.find((provider) =>
-        providerSupports(provider, capabilities, input.command.modelId),
-      );
-      if (fallback !== undefined) {
-        selectedProvider = {
-          provider: fallback,
-          providerSource: "fallback",
-          modelId: input.command.modelId ?? fallback.defaultModelId,
-          modelSource: input.command.modelId === undefined ? "provider-default" : "explicit",
-        };
-      }
-    }
-  }
-
-  if (selectedProvider === undefined && reasons.length === 0) {
-    reasons.push("No healthy compatible provider is available");
-  }
+  const selectedProvider = resolveProviderModelSelection({
+    explicit: {
+      ...(input.command.providerId === undefined ? {} : { providerId: input.command.providerId }),
+      ...(input.command.modelId === undefined ? {} : { modelId: input.command.modelId }),
+    },
+    ...(input.policy === undefined ? {} : { policy: input.policy }),
+    ...(input.tierCandidates === undefined ? {} : { tierCandidates: input.tierCandidates }),
+    classifier: input.classifier,
+    providers: input.providers,
+    capabilities,
+  });
+  reasons.push(...selectedProvider.reasons);
   if (risk.level === "blocked") reasons.push("The requested action is blocked by policy");
 
   const status: RouteStatus =
@@ -393,8 +501,8 @@ export function resolveRoute(input: RouteResolutionInput): RouteDecision {
     spaceId: space.value,
     repositoryId: repository.value,
     projectId: project.value,
-    providerId: selectedProvider?.provider.providerId ?? input.command.providerId ?? null,
-    modelId: selectedProvider?.modelId ?? input.command.modelId ?? null,
+    providerId: selectedProvider.providerId,
+    modelId: selectedProvider.modelId,
     capabilities,
     actionKind: input.classifier.actionKind,
     risk: risk.level,
@@ -403,12 +511,8 @@ export function resolveRoute(input: RouteResolutionInput): RouteDecision {
       space: space.source,
       repository: repository.source,
       project: project.source,
-      provider:
-        selectedProvider?.providerSource ??
-        (input.command.providerId === undefined ? "unresolved" : "explicit"),
-      model:
-        selectedProvider?.modelSource ??
-        (input.command.modelId === undefined ? "unresolved" : "explicit"),
+      provider: selectedProvider.providerSource,
+      model: selectedProvider.modelSource,
     },
     reasons,
   };

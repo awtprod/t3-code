@@ -68,29 +68,14 @@ const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
-// Structural (by value) comparison of two model selections. `ModelSelection`
-// is a plain decoded struct, so `Equal.equals` degrades to reference equality
-// and reports two structurally-identical selections as different — which would
-// restart (and full-replay) the provider session on every turn. Compare the
-// fields directly instead; `options` is an order-insensitive set keyed by id.
-const modelSelectionOptionsKey = (options: ModelSelection["options"]): string =>
-  options === undefined
-    ? ""
-    : [...options]
-        .map((option) => `${option.id}=${String(option.value)}`)
-        .sort()
-        .join(" ");
-
-const modelSelectionsEqual = (
-  a: ModelSelection | undefined,
-  b: ModelSelection | undefined,
-): boolean => {
-  if (a === b) return true;
-  if (a === undefined || b === undefined) return false;
-  return (
-    a.instanceId === b.instanceId &&
-    a.model === b.model &&
-    modelSelectionOptionsKey(a.options) === modelSelectionOptionsKey(b.options)
+const changedModelSelectionOptionIds = (
+  previous: ModelSelection | undefined,
+  requested: ModelSelection,
+): ReadonlyArray<string> => {
+  const previousOptions = new Map(previous?.options?.map((option) => [option.id, option.value]));
+  const requestedOptions = new Map(requested.options?.map((option) => [option.id, option.value]));
+  return [...new Set([...previousOptions.keys(), ...requestedOptions.keys()])].filter(
+    (id) => previousOptions.get(id) !== requestedOptions.get(id),
   );
 };
 
@@ -721,8 +706,8 @@ const make = Effect.gen(function* () {
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
-      const sessionModelSwitch = (yield* providerService.getCapabilities(desiredInstanceId))
-        .sessionModelSwitch;
+      const adapterCapabilities = yield* providerService.getCapabilities(desiredInstanceId);
+      const sessionModelSwitch = adapterCapabilities.sessionModelSwitch;
       const modelChanged =
         requestedModelSelection !== undefined &&
         requestedModelSelection.model !== activeSession?.model;
@@ -731,17 +716,21 @@ const make = Effect.gen(function* () {
         activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
       const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
       const previousModelSelection = threadModelSelections.get(threadId);
-      const shouldRestartForModelSelectionChange =
-        preferredProvider === "claudeAgent" &&
-        requestedModelSelection !== undefined &&
-        !modelSelectionsEqual(previousModelSelection, requestedModelSelection);
+      const changedOptionIds =
+        requestedModelSelection === undefined
+          ? []
+          : changedModelSelectionOptionIds(previousModelSelection, requestedModelSelection);
+      const declaredInSessionOptionIds = new Set(adapterCapabilities.inSessionOptionIds ?? []);
+      const shouldRestartForOptionChange = changedOptionIds.some(
+        (optionId) => !declaredInSessionOptionIds.has(optionId),
+      );
 
       if (
         !runtimeModeChanged &&
         !cwdChanged &&
         !instanceChanged &&
         !shouldRestartForModelChange &&
-        !shouldRestartForModelSelectionChange
+        !shouldRestartForOptionChange
       ) {
         return existingSessionThreadId;
       }
@@ -758,6 +747,8 @@ const make = Effect.gen(function* () {
         desiredProvider: desiredModelSelection.instanceId,
         currentRuntimeMode: thread.session?.runtimeMode,
         desiredRuntimeMode: thread.runtimeMode,
+        changedOptionIds,
+        shouldRestartForOptionChange,
         runtimeModeChanged,
         previousCwd: activeSession?.cwd,
         desiredCwd: effectiveCwd,
@@ -765,7 +756,6 @@ const make = Effect.gen(function* () {
         modelChanged,
         instanceChanged,
         shouldRestartForModelChange,
-        shouldRestartForModelSelectionChange,
         hasResumeCursor: resumeCursor !== undefined,
       });
       const restartedSession = yield* startProviderSession(

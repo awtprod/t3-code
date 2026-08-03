@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId, ThreadId, TurnId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { runMigrations } from "../Migrations.ts";
@@ -17,6 +18,7 @@ it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
   it.effect("upserts replayed components and returns honest aggregates and pagination", () =>
     Effect.gen(function* () {
       yield* runMigrations();
+      const sql = yield* SqlClient.SqlClient;
       const repository = yield* ProjectionTurnUsageRepository;
       const provider = ProviderDriverKind.make("kimi");
       const providerInstanceId = ProviderInstanceId.make("kimi-main");
@@ -45,6 +47,15 @@ it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
           completedAt,
         },
       });
+      yield* sql`
+        INSERT INTO internal_generation_usage (
+          operation_id, operation, provider_instance_id, model, duration_ms,
+          input_tokens, output_tokens, cost_micro_usd, status, completed_at
+        ) VALUES (
+          'internal-1', 'title', ${providerInstanceId}, 'kimi-code/k3', 42,
+          NULL, NULL, NULL, 'success', ${completedAt}
+        )
+      `;
       // A replay updates the stable component row instead of counting it twice.
       yield* repository.record({
         ...base,
@@ -102,6 +113,10 @@ it.layer(layer)("ProjectionTurnUsageRepository", (it) => {
       assert.equal(first.turns.length, 1);
       assert.equal(first.nextCursor, "1");
       assert.equal(first.summary.cost.kind, "api-equivalent-estimate");
+      assert.equal(first.internalGeneration.summary.invocationCount, 1);
+      assert.equal(first.internalGeneration.summary.successCount, 1);
+      assert.equal(first.internalGeneration.summary.inputTokens, null);
+      assert.equal(first.internalGeneration.byOperation[0]?.key, "title");
 
       const second = yield* repository.query({
         from: "2026-08-01T00:00:00.000Z",

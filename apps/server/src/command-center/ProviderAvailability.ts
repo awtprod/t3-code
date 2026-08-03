@@ -1,3 +1,4 @@
+import * as NodeProcess from "node:process";
 import {
   CAPABILITY_NAMES,
   ModelId,
@@ -12,11 +13,15 @@ import { isProviderAvailable, type ServerProvider } from "@t3tools/contracts";
  * candidate set only on Linux; its adapter then runs the executable, version,
  * Bubblewrap, workspace, and private-home probes before starting the turn.
  */
-export function commandCenterProviderAvailability(
+export type ProviderAvailabilityPurpose = "command-center-automation" | "interactive-routing";
+
+export function providerAvailability(
   providers: ReadonlyArray<ServerProvider>,
+  purpose: ProviderAvailabilityPurpose,
 ): ReadonlyArray<ProviderAvailability> {
   return providers.flatMap((provider, priority) => {
     if (
+      purpose === "command-center-automation" &&
       provider.driver !== "codex" &&
       !(
         provider.driver === "kimi" &&
@@ -44,4 +49,9 @@ export function commandCenterProviderAvailability(
     ];
   });
 }
-import * as NodeProcess from "node:process";
+
+export function commandCenterProviderAvailability(
+  providers: ReadonlyArray<ServerProvider>,
+): ReadonlyArray<ProviderAvailability> {
+  return providerAvailability(providers, "command-center-automation");
+}

@@ -11,6 +11,8 @@ import {
 } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { TurnUsageQuality, TurnUsageWorkload } from "./providerRuntime.ts";
+import { EfficiencyTier } from "./efficiency.ts";
+import { RouteSelectionSource } from "@command-center/core";
 
 export const UsageBucketSize = Schema.Literals(["hour", "day", "week", "month"]);
 export type UsageBucketSize = typeof UsageBucketSize.Type;
@@ -24,6 +26,7 @@ export const UsageQueryInput = Schema.Struct({
   model: Schema.optional(TrimmedNonEmptyString),
   workload: Schema.optional(TurnUsageWorkload),
   quality: Schema.optional(TurnUsageQuality),
+  tier: Schema.optional(EfficiencyTier),
   cursor: Schema.optional(TrimmedNonEmptyString),
   limit: Schema.optional(PositiveInt),
 });
@@ -87,6 +90,11 @@ export const UsageTurnRow = Schema.Struct({
   provider: ProviderDriverKind,
   model: Schema.NullOr(TrimmedNonEmptyString),
   workload: TurnUsageWorkload,
+  tier: Schema.NullOr(EfficiencyTier),
+  efficiencySource: Schema.NullOr(RouteSelectionSource),
+  efficiencyRuleId: Schema.NullOr(TrimmedNonEmptyString),
+  fallbackReason: Schema.NullOr(TrimmedNonEmptyString),
+  experimentArm: Schema.NullOr(Schema.Literals(["control", "challenger"])),
   completedAt: IsoDateTime,
   summary: UsageSummary,
 });
@@ -98,6 +106,32 @@ export const UsagePricingProvenance = Schema.Struct({
 });
 export type UsagePricingProvenance = typeof UsagePricingProvenance.Type;
 
+export const InternalGenerationUsageSummary = Schema.Struct({
+  invocationCount: NonNegativeInt,
+  successCount: NonNegativeInt,
+  errorCount: NonNegativeInt,
+  durationMs: NonNegativeInt,
+  inputTokens: Schema.NullOr(NonNegativeInt),
+  outputTokens: Schema.NullOr(NonNegativeInt),
+  costMicroUsd: Schema.NullOr(NonNegativeInt),
+});
+export type InternalGenerationUsageSummary = typeof InternalGenerationUsageSummary.Type;
+
+export const InternalGenerationUsageBreakdown = Schema.Struct({
+  key: TrimmedNonEmptyString,
+  label: TrimmedNonEmptyString,
+  summary: InternalGenerationUsageSummary,
+});
+export type InternalGenerationUsageBreakdown = typeof InternalGenerationUsageBreakdown.Type;
+
+export const InternalGenerationUsageResult = Schema.Struct({
+  summary: InternalGenerationUsageSummary,
+  byOperation: Schema.Array(InternalGenerationUsageBreakdown),
+  byProvider: Schema.Array(InternalGenerationUsageBreakdown),
+  byModel: Schema.Array(InternalGenerationUsageBreakdown),
+});
+export type InternalGenerationUsageResult = typeof InternalGenerationUsageResult.Type;
+
 export const UsageQueryResult = Schema.Struct({
   summary: UsageSummary,
   timeSeries: Schema.Array(UsageTimeSeriesBucket),
@@ -106,7 +140,13 @@ export const UsageQueryResult = Schema.Struct({
   byProject: Schema.Array(UsageBreakdown),
   byWorkload: Schema.Array(UsageBreakdown),
   byComponent: Schema.Array(UsageBreakdown),
+  byTier: Schema.Array(UsageBreakdown),
+  byRule: Schema.Array(UsageBreakdown),
+  byEfficiencySource: Schema.Array(UsageBreakdown),
+  byFallback: Schema.Array(UsageBreakdown),
+  byExperimentArm: Schema.Array(UsageBreakdown),
   pricingProvenance: Schema.Array(UsagePricingProvenance),
+  internalGeneration: InternalGenerationUsageResult,
   turns: Schema.Array(UsageTurnRow),
   nextCursor: Schema.NullOr(TrimmedNonEmptyString),
 });

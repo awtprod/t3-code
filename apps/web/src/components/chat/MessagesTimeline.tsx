@@ -51,6 +51,7 @@ import {
   MessageCircleIcon,
   MousePointerClickIcon,
   PaintbrushIcon,
+  RotateCcwIcon,
   MinusIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -135,6 +136,8 @@ interface TimelineRowSharedState {
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onPrepareTierRetry: (text: string, turnId: TurnId) => void;
+  canRetryOneTierHigher: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
@@ -154,6 +157,7 @@ const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FADE_HEADER = <div className="h-10 sm:h-12" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const NOOP_PREPARE_TIER_RETRY = (_text: string, _turnId: TurnId) => {};
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -180,6 +184,8 @@ interface MessagesTimelineProps {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onPrepareTierRetry?: (text: string, turnId: TurnId) => void;
+  canRetryOneTierHigher?: boolean;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -217,6 +223,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  onPrepareTierRetry = NOOP_PREPARE_TIER_RETRY,
+  canRetryOneTierHigher = false,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -444,6 +452,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      onPrepareTierRetry,
+      canRetryOneTierHigher,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -458,6 +468,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      onPrepareTierRetry,
+      canRetryOneTierHigher,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -886,6 +898,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
   const userImages = row.message.attachments ?? [];
   const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
   const terminalContexts = displayedUserMessage.contexts;
@@ -978,6 +991,27 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           </Tooltip>
           <div className="flex items-center gap-0.5">
             {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
+            {ctx.canRetryOneTierHigher && row.message.turnId ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      disabled={activity.isWorking}
+                      onClick={() =>
+                        ctx.onPrepareTierRetry(elementContextState.promptText, row.message.turnId!)
+                      }
+                      aria-label="Retry one tier higher"
+                    />
+                  }
+                >
+                  <RotateCcwIcon className="size-3" />
+                </TooltipTrigger>
+                <TooltipPopup side="top">Prepare retry one tier higher</TooltipPopup>
+              </Tooltip>
+            ) : null}
             {displayedUserMessage.copyText && (
               <MessageCopyButton text={displayedUserMessage.copyText} variant="ghost" />
             )}

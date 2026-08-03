@@ -9,11 +9,15 @@ import {
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
+  EfficiencyTier,
+  ThreadRoutingMode,
   ThreadId,
   type ModelSelection as ModelSelectionType,
   type ProjectId as ProjectIdType,
   type ProviderInteractionMode as ProviderInteractionModeType,
   type RuntimeMode as RuntimeModeType,
+  type EfficiencyTier as EfficiencyTierType,
+  type ThreadRoutingMode as ThreadRoutingModeType,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
@@ -21,7 +25,7 @@ import { DraftComposerImageAttachmentSchema } from "../lib/composer-image-schema
 import type { DraftComposerImageAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
 
-const THREAD_OUTBOX_SCHEMA_VERSION = 3;
+const THREAD_OUTBOX_SCHEMA_VERSION = 4;
 const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
 
 const QueuedThreadCreationSchema = Schema.Struct({
@@ -37,7 +41,7 @@ const QueuedThreadCreationSchema = Schema.Struct({
 });
 
 export const QueuedThreadMessageSchema = Schema.Struct({
-  schemaVersion: Schema.Literals([1, 2, THREAD_OUTBOX_SCHEMA_VERSION]),
+  schemaVersion: Schema.Literals([1, 2, 3, THREAD_OUTBOX_SCHEMA_VERSION]),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   messageId: MessageId,
@@ -47,6 +51,8 @@ export const QueuedThreadMessageSchema = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   runtimeMode: Schema.optional(RuntimeMode),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
   // Present when the queued item creates a brand-new thread (pending task)
   // instead of appending a turn to an existing one.
   creation: Schema.optional(QueuedThreadCreationSchema),
@@ -76,6 +82,8 @@ export interface QueuedThreadMessage {
   readonly modelSelection?: ModelSelectionType;
   readonly runtimeMode?: RuntimeModeType;
   readonly interactionMode?: ProviderInteractionModeType;
+  readonly routingMode?: ThreadRoutingModeType;
+  readonly efficiencyTier?: EfficiencyTierType;
   readonly creation?: QueuedThreadCreation;
   readonly createdAt: string;
 }
@@ -84,16 +92,20 @@ export interface ThreadSettingsSnapshot {
   readonly modelSelection: ModelSelectionType;
   readonly runtimeMode: RuntimeModeType;
   readonly interactionMode: ProviderInteractionModeType;
+  readonly routingMode?: ThreadRoutingModeType;
+  readonly efficiencyTier?: EfficiencyTierType;
 }
 
 export function resolveQueuedThreadSettings(
   message: QueuedThreadMessage,
   thread: ThreadSettingsSnapshot,
-): ThreadSettingsSnapshot {
+): ThreadSettingsSnapshot & { readonly routingMode: ThreadRoutingModeType } {
   return {
     modelSelection: message.modelSelection ?? thread.modelSelection,
     runtimeMode: message.runtimeMode ?? thread.runtimeMode,
     interactionMode: message.interactionMode ?? thread.interactionMode,
+    routingMode: message.routingMode ?? thread.routingMode ?? "manual",
+    efficiencyTier: message.efficiencyTier ?? thread.efficiencyTier,
   };
 }
 

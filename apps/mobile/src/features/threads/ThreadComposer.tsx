@@ -1,11 +1,13 @@
 import { isLiquidGlassSupported, LiquidGlassView } from "@callstack/liquid-glass";
 import type {
   EnvironmentId,
+  EfficiencyTier,
   MessageId,
   ModelSelection,
   OrchestrationThreadShell,
   ProviderInteractionMode,
   RuntimeMode,
+  ThreadRoutingMode,
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
 import {
@@ -113,6 +115,7 @@ export interface ThreadComposerProps {
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
+  readonly onUpdateEfficiencyRouting: (mode: ThreadRoutingMode, tier: EfficiencyTier) => void;
   readonly onReconnectEnvironment: () => void;
   readonly onExpandedChange?: (expanded: boolean) => void;
 }
@@ -316,6 +319,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const currentModelSelection = props.selectedThread.modelSelection;
   const currentRuntimeMode = props.selectedThread.runtimeMode;
   const currentInteractionMode = props.selectedThread.interactionMode ?? "default";
+  const currentRoutingMode = props.selectedThread.routingMode ?? "manual";
+  const currentEfficiencyTier = props.selectedThread.efficiencyTier ?? "economy";
   const connectionStatus = composerConnectionStatus({
     connectionError: props.connectionError,
     connectionState: props.connectionState,
@@ -627,6 +632,24 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       })),
     [providerGroups, currentModelSelection],
   );
+  const efficiencyMenuActions = useMemo(
+    () => [
+      {
+        id: "efficiency:manual",
+        title: "Manual model",
+        state: currentRoutingMode === "manual" ? ("on" as const) : undefined,
+      },
+      ...(["economy", "balanced", "quality"] as const).map((tier) => ({
+        id: `efficiency:auto:${tier}`,
+        title: `Auto · ${tier[0]!.toUpperCase()}${tier.slice(1)}`,
+        state:
+          currentRoutingMode === "auto" && currentEfficiencyTier === tier
+            ? ("on" as const)
+            : undefined,
+      })),
+    ],
+    [currentEfficiencyTier, currentRoutingMode],
+  );
 
   // ── Options menu ─────────────────────────────────────────
   const optionsMenuActions = useMemo(
@@ -685,6 +708,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     const modelKey = event.slice("model:".length);
     const option = modelOptions.find((o) => o.key === modelKey);
     if (option) {
+      props.onUpdateEfficiencyRouting("manual", currentEfficiencyTier);
       props.onUpdateModelSelection(option.selection);
     }
   }
@@ -692,6 +716,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   function handleOptionsMenuAction(event: string) {
     const providerOptions = applyProviderOptionMenuEvent(providerOptionDescriptors, event);
     if (providerOptions) {
+      props.onUpdateEfficiencyRouting("manual", currentEfficiencyTier);
       props.onUpdateModelSelection({
         ...currentModelSelection,
         options: providerOptions,
@@ -706,6 +731,19 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     if (event.startsWith("options:interaction:")) {
       const interactionMode = event.slice("options:interaction:".length) as ProviderInteractionMode;
       props.onUpdateInteractionMode(interactionMode);
+    }
+  }
+
+  function handleEfficiencyMenuAction(event: string) {
+    if (event === "efficiency:manual") {
+      props.onUpdateEfficiencyRouting("manual", currentEfficiencyTier);
+      return;
+    }
+    if (event.startsWith("efficiency:auto:")) {
+      props.onUpdateEfficiencyRouting(
+        "auto",
+        event.slice("efficiency:auto:".length) as EfficiencyTier,
+      );
     }
   }
 
@@ -879,6 +917,24 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     label={currentModelOption?.label ?? currentModelSelection.model}
                   />
                 </ControlPillMenu>
+                {props.serverConfig?.settings.efficiency.enabled ? (
+                  <ControlPillMenu
+                    actions={efficiencyMenuActions}
+                    onPressAction={({ nativeEvent }) =>
+                      handleEfficiencyMenuAction(nativeEvent.event)
+                    }
+                  >
+                    <ComposerToolbarTrigger
+                      accessibilityLabel="Efficiency routing"
+                      icon="gauge.with.dots.needle.33percent"
+                      label={
+                        currentRoutingMode === "manual"
+                          ? "Manual"
+                          : `Auto · ${currentEfficiencyTier[0]!.toUpperCase()}${currentEfficiencyTier.slice(1)}`
+                      }
+                    />
+                  </ControlPillMenu>
+                ) : null}
                 <ControlPillMenu
                   actions={optionsMenuActions}
                   onPressAction={({ nativeEvent }) => handleOptionsMenuAction(nativeEvent.event)}

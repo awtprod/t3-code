@@ -6,6 +6,8 @@ import {
   type ProjectId,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type ThreadRoutingMode,
+  type EfficiencyTier,
 } from "@t3tools/contracts";
 
 import { toUploadChatImageAttachments, type DraftComposerImageAttachment } from "./composerImages";
@@ -32,6 +34,8 @@ export interface ProjectThreadStartTurnSpec {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly routingMode?: ThreadRoutingMode;
+  readonly efficiencyTier?: EfficiencyTier;
   readonly workspaceMode: "local" | "worktree";
   readonly branch: string | null;
   readonly worktreePath: string | null;
@@ -58,6 +62,8 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
       attachments: toUploadChatImageAttachments(spec.attachments),
     },
     modelSelection: spec.modelSelection,
+    routingMode: spec.routingMode ?? "manual",
+    ...(spec.efficiencyTier === undefined ? {} : { efficiencyTier: spec.efficiencyTier }),
     titleSeed: title,
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
@@ -66,6 +72,8 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
         projectId: spec.projectId,
         title,
         modelSelection: spec.modelSelection,
+        routingMode: spec.routingMode ?? "manual",
+        ...(spec.efficiencyTier === undefined ? {} : { efficiencyTier: spec.efficiencyTier }),
         runtimeMode: spec.runtimeMode,
         interactionMode: spec.interactionMode,
         branch: spec.branch,

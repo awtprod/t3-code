@@ -4,10 +4,14 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProviderInteractionMode as ProviderInteractionModeSchema,
   RuntimeMode as RuntimeModeSchema,
+  EfficiencyTier as EfficiencyTierSchema,
+  ThreadRoutingMode as ThreadRoutingModeSchema,
+  type EfficiencyTier,
   type EnvironmentId,
   type ModelSelection,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type ThreadRoutingMode,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { useEffect } from "react";
@@ -44,6 +48,8 @@ export interface ComposerDraft {
   readonly modelSelection?: ModelSelection;
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly routingMode?: ThreadRoutingMode;
+  readonly efficiencyTier?: EfficiencyTier;
   readonly workspaceSelection?: ComposerDraftWorkspaceSelection;
 }
 
@@ -62,7 +68,12 @@ export interface ComposerDraftWorkspaceSelection {
 
 export type ComposerDraftSettingsUpdate = Pick<
   ComposerDraft,
-  "modelSelection" | "runtimeMode" | "interactionMode" | "workspaceSelection"
+  | "modelSelection"
+  | "runtimeMode"
+  | "interactionMode"
+  | "routingMode"
+  | "efficiencyTier"
+  | "workspaceSelection"
 >;
 
 const ComposerDraftWorkspaceSelectionSchema = Schema.Struct({
@@ -79,6 +90,8 @@ const ComposerDraftSchema = Schema.Struct({
   modelSelection: Schema.optional(ModelSelectionSchema),
   runtimeMode: Schema.optional(RuntimeModeSchema),
   interactionMode: Schema.optional(ProviderInteractionModeSchema),
+  routingMode: Schema.optional(ThreadRoutingModeSchema),
+  efficiencyTier: Schema.optional(EfficiencyTierSchema),
   workspaceSelection: Schema.optional(ComposerDraftWorkspaceSelectionSchema),
 });
 
@@ -131,6 +144,8 @@ function isEmptyDraft(draft: ComposerDraft): boolean {
     draft.modelSelection === undefined &&
     draft.runtimeMode === undefined &&
     draft.interactionMode === undefined &&
+    draft.routingMode === undefined &&
+    draft.efficiencyTier === undefined &&
     draft.workspaceSelection === undefined
   );
 }

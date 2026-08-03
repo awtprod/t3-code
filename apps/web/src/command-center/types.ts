@@ -55,6 +55,7 @@ export type CommandCenterRouteSource =
   | "auto"
   | "explicit"
   | "policy"
+  | "tier-policy"
   | "classifier"
   | "fallback"
   | "provider-default"

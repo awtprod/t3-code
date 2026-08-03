@@ -368,6 +368,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: command.projectId,
           title: command.title,
           modelSelection: command.modelSelection,
+          routingMode: command.routingMode,
+          ...(command.efficiencyTier === undefined
+            ? {}
+            : { efficiencyTier: command.efficiencyTier }),
           runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
           branch: command.branch,
@@ -670,6 +674,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
+          ...(command.routingMode !== undefined
+            ? { routingMode: command.routingMode }
+            : command.modelSelection !== undefined
+              ? { routingMode: "manual" as const }
+              : {}),
+          ...(command.efficiencyTier !== undefined
+            ? { efficiencyTier: command.efficiencyTier }
+            : {}),
           ...(branch !== undefined ? { branch } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
           updatedAt: occurredAt,
@@ -813,6 +825,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
+          ...(command.routingMode !== undefined ? { routingMode: command.routingMode } : {}),
+          ...(command.efficiencyTier !== undefined
+            ? { efficiencyTier: command.efficiencyTier }
+            : {}),
+          ...(command.efficiencyDecision !== undefined
+            ? { efficiencyDecision: command.efficiencyDecision }
+            : {}),
+          ...(command.retryOfTurnId !== undefined ? { retryOfTurnId: command.retryOfTurnId } : {}),
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
