@@ -76,6 +76,12 @@ export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolea
   return createClerkBridge({
     storage: storage({ path: stateDir }),
     passkeys: true,
+    // Command Center registers both renderer schemes synchronously at module
+    // load. Layer construction can lose the race with Electron's `ready`
+    // event, so Clerk must not repeat that registration here. It still uses
+    // the renderer configuration for OAuth transport and single-instance
+    // handling.
+    registerRendererScheme: false,
     renderer: {
       scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
       host: ElectronProtocol.DESKTOP_HOST,

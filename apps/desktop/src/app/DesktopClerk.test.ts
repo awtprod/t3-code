@@ -91,6 +91,7 @@ describe("DesktopClerk", () => {
           {
             storage: storageAdapter,
             passkeys: true,
+            registerRendererScheme: false,
             renderer: { scheme: "commandcenter-dev", host: "app" },
           },
         ],
@@ -224,6 +225,7 @@ describe("DesktopClerk", () => {
         {
           storage: storageAdapter,
           passkeys: true,
+          registerRendererScheme: false,
           renderer: { scheme, host: "app" },
         },
       ],

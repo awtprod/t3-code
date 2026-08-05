@@ -1,0 +1,30 @@
+diff --git a/dist/cjs/index.js b/dist/cjs/index.js
+--- a/dist/cjs/index.js
++++ b/dist/cjs/index.js
+@@ -294 +294 @@ function createClerkBridge(options) {
+-			electron.protocol.registerSchemesAsPrivileged([{
++			if (options.registerRendererScheme !== false) electron.protocol.registerSchemesAsPrivileged([{
+diff --git a/dist/esm/index.js b/dist/esm/index.js
+--- a/dist/esm/index.js
++++ b/dist/esm/index.js
+@@ -293 +293 @@ function createClerkBridge(options) {
+-			protocol.registerSchemesAsPrivileged([{
++			if (options.registerRendererScheme !== false) protocol.registerSchemesAsPrivileged([{
+diff --git a/dist/types/shared/types.d.ts b/dist/types/shared/types.d.ts
+--- a/dist/types/shared/types.d.ts
++++ b/dist/types/shared/types.d.ts
+@@ -14,6 +14,14 @@ export type CreateClerkBridgeOptions = {
+      * Registers the custom scheme used to serve the Electron renderer from a stable origin.
+      */
+     renderer?: RendererSchemeOptions;
++    /**
++     * Whether the bridge should register the renderer scheme with Electron. Set this to `false`
++     * when the application already registered the same scheme synchronously during module load.
++     * The renderer configuration is still used for OAuth transport and single-instance handling.
++     *
++     * @default true
++     */
++    registerRendererScheme?: boolean;
+     /**
+      * Whether Clerk should acquire and release Electron's process-wide single-instance lock for OAuth
+      * deep links. Set this to `false` when the application manages the lock itself. Ignored on macOS,

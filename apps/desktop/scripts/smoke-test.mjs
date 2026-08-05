@@ -20,6 +20,7 @@ const child = NodeChildProcess.spawn(electronCommand.electronPath, electronComma
 });
 
 let output = "";
+let reachedTimeout = false;
 child.stdout.on("data", (chunk) => {
   output += chunk.toString();
 });
@@ -28,10 +29,11 @@ child.stderr.on("data", (chunk) => {
 });
 
 const timeout = setTimeout(() => {
+  reachedTimeout = true;
   child.kill();
 }, 8_000);
 
-child.on("exit", () => {
+child.on("exit", (code, signal) => {
   clearTimeout(timeout);
 
   const fatalPatterns = [
@@ -43,6 +45,11 @@ child.on("exit", () => {
     "Uncaught ReferenceError",
   ];
   const failures = fatalPatterns.filter((pattern) => output.includes(pattern));
+  if (!reachedTimeout) {
+    failures.unshift(
+      `Electron exited before the smoke-test window (code: ${String(code)}, signal: ${String(signal)})`,
+    );
+  }
 
   if (failures.length > 0) {
     console.error("\nDesktop smoke test failed:");
