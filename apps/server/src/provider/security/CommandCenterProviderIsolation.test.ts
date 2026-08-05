@@ -253,7 +253,10 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
   const makeLayout = Effect.fn("CommandCenterProviderIsolation.test.makeLayout")(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cc-isolation-" });
+    const temporaryBaseDir = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "cc-isolation-",
+    });
+    const baseDir = yield* fileSystem.realPath(temporaryBaseDir);
     const worktreesDir = path.join(baseDir, "worktrees");
     const repositoriesDir = path.join(baseDir, "repositories");
     yield* fileSystem.makeDirectory(worktreesDir, { recursive: true });
