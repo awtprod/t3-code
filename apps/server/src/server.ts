@@ -412,6 +412,7 @@ const AutomationRecoveryCoordinatorLayerLive = AutomationRecoveryCoordinator.lay
 const RunLifecycleLayerLive = RunLifecycle.layer.pipe(
   Layer.provide(ProviderLayerLive),
   Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(OrchestrationLayerLive),
   Layer.provide(PersistenceLayerLive),
 );
 

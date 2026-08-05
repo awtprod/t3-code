@@ -704,6 +704,32 @@ export function ProviderInstanceCard({
                   </PopoverPopup>
                 </Popover>
               ) : null}
+              {!versionAdvisory && onRunUpdate && updateCommand ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost"
+                        className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+                        disabled={isUpdating}
+                        onClick={onRunUpdate}
+                        aria-label={`Update or reinstall ${displayName}`}
+                      >
+                        {isUpdating ? (
+                          <LoaderIcon className="size-3.5 animate-spin" />
+                        ) : (
+                          <DownloadIcon className="size-3.5" />
+                        )}
+                      </Button>
+                    }
+                  />
+                  <TooltipPopup side="top">
+                    {isUpdating ? "Updating provider" : "Update or reinstall provider"}
+                  </TooltipPopup>
+                </Tooltip>
+              ) : null}
               {titleTailNode}
             </div>
             {authRowNode}
