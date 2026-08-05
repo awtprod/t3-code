@@ -66,6 +66,7 @@ import Migration0050 from "./Migrations/050_ProjectionThreadsSettled.ts";
 import Migration0051 from "./Migrations/051_ProjectionThreadsSnoozed.ts";
 import Migration0052 from "./Migrations/052_ProjectionThreadTitleRegeneration.ts";
 import Migration0053 from "./Migrations/053_ProjectionTurnUsage.ts";
+import Migration0054 from "./Migrations/054_TokenEfficiencyRouting.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -131,6 +132,7 @@ export const migrationEntries = [
   [51, "ProjectionThreadsSnoozed", Migration0051],
   [52, "ProjectionThreadTitleRegeneration", Migration0052],
   [53, "ProjectionTurnUsage", Migration0053],
+  [54, "TokenEfficiencyRouting", Migration0054],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

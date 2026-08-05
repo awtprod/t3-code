@@ -6,8 +6,10 @@ import { mapAtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import {
   ThreadId,
   type ModelSelection,
+  type EfficiencyTier,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type ThreadRoutingMode,
 } from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as Cause from "effect/Cause";
@@ -35,6 +37,8 @@ export function useCreateProjectThread() {
       readonly startFromOrigin?: boolean;
       readonly runtimeMode: RuntimeMode;
       readonly interactionMode: ProviderInteractionMode;
+      readonly routingMode: ThreadRoutingMode;
+      readonly efficiencyTier: EfficiencyTier;
       readonly initialMessageText: string;
       readonly initialAttachments: ReadonlyArray<DraftComposerImageAttachment>;
       /** Reuse identifiers from a queued pending task instead of minting new ones. */
@@ -70,6 +74,8 @@ export function useCreateProjectThread() {
           modelSelection: input.modelSelection,
           runtimeMode: input.runtimeMode,
           interactionMode: input.interactionMode,
+          routingMode: input.routingMode,
+          efficiencyTier: input.efficiencyTier,
           workspaceMode: input.envMode,
           branch: input.branch,
           worktreePath: input.worktreePath,

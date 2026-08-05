@@ -36,6 +36,7 @@ import {
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
   ThreadTurnInterruptRequestedPayload,
+  ThreadTurnStartRequestedPayload,
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
@@ -328,6 +329,10 @@ export function projectEvent(
             projectId: payload.projectId,
             title: payload.title,
             modelSelection: payload.modelSelection,
+            routingMode: payload.routingMode,
+            ...(payload.efficiencyTier === undefined
+              ? {}
+              : { efficiencyTier: payload.efficiencyTier }),
             runtimeMode: payload.runtimeMode,
             interactionMode: payload.interactionMode,
             branch: payload.branch,
@@ -452,6 +457,10 @@ export function projectEvent(
             ...(payload.modelSelection !== undefined
               ? { modelSelection: payload.modelSelection }
               : {}),
+            ...(payload.routingMode !== undefined ? { routingMode: payload.routingMode } : {}),
+            ...(payload.efficiencyTier !== undefined
+              ? { efficiencyTier: payload.efficiencyTier }
+              : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
             updatedAt: payload.updatedAt,
@@ -466,6 +475,28 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             runtimeMode: payload.runtimeMode,
             updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.turn-start-requested":
+      return decodeForEvent(
+        ThreadTurnStartRequestedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            ...(payload.modelSelection !== undefined
+              ? { modelSelection: payload.modelSelection }
+              : {}),
+            ...(payload.routingMode !== undefined ? { routingMode: payload.routingMode } : {}),
+            ...(payload.efficiencyTier !== undefined
+              ? { efficiencyTier: payload.efficiencyTier }
+              : {}),
+            updatedAt: event.occurredAt,
           }),
         })),
       );

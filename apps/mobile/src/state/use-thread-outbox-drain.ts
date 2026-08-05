@@ -170,13 +170,21 @@ export function useThreadOutboxDrain(): void {
       const settings = resolveQueuedThreadSettings(queuedMessage, thread);
       const { reportFailure, completeDelivery } = makeDeliveryHelpers(queuedMessage);
 
-      if (!modelSelectionsEqual(settings.modelSelection, thread.modelSelection)) {
+      if (
+        !modelSelectionsEqual(settings.modelSelection, thread.modelSelection) ||
+        settings.routingMode !== (thread.routingMode ?? "manual") ||
+        settings.efficiencyTier !== thread.efficiencyTier
+      ) {
         const updateResult = await updateThreadMetadata({
           environmentId: queuedMessage.environmentId,
           input: {
             commandId: settingsCommandId(queuedMessage, "model-selection"),
             threadId: queuedMessage.threadId,
             modelSelection: settings.modelSelection,
+            routingMode: settings.routingMode,
+            ...(settings.efficiencyTier === undefined
+              ? {}
+              : { efficiencyTier: settings.efficiencyTier }),
           },
         });
         if (AsyncResult.isFailure(updateResult)) {
@@ -229,6 +237,10 @@ export function useThreadOutboxDrain(): void {
             attachments: toUploadChatImageAttachments(queuedMessage.attachments),
           },
           modelSelection: settings.modelSelection,
+          routingMode: settings.routingMode,
+          ...(settings.efficiencyTier === undefined
+            ? {}
+            : { efficiencyTier: settings.efficiencyTier }),
           runtimeMode: settings.runtimeMode,
           interactionMode: settings.interactionMode,
           createdAt: queuedMessage.createdAt,
@@ -270,6 +282,10 @@ export function useThreadOutboxDrain(): void {
           modelSelection,
           runtimeMode: queuedMessage.runtimeMode ?? DEFAULT_RUNTIME_MODE,
           interactionMode: queuedMessage.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
+          routingMode: queuedMessage.routingMode ?? "manual",
+          ...(queuedMessage.efficiencyTier === undefined
+            ? {}
+            : { efficiencyTier: queuedMessage.efficiencyTier }),
           workspaceMode: creation.workspaceMode,
           branch: creation.branch,
           worktreePath: creation.worktreePath,

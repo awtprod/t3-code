@@ -6,6 +6,7 @@ import {
   DatabaseIcon,
   ChartNoAxesCombinedIcon,
   FlaskConicalIcon,
+  GaugeIcon,
   GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
@@ -31,6 +32,7 @@ export type SettingsSectionPath =
   | "/settings/keybindings"
   | "/settings/providers"
   | "/settings/usage"
+  | "/settings/efficiency"
   | "/settings/source-control"
   | "/settings/databases"
   | "/settings/connections"
@@ -47,6 +49,7 @@ export const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   { label: "Keybindings", to: "/settings/keybindings", icon: KeyboardIcon },
   { label: "Providers", to: "/settings/providers", icon: BotIcon },
   { label: "Usage", to: "/settings/usage", icon: ChartNoAxesCombinedIcon },
+  { label: "Efficiency", to: "/settings/efficiency", icon: GaugeIcon },
   { label: "Source Control", to: "/settings/source-control", icon: GitBranchIcon },
   { label: "Databases", to: "/settings/databases", icon: DatabaseIcon },
   { label: "Connections", to: "/settings/connections", icon: Link2Icon },

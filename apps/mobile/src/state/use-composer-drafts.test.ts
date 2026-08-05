@@ -38,6 +38,8 @@ describe("mobile composer drafts", () => {
             },
             runtimeMode: "approval-required",
             interactionMode: "plan",
+            routingMode: "auto",
+            efficiencyTier: "balanced",
             workspaceSelection: {
               mode: "worktree",
               branch: "main",
@@ -57,6 +59,8 @@ describe("mobile composer drafts", () => {
         },
         runtimeMode: "approval-required",
         interactionMode: "plan",
+        routingMode: "auto",
+        efficiencyTier: "balanced",
         workspaceSelection: {
           mode: "worktree",
           branch: "main",
@@ -102,6 +106,8 @@ describe("mobile composer drafts", () => {
         model: "gpt-5.4",
         options: [{ id: "reasoningEffort", value: "xhigh" }],
       },
+      routingMode: "auto",
+      efficiencyTier: "quality",
       workspaceSelection: {
         mode: "worktree",
         branch: "main",
@@ -112,6 +118,8 @@ describe("mobile composer drafts", () => {
     expect(clearComposerDraftContentState({ [draftKey]: draft }, draftKey)).toEqual({
       [draftKey]: {
         modelSelection: draft.modelSelection,
+        routingMode: draft.routingMode,
+        efficiencyTier: draft.efficiencyTier,
         workspaceSelection: draft.workspaceSelection,
         text: "",
         attachments: [],

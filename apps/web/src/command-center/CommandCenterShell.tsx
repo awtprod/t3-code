@@ -82,6 +82,7 @@ const ROUTE_SOURCE_LABEL: Record<CommandCenterRouteSource, string> = {
   fallback: "Fallback",
   "provider-default": "Default",
   policy: "Policy",
+  "tier-policy": "Efficiency tier",
   unresolved: "Unresolved",
 };
 

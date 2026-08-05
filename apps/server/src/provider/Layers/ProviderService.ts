@@ -58,6 +58,8 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import { resolveSupabaseConnection } from "../../database/SupabaseMcpConnector.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import { commandCenterProviderIsolationIssue } from "../security/CommandCenterProviderIsolation.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
@@ -241,6 +243,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const prepareMcpSession = (
@@ -249,12 +252,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     projectId?: ProjectId,
     cwd?: string,
   ) =>
-    McpSessionRegistry.issueActiveMcpCredential({
-      threadId,
-      providerInstanceId,
-      ...(projectId === undefined ? {} : { projectId }),
-      ...(cwd === undefined ? {} : { cwd }),
-    }).pipe(
+    serverSettings.getSettings.pipe(
+      Effect.map((settings) =>
+        resolveSupabaseConnection(settings.databaseConnections, {
+          ...(projectId === undefined ? {} : { projectId }),
+          ...(cwd === undefined ? {} : { cwd }),
+        }),
+      ),
+      Effect.orElseSucceed(() => undefined),
+      Effect.flatMap((database) =>
+        McpSessionRegistry.issueActiveMcpCredential({
+          threadId,
+          providerInstanceId,
+          ...(projectId === undefined ? {} : { projectId }),
+          ...(cwd === undefined ? {} : { cwd }),
+          ...(database === undefined
+            ? {}
+            : { databaseAccess: database.connection.readOnly ? "read" : "write" }),
+        }),
+      ),
       Effect.tap((credential) =>
         credential
           ? Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config))

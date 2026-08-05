@@ -22,6 +22,7 @@ import {
   getStartedThreadModelChangeBlockReason,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
+  loadComposerImagesForRetry,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
@@ -35,6 +36,56 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+describe("loadComposerImagesForRetry", () => {
+  it("restores every prior attachment as a sendable composer image", async () => {
+    const requestedUrls: string[] = [];
+    const images = await loadComposerImagesForRetry(
+      [
+        {
+          type: "image",
+          id: "image-1",
+          name: "context.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+          previewUrl: "https://example.test/assets/image-1",
+        },
+      ],
+      {
+        fetchAttachment: async (url) => {
+          requestedUrls.push(url);
+          return new Blob([new Uint8Array([1, 2, 3, 4])], { type: "image/png" });
+        },
+        createPreviewUrl: () => "blob:retry-image-1",
+      },
+    );
+
+    expect(requestedUrls).toEqual(["https://example.test/assets/image-1"]);
+    expect(images).toHaveLength(1);
+    expect(images[0]).toMatchObject({
+      id: "image-1",
+      name: "context.png",
+      mimeType: "image/png",
+      sizeBytes: 4,
+      previewUrl: "blob:retry-image-1",
+    });
+    expect(images[0]?.file).toBeInstanceOf(File);
+  });
+
+  it("rejects instead of silently dropping an unavailable attachment", async () => {
+    await expect(
+      loadComposerImagesForRetry([
+        {
+          type: "image",
+          id: "image-1",
+          name: "missing.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+        },
+      ]),
+    ).rejects.toThrow("missing.png");
+  });
+});
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return {

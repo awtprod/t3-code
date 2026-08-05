@@ -23,14 +23,17 @@ import { Tool, Toolkit } from "effect/unstable/ai";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import { requireCapability } from "../../ToolCapability.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
   PreviewAutomationBroker.PreviewAutomationBroker,
 ];
 
+const previewTool = <T extends Tool.Any>(tool: T): T => requireCapability(tool, "preview");
+
 const browserTool = <T extends Tool.Any>(tool: T): T =>
-  tool.annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
+  previewTool(tool).annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
 
 const safeBrowserTool = <T extends Tool.Any>(tool: T): T =>
   browserTool(tool).annotate(Tool.Destructive, false) as T;
@@ -38,18 +41,20 @@ const safeBrowserTool = <T extends Tool.Any>(tool: T): T =>
 const readonlyBrowserTool = <T extends Tool.Any>(tool: T): T =>
   safeBrowserTool(tool).annotate(Tool.Readonly, true).annotate(Tool.Idempotent, true) as T;
 
-export const PreviewStatusTool = Tool.make("preview_status", {
-  description:
-    "Report whether a collaborative browser tab is automation-capable, including its URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab.",
-  parameters: PreviewAutomationTabTargetInput,
-  success: PreviewAutomationStatus,
-  failure: PreviewAutomationError,
-  dependencies,
-})
-  .annotate(Tool.Title, "Get preview status")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+export const PreviewStatusTool = previewTool(
+  Tool.make("preview_status", {
+    description:
+      "Report whether a collaborative browser tab is automation-capable, including its URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab.",
+    parameters: PreviewAutomationTabTargetInput,
+    success: PreviewAutomationStatus,
+    failure: PreviewAutomationError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Get preview status")
+    .annotate(Tool.Readonly, true)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true),
+);
 
 export const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {

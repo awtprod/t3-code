@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import type {
   EnvironmentId,
+  EfficiencyTier,
   ModelSelection,
   ProviderInteractionMode,
   ProviderOptionSelection,
@@ -14,6 +15,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   MessageId,
   ThreadId,
+  ThreadRoutingMode,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
@@ -130,6 +132,8 @@ type NewTaskFlowContextValue = {
   readonly availableBranches: ReadonlyArray<VcsRef>;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly routingMode: ThreadRoutingMode;
+  readonly efficiencyTier: EfficiencyTier;
   readonly expandedProvider: string | null;
   readonly environments: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
@@ -163,6 +167,7 @@ type NewTaskFlowContextValue = {
   readonly loadBranches: () => Promise<void>;
   readonly setRuntimeMode: (value: RuntimeMode) => void;
   readonly setInteractionMode: (value: ProviderInteractionMode) => void;
+  readonly setEfficiencyRouting: (mode: ThreadRoutingMode, tier: EfficiencyTier) => void;
   readonly setSelectedModelOptions: (
     value: ReadonlyArray<ProviderOptionSelection> | undefined,
   ) => void;
@@ -368,6 +373,13 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     true;
   const runtimeMode = selectedProjectDraft.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode = selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE;
+  const routingMode =
+    selectedProjectDraft.routingMode ??
+    (selectedEnvironmentServerConfig?.settings.efficiency.enabled ? "auto" : "manual");
+  const efficiencyTier =
+    selectedProjectDraft.efficiencyTier ??
+    selectedEnvironmentServerConfig?.settings.efficiency.defaultTier ??
+    "economy";
 
   // Stored selections (draft and project default) only count while their
   // provider is usable on the server; otherwise the server's default model
@@ -424,6 +436,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       }
       updateComposerDraftSettings(selectedProjectDraftKey, {
         modelSelection: option.selection,
+        routingMode: "manual",
       });
     },
     [modelOptions, selectedProjectDraftKey],
@@ -650,6 +663,17 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     },
     [selectedProjectDraftKey],
   );
+  const setEfficiencyRouting = useCallback(
+    (mode: ThreadRoutingMode, tier: EfficiencyTier) => {
+      if (selectedProjectDraftKey) {
+        updateComposerDraftSettings(selectedProjectDraftKey, {
+          routingMode: mode,
+          efficiencyTier: tier,
+        });
+      }
+    },
+    [selectedProjectDraftKey],
+  );
 
   const beginEditingPendingTask = useCallback((messageId: string): boolean => {
     const message = findQueuedPendingTask(messageId);
@@ -665,6 +689,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         modelSelection: message.modelSelection,
         runtimeMode: message.runtimeMode,
         interactionMode: message.interactionMode,
+        routingMode: message.routingMode,
+        efficiencyTier: message.efficiencyTier,
         workspaceSelection: {
           mode: message.creation.workspaceMode,
           branch: message.creation.branch,
@@ -725,6 +751,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         modelSelection: draftModelSelection,
         runtimeMode: draft.runtimeMode ?? DEFAULT_RUNTIME_MODE,
         interactionMode: draft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
+        routingMode: draft.routingMode ?? routingMode,
+        efficiencyTier: draft.efficiencyTier ?? efficiencyTier,
         creation: {
           projectId: selectedProject.id,
           ...(projectTitle !== undefined ? { projectTitle } : {}),
@@ -751,6 +779,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedProjectDraftKey,
       startFromOrigin,
       workspaceMode,
+      routingMode,
+      efficiencyTier,
     ],
   );
 
@@ -864,6 +894,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       availableBranches,
       runtimeMode,
       interactionMode,
+      routingMode,
+      efficiencyTier,
       expandedProvider,
       environments,
       selectedProject,
@@ -894,6 +926,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       loadBranches,
       setRuntimeMode,
       setInteractionMode,
+      setEfficiencyRouting,
       setSelectedModelOptions,
       setExpandedProvider,
     }),
@@ -911,6 +944,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       filteredBranches,
       finishEditingPendingTask,
       interactionMode,
+      routingMode,
+      efficiencyTier,
       loadBranches,
       logicalProjects,
       modelOptions,
@@ -934,6 +969,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectBranch,
       selectEnvironment,
       setInteractionMode,
+      setEfficiencyRouting,
       setPrompt,
       setRuntimeMode,
       setSelectedModelKey,

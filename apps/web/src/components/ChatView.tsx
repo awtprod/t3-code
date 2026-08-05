@@ -106,6 +106,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   DEFAULT_THREAD_TERMINAL_ID,
   MAX_TERMINALS_PER_GROUP,
+  type ChatImageAttachment,
   type ChatMessage,
   type SessionPhase,
   type Thread,
@@ -267,6 +268,7 @@ import {
   type LocalDispatchSnapshot,
   PullRequestDialogState,
   cloneComposerImageForRetry,
+  loadComposerImagesForRetry,
   deriveLockedProvider,
   readFileAsDataUrl,
   reconcileMountedTerminalThreadIds,
@@ -1460,6 +1462,38 @@ function ChatViewContent(props: ChatViewProps) {
   const interactionMode =
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
+  const [efficiencyRoutingOverride, setEfficiencyRoutingOverride] = useState<{
+    readonly mode: "manual" | "auto";
+    readonly tier: "economy" | "balanced" | "quality";
+  } | null>(null);
+  const retryOfTurnIdRef = useRef<TurnId | null>(null);
+  useEffect(() => {
+    setEfficiencyRoutingOverride(null);
+    retryOfTurnIdRef.current = null;
+  }, [routeThreadKey]);
+  const composerEfficiencyRoutingMode =
+    efficiencyRoutingOverride?.mode ??
+    activeThread?.routingMode ??
+    (isLocalDraftThread && settings.efficiency.enabled ? "auto" : "manual");
+  const composerEfficiencyTier =
+    efficiencyRoutingOverride?.tier ??
+    activeThread?.efficiencyTier ??
+    settings.efficiency.defaultTier;
+  const handleEfficiencyRoutingChange = useCallback(
+    (mode: "manual" | "auto", tier: "economy" | "balanced" | "quality") => {
+      setEfficiencyRoutingOverride({ mode, tier });
+      if (!isServerThread || !activeThread) return;
+      void updateThreadMetadata({
+        environmentId,
+        input: {
+          threadId: activeThread.id,
+          routingMode: mode,
+          efficiencyTier: tier,
+        },
+      });
+    },
+    [activeThread, environmentId, isServerThread, updateThreadMetadata],
+  );
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
   const runningTerminalIds = useThreadRunningTerminalIds({
@@ -2621,6 +2655,52 @@ function ChatViewContent(props: ChatViewProps) {
       focusComposer();
     });
   }, [focusComposer]);
+  const prepareRetryOneTierHigher = useCallback(
+    async (input: {
+      readonly text: string;
+      readonly turnId: TurnId;
+      readonly attachments: ReadonlyArray<ChatImageAttachment>;
+    }) => {
+      const nextTier =
+        composerEfficiencyTier === "economy"
+          ? "balanced"
+          : composerEfficiencyTier === "balanced"
+            ? "quality"
+            : null;
+      if (nextTier === null) return;
+      let images: ComposerImageAttachment[];
+      try {
+        images = await loadComposerImagesForRetry(input.attachments);
+      } catch (error) {
+        toastManager.add({
+          title: "Could not prepare the retry",
+          description: error instanceof Error ? error.message : String(error),
+          type: "error",
+        });
+        return;
+      }
+      retryOfTurnIdRef.current = input.turnId;
+      setEfficiencyRoutingOverride({ mode: "auto", tier: nextTier });
+      clearComposerDraftContent(composerDraftTarget);
+      promptRef.current = input.text;
+      composerImagesRef.current = images;
+      composerTerminalContextsRef.current = [];
+      composerElementContextsRef.current = [];
+      setComposerDraftPrompt(composerDraftTarget, input.text);
+      addComposerDraftImages(composerDraftTarget, images);
+      composerRef.current?.resetCursorState({ cursor: input.text.length, prompt: input.text });
+      scheduleComposerFocus();
+    },
+    [
+      addComposerDraftImages,
+      clearComposerDraftContent,
+      composerDraftTarget,
+      composerEfficiencyTier,
+      composerRef,
+      scheduleComposerFocus,
+      setComposerDraftPrompt,
+    ],
+  );
   const addTerminalContextToDraft = useCallback(
     (selection: TerminalContextSelection) => {
       composerRef.current?.addTerminalContext(selection);
@@ -3430,6 +3510,8 @@ function ChatViewContent(props: ChatViewProps) {
       threadId: ThreadId;
       createdAt: string;
       modelSelection?: ModelSelection;
+      routingMode?: "manual" | "auto";
+      efficiencyTier?: "economy" | "balanced" | "quality";
       branch?: string;
       runtimeMode: RuntimeMode;
       interactionMode: ProviderInteractionMode;
@@ -3443,6 +3525,12 @@ function ChatViewContent(props: ChatViewProps) {
         currentModelSelection: serverThread.modelSelection,
         ...(input.modelSelection ? { nextModelSelection: input.modelSelection } : {}),
         currentBranch: serverThread.branch,
+        currentRoutingMode: serverThread.routingMode ?? "manual",
+        ...(input.routingMode ? { nextRoutingMode: input.routingMode } : {}),
+        ...(serverThread.efficiencyTier
+          ? { currentEfficiencyTier: serverThread.efficiencyTier }
+          : {}),
+        ...(input.efficiencyTier ? { nextEfficiencyTier: input.efficiencyTier } : {}),
         ...(input.branch ? { nextBranch: input.branch } : {}),
       });
       if (metadataUpdate) {
@@ -4802,6 +4890,9 @@ function ChatViewContent(props: ChatViewProps) {
       ctxSelectedModel || activeProject.defaultModelSelection?.model || DEFAULT_MODEL,
       ctxSelectedModelSelection.options,
     );
+    const selectedRoutingMode = composerEfficiencyRoutingMode;
+    const selectedEfficiencyTier = composerEfficiencyTier;
+    const retryOfTurnIdForSend = retryOfTurnIdRef.current;
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
     // Auto-title from first message
@@ -4823,6 +4914,8 @@ function ChatViewContent(props: ChatViewProps) {
         threadId: threadIdForSend,
         createdAt: messageCreatedAt,
         ...(ctxSelectedModel ? { modelSelection: ctxSelectedModelSelection } : {}),
+        routingMode: selectedRoutingMode,
+        efficiencyTier: selectedEfficiencyTier,
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
@@ -4850,6 +4943,8 @@ function ChatViewContent(props: ChatViewProps) {
                       projectId: activeProject.id,
                       title,
                       modelSelection: threadCreateModelSelection,
+                      routingMode: selectedRoutingMode,
+                      efficiencyTier: selectedEfficiencyTier,
                       runtimeMode,
                       interactionMode,
                       branch: activeThreadBranch,
@@ -4883,6 +4978,9 @@ function ChatViewContent(props: ChatViewProps) {
             attachments: turnAttachmentsResult.value,
           },
           modelSelection: ctxSelectedModelSelection,
+          routingMode: selectedRoutingMode,
+          efficiencyTier: selectedEfficiencyTier,
+          ...(retryOfTurnIdForSend === null ? {} : { retryOfTurnId: retryOfTurnIdForSend }),
           titleSeed: title,
           runtimeMode,
           interactionMode,
@@ -4894,6 +4992,7 @@ function ChatViewContent(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        retryOfTurnIdRef.current = null;
       }
     }
 
@@ -5172,6 +5271,8 @@ function ChatViewContent(props: ChatViewProps) {
         effort: ctxSelectedPromptEffort,
         text: trimmed,
       });
+      const selectedRoutingMode = composerEfficiencyRoutingMode;
+      const selectedEfficiencyTier = composerEfficiencyTier;
 
       sendInFlightRef.current = true;
       beginLocalDispatch({ preparingWorktree: false });
@@ -5207,6 +5308,8 @@ function ChatViewContent(props: ChatViewProps) {
         threadId: threadIdForSend,
         createdAt: messageCreatedAt,
         modelSelection: ctxSelectedModelSelection,
+        routingMode: selectedRoutingMode,
+        efficiencyTier: selectedEfficiencyTier,
         ...(localCheckoutBranchMismatch
           ? { branch: localCheckoutBranchMismatch.currentBranch }
           : {}),
@@ -5235,6 +5338,8 @@ function ChatViewContent(props: ChatViewProps) {
               attachments: [],
             },
             modelSelection: ctxSelectedModelSelection,
+            routingMode: selectedRoutingMode,
+            efficiencyTier: selectedEfficiencyTier,
             titleSeed: activeThread.title,
             runtimeMode,
             interactionMode: nextInteractionMode,
@@ -5294,6 +5399,8 @@ function ChatViewContent(props: ChatViewProps) {
       setThreadError,
       startThreadTurn,
       autoOpenPlanSidebar,
+      composerEfficiencyRoutingMode,
+      composerEfficiencyTier,
       environmentId,
       composerRef,
     ],
@@ -5338,6 +5445,8 @@ function ChatViewContent(props: ChatViewProps) {
     });
     const nextThreadTitle = truncate(buildPlanImplementationThreadTitle(planMarkdown));
     const nextThreadModelSelection: ModelSelection = ctxSelectedModelSelection;
+    const nextRoutingMode = composerEfficiencyRoutingMode;
+    const nextEfficiencyTier = composerEfficiencyTier;
 
     sendInFlightRef.current = true;
     beginLocalDispatch({ preparingWorktree: false });
@@ -5353,6 +5462,8 @@ function ChatViewContent(props: ChatViewProps) {
         projectId: activeProject.id,
         title: nextThreadTitle,
         modelSelection: nextThreadModelSelection,
+        routingMode: nextRoutingMode,
+        efficiencyTier: nextEfficiencyTier,
         runtimeMode,
         interactionMode: "default",
         branch: activeThreadBranch,
@@ -5375,6 +5486,8 @@ function ChatViewContent(props: ChatViewProps) {
             attachments: [],
           },
           modelSelection: ctxSelectedModelSelection,
+          routingMode: nextRoutingMode,
+          efficiencyTier: nextEfficiencyTier,
           titleSeed: nextThreadTitle,
           runtimeMode,
           interactionMode: "default",
@@ -5455,6 +5568,8 @@ function ChatViewContent(props: ChatViewProps) {
     runtimeMode,
     startThreadTurn,
     autoOpenPlanSidebar,
+    composerEfficiencyRoutingMode,
+    composerEfficiencyTier,
     environmentId,
     composerRef,
   ]);
@@ -5820,6 +5935,12 @@ function ChatViewContent(props: ChatViewProps) {
                 onOpenTurnDiff={onOpenTurnDiff}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
+                onPrepareTierRetry={prepareRetryOneTierHigher}
+                canRetryOneTierHigher={
+                  composerEfficiencyRoutingMode === "auto" &&
+                  composerEfficiencyTier !== "quality" &&
+                  !isWorking
+                }
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
                 markdownCwd={gitCwd ?? undefined}
@@ -5957,6 +6078,8 @@ function ChatViewContent(props: ChatViewProps) {
                             }
                             activeThreadModelSelection={activeThread?.modelSelection}
                             activeThreadActivities={activeThread?.activities}
+                            efficiencyRoutingMode={composerEfficiencyRoutingMode}
+                            efficiencyTier={composerEfficiencyTier}
                             resolvedTheme={resolvedTheme}
                             settings={settings}
                             keybindings={keybindings}
@@ -5967,6 +6090,7 @@ function ChatViewContent(props: ChatViewProps) {
                             composerTerminalContextsRef={composerTerminalContextsRef}
                             composerElementContextsRef={composerElementContextsRef}
                             onSend={onSend}
+                            onEfficiencyRoutingChange={handleEfficiencyRoutingChange}
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
                             onRespondToApproval={onRespondToApproval}

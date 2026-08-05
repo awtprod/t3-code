@@ -32,6 +32,7 @@ import {
   makeWithDependencies,
   planRepositoryProjectResolution,
   renderThreadMessage,
+  selectPriorContext,
   selectRepositoryProject,
   validateCommandCenterSystemWorkspace,
 } from "./RunDispatcher.ts";
@@ -64,6 +65,26 @@ const readyRoute = decodeRoute({
     model: "provider-default",
   },
   reasons: [],
+});
+
+it("caps Space instructions and the total prior-context payload deterministically", () => {
+  const priorContext = Array.from({ length: 3 }, (_, index) => ({
+    commandText: `request-${index}-${"c".repeat(3_000)}`,
+    responseText: `result-${index}-${"r".repeat(3_000)}`,
+  }));
+  const selected = selectPriorContext(priorContext);
+  expect(selected.join("").length).toBeLessThanOrEqual(8_000);
+  expect(selected.at(-1)).toContain("request-0-");
+
+  const rendered = renderThreadMessage({
+    space: { ...space, instructions: "i".repeat(8_000) },
+    route: readyRoute,
+    commandText: "Do the current task",
+    priorContext,
+  });
+  const instructionSection = rendered.split("\n\nBounded prior Command context", 1)[0] ?? "";
+  expect(instructionSection).toContain("[truncated: context budget exhausted]");
+  expect(rendered).toContain("request-0-");
 });
 
 const command = decodeCommand({

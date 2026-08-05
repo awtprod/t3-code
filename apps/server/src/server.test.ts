@@ -576,6 +576,62 @@ const buildAppUnderTest = (options?: {
     });
     const orchestrationCommandDispatcherLayer = OrchestrationCommandDispatcher.layer.pipe(
       Layer.provide(orchestrationEngineLayer),
+      Layer.provide(
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([]),
+          refresh: () => Effect.succeed([]),
+          refreshInstance: () => Effect.succeed([]),
+          getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+            Effect.succeed(
+              makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
+            ),
+          setProviderMaintenanceActionState: () => Effect.succeed([]),
+          streamChanges: Stream.empty,
+          ...options?.layers?.providerRegistry,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ServerSettings.ServerSettingsService)({
+          start: Effect.void,
+          ready: Effect.void,
+          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+          updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
+          streamChanges: Stream.empty,
+          ...options?.layers?.serverSettings,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
+          getCommandReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
+          getSnapshot: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
+          getShellSnapshot: () =>
+            Effect.succeed({
+              snapshotSequence: 0,
+              projects: [],
+              threads: [],
+              updatedAt: "1970-01-01T00:00:00.000Z",
+            }),
+          getArchivedShellSnapshot: () =>
+            Effect.succeed({
+              snapshotSequence: 0,
+              projects: [],
+              threads: [],
+              updatedAt: "1970-01-01T00:00:00.000Z",
+            }),
+          searchThreads: () => Effect.succeed({ matches: [] }),
+          getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
+          getProjectShellById: () => Effect.succeed(Option.none()),
+          getThreadShellById: () => Effect.succeed(Option.none()),
+          getThreadDetailById: () => Effect.succeed(Option.none()),
+          getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+          getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
+          getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+          getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+          getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+          getFullThreadDiffContext: () => Effect.succeed(Option.none()),
+          ...options?.layers?.projectionSnapshotQuery,
+        }),
+      ),
       Layer.provide(gitWorkflowLayer),
       Layer.provide(projectSetupScriptRunnerLayer),
       Layer.provide(vcsStatusBroadcasterLayer),

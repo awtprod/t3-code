@@ -1247,6 +1247,7 @@ export const makeCodexSessionRuntime = (
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const closedRef = yield* Ref.make(false);
+    const mcpCatalogReloadedRef = yield* Ref.make(false);
     // Records the single terminal lifecycle emit (`session/exited` from a process
     // exit XOR `session/closed` from a graceful close). Distinct from
     // `closedRef`, which guards the one-time close() *cleanup* (scope + queues):
@@ -1820,6 +1821,17 @@ export const makeCodexSessionRuntime = (
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
 
+      if (hasConfiguredMcpServer(options.appServerArgs)) {
+        yield* client.request("config/mcpServer/reload", undefined).pipe(
+          Effect.tap(() => Ref.set(mcpCatalogReloadedRef, true)),
+          Effect.catch((cause) =>
+            Effect.logWarning("Failed to load the Codex MCP tool catalog for this session.", {
+              cause,
+            }),
+          ),
+        );
+      }
+
       if (isCommandCenterPermissionProfile(options.permissionProfile)) {
         if (options.commandCenterPlatform === "win32") {
           if (options.windowsSandboxMode === undefined) {
@@ -1914,10 +1926,14 @@ export const makeCodexSessionRuntime = (
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          if (hasConfiguredMcpServer(options.appServerArgs)) {
+          if (
+            hasConfiguredMcpServer(options.appServerArgs) &&
+            !(yield* Ref.get(mcpCatalogReloadedRef))
+          ) {
             yield* client.request("config/mcpServer/reload", undefined).pipe(
+              Effect.tap(() => Ref.set(mcpCatalogReloadedRef, true)),
               Effect.catch((cause) =>
-                Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {
+                Effect.logWarning("Failed to load the Codex MCP tool catalog for this session.", {
                   cause,
                 }),
               ),

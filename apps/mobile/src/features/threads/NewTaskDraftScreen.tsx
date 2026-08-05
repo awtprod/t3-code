@@ -622,6 +622,22 @@ export function NewTaskDraftScreen(props: {
     ],
     [flow.interactionMode, flow.runtimeMode, providerOptionDescriptors],
   );
+  const efficiencyMenuActions = useMemo(
+    () => [
+      {
+        id: "efficiency:manual",
+        title: "Manual model",
+        state: flow.routingMode === "manual" ? ("on" as const) : undefined,
+      },
+      ...(["economy", "balanced", "quality"] as const).map((tier) => ({
+        id: `efficiency:auto:${tier}`,
+        title: `Auto · ${tier[0]!.toUpperCase()}${tier.slice(1)}`,
+        state:
+          flow.routingMode === "auto" && flow.efficiencyTier === tier ? ("on" as const) : undefined,
+      })),
+    ],
+    [flow.efficiencyTier, flow.routingMode],
+  );
 
   const workspaceMenuActions = useMemo(() => {
     const branchActions =
@@ -765,6 +781,20 @@ export function NewTaskDraftScreen(props: {
     }
   }
 
+  function handleEfficiencyMenuAction(event: string) {
+    if (isIncomingShareTransferPending) return;
+    if (event === "efficiency:manual") {
+      flow.setEfficiencyRouting("manual", flow.efficiencyTier);
+      return;
+    }
+    if (event.startsWith("efficiency:auto:")) {
+      flow.setEfficiencyRouting(
+        "auto",
+        event.slice("efficiency:auto:".length) as typeof flow.efficiencyTier,
+      );
+    }
+  }
+
   async function handlePickImages(): Promise<void> {
     if (isIncomingShareTransferPending) {
       return;
@@ -814,6 +844,8 @@ export function NewTaskDraftScreen(props: {
     const startFromOrigin = draft.workspaceSelection?.startFromOrigin ?? flow.startFromOrigin;
     const runtimeMode = draft.runtimeMode ?? flow.runtimeMode;
     const interactionMode = draft.interactionMode ?? flow.interactionMode;
+    const routingMode = draft.routingMode ?? flow.routingMode;
+    const efficiencyTier = draft.efficiencyTier ?? flow.efficiencyTier;
     const initialMessageText = draft.text.trim();
 
     if (
@@ -885,6 +917,8 @@ export function NewTaskDraftScreen(props: {
       startFromOrigin,
       runtimeMode,
       interactionMode,
+      routingMode,
+      efficiencyTier,
       initialMessageText,
       initialAttachments: draft.attachments,
       ...(editingPendingTask
@@ -1024,6 +1058,23 @@ export function NewTaskDraftScreen(props: {
           label={configurationLabel}
         />
       </ControlPillMenu>
+      {selectedEnvironmentServerConfig?.settings.efficiency.enabled ? (
+        <ControlPillMenu
+          actions={efficiencyMenuActions}
+          onPressAction={({ nativeEvent }) => handleEfficiencyMenuAction(nativeEvent.event)}
+        >
+          <ComposerToolbarTrigger
+            accessibilityLabel="Efficiency routing"
+            disabled={isIncomingShareTransferPending}
+            icon="gauge.with.dots.needle.33percent"
+            label={
+              flow.routingMode === "manual"
+                ? "Manual"
+                : `Auto · ${flow.efficiencyTier[0]!.toUpperCase()}${flow.efficiencyTier.slice(1)}`
+            }
+          />
+        </ControlPillMenu>
+      ) : null}
       <ControlPillMenu
         actions={environmentMenuActions}
         onPressAction={({ nativeEvent }) => handleEnvironmentMenuAction(nativeEvent.event)}

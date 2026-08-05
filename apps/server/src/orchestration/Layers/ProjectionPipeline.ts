@@ -621,6 +621,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             projectId: event.payload.projectId,
             title: event.payload.title,
             modelSelection: event.payload.modelSelection,
+            routingMode: event.payload.routingMode ?? "manual",
+            efficiencyTier: event.payload.efficiencyTier ?? null,
             runtimeMode: event.payload.runtimeMode,
             interactionMode: event.payload.interactionMode,
             branch: event.payload.branch,
@@ -758,6 +760,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.modelSelection !== undefined
               ? { modelSelection: event.payload.modelSelection }
               : {}),
+            ...(event.payload.routingMode !== undefined
+              ? { routingMode: event.payload.routingMode }
+              : {}),
+            ...(event.payload.efficiencyTier !== undefined
+              ? { efficiencyTier: event.payload.efficiencyTier }
+              : {}),
             ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
             ...(event.payload.worktreePath !== undefined
               ? { worktreePath: event.payload.worktreePath }
@@ -793,6 +801,27 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...existingRow.value,
             interactionMode: event.payload.interactionMode,
             updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.turn-start-requested": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            ...(event.payload.modelSelection === undefined
+              ? {}
+              : { modelSelection: event.payload.modelSelection }),
+            ...(event.payload.routingMode === undefined
+              ? {}
+              : { routingMode: event.payload.routingMode }),
+            ...(event.payload.efficiencyTier === undefined
+              ? {}
+              : { efficiencyTier: event.payload.efficiencyTier }),
+            updatedAt: event.payload.createdAt,
           });
           return;
         }
@@ -1143,6 +1172,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             requestedAt: event.payload.createdAt,
             requestSequence: event.sequence,
             modelSelection: event.payload.modelSelection ?? null,
+            efficiencyDecision: event.payload.efficiencyDecision ?? null,
             pendingInterruptRequested: false,
           });
           return;
@@ -1360,6 +1390,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               requestSequence:
                 existingTurn.value.requestSequence ??
                 (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.requestSequence : null),
+              efficiencyDecision:
+                existingTurn.value.efficiencyDecision ??
+                (Option.isSome(pendingTurnStart)
+                  ? (pendingTurnStart.value.efficiencyDecision ?? null)
+                  : null),
             });
           } else {
             yield* projectionTurnRepository.upsertByTurnId({
@@ -1394,6 +1429,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               checkpointRef: null,
               checkpointStatus: null,
               checkpointFiles: [],
+              efficiencyDecision: Option.isSome(pendingTurnStart)
+                ? (pendingTurnStart.value.efficiencyDecision ?? null)
+                : null,
             });
           }
 

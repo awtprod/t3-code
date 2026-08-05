@@ -5,6 +5,7 @@ import type { LegendListRef } from "@legendapp/list/react-native";
 import type {
   ApprovalRequestId,
   EnvironmentId,
+  EfficiencyTier,
   MessageId,
   ModelSelection,
   OrchestrationThreadShell,
@@ -13,6 +14,7 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
   ThreadId,
+  ThreadRoutingMode,
 } from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -81,6 +83,7 @@ export interface ThreadDetailScreenProps {
   readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateThreadRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateThreadInteractionMode: (interactionMode: ProviderInteractionMode) => void;
+  readonly onUpdateThreadEfficiencyRouting: (mode: ThreadRoutingMode, tier: EfficiencyTier) => void;
   readonly onRespondToApproval: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -443,6 +446,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               onUpdateModelSelection={props.onUpdateThreadModelSelection}
               onUpdateRuntimeMode={props.onUpdateThreadRuntimeMode}
               onUpdateInteractionMode={props.onUpdateThreadInteractionMode}
+              onUpdateEfficiencyRouting={props.onUpdateThreadEfficiencyRouting}
               onExpandedChange={setComposerExpanded}
             />
           </View>

@@ -1,6 +1,7 @@
 import type {
   ApprovalRequestId,
   EnvironmentId,
+  EfficiencyTier,
   ModelSelection,
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
@@ -10,6 +11,7 @@ import type {
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
+  ThreadRoutingMode,
   TurnId,
 } from "@t3tools/contracts";
 import {
@@ -406,6 +408,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   activeThreadProviderDisplayName: string | null;
+  contextAdviceThreshold: number | null;
+  toolWarningThreshold: number | null;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -433,6 +437,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         <ContextWindowMeter
           usage={props.activeContextWindow}
           providerDisplayName={props.activeThreadProviderDisplayName}
+          adviceThresholdPercent={props.contextAdviceThreshold}
+          toolWarningThreshold={props.toolWarningThreshold}
         />
       ) : null}
       {props.isPreparingWorktree ? (
@@ -570,6 +576,8 @@ export interface ChatComposerProps {
 
   // Context window
   activeThreadActivities: Thread["activities"] | undefined;
+  efficiencyRoutingMode: ThreadRoutingMode;
+  efficiencyTier: EfficiencyTier;
 
   // Misc
   resolvedTheme: "light" | "dark";
@@ -587,6 +595,7 @@ export interface ChatComposerProps {
 
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
+  onEfficiencyRoutingChange: (mode: ThreadRoutingMode, tier: EfficiencyTier) => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -663,6 +672,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
     activeThreadActivities,
+    efficiencyRoutingMode,
+    efficiencyTier,
     resolvedTheme,
     settings,
     keybindings,
@@ -674,6 +685,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerTerminalContextsRef,
     composerElementContextsRef,
     onSend,
+    onEfficiencyRoutingChange,
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
@@ -952,6 +964,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     return formatProviderDisplayName(activeThreadModelSelection.instanceId);
   }, [providerStatuses, activeThreadModelSelection]);
+  const activeEfficiencyTier = activeThread?.efficiencyTier ?? settings.efficiency.defaultTier;
+  const contextAdviceThreshold =
+    activeThread?.routingMode === "auto"
+      ? settings.efficiency.contextThresholds[activeEfficiencyTier]
+      : null;
+  const toolWarningThreshold =
+    activeThread?.routingMode === "auto"
+      ? settings.efficiency.toolWarnings[activeEfficiencyTier]
+      : null;
 
   // ------------------------------------------------------------------
   // Composer-local state
@@ -3157,9 +3178,43 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       setIsComposerModelPickerOpen(open);
                     }}
                     getModelDisabledReason={getModelDisabledReason}
-                    onInstanceModelChange={onProviderModelSelect}
+                    onInstanceModelChange={(instanceId, model) => {
+                      onEfficiencyRoutingChange("manual", efficiencyTier);
+                      onProviderModelSelect(instanceId, model);
+                    }}
                   />
                 )}
+
+                {settings.efficiency.enabled ? (
+                  <Select
+                    value={efficiencyRoutingMode === "manual" ? "manual" : `auto:${efficiencyTier}`}
+                    onValueChange={(value) => {
+                      if (!value) return;
+                      if (value === "manual") {
+                        onEfficiencyRoutingChange("manual", efficiencyTier);
+                      } else {
+                        onEfficiencyRoutingChange(
+                          "auto",
+                          value.slice("auto:".length) as EfficiencyTier,
+                        );
+                      }
+                    }}
+                  >
+                    <ComposerSelectControl aria-label="Efficiency routing" className="font-medium">
+                      <SelectValue>
+                        {efficiencyRoutingMode === "manual"
+                          ? "Manual"
+                          : `Auto · ${efficiencyTier[0]!.toUpperCase()}${efficiencyTier.slice(1)}`}
+                      </SelectValue>
+                    </ComposerSelectControl>
+                    <SelectPopup alignItemWithTrigger={false}>
+                      <SelectItem value="manual">Manual model</SelectItem>
+                      <SelectItem value="auto:economy">Auto · Economy</SelectItem>
+                      <SelectItem value="auto:balanced">Auto · Balanced</SelectItem>
+                      <SelectItem value="auto:quality">Auto · Quality</SelectItem>
+                    </SelectPopup>
+                  </Select>
+                ) : null}
 
                 {isComposerFooterCompact ? (
                   <CompactComposerControlsMenu
@@ -3209,6 +3264,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   activeThreadProviderDisplayName={activeThreadProviderDisplayName}
+                  contextAdviceThreshold={contextAdviceThreshold}
+                  toolWarningThreshold={toolWarningThreshold}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

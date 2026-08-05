@@ -72,6 +72,28 @@ it.effect("binds project and working-directory scope into the issued credential"
   }),
 );
 
+it.effect("derives read-only and writable database capabilities at credential issue time", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issueCapabilities = Effect.fnUntraced(function* (databaseAccess: "read" | "write") {
+      const issued = yield* registry.issue({
+        threadId: ThreadId.make(`thread-database-${databaseAccess}`),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        databaseAccess,
+      });
+      const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      return (yield* registry.resolve(token))?.capabilities ?? new Set();
+    });
+
+    expect([...(yield* issueCapabilities("read"))]).toEqual(["preview", "database.read"]);
+    expect([...(yield* issueCapabilities("write"))]).toEqual([
+      "preview",
+      "database.read",
+      "database.write",
+    ]);
+  }),
+);
+
 it.effect("builds MCP endpoints from the bound server host", () =>
   Effect.gen(function* () {
     const cases = [

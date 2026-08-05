@@ -92,6 +92,8 @@ describe("thread outbox", () => {
       },
       runtimeMode: "approval-required",
       interactionMode: "plan",
+      routingMode: "auto",
+      efficiencyTier: "balanced",
     } satisfies QueuedThreadMessage;
 
     expect(decodeQueuedThreadMessage(encodeQueuedThreadMessage(selectedMessage))).toEqual(
@@ -102,11 +104,15 @@ describe("thread outbox", () => {
         modelSelection: selectedMessage.modelSelection,
         runtimeMode: selectedMessage.runtimeMode,
         interactionMode: selectedMessage.interactionMode,
+        routingMode: selectedMessage.routingMode,
+        efficiencyTier: selectedMessage.efficiencyTier,
       }),
     ).toEqual({
       modelSelection: selectedMessage.modelSelection,
       runtimeMode: selectedMessage.runtimeMode,
       interactionMode: selectedMessage.interactionMode,
+      routingMode: selectedMessage.routingMode,
+      efficiencyTier: selectedMessage.efficiencyTier,
     });
   });
 

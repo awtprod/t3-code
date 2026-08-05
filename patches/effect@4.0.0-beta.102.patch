@@ -2,6 +2,17 @@ diff --git a/dist/unstable/ai/McpServer.js b/dist/unstable/ai/McpServer.js
 index 2830482842c07f2f0fb412076c901e52830b7e24..cd92160578fd152c6b6399ad8a328c4ddd7d300c 100644
 --- a/dist/unstable/ai/McpServer.js
 +++ b/dist/unstable/ai/McpServer.js
+@@ -38,7 +38,10 @@ import * as RpcSerialization from "../rpc/RpcSerialization.js";
+ import * as RpcServer from "../rpc/RpcServer.js";
+ import * as AiError from "./AiError.js";
+ import { CallToolResult, ClientNotificationRpcs, ClientRpcs, CompleteResult, Elicit, ElicitationDeclined, EnabledWhen, GetPromptResult, InternalError, InvalidParams, isParam, ListPromptsResult, ListResourcesResult, ListResourceTemplatesResult, ListToolsResult, McpServerClient, McpServerClientMiddleware, Prompt, Resource, ResourceTemplate, ServerNotificationRpcs, ServerRequestRpcs, TextContent, Tool as McpTool } from "./McpSchema.js";
+ import * as Tool from "./Tool.js";
++export const McpListToolFilter = /*#__PURE__*/Context.Reference("effect/ai/McpServer/McpListToolFilter", {
++  defaultValue: () => () => true
++});
+ /**
+  * Service that stores and serves an MCP server's registered tools, resources,
+  * prompts, completions, and outgoing notifications.
 @@ -230,6 +230,26 @@ export const run = /*#__PURE__*/Effect.fnUntraced(function* (options) {
    const server = yield* McpServer;
    const isHttp = Option.isSome(yield* Effect.serviceOption(HttpRouter.HttpRouter));
@@ -38,6 +49,30 @@ index 2830482842c07f2f0fb412076c901e52830b7e24..cd92160578fd152c6b6399ad8a328c4d
    return Layer.merge(layerWithProtocolState(options), routes).pipe(Layer.provide(layerMcpProtocolHttp(options)), Layer.provide(protocolState), Layer.provide(RpcSerialization.layerJsonRpc()));
  };
  const layerMcpProtocolHttp = options => Layer.effect(RpcServer.Protocol)(Effect.gen(function* () {
+@@ -994,10 +1017,11 @@ const layerHandlers = options => Layer.effectDiscard(Effect.gen(function* () {
+     "tools/list": (_, {
+       client,
+       headers
+-    }) => Effect.sync(() => {
++    }) => Effect.gen(function* () {
++      const listToolFilter = yield* McpListToolFilter;
+       const initialized = getInitializedClient(clientSessions, client.id, headers);
+       return new ListToolsResult({
+-        tools: filterByClient(initialized, server.tools, "tool")
++        tools: filterByClient(initialized, server.tools, "tool").filter(listToolFilter)
+       });
+     }),
+     // Notifications
+diff --git a/dist/unstable/ai/McpServer.d.ts b/dist/unstable/ai/McpServer.d.ts
+index 8c3d4b15e..c304e0ca3 100644
+--- a/dist/unstable/ai/McpServer.d.ts
++++ b/dist/unstable/ai/McpServer.d.ts
+@@ -14,3 +14,5 @@ import type { CallTool, ClientCapabilities, Complete, GetPrompt, Param, PromptMe
+ import * as Tool from "./Tool.ts";
+ import type * as Toolkit from "./Toolkit.ts";
++export type McpListToolFilter = (tool: McpTool) => boolean;
++export declare const McpListToolFilter: Context.Reference<McpListToolFilter>;
+ declare const McpServer_base: Context.ServiceClass<McpServer, "effect/ai/McpServer", {
 diff --git a/dist/unstable/rpc/RpcClient.d.ts b/dist/unstable/rpc/RpcClient.d.ts
 index a70061a638faabdd663eca25cb79585fec06e03c..15c940b61860830f11cad86b155e3b76f43d34ea 100644
 --- a/dist/unstable/rpc/RpcClient.d.ts

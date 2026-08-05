@@ -18,6 +18,7 @@ export interface McpCredentialRequest {
   readonly projectId?: ProjectId;
   readonly cwd?: string;
   readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
+  readonly databaseAccess?: "read" | "write";
   readonly spaceId?: SpaceId;
   readonly repositoryId?: RepositoryId;
 }
@@ -147,6 +148,11 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       );
       const spaceId = request.spaceId ?? registeredScope?.spaceId;
       const repositoryId = request.repositoryId ?? registeredScope?.repositoryId;
+      const capabilities = new Set<McpInvocationContext.McpCapability>(
+        request.capabilities ?? registeredScope?.capabilities ?? ["preview"],
+      );
+      if (request.databaseAccess !== undefined) capabilities.add("database.read");
+      if (request.databaseAccess === "write") capabilities.add("database.write");
       const scope: McpInvocationContext.McpInvocationScope = {
         environmentId,
         threadId: ThreadId.make(request.threadId),
@@ -154,7 +160,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
         ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
         ...(request.cwd?.trim() ? { cwd: request.cwd.trim() } : {}),
-        capabilities: request.capabilities ?? registeredScope?.capabilities ?? new Set(["preview"]),
+        capabilities,
         ...(spaceId === undefined ? {} : { spaceId }),
         ...(repositoryId === undefined ? {} : { repositoryId }),
         memoryWriteMode: registeredScope?.memoryWriteMode ?? "propose",

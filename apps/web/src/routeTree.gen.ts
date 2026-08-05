@@ -19,6 +19,7 @@ import { Route as SettingsSourceControlRouteImport } from './routes/settings.sou
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
+import { Route as SettingsEfficiencyRouteImport } from './routes/settings.efficiency'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/settings.diagnostics'
 import { Route as SettingsDatabasesRouteImport } from './routes/settings.databases'
 import { Route as SettingsConnectionsRouteImport } from './routes/settings.connections'
@@ -78,6 +79,11 @@ const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
 const SettingsGeneralRoute = SettingsGeneralRouteImport.update({
   id: '/general',
   path: '/general',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsEfficiencyRoute = SettingsEfficiencyRouteImport.update({
+  id: '/efficiency',
+  path: '/efficiency',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsDiagnosticsRoute = SettingsDiagnosticsRouteImport.update({
@@ -151,6 +157,7 @@ export interface FileRoutesByFullPath {
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/databases': typeof SettingsDatabasesRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
+  '/settings/efficiency': typeof SettingsEfficiencyRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -172,6 +179,7 @@ export interface FileRoutesByTo {
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/databases': typeof SettingsDatabasesRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
+  '/settings/efficiency': typeof SettingsEfficiencyRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -196,6 +204,7 @@ export interface FileRoutesById {
   '/settings/connections': typeof SettingsConnectionsRoute
   '/settings/databases': typeof SettingsDatabasesRoute
   '/settings/diagnostics': typeof SettingsDiagnosticsRoute
+  '/settings/efficiency': typeof SettingsEfficiencyRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -221,6 +230,7 @@ export interface FileRouteTypes {
     | '/settings/connections'
     | '/settings/databases'
     | '/settings/diagnostics'
+    | '/settings/efficiency'
     | '/settings/general'
     | '/settings/keybindings'
     | '/settings/providers'
@@ -242,6 +252,7 @@ export interface FileRouteTypes {
     | '/settings/connections'
     | '/settings/databases'
     | '/settings/diagnostics'
+    | '/settings/efficiency'
     | '/settings/general'
     | '/settings/keybindings'
     | '/settings/providers'
@@ -265,6 +276,7 @@ export interface FileRouteTypes {
     | '/settings/connections'
     | '/settings/databases'
     | '/settings/diagnostics'
+    | '/settings/efficiency'
     | '/settings/general'
     | '/settings/keybindings'
     | '/settings/providers'
@@ -353,6 +365,13 @@ declare module '@tanstack/react-router' {
       path: '/general'
       fullPath: '/settings/general'
       preLoaderRoute: typeof SettingsGeneralRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/efficiency': {
+      id: '/settings/efficiency'
+      path: '/efficiency'
+      fullPath: '/settings/efficiency'
+      preLoaderRoute: typeof SettingsEfficiencyRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/diagnostics': {
@@ -460,6 +479,7 @@ interface SettingsRouteChildren {
   SettingsConnectionsRoute: typeof SettingsConnectionsRoute
   SettingsDatabasesRoute: typeof SettingsDatabasesRoute
   SettingsDiagnosticsRoute: typeof SettingsDiagnosticsRoute
+  SettingsEfficiencyRoute: typeof SettingsEfficiencyRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
@@ -474,6 +494,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsConnectionsRoute: SettingsConnectionsRoute,
   SettingsDatabasesRoute: SettingsDatabasesRoute,
   SettingsDiagnosticsRoute: SettingsDiagnosticsRoute,
+  SettingsEfficiencyRoute: SettingsEfficiencyRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,
