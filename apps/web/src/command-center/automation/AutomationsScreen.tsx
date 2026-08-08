@@ -230,7 +230,7 @@ export function AutomationsScreen({
             COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
           )}
         >
-          <div className="flex min-h-8 items-center gap-3">
+          <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-2">
             <Button
               aria-label="Back to Command"
               render={<a href="/" />}
@@ -251,6 +251,11 @@ export function AutomationsScreen({
                 disabled={authoringUnavailable}
                 onClick={() => setShowCreate(true)}
                 size="sm"
+                title={
+                  authoringUnavailable
+                    ? "Creating automations isn't supported in this environment yet."
+                    : undefined
+                }
                 variant="outline"
               >
                 <PlusIcon />
@@ -267,6 +272,11 @@ export function AutomationsScreen({
                   disabled={saveDisabled}
                   onClick={onSave}
                   size="sm"
+                  title={
+                    authoringUnavailable
+                      ? "Saving automations isn't supported in this environment yet."
+                      : undefined
+                  }
                 >
                   {isSaving ? (
                     <LoaderCircleIcon className="animate-spin motion-reduce:animate-none" />
@@ -280,9 +290,8 @@ export function AutomationsScreen({
           </div>
           {authoringUnavailable ? (
             <p className="mt-2 text-xs text-warning" role="status">
-              Automation viewing and runs remain available. Local authoring is unavailable:{" "}
-              {authoringHealth.message ??
-                "this environment does not pass the Linux atomic-exchange preflight"}
+              View and run only. Creating and saving automations isn&apos;t supported in this
+              environment yet.
             </p>
           ) : null}
           {editorError ? (
@@ -291,7 +300,7 @@ export function AutomationsScreen({
             </p>
           ) : configCommitSha ? (
             <p className="mt-1 truncate text-[0.6875rem] text-muted-foreground">
-              Local config commit {configCommitSha.slice(0, 10)} · publication is handled separately
+              Loaded from local config commit {configCommitSha.slice(0, 10)}
             </p>
           ) : null}
           {showCreate && onCreate ? (
@@ -449,6 +458,7 @@ export function AutomationsScreen({
                   className="h-full min-h-[28rem]"
                   definition={editorDefinition}
                   onDefinitionChange={onDefinitionChange}
+                  readOnly={authoringUnavailable}
                 />
               ) : (
                 <div

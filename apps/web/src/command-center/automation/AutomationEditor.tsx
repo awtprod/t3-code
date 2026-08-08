@@ -409,7 +409,7 @@ function AutomationInspector({
   return (
     <aside
       aria-label="Automation authoring controls"
-      className="w-full shrink-0 border-t bg-card p-4 lg:w-80 lg:border-l lg:border-t-0"
+      className="w-full shrink-0 border-t bg-card p-4 @[80rem]/automation:w-80 @[80rem]/automation:border-l @[80rem]/automation:border-t-0"
       data-slot="automation-inspector"
     >
       <h3 className="text-sm font-semibold">Node editor</h3>
@@ -569,7 +569,7 @@ function ValidationPanel({
   return (
     <aside
       aria-label="Automation validation"
-      className="w-full shrink-0 border-t bg-card p-4 lg:w-72 lg:border-l lg:border-t-0"
+      className="w-full shrink-0 border-t bg-card p-4 @[80rem]/automation:w-72 @[80rem]/automation:border-l @[80rem]/automation:border-t-0"
       data-slot="automation-validation"
     >
       <div className="flex items-center gap-2">
@@ -687,7 +687,7 @@ export function AutomationEditor({
     <section
       aria-label={`${definition.name} automation editor`}
       className={cn(
-        "flex min-h-0 flex-col overflow-hidden rounded-2xl border bg-background",
+        "@container/automation flex min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl border bg-background",
         className,
       )}
       data-slot="automation-editor"
@@ -712,7 +712,7 @@ export function AutomationEditor({
           {readOnly ? <Badge variant="outline">Read only</Badge> : null}
         </div>
 
-        <div className="mt-3 grid gap-2 md:grid-cols-[minmax(10rem,1fr)_10rem_minmax(12rem,1fr)_auto]">
+        <div className="mt-3 grid gap-2 @[36rem]/automation:grid-cols-2 @[56rem]/automation:grid-cols-[minmax(10rem,1fr)_10rem_minmax(12rem,1fr)_auto]">
           <label className="text-xs font-medium">
             Name
             <Input
@@ -751,7 +751,7 @@ export function AutomationEditor({
             </select>
           </label>
           {definition.trigger.kind === "schedule" ? (
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 gap-2 @[32rem]/automation:grid-cols-2">
               <label className="text-xs font-medium">
                 Expression
                 <Input
@@ -861,8 +861,8 @@ export function AutomationEditor({
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <div className="min-h-[28rem] min-w-0 flex-1 overflow-auto bg-muted/20">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto @[80rem]/automation:flex-row @[80rem]/automation:overflow-hidden">
+        <div className="min-h-[28rem] min-w-0 shrink-0 overflow-auto bg-muted/20 @[80rem]/automation:min-h-0 @[80rem]/automation:flex-1">
           <DndContext modifiers={CANVAS_DND_MODIFIERS} onDragEnd={handleDragEnd} sensors={sensors}>
             <div
               aria-label="Automation canvas"

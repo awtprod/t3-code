@@ -32,6 +32,8 @@ describe("AutomationEditor", () => {
     );
 
     expect(html).toContain('data-slot="automation-editor"');
+    expect(html).toContain("@container/automation");
+    expect(html).toContain("@[80rem]/automation:flex-row");
     expect(html).toContain('data-slot="automation-canvas"');
     expect(html).toContain('data-slot="automation-edges"');
     expect(html).toContain('data-kind="connector.read"');

@@ -72,9 +72,11 @@ describe("AutomationsScreen", () => {
       />,
     );
 
-    expect(html).toContain("Automation viewing and runs remain available");
-    expect(html).toContain("Linux atomic exchange support is unavailable.");
+    expect(html).toContain("View and run only");
+    expect(html).toContain("Creating and saving automations isn&#x27;t supported");
+    expect(html).not.toContain("Linux atomic exchange support is unavailable.");
     expect(html).toContain('data-slot="automation-editor"');
+    expect(html).toContain("Read only");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*New automation/su);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Save local commit/su);
   });
