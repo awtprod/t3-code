@@ -115,7 +115,7 @@ const decodeRoot = Schema.decodeUnknownEffect(RootConfigFile);
 const decodeSpace = Schema.decodeUnknownEffect(SpaceConfigFile);
 const decodeCanonicalSpace = Schema.decodeUnknownEffect(Space);
 const decodeCanonicalConnection = Schema.decodeUnknownEffect(Connection);
-const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 const configError = (message: string, cause?: unknown) =>
   new CommandCenterError({

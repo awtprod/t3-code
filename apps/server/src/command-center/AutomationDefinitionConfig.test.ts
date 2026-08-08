@@ -22,8 +22,8 @@ const decodeSpace = Schema.decodeUnknownSync(Space);
 const decodeGet = Schema.decodeUnknownSync(CommandCenterAutomationDefinitionGetInput);
 const decodeCreate = Schema.decodeUnknownSync(CommandCenterAutomationDefinitionCreateInput);
 const decodeSave = Schema.decodeUnknownSync(CommandCenterAutomationDefinitionSaveInput);
-const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
-const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const fixtureSpace = decodeSpace({
   id: "sample-space",

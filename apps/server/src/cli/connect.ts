@@ -425,7 +425,7 @@ const disconnectCloud = Effect.fn("cloud.cli.disconnect")(function* (options: {
 
   if (options.clearAuthorization) {
     yield* Console.log(
-      "Signed out of T3 Connect locally.\nThe background service is managed separately with `t3 service`.",
+      "Signed out of T3 Connect locally.\nThe background service is managed separately with `command-center service`.",
     );
   }
 });
@@ -686,52 +686,6 @@ const connectLogoutCommand = Command.make("logout", {
   ),
 );
 
-const offerBootService = Effect.gen(function* () {
-  const bootService = yield* BootService.BootService;
-  const { supported, installed, current } = yield* bootService.status;
-  if (!supported) {
-    // Don't prompt for something that can only fail; background setup is
-    // Linux/systemd-only for now.
-    return false;
-  }
-  if (installed && current) {
-    yield* Console.log(
-      "Command Center is already set up to run in the background on this machine.",
-    );
-    return true;
-  }
-  const wanted = yield* Prompt.run(
-    Prompt.confirm({
-      message: installed
-        ? "The installed Command Center background service is from an older setup. Update it now?"
-        : "Run Command Center in the background whenever this machine boots? " +
-          "It stays reachable through T3 Connect even after you log out.",
-      initial: true,
-    }),
-  );
-  if (!wanted) {
-    return false;
-  }
-  const plan = yield* bootService.install;
-  yield* Console.log(`Background service installed. Logs: ${plan.logPath}`);
-  return true;
-});
-
-export const recoverBootServiceOffer = <R>(
-  offer: Effect.Effect<boolean, BootService.BootServiceError | Terminal.QuitError, R>,
-) =>
-  offer.pipe(
-    Effect.catchTags({
-      QuitError: () => Effect.succeed(false),
-      BootServiceUnsupportedError: (error) =>
-        Console.log(`Skipping background setup: ${error.message}`).pipe(Effect.as(false)),
-      BootServiceCommandError: (error) =>
-        Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
-      BootServiceInstallError: (error) =>
-        Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
-    }),
-  );
-
 export const connectCommand = Command.make("connect", {
   ...projectLocationFlags,
   headless: headlessFlag,
@@ -756,15 +710,12 @@ export const connectCommand = Command.make("connect", {
         const background = yield* recoverServiceOnboardingOffer(offerServiceDuringOnboarding);
         if (background) {
           yield* Console.log(
-            "\n✓ Background service ready\n\nT3 Code will stay reachable after you log out.",
+            "\n✓ Background service ready\n\nCommand Center will stay reachable after you log out.",
           );
           return;
         }
         const serveCommand = yield* resolveCliCommand("serve");
         yield* Console.log(
-          background
-            ? "\n✓ Background service ready\n\nCommand Center will stay reachable after you log out."
-            : "\nNext\n  Start the server with `t3 serve` to make this machine reachable.",
           `\nNext\n  Start the server with \`${serveCommand}\` to make this machine reachable.`,
         );
       }),

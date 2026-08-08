@@ -184,7 +184,7 @@ export class GoogleReadConnector extends Context.Service<
   GoogleReadConnectorShape
 >()("@awtprod/command-center/command-center/GoogleReadConnector") {}
 
-const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeArtifact = Schema.decodeUnknownEffect(Artifact);
 const isConnectorError = Schema.is(GoogleReadConnectorError);
 

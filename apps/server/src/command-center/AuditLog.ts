@@ -47,8 +47,8 @@ interface AuditEventRow {
   readonly occurredAt: string;
 }
 
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
-const decodeJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const textEncoder = new TextEncoder();
 
 export const commandCenterAuditHashDocument = (input: {

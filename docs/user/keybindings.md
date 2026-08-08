@@ -64,6 +64,9 @@ Invalid rules are ignored. Invalid config files are ignored. Warnings are logged
 - `preview.zoomOut`: zoom the preview viewport out one step (in focused preview context by default)
 - `preview.resetZoom`: reset the preview zoom to 100% (in focused preview context by default)
 - `commandPalette.toggle`: open or close the global command palette
+- `filePicker.toggle`: open or close file search for the active project
+- `projectSearch.toggle`: search inside the active project's files
+- `themeEditor.toggle`: open or close the floating theme editor
 - `chat.new`: create a new chat thread preserving the active thread's branch/worktree state
 - `chat.newLocal`: create a new chat thread for the active project in a new environment (local/worktree determined by app settings (default `local`))
 - `editor.openFavorite`: open current project/worktree in the last-used editor
@@ -78,6 +81,16 @@ Supported modifiers:
 - `ctrl` / `control`
 - `shift`
 - `alt` / `option`
+
+`filePicker.toggle` opens file search for the active project and defaults to `mod+p`.
+`projectSearch.toggle` searches inside the active project's files and defaults to `mod+shift+f`.
+Repeating either shortcut closes that search, and switching shortcuts replaces the open search.
+`themeEditor.toggle` opens or closes the floating theme editor and defaults to
+`mod+alt+shift+t`. Select a color label to spotlight the elements that use it; select the label
+again to clear the spotlight. The swatch and hex field keep that color selected while you edit it.
+Use **Inspect** to pick an element in the app and reveal its color token. Inspect disarms after one
+successful pick; its hover glow and badge preview the element and token that click will select.
+**Cancel** or `Escape` exits Inspect and clears its selection and spotlight.
 
 Examples:
 

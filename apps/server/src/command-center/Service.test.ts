@@ -44,8 +44,8 @@ const decodeRemember = Schema.decodeUnknownSync(CommandCenterMemoryRememberInput
 const decodeProposal = Schema.decodeUnknownSync(CommandCenterMemoryProposeInput);
 const decodeMemoryReview = Schema.decodeUnknownSync(CommandCenterMemoryReviewInput);
 const decodeApprovalDecision = Schema.decodeUnknownSync(CommandCenterApprovalDecisionInput);
-const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
-const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const fixtureTimestamp = "2026-01-01T00:00:00.000Z";
 

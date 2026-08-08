@@ -366,6 +366,11 @@ export function createDevRunnerEnv({
       delete output.T3CODE_HOME;
     }
 
+    // Dev-runner servers are never launcher-managed. Do not inherit service
+    // metadata from a parent Command Center process.
+    delete output.T3_SERVICE_LAUNCHER_CONTEXT;
+    delete output.T3_BOOT_SERVICE_UNIT;
+
     if (isServeMode) {
       output.T3CODE_PORT = String(serverPort);
     } else if (!isDesktopMode) {
@@ -871,6 +876,14 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
           // explicit --dev-url still wins.
           if (input.devUrl === undefined) {
             env.VITE_DEV_SERVER_URL = shared.url;
+          }
+          // A shared origin serves a remote browser, where unbundled dev's
+          // per-module requests each pay a tailnet round trip — a cold module
+          // graph takes minutes to first paint. Bundled dev collapses that to
+          // a few chunk requests. Only defaulted, so T3CODE_BUNDLED_DEV=0
+          // still opts a --share run back out.
+          if (env.T3CODE_BUNDLED_DEV === undefined) {
+            env.T3CODE_BUNDLED_DEV = "1";
           }
           yield* Effect.logInfo(`[dev-runner] shared on tailnet: ${shared.url}`);
         }

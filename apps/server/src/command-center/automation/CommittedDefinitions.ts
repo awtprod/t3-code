@@ -27,7 +27,7 @@ export interface CommittedAutomationSnapshot {
 const COMMIT_SHA_PATTERN = /^[a-f0-9]{40,64}$/u;
 const COMMITTED_AUTOMATION_PATH_PATTERN = /^automations\/[^/]+\.json$/u;
 const decodeAutomation = Schema.decodeUnknownEffect(Automation);
-const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 export class CommittedAutomationConfigError extends Schema.TaggedErrorClass<CommittedAutomationConfigError>()(
   "CommittedAutomationConfigError",

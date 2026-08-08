@@ -1386,8 +1386,8 @@ const AuthoringHelperResultSchema = Schema.Struct({
   recoveryDirectoryIdentity: Schema.optional(AtomicDirectoryIdentitySchema),
 });
 
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
-const decodeJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeAuthoringHelperResult = Schema.decodeUnknownEffect(AuthoringHelperResultSchema);
 
 function sha256(contents: Uint8Array): string {

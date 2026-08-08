@@ -62,7 +62,7 @@ type ManifestEntry = typeof ManifestEntry.Type;
 type LoadedCommandCenterConfigSpace =
   CommandCenterConfig.LoadedCommandCenterConfig["spaces"][number];
 
-const decodeJson = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
+const decodeJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeManifest = Schema.decodeUnknownExit(Manifest);
 
 export const AutomationScopedShellErrorCode = Schema.Literals([

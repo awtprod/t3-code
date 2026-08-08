@@ -65,7 +65,7 @@ export class RunLifecycleError extends Schema.TaggedErrorClass<RunLifecycleError
 ) {}
 
 const isRunLifecycleError = Schema.is(RunLifecycleError);
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const lifecycleError = (reason: RunLifecycleError["reason"], message: string, cause?: unknown) =>
   new RunLifecycleError({

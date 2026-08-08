@@ -84,8 +84,8 @@ const decodeItemsListResult = Schema.decodeUnknownSync(
 );
 const isGoogleReadRequest = Schema.is(GoogleReadRequest);
 const decodeRouteReceipt = Schema.decodeUnknownSync(CommandCenterRouteSelectedPayload);
-const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
-const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const studioSpace = decodeSpace({
   id: "example-studio",
