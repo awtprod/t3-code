@@ -287,6 +287,7 @@ function AutomationsEnvironmentRouteView({
       editorStatus={editorStatus}
       environmentId={environmentId}
       environmentOptions={environmentOptions}
+      hasUnsavedChanges={Object.values(drafts).some(({ dirty }) => dirty)}
       isDirty={activeDraft?.dirty ?? false}
       isCreating={isCreating}
       isSaving={savingAutomationId === selectedAutomation?.id}
@@ -323,9 +324,13 @@ function AutomationsRouteView() {
           id: environment.environmentId,
           label: environment.label,
           isPrimary: environment.entry.target._tag === "PrimaryConnectionTarget",
+          platformOs: environment.serverConfig?.environment.platform.os ?? "unknown",
         }))
-        .sort((left, right) => Number(right.isPrimary) - Number(left.isPrimary))
-        .map(({ id, label }) => ({ id, label })),
+        .sort(
+          (left, right) =>
+            Number(left.isPrimary) - Number(right.isPrimary) ||
+            left.label.localeCompare(right.label),
+        ),
     [environments],
   );
   const environmentId = resolveAutomationEnvironmentId({

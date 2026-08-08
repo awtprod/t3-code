@@ -1,5 +1,5 @@
 import type { Automation, AutomationNodeKind, Space } from "@command-center/core";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ExecutionEnvironmentPlatformOs } from "@t3tools/contracts";
 
 import type {
   AutomationEditorDefinition,
@@ -24,6 +24,8 @@ export interface ResolveAutomationsScreenStatusInput {
 
 export interface AutomationEnvironmentCandidate {
   readonly id: EnvironmentId;
+  readonly isPrimary?: boolean;
+  readonly platformOs?: ExecutionEnvironmentPlatformOs;
 }
 
 const PREFERRED_AUTOMATION_ENVIRONMENT_KEY = "t3code:automations:environment";
@@ -50,11 +52,17 @@ export function resolveAutomationEnvironmentId(input: {
   readonly primaryEnvironmentId: EnvironmentId | null;
   readonly environments: ReadonlyArray<AutomationEnvironmentCandidate>;
 }): EnvironmentId | null {
-  if (
-    input.requestedEnvironmentId !== null &&
-    input.environments.some(({ id }) => id === input.requestedEnvironmentId)
-  ) {
-    return input.requestedEnvironmentId;
+  const requested = input.environments.find(({ id }) => id === input.requestedEnvironmentId);
+  const remoteLinux = input.environments.find(
+    ({ isPrimary, platformOs }) => isPrimary === false && platformOs === "linux",
+  );
+  const remote = remoteLinux ?? input.environments.find(({ isPrimary }) => isPrimary === false);
+
+  if (requested !== undefined) {
+    return requested.id;
+  }
+  if (remote !== undefined) {
+    return remote.id;
   }
   if (
     input.primaryEnvironmentId !== null &&

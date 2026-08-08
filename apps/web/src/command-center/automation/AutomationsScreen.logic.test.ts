@@ -18,16 +18,38 @@ describe("automations route state", () => {
       resolveAutomationEnvironmentId({
         requestedEnvironmentId: linux,
         primaryEnvironmentId: windows,
-        environments: [{ id: windows }, { id: linux }],
+        environments: [
+          { id: windows, isPrimary: true, platformOs: "windows" },
+          { id: linux, isPrimary: false, platformOs: "linux" },
+        ],
       }),
     ).toBe(linux);
     expect(
       resolveAutomationEnvironmentId({
         requestedEnvironmentId: EnvironmentId.make("removed-environment"),
         primaryEnvironmentId: windows,
-        environments: [{ id: windows }, { id: linux }],
+        environments: [
+          { id: windows, isPrimary: true, platformOs: "windows" },
+          { id: linux, isPrimary: false, platformOs: "linux" },
+        ],
       }),
-    ).toBe(windows);
+    ).toBe(linux);
+  });
+
+  it("defaults away from the local primary when a remote automation host is available", () => {
+    const windows = EnvironmentId.make("windows-primary");
+    const linux = EnvironmentId.make("openclaw-server");
+
+    expect(
+      resolveAutomationEnvironmentId({
+        requestedEnvironmentId: null,
+        primaryEnvironmentId: windows,
+        environments: [
+          { id: windows, isPrimary: true, platformOs: "windows" },
+          { id: linux, isPrimary: false, platformOs: "linux" },
+        ],
+      }),
+    ).toBe(linux);
   });
 
   it("uses safe disconnected, loading, unavailable, and config states", () => {

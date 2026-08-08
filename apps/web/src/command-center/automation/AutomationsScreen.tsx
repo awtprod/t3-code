@@ -1,7 +1,7 @@
 "use client";
 
 import type { Automation, Space } from "@command-center/core";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ExecutionEnvironmentPlatformOs } from "@t3tools/contracts";
 import {
   ArrowLeftIcon,
   CheckCircle2Icon,
@@ -44,6 +44,8 @@ import type { AutomationEditorDefinition } from "./types";
 export interface AutomationEnvironmentOption {
   readonly id: EnvironmentId;
   readonly label: string;
+  readonly isPrimary?: boolean;
+  readonly platformOs?: ExecutionEnvironmentPlatformOs;
 }
 
 const EMPTY_AUTOMATION_ENVIRONMENT_OPTIONS: ReadonlyArray<AutomationEnvironmentOption> = [];
@@ -63,6 +65,7 @@ export interface AutomationsScreenProps {
   readonly editorStatus?: "loading" | "ready" | "unavailable" | undefined;
   readonly editorError?: string | null | undefined;
   readonly isDirty?: boolean | undefined;
+  readonly hasUnsavedChanges?: boolean | undefined;
   readonly isSaving?: boolean | undefined;
   readonly onDefinitionChange?: ((definition: AutomationEditorDefinition) => void) | undefined;
   readonly onSave?: (() => void) | undefined;
@@ -187,6 +190,7 @@ export function AutomationsScreen({
   editorStatus = "unavailable",
   editorError,
   isDirty = false,
+  hasUnsavedChanges = isDirty,
   isSaving = false,
   onDefinitionChange,
   onSave,
@@ -275,15 +279,22 @@ export function AutomationsScreen({
                     onEnvironmentChange === undefined ||
                     environmentOptions.length < 2 ||
                     isCreating ||
-                    isSaving ||
-                    isDirty
+                    isSaving
                   }
-                  onChange={(event) =>
-                    onEnvironmentChange?.(event.currentTarget.value as EnvironmentId)
-                  }
+                  onChange={(event) => {
+                    const nextEnvironmentId = event.currentTarget.value as EnvironmentId;
+                    if (
+                      hasUnsavedChanges &&
+                      !window.confirm("Discard unsaved automation changes and switch environments?")
+                    ) {
+                      event.currentTarget.value = environmentId;
+                      return;
+                    }
+                    onEnvironmentChange?.(nextEnvironmentId);
+                  }}
                   title={
-                    isDirty
-                      ? "Save or reload your changes before switching environments"
+                    hasUnsavedChanges
+                      ? "Switching environments will ask before discarding unsaved changes"
                       : "Automations are stored and run by this environment"
                   }
                   value={environmentId}

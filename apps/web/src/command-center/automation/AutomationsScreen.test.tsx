@@ -47,6 +47,9 @@ describe("AutomationsScreen", () => {
     expect(html).toContain("Unsaved");
     expect(html).toContain("Save commit");
     expect(html).toContain("New automation");
+    expect(html).toMatch(
+      /<select[^>]*aria-label="Automation runtime environment"(?![^>]*disabled)/u,
+    );
     expect(html).not.toContain("Read only");
     expect(html).not.toContain("Push");
   });
