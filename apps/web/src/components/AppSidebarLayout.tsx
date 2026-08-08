@@ -91,7 +91,7 @@ function SidebarControl() {
 
   return (
     <div
-      className="pointer-events-none fixed left-[var(--workspace-controls-left)] top-[var(--workspace-controls-top)] z-50 flex h-[var(--workspace-topbar-height)] items-center"
+      className="pointer-events-none fixed left-[var(--workspace-controls-left)] top-[calc(var(--desktop-titlebar-clearance)+var(--workspace-controls-top))] z-50 flex h-[var(--workspace-topbar-height)] items-center"
       data-sidebar-control=""
     >
       <Tooltip>
@@ -183,7 +183,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   }, [navigate, pathname]);
 
   return (
-    <SidebarProvider className="h-dvh! min-h-0!" defaultOpen style={sidebarProviderStyle}>
+    <SidebarProvider className="h-full! min-h-0!" defaultOpen style={sidebarProviderStyle}>
       <Sidebar
         side="left"
         collapsible="offcanvas"

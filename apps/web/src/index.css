@@ -95,11 +95,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --glass-opacity: 80%;
   --glass-saturation: 1.14;
   --desktop-window-right-resize-inset: 0px;
+  --desktop-titlebar-clearance: 0px;
   --workspace-topbar-height: 52px;
   --workspace-controls-top: 0px;
   --workspace-controls-left: calc(env(safe-area-inset-left) + 0.75rem);
   --workspace-controls-right: calc(env(safe-area-inset-right) + 0.75rem);
-  --workspace-native-controls-inset: 0px;
   --workspace-titlebar-control-size: 1.75rem;
   --workspace-titlebar-control-gap: 0.75rem;
 }
@@ -118,25 +118,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   );
 }
 
+.electron {
+  --desktop-titlebar-clearance: 40px;
+}
+
 .wco {
+  --desktop-titlebar-clearance: env(titlebar-area-height, 40px);
   --workspace-topbar-height: env(titlebar-area-height, 52px);
   --workspace-controls-top: env(titlebar-area-y, 0px);
   --workspace-controls-left: calc(env(titlebar-area-x, 0px) + 0.75rem);
-  --workspace-controls-right: calc(
-    100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px) + 0.75rem
-  );
-  --workspace-native-controls-inset: calc(
-    100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px) + 0.75rem
-  );
-}
-
-/* Electron can expose native Windows caption buttons without making the
-   Window Controls Overlay API available to the renderer. Keep app-owned
-   titlebar actions clear of the standard three-button caption area until
-   the WCO geometry above is available. */
-:root.electron-windows:not(.wco) {
-  --workspace-controls-right: 9.375rem;
-  --workspace-native-controls-inset: 9.375rem;
+  --workspace-controls-right: calc(env(safe-area-inset-right) + 0.75rem);
 }
 
 @theme inline {
@@ -1008,8 +999,39 @@ body {
   overflow-x: clip;
   overflow-y: hidden;
   overscroll-behavior-y: none;
-  padding-top: max(env(safe-area-inset-top), 0px);
+  padding-top: calc(max(env(safe-area-inset-top), 0px) + var(--desktop-titlebar-clearance));
   padding-right: var(--desktop-window-right-resize-inset);
+}
+
+[data-slot="desktop-titlebar-clearance"] {
+  position: fixed;
+  z-index: 2147483646;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: var(--desktop-titlebar-clearance);
+  background-color: var(--background);
+  background-image: var(--surface-grain);
+  background-repeat: repeat;
+  background-size: 256px 256px;
+  -webkit-app-region: drag;
+}
+
+.electron [data-slot="sidebar-container"] {
+  top: var(--desktop-titlebar-clearance);
+  height: calc(100svh - var(--desktop-titlebar-clearance));
+}
+
+.electron
+  :is(
+    [data-slot="sheet-viewport"],
+    [data-slot="dialog-viewport"],
+    [data-slot="alert-dialog-viewport"],
+    [data-slot="command-dialog-viewport"],
+    [data-slot="expanded-image-dialog"]
+  ) {
+  top: var(--desktop-titlebar-clearance);
+  height: calc(100dvh - var(--desktop-titlebar-clearance));
 }
 
 .electron-windows {

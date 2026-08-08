@@ -122,6 +122,7 @@ packageExtensions:
       vite: "catalog:"
 
 patchedDependencies:
+  "@clerk/electron@0.0.24": patches/@clerk__electron@0.0.24.patch
   "@effect/platform-bun@4.0.0-beta.102": patches/@effect__platform-bun@4.0.0-beta.102.patch
   "@effect/platform-node@4.0.0-beta.102": patches/@effect__platform-node@4.0.0-beta.102.patch
   "@effect/vitest@4.0.0-beta.102": patches/@effect__vitest@4.0.0-beta.102.patch

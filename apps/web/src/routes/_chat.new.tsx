@@ -57,7 +57,7 @@ function NewThreadRouteView() {
 
 function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <Empty className="flex-1">
         <EmptyHeader className="max-w-md">
           <EmptyTitle className="text-xl text-foreground">Couldn’t start a new thread</EmptyTitle>
@@ -79,7 +79,7 @@ function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
 function NoProjectsHero() {
   const openAddProject = () => openCommandPalette({ open: "add-project" });
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <Empty className="flex-1">
         <EmptyHeader className="max-w-md">
           <EmptyTitle className="text-2xl text-foreground sm:text-3xl">
