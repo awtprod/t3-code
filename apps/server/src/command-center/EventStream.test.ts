@@ -17,7 +17,7 @@ import { CommandCenterEventStream, layer as eventStreamLayer } from "./EventStre
 
 type Sql = SqlClient.SqlClient;
 
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const decodeRoute = Schema.decodeUnknownSync(RouteDecision);
 const decodeCommand = Schema.decodeUnknownSync(CommandCenterCommandSubmitInput);
 const fixtureTime = "2026-01-01T00:00:00.000Z";

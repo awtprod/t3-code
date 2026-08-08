@@ -77,7 +77,7 @@ const decodeSubmitResult = Schema.decodeUnknownEffect(CommandCenterCommandSubmit
 const decodeCommandInput = Schema.decodeUnknownEffect(CommandCenterCommandSubmitInput);
 const decodeRouteDecision = Schema.decodeUnknownEffect(RouteDecision);
 const decodeCommandApprovalPayload = Schema.decodeUnknownEffect(CommandApprovalPayload);
-const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const isCommandCenterError = Schema.is(CommandCenterError);
 
 const persistenceError = (message: string, cause?: unknown) =>

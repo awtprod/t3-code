@@ -45,6 +45,7 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
   });
   const client = McpSchema.McpServerClient.of({
     clientId: 1,
+    protocolVersion: "2025-06-18",
     initializePayload: {
       protocolVersion: "2025-03-26",
       capabilities: {},

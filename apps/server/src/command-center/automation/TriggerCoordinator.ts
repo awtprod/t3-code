@@ -32,7 +32,7 @@ const WEEKDAYS: Readonly<Record<string, number>> = {
   Fri: 5,
   Sat: 6,
 };
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 export class AutomationTriggerError extends Schema.TaggedErrorClass<AutomationTriggerError>()(
   "AutomationTriggerError",

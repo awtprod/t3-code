@@ -15,6 +15,7 @@ const expectedThreadColumns = new Set([
   "snoozed_at",
   "title_regeneration_request_id",
   "title_regeneration_started_at",
+  "pinned_at",
 ]);
 
 const assertIntegratedSchema = Effect.gen(function* () {
@@ -33,12 +34,18 @@ const assertIntegratedSchema = Effect.gen(function* () {
     )
   `;
   assert.equal(commandCenterTables.length, 4);
+
+  const keysetIndexes = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master
+    WHERE type = 'index' AND name = 'idx_projection_turns_thread_keyset'
+  `;
+  assert.deepStrictEqual(keysetIndexes, [{ name: "idx_projection_turns_thread_keyset" }]);
 });
 
 layer("Command Center and upstream migration compatibility", (it) => {
   it.effect("creates the combined schema on a clean database", () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 52 });
+      yield* runMigrations({ toMigrationInclusive: 56 });
       yield* assertIntegratedSchema;
     }),
   );
@@ -59,7 +66,7 @@ layer("Command Center and upstream migration compatibility", (it) => {
         )
       `;
 
-      yield* runMigrations({ toMigrationInclusive: 52 });
+      yield* runMigrations({ toMigrationInclusive: 56 });
       yield* assertIntegratedSchema;
       const rows = yield* sql<{ readonly title: string }>`
         SELECT title FROM projection_threads WHERE thread_id = 'thread-before-upstream'

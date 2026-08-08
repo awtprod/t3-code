@@ -48,7 +48,7 @@ Depending on your Tailscale setup, this may include:
 - an HTTPS MagicDNS endpoint when Tailscale Serve is configured for this backend
 
 The Tailscale HTTPS endpoint uses the clean MagicDNS URL, such as
-`https://machine.tailnet.ts.net/`, and is disabled until the app verifies that the URL reaches this
+`https://machine.example-tailnet.ts.net/`, and is disabled until the app verifies that the URL reaches this
 backend. Use **Setup** on the Tailscale HTTPS row to opt in. The desktop app restarts the backend
 with the same server-side behavior as `command-center serve --tailscale-serve`, then the server asks Tailscale
 Serve to proxy HTTPS traffic to the local backend.

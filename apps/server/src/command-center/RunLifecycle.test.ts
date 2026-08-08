@@ -29,7 +29,7 @@ import {
 } from "./RunLifecycle.ts";
 
 const fixtureTime = "2026-01-01T00:00:00.000Z";
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const decodeProviderEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 const testLayer = eventStreamLayer.pipe(

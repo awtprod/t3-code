@@ -64,8 +64,8 @@ const decodeRoute = Schema.decodeUnknownEffect(RouteDecisionSchema);
 const decodeCommand = Schema.decodeUnknownEffect(CommandCenterCommandSubmitInput);
 const decodePolicy = Schema.decodeUnknownEffect(SpacePolicySchema);
 const decodeRepositories = Schema.decodeUnknownEffect(Schema.Array(RepositoryBindingSchema));
-const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
-const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 export class RunDispatcherError extends Schema.TaggedErrorClass<RunDispatcherError>()(
   "RunDispatcherError",

@@ -106,7 +106,7 @@ const MemoryAuditPayload = Schema.Struct({
   status: Schema.String,
 });
 
-const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeEventEnvelope = Schema.decodeUnknownEffect(CommandCenterEventEnvelope);
 const decodeRoutePayload = Schema.decodeUnknownEffect(CommandCenterRouteSelectedPayload);
 const decodeRunStatePayload = Schema.decodeUnknownEffect(CommandCenterRunStateChangedPayload);

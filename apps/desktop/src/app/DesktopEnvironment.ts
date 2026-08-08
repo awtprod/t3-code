@@ -66,6 +66,8 @@ export class DesktopEnvironment extends Context.Service<
     readonly appUserModelId: string;
     readonly linuxDesktopEntryName: string;
     readonly linuxWmClass: string;
+    readonly linuxApplicationsDir: string;
+    readonly appImagePath: Option.Option<string>;
     readonly userDataDirName: string;
     readonly legacyUserDataDirNames: readonly string[];
     readonly defaultDesktopSettings: DesktopAppSettings.DesktopSettings;
@@ -168,6 +170,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const legacyUserDataDirNames = isDevelopment
     ? ["t3code-dev", "T3 Code (Dev)"]
     : ["t3code", "T3 Code (Alpha)", "Command Center (Alpha)"];
+  const linuxApplicationsDir = path.join(
+    Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
+    "applications",
+  );
   const resourcesPath = input.resourcesPath;
 
   return DesktopEnvironment.of({
@@ -211,6 +217,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
     ),
     linuxDesktopEntryName: isDevelopment ? "commandcenter-dev.desktop" : "command-center.desktop",
     linuxWmClass: isDevelopment ? "commandcenter-dev" : "command-center",
+    linuxApplicationsDir,
+    appImagePath: config.appImagePath,
     userDataDirName,
     legacyUserDataDirNames,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

@@ -32,7 +32,7 @@ const repositoryBRemote = "https://example.invalid/sample/repository-b.git";
 const repositoryACanonicalRemote = normalizeGitRemoteUrl(repositoryARemote);
 const repositoryBCanonicalRemote = normalizeGitRemoteUrl(repositoryBRemote);
 const decodeSpace = Schema.decodeUnknownSync(Space);
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const space = decodeSpace({
   id: "space-a",
   slug: "space-a",

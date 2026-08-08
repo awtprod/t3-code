@@ -35,6 +35,18 @@ This document covers the unified release workflow for stable and nightly desktop
   configuration is complete. Pre-release and nightly builds may be unsigned only when no partial
   signing configuration is present.
 
+## Required release credentials
+
+Stable releases require these GitHub Actions secrets in addition to the platform and deployment
+credentials documented below:
+
+- `RELEASE_APP_ID`
+- `RELEASE_APP_PRIVATE_KEY`
+
+The finalize job uses them to commit and push aligned package versions to `main` as the Release App.
+GitHub Release publication uses the repository-scoped workflow token so it has a rate-limit quota
+independent from the shared Release App installation.
+
 ## T3 Connect relay deployment
 
 The relay is a shared control plane versioned separately from client releases. Stable and nightly
@@ -161,6 +173,28 @@ One-time Vercel dashboard setup:
 - Publishes Electron auto-update metadata to the dedicated `nightly` updater channel, so desktop users can opt into that track independently from stable.
 - Publishes the CLI package (`apps/server`, npm package `@awtprod/command-center`) to the `nightly` npm dist-tag using the same nightly version.
 - Does not commit version bumps back to `main`.
+
+## Server self-update release invariant
+
+Connected servers update to the client's exact version, not to an npm dist-tag. Every released
+desktop or hosted client version must therefore have a matching
+`@awtprod/command-center@<version>` package available on npm before users can receive that client.
+
+The workflow enforces this ordering:
+
+1. `publish_cli` publishes the exact stable or nightly version to npm.
+2. `release` depends on `publish_cli` before exposing desktop artifacts in GitHub Releases.
+3. `deploy_web` depends on `release` before moving the hosted channel to the new client.
+
+Preserve these dependencies when changing the release graph. Publishing a client first would leave
+the **Update server** action targeting a package version that does not exist yet.
+
+For a release smoke test, confirm `npm view @awtprod/command-center@<version> version` returns the expected version, then
+connect the new client to a server on the previous version and verify that the update action
+reconnects to the matching server. Use releases with identical migration manifests for the
+automatic path. When the manifest changed, verify that the remote action stops before restart and
+shows the exact local `npx @awtprod/command-center@<version> service update` command. Also test the manual or
+desktop-managed guidance when those environments are available.
 
 ## Desktop auto-update notes
 

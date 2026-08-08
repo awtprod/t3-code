@@ -105,7 +105,7 @@ interface SearchStateRow {
   readonly indexedSourceGeneration: number;
 }
 
-const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const isMemorySearchIndexError = Schema.is(MemorySearchIndexError);
 
 const persistenceError = (cause: unknown) =>

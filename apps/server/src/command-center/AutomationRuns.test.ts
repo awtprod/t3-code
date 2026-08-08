@@ -27,7 +27,7 @@ const commitSha = "1234567890abcdef1234567890abcdef12345678";
 const definitionDigest = `sha256:${"a".repeat(64)}`;
 const decodeSpace = Schema.decodeUnknownSync(Space);
 const decodeAutomation = Schema.decodeUnknownSync(Automation);
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const space = decodeSpace({
   id: "space-a",

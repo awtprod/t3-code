@@ -76,7 +76,7 @@ function branchRefIsSafe(branchRef: string): boolean {
   );
 }
 
-const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeSourceDefinition = Schema.decodeUnknownEffect(CommandCenterAutomationSourceDefinition);
 
 const configError = (message: string, cause?: unknown) =>

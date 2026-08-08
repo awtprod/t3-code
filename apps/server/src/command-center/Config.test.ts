@@ -15,7 +15,7 @@ import {
   layer as commandCenterConfigLayer,
 } from "./Config.ts";
 
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const configTestLayer = commandCenterConfigLayer.pipe(
   Layer.provide(

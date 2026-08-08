@@ -300,7 +300,7 @@ const TERMINAL_EXECUTION_STATES = new Set<AutomationRuntimeExecutionState>([
   "failed",
   "canceled",
 ]);
-const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeAutomation = Schema.decodeUnknownEffect(Automation);
 
 const runtimeError = (code: AutomationRuntimeErrorCode, detail: string) =>

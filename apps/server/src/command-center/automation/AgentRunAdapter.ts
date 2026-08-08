@@ -217,7 +217,7 @@ export function makeAutomationAgentRunAdapter(
   });
 }
 
-const decodeStoredJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeStoredJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 /** Exact child lookup used by durable automation wait reconciliation. */
 export function makeAutomationAgentRunInspector(sql: SqlClient.SqlClient) {
