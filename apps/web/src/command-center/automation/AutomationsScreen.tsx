@@ -31,6 +31,7 @@ import {
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { SidebarInset } from "~/components/ui/sidebar";
 import { Skeleton } from "~/components/ui/skeleton";
+import { isElectron } from "~/env";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
@@ -227,6 +228,8 @@ export function AutomationsScreen({
         <header
           className={cn(
             "flex min-h-[var(--workspace-topbar-height)] shrink-0 flex-col justify-center border-b bg-background px-3 py-2 transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none sm:px-5",
+            isElectron &&
+              "drag-region pr-[max(var(--workspace-native-controls-inset),0.75rem)] sm:pr-[max(var(--workspace-native-controls-inset),1.25rem)]",
             COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
           )}
         >
