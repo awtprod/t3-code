@@ -259,7 +259,7 @@ function AutomationsRouteView() {
 
   return (
     <AutomationsScreen
-      authoringHealth={definitionQuery.data?.authoringHealth}
+      authoringHealth={definitionQuery.data?.authoringHealth ?? bootstrap?.authoringHealth}
       automations={bootstrap?.automations ?? []}
       configCommitSha={
         activeDraft?.configCommitSha ?? definitionQuery.data?.configCommitSha ?? undefined

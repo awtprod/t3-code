@@ -20,6 +20,10 @@ committed definitions and running committed automations remain available. The fi
 exchange is checked again at every save and fails closed if the checkout filesystem does not support
 the primitive.
 
+Committed definitions are resolved from the checkout's `HEAD` tree by their definition identity,
+not by assuming the JSON filename matches the automation id. Read-only viewing therefore also works
+from a detached checkout; creation and editing still require a checked-out named branch.
+
 ## Atomic publication and recovery
 
 Authoring stages exact validated bytes under `.git/command-center-recovery/<transaction>/`. A
