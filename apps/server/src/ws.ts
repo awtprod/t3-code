@@ -883,9 +883,21 @@ const makeWsRpcLayer = (
 
       return WsRpcGroup.of({
         [COMMAND_CENTER_WS_METHODS.bootstrap]: (_input) =>
-          observeRpcEffect(COMMAND_CENTER_WS_METHODS.bootstrap, commandCenter.bootstrap, {
-            "rpc.aggregate": "command-center",
-          }),
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.bootstrap,
+            Effect.all({
+              snapshot: commandCenter.bootstrap,
+              authoringHealth: automationDefinitionConfig.authoringHealth,
+            }).pipe(
+              Effect.map(({ snapshot, authoringHealth }) => ({
+                ...snapshot,
+                authoringHealth,
+              })),
+            ),
+            {
+              "rpc.aggregate": "command-center",
+            },
+          ),
         [COMMAND_CENTER_WS_METHODS.commandSubmit]: (input) =>
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.commandSubmit,

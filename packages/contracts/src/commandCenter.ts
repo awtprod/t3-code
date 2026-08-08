@@ -104,6 +104,13 @@ export const CommandCenterConfigHealth = Schema.Struct({
 });
 export type CommandCenterConfigHealth = typeof CommandCenterConfigHealth.Type;
 
+export const CommandCenterAutomationAuthoringHealth = Schema.Struct({
+  status: Schema.Literals(["available", "unavailable"]),
+  message: Schema.optional(TrimmedNonEmptyString),
+});
+export type CommandCenterAutomationAuthoringHealth =
+  typeof CommandCenterAutomationAuthoringHealth.Type;
+
 export const CommandCenterBootstrap = Schema.Struct({
   timezone: Schema.NullOr(TrimmedNonEmptyString),
   spaces: Schema.Array(Space),
@@ -115,6 +122,7 @@ export const CommandCenterBootstrap = Schema.Struct({
   connections: Schema.Array(Connection),
   memories: Schema.Array(Memory),
   configHealth: CommandCenterConfigHealth,
+  authoringHealth: Schema.optional(CommandCenterAutomationAuthoringHealth),
 });
 export type CommandCenterBootstrap = typeof CommandCenterBootstrap.Type;
 
@@ -321,12 +329,7 @@ export const CommandCenterAutomationDefinitionSnapshot = Schema.Struct({
   definition: CommandCenterAutomationSourceDefinition,
   definitionDigest: CommandCenterAutomationDefinitionDigest,
   configCommitSha: CommandCenterConfigCommitSha,
-  authoringHealth: Schema.optional(
-    Schema.Struct({
-      status: Schema.Literals(["available", "unavailable"]),
-      message: Schema.optional(TrimmedNonEmptyString),
-    }),
-  ),
+  authoringHealth: Schema.optional(CommandCenterAutomationAuthoringHealth),
 });
 export type CommandCenterAutomationDefinitionSnapshot =
   typeof CommandCenterAutomationDefinitionSnapshot.Type;

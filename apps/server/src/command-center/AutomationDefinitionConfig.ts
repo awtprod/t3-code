@@ -2,6 +2,7 @@ import { AutomationId } from "@command-center/core";
 import {
   CommandCenterAutomationSourceDefinition,
   CommandCenterError,
+  type CommandCenterAutomationAuthoringHealth,
   type CommandCenterAutomationDefinitionCreateInput as CommandCenterAutomationDefinitionCreateInputType,
   type CommandCenterAutomationDefinitionGetInput,
   type CommandCenterAutomationDefinitionSaveInput,
@@ -30,7 +31,7 @@ import {
   type AtomicFileIdentity,
   makeAtomicTargetExchange,
 } from "./AtomicTargetExchange.ts";
-import { CommandCenterConfig } from "./Config.ts";
+import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import {
   AUTHORING_LAYOUT_KEY,
   automaticAutomationId,
@@ -51,6 +52,8 @@ import {
 const AUTOMATION_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,127}$/u;
 const COMMIT_SHA_PATTERN = /^[a-f0-9]{40,64}$/u;
 const AUTOMATION_RELATIVE_PATH_PATTERN = /^automations\/([a-z0-9][a-z0-9-]{0,127})\.json$/u;
+const AUTOMATION_TREE_ENTRY_PATTERN =
+  /^100644 blob ([a-f0-9]{40,64})\t(automations\/[a-z0-9][a-z0-9-]{0,127}\.json)$/u;
 const SOURCE_FILE_MODE_PATTERN =
   /^100644 blob ([a-f0-9]{40,64})\tautomations\/[a-z0-9][a-z0-9-]{0,127}\.json\n?$/u;
 
@@ -124,6 +127,7 @@ export interface AutomationDefinitionCommitAuditInput {
 }
 
 export interface AutomationDefinitionConfigShape {
+  readonly authoringHealth: Effect.Effect<CommandCenterAutomationAuthoringHealth>;
   readonly create: <E, R>(
     input: CommandCenterAutomationDefinitionCreateInputType,
     recordAudit: (input: AutomationDefinitionCommitAuditInput) => Effect.Effect<void, E, R>,
@@ -142,16 +146,19 @@ export class AutomationDefinitionConfig extends Context.Service<
   AutomationDefinitionConfigShape
 >()("@awtprod/command-center/command-center/AutomationDefinitionConfig") {}
 
-interface LoadedSource {
+interface LoadedCommittedSource {
   readonly configDirectory: string;
   readonly relativePath: string;
   readonly targetPath: string;
   readonly commitSha: string;
-  readonly branchRef: string;
   readonly blobSha: string;
   readonly definition: CommandCenterAutomationSourceDefinitionType;
   readonly definitionDigest: AutomationDefinitionDigest;
   readonly originalContents: string;
+}
+
+interface LoadedSource extends LoadedCommittedSource {
+  readonly branchRef: string;
 }
 
 interface AuthoredTargetIdentity {
@@ -188,6 +195,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const writeLock = yield* Semaphore.make(1);
   const atomicTargetExchange = yield* makeAtomicTargetExchange();
+  const atomicAuthoringPreflight = yield* Effect.cached(atomicTargetExchange.preflight());
   let verifiedAuthoringGitExecutable: string | undefined;
 
   /** Publish service-owned bytes through pinned dirfds and RENAME_NOREPLACE. */
@@ -361,6 +369,33 @@ export const make = Effect.gen(function* () {
     if (result.code !== 0) return yield* persistenceError(message);
     return result.stdout;
   });
+
+  const requireReadGitSuccess = Effect.fn("AutomationDefinitionConfig.requireReadGitSuccess")(
+    function* (configDirectory: string, args: ReadonlyArray<string>, message: string) {
+      const gitExecutable = resolveTrustedHostExecutable("git", {
+        writableRoots: [configDirectory],
+      });
+      if (gitExecutable === undefined) {
+        return yield* configError("Could not resolve Git outside the private config checkout.");
+      }
+      const result = yield* runner
+        .run({
+          command: gitExecutable,
+          args: hardenedHostGitArguments(["-C", configDirectory, ...args]),
+          env: hardenedHostGitEnvironment([], { writableRoots: [configDirectory] }),
+          extendEnv: false,
+          timeout: "10 seconds",
+          maxOutputBytes: 4 * 1024 * 1024,
+        })
+        .pipe(
+          Effect.mapError((cause) =>
+            configError("Could not inspect the private config checkout.", cause),
+          ),
+        );
+      if (result.code !== 0) return yield* configError(message);
+      return result.stdout;
+    },
+  );
 
   const readPinnedBranch = Effect.fn("AutomationDefinitionConfig.readPinnedBranch")(function* (
     configDirectory: string,
@@ -793,37 +828,136 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const resolveCheckout = Effect.fn("AutomationDefinitionConfig.resolveCheckout")(function* () {
-    const loaded = yield* config.load;
-    if (loaded.health.status !== "loaded") {
-      return yield* configError("Private Command Center configuration is not available.");
-    }
+  const resolveReadableCheckout = Effect.fn("AutomationDefinitionConfig.resolveReadableCheckout")(
+    function* () {
+      const loaded = yield* config.load;
+      if (loaded.health.status !== "loaded") {
+        return yield* configError("Private Command Center configuration is not available.");
+      }
 
-    const configured = yield* fs
-      .realPath(config.configDirectory)
-      .pipe(
-        Effect.mapError((cause) =>
-          configError("The private configuration checkout could not be resolved.", cause),
-        ),
+      const configured = yield* fs
+        .realPath(config.configDirectory)
+        .pipe(
+          Effect.mapError((cause) =>
+            configError("The private configuration checkout could not be resolved.", cause),
+          ),
+        );
+      const gitRootOutput = yield* requireReadGitSuccess(
+        configured,
+        ["rev-parse", "--show-toplevel"],
+        "Private configuration is not a Git checkout.",
       );
-    const gitRootOutput = yield* requireGitSuccess(
-      configured,
-      ["rev-parse", "--show-toplevel"],
-      "Private configuration is not a Git checkout.",
-    );
-    const gitRoot = yield* fs
-      .realPath(gitRootOutput.trim())
-      .pipe(
-        Effect.mapError((cause) =>
-          configError("The private configuration Git root could not be resolved.", cause),
-        ),
-      );
-    if (path.resolve(configured) !== path.resolve(gitRoot)) {
-      return yield* configError("Private configuration must point at the checkout root.");
-    }
-    const branchRef = yield* readPinnedBranch(configured);
-    return { configDirectory: configured, branchRef, loaded };
+      const gitRoot = yield* fs
+        .realPath(gitRootOutput.trim())
+        .pipe(
+          Effect.mapError((cause) =>
+            configError("The private configuration Git root could not be resolved.", cause),
+          ),
+        );
+      if (path.resolve(configured) !== path.resolve(gitRoot)) {
+        return yield* configError("Private configuration must point at the checkout root.");
+      }
+      return { configDirectory: configured, loaded };
+    },
+  );
+
+  const resolveCheckout = Effect.fn("AutomationDefinitionConfig.resolveCheckout")(function* () {
+    const checkout = yield* resolveReadableCheckout();
+    const branchRef = yield* readPinnedBranch(checkout.configDirectory);
+    return { ...checkout, branchRef };
   });
+
+  const loadCommittedSource = Effect.fn("AutomationDefinitionConfig.loadCommittedSource")(
+    function* (
+      input: CommandCenterAutomationDefinitionGetInput,
+      checkout: {
+        readonly configDirectory: string;
+        readonly loaded: LoadedCommandCenterConfig;
+      },
+      commitReference: string,
+    ) {
+      if (!checkout.loaded.spaces.some((space) => space.id === input.spaceId)) {
+        return yield* notFoundError("The requested automation Space was not found.");
+      }
+
+      const commitSha = (yield* requireReadGitSuccess(
+        checkout.configDirectory,
+        ["rev-parse", "--verify", `${commitReference}^{commit}`],
+        "Private configuration does not have a committed definition.",
+      ))
+        .trim()
+        .toLowerCase();
+      if (!COMMIT_SHA_PATTERN.test(commitSha)) {
+        return yield* configError("Private configuration returned an invalid commit identifier.");
+      }
+
+      const tree = yield* requireReadGitSuccess(
+        checkout.configDirectory,
+        ["ls-tree", "-rz", "--full-tree", commitSha, "--", "automations"],
+        "Could not list committed automation definitions.",
+      );
+      const entries = tree
+        .split("\0")
+        .flatMap((entry) => {
+          const match = AUTOMATION_TREE_ENTRY_PATTERN.exec(entry);
+          return match === null ? [] : [{ blobSha: match[1]!, relativePath: match[2]! }];
+        })
+        .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+      const matches: LoadedCommittedSource[] = [];
+      for (const entry of entries) {
+        const targetPath = path.resolve(checkout.configDirectory, entry.relativePath);
+        const relativeTarget = path.relative(checkout.configDirectory, targetPath);
+        if (relativeTarget !== entry.relativePath || path.isAbsolute(relativeTarget)) {
+          return yield* validationError(
+            "Automation configuration path escaped its safe directory.",
+          );
+        }
+        const originalContents = yield* requireReadGitSuccess(
+          checkout.configDirectory,
+          ["show", `${commitSha}:${entry.relativePath}`],
+          "Could not read the committed automation definition.",
+        );
+        const parsed = yield* decodeUnknownJsonString(originalContents).pipe(
+          Effect.mapError((cause) =>
+            configError("The committed automation definition is not valid JSON.", cause),
+          ),
+        );
+        const definition = yield* decodeSourceDefinition(parsed).pipe(
+          Effect.mapError((cause) =>
+            configError("The committed automation definition has an invalid shape.", cause),
+          ),
+        );
+        if (definition.id !== input.automationId || definition.spaceId !== input.spaceId) continue;
+        const validated = validateAutomationDefinition(parsed);
+        if (!validated.ok) {
+          return yield* configError(
+            `The committed automation definition is invalid: ${validated.issues
+              .map((issue) => issue.message)
+              .join("; ")}`,
+          );
+        }
+        matches.push({
+          configDirectory: checkout.configDirectory,
+          relativePath: entry.relativePath,
+          targetPath,
+          commitSha,
+          blobSha: entry.blobSha,
+          definition,
+          definitionDigest: digestAutomationDefinition(validated.definition),
+          originalContents,
+        });
+      }
+      if (matches.length === 0) {
+        return yield* notFoundError("The requested committed automation definition was not found.");
+      }
+      if (matches.length > 1) {
+        return yield* configError(
+          "The committed configuration contains duplicate automation identities.",
+        );
+      }
+      return matches[0]!;
+    },
+  );
 
   const loadSource = Effect.fn("AutomationDefinitionConfig.loadSource")(function* (
     input: CommandCenterAutomationDefinitionGetInput,
@@ -832,81 +966,8 @@ export const make = Effect.gen(function* () {
       return yield* validationError("Automation id is not safe for a configuration file name.");
     }
     const checkout = yield* resolveCheckout();
-    if (!checkout.loaded.spaces.some((space) => space.id === input.spaceId)) {
-      return yield* notFoundError("The requested automation Space was not found.");
-    }
-
-    const relativePath = `automations/${input.automationId}.json`;
-    const targetPath = path.resolve(checkout.configDirectory, relativePath);
-    const relativeTarget = path.relative(checkout.configDirectory, targetPath);
-    if (relativeTarget !== relativePath || path.isAbsolute(relativeTarget)) {
-      return yield* validationError("Automation configuration path escaped its safe directory.");
-    }
-
-    const commitSha = (yield* requireGitSuccess(
-      checkout.configDirectory,
-      ["rev-parse", "--verify", `${checkout.branchRef}^{commit}`],
-      "Private configuration does not have a committed definition.",
-    ))
-      .trim()
-      .toLowerCase();
-    if (!COMMIT_SHA_PATTERN.test(commitSha)) {
-      return yield* configError("Private configuration returned an invalid commit identifier.");
-    }
-
-    const sourceMode = yield* requireGitSuccess(
-      checkout.configDirectory,
-      ["ls-tree", commitSha, "--", relativePath],
-      "Could not inspect the committed automation definition.",
-    );
-    if (sourceMode.trim().length === 0) {
-      return yield* notFoundError("The requested committed automation definition was not found.");
-    }
-    const sourceMatch = SOURCE_FILE_MODE_PATTERN.exec(sourceMode);
-    if (sourceMatch === null) {
-      return yield* configError("The automation definition is not a regular private config file.");
-    }
-
-    const originalContents = yield* requireGitSuccess(
-      checkout.configDirectory,
-      ["show", `${commitSha}:${relativePath}`],
-      "Could not read the committed automation definition.",
-    );
-    const parsed = yield* decodeUnknownJsonString(originalContents).pipe(
-      Effect.mapError((cause) =>
-        configError("The committed automation definition is not valid JSON.", cause),
-      ),
-    );
-    const definition = yield* decodeSourceDefinition(parsed).pipe(
-      Effect.mapError((cause) =>
-        configError("The committed automation definition has an invalid shape.", cause),
-      ),
-    );
-    const validated = validateAutomationDefinition(parsed);
-    if (!validated.ok) {
-      return yield* configError(
-        `The committed automation definition is invalid: ${validated.issues
-          .map((issue) => issue.message)
-          .join("; ")}`,
-      );
-    }
-    if (definition.id !== input.automationId || definition.spaceId !== input.spaceId) {
-      return yield* configError(
-        "The committed automation identity does not match the requested definition.",
-      );
-    }
-
-    return {
-      configDirectory: checkout.configDirectory,
-      relativePath,
-      targetPath,
-      commitSha,
-      branchRef: checkout.branchRef,
-      blobSha: sourceMatch[1]!,
-      definition,
-      definitionDigest: digestAutomationDefinition(validated.definition),
-      originalContents,
-    } satisfies LoadedSource;
+    const source = yield* loadCommittedSource(input, checkout, checkout.branchRef);
+    return { ...source, branchRef: checkout.branchRef };
   });
 
   const toSnapshot = (
@@ -924,12 +985,14 @@ export const make = Effect.gen(function* () {
     ...(authoringHealth === undefined ? {} : { authoringHealth }),
   });
 
-  const readAuthoringHealth = atomicTargetExchange.preflight().pipe(
-    Effect.as({ status: "available" as const }),
-    Effect.catch((cause) =>
-      Effect.succeed({ status: "unavailable" as const, message: cause.message }),
-    ),
-  );
+  const readAuthoringHealth = (configDirectory: string) =>
+    readPinnedBranch(configDirectory).pipe(
+      Effect.andThen(atomicAuthoringPreflight),
+      Effect.as({ status: "available" as const }),
+      Effect.catch((cause) =>
+        Effect.succeed({ status: "unavailable" as const, message: cause.message }),
+      ),
+    );
 
   const ensureTargetClean = Effect.fn("AutomationDefinitionConfig.ensureTargetClean")(function* (
     source: LoadedSource,
@@ -1172,9 +1235,21 @@ export const make = Effect.gen(function* () {
 
   const get: AutomationDefinitionConfigShape["get"] = (input) =>
     Effect.gen(function* () {
-      const source = yield* loadSource(input);
-      return toSnapshot(source, yield* readAuthoringHealth);
+      if (!AUTOMATION_ID_PATTERN.test(input.automationId)) {
+        return yield* validationError("Automation id is not safe for a configuration file name.");
+      }
+      const checkout = yield* resolveReadableCheckout();
+      const source = yield* loadCommittedSource(input, checkout, "HEAD");
+      return toSnapshot(source, yield* readAuthoringHealth(checkout.configDirectory));
     });
+
+  const authoringHealth: AutomationDefinitionConfigShape["authoringHealth"] =
+    resolveReadableCheckout().pipe(
+      Effect.flatMap((checkout) => readAuthoringHealth(checkout.configDirectory)),
+      Effect.catch((cause) =>
+        Effect.succeed({ status: "unavailable" as const, message: cause.message }),
+      ),
+    );
 
   const restoreCreatedTarget = Effect.fn("AutomationDefinitionConfig.restoreCreatedTarget")(
     function* (input: {
@@ -1641,7 +1716,7 @@ export const make = Effect.gen(function* () {
       );
     }
     if (prepared.nextDigest === source.definitionDigest) {
-      return toSnapshot(source, yield* readAuthoringHealth);
+      return toSnapshot(source, yield* readAuthoringHealth(source.configDirectory));
     }
 
     yield* requirePinnedBranch(source.configDirectory, source.branchRef, source.commitSha);
@@ -1787,7 +1862,7 @@ export const make = Effect.gen(function* () {
   const save: AutomationDefinitionConfigShape["save"] = (input, recordAudit) =>
     writeLock.withPermits(1)(saveUnlocked(input, recordAudit));
 
-  return AutomationDefinitionConfig.of({ create, get, save });
+  return AutomationDefinitionConfig.of({ authoringHealth, create, get, save });
 });
 
 export const layer = Layer.effect(AutomationDefinitionConfig, make);
