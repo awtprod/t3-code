@@ -57,6 +57,15 @@ const AUTOMATION_TREE_ENTRY_PATTERN =
 const SOURCE_FILE_MODE_PATTERN =
   /^100644 blob ([a-f0-9]{40,64})\tautomations\/[a-z0-9][a-z0-9-]{0,127}\.json\n?$/u;
 
+export function matchesAutomationRelativePath(
+  relativeTarget: string,
+  expectedRelativePath: string,
+  pathSeparator: string,
+  isAbsolute: boolean,
+): boolean {
+  return !isAbsolute && relativeTarget.split(pathSeparator).join("/") === expectedRelativePath;
+}
+
 function branchRefIsSafe(branchRef: string): boolean {
   if (!branchRef.startsWith("refs/heads/") || branchRef.length > 255) return false;
   const suffix = branchRef.slice("refs/heads/".length);
@@ -907,7 +916,14 @@ export const make = Effect.gen(function* () {
       for (const entry of entries) {
         const targetPath = path.resolve(checkout.configDirectory, entry.relativePath);
         const relativeTarget = path.relative(checkout.configDirectory, targetPath);
-        if (relativeTarget !== entry.relativePath || path.isAbsolute(relativeTarget)) {
+        if (
+          !matchesAutomationRelativePath(
+            relativeTarget,
+            entry.relativePath,
+            path.sep,
+            path.isAbsolute(relativeTarget),
+          )
+        ) {
           return yield* validationError(
             "Automation configuration path escaped its safe directory.",
           );
@@ -1409,7 +1425,14 @@ export const make = Effect.gen(function* () {
         const relativePath = `automations/${automationId}.json`;
         const targetPath = path.resolve(checkout.configDirectory, relativePath);
         const relativeTarget = path.relative(checkout.configDirectory, targetPath);
-        if (relativeTarget !== relativePath || path.isAbsolute(relativeTarget)) {
+        if (
+          !matchesAutomationRelativePath(
+            relativeTarget,
+            relativePath,
+            path.sep,
+            path.isAbsolute(relativeTarget),
+          )
+        ) {
           return yield* validationError(
             "Automation configuration path escaped its safe directory.",
           );

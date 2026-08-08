@@ -16,7 +16,10 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ProcessRunner from "../processRunner.ts";
-import { make as makeAutomationDefinitionConfig } from "./AutomationDefinitionConfig.ts";
+import {
+  make as makeAutomationDefinitionConfig,
+  matchesAutomationRelativePath,
+} from "./AutomationDefinitionConfig.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 
 const decodeSpace = Schema.decodeUnknownSync(Space);
@@ -69,6 +72,33 @@ const createInput = decodeCreate({
   nodes: [{ id: "prepare", kind: "transform", config: { template: "Prepare weekly brief" } }],
   edges: [],
   layout: { nodes: { prepare: { x: 80, y: 120 } } },
+});
+
+it("compares Git paths with Windows relative paths without weakening escape checks", () => {
+  expect(
+    matchesAutomationRelativePath(
+      "automations\\sample-flow.json",
+      "automations/sample-flow.json",
+      "\\",
+      false,
+    ),
+  ).toBe(true);
+  expect(
+    matchesAutomationRelativePath(
+      "..\\outside\\sample-flow.json",
+      "automations/sample-flow.json",
+      "\\",
+      false,
+    ),
+  ).toBe(false);
+  expect(
+    matchesAutomationRelativePath(
+      "C:\\private\\automations\\sample-flow.json",
+      "automations/sample-flow.json",
+      "\\",
+      true,
+    ),
+  ).toBe(false);
 });
 
 const makeFixtureWithOptions = Effect.fn("AutomationDefinitionConfigTest.makeFixture")(function* (
