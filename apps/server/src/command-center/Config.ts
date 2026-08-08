@@ -155,7 +155,7 @@ export const layer = Layer.effect(
     const processRunner = yield* ProcessRunner;
     const serverConfig = yield* ServerConfig;
     const configDirectory = path.resolve(
-      process.env.COMMAND_CENTER_CONFIG_DIR ?? `${serverConfig.baseDir}-config`,
+      serverConfig.commandCenterConfigDir ?? `${serverConfig.baseDir}-config`,
     );
 
     const canonicalizeConfigDirectory = Effect.fn("CommandCenterConfig.canonicalizeDirectory")(

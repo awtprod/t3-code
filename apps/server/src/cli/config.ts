@@ -125,6 +125,10 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  commandCenterConfigDir: Config.string("COMMAND_CENTER_CONFIG_DIR").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
   devUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   devAllowedOrigins: Config.string("T3CODE_DEV_ALLOWED_ORIGINS").pipe(
     Config.withDefault(""),
@@ -448,6 +452,9 @@ export const resolveServerConfig = (
       port,
       cwd,
       baseDir,
+      ...(env.commandCenterConfigDir === undefined
+        ? {}
+        : { commandCenterConfigDir: env.commandCenterConfigDir }),
       ...derivedPaths,
       serverTracePath,
       host,

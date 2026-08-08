@@ -68,6 +68,9 @@ export const CapabilityName = Schema.Literals([
   "cc.connections.google.gmail.drafts.create",
   "cc.connections.google.calendar.read",
   "cc.connections.google.drive.read",
+  "cc.sales.read",
+  "cc.sales.propose",
+  "cc.sales.write",
   "cc.runs.start",
 ]);
 export type CapabilityName = typeof CapabilityName.Type;
@@ -85,6 +88,9 @@ export const CAPABILITY_NAMES: ReadonlyArray<CapabilityName> = [
   "cc.connections.google.gmail.drafts.create",
   "cc.connections.google.calendar.read",
   "cc.connections.google.drive.read",
+  "cc.sales.read",
+  "cc.sales.propose",
+  "cc.sales.write",
   "cc.runs.start",
 ];
 
