@@ -110,6 +110,7 @@ export function moveAutomationNode(
 const NODE_ID_STEMS: Record<AutomationEditorNodeKind, string> = {
   "agent.run": "agent",
   "connector.read": "connector",
+  "connector.write": "connector-write",
   "item.mutate": "item",
   approval: "approval",
   condition: "condition",

@@ -55,6 +55,8 @@ export interface AutomationsScreenProps {
   readonly automations: ReadonlyArray<Automation>;
   readonly spaces: ReadonlyArray<Space>;
   readonly onRefresh?: (() => void) | undefined;
+  readonly isRefreshing?: boolean | undefined;
+  readonly refreshError?: string | null | undefined;
   readonly onCreate?:
     | ((input: { readonly name: string; readonly spaceId: string }) => void)
     | undefined;
@@ -114,10 +116,11 @@ function AutomationsLoading() {
 interface AutomationEmptyStateProps {
   readonly status: Exclude<AutomationsScreenStatus, "loading" | "ready"> | "empty";
   readonly onRefresh?: (() => void) | undefined;
+  readonly isRefreshing?: boolean | undefined;
   readonly onNew?: (() => void) | undefined;
 }
 
-function AutomationEmptyState({ status, onRefresh, onNew }: AutomationEmptyStateProps) {
+function AutomationEmptyState({ status, onRefresh, isRefreshing = false, onNew }: AutomationEmptyStateProps) {
   const content =
     status === "disconnected"
       ? {
@@ -163,9 +166,9 @@ function AutomationEmptyState({ status, onRefresh, onNew }: AutomationEmptyState
           </Button>
         ) : null}
         {onRefresh && status !== "disconnected" ? (
-          <Button onClick={onRefresh} size="sm" variant="outline">
-            <RefreshCwIcon />
-            Check again
+          <Button disabled={isRefreshing} onClick={onRefresh} size="sm" variant="outline">
+            <RefreshCwIcon className={isRefreshing ? "animate-spin motion-reduce:animate-none" : undefined} />
+            {isRefreshing ? "Checking" : "Check again"}
           </Button>
         ) : null}
         <Button render={<a href="/" />} size="sm" variant="ghost">
@@ -182,6 +185,8 @@ export function AutomationsScreen({
   automations,
   spaces,
   onRefresh,
+  isRefreshing = false,
+  refreshError,
   onCreate,
   isCreating = false,
   selectedAutomationId: controlledSelectedAutomationId,
@@ -307,6 +312,10 @@ export function AutomationsScreen({
                 </select>
               </label>
             ) : null}
+            <Button render={<a href="/settings/connections" />} size="sm" variant="outline">
+              <PlusIcon />
+              Add environment
+            </Button>
             {status === "ready" && onCreate && spaces.length > 0 ? (
               <Button
                 disabled={authoringUnavailable}
@@ -436,8 +445,9 @@ export function AutomationsScreen({
 
         {status === "loading" ? <AutomationsLoading /> : null}
         {status !== "loading" && status !== "ready" ? (
-          <AutomationEmptyState onRefresh={onRefresh} status={status} />
+          <AutomationEmptyState isRefreshing={isRefreshing} onRefresh={onRefresh} status={status} />
         ) : null}
+        {refreshError ? <p className="px-4 pt-3 text-sm text-destructive" role="alert">{refreshError}</p> : null}
         {status === "ready" && automations.length === 0 ? (
           <main className="flex min-h-0 flex-1">
             <aside className="hidden w-60 shrink-0 border-r bg-sidebar md:block">
@@ -451,6 +461,7 @@ export function AutomationsScreen({
             <AutomationEmptyState
               onNew={onCreate && spaces.length > 0 ? () => setShowCreate(true) : undefined}
               onRefresh={onRefresh}
+              isRefreshing={isRefreshing}
               status="empty"
             />
           </main>

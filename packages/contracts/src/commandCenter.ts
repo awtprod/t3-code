@@ -2,6 +2,7 @@ import {
   Approval,
   ApprovalId,
   Artifact,
+  ArtifactId,
   ArtifactKind,
   Automation,
   AutomationId,
@@ -256,6 +257,7 @@ export const CommandCenterAutomationSourceTrigger = Schema.Union([
 export const CommandCenterAutomationSourceNodeKind = Schema.Literals([
   "agent.run",
   "connector.read",
+  "connector.write",
   "item.mutate",
   "condition",
   "transform",
@@ -691,3 +693,32 @@ export const GoogleReadResult = Schema.Union([
   }),
 ]);
 export type GoogleReadResult = typeof GoogleReadResult.Type;
+
+/** A Gmail draft is a write, but never an instruction to send email. */
+export const GoogleDraftCreateRequest = Schema.Struct({
+  ...GoogleConnectionSelection,
+  operation: Schema.Literal("gmail.draft.create"),
+  to: Schema.Array(TrimmedNonEmptyString),
+  cc: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  bcc: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  subject: TrimmedNonEmptyString,
+  body: Schema.optional(Schema.String),
+  bodyHtml: Schema.optional(Schema.String),
+  replyToMessageId: Schema.optional(TrimmedNonEmptyString),
+  threadId: Schema.optional(TrimmedNonEmptyString),
+  attachmentArtifactIds: Schema.optional(Schema.Array(ArtifactId)),
+}).check(
+  Schema.makeFilter((value) =>
+    value.body !== undefined || value.bodyHtml !== undefined ||
+    "A Gmail draft requires a plain-text or HTML body.",
+  ),
+);
+export type GoogleDraftCreateRequest = typeof GoogleDraftCreateRequest.Type;
+
+export const GoogleDraftCreateResult = Schema.Struct({
+  operation: Schema.Literal("gmail.draft.create"),
+  draftId: TrimmedNonEmptyString,
+  messageId: Schema.optional(TrimmedNonEmptyString),
+  threadId: Schema.optional(TrimmedNonEmptyString),
+});
+export type GoogleDraftCreateResult = typeof GoogleDraftCreateResult.Type;

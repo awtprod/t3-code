@@ -13,7 +13,7 @@ import { formatSchemaError } from "@t3tools/shared/schemaJson";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
-import { validateAutomationGraph } from "./Graph.ts";
+import { analyzeAutomationGraph } from "./Graph.ts";
 
 export const AutomationFileTriggerKind = Schema.Literals(["manual", "schedule", "webhook"]);
 export type AutomationFileTriggerKind = typeof AutomationFileTriggerKind.Type;
@@ -21,6 +21,7 @@ export type AutomationFileTriggerKind = typeof AutomationFileTriggerKind.Type;
 export const AutomationFileNodeKind = Schema.Literals([
   "agent.run",
   "connector.read",
+  "connector.write",
   "item.mutate",
   "condition",
   "transform",
@@ -192,6 +193,7 @@ export const AutomationValidationIssueCode = Schema.Literals([
   "state.unknown-node",
   "node.config.invalid",
   "node.config.private-data",
+  "node.approval.required",
   "v1.unsupported-node",
   "v1.unsupported-external-wait",
 ]);
@@ -285,7 +287,8 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
     };
   }
 
-  const issues: AutomationValidationIssue[] = [...validateAutomationGraph(decoded.value)];
+  const graph = analyzeAutomationGraph(decoded.value);
+  const issues: AutomationValidationIssue[] = [...graph.issues];
   decoded.value.nodes.forEach((node, index) => {
     if (!automationConfigIsSafeForGit(node.config)) {
       issues.push({
@@ -313,6 +316,20 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
           code: "node.config.invalid",
           message: config.message,
           path: ["nodes", index, "config"],
+          nodeIds: [node.id],
+        });
+      }
+    }
+    if (node.kind === "connector.write" && node.config.operation === "gmail.draft.create") {
+      const predecessors = graph.predecessorIds[node.id] ?? [];
+      const approved = predecessors.some(
+        (predecessorId) => decoded.value.nodes.find((candidate) => candidate.id === predecessorId)?.kind === "approval",
+      );
+      if (!approved) {
+        issues.push({
+          code: "node.approval.required",
+          message: `Gmail draft node '${node.id}' requires an immediately preceding Approval node.`,
+          path: ["nodes", index],
           nodeIds: [node.id],
         });
       }

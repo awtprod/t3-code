@@ -86,6 +86,12 @@ const NODE_PRESENTATION: Record<AutomationEditorNodeKind, NodePresentation> = {
     icon: CableIcon,
     accentClassName: "bg-info/10 text-info-foreground",
   },
+  "connector.write": {
+    label: "Connector write",
+    description: "Create an approval-gated external draft",
+    icon: CableIcon,
+    accentClassName: "bg-warning/10 text-warning-foreground",
+  },
   "item.mutate": {
     label: "Item change",
     description: "Create or update an Item",

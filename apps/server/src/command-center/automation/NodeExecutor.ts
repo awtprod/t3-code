@@ -1,6 +1,7 @@
 import { SpaceId, type ItemKind, type ItemPriority } from "@command-center/core";
 import {
   GoogleReadRequest,
+  GoogleDraftCreateRequest,
   type GoogleReadRequest as GoogleReadRequestType,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -24,6 +25,7 @@ import {
 import type { AutomationNodeExecutionContext, AutomationNodeExecutionOutcome } from "./Runtime.ts";
 
 const decodeGoogleReadRequest = Schema.decodeUnknownEffect(GoogleReadRequest);
+const decodeGoogleDraftCreateRequest = Schema.decodeUnknownEffect(GoogleDraftCreateRequest);
 
 const ITEM_KINDS = new Set<ItemKind>(["idea", "task", "decision", "alert", "approval"]);
 const ITEM_PRIORITIES = new Set<ItemPriority>(["low", "normal", "high", "urgent"]);
@@ -59,6 +61,7 @@ export interface AutomationNodeExecutorDependencies {
     { readonly operation: string; readonly contentTrust: string; readonly data: unknown },
     string
   >;
+  readonly googleDraft?: (input: import("@t3tools/contracts").GoogleDraftCreateRequest) => Effect.Effect<Schema.Json, string>;
   readonly runScopedShell: (
     input: AutomationScopedShellRequest,
   ) => Effect.Effect<AutomationScopedShellResult, AutomationScopedShellError>;
@@ -327,6 +330,29 @@ const executeConnectorRead = Effect.fn("AutomationNodeExecutor.connectorRead")(f
   } as const;
 });
 
+const executeConnectorWrite = Effect.fn("AutomationNodeExecutor.connectorWrite")(function* (
+  context: AutomationNodeExecutionContext,
+  dependencies: AutomationNodeExecutorDependencies,
+) {
+  const connectionId = context.node.config.connectionId;
+  if (typeof connectionId !== "string" || connectionId.trim().length === 0) {
+    return permanentFailure(`Connector write node '${context.node.id}' requires a connectionId.`);
+  }
+  const request = yield* decodeGoogleDraftCreateRequest(
+    googleRequestConfig(context.node.config, context.spaceId, connectionId),
+  ).pipe(Effect.match({ onFailure: () => ({ _tag: "Left" as const }), onSuccess: (value) => ({ _tag: "Right" as const, value }) }));
+  if (request._tag === "Left") return permanentFailure("The connector write node does not contain a valid Gmail draft request.");
+  if (dependencies.googleDraft === undefined) {
+    return permanentFailure("Gmail draft creation is not configured on this server.");
+  }
+  const drafted = yield* dependencies.googleDraft(request.value).pipe(
+    Effect.match({ onFailure: (error) => ({ _tag: "Left" as const, error }), onSuccess: (value) => ({ _tag: "Right" as const, value }) }),
+  );
+  return drafted._tag === "Left"
+    ? ({ type: "retry", error: drafted.error } as const)
+    : ({ type: "succeeded", output: { operation: "gmail.draft.create", data: drafted.value } } as const);
+});
+
 const executeAgentRun = Effect.fn("AutomationNodeExecutor.agentRun")(function* (
   context: AutomationNodeExecutionContext,
   dependencies: AutomationNodeExecutorDependencies,
@@ -464,6 +490,8 @@ export function makeSafeAutomationNodeExecutor(dependencies: AutomationNodeExecu
         return executeItemMutation(context, dependencies);
       case "connector.read":
         return executeConnectorRead(context, dependencies);
+      case "connector.write":
+        return executeConnectorWrite(context, dependencies);
       case "agent.run":
         return executeAgentRun(context, dependencies);
       case "shell.scoped":

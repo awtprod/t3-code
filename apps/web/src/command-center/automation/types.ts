@@ -1,6 +1,7 @@
 export const AUTOMATION_EDITOR_NODE_KINDS = [
   "agent.run",
   "connector.read",
+  "connector.write",
   "item.mutate",
   "condition",
   "transform",
@@ -15,6 +16,7 @@ export type AutomationEditorNodeKind = (typeof AUTOMATION_EDITOR_NODE_KINDS)[num
 export const AUTOMATION_EDITOR_ADDABLE_NODE_KINDS = [
   "agent.run",
   "connector.read",
+  "connector.write",
   "item.mutate",
   "condition",
   "transform",

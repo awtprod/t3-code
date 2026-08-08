@@ -47,6 +47,7 @@ describe("AutomationsScreen", () => {
     expect(html).toContain("Unsaved");
     expect(html).toContain("Save commit");
     expect(html).toContain("New automation");
+    expect(html).toContain('href="/settings/connections"');
     expect(html).toMatch(
       /<select[^>]*aria-label="Automation runtime environment"(?![^>]*disabled)/u,
     );
@@ -116,6 +117,7 @@ describe("AutomationsScreen", () => {
     expect(empty).toContain('data-slot="automations-empty"');
     expect(empty).toContain("No committed automations yet");
     expect(empty).toContain("Check again");
+    expect(empty).toContain("Add environment");
   });
 
   it("does not expose environment error details in its unavailable state", () => {

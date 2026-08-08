@@ -69,6 +69,8 @@ function AutomationsEnvironmentRouteView({
   const [savingAutomationId, setSavingAutomationId] = useState<string>();
   const [isCreating, setIsCreating] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const bootstrapQuery = useEnvironmentQuery(
     environmentId === null
       ? null
@@ -113,6 +115,7 @@ function AutomationsEnvironmentRouteView({
   const createDefinition = useAtomCommand(commandCenterEnvironment.createAutomationDefinition, {
     reportFailure: false,
   });
+  const syncSpaces = useAtomCommand(commandCenterEnvironment.syncSpaces, { reportFailure: false });
   const status = resolveAutomationsScreenStatus({
     connected: environmentId !== null,
     isPending: bootstrapQuery.isPending,
@@ -263,7 +266,16 @@ function AutomationsEnvironmentRouteView({
     [bootstrapQuery, createDefinition, environmentId, isCreating],
   );
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback(async () => {
+    if (isRefreshing || environmentId === null) return;
+    setIsRefreshing(true);
+    setRefreshError(null);
+    const result = await syncSpaces({ environmentId, input: {} });
+    if (result._tag !== "Success") {
+      setRefreshError("Could not recheck the private configuration. Try again after the environment is reachable.");
+      setIsRefreshing(false);
+      return;
+    }
     if (selectedId !== undefined) {
       setDrafts((current) => {
         const { [selectedId]: _discarded, ...rest } = current;
@@ -273,7 +285,8 @@ function AutomationsEnvironmentRouteView({
     setSaveError(null);
     definitionQuery.refresh();
     bootstrapQuery.refresh();
-  }, [bootstrapQuery, definitionQuery, selectedId]);
+    setIsRefreshing(false);
+  }, [bootstrapQuery, definitionQuery, environmentId, isRefreshing, selectedId, syncSpaces]);
 
   return (
     <AutomationsScreen
@@ -291,6 +304,8 @@ function AutomationsEnvironmentRouteView({
       isDirty={activeDraft?.dirty ?? false}
       isCreating={isCreating}
       isSaving={savingAutomationId === selectedAutomation?.id}
+      isRefreshing={isRefreshing}
+      refreshError={refreshError}
       onDefinitionChange={changeDefinition}
       onEnvironmentChange={onEnvironmentChange}
       onCreate={(input) => {

@@ -48,7 +48,7 @@ const RootConfigFile = Schema.Struct({
       accountLabel: NonEmpty,
       credentialRef: NonEmpty,
       capabilities: Schema.Array(
-        Schema.Literals(["gmail.read", "calendar.read", "drive.read"]),
+        Schema.Literals(["gmail.read", "gmail.drafts.create", "calendar.read", "drive.read"]),
       ).check(Schema.isNonEmpty()),
       enabled: Schema.Boolean,
     }),
