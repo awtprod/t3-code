@@ -104,7 +104,7 @@ This is the key abstraction that keeps SSH from taking over the model.
 A single environment may have many endpoints:
 
 - `wss://t3.example.com`
-- `ws://10.0.0.25:3773`
+- `ws://192.0.2.25:3773`
 - a tunneled relay URL
 - a desktop-managed SSH tunnel that resolves to a local forwarded WebSocket URL
 
@@ -203,7 +203,7 @@ They do not answer:
 
 Examples:
 
-- `ws://10.0.0.15:3773`
+- `ws://192.0.2.15:3773`
 - `wss://t3.example.com`
 
 This is the base model and should be the first-class default.
