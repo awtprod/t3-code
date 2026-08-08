@@ -520,7 +520,7 @@ export function CommandCenterHome() {
       : null;
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <CommandCenterShell
         activeConversationId={activeConversationId}
         context={projection.context}

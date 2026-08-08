@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeNet from "node:net";
+
 import {
   ApprovalRequestId,
   DEFAULT_MODEL,
@@ -39,6 +42,7 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 import {
@@ -48,6 +52,12 @@ import {
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 const decodeV2CommandExecResponse = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2CommandExecResponse,
+);
+const decodeV2WindowsSandboxReadinessResponse = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2WindowsSandboxReadinessResponse,
+);
+const decodeV2WindowsSandboxSetupStartResponse = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2WindowsSandboxSetupStartResponse,
 );
 // The generated response schemas omit `activePermissionProfile`, so it is
 // reassigned here. The Codex App Server sends `null` when no permission profile
@@ -145,6 +155,7 @@ export interface CodexSessionRuntimeOptions {
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
   readonly homePath?: string;
+  readonly launchArgs?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
@@ -153,6 +164,8 @@ export interface CodexSessionRuntimeOptions {
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
   readonly permissionProfile?: string;
+  readonly commandCenterPlatform?: NodeJS.Platform;
+  readonly windowsSandboxMode?: "elevated";
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -206,6 +219,7 @@ export interface CodexSessionRuntimeShape {
 export type CodexSessionRuntimeError =
   | CodexErrors.CodexAppServerError
   | CodexSessionRuntimeIsolationProbeError
+  | CodexSessionRuntimeWindowsSandboxSetupError
   | CodexSessionRuntimePermissionProfileMismatchError
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
@@ -217,6 +231,18 @@ export class CodexSessionRuntimeIsolationProbeError extends Schema.TaggedErrorCl
   {
     issue: Schema.String,
     exitCode: Schema.optional(Schema.Number),
+  },
+) {
+  override get message(): string {
+    return this.issue;
+  }
+}
+
+export class CodexSessionRuntimeWindowsSandboxSetupError extends Schema.TaggedErrorClass<CodexSessionRuntimeWindowsSandboxSetupError>()(
+  "CodexSessionRuntimeWindowsSandboxSetupError",
+  {
+    issue: Schema.String,
+    mode: Schema.Literals(["elevated", "unelevated"]),
   },
 ) {
   override get message(): string {
@@ -363,23 +389,35 @@ export function matchesCodexInterruptTarget(
 function runtimeModeToThreadConfig(input: RuntimeMode): {
   readonly approvalPolicy: EffectCodexSchema.V2ThreadStartParams__AskForApproval;
   readonly sandbox: EffectCodexSchema.V2ThreadStartParams__SandboxMode;
+  // Always explicit: omitting the field on resume keeps the thread's previous
+  // reviewer, which would leave auto_review sticky after switching modes.
+  readonly approvalsReviewer: EffectCodexSchema.V2ThreadStartParams__ApprovalsReviewer;
 } {
   switch (input) {
     case "approval-required":
       return {
         approvalPolicy: "untrusted",
         sandbox: "read-only",
+        approvalsReviewer: "user",
       };
     case "auto-accept-edits":
       return {
         approvalPolicy: "on-request",
         sandbox: "workspace-write",
+        approvalsReviewer: "user",
+      };
+    case "auto":
+      return {
+        approvalPolicy: "on-request",
+        sandbox: "workspace-write",
+        approvalsReviewer: "auto_review",
       };
     case "full-access":
     default:
       return {
         approvalPolicy: "never",
         sandbox: "danger-full-access",
+        approvalsReviewer: "user",
       };
   }
 }
@@ -397,7 +435,7 @@ export function buildThreadStartParams(input: {
     approvalPolicy: input.permissionProfile ? "never" : config.approvalPolicy,
     ...(input.permissionProfile
       ? { permissions: input.permissionProfile }
-      : { sandbox: config.sandbox }),
+      : { sandbox: config.sandbox, approvalsReviewer: config.approvalsReviewer }),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
   };
@@ -412,6 +450,7 @@ function runtimeModeToTurnSandboxPolicy(
         type: "readOnly",
       };
     case "auto-accept-edits":
+    case "auto":
       return {
         type: "workspaceWrite",
       };
@@ -487,7 +526,10 @@ export function buildTurnStartParams(input: {
     approvalPolicy: input.permissionProfile ? "never" : config.approvalPolicy,
     ...(input.permissionProfile
       ? { permissions: input.permissionProfile }
-      : { sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode) }),
+      : {
+          approvalsReviewer: config.approvalsReviewer,
+          sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
+        }),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
@@ -565,7 +607,10 @@ function isCommandCenterPermissionProfile(
   );
 }
 
-export function buildCommandCenterIsolationProbeScript(writable: boolean): string {
+export function buildCommandCenterIsolationProbeScript(
+  writable: boolean,
+  blockedNetworkPort?: number,
+): string {
   const workspaceCheck = writable
     ? [
         'probe_path=".cc-provider-isolation-probe.$$"',
@@ -594,6 +639,10 @@ export function buildCommandCenterIsolationProbeScript(writable: boolean): strin
     "done",
     'test ! -r "$HOME/auth.json" || exit 71',
     'test ! -r "/proc/1/root$HOME/auth.json" || exit 72',
+    'test ! -r "$HOME/.cc-provider-isolation-canary" || exit 80',
+    ...(blockedNetworkPort === undefined
+      ? []
+      : [`if (: > /dev/tcp/127.0.0.1/${blockedNetworkPort}) 2>/dev/null; then`, "  exit 79", "fi"]),
     "if test -e .git; then",
     "  test ! -w .git || exit 75",
     "  /usr/bin/git status --porcelain=v1 >/dev/null",
@@ -607,6 +656,139 @@ export function buildCommandCenterIsolationProbeScript(writable: boolean): strin
   ].join("\n");
 }
 
+export function buildCommandCenterDarwinIsolationProbeScript(
+  writable: boolean,
+  blockedNetworkPort?: number,
+): string {
+  const workspaceCheck = writable
+    ? [
+        'probe_path=".cc-provider-isolation-probe.$$"',
+        "trap 'rm -f \"$probe_path\"' EXIT",
+        ': > "$probe_path" || exit 73',
+        'rm -f "$probe_path"',
+        "trap - EXIT",
+      ]
+    : [
+        'probe_path=".cc-provider-isolation-probe.$$"',
+        "trap 'rm -f \"$probe_path\"' EXIT",
+        'if : > "$probe_path" 2>/dev/null; then',
+        '  rm -f "$probe_path"',
+        "  trap - EXIT",
+        "  exit 74",
+        "fi",
+        `printf '${COMMAND_CENTER_ISOLATION_READ_DENIAL_READY}\\n'`,
+        "exit 73",
+      ];
+  return [
+    "set -eu",
+    'test -z "${CC_PROVIDER_ISOLATION_SENTINEL:-}" || exit 70',
+    'test -z "${T3_MCP_BEARER_TOKEN:-}" || exit 70',
+    'test -z "${OPENAI_API_KEY:-}" || exit 70',
+    'test ! -r "$HOME/auth.json" || exit 71',
+    'test ! -r "$HOME/.cc-provider-isolation-canary" || exit 80',
+    ...(blockedNetworkPort === undefined
+      ? []
+      : [
+          `if /usr/bin/nc -z -w 1 127.0.0.1 ${blockedNetworkPort} 2>/dev/null; then`,
+          "  exit 79",
+          "fi",
+        ]),
+    "if test -e .git; then",
+    "  test ! -w .git || exit 75",
+    "  /usr/bin/git status --porcelain=v1 >/dev/null",
+    "  git_dir=$(/usr/bin/git rev-parse --git-dir 2>/dev/null || true)",
+    '  test -z "$git_dir" || test ! -w "$git_dir" || exit 76',
+    "  common_git_dir=$(/usr/bin/git rev-parse --git-common-dir 2>/dev/null || true)",
+    '  test -z "$common_git_dir" || test ! -w "$common_git_dir" || exit 77',
+    "fi",
+    ...workspaceCheck,
+    `printf '${COMMAND_CENTER_ISOLATION_PROBE_SUCCESS}\\n'`,
+  ].join("\n");
+}
+
+export function buildCommandCenterWindowsIsolationProbeScript(
+  writable: boolean,
+  blockedNetworkPort?: number,
+): string {
+  const workspaceCheck = writable
+    ? [
+        "$probePath = Join-Path (Get-Location) '.cc-provider-isolation-probe'",
+        "try { [IO.File]::WriteAllText($probePath, '') } catch { exit 73 }",
+        "Remove-Item -LiteralPath $probePath -Force",
+      ]
+    : [
+        "$probePath = Join-Path (Get-Location) '.cc-provider-isolation-probe'",
+        "try { [IO.File]::WriteAllText($probePath, ''); Remove-Item -LiteralPath $probePath -Force; exit 74 } catch {}",
+        `Write-Output '${COMMAND_CENTER_ISOLATION_READ_DENIAL_READY}'`,
+        "exit 73",
+      ];
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "if ($env:CC_PROVIDER_ISOLATION_SENTINEL -or $env:T3_MCP_BEARER_TOKEN -or $env:OPENAI_API_KEY) { exit 70 }",
+    "$authPath = Join-Path $env:USERPROFILE 'auth.json'",
+    "try { $stream = [IO.File]::OpenRead($authPath); $stream.Dispose(); exit 71 } catch {}",
+    "$canaryPath = Join-Path $env:USERPROFILE '.cc-provider-isolation-canary'",
+    "try { $stream = [IO.File]::OpenRead($canaryPath); $stream.Dispose(); exit 80 } catch {}",
+    ...(blockedNetworkPort === undefined
+      ? []
+      : [
+          `try { $client = [Net.Sockets.TcpClient]::new(); $client.Connect('127.0.0.1', ${blockedNetworkPort}); $client.Dispose(); exit 79 } catch {}`,
+        ]),
+    "if (Test-Path -LiteralPath '.git') {",
+    "  $gitEntry = Get-Item -LiteralPath '.git' -Force",
+    "  if ($gitEntry.PSIsContainer) {",
+    "    $gitProbe = Join-Path $gitEntry.FullName '.cc-provider-isolation-probe'",
+    "    try { [IO.File]::WriteAllText($gitProbe, ''); Remove-Item -LiteralPath $gitProbe -Force; exit 75 } catch {}",
+    "  } else {",
+    "    try { $stream = [IO.File]::Open($gitEntry.FullName, 'Open', 'Write'); $stream.Dispose(); exit 75 } catch {}",
+    "  }",
+    "  & git status --porcelain=v1 *> $null",
+    "  if ($LASTEXITCODE -ne 0) { exit 78 }",
+    "}",
+    ...workspaceCheck,
+    `Write-Output '${COMMAND_CENTER_ISOLATION_PROBE_SUCCESS}'`,
+  ].join("\n");
+}
+
+const acquireCommandCenterNetworkProbe = Effect.callback<
+  { readonly server: NodeNet.Server; readonly port: number },
+  CodexSessionRuntimeIsolationProbeError
+>((resume) => {
+  const server = NodeNet.createServer((socket) => socket.destroy());
+  server.unref();
+  server.once("error", (cause) =>
+    resume(
+      Effect.fail(
+        new CodexSessionRuntimeIsolationProbeError({
+          issue: `Command Center could not open its local network-isolation probe: ${cause.message}`,
+        }),
+      ),
+    ),
+  );
+  server.listen({ host: "127.0.0.1", port: 0 }, () => {
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    resume(
+      port > 0
+        ? Effect.succeed({ server, port })
+        : Effect.fail(
+            new CodexSessionRuntimeIsolationProbeError({
+              issue: "Command Center received an invalid local network-isolation probe port.",
+            }),
+          ),
+    );
+  });
+  return Effect.sync(() => server.close());
+});
+
+const releaseCommandCenterNetworkProbe = (probe: {
+  readonly server: NodeNet.Server;
+  readonly port: number;
+}) =>
+  Effect.callback<void>((resume) => {
+    probe.server.close(() => resume(Effect.void));
+  });
+
 /**
  * Exercise the admitted profile through the same app-server command path used
  * by Codex tools before any untrusted model turn can run.
@@ -617,6 +799,7 @@ export const verifyCommandCenterCodexIsolation = Effect.fn(
   readonly client: CodexIsolationProbeClient;
   readonly cwd: string;
   readonly permissionProfile: string;
+  readonly platform: NodeJS.Platform;
 }) {
   const writable = input.permissionProfile === COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE;
   if (!writable && input.permissionProfile !== COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE) {
@@ -624,24 +807,53 @@ export const verifyCommandCenterCodexIsolation = Effect.fn(
       issue: "Command Center received an unknown Codex isolation profile.",
     });
   }
-  const result = yield* input.client
-    .request("command/exec", {
-      command: ["/usr/bin/bash", "-c", buildCommandCenterIsolationProbeScript(writable)],
-      cwd: input.cwd,
-      timeoutMs: 10_000,
-    })
-    .pipe(
-      Effect.flatMap(decodeV2CommandExecResponse),
-      Effect.mapError((cause) =>
-        Schema.isSchemaError(cause)
-          ? CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
-              "decode-response-payload",
-              cause,
-              { method: "command/exec" },
-            )
-          : cause,
-      ),
-    );
+  const result = yield* Effect.scoped(
+    Effect.gen(function* () {
+      const networkProbe = yield* Effect.acquireRelease(
+        acquireCommandCenterNetworkProbe,
+        releaseCommandCenterNetworkProbe,
+      );
+      const command =
+        input.platform === "win32"
+          ? [
+              "powershell.exe",
+              "-NoLogo",
+              "-NoProfile",
+              "-NonInteractive",
+              "-Command",
+              buildCommandCenterWindowsIsolationProbeScript(writable, networkProbe.port),
+            ]
+          : input.platform === "darwin"
+            ? [
+                "/bin/bash",
+                "-c",
+                buildCommandCenterDarwinIsolationProbeScript(writable, networkProbe.port),
+              ]
+            : [
+                "/usr/bin/bash",
+                "-c",
+                buildCommandCenterIsolationProbeScript(writable, networkProbe.port),
+              ];
+      return yield* input.client
+        .request("command/exec", {
+          command,
+          cwd: input.cwd,
+          timeoutMs: 10_000,
+        })
+        .pipe(
+          Effect.flatMap(decodeV2CommandExecResponse),
+          Effect.mapError((cause) =>
+            Schema.isSchemaError(cause)
+              ? CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+                  "decode-response-payload",
+                  cause,
+                  { method: "command/exec" },
+                )
+              : cause,
+          ),
+        );
+    }),
+  );
   const accepted = writable
     ? result.exitCode === 0 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_PROBE_SUCCESS
     : result.exitCode === 73 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_READ_DENIAL_READY;
@@ -651,6 +863,72 @@ export const verifyCommandCenterCodexIsolation = Effect.fn(
         "Command Center blocked the Codex session because its live filesystem, process, or environment isolation probe failed.",
       exitCode: result.exitCode,
     });
+  }
+});
+
+interface CodexWindowsSandboxSetupClient {
+  readonly request: (
+    method: "windowsSandbox/readiness" | "windowsSandbox/setupStart",
+    payload: unknown,
+  ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+}
+
+export const ensureCommandCenterWindowsSandbox = Effect.fn(
+  "CodexSessionRuntime.ensureCommandCenterWindowsSandbox",
+)(function* (input: {
+  readonly client: CodexWindowsSandboxSetupClient;
+  readonly cwd: string;
+  readonly mode: "elevated";
+  readonly setupCompleted: Effect.Effect<
+    EffectCodexSchema.V2WindowsSandboxSetupCompletedNotification,
+    never
+  >;
+}) {
+  const setupError = (issue: string) =>
+    new CodexSessionRuntimeWindowsSandboxSetupError({
+      issue,
+      mode: input.mode,
+    });
+  const readiness = yield* input.client.request("windowsSandbox/readiness", undefined).pipe(
+    Effect.flatMap(decodeV2WindowsSandboxReadinessResponse),
+    Effect.mapError((cause) =>
+      setupError(
+        `Command Center requires a Codex installation with native Windows sandbox setup support: ${cause instanceof Error ? cause.message : String(cause)}`,
+      ),
+    ),
+  );
+  if (readiness.status === "ready") return;
+
+  const started = yield* input.client
+    .request("windowsSandbox/setupStart", { mode: input.mode, cwd: input.cwd })
+    .pipe(
+      Effect.flatMap(decodeV2WindowsSandboxSetupStartResponse),
+      Effect.mapError((cause) =>
+        setupError(
+          `Codex could not start ${input.mode} Windows sandbox setup: ${cause instanceof Error ? cause.message : String(cause)}`,
+        ),
+      ),
+    );
+  if (!started.started) {
+    return yield* setupError(`Codex declined to start ${input.mode} Windows sandbox setup.`);
+  }
+
+  const completed = yield* input.setupCompleted.pipe(
+    Effect.timeout("2 minutes"),
+    Effect.mapError(() =>
+      setupError(`Timed out waiting for ${input.mode} Windows sandbox setup to complete.`),
+    ),
+  );
+  if (completed.mode !== input.mode) {
+    return yield* setupError(
+      `Codex completed '${completed.mode}' Windows sandbox setup while '${input.mode}' was required.`,
+    );
+  }
+  if (!completed.success) {
+    const safeError = completed.error?.split(/\r?\n/u)[0]?.trim();
+    return yield* setupError(
+      `Command Center requires Codex's administrator-approved Windows sandbox to enforce workspace-only filesystem access. Approve the administrator prompt and try again.${safeError ? ` Codex reported: ${safeError}` : ""}`,
+    );
   }
 });
 
@@ -969,6 +1247,7 @@ export const makeCodexSessionRuntime = (
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const closedRef = yield* Ref.make(false);
+    const mcpCatalogReloadedRef = yield* Ref.make(false);
     // Records the single terminal lifecycle emit (`session/exited` from a process
     // exit XOR `session/closed` from a graceful close). Distinct from
     // `closedRef`, which guards the one-time close() *cleanup* (scope + queues):
@@ -1000,11 +1279,11 @@ export const makeCodexSessionRuntime = (
       ...(isolationSentinel ? { CC_PROVIDER_ISOLATION_SENTINEL: isolationSentinel } : {}),
     };
     const extendEnv = options.environment === undefined;
-    const spawnCommand = yield* resolveSpawnCommand(
-      options.binaryPath,
-      ["app-server", ...(options.appServerArgs ?? [])],
-      { env, extendEnv },
-    );
+    const appServerArgs = codexSessionAppServerArgs(options.appServerArgs, options.launchArgs);
+    const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, appServerArgs, {
+      env,
+      extendEnv,
+    });
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -1034,6 +1313,8 @@ export const makeCodexSessionRuntime = (
       Effect.provide(clientContext),
     );
     const serverNotifications = yield* Queue.unbounded<CodexServerNotification>();
+    const windowsSandboxSetupCompleted =
+      yield* Deferred.make<EffectCodexSchema.V2WindowsSandboxSetupCompletedNotification>();
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
     const randomUUIDv4 = (purpose: CodexErrors.CodexAppServerIdentifierPurpose) =>
       crypto.randomUUIDv4.pipe(
@@ -1118,6 +1399,9 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
+        if (notification.method === "windowsSandbox/setupCompleted") {
+          yield* Deferred.succeed(windowsSandboxSetupCompleted, notification.params);
+        }
         const payload = notification.params;
         const route = readRouteFields(notification);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
@@ -1537,11 +1821,37 @@ export const makeCodexSessionRuntime = (
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
 
+      if (hasConfiguredMcpServer(options.appServerArgs)) {
+        yield* client.request("config/mcpServer/reload", undefined).pipe(
+          Effect.tap(() => Ref.set(mcpCatalogReloadedRef, true)),
+          Effect.catch((cause) =>
+            Effect.logWarning("Failed to load the Codex MCP tool catalog for this session.", {
+              cause,
+            }),
+          ),
+        );
+      }
+
       if (isCommandCenterPermissionProfile(options.permissionProfile)) {
+        if (options.commandCenterPlatform === "win32") {
+          if (options.windowsSandboxMode === undefined) {
+            return yield* new CodexSessionRuntimeWindowsSandboxSetupError({
+              issue: "Command Center did not select a native Windows sandbox mode.",
+              mode: "elevated",
+            });
+          }
+          yield* ensureCommandCenterWindowsSandbox({
+            client: client.raw,
+            cwd: options.cwd,
+            mode: options.windowsSandboxMode,
+            setupCompleted: Deferred.await(windowsSandboxSetupCompleted),
+          });
+        }
         yield* verifyCommandCenterCodexIsolation({
           client: client.raw,
           cwd: options.cwd,
           permissionProfile: options.permissionProfile,
+          platform: options.commandCenterPlatform ?? "linux",
         });
       }
 
@@ -1616,10 +1926,14 @@ export const makeCodexSessionRuntime = (
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          if (hasConfiguredMcpServer(options.appServerArgs)) {
+          if (
+            hasConfiguredMcpServer(options.appServerArgs) &&
+            !(yield* Ref.get(mcpCatalogReloadedRef))
+          ) {
             yield* client.request("config/mcpServer/reload", undefined).pipe(
+              Effect.tap(() => Ref.set(mcpCatalogReloadedRef, true)),
               Effect.catch((cause) =>
-                Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {
+                Effect.logWarning("Failed to load the Codex MCP tool catalog for this session.", {
                   cause,
                 }),
               ),

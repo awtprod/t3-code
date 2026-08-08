@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
+import * as NodeModule from "node:module";
 
 import type { ProviderDriverKind, RuntimeMode, ThreadId } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
@@ -14,12 +15,21 @@ import * as Schema from "effect/Schema";
 import { trustedHostExecutablePath, unsafeHostGitConfigKey } from "../../vcs/HostGitSecurity.ts";
 
 export const COMMAND_CENTER_THREAD_ID_PREFIX = "cc:";
+export const COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX = "cc:interactive:";
+export const COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX = "cc:automation:";
+
+export type CommandCenterExecutionClass = "interactive" | "automation" | "legacy";
 
 export const COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE = "command-center-isolated-read-v1";
 export const COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE = "command-center-isolated-write-v1";
 
-const COMMAND_CENTER_CODEX_RUNTIME_ALIASES = [
+const COMMAND_CENTER_CODEX_LINUX_RUNTIME_ALIASES = [
   "codex-linux-sandbox",
+  "apply_patch",
+  "applypatch",
+  "codex-execve-wrapper",
+] as const;
+const COMMAND_CENTER_CODEX_DARWIN_RUNTIME_ALIASES = [
   "apply_patch",
   "applypatch",
   "codex-execve-wrapper",
@@ -70,6 +80,7 @@ function sameControlFileIdentity(
 export interface CommandCenterCodexIsolation {
   readonly permissionProfile: string;
   readonly appServerArgs: ReadonlyArray<string>;
+  readonly windowsSandboxMode?: "elevated";
 }
 
 export interface CommandCenterManagedGitMetadata {
@@ -116,6 +127,8 @@ export interface CommandCenterProviderEnvironmentInput {
   readonly source: NodeJS.ProcessEnv;
   readonly homePath: string;
   readonly helperBinPath: string;
+  /** Optional packaged-tool directory next to the admitted native Codex runtime. */
+  readonly runtimeSupportPath?: string;
   readonly tempPath: string;
   readonly xdgConfigPath: string;
   readonly xdgCachePath: string;
@@ -146,7 +159,15 @@ export function commandCenterProviderEnvironment(
     if (value !== undefined) environment[name] = value;
   }
   const trustedPath = trustedHostExecutablePath({
-    sourceEnvironment: input.source,
+    sourceEnvironment:
+      input.runtimeSupportPath === undefined
+        ? input.source
+        : {
+            ...input.source,
+            PATH: [input.runtimeSupportPath, readEnvironmentValue(input.source, "PATH")]
+              .filter((entry): entry is string => entry !== undefined)
+              .join(NodePath.delimiter),
+          },
     writableRoots: input.writableRoots,
   });
   const providerPath = [input.helperBinPath, ...trustedPath.split(NodePath.delimiter)]
@@ -225,18 +246,47 @@ export interface PrepareCommandCenterCodexHomeInput {
   readonly path: Path.Path;
   readonly crypto: Crypto.Crypto;
   readonly runtimeExecutablePath: string;
+  readonly platform: NodeJS.Platform;
   /** Canonicalized below; the native runtime must not be replaceable by a provider turn. */
   readonly writableRoots: ReadonlyArray<string>;
+}
+
+export interface ResolveCommandCenterCodexRuntimeInput {
+  readonly commandPath: string;
+  readonly platform: NodeJS.Platform;
+  readonly architecture: NodeJS.Architecture;
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly path: Path.Path;
 }
 
 export function isCommandCenterThreadId(threadId: ThreadId | string): boolean {
   return String(threadId).startsWith(COMMAND_CENTER_THREAD_ID_PREFIX);
 }
 
-export function commandCenterProviderPlatformIssue(platform: NodeJS.Platform): string | undefined {
-  return platform === "linux"
-    ? undefined
-    : "Command Center provider isolation is supported only on verified Linux hosts; macOS and Windows dispatch is blocked.";
+export function commandCenterExecutionClass(
+  threadId: ThreadId | string,
+): CommandCenterExecutionClass | undefined {
+  const value = String(threadId);
+  if (value.startsWith(COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX)) return "interactive";
+  if (value.startsWith(COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX)) return "automation";
+  return value.startsWith(COMMAND_CENTER_THREAD_ID_PREFIX) ? "legacy" : undefined;
+}
+
+export function commandCenterProviderPlatformIssue(
+  platform: NodeJS.Platform,
+  threadId: ThreadId | string,
+): string | undefined {
+  if (platform === "linux") return undefined;
+  if (
+    (platform === "darwin" || platform === "win32") &&
+    commandCenterExecutionClass(threadId) === "interactive"
+  ) {
+    return undefined;
+  }
+  if (platform === "darwin" || platform === "win32") {
+    return "Unattended Command Center automation currently requires a verified Linux host; native macOS and Windows support is limited to user-started chats.";
+  }
+  return `Command Center provider isolation is not supported on '${platform}'.`;
 }
 
 export function commandCenterProviderIsolationIssue(input: {
@@ -245,8 +295,8 @@ export function commandCenterProviderIsolationIssue(input: {
   readonly runtimeMode: RuntimeMode;
 }): string | undefined {
   if (!isCommandCenterThreadId(input.threadId)) return undefined;
-  if (String(input.provider) !== "codex") {
-    return "Command Center runs require the Codex provider because the selected provider does not expose a verified host-filesystem isolation profile.";
+  if (String(input.provider) !== "codex" && String(input.provider) !== "kimi") {
+    return "Command Center runs require Codex or a verified native Kimi provider because the selected provider does not expose a host-filesystem isolation profile.";
   }
   if (input.runtimeMode === "full-access") {
     return "Command Center runs cannot use full-access provider sessions.";
@@ -294,6 +344,10 @@ function isWithinRoot(path: Path.Path, candidate: string, root: string): boolean
   );
 }
 
+function isSameResolvedPath(path: Path.Path, left: string, right: string): boolean {
+  return path.relative(left, right) === "" && path.relative(right, left) === "";
+}
+
 function safeManagedComponent(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
 }
@@ -333,6 +387,80 @@ function codexHomeError(issue: string, cause?: unknown): CommandCenterCodexHomeI
   });
 }
 
+/** Resolve the native executable behind the official Windows npm launcher without executing it. */
+export const resolveCommandCenterCodexRuntimeExecutable = Effect.fn(
+  "CommandCenterProviderIsolation.resolveCodexRuntimeExecutable",
+)(function* (input: ResolveCommandCenterCodexRuntimeInput) {
+  const { fileSystem, path } = input;
+  const canonicalCommandPath = yield* fileSystem
+    .realPath(input.commandPath)
+    .pipe(
+      Effect.mapError((cause) =>
+        codexHomeError("Command Center could not canonicalize the Codex runtime launcher.", cause),
+      ),
+    );
+  if (input.platform !== "win32" || path.extname(canonicalCommandPath).toLowerCase() === ".exe") {
+    return canonicalCommandPath;
+  }
+  const target =
+    input.architecture === "arm64"
+      ? {
+          packageName: "@openai/codex-win32-arm64",
+          triple: "aarch64-pc-windows-msvc",
+        }
+      : input.architecture === "x64"
+        ? {
+            packageName: "@openai/codex-win32-x64",
+            triple: "x86_64-pc-windows-msvc",
+          }
+        : undefined;
+  if (target === undefined) {
+    return yield* codexHomeError(
+      `Command Center does not support the '${input.architecture}' Windows Codex runtime architecture.`,
+    );
+  }
+  const codexPackageRoot = path.join(
+    path.dirname(canonicalCommandPath),
+    "node_modules",
+    "@openai",
+    "codex",
+  );
+  const codexLauncherPath = path.join(codexPackageRoot, "bin", "codex.js");
+  if (!(yield* fileSystem.exists(codexLauncherPath))) {
+    return yield* codexHomeError(
+      "Command Center requires the official native Codex package; the configured Windows launcher does not have a verifiable @openai/codex installation.",
+    );
+  }
+  const packageJsonPath = yield* Effect.try({
+    try: () =>
+      NodeModule.createRequire(codexLauncherPath).resolve(`${target.packageName}/package.json`),
+    catch: (cause) =>
+      codexHomeError(
+        `Command Center could not resolve the native ${target.packageName} package. Reinstall or update @openai/codex.`,
+        cause,
+      ),
+  });
+  const platformVendorRoot = path.join(path.dirname(packageJsonPath), "vendor", target.triple);
+  const nativeExecutableCandidates = [
+    path.join(platformVendorRoot, "bin", "codex.exe"),
+    path.join(platformVendorRoot, "codex", "codex.exe"),
+  ];
+  for (const candidate of nativeExecutableCandidates) {
+    if (yield* fileSystem.exists(candidate)) {
+      return yield* fileSystem
+        .realPath(candidate)
+        .pipe(
+          Effect.mapError((cause) =>
+            codexHomeError("Command Center could not canonicalize the native codex.exe.", cause),
+          ),
+        );
+    }
+  }
+  return yield* codexHomeError(
+    "Command Center found the Windows Codex package but not its native codex.exe. Reinstall @openai/codex with optional dependencies enabled.",
+  );
+});
+
 function isNotSymlink(error: PlatformError.PlatformError): boolean {
   const cause = error.reason.cause;
   return (
@@ -353,9 +481,23 @@ export const prepareCommandCenterCodexHome = Effect.fn(
   "CommandCenterProviderIsolation.prepareCodexHome",
 )(function* (input: PrepareCommandCenterCodexHomeInput) {
   const { fileSystem, path } = input;
-  const digest = Encoding.encodeHex(
+  const threadDigest = Encoding.encodeHex(
     yield* input.crypto
       .digest("SHA-256", new TextEncoder().encode(String(input.threadId)))
+      .pipe(
+        Effect.mapError((cause) =>
+          codexHomeError("Command Center could not derive its isolated Codex home.", cause),
+        ),
+      ),
+  );
+  const digest = Encoding.encodeHex(
+    yield* input.crypto
+      .digest(
+        "SHA-256",
+        new TextEncoder().encode(
+          input.platform === "win32" ? "windows-control-v1" : String(input.threadId),
+        ),
+      )
       .pipe(
         Effect.mapError((cause) =>
           codexHomeError("Command Center could not derive its isolated Codex home.", cause),
@@ -371,15 +513,18 @@ export const prepareCommandCenterCodexHome = Effect.fn(
     );
   const homesRoot = path.join(canonicalStateDir, "provider-homes", "codex-command-center");
   const homePath = path.join(homesRoot, digest);
+  const codexTempPath = path.join(homePath, "tmp");
+  const threadStatePath =
+    input.platform === "win32" ? path.join(homePath, "thread-state", threadDigest) : homePath;
   const layout = {
     homePath,
     helperBinPath: path.join(homePath, "provider-bin"),
-    tempPath: path.join(homePath, "tmp"),
-    xdgConfigPath: path.join(homePath, "xdg-config"),
-    xdgCachePath: path.join(homePath, "xdg-cache"),
-    xdgDataPath: path.join(homePath, "xdg-data"),
-    appDataPath: path.join(homePath, "app-data"),
-    localAppDataPath: path.join(homePath, "local-app-data"),
+    tempPath: path.join(threadStatePath, "tmp"),
+    xdgConfigPath: path.join(threadStatePath, "xdg-config"),
+    xdgCachePath: path.join(threadStatePath, "xdg-cache"),
+    xdgDataPath: path.join(threadStatePath, "xdg-data"),
+    appDataPath: path.join(threadStatePath, "app-data"),
+    localAppDataPath: path.join(threadStatePath, "local-app-data"),
   } satisfies CommandCenterCodexHomeLayout;
 
   const makePrivateDirectory = (directoryPath: string) =>
@@ -393,6 +538,8 @@ export const prepareCommandCenterCodexHome = Effect.fn(
     [
       homesRoot,
       layout.homePath,
+      codexTempPath,
+      threadStatePath,
       layout.helperBinPath,
       layout.tempPath,
       layout.xdgConfigPath,
@@ -420,8 +567,8 @@ export const prepareCommandCenterCodexHome = Effect.fn(
       ),
     );
   if (
-    canonicalHomesRoot !== homesRoot ||
-    canonicalHomePath !== layout.homePath ||
+    !isSameResolvedPath(path, canonicalHomesRoot, homesRoot) ||
+    !isSameResolvedPath(path, canonicalHomePath, layout.homePath) ||
     !isWithinRoot(path, canonicalHomePath, canonicalHomesRoot)
   ) {
     return yield* codexHomeError("Command Center's isolated Codex home contains a symlink escape.");
@@ -471,7 +618,10 @@ export const prepareCommandCenterCodexHome = Effect.fn(
         codexHomeError("Command Center could not inspect its Codex runtime executable.", cause),
       ),
     );
-  if (runtimeStat.type !== "File" || (runtimeStat.mode & 0o111) === 0) {
+  if (
+    runtimeStat.type !== "File" ||
+    (input.platform !== "win32" && (runtimeStat.mode & 0o111) === 0)
+  ) {
     return yield* codexHomeError(
       "Command Center requires the Codex runtime to be a regular executable file.",
     );
@@ -486,16 +636,25 @@ export const prepareCommandCenterCodexHome = Effect.fn(
       codexHomeError("Command Center could not inspect its Codex runtime format.", cause),
     ),
   );
-  if (
-    Option.isNone(runtimeHeader) ||
-    runtimeHeader.value.length !== 4 ||
-    runtimeHeader.value[0] !== 0x7f ||
-    runtimeHeader.value[1] !== 0x45 ||
-    runtimeHeader.value[2] !== 0x4c ||
-    runtimeHeader.value[3] !== 0x46
-  ) {
+  const header = Option.getOrUndefined(runtimeHeader);
+  const headerMagic = header === undefined ? "" : Encoding.encodeHex(header);
+  const expectedNativeFormat =
+    (input.platform === "linux" && headerMagic === "7f454c46") ||
+    (input.platform === "darwin" &&
+      [
+        "feedface",
+        "feedfacf",
+        "cefaedfe",
+        "cffaedfe",
+        "cafebabe",
+        "bebafeca",
+        "cafebabf",
+        "bfbafeca",
+      ].includes(headerMagic)) ||
+    (input.platform === "win32" && header?.[0] === 0x4d && header[1] === 0x5a);
+  if (!expectedNativeFormat) {
     return yield* codexHomeError(
-      "Command Center requires a native ELF Codex runtime; script and Node.js launchers are blocked.",
+      `Command Center requires a native Codex runtime for '${input.platform}'; script, shim, and cross-platform launchers are blocked.`,
     );
   }
   const canonicalWritableRoots = yield* Effect.forEach(
@@ -515,32 +674,7 @@ export const prepareCommandCenterCodexHome = Effect.fn(
       "Command Center refuses a Codex runtime located under a provider-writable root.",
     );
   }
-  const [canonicalEnv, canonicalBash] = yield* Effect.all([
-    fileSystem.realPath("/usr/bin/env"),
-    fileSystem.realPath("/usr/bin/bash"),
-  ]).pipe(
-    Effect.mapError((cause) =>
-      codexHomeError(
-        "Command Center requires canonical /usr/bin/env and /usr/bin/bash helpers on Linux.",
-        cause,
-      ),
-    ),
-  );
-  if (canonicalEnv !== "/usr/bin/env" || canonicalBash !== "/usr/bin/bash") {
-    return yield* codexHomeError(
-      "Command Center refuses non-canonical Linux environment or shell helpers.",
-    );
-  }
   const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
-  const helperWrapper = (alias: (typeof COMMAND_CENTER_CODEX_RUNTIME_ALIASES)[number]) =>
-    [
-      "#!/usr/bin/bash",
-      "set -euo pipefail",
-      `canonical_codex=${shellQuote(canonicalRuntimeExecutable)}`,
-      `isolated_home=${shellQuote(layout.homePath)}`,
-      `exec /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$isolated_home" LANG=C.UTF-8 /usr/bin/bash -c 'exec -a ${alias} "$@"' _ "$canonical_codex" "$@"`,
-      "",
-    ].join("\n");
   const writePrivateFile = Effect.fn("CommandCenterProviderIsolation.writePrivateFile")(function* (
     targetPath: string,
     contents: Uint8Array,
@@ -550,7 +684,7 @@ export const prepareCommandCenterCodexHome = Effect.fn(
       path.dirname(targetPath),
       `.cc-${yield* input.crypto.randomUUIDv4.pipe(
         Effect.mapError((cause) =>
-          codexHomeError("Command Center could not stage its Linux sandbox helper.", cause),
+          codexHomeError("Command Center could not stage its native sandbox helper.", cause),
         ),
       )}.tmp`,
     );
@@ -559,25 +693,81 @@ export const prepareCommandCenterCodexHome = Effect.fn(
       Effect.andThen(fileSystem.rename(temporaryPath, targetPath)),
       Effect.andThen(fileSystem.chmod(targetPath, mode)),
       Effect.mapError((cause) =>
-        codexHomeError("Command Center could not install its Linux sandbox helper.", cause),
+        codexHomeError("Command Center could not install its native sandbox helper.", cause),
       ),
       Effect.ensuring(fileSystem.remove(temporaryPath, { force: true }).pipe(Effect.ignore)),
     );
   });
-  yield* Effect.forEach(
-    COMMAND_CENTER_CODEX_RUNTIME_ALIASES,
-    (alias) =>
-      writePrivateFile(
-        path.join(layout.helperBinPath, alias),
-        new TextEncoder().encode(helperWrapper(alias)),
-        0o500,
-      ),
-    { concurrency: 1, discard: true },
+  yield* writePrivateFile(
+    path.join(layout.homePath, ".cc-provider-isolation-canary"),
+    new TextEncoder().encode("Command Center private provider state.\n"),
+    0o600,
   );
-  // Codex normally creates an argv0 alias under this path. A mode-000 regular
-  // file makes that update fail closed and forces the documented PATH helper
-  // lookup, where the scrubbed wrapper above is first.
-  yield* writePrivateFile(path.join(layout.tempPath, "arg0"), new Uint8Array(), 0o000);
+
+  if (input.platform === "linux" || input.platform === "darwin") {
+    const expectedEnv = "/usr/bin/env";
+    const expectedBash = input.platform === "linux" ? "/usr/bin/bash" : "/bin/bash";
+    const [canonicalEnv, canonicalBash, canonicalNetcat] = yield* Effect.all([
+      fileSystem.realPath(expectedEnv),
+      fileSystem.realPath(expectedBash),
+      input.platform === "darwin" ? fileSystem.realPath("/usr/bin/nc") : Effect.void,
+    ]).pipe(
+      Effect.mapError((cause) =>
+        codexHomeError(
+          `Command Center requires canonical ${expectedEnv} and ${expectedBash} helpers on ${input.platform}.`,
+          cause,
+        ),
+      ),
+    );
+    if (
+      canonicalEnv !== expectedEnv ||
+      canonicalBash !== expectedBash ||
+      (input.platform === "darwin" && canonicalNetcat !== "/usr/bin/nc")
+    ) {
+      return yield* codexHomeError(
+        `Command Center refuses non-canonical ${input.platform} environment or shell helpers.`,
+      );
+    }
+    const aliases =
+      input.platform === "linux"
+        ? COMMAND_CENTER_CODEX_LINUX_RUNTIME_ALIASES
+        : COMMAND_CENTER_CODEX_DARWIN_RUNTIME_ALIASES;
+    const helperWrapper = (alias: (typeof aliases)[number]) =>
+      [
+        `#!${expectedBash}`,
+        "set -euo pipefail",
+        `canonical_codex=${shellQuote(canonicalRuntimeExecutable)}`,
+        `isolated_home=${shellQuote(layout.homePath)}`,
+        `exec ${expectedEnv} -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$isolated_home" LANG=C.UTF-8 ${expectedBash} -c 'exec -a ${alias} "$@"' _ "$canonical_codex" "$@"`,
+        "",
+      ].join("\n");
+    yield* Effect.forEach(
+      aliases,
+      (alias) =>
+        writePrivateFile(
+          path.join(layout.helperBinPath, alias),
+          new TextEncoder().encode(helperWrapper(alias)),
+          0o500,
+        ),
+      { concurrency: 1, discard: true },
+    );
+  } else if (input.platform === "win32") {
+    const escapedRuntime = canonicalRuntimeExecutable.replaceAll("%", "%%");
+    const applyPatchWrapper = new TextEncoder().encode(
+      `@echo off\r\n"${escapedRuntime}" --codex-run-as-apply-patch %*\r\n`,
+    );
+    yield* Effect.forEach(
+      ["apply_patch.bat", "applypatch.bat"],
+      (alias) => writePrivateFile(path.join(layout.helperBinPath, alias), applyPatchWrapper, 0o600),
+      { concurrency: 1, discard: true },
+    );
+  }
+  if (input.platform !== "win32") {
+    // Codex normally creates an argv0 alias under this path. A mode-000 regular
+    // file makes that update fail closed and forces the documented PATH helper
+    // lookup, where the scrubbed wrapper above is first.
+    yield* writePrivateFile(path.join(codexTempPath, "arg0"), new Uint8Array(), 0o000);
+  }
 
   const sourceAuthPath = path.join(path.resolve(input.sourceHomePath), "auth.json");
   const targetAuthPath = path.join(layout.homePath, "auth.json");
@@ -694,7 +884,11 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
       fileSystem.stat(target),
       fileSystem.realPath(target),
     ]).pipe(Effect.mapError((cause) => managedWorktreeError(issue, cause)));
-    if (info.type !== "File" || Option.getOrUndefined(info.nlink) !== 1 || canonical !== target) {
+    if (
+      info.type !== "File" ||
+      Option.getOrUndefined(info.nlink) !== 1 ||
+      !isSameResolvedPath(path, canonical, target)
+    ) {
       return yield* managedWorktreeError(issue);
     }
   });
@@ -724,7 +918,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
           `Command Center's ${config.description} is unavailable.`,
         );
       }
-      if (canonical.value !== config.target) {
+      if (!isSameResolvedPath(path, canonical.value, config.target)) {
         return yield* managedWorktreeError(
           `Command Center's ${config.description} must not be a symlink.`,
         );
@@ -768,7 +962,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
         ),
       );
       if (
-        canonicalAfter !== canonical.value ||
+        !isSameResolvedPath(path, canonicalAfter, canonical.value) ||
         !sameControlFileIdentity(expectedIdentity, secureControlFileIdentity(after))
       ) {
         return yield* managedWorktreeError(
@@ -801,7 +995,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
     ),
   ]);
   const expectedWorktreesDir = path.join(canonicalBaseDir, "worktrees");
-  if (canonicalWorktreesDir !== expectedWorktreesDir) {
+  if (!isSameResolvedPath(path, canonicalWorktreesDir, expectedWorktreesDir)) {
     return yield* managedWorktreeError(
       "Command Center's managed worktree directory escapes its runtime base directory.",
     );
@@ -810,7 +1004,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
   const dotGitPath = path.join(canonicalCwd, ".git");
   const dotGitStat = yield* statOptional(dotGitPath);
   const inManagedWorktrees =
-    canonicalCwd !== canonicalWorktreesDir &&
+    !isSameResolvedPath(path, canonicalCwd, canonicalWorktreesDir) &&
     isWithinRoot(path, canonicalCwd, canonicalWorktreesDir);
 
   if (!inManagedWorktrees) {
@@ -852,7 +1046,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
     gitDirCandidate,
     "Command Center could not canonicalize the managed worktree Git directory.",
   );
-  if (path.normalize(gitDirCandidate) !== canonicalGitDir) {
+  if (!isSameResolvedPath(path, path.normalize(gitDirCandidate), canonicalGitDir)) {
     return yield* managedWorktreeError(
       "The managed Command Center worktree Git directory contains a symlink escape.",
     );
@@ -881,7 +1075,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
     commonDirCandidate,
     "Command Center could not canonicalize the managed common Git directory.",
   );
-  if (path.normalize(commonDirCandidate) !== canonicalCommonDir) {
+  if (!isSameResolvedPath(path, path.normalize(commonDirCandidate), canonicalCommonDir)) {
     return yield* managedWorktreeError(
       "The managed Command Center common Git directory contains a symlink escape.",
     );
@@ -892,7 +1086,7 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
     repositoriesDir,
     "Command Center could not canonicalize its managed repository directory.",
   );
-  if (canonicalRepositoriesDir !== repositoriesDir) {
+  if (!isSameResolvedPath(path, canonicalRepositoriesDir, repositoriesDir)) {
     return yield* managedWorktreeError(
       "Command Center's managed repository directory contains a symlink escape.",
     );
@@ -950,8 +1144,8 @@ export const resolveCommandCenterManagedGitMetadata = Effect.fn(
     "Command Center could not canonicalize the workspace Git metadata pointer.",
   );
   if (
-    path.normalize(reversePointerCandidate) !== canonicalReversePointer ||
-    canonicalReversePointer !== canonicalDotGitPath
+    !isSameResolvedPath(path, path.normalize(reversePointerCandidate), canonicalReversePointer) ||
+    !isSameResolvedPath(path, canonicalReversePointer, canonicalDotGitPath)
   ) {
     return yield* managedWorktreeError(
       "The managed Command Center worktree Git metadata pointers do not round-trip safely.",
@@ -981,6 +1175,7 @@ export function commandCenterCodexIsolation(
   managedGitMetadata?: CommandCenterManagedGitMetadata,
   runtimeExecutablePath?: string,
   codexHome?: Pick<CommandCenterCodexHomeLayout, "homePath" | "helperBinPath">,
+  platform: NodeJS.Platform = "linux",
 ): CommandCenterCodexIsolation | undefined {
   if (
     runtimeMode === "full-access" ||
@@ -989,7 +1184,7 @@ export function commandCenterCodexIsolation(
   ) {
     return undefined;
   }
-  const writable = runtimeMode === "auto-accept-edits";
+  const writable = runtimeMode === "auto-accept-edits" || runtimeMode === "auto";
   const permissionProfile = writable
     ? COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE
     : COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE;
@@ -1004,6 +1199,7 @@ export function commandCenterCodexIsolation(
   });
   return {
     permissionProfile,
+    ...(platform === "win32" ? { windowsSandboxMode: "elevated" as const } : {}),
     appServerArgs: [
       "--strict-config",
       "-c",
@@ -1042,6 +1238,7 @@ export function commandCenterCodexIsolation(
       `default_permissions=${JSON.stringify(permissionProfile)}`,
       "-c",
       `permissions.${permissionProfile}=${profile}`,
+      ...(platform === "win32" ? ["-c", 'windows.sandbox="elevated"'] : []),
     ],
   };
 }

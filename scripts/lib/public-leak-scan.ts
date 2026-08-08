@@ -143,7 +143,7 @@ const PRIVATE_DNS_SUFFIXES = [
   ".svc",
 ] as const;
 const RESERVED_DOCUMENTATION_HOSTS = new Set(["example.com", "example.net", "example.org"]);
-const PLACEHOLDER_TAILNET_HOSTS = new Set(["example-tailnet.ts.net", "example.ts.net"]);
+const PLACEHOLDER_TAILNET_HOSTS = ["example-tailnet.ts.net", "example.ts.net"] as const;
 
 const FORBIDDEN_FILE_PATTERNS: readonly RegExp[] = [
   /(?:^|\/)\.env(?:\..+)?$/iu,
@@ -212,16 +212,46 @@ export function scanPublicPath(
 }
 
 const REVIEWABLE_BINARY_FILE_PATTERN = /\.(?:avif|gif|icns|ico|jpe?g|otf|png|ttf|webp|woff2?)$/iu;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const REVIEWED_WASM_ASSETS = new Set([
+  "apps/web/src/terminal/ghostty/vendor/ghostty-vt.wasm",
+  "apps/web/src/terminal/ghostty/vendor/ghostty-write-pty.wasm",
+]);
 
 export function isReviewablePublicBinary(path: string): boolean {
-  return REVIEWABLE_BINARY_FILE_PATTERN.test(normalizePath(path));
+  const normalizedPath = normalizePath(path);
+  return (
+    REVIEWABLE_BINARY_FILE_PATTERN.test(normalizedPath) || REVIEWED_WASM_ASSETS.has(normalizedPath)
+  );
 }
 
 /** Extract human-readable metadata without treating compressed payload bytes as trusted text. */
 export function extractPublicBinaryMetadata(bytes: Uint8Array): string {
-  return Buffer.from(bytes)
-    .toString("utf8")
-    .replace(/[^\p{L}\p{N}\p{P}\p{Z}\t\r\n]+/gu, "\n");
+  const buffer = Buffer.from(bytes);
+  const metadata = buffer.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
+    ? extractPngTextMetadata(buffer)
+    : buffer;
+  return metadata.toString("utf8").replace(/[^\p{L}\p{N}\p{P}\p{Z}\t\r\n]+/gu, "\n");
+}
+
+function extractPngTextMetadata(bytes: Buffer): Buffer {
+  const chunks: Buffer[] = [];
+  let offset = PNG_SIGNATURE.length;
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset);
+    const typeStart = offset + 4;
+    const dataStart = typeStart + 4;
+    const dataEnd = dataStart + length;
+    const chunkEnd = dataEnd + 4;
+    if (dataEnd < dataStart || chunkEnd > bytes.length) break;
+
+    const type = bytes.subarray(typeStart, dataStart).toString("ascii");
+    if (type === "tEXt" || type === "zTXt" || type === "iTXt") {
+      chunks.push(bytes.subarray(dataStart, dataEnd));
+    }
+    offset = chunkEnd;
+  }
+  return Buffer.concat(chunks);
 }
 
 export function makePublicBlobFinding(input: {
@@ -256,7 +286,9 @@ export function scanPublicText({
     for (const match of text.matchAll(rule.pattern)) {
       if (
         rule.id === "account-address" &&
-        (isReservedExampleAddress(match[0]) || isScpGitRemoteAccount(text, match.index, match[0]))
+        (isReservedExampleAddress(match[0]) ||
+          isGitRemoteAccount(text, match.index, match[0]) ||
+          isPackageVersionReference(text, match.index, match[0]))
       ) {
         continue;
       }
@@ -362,10 +394,26 @@ function scanPrivateScpGitRemotes(path: string, text: string): readonly PublicLe
   return findings;
 }
 
-function isScpGitRemoteAccount(text: string, index: number, account: string): boolean {
-  if (!account.toLocaleLowerCase("en-US").startsWith("git@")) return false;
+function isGitRemoteAccount(text: string, index: number, account: string): boolean {
+  const gitOffset = account.toLocaleLowerCase("en-US").lastIndexOf("git@");
+  if (gitOffset < 0) return false;
   const pathStart = index + account.length;
-  return text[pathStart] === ":" && /^[^\s<>"'`]+/u.test(text.slice(pathStart + 1));
+  const isScpRemote = text[pathStart] === ":" && /^[^\s<>"'`]+/u.test(text.slice(pathStart + 1));
+  const gitStart = index + gitOffset;
+  const isSshUrl =
+    text.slice(Math.max(0, gitStart - 6), gitStart).toLocaleLowerCase("en-US") === "ssh://";
+  return isScpRemote || (isSshUrl && (text[pathStart] === ":" || text[pathStart] === "/"));
+}
+
+function isPackageVersionReference(text: string, index: number, account: string): boolean {
+  const atIndex = account.indexOf("@");
+  const versionStart = atIndex + 1;
+  if (!/^\d+\./u.test(account.slice(versionStart))) return false;
+  return (
+    account.slice(0, atIndex).includes("/") ||
+    account.endsWith(".patch") ||
+    /^\.\d/u.test(text.slice(index + account.length))
+  );
 }
 
 function scanPrivateUrls(path: string, text: string): readonly PublicLeakFinding[] {
@@ -431,7 +479,9 @@ function isPrivateUrlHost(rawHostname: string): boolean {
   if (ipVersion === 6) return isPrivateIpv6(hostname);
 
   if (hostname === "ts.net" || hostname.endsWith(".ts.net")) {
-    return !PLACEHOLDER_TAILNET_HOSTS.has(hostname);
+    return !PLACEHOLDER_TAILNET_HOSTS.some(
+      (placeholder) => hostname === placeholder || hostname.endsWith(`.${placeholder}`),
+    );
   }
   if (PRIVATE_DNS_SUFFIXES.some((suffix) => hostname.endsWith(suffix))) return true;
 
@@ -469,6 +519,7 @@ function isReservedPublicHost(hostname: string): boolean {
     const [first, second, third] = parseIpv4(hostname);
     return (
       first === 127 ||
+      hostname === "10.0.2.2" ||
       (first === 192 && second === 0 && third === 2) ||
       (first === 198 && second === 51 && third === 100) ||
       (first === 203 && second === 0 && third === 113)

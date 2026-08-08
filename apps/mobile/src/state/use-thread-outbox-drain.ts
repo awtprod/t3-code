@@ -21,7 +21,11 @@ import { toUploadChatImageAttachments } from "../lib/composerImages";
 import { randomHex } from "../lib/uuid";
 import { appAtomRegistry } from "./atom-registry";
 import { useProjects, useThreadShells } from "./entities";
-import { ensureThreadOutboxLoaded, removeThreadOutboxMessage } from "./thread-outbox";
+import {
+  confirmThreadOutboxMessageQueued,
+  ensureThreadOutboxLoaded,
+  removeThreadOutboxMessage,
+} from "./thread-outbox";
 import {
   isQueuedThreadCreationSendable,
   modelSelectionsEqual,
@@ -33,7 +37,7 @@ import {
   type QueuedThreadMessage,
   type ThreadOutboxCommandStage,
 } from "./thread-outbox-model";
-import { threadEnvironment } from "./threads";
+import { environmentThreadShells, threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
 import {
   editingQueuedMessageIdsAtom,
@@ -166,13 +170,21 @@ export function useThreadOutboxDrain(): void {
       const settings = resolveQueuedThreadSettings(queuedMessage, thread);
       const { reportFailure, completeDelivery } = makeDeliveryHelpers(queuedMessage);
 
-      if (!modelSelectionsEqual(settings.modelSelection, thread.modelSelection)) {
+      if (
+        !modelSelectionsEqual(settings.modelSelection, thread.modelSelection) ||
+        settings.routingMode !== (thread.routingMode ?? "manual") ||
+        settings.efficiencyTier !== thread.efficiencyTier
+      ) {
         const updateResult = await updateThreadMetadata({
           environmentId: queuedMessage.environmentId,
           input: {
             commandId: settingsCommandId(queuedMessage, "model-selection"),
             threadId: queuedMessage.threadId,
             modelSelection: settings.modelSelection,
+            routingMode: settings.routingMode,
+            ...(settings.efficiencyTier === undefined
+              ? {}
+              : { efficiencyTier: settings.efficiencyTier }),
           },
         });
         if (AsyncResult.isFailure(updateResult)) {
@@ -225,6 +237,10 @@ export function useThreadOutboxDrain(): void {
             attachments: toUploadChatImageAttachments(queuedMessage.attachments),
           },
           modelSelection: settings.modelSelection,
+          routingMode: settings.routingMode,
+          ...(settings.efficiencyTier === undefined
+            ? {}
+            : { efficiencyTier: settings.efficiencyTier }),
           runtimeMode: settings.runtimeMode,
           interactionMode: settings.interactionMode,
           createdAt: queuedMessage.createdAt,
@@ -266,6 +282,10 @@ export function useThreadOutboxDrain(): void {
           modelSelection,
           runtimeMode: queuedMessage.runtimeMode ?? DEFAULT_RUNTIME_MODE,
           interactionMode: queuedMessage.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
+          routingMode: queuedMessage.routingMode ?? "manual",
+          ...(queuedMessage.efficiencyTier === undefined
+            ? {}
+            : { efficiencyTier: queuedMessage.efficiencyTier }),
           workspaceMode: creation.workspaceMode,
           branch: creation.branch,
           worktreePath: creation.worktreePath,
@@ -349,8 +369,32 @@ export function useThreadOutboxDrain(): void {
             return false;
           },
         );
-      const delivery =
-        deliveryAction === "remove"
+      // Enqueues publish optimistically before their durable write settles.
+      // Confirm the write landed (and the message wasn't rolled back) before
+      // sending, so a failed write can never chase an already-delivered turn.
+      const delivery = confirmThreadOutboxMessageQueued(nextQueuedMessage).then((queued) => {
+        if (!queued) {
+          // Rolled back by a failed write; nothing to deliver or retry.
+          return true;
+        }
+        // The guards evaluated before the confirmation await are stale by now:
+        // the thread may have gone busy, or the user may have opened this
+        // message in the editor. Re-read both and defer to the next drain pass
+        // (returning true skips the failure/backoff path) rather than sending
+        // a payload the user is editing or racing an active turn.
+        if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[nextQueuedMessage.messageId]) {
+          return true;
+        }
+        const freshThread = findThread(
+          appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
+          nextQueuedMessage,
+        );
+        const freshThreadBusy =
+          freshThread?.session?.status === "running" || freshThread?.session?.status === "starting";
+        if (deliveryAction === "send" && creation === undefined && freshThreadBusy) {
+          return true;
+        }
+        return deliveryAction === "remove"
           ? removeQueuedMessage("[thread-outbox] failed to remove message for a missing thread")
           : creation !== undefined
             ? creationProjectCwd !== null
@@ -359,6 +403,7 @@ export function useThreadOutboxDrain(): void {
             : thread !== undefined
               ? sendQueuedMessage(nextQueuedMessage, thread)
               : Promise.resolve(false);
+      });
       void delivery
         .then((sent) => {
           if (sent) {

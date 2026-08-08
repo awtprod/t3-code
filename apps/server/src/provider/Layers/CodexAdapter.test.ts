@@ -45,6 +45,7 @@ import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
+  CodexSessionRuntimeIsolationProbeError,
   CodexSessionRuntimeThreadIdMissingError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeError,
@@ -76,6 +77,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   public currentSession: ProviderSession | undefined;
   public interruptTurnFailure: CodexSessionRuntimeError | undefined;
   public sendTurnFailure: CodexSessionRuntimeError | undefined;
+  public startFailure: CodexSessionRuntimeError | undefined;
   public readonly interruptTurnCalls: Array<
     readonly [TurnId | undefined, ProviderTurnTargetIdentity | undefined]
   > = [];
@@ -144,6 +146,9 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   start() {
+    if (this.startFailure !== undefined) {
+      return Effect.fail(this.startFailure);
+    }
     return Effect.promise(() => this.startImpl()).pipe(
       Effect.tap((session) =>
         Effect.sync(() => {
@@ -214,16 +219,22 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 }
 
-function makeRuntimeFactory() {
+function makeRuntimeFactory(input?: {
+  readonly startFailures?: ReadonlyArray<CodexSessionRuntimeError | undefined>;
+}) {
   const runtimes: Array<FakeCodexRuntime> = [];
-  const factory = vi.fn((options: CodexSessionRuntimeOptions) => {
-    const runtime = new FakeCodexRuntime(options);
+  const factory = vi.fn((runtimeOptions: CodexSessionRuntimeOptions) => {
+    const runtime = new FakeCodexRuntime(runtimeOptions);
+    runtime.startFailure = input?.startFailures?.[runtimes.length];
     runtimes.push(runtime);
     return Effect.succeed(runtime);
   });
 
   return {
     factory,
+    get runtimes(): ReadonlyArray<FakeCodexRuntime> {
+      return runtimes;
+    },
     get lastRuntime(): FakeCodexRuntime | undefined {
       return runtimes.at(-1);
     },
@@ -417,6 +428,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
       NodeAssert.deepStrictEqual(validationRuntimeFactory.factory.mock.calls[0]?.[0], {
         binaryPath: "codex",
         cwd: process.cwd(),
+        launchArgs: "",
         model: "gpt-5.3-codex",
         providerInstanceId: ProviderInstanceId.make("codex"),
         serviceTier: "priority",
@@ -424,6 +436,62 @@ validationLayer("CodexAdapterLive validation", (it) => {
         runtimeMode: "full-access",
       });
     }),
+  );
+});
+
+it.effect("fails closed when elevated Windows Command Center isolation cannot be verified", () => {
+  const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cc-windows-fallback-"));
+  const runtimePath = NodePath.join(tempDir, "codex.exe");
+  const sourceHomePath = NodePath.join(tempDir, "codex-home");
+  NodeFS.mkdirSync(sourceHomePath, { recursive: true });
+  NodeFS.writeFileSync(runtimePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
+
+  const runtimeFactory = makeRuntimeFactory({
+    startFailures: [
+      new CodexSessionRuntimeIsolationProbeError({
+        issue: "The elevated live isolation probe failed.",
+        exitCode: 79,
+      }),
+    ],
+  });
+  const layer = Layer.effect(
+    CodexAdapter,
+    makeCodexAdapter(decodeCodexSettings({}), {
+      makeRuntime: runtimeFactory.factory,
+      commandCenterSourceHomePath: sourceHomePath,
+      commandCenterRuntimeExecutablePath: runtimePath,
+      commandCenterPlatform: "win32",
+      commandCenterArchitecture: "x64",
+    }),
+  ).pipe(
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "codex-adapter-windows-fallback-" }),
+    ),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const threadId = asThreadId("cc:interactive:windows-fallback");
+    const result = yield* adapter
+      .startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "approval-required",
+      })
+      .pipe(Effect.result);
+
+    NodeAssert.equal(result._tag, "Failure");
+    NodeAssert.equal(result.failure._tag, "ProviderAdapterProcessError");
+    NodeAssert.match(result.failure.message, /elevated live isolation probe failed/u);
+    NodeAssert.equal(runtimeFactory.runtimes.length, 1);
+    NodeAssert.equal(runtimeFactory.runtimes[0]?.options.windowsSandboxMode, "elevated");
+    NodeAssert.equal(runtimeFactory.runtimes[0]?.closeImpl.mock.calls.length, 1);
+  }).pipe(
+    Effect.provide(layer),
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
   );
 });
 
@@ -718,6 +786,68 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       NodeAssert.deepStrictEqual(started.target, target);
     }),
   );
+  it.effect("passes configured launch args into the session runtime", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({ launchArgs: "--strict-config --enable foo" });
+        return yield* makeCodexAdapter(codexConfig, {
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("sess-launch-args"),
+        runtimeMode: "full-access",
+      });
+
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.options.launchArgs, "--strict-config --enable foo");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("uses T3CODE_CODEX_LAUNCH_ARGS for the session runtime", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({ launchArgs: "--enable settings-feature" });
+        return yield* makeCodexAdapter(codexConfig, {
+          environment: { T3CODE_CODEX_LAUNCH_ARGS: " --strict-config --enable env-feature " },
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("sess-launch-args-env"),
+        runtimeMode: "full-access",
+      });
+
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.options.launchArgs, "--strict-config --enable env-feature");
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect("maps codex model options for the adapter's bound custom instance id", () => {
     const customInstanceId = ProviderInstanceId.make("codex_personal");
@@ -2422,7 +2552,7 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       yield* Scope.close(scope, Exit.void);
       scopeClosed = true;
 
-      const threadLogPath = NodePath.join(tempDir, "thread-logger.log");
+      const threadLogPath = NodePath.join(tempDir, "provider-native.thread-logger.log");
       NodeAssert.equal(NodeFS.existsSync(threadLogPath), true);
       const contents = NodeFS.readFileSync(threadLogPath, "utf8");
       NodeAssert.match(contents, /NTIVE: .*"message":"native flush test"/);

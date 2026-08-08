@@ -5,10 +5,12 @@ import {
   CommandId,
   MessageId,
   type EnvironmentId,
+  type EfficiencyTier,
   type ModelSelection,
   type ProviderInteractionMode,
   type RuntimeMode,
   type ThreadId,
+  type ThreadRoutingMode,
 } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import { deriveActiveWorkStartedAt } from "@t3tools/shared/orchestrationTiming";
@@ -30,6 +32,7 @@ import {
   composerDraftsAtom,
   ensureComposerDraftsLoaded,
   getComposerDraftSnapshot,
+  mergeComposerDraftContent,
   removeComposerDraftAttachment,
   setComposerDraftText,
   updateComposerDraftSettings,
@@ -102,6 +105,9 @@ export function useThreadComposerState() {
   const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const interactionMode = selectedDraft?.interactionMode ?? selectedThread?.interactionMode ?? null;
+  const routingMode = selectedDraft?.routingMode ?? selectedThread?.routingMode ?? "manual";
+  const efficiencyTier =
+    selectedDraft?.efficiencyTier ?? selectedThread?.efficiencyTier ?? "economy";
 
   const selectedThreadSessionActivity = useMemo(() => {
     const selectedThread = selectedThreadDetail ?? selectedThreadShell;
@@ -148,27 +154,38 @@ export function useThreadComposerState() {
 
     const metadata = makeQueuedMessageMetadata();
     const messageId = MessageId.make(metadata.messageId);
-    try {
-      await enqueueThreadOutboxMessage({
-        environmentId: selectedThreadShell.environmentId,
-        threadId: selectedThreadShell.id,
-        messageId,
-        commandId: CommandId.make(metadata.commandId),
-        text,
-        attachments,
-        modelSelection: draft.modelSelection ?? thread.modelSelection,
-        runtimeMode: draft.runtimeMode ?? thread.runtimeMode,
-        interactionMode: draft.interactionMode ?? thread.interactionMode,
-        createdAt: metadata.createdAt,
-      });
-      clearComposerDraftContent(threadKey);
-      return messageId;
-    } catch (error) {
+    // Enqueue publishes the queued atom synchronously (the durable write
+    // happens behind it), so clearing the draft here gives send feedback on
+    // the tap frame instead of after file I/O. If the write fails the message
+    // is rolled out of the queue and the content is merged back into the
+    // draft, preserving anything typed since.
+    const enqueuePromise = enqueueThreadOutboxMessage({
+      environmentId: selectedThreadShell.environmentId,
+      threadId: selectedThreadShell.id,
+      messageId,
+      commandId: CommandId.make(metadata.commandId),
+      text,
+      attachments,
+      modelSelection: draft.modelSelection ?? thread.modelSelection,
+      runtimeMode: draft.runtimeMode ?? thread.runtimeMode,
+      interactionMode: draft.interactionMode ?? thread.interactionMode,
+      routingMode: draft.routingMode ?? thread.routingMode ?? "manual",
+      efficiencyTier: draft.efficiencyTier ?? thread.efficiencyTier,
+      createdAt: metadata.createdAt,
+    });
+    clearComposerDraftContent(threadKey);
+    enqueuePromise.catch((error: unknown) => {
+      // Restore text via merge (idempotent) but attachments via the uncapped
+      // append: the merge path slots existing attachments first and truncates
+      // at the send limit, which would silently drop this message's images if
+      // the user attached new ones while the write was in flight.
+      void mergeComposerDraftContent(threadKey, { text, attachments: [] });
+      appendComposerDraftAttachments(threadKey, attachments);
       setPendingConnectionError(
         error instanceof Error ? error.message : "Failed to save the queued message.",
       );
-      return null;
-    }
+    });
+    return messageId;
   }, [selectedThreadDetail, selectedThreadShell]);
 
   const onChangeDraftMessage = useCallback(
@@ -264,7 +281,10 @@ export function useThreadComposerState() {
       if (!selectedThreadKey) {
         return;
       }
-      updateComposerDraftSettings(selectedThreadKey, { modelSelection: value });
+      updateComposerDraftSettings(selectedThreadKey, {
+        modelSelection: value,
+        routingMode: "manual",
+      });
     },
     [selectedThreadKey],
   );
@@ -289,6 +309,17 @@ export function useThreadComposerState() {
     [selectedThreadKey],
   );
 
+  const onUpdateEfficiencyRouting = useCallback(
+    (mode: ThreadRoutingMode, tier: EfficiencyTier) => {
+      if (!selectedThreadKey) return;
+      updateComposerDraftSettings(selectedThreadKey, {
+        routingMode: mode,
+        efficiencyTier: tier,
+      });
+    },
+    [selectedThreadKey],
+  );
+
   return {
     selectedThreadFeed,
     selectedThreadQueueCount,
@@ -298,6 +329,8 @@ export function useThreadComposerState() {
     modelSelection,
     runtimeMode,
     interactionMode,
+    routingMode,
+    efficiencyTier,
     activeThreadBusy,
     onChangeDraftMessage,
     onPickDraftImages,
@@ -308,5 +341,6 @@ export function useThreadComposerState() {
     onUpdateModelSelection,
     onUpdateRuntimeMode,
     onUpdateInteractionMode,
+    onUpdateEfficiencyRouting,
   };
 }

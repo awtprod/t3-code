@@ -12,6 +12,15 @@ import {
 
 const joinUrl = (...segments: readonly string[]) => segments.join("");
 
+function pngWithChunk(type: string, payload: Uint8Array): Uint8Array {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const chunk = Buffer.alloc(12 + payload.length);
+  chunk.writeUInt32BE(payload.length, 0);
+  chunk.write(type, 4, 4, "ascii");
+  Buffer.from(payload).copy(chunk, 8);
+  return Buffer.concat([signature, chunk]);
+}
+
 describe("public leak scan", () => {
   it("accepts a generic public-safe configuration", () => {
     const findings = scanPublicText({
@@ -173,6 +182,8 @@ describe("public leak scan", () => {
       "https://service.example.test/",
       "https://example.ts.net/",
       "https://example-tailnet.ts.net/",
+      "https://host.example.ts.net/",
+      "http://10.0.2.2:3773/",
       "http://192.0.2.10/",
       "http://198.51.100.20/",
       "http://203.0.113.30/",
@@ -222,6 +233,24 @@ describe("public leak scan", () => {
     expect(scanPublicText({ path: "scripts/assets.mjs", text: source })).toEqual([]);
   });
 
+  it("does not treat package versions or SSH Git URL users as account addresses", () => {
+    expect(
+      scanPublicText({
+        path: "pnpm-workspace.yaml",
+        text: [
+          "effect@4.0.0-beta.102: patches/effect@4.0.0-beta.102.patch",
+          "patch: effect__platform-bun@4.0.0-beta.102.patch",
+        ].join("\n"),
+      }),
+    ).toEqual([]);
+    expect(
+      scanPublicText({
+        path: "fixture.ts",
+        text: "ssh://git@github.com:22/example/repository.git",
+      }),
+    ).toEqual([]);
+  });
+
   it("detects private denylist terms case-insensitively", () => {
     const findings = scanPublicText({
       path: "spaces.json",
@@ -264,6 +293,10 @@ describe("public leak scan", () => {
 
   it("allows only reviewable public binary formats and exposes printable metadata", () => {
     expect(isReviewablePublicBinary("apps/web/public/icon.png")).toBe(true);
+    expect(isReviewablePublicBinary("apps/web/src/terminal/ghostty/vendor/ghostty-vt.wasm")).toBe(
+      true,
+    );
+    expect(isReviewablePublicBinary("apps/web/src/terminal/unreviewed.wasm")).toBe(false);
     expect(isReviewablePublicBinary("runtime/archive.bin")).toBe(false);
 
     const metadata = extractPublicBinaryMetadata(
@@ -271,6 +304,20 @@ describe("public leak scan", () => {
     );
     expect(
       scanPublicText({ path: "icon.png", text: metadata, denylist: ["private label"] })[0]?.rule,
+    ).toBe("private-denylist");
+
+    const compressedPixels = extractPublicBinaryMetadata(
+      pngWithChunk("IDAT", new TextEncoder().encode("private label")),
+    );
+    expect(
+      scanPublicText({ path: "icon.png", text: compressedPixels, denylist: ["private label"] }),
+    ).toEqual([]);
+
+    const pngMetadata = extractPublicBinaryMetadata(
+      pngWithChunk("tEXt", new TextEncoder().encode("Comment\0private label")),
+    );
+    expect(
+      scanPublicText({ path: "icon.png", text: pngMetadata, denylist: ["private label"] })[0]?.rule,
     ).toBe("private-denylist");
   });
 

@@ -48,6 +48,8 @@ export const ProviderId = makeEntityId("CommandCenterProviderId");
 export type ProviderId = typeof ProviderId.Type;
 export const ModelId = makeEntityId("CommandCenterModelId");
 export type ModelId = typeof ModelId.Type;
+export const EfficiencyCandidateId = makeEntityId("EfficiencyCandidateId");
+export type EfficiencyCandidateId = typeof EfficiencyCandidateId.Type;
 export const CommandId = makeEntityId("CommandCenterCommandId");
 export type CommandId = typeof CommandId.Type;
 export const AutomationNodeId = makeEntityId("CommandCenterAutomationNodeId");
@@ -91,6 +93,9 @@ export const ACTIVE_CAPABILITY_NAMES: ReadonlyArray<CapabilityName> = CAPABILITY
 
 export const RiskLevel = Schema.Literals(["low", "reversible", "approval-required", "blocked"]);
 export type RiskLevel = typeof RiskLevel.Type;
+
+export const EfficiencyTier = Schema.Literals(["economy", "balanced", "quality"]);
+export type EfficiencyTier = typeof EfficiencyTier.Type;
 
 export const ActionKind = Schema.Literals([
   "read",

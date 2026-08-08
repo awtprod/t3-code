@@ -40,9 +40,8 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
     providerInstanceId: ProviderInstanceId.make("codex"),
     projectId: ProjectId.make("project-a"),
     cwd: "/work/project-a-worktree",
-    capabilities: new Set(["preview"]),
+    capabilities: new Set(["preview", "database.read"]),
     issuedAt: 1,
-    expiresAt: Number.MAX_SAFE_INTEGER,
   });
   const client = McpSchema.McpServerClient.of({
     clientId: 1,
@@ -74,6 +73,7 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
     expect(result.structuredContent).toMatchObject({
       projectRef: "supabase-a",
       readOnly: true,
+      result: { truncated: false, omittedCount: 0 },
     });
     expect(calls).toEqual([
       {

@@ -1,6 +1,23 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { parseCliArgs } from "./cliArgs.ts";
+import { parseCliArgs, tokenizeCliArgs } from "./cliArgs.ts";
+
+describe("tokenizeCliArgs", () => {
+  it("preserves quoted values and escaped spaces", () => {
+    expect(
+      tokenizeCliArgs(
+        String.raw`--config model="gpt 5" --enable foo\ bar --config=profile='work profile'`,
+      ),
+    ).toEqual(["--config", "model=gpt 5", "--enable", "foo bar", "--config=profile=work profile"]);
+  });
+
+  it("preserves literal backslashes in path values", () => {
+    const windowsHome = ["C:", "Users", "me"].join("\\");
+    expect(
+      tokenizeCliArgs(`--config cacheDir=${windowsHome} --config "quoted=${windowsHome}"`),
+    ).toEqual(["--config", `cacheDir=${windowsHome}`, "--config", `quoted=${windowsHome}`]);
+  });
+});
 
 describe("parseCliArgs", () => {
   it("returns empty result for empty string", () => {
@@ -53,6 +70,13 @@ describe("parseCliArgs", () => {
   it("parses --append-system-prompt with value and --chrome", () => {
     expect(parseCliArgs("--append-system-prompt always-think-step-by-step --chrome")).toEqual({
       flags: { "append-system-prompt": "always-think-step-by-step", chrome: null },
+      positionals: [],
+    });
+  });
+
+  it("parses quoted --append-system-prompt with value and --chrome", () => {
+    expect(parseCliArgs(`--append-system-prompt "always think step by step" --chrome`)).toEqual({
+      flags: { "append-system-prompt": "always think step by step", chrome: null },
       positionals: [],
     });
   });

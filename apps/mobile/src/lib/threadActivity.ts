@@ -36,8 +36,9 @@ export interface ThreadFeedActivity {
   readonly turnId: TurnId | null;
   readonly summary: string;
   readonly detail: string | null;
-  readonly fullDetail: string | null;
-  readonly copyText: string;
+  readonly canExpand: boolean;
+  readonly getFullDetail: () => string | null;
+  readonly getCopyText: () => string;
   readonly icon:
     | "agent"
     | "alert"
@@ -98,6 +99,11 @@ type RawThreadFeedEntry =
 
 export type ThreadFeedEntry =
   | Extract<RawThreadFeedEntry, { type: "message" }>
+  | {
+      readonly type: "working";
+      readonly id: string;
+      readonly createdAt: string;
+    }
   | {
       readonly type: "activity-group";
       readonly id: string;
@@ -316,10 +322,35 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (title) {
     entry.toolTitle = title;
   }
-  if (itemType === "mcp_tool_call") {
+  if (itemType === "mcp_tool_call" || itemType === "collab_agent_tool_call") {
     const data = asRecord(payload?.data);
-    if (data?.item !== undefined) {
-      entry.toolData = data.item;
+    if (data !== null) {
+      entry.toolData = itemType === "mcp_tool_call" && data.item !== undefined ? data.item : data;
+    }
+    if (itemType === "collab_agent_tool_call" && data !== null) {
+      const provider = typeof data.provider === "string" ? data.provider : "Agent";
+      const name = typeof data.name === "string" ? data.name : "Subagent";
+      const state = typeof data.state === "string" ? data.state : "running";
+      const result =
+        typeof data.resultSummary === "string"
+          ? data.resultSummary
+          : typeof data.errorSummary === "string"
+            ? data.errorSummary
+            : null;
+      const usage = asRecord(data.usage);
+      const tokens = [
+        usage?.uncachedInputTokens,
+        usage?.cacheReadInputTokens,
+        usage?.cacheWriteInputTokens,
+        usage?.outputTokens,
+      ].reduce<number>(
+        (sum, value) => sum + (typeof value === "number" && value >= 0 ? value : 0),
+        0,
+      );
+      entry.label = `${name} · ${provider}`;
+      entry.detail = [state, result, tokens > 0 ? `${tokens.toLocaleString()} tokens` : null]
+        .filter((value): value is string => Boolean(value))
+        .join(" · ");
     }
   }
   if (itemType) {
@@ -519,7 +550,8 @@ function workEntryIcon(entry: DerivedWorkLogEntry): ThreadFeedActivity["icon"] {
   if (entry.itemType === "web_search") return "globe";
   if (entry.itemType === "image_view") return "eye";
   if (entry.itemType === "mcp_tool_call") return "wrench";
-  if (entry.itemType === "dynamic_tool_call" || entry.itemType === "collab_agent_tool_call") {
+  if (entry.itemType === "collab_agent_tool_call") return "agent";
+  if (entry.itemType === "dynamic_tool_call") {
     return "hammer";
   }
   if (entry.tone === "error") return "alert";
@@ -537,8 +569,13 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
     }
   };
 
-  if (entry.itemType === "mcp_tool_call" && entry.toolData !== undefined) {
-    appendUniqueBlock(`MCP call\n${JSON.stringify(entry.toolData, null, 2)}`);
+  if (
+    (entry.itemType === "mcp_tool_call" || entry.itemType === "collab_agent_tool_call") &&
+    entry.toolData !== undefined
+  ) {
+    appendUniqueBlock(
+      `${entry.itemType === "collab_agent_tool_call" ? "Native subagent" : "MCP call"}\n${JSON.stringify(entry.toolData, null, 2)}`,
+    );
   }
   appendUniqueBlock(entry.rawCommand ?? entry.command);
   appendUniqueBlock(entry.detail);
@@ -547,6 +584,28 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
   }
 
   return blocks.length > 0 ? blocks.join("\n\n") : null;
+}
+
+function workEntryHasExpandedBody(entry: WorkLogEntry): boolean {
+  return (
+    ((entry.itemType === "mcp_tool_call" || entry.itemType === "collab_agent_tool_call") &&
+      entry.toolData !== undefined) ||
+    Boolean((entry.rawCommand ?? entry.command)?.trim()) ||
+    Boolean(entry.detail?.trim()) ||
+    (entry.changedFiles?.some((path) => path.trim().length > 0) ?? false)
+  );
+}
+
+function memoizeValue<T>(build: () => T): () => T {
+  let value: T;
+  let initialized = false;
+  return () => {
+    if (!initialized) {
+      value = build();
+      initialized = true;
+    }
+    return value;
+  };
 }
 
 function workEntryPreview(
@@ -930,6 +989,11 @@ function isEmptyMessage(entry: RawThreadFeedEntry): boolean {
 
 function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): ThreadFeedEntry[] {
   const grouped: ThreadFeedEntry[] = [];
+  // Mutable backing array for the trailing group so appending an activity is
+  // O(1) instead of re-copying the group (which made this loop quadratic on
+  // long tool runs). The array is only mutated while it is the trailing group.
+  let openGroupActivities: ThreadFeedActivity[] | null = null;
+  let openGroupTurnId: TurnId | null = null;
 
   for (const entry of entries) {
     // Skip empty messages so they don't break activity grouping.
@@ -939,24 +1003,23 @@ function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): Th
 
     if (entry.type !== "activity") {
       grouped.push(entry);
+      openGroupActivities = null;
       continue;
     }
 
-    const previous = grouped.at(-1);
-    if (previous?.type === "activity-group" && previous.turnId === entry.turnId) {
-      grouped[grouped.length - 1] = {
-        ...previous,
-        activities: [...previous.activities, entry.activity],
-      };
+    if (openGroupActivities !== null && openGroupTurnId === entry.turnId) {
+      openGroupActivities.push(entry.activity);
       continue;
     }
 
+    openGroupActivities = [entry.activity];
+    openGroupTurnId = entry.turnId;
     grouped.push({
       type: "activity-group",
       id: entry.id,
       createdAt: entry.createdAt,
       turnId: entry.turnId,
-      activities: [entry.activity],
+      activities: openGroupActivities,
     });
   }
 
@@ -1105,9 +1168,11 @@ export function deriveThreadFeedPresentation(
   latestTurn: ThreadFeedLatestTurn | null,
   expandedTurnIds: ReadonlySet<TurnId>,
   expandedWorkGroupIds: ReadonlySet<string> = new Set(),
+  activeWorkStartedAt: string | null = null,
 ): ThreadFeedEntry[] {
   const sourceFeed = feed.filter(
-    (entry) => entry.type !== "turn-fold" && entry.type !== "work-toggle",
+    (entry) =>
+      entry.type !== "turn-fold" && entry.type !== "work-toggle" && entry.type !== "working",
   );
   const foldsByAnchorId = deriveThreadFeedTurnFolds(sourceFeed, latestTurn);
   const collapsedEntryIds = new Set<string>();
@@ -1136,12 +1201,19 @@ export function deriveThreadFeedPresentation(
       appendPresentedFeedEntry(result, entry, expandedWorkGroupIds);
     }
   }
+  if (activeWorkStartedAt !== null) {
+    result.push({
+      type: "working",
+      id: "working-indicator-row",
+      createdAt: activeWorkStartedAt,
+    });
+  }
   return result;
 }
 
 function appendPresentedFeedEntry(
   result: ThreadFeedEntry[],
-  entry: Exclude<ThreadFeedEntry, { readonly type: "turn-fold" | "work-toggle" }>,
+  entry: Exclude<ThreadFeedEntry, { readonly type: "turn-fold" | "work-toggle" | "working" }>,
   expandedWorkGroupIds: ReadonlySet<string>,
 ): void {
   if (entry.type !== "activity-group") {
@@ -1189,13 +1261,24 @@ function appendPresentedFeedEntry(
   });
 }
 
-export function derivePendingApprovals(
+/**
+ * Sorts activities into lifecycle order. `derivePendingApprovals` and
+ * `derivePendingUserInputs` both expect this ordering; sorting once and
+ * passing the result to both avoids re-sorting the full activity history
+ * per derivation.
+ */
+export function sortThreadActivities(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlyArray<OrchestrationThreadActivity> {
+  return Arr.sort(activities, activityOrder);
+}
+
+export function derivePendingApprovals(
+  sortedActivities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingApproval[] {
   const openByRequestId = new Map<ApprovalRequestId, PendingApproval>();
-  const ordered = Arr.sort(activities, activityOrder);
 
-  for (const activity of ordered) {
+  for (const activity of sortedActivities) {
     const payload =
       activity.payload && typeof activity.payload === "object"
         ? (activity.payload as Record<string, unknown>)
@@ -1237,12 +1320,11 @@ export function derivePendingApprovals(
 }
 
 export function derivePendingUserInputs(
-  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  sortedActivities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingUserInput[] {
   const openByRequestId = new Map<ApprovalRequestId, PendingUserInput>();
-  const ordered = Arr.sort(activities, activityOrder);
 
-  for (const activity of ordered) {
+  for (const activity of sortedActivities) {
     const payload =
       activity.payload && typeof activity.payload === "object"
         ? (activity.payload as Record<string, unknown>)
@@ -1339,7 +1421,14 @@ export function buildThreadFeed(
         .map<RawThreadFeedEntry>((entry) => {
           const summary = workEntryHeading(entry);
           const detail = workEntryPreview(entry);
-          const fullDetail = buildWorkEntryExpandedBody(entry);
+          const getFullDetail = memoizeValue(() => buildWorkEntryExpandedBody(entry));
+          const getCopyText = memoizeValue(() =>
+            [summary, detail, getFullDetail()]
+              .filter((value, index, values): value is string => {
+                return Boolean(value) && values.indexOf(value) === index;
+              })
+              .join("\n"),
+          );
           return {
             type: "activity",
             id: entry.id,
@@ -1351,13 +1440,10 @@ export function buildThreadFeed(
               turnId: entry.turnId,
               summary,
               detail,
-              fullDetail,
+              canExpand: workEntryHasExpandedBody(entry),
+              getFullDetail,
+              getCopyText,
               icon: workEntryIcon(entry),
-              copyText: [summary, detail, fullDetail]
-                .filter((value, index, values): value is string => {
-                  return Boolean(value) && values.indexOf(value) === index;
-                })
-                .join("\n"),
               toolLike: workLogEntryIsToolLike(entry),
               status: workEntryStatus(entry),
             },

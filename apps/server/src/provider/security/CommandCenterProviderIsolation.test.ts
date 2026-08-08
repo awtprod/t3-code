@@ -12,12 +12,14 @@ import * as Path from "effect/Path";
 import {
   COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE,
   COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE,
+  commandCenterExecutionClass,
   commandCenterCodexIsolation,
   commandCenterProviderEnvironment,
   commandCenterProviderIsolationIssue,
   commandCenterProviderPlatformIssue,
   isCommandCenterThreadId,
   prepareCommandCenterCodexHome,
+  resolveCommandCenterCodexRuntimeExecutable,
   resolveCommandCenterManagedGitMetadata,
 } from "./CommandCenterProviderIsolation.ts";
 
@@ -27,10 +29,29 @@ describe("CommandCenterProviderIsolation", () => {
     NodeAssert.equal(isCommandCenterThreadId("thread-1"), false);
   });
 
-  it("allows only the live-verified Linux process boundary", () => {
-    NodeAssert.equal(commandCenterProviderPlatformIssue("linux"), undefined);
-    NodeAssert.match(commandCenterProviderPlatformIssue("darwin") ?? "", /dispatch is blocked/u);
-    NodeAssert.match(commandCenterProviderPlatformIssue("win32") ?? "", /dispatch is blocked/u);
+  it("admits native interactive chats while keeping unattended runs Linux-only", () => {
+    NodeAssert.equal(commandCenterExecutionClass("cc:interactive:run-1"), "interactive");
+    NodeAssert.equal(commandCenterExecutionClass("cc:automation:run-1"), "automation");
+    NodeAssert.equal(commandCenterExecutionClass("cc:run-1"), "legacy");
+    NodeAssert.equal(commandCenterExecutionClass("thread-1"), undefined);
+
+    NodeAssert.equal(commandCenterProviderPlatformIssue("linux", "cc:run-1"), undefined);
+    NodeAssert.equal(
+      commandCenterProviderPlatformIssue("darwin", "cc:interactive:run-1"),
+      undefined,
+    );
+    NodeAssert.equal(
+      commandCenterProviderPlatformIssue("win32", "cc:interactive:run-1"),
+      undefined,
+    );
+    NodeAssert.match(
+      commandCenterProviderPlatformIssue("darwin", "cc:automation:run-1") ?? "",
+      /requires a verified Linux host/u,
+    );
+    NodeAssert.match(
+      commandCenterProviderPlatformIssue("win32", "cc:run-1") ?? "",
+      /requires a verified Linux host/u,
+    );
   });
 
   it("fails closed for unverified providers and full-access sessions", () => {
@@ -40,7 +61,7 @@ describe("CommandCenterProviderIsolation", () => {
         provider: "claude-code",
         runtimeMode: "approval-required",
       }) ?? "",
-      /require the Codex provider/u,
+      /require Codex or a verified native Kimi provider/u,
     );
     NodeAssert.match(
       commandCenterProviderIsolationIssue({
@@ -55,6 +76,14 @@ describe("CommandCenterProviderIsolation", () => {
         threadId: "thread-1",
         provider: "claude-code",
         runtimeMode: "full-access",
+      }),
+      undefined,
+    );
+    NodeAssert.equal(
+      commandCenterProviderIsolationIssue({
+        threadId: "cc:run-1",
+        provider: "kimi",
+        runtimeMode: "approval-required",
       }),
       undefined,
     );
@@ -87,9 +116,20 @@ describe("CommandCenterProviderIsolation", () => {
     );
     NodeAssert.ok(read);
     NodeAssert.ok(write);
+    const auto = commandCenterCodexIsolation("auto", undefined, "/runtime/codex", codexHome);
+    const windowsElevated = commandCenterCodexIsolation(
+      "approval-required",
+      undefined,
+      "C:\\runtime\\codex.exe",
+      codexHome,
+      "win32",
+    );
+    NodeAssert.ok(auto);
+    NodeAssert.ok(windowsElevated);
 
     NodeAssert.equal(read.permissionProfile, COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE);
     NodeAssert.equal(write.permissionProfile, COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE);
+    NodeAssert.equal(auto.permissionProfile, COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE);
 
     const readConfig = read.appServerArgs.join(" ");
     NodeAssert.match(readConfig, /--strict-config/u);
@@ -117,6 +157,8 @@ describe("CommandCenterProviderIsolation", () => {
     NodeAssert.match(writeConfig, /default_permissions="command-center-isolated-write-v1"/u);
     NodeAssert.match(writeConfig, /":workspace_roots"=\{"\."="write"\}/u);
     NodeAssert.doesNotMatch(writeConfig, /network=\{enabled=true\}/u);
+    NodeAssert.match(windowsElevated.appServerArgs.join(" "), /windows\.sandbox="elevated"/u);
+    NodeAssert.doesNotMatch(windowsElevated.appServerArgs.join(" "), /unelevated/u);
   });
 
   it.runIf(NodeProcess.platform === "linux")(
@@ -211,7 +253,10 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
   const makeLayout = Effect.fn("CommandCenterProviderIsolation.test.makeLayout")(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cc-isolation-" });
+    const temporaryBaseDir = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "cc-isolation-",
+    });
+    const baseDir = yield* fileSystem.realPath(temporaryBaseDir);
     const worktreesDir = path.join(baseDir, "worktrees");
     const repositoriesDir = path.join(baseDir, "repositories");
     yield* fileSystem.makeDirectory(worktreesDir, { recursive: true });
@@ -243,21 +288,27 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
         path,
         crypto,
         runtimeExecutablePath: NodeProcess.execPath,
+        platform: NodeProcess.platform,
         writableRoots: [root],
       });
       const targetAuthPath = path.join(isolated.homePath, "auth.json");
       const arg0BlockerPath = path.join(isolated.tempPath, "arg0");
       NodeAssert.equal(yield* fileSystem.readFileString(targetAuthPath), '{"token":"test-only"}\n');
-      for (const alias of [
-        "codex-linux-sandbox",
-        "apply_patch",
-        "applypatch",
-        "codex-execve-wrapper",
-      ]) {
+      const aliases =
+        NodeProcess.platform === "win32"
+          ? ["apply_patch.bat", "applypatch.bat"]
+          : NodeProcess.platform === "darwin"
+            ? ["apply_patch", "applypatch", "codex-execve-wrapper"]
+            : ["codex-linux-sandbox", "apply_patch", "applypatch", "codex-execve-wrapper"];
+      for (const alias of aliases) {
         const helperPath = path.join(isolated.helperBinPath, alias);
         const helper = yield* fileSystem.readFileString(helperPath);
-        NodeAssert.match(helper, /exec \/usr\/bin\/env -i/u);
-        NodeAssert.equal(helper.includes(`exec -a ${alias}`), true);
+        if (NodeProcess.platform === "win32") {
+          NodeAssert.match(helper, /--codex-run-as-apply-patch/u);
+        } else {
+          NodeAssert.match(helper, /exec \/usr\/bin\/env -i/u);
+          NodeAssert.equal(helper.includes(`exec -a ${alias}`), true);
+        }
         NodeAssert.doesNotMatch(helper, /T3_MCP_BEARER_TOKEN|OPENAI_API_KEY/u);
         if (NodeProcess.platform !== "win32") {
           NodeAssert.equal((yield* fileSystem.stat(helperPath)).mode & 0o777, 0o500);
@@ -303,6 +354,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
         path,
         crypto,
         runtimeExecutablePath: NodeProcess.execPath,
+        platform: NodeProcess.platform,
         writableRoots: [root],
       } as const;
       const isolated = yield* prepareCommandCenterCodexHome(input);
@@ -331,6 +383,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
         path,
         crypto,
         runtimeExecutablePath: NodeProcess.execPath,
+        platform: NodeProcess.platform,
         writableRoots: [root],
       } as const;
       const isolated = yield* prepareCommandCenterCodexHome(input);
@@ -376,9 +429,10 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
         path,
         crypto,
         runtimeExecutablePath: scriptPath,
+        platform: NodeProcess.platform,
         writableRoots: [],
       }).pipe(Effect.flip);
-      NodeAssert.match(scriptError.issue, /requires a native ELF Codex runtime/u);
+      NodeAssert.match(scriptError.issue, /requires a native Codex runtime/u);
 
       const writableRuntimeError = yield* prepareCommandCenterCodexHome({
         stateDir,
@@ -388,11 +442,101 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
         path,
         crypto,
         runtimeExecutablePath: NodeProcess.execPath,
+        platform: NodeProcess.platform,
         writableRoots: [path.dirname(NodeProcess.execPath)],
       }).pipe(Effect.flip);
       NodeAssert.match(
         writableRuntimeError.issue,
         /runtime located under a provider-writable root/u,
+      );
+    }),
+  );
+
+  it.effect("shares only Windows sandbox control state while keeping thread state separate", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cc-windows-home-" });
+      const stateDir = path.join(root, "state");
+      const sourceHomePath = path.join(root, "source-home");
+      const runtimePath = path.join(root, "codex.exe");
+      yield* fileSystem.makeDirectory(stateDir, { recursive: true });
+      yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+      yield* fileSystem.writeFile(runtimePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
+
+      const makeHome = (threadId: string) =>
+        prepareCommandCenterCodexHome({
+          stateDir,
+          sourceHomePath,
+          threadId,
+          fileSystem,
+          path,
+          crypto,
+          runtimeExecutablePath: runtimePath,
+          platform: "win32",
+          writableRoots: [],
+        });
+      const first = yield* makeHome("cc:interactive:first");
+      const second = yield* makeHome("cc:interactive:second");
+
+      NodeAssert.equal(first.homePath, second.homePath);
+      NodeAssert.notEqual(first.tempPath, second.tempPath);
+      NodeAssert.match(
+        yield* fileSystem.readFileString(path.join(first.helperBinPath, "apply_patch.bat")),
+        /--codex-run-as-apply-patch/u,
+      );
+    }),
+  );
+
+  it.effect("resolves current and legacy native executables behind a Windows npm launcher", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cc-windows-runtime-" });
+      const commandPath = path.join(root, "codex.cmd");
+      const packageRoot = path.join(root, "node_modules", "@openai", "codex");
+      const platformPackageRoot = path.join(
+        packageRoot,
+        "node_modules",
+        "@openai",
+        "codex-win32-x64",
+      );
+      const platformVendorRoot = path.join(platformPackageRoot, "vendor", "x86_64-pc-windows-msvc");
+      const currentNativePath = path.join(platformVendorRoot, "bin", "codex.exe");
+      const legacyNativePath = path.join(platformVendorRoot, "codex", "codex.exe");
+      yield* writeFile(commandPath, "@echo off\r\n");
+      yield* writeFile(path.join(packageRoot, "bin", "codex.js"), "// launcher\n");
+      yield* writeFile(
+        path.join(platformPackageRoot, "package.json"),
+        '{"name":"@openai/codex-win32-x64","version":"0.0.0"}\n',
+      );
+      yield* fileSystem.makeDirectory(path.dirname(currentNativePath), { recursive: true });
+      yield* fileSystem.makeDirectory(path.dirname(legacyNativePath), { recursive: true });
+      yield* fileSystem.writeFile(currentNativePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
+      yield* fileSystem.writeFile(legacyNativePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
+
+      NodeAssert.equal(
+        yield* resolveCommandCenterCodexRuntimeExecutable({
+          commandPath,
+          platform: "win32",
+          architecture: "x64",
+          fileSystem,
+          path,
+        }),
+        yield* fileSystem.realPath(currentNativePath),
+      );
+
+      yield* fileSystem.remove(currentNativePath);
+      NodeAssert.equal(
+        yield* resolveCommandCenterCodexRuntimeExecutable({
+          commandPath,
+          platform: "win32",
+          architecture: "x64",
+          fileSystem,
+          path,
+        }),
+        yield* fileSystem.realPath(legacyNativePath),
       );
     }),
   );

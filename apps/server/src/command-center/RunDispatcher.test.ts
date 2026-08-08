@@ -32,6 +32,7 @@ import {
   makeWithDependencies,
   planRepositoryProjectResolution,
   renderThreadMessage,
+  selectPriorContext,
   selectRepositoryProject,
   validateCommandCenterSystemWorkspace,
 } from "./RunDispatcher.ts";
@@ -64,6 +65,26 @@ const readyRoute = decodeRoute({
     model: "provider-default",
   },
   reasons: [],
+});
+
+it("caps Space instructions and the total prior-context payload deterministically", () => {
+  const priorContext = Array.from({ length: 3 }, (_, index) => ({
+    commandText: `request-${index}-${"c".repeat(3_000)}`,
+    responseText: `result-${index}-${"r".repeat(3_000)}`,
+  }));
+  const selected = selectPriorContext(priorContext);
+  expect(selected.join("").length).toBeLessThanOrEqual(8_000);
+  expect(selected.at(-1)).toContain("request-0-");
+
+  const rendered = renderThreadMessage({
+    space: { ...space, instructions: "i".repeat(8_000) },
+    route: readyRoute,
+    commandText: "Do the current task",
+    priorContext,
+  });
+  const instructionSection = rendered.split("\n\nBounded prior Command context", 1)[0] ?? "";
+  expect(instructionSection).toContain("[truncated: context budget exhausted]");
+  expect(rendered).toContain("request-0-");
 });
 
 const command = decodeCommand({
@@ -104,6 +125,7 @@ function makeFixture(
     readonly resolveTargetProject?: DispatcherDependencies["resolveTargetProject"];
     readonly space?: StoredSpace;
     readonly executionAuthorized?: boolean;
+    readonly parentRunId?: string;
     readonly priorContext?: ReadonlyArray<{
       readonly commandText: string;
       readonly responseText?: string;
@@ -117,6 +139,7 @@ function makeFixture(
     projectId: null,
     threadId: null,
     executionAuthorizedAt: options.executionAuthorized === false ? null : fixtureTime,
+    parentRunId: options.parentRunId ?? null,
     state: "queued",
     route,
     command,
@@ -279,7 +302,7 @@ it.effect("links one fresh thread and registers the exact Space and repository s
 
     expect(first).toMatchObject({
       projectId: targetProject.id,
-      threadId: ThreadId.make("cc:thread-example"),
+      threadId: ThreadId.make("cc:interactive:thread-example"),
       state: "running",
       sequence: 42,
       duplicate: false,
@@ -287,7 +310,7 @@ it.effect("links one fresh thread and registers the exact Space and repository s
     expect(duplicate.duplicate).toBe(true);
     expect(state.dispatchCount).toBe(1);
     expect(state.recordedSequence).toBe(42);
-    expect(state.registeredThread).toBe(ThreadId.make("cc:thread-example"));
+    expect(state.registeredThread).toBe(ThreadId.make("cc:interactive:thread-example"));
     expect(state.registeredScope?.spaceId).toBe(spaceId);
     expect(state.registeredScope?.repositoryId).toBe(repositoryId);
     expect(state.registeredScope?.memoryWriteMode).toBe("propose");
@@ -306,6 +329,20 @@ it.effect("links one fresh thread and registers the exact Space and repository s
     });
     expect(dispatchedCommand.message.text).toContain("Command Center route receipt");
     expect(dispatchedCommand.message.text).toContain("Space instructions");
+  }),
+);
+
+it.effect("marks automation child threads as unattended before provider dispatch", () =>
+  Effect.gen(function* () {
+    const fixture = makeFixture(readyRoute, { parentRunId: "automation-execution-example" });
+
+    const result = yield* fixture.dispatcher.dispatch({
+      runId,
+      dispatchCommand: fixture.dispatch(),
+    });
+
+    expect(result.threadId).toBe(ThreadId.make("cc:automation:thread-example"));
+    expect(fixture.read().registeredThread).toBe(ThreadId.make("cc:automation:thread-example"));
   }),
 );
 
@@ -371,7 +408,7 @@ it.effect("persists dispatch failure and revokes the linked thread scope", () =>
     expect(failure.reason).toBe("dispatch-failed");
     expect(state.storedRun.state).toBe("failed");
     expect(state.failedError?.reason).toBe("dispatch-failed");
-    expect(state.unregisteredThread).toBe(ThreadId.make("cc:thread-example"));
+    expect(state.unregisteredThread).toBe(ThreadId.make("cc:interactive:thread-example"));
   }),
 );
 

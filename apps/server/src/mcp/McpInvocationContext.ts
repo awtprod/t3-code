@@ -1,5 +1,6 @@
 import {
   CommandCenterMcpCapabilityUnavailableError,
+  DatabaseToolError,
   type EnvironmentId,
   PreviewAutomationUnavailableError,
   type ProjectId,
@@ -10,7 +11,7 @@ import type { CapabilityName, RepositoryId, SpaceId } from "@command-center/core
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-export type McpCapability = "preview" | CapabilityName;
+export type McpCapability = "preview" | "database.read" | "database.write" | CapabilityName;
 export type McpMemoryWriteMode = "propose" | "remember";
 
 export interface McpInvocationScope {
@@ -28,7 +29,6 @@ export interface McpInvocationScope {
   /** Server-issued policy. Tool input cannot promote proposal-only credentials. */
   readonly memoryWriteMode?: McpMemoryWriteMode;
   readonly issuedAt: number;
-  readonly expiresAt: number;
 }
 
 export class McpInvocationContext extends Context.Service<
@@ -64,7 +64,22 @@ export const requireCommandCenterCapability = Effect.fn("mcp.requireCommandCente
   },
 );
 
+export const requireDatabaseCapability = Effect.fn("mcp.requireDatabaseCapability")(function* (
+  capability: "database.read" | "database.write",
+) {
+  const invocation = yield* McpInvocationContext;
+  if (!invocation.capabilities.has(capability)) {
+    return yield* new DatabaseToolError({
+      reason: "not-configured",
+      message: `This MCP credential does not allow ${capability}.`,
+    });
+  }
+  return invocation;
+});
+
 export const requireMcpCapability = (capability: McpCapability) =>
   capability === "preview"
     ? requirePreviewCapability()
-    : requireCommandCenterCapability(capability);
+    : capability === "database.read" || capability === "database.write"
+      ? requireDatabaseCapability(capability)
+      : requireCommandCenterCapability(capability);

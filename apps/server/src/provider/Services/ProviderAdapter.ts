@@ -31,6 +31,8 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /** Option ids verified to apply to an existing session without replay. */
+  readonly inSessionOptionIds?: ReadonlyArray<string>;
 }
 
 export interface ProviderThreadTurnSnapshot {

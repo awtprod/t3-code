@@ -4,6 +4,7 @@ import { Tool, Toolkit } from "effect/unstable/ai";
 
 import * as SupabaseMcpConnector from "../../../database/SupabaseMcpConnector.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { requireCapability } from "../../ToolCapability.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -38,7 +39,9 @@ const makeTool = <Name extends string, Parameters extends Schema.Top>(
     failure: DatabaseToolError,
     dependencies,
   }).annotate(Tool.Title, title);
-  return mode === "read" ? readonlyTool(tool) : writeTool(tool);
+  return mode === "read"
+    ? requireCapability(readonlyTool(tool), "database.read")
+    : requireCapability(writeTool(tool), "database.write");
 };
 
 export const SupabaseListTablesTool = makeTool(

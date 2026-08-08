@@ -82,6 +82,7 @@ const ROUTE_SOURCE_LABEL: Record<CommandCenterRouteSource, string> = {
   fallback: "Fallback",
   "provider-default": "Default",
   policy: "Policy",
+  "tier-policy": "Efficiency tier",
   unresolved: "Unresolved",
 };
 
@@ -797,7 +798,7 @@ function ContextRail({
   const [activeView, setActiveView] = useState<"needs-you" | "runs" | "context">("needs-you");
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-card-foreground">
-      <div className="flex h-[var(--workspace-topbar-height)] shrink-0 items-end border-b px-2">
+      <div className="drag-region flex h-[var(--workspace-topbar-height)] shrink-0 items-end border-b px-2">
         <div
           aria-label="Context views"
           className="flex min-w-0 items-center gap-0.5"
@@ -900,7 +901,7 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
         className="flex h-full min-h-0 min-w-0 flex-1 flex-col"
         data-slot="command-center-conversation"
       >
-        <header className="pointer-events-none absolute inset-x-0 top-0 z-30 flex h-14 items-center justify-between px-3 sm:px-5">
+        <header className="drag-region pointer-events-none absolute inset-x-0 top-0 z-30 flex h-14 items-center justify-between px-3 sm:px-5">
           <div className="pointer-events-auto rounded-xl bg-background/70 backdrop-blur-md [&_[data-slot=popover-trigger]>span]:hidden [&_[data-slot=popover-trigger]]:size-8 [&_[data-slot=popover-trigger]]:px-0">
             <CommandCenterHistoryMenu
               activeConversationId={props.activeConversationId}

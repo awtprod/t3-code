@@ -62,6 +62,11 @@ import Migration0046 from "./Migrations/046_ProjectionThreadSessionGeneration.ts
 import Migration0047 from "./Migrations/047_ProjectionPendingTurnStartMultiSlot.ts";
 import Migration0048 from "./Migrations/048_ProviderTurnSendClaims.ts";
 import Migration0049 from "./Migrations/049_ProjectionThreadActivityCorrelation.ts";
+import Migration0050 from "./Migrations/050_ProjectionThreadsSettled.ts";
+import Migration0051 from "./Migrations/051_ProjectionThreadsSnoozed.ts";
+import Migration0052 from "./Migrations/052_ProjectionThreadTitleRegeneration.ts";
+import Migration0053 from "./Migrations/053_ProjectionTurnUsage.ts";
+import Migration0054 from "./Migrations/054_TokenEfficiencyRouting.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -123,6 +128,11 @@ export const migrationEntries = [
   [47, "ProjectionPendingTurnStartMultiSlot", Migration0047],
   [48, "ProviderTurnSendClaims", Migration0048],
   [49, "ProjectionThreadActivityCorrelation", Migration0049],
+  [50, "ProjectionThreadsSettled", Migration0050],
+  [51, "ProjectionThreadsSnoozed", Migration0051],
+  [52, "ProjectionThreadTitleRegeneration", Migration0052],
+  [53, "ProjectionTurnUsage", Migration0053],
+  [54, "TokenEfficiencyRouting", Migration0054],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

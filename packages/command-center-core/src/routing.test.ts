@@ -4,8 +4,11 @@ import * as Schema from "effect/Schema";
 import { Space } from "./domain.ts";
 import {
   ProviderAvailability,
+  ProviderModelCandidate,
+  RouteSelection,
   RouteResolutionInput,
   normalizeSpaceAlias,
+  resolveProviderModelSelection,
   resolveRoute,
   resolveSpaceAlias,
 } from "./routing.ts";
@@ -13,6 +16,8 @@ import {
 const decodeSpace = Schema.decodeUnknownSync(Space);
 const decodeProvider = Schema.decodeUnknownSync(ProviderAvailability);
 const decodeRouteInput = Schema.decodeUnknownSync(RouteResolutionInput);
+const decodeSelection = Schema.decodeUnknownSync(RouteSelection);
+const decodeCandidate = Schema.decodeUnknownSync(ProviderModelCandidate);
 
 const sampleStudio = decodeSpace({
   id: "example-studio",
@@ -36,6 +41,36 @@ const sampleStudio = decodeSpace({
   lifecycle: "active",
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
+});
+
+it("selects deterministic tier candidates between policy and classifier", () => {
+  const providers = [
+    provider({ providerId: "codex", modelIds: ["terra", "sol"], defaultModelId: "sol" }),
+    provider({ providerId: "claude", modelIds: ["sonnet"], defaultModelId: "sonnet" }),
+  ];
+  const tier = resolveProviderModelSelection({
+    tierCandidates: [
+      decodeCandidate({ candidateId: "economy-codex", providerId: "codex", modelId: "terra" }),
+    ],
+    classifier: decodeSelection({ providerId: "claude", modelId: "sonnet" }),
+    providers,
+  });
+  assert.strictEqual(tier.providerId, "codex");
+  assert.strictEqual(tier.modelId, "terra");
+  assert.strictEqual(tier.providerSource, "tier-policy");
+  assert.strictEqual(tier.modelSource, "tier-policy");
+  assert.strictEqual(tier.candidateId, "economy-codex");
+  assert.deepStrictEqual(tier.reasons, []);
+
+  const fallback = resolveProviderModelSelection({
+    tierCandidates: [
+      decodeCandidate({ candidateId: "missing", providerId: "codex", modelId: "unknown" }),
+    ],
+    classifier: decodeSelection({ providerId: "claude", modelId: "sonnet" }),
+    providers,
+  });
+  assert.strictEqual(fallback.providerId, "claude");
+  assert.strictEqual(fallback.providerSource, "classifier");
 });
 
 const demoGarden = decodeSpace({

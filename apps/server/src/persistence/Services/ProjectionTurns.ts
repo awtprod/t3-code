@@ -8,6 +8,7 @@
  */
 import {
   CheckpointRef,
+  EfficiencyDecision,
   IsoDateTime,
   MessageId,
   ModelSelection,
@@ -50,6 +51,7 @@ export const ProjectionTurn = Schema.Struct({
   checkpointRef: Schema.NullOr(CheckpointRef),
   checkpointStatus: Schema.NullOr(OrchestrationCheckpointStatus),
   checkpointFiles: Schema.Array(OrchestrationCheckpointFile),
+  efficiencyDecision: Schema.optional(Schema.NullOr(EfficiencyDecision)),
 });
 export type ProjectionTurn = typeof ProjectionTurn.Type;
 
@@ -69,6 +71,7 @@ export const ProjectionTurnById = Schema.Struct({
   checkpointRef: Schema.NullOr(CheckpointRef),
   checkpointStatus: Schema.NullOr(OrchestrationCheckpointStatus),
   checkpointFiles: Schema.Array(OrchestrationCheckpointFile),
+  efficiencyDecision: Schema.optional(Schema.NullOr(EfficiencyDecision)),
 });
 export type ProjectionTurnById = typeof ProjectionTurnById.Type;
 
@@ -91,6 +94,7 @@ export const ProjectionPendingTurnStart = Schema.Struct({
    * turn) so a pending steer resumes on the model the user chose for it.
    */
   modelSelection: Schema.NullOr(ModelSelection),
+  efficiencyDecision: Schema.optional(Schema.NullOr(EfficiencyDecision)),
   /**
    * True when a user `thread.turn.interrupt` landed on this pending start before
    * the provider reported `turn.started` (an id-less interrupt the projection

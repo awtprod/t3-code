@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   public_safety:
     name: Public repository safety
@@ -63,6 +67,11 @@ jobs:
           cache: true
           run-install: true
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
@@ -71,6 +80,9 @@ jobs:
 
       - name: Typecheck
         run: vpr typecheck
+
+      - name: Check resource monitor formatting
+        run: cargo fmt --manifest-path native/resource-monitor/Cargo.toml -- --check
 
       - name: Build desktop pipeline
         run: vp run build:desktop
@@ -84,7 +96,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -96,11 +108,47 @@ jobs:
           cache: true
           run-install: true
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
       - name: Test
         run: vp run test
+
+      - name: Test resource monitor
+        run: cargo test --locked --manifest-path native/resource-monitor/Cargo.toml
+
+  command_center_native_isolation:
+    name: Command Center Native Isolation (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS
+            os: macos-26
+          - label: Windows
+            os: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Test native Command Center isolation
+        run: >-
+          vp test run
+          apps/server/src/provider/security/CommandCenterProviderIsolation.test.ts
+          apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
+          apps/server/src/command-center/RunDispatcher.test.ts
 
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis

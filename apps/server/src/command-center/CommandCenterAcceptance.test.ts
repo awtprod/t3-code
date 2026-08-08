@@ -363,6 +363,7 @@ const makeDispatcherHarness = (
           projectId: row.projectId,
           threadId: row.threadId,
           executionAuthorizedAt: row.executionAuthorizedAt,
+          parentRunId: null,
           state: row.state,
           route: submitted.route,
           command,

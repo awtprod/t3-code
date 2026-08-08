@@ -13,14 +13,19 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
+import { resolveInteractiveEfficiency } from "../efficiency/EfficiencyRouting.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { normalizeDispatchCommand } from "./Normalizer.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 
@@ -91,6 +96,9 @@ export class OrchestrationCommandDispatcher extends Context.Service<
 export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+  const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const providerRegistry = yield* ProviderRegistry;
+  const serverSettings = yield* ServerSettingsService;
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
@@ -282,6 +290,10 @@ export const make = Effect.gen(function* () {
             projectId: bootstrap.createThread.projectId,
             title: bootstrap.createThread.title,
             modelSelection: bootstrap.createThread.modelSelection,
+            routingMode: bootstrap.createThread.routingMode,
+            ...(bootstrap.createThread.efficiencyTier === undefined
+              ? {}
+              : { efficiencyTier: bootstrap.createThread.efficiencyTier }),
             runtimeMode: bootstrap.createThread.runtimeMode,
             interactionMode: bootstrap.createThread.interactionMode,
             branch: bootstrap.createThread.branch,
@@ -336,16 +348,52 @@ export const make = Effect.gen(function* () {
       );
     });
 
-  const dispatchNormalized: OrchestrationCommandDispatcherShape["dispatchNormalized"] = (command) =>
-    command.type === "thread.turn.start" && command.bootstrap
-      ? dispatchBootstrapTurnStart(command)
-      : orchestrationEngine
-          .dispatch(command)
-          .pipe(
-            Effect.mapError((cause) =>
-              toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-            ),
+  const resolveEfficiency = (
+    command: OrchestrationCommand,
+  ): Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError> => {
+    if (command.type !== "thread.turn.start") return Effect.succeed(command);
+    return Effect.gen(function* () {
+      const thread = command.bootstrap?.createThread
+        ? undefined
+        : Option.getOrUndefined(
+            yield* projectionSnapshotQuery.getThreadShellById(command.threadId),
           );
+      const routingMode =
+        command.routingMode ??
+        command.bootstrap?.createThread?.routingMode ??
+        thread?.routingMode ??
+        "manual";
+      if (routingMode !== "auto") return command;
+      const settings = yield* serverSettings.getSettings;
+      if (!settings.efficiency.enabled) return command;
+      const providers = yield* providerRegistry.getProviders;
+      return resolveInteractiveEfficiency({
+        command,
+        ...(thread === undefined ? {} : { thread }),
+        settings: settings.efficiency,
+        providers,
+      }).command;
+    }).pipe(
+      Effect.mapError((cause) =>
+        toDispatchCommandError(cause, "Failed to resolve token-efficiency routing"),
+      ),
+    );
+  };
+
+  const dispatchNormalized: OrchestrationCommandDispatcherShape["dispatchNormalized"] = (command) =>
+    resolveEfficiency(command).pipe(
+      Effect.flatMap((resolvedCommand) =>
+        resolvedCommand.type === "thread.turn.start" && resolvedCommand.bootstrap
+          ? dispatchBootstrapTurnStart(resolvedCommand)
+          : orchestrationEngine
+              .dispatch(resolvedCommand)
+              .pipe(
+                Effect.mapError((cause) =>
+                  toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+                ),
+              ),
+      ),
+    );
 
   const dispatch: OrchestrationCommandDispatcherShape["dispatch"] = (command) =>
     normalizeDispatchCommand(command).pipe(

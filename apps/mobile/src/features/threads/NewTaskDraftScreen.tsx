@@ -42,7 +42,8 @@ import {
   restoreComposerDraftSnapshot,
   type ComposerDraft,
 } from "../../state/use-composer-drafts";
-import { useProjects } from "../../state/entities";
+import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
+import { resolveSelectableModelSelection } from "../../lib/modelOptions";
 import { deriveThreadTitleFromPrompt } from "../../lib/projectThreadStartTurn";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage, removeThreadOutboxMessage } from "../../state/thread-outbox";
@@ -90,6 +91,9 @@ export function NewTaskDraftScreen(props: {
   const controlsBottomPadding = isKeyboardVisible ? 8 : Math.max(insets.bottom, 10);
   const { logicalProjects, selectedProject, setProject } = flow;
   const { connectedEnvironments } = useRemoteConnectionStatus();
+  const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
+    selectedProject?.environmentId ?? null,
+  );
   const environmentConnected =
     selectedProject !== null &&
     connectedEnvironments.find(
@@ -582,10 +586,13 @@ export function NewTaskDraftScreen(props: {
             ? "Approve actions"
             : flow.runtimeMode === "auto-accept-edits"
               ? "Auto-accept edits"
-              : "Full access",
+              : flow.runtimeMode === "auto"
+                ? "Auto"
+                : "Full access",
         subactions: [
           { id: "options:runtime:approval-required", title: "Approve actions" },
           { id: "options:runtime:auto-accept-edits", title: "Auto-accept edits" },
+          { id: "options:runtime:auto", title: "Auto" },
           { id: "options:runtime:full-access", title: "Full access" },
         ].map((option) => {
           const value = option.id.replace("options:runtime:", "");
@@ -614,6 +621,22 @@ export function NewTaskDraftScreen(props: {
       },
     ],
     [flow.interactionMode, flow.runtimeMode, providerOptionDescriptors],
+  );
+  const efficiencyMenuActions = useMemo(
+    () => [
+      {
+        id: "efficiency:manual",
+        title: "Manual model",
+        state: flow.routingMode === "manual" ? ("on" as const) : undefined,
+      },
+      ...(["economy", "balanced", "quality"] as const).map((tier) => ({
+        id: `efficiency:auto:${tier}`,
+        title: `Auto · ${tier[0]!.toUpperCase()}${tier.slice(1)}`,
+        state:
+          flow.routingMode === "auto" && flow.efficiencyTier === tier ? ("on" as const) : undefined,
+      })),
+    ],
+    [flow.efficiencyTier, flow.routingMode],
   );
 
   const workspaceMenuActions = useMemo(() => {
@@ -758,6 +781,20 @@ export function NewTaskDraftScreen(props: {
     }
   }
 
+  function handleEfficiencyMenuAction(event: string) {
+    if (isIncomingShareTransferPending) return;
+    if (event === "efficiency:manual") {
+      flow.setEfficiencyRouting("manual", flow.efficiencyTier);
+      return;
+    }
+    if (event.startsWith("efficiency:auto:")) {
+      flow.setEfficiencyRouting(
+        "auto",
+        event.slice("efficiency:auto:".length) as typeof flow.efficiencyTier,
+      );
+    }
+  }
+
   async function handlePickImages(): Promise<void> {
     if (isIncomingShareTransferPending) {
       return;
@@ -792,7 +829,14 @@ export function NewTaskDraftScreen(props: {
       return;
     }
     const draft = getComposerDraftSnapshot(draftKey);
-    const modelSelection = draft.modelSelection ?? flow.selectedModel;
+    // Snapshot read keeps just-typed selector state; the availability gate
+    // still applies so a stored selection on a disabled provider falls back
+    // to the flow's resolved model.
+    const modelSelection =
+      resolveSelectableModelSelection(
+        selectedEnvironmentServerConfig,
+        draft.modelSelection ?? null,
+      ) ?? flow.selectedModel;
     const workspaceMode = draft.workspaceSelection?.mode ?? flow.workspaceMode;
     const selectedBranchName = draft.workspaceSelection?.branch ?? flow.selectedBranchName;
     const selectedWorktreePath =
@@ -800,6 +844,8 @@ export function NewTaskDraftScreen(props: {
     const startFromOrigin = draft.workspaceSelection?.startFromOrigin ?? flow.startFromOrigin;
     const runtimeMode = draft.runtimeMode ?? flow.runtimeMode;
     const interactionMode = draft.interactionMode ?? flow.interactionMode;
+    const routingMode = draft.routingMode ?? flow.routingMode;
+    const efficiencyTier = draft.efficiencyTier ?? flow.efficiencyTier;
     const initialMessageText = draft.text.trim();
 
     if (
@@ -844,7 +890,10 @@ export function NewTaskDraftScreen(props: {
       if (editingPendingTask) {
         flow.finishEditingPendingTask();
       } else {
-        clearComposerDraftContent(draftKey);
+        // Drop the workspace selection with the content: the next task should
+        // re-resolve mode/branch/origin from the server's configured defaults
+        // instead of resurrecting this task's picks.
+        clearComposerDraftContent(draftKey, { clearWorkspaceSelection: true });
       }
       navigation.getParent()?.goBack();
       return;
@@ -868,6 +917,8 @@ export function NewTaskDraftScreen(props: {
       startFromOrigin,
       runtimeMode,
       interactionMode,
+      routingMode,
+      efficiencyTier,
       initialMessageText,
       initialAttachments: draft.attachments,
       ...(editingPendingTask
@@ -902,7 +953,7 @@ export function NewTaskDraftScreen(props: {
       }
       flow.finishEditingPendingTask();
     } else {
-      clearComposerDraftContent(draftKey);
+      clearComposerDraftContent(draftKey, { clearWorkspaceSelection: true });
     }
     navigation.dispatch(
       StackActions.replace("Thread", {
@@ -943,7 +994,11 @@ export function NewTaskDraftScreen(props: {
   const promptEditor = (
     <ComposerEditor
       ref={promptInputRef}
-      autoFocus={!isAndroid}
+      // Native autoFocus fires becomeFirstResponder in didMoveToWindow, which
+      // forces the iOS keyboard bring-up during the formSheet present
+      // animation and stalls it. The runAfterInteractions effect above focuses
+      // the editor once the transition settles instead.
+      autoFocus={false}
       editable={!isIncomingShareTransferPending}
       multiline
       scrollEnabled={isExpanded}
@@ -1003,6 +1058,23 @@ export function NewTaskDraftScreen(props: {
           label={configurationLabel}
         />
       </ControlPillMenu>
+      {selectedEnvironmentServerConfig?.settings.efficiency.enabled ? (
+        <ControlPillMenu
+          actions={efficiencyMenuActions}
+          onPressAction={({ nativeEvent }) => handleEfficiencyMenuAction(nativeEvent.event)}
+        >
+          <ComposerToolbarTrigger
+            accessibilityLabel="Efficiency routing"
+            disabled={isIncomingShareTransferPending}
+            icon="gauge.with.dots.needle.33percent"
+            label={
+              flow.routingMode === "manual"
+                ? "Manual"
+                : `Auto · ${flow.efficiencyTier[0]!.toUpperCase()}${flow.efficiencyTier.slice(1)}`
+            }
+          />
+        </ControlPillMenu>
+      ) : null}
       <ControlPillMenu
         actions={environmentMenuActions}
         onPressAction={({ nativeEvent }) => handleEnvironmentMenuAction(nativeEvent.event)}

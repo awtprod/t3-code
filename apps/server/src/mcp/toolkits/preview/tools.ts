@@ -10,6 +10,8 @@ import {
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
   PreviewAutomationScrollInput,
+  PreviewAutomationSetColorSchemeInput,
+  PreviewAutomationSetColorSchemeResult,
   PreviewAutomationSnapshot,
   PreviewAutomationStatus,
   PreviewAutomationTabTargetInput,
@@ -21,14 +23,17 @@ import { Tool, Toolkit } from "effect/unstable/ai";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import { requireCapability } from "../../ToolCapability.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
   PreviewAutomationBroker.PreviewAutomationBroker,
 ];
 
+const previewTool = <T extends Tool.Any>(tool: T): T => requireCapability(tool, "preview");
+
 const browserTool = <T extends Tool.Any>(tool: T): T =>
-  tool.annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
+  previewTool(tool).annotate(Tool.OpenWorld, true).annotate(Tool.Destructive, true) as T;
 
 const safeBrowserTool = <T extends Tool.Any>(tool: T): T =>
   browserTool(tool).annotate(Tool.Destructive, false) as T;
@@ -36,23 +41,25 @@ const safeBrowserTool = <T extends Tool.Any>(tool: T): T =>
 const readonlyBrowserTool = <T extends Tool.Any>(tool: T): T =>
   safeBrowserTool(tool).annotate(Tool.Readonly, true).annotate(Tool.Idempotent, true) as T;
 
-export const PreviewStatusTool = Tool.make("preview_status", {
-  description:
-    "Report whether a collaborative browser tab is automation-capable, including its URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab.",
-  parameters: PreviewAutomationTabTargetInput,
-  success: PreviewAutomationStatus,
-  failure: PreviewAutomationError,
-  dependencies,
-})
-  .annotate(Tool.Title, "Get preview status")
-  .annotate(Tool.Readonly, true)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+export const PreviewStatusTool = previewTool(
+  Tool.make("preview_status", {
+    description:
+      "Report whether a collaborative browser tab is automation-capable, including its URL, title, visibility, loading state, viewport mode, and measured CSS-pixel size. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab.",
+    parameters: PreviewAutomationTabTargetInput,
+    success: PreviewAutomationStatus,
+    failure: PreviewAutomationError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Get preview status")
+    .annotate(Tool.Readonly, true)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true),
+);
 
 export const PreviewOpenTool = browserTool(
   Tool.make("preview_open", {
     description:
-      "Show and initialize a collaborative browser tab. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab.",
+      "Initialize a collaborative browser tab and open its thread-bound inline preview by default. Set open=false for background-only automation. Pass tabId to reuse a specific existing tab, set reuseExistingTab=false to create another tab, or omit both to use this agent session's current tab.",
     parameters: PreviewAutomationOpenInput,
     success: PreviewAutomationStatus,
     failure: PreviewAutomationError,
@@ -83,6 +90,19 @@ export const PreviewResizeTool = safeBrowserTool(
     dependencies,
   })
     .annotate(Tool.Title, "Resize browser viewport")
+    .annotate(Tool.Idempotent, true),
+);
+
+export const PreviewSetAppearanceTool = safeBrowserTool(
+  Tool.make("preview_set_appearance", {
+    description:
+      "Emulate prefers-color-scheme in a collaborative browser tab, optionally selected by tabId. Use {colorScheme:'dark'} or {colorScheme:'light'} to preview the page in that appearance, and {colorScheme:'system'} to clear the override and follow the OS appearance.",
+    parameters: PreviewAutomationSetColorSchemeInput,
+    success: PreviewAutomationSetColorSchemeResult,
+    failure: PreviewAutomationError,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Set preview appearance")
     .annotate(Tool.Idempotent, true),
 );
 
@@ -176,7 +196,8 @@ export const PreviewRecordingStartTool = safeBrowserTool(
 
 export const PreviewRecordingStopTool = safeBrowserTool(
   Tool.make("preview_recording_stop", {
-    description: "Stop the active browser recording and save it as a local evidence artifact.",
+    description:
+      "Stop recording the collaborative browser tab selected by tabId, or this agent session's current tab when omitted, and save it as a local evidence artifact.",
     parameters: PreviewAutomationTabTargetInput,
     success: PreviewAutomationRecordingArtifact,
     failure: PreviewAutomationError,
@@ -189,6 +210,7 @@ export const PreviewToolkit = Toolkit.make(
   PreviewOpenTool,
   PreviewNavigateTool,
   PreviewResizeTool,
+  PreviewSetAppearanceTool,
   PreviewSnapshotTool,
   PreviewClickTool,
   PreviewTypeTool,
@@ -205,6 +227,7 @@ export const PreviewStandardToolkit = Toolkit.make(
   PreviewOpenTool,
   PreviewNavigateTool,
   PreviewResizeTool,
+  PreviewSetAppearanceTool,
   PreviewClickTool,
   PreviewTypeTool,
   PreviewPressTool,

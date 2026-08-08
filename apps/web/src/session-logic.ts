@@ -51,6 +51,12 @@ export const PROVIDER_OPTIONS: Array<{
     available: true,
     pickerSidebarBadge: "new",
   },
+  {
+    value: ProviderDriverKind.make("kimi"),
+    label: "Kimi",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
 ];
 
 export type WorkLogToolLifecycleStatus =
@@ -734,10 +740,12 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (title) {
     entry.toolTitle = title;
   }
-  if (itemType === "mcp_tool_call") {
+  if (itemType === "mcp_tool_call" || itemType === "collab_agent_tool_call") {
     const data = asRecord(payload?.data);
-    if (data?.item !== undefined) {
+    if (itemType === "mcp_tool_call" && data?.item !== undefined) {
       entry.toolData = data.item;
+    } else if (itemType === "collab_agent_tool_call" && data !== null) {
+      entry.toolData = data;
     }
   }
   if (itemType) {

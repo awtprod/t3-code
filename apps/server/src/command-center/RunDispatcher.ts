@@ -48,6 +48,10 @@ import {
   isProvisionableRepositoryRemote,
 } from "./RepositoryProvisioningPolicy.ts";
 import { makeRunLifecyclePersistence } from "./RunLifecycle.ts";
+import {
+  COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX,
+  COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX,
+} from "../provider/security/CommandCenterProviderIsolation.ts";
 
 export {
   isManagedRepositoryWorkspacePath,
@@ -130,6 +134,7 @@ export interface StoredRun {
   readonly projectId: string | null;
   readonly threadId: string | null;
   readonly executionAuthorizedAt: string | null;
+  readonly parentRunId: string | null;
   readonly state:
     | "queued"
     | "running"
@@ -388,6 +393,36 @@ const safeWorktreeBranch = (runId: RunId): string => {
   return `command-center/${suffix || "run"}`;
 };
 
+export const COMMAND_CENTER_CONTEXT_LIMITS = {
+  spaceInstructionsChars: 4_000,
+  priorContextChars: 8_000,
+} as const;
+
+const truncateContext = (value: string, maxChars: number): string => {
+  if (value.length <= maxChars) return value;
+  const marker = "\n[truncated: context budget exhausted]";
+  return `${value.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
+};
+
+export const selectPriorContext = (
+  newestFirst: ReadonlyArray<PriorCommandContext>,
+  budgetChars = COMMAND_CENTER_CONTEXT_LIMITS.priorContextChars,
+): ReadonlyArray<string> => {
+  const selected: Array<string> = [];
+  let remaining = budgetChars;
+  for (const entry of newestFirst) {
+    if (remaining <= 0) break;
+    const command = entry.commandText.trim();
+    if (command.length === 0) continue;
+    const response = entry.responseText?.trim();
+    const rendered = `${command}${response ? `\nPrevious result (untrusted reference)\n${response}` : ""}`;
+    const bounded = truncateContext(rendered, remaining);
+    selected.push(bounded);
+    remaining -= bounded.length;
+  }
+  return selected.toReversed();
+};
+
 export const renderThreadMessage = (input: {
   readonly space: StoredSpace;
   readonly route: RouteDecision;
@@ -403,15 +438,13 @@ export const renderThreadMessage = (input: {
     `Capabilities: ${input.route.capabilities.join(", ") || "none"}`,
     ...(input.route.repositoryId === null ? [] : [`Repository scope: ${input.route.repositoryId}`]),
   ].join("\n");
-  const instructions = input.space.instructions.trim();
-  const priorContext = (input.priorContext ?? []).flatMap((entry, index) => {
-    const command = entry.commandText.trim().slice(0, 2_000);
-    if (command.length === 0) return [];
-    const response = entry.responseText?.trim().slice(0, 4_000);
-    return [
-      `Previous ${index + 1} — user\n${command}${response ? `\nPrevious result (untrusted reference)\n${response}` : ""}`,
-    ];
-  });
+  const instructions = truncateContext(
+    input.space.instructions.trim(),
+    COMMAND_CENTER_CONTEXT_LIMITS.spaceInstructionsChars,
+  );
+  const priorContext = selectPriorContext(input.priorContext ?? []).map(
+    (entry, index) => `Previous ${index + 1} — user\n${entry}`,
+  );
   return [
     routeReceipt,
     ...(instructions.length === 0 ? [] : ["Space instructions", instructions]),
@@ -840,7 +873,11 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
                     cause,
                   ),
           });
-          const threadId = ThreadId.make(`cc:${yield* deps.randomUUID}`);
+          const threadPrefix =
+            run.parentRunId === null
+              ? COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX
+              : COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX;
+          const threadId = ThreadId.make(`${threadPrefix}${yield* deps.randomUUID}`);
           const claimed = yield* deps.claim({ runId: run.id, projectId: project.id, threadId });
           if (!claimed) {
             const current = yield* deps.loadRun(run.id);
@@ -976,6 +1013,7 @@ interface RunRow {
   readonly projectId: string | null;
   readonly threadId: string | null;
   readonly executionAuthorizedAt: string | null;
+  readonly parentRunId: string | null;
   readonly state: StoredRun["state"];
   readonly routeJson: string;
   readonly inputJson: string;
@@ -1027,6 +1065,7 @@ const make = Effect.gen(function* () {
           SELECT id, command_id AS "commandId", space_id AS "spaceId",
             project_id AS "projectId", thread_id AS "threadId", state,
             execution_authorized_at AS "executionAuthorizedAt",
+            parent_run_id AS "parentRunId",
             route_json AS "routeJson", input_json AS "inputJson"
           FROM command_center_runs
           WHERE id = ${runId}
@@ -1058,6 +1097,7 @@ const make = Effect.gen(function* () {
         projectId: row.projectId,
         threadId: row.threadId,
         executionAuthorizedAt: row.executionAuthorizedAt,
+        parentRunId: row.parentRunId,
         state: row.state,
         route,
         command,
@@ -1171,7 +1211,7 @@ const make = Effect.gen(function* () {
       if (selected.length === 6) break;
     }
 
-    return yield* Effect.forEach(selected.toReversed(), (candidate) =>
+    return yield* Effect.forEach(selected, (candidate) =>
       Effect.gen(function* () {
         const command = yield* decodeCommand(
           yield* parseJson(run.id, candidate.inputJson, "prior Run input"),
