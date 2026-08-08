@@ -20,10 +20,7 @@ import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { faviconUrlForOrigin } from "~/lib/favicon";
 import { useTheme } from "~/hooks/useTheme";
-import {
-  COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
-  NATIVE_WINDOW_CONTROLS_WITH_ACTIONS_TITLEBAR_INSET_CLASS,
-} from "~/workspaceTitlebar";
+import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 import { PreviewPanelShell, type PreviewPanelMode } from "./preview/PreviewPanelShell";
 import { PierreEntryIcon } from "./chat/PierreEntryIcon";
@@ -363,7 +360,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
           "workspace-topbar gap-1 pl-2",
           !ownsDesktopTitleBar && "[--workspace-topbar-height:--spacing(11)]",
           props.mode === "inline" ? "pr-28" : "pr-3",
-          ownsDesktopTitleBar && NATIVE_WINDOW_CONTROLS_WITH_ACTIONS_TITLEBAR_INSET_CLASS,
           props.mode === "inline" && props.maximized && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
         )}
         data-right-panel-tabbar

@@ -26,7 +26,6 @@ import { ScrollArea } from "~/components/ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger } from "~/components/ui/select";
 import { Textarea } from "~/components/ui/textarea";
 import { cn } from "~/lib/utils";
-import { NATIVE_WINDOW_CONTROLS_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 import type {
   CommandCenterActiveRun,
@@ -799,12 +798,7 @@ function ContextRail({
   const [activeView, setActiveView] = useState<"needs-you" | "runs" | "context">("needs-you");
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-card-foreground">
-      <div
-        className={cn(
-          "drag-region flex h-[var(--workspace-topbar-height)] shrink-0 items-end border-b px-2",
-          NATIVE_WINDOW_CONTROLS_TITLEBAR_INSET_CLASS,
-        )}
-      >
+      <div className="drag-region flex h-[var(--workspace-topbar-height)] shrink-0 items-end border-b px-2">
         <div
           aria-label="Context views"
           className="flex min-w-0 items-center gap-0.5"
@@ -907,12 +901,7 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
         className="flex h-full min-h-0 min-w-0 flex-1 flex-col"
         data-slot="command-center-conversation"
       >
-        <header
-          className={cn(
-            "drag-region pointer-events-none absolute inset-x-0 top-0 z-30 flex h-14 items-center justify-between px-3 sm:px-5",
-            NATIVE_WINDOW_CONTROLS_TITLEBAR_INSET_CLASS,
-          )}
-        >
+        <header className="drag-region pointer-events-none absolute inset-x-0 top-0 z-30 flex h-14 items-center justify-between px-3 sm:px-5">
           <div className="pointer-events-auto rounded-xl bg-background/70 backdrop-blur-md [&_[data-slot=popover-trigger]>span]:hidden [&_[data-slot=popover-trigger]]:size-8 [&_[data-slot=popover-trigger]]:px-0">
             <CommandCenterHistoryMenu
               activeConversationId={props.activeConversationId}
