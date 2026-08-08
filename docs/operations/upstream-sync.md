@@ -1,8 +1,9 @@
 # Syncing T3 Code upstream
 
 Command Center starts from T3 Code commit
-`b511227b7ad421c422f1ebca65116776020e4799`. The public fork retains T3 Code's MIT
-license in `LICENSE`; upstream copyright and attribution must remain intact.
+`b511227b7ad421c422f1ebca65116776020e4799`. Its currently integrated upstream
+baseline is recorded in `.command-center-public-baseline`. The public fork retains
+T3 Code's MIT license in `LICENSE`; upstream copyright and attribution must remain intact.
 
 Upstream updates are intentionally pull-request-only. The **Upstream sync** GitHub workflow has no
 schedule or push trigger. An operator must dispatch it with both:
