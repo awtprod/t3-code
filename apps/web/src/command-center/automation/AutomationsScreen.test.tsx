@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { AutomationsScreen } from "./AutomationsScreen";
@@ -6,6 +7,9 @@ import { projectAutomationForEditor } from "./AutomationsScreen.logic";
 import { SAMPLE_AUTOMATION, SAMPLE_SPACE } from "./AutomationsScreen.test-fixtures";
 
 describe("AutomationsScreen", () => {
+  const windowsEnvironmentId = EnvironmentId.make("windows-primary");
+  const linuxEnvironmentId = EnvironmentId.make("linux-runner");
+
   it("renders the exact source through the local-commit editor", () => {
     const definition = {
       ...projectAutomationForEditor(SAMPLE_AUTOMATION),
@@ -16,9 +20,15 @@ describe("AutomationsScreen", () => {
         automations={[SAMPLE_AUTOMATION]}
         editorDefinition={definition}
         editorStatus="ready"
+        environmentId={linuxEnvironmentId}
+        environmentOptions={[
+          { id: windowsEnvironmentId, label: "Windows PC" },
+          { id: linuxEnvironmentId, label: "Linux box" },
+        ]}
         isDirty
         onCreate={vi.fn()}
         onDefinitionChange={vi.fn()}
+        onEnvironmentChange={vi.fn()}
         onSave={vi.fn()}
         spaces={[SAMPLE_SPACE]}
         status="ready"
@@ -31,8 +41,11 @@ describe("AutomationsScreen", () => {
     expect(html).toContain("Sample Space");
     expect(html).toContain('data-slot="automation-editor"');
     expect(html).toContain("Private config");
+    expect(html).toContain("Runs on");
+    expect(html).toContain('aria-label="Automation runtime environment"');
+    expect(html).toContain("Linux box");
     expect(html).toContain("Unsaved");
-    expect(html).toContain("Save local commit");
+    expect(html).toContain("Save commit");
     expect(html).toContain("New automation");
     expect(html).not.toContain("Read only");
     expect(html).not.toContain("Push");
@@ -63,22 +76,28 @@ describe("AutomationsScreen", () => {
         automations={[SAMPLE_AUTOMATION]}
         editorDefinition={projectAutomationForEditor(SAMPLE_AUTOMATION)}
         editorStatus="ready"
+        environmentId={windowsEnvironmentId}
+        environmentOptions={[
+          { id: windowsEnvironmentId, label: "Windows PC" },
+          { id: linuxEnvironmentId, label: "Linux box" },
+        ]}
         isDirty
         onCreate={vi.fn()}
         onDefinitionChange={vi.fn()}
+        onEnvironmentChange={vi.fn()}
         onSave={vi.fn()}
         spaces={[SAMPLE_SPACE]}
         status="ready"
       />,
     );
 
-    expect(html).toContain("View and run only");
-    expect(html).toContain("Creating and saving automations isn&#x27;t supported");
+    expect(html).toContain("Windows PC is view and run only");
+    expect(html).toContain("choose a Linux environment");
     expect(html).not.toContain("Linux atomic exchange support is unavailable.");
     expect(html).toContain('data-slot="automation-editor"');
     expect(html).toContain("Read only");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*New automation/su);
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Save local commit/su);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Save commit/su);
   });
 
   it("renders explicit loading and empty committed-definition states", () => {

@@ -1,13 +1,35 @@
+import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   automationSpaceName,
   projectAutomationForEditor,
+  resolveAutomationEnvironmentId,
   resolveAutomationsScreenStatus,
 } from "./AutomationsScreen.logic";
 import { SAMPLE_AUTOMATION, SAMPLE_SPACE } from "./AutomationsScreen.test-fixtures";
 
 describe("automations route state", () => {
+  it("routes automations to an explicitly selected remote environment", () => {
+    const windows = EnvironmentId.make("windows-primary");
+    const linux = EnvironmentId.make("linux-runner");
+
+    expect(
+      resolveAutomationEnvironmentId({
+        requestedEnvironmentId: linux,
+        primaryEnvironmentId: windows,
+        environments: [{ id: windows }, { id: linux }],
+      }),
+    ).toBe(linux);
+    expect(
+      resolveAutomationEnvironmentId({
+        requestedEnvironmentId: EnvironmentId.make("removed-environment"),
+        primaryEnvironmentId: windows,
+        environments: [{ id: windows }, { id: linux }],
+      }),
+    ).toBe(windows);
+  });
+
   it("uses safe disconnected, loading, unavailable, and config states", () => {
     expect(
       resolveAutomationsScreenStatus({

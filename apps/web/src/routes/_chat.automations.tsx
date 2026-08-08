@@ -2,18 +2,27 @@ import { createFileRoute } from "@tanstack/react-router";
 import { AutomationNodeId, SpaceId } from "@command-center/core";
 import {
   CommandCenterAutomationSourceDefinition,
+  type EnvironmentId,
   type CommandCenterAutomationDefinitionSnapshot,
 } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { AutomationsScreen } from "../command-center/automation/AutomationsScreen";
-import { resolveAutomationsScreenStatus } from "../command-center/automation/AutomationsScreen.logic";
+import {
+  type AutomationEnvironmentOption,
+  AutomationsScreen,
+} from "../command-center/automation/AutomationsScreen";
+import {
+  readPreferredAutomationEnvironmentId,
+  rememberPreferredAutomationEnvironmentId,
+  resolveAutomationEnvironmentId,
+  resolveAutomationsScreenStatus,
+} from "../command-center/automation/AutomationsScreen.logic";
 import { validateAutomationEditorDefinition } from "../command-center/automation/logic";
 import type { AutomationEditorDefinition } from "../command-center/automation/types";
 import { commandCenterEnvironment } from "../state/commandCenter";
-import { usePrimaryEnvironmentId } from "../state/environments";
+import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
 
@@ -41,11 +50,20 @@ function editorDefinition(
 function saveFailureMessage(failure: unknown): string {
   return failure instanceof Error && failure.message.trim().length > 0
     ? failure.message
-    : "The local automation config commit could not be created.";
+    : "The automation config commit could not be created on the selected environment.";
 }
 
-function AutomationsRouteView() {
-  const environmentId = usePrimaryEnvironmentId();
+interface AutomationsEnvironmentRouteViewProps {
+  readonly environmentId: EnvironmentId | null;
+  readonly environmentOptions: ReadonlyArray<AutomationEnvironmentOption>;
+  readonly onEnvironmentChange: (environmentId: EnvironmentId) => void;
+}
+
+function AutomationsEnvironmentRouteView({
+  environmentId,
+  environmentOptions,
+  onEnvironmentChange,
+}: AutomationsEnvironmentRouteViewProps) {
   const [selectedAutomationId, setSelectedAutomationId] = useState<string>();
   const [drafts, setDrafts] = useState<Readonly<Record<string, AutomationDraft>>>({});
   const [savingAutomationId, setSavingAutomationId] = useState<string>();
@@ -267,10 +285,13 @@ function AutomationsRouteView() {
       editorDefinition={activeDefinition}
       editorError={saveError ?? definitionQuery.error}
       editorStatus={editorStatus}
+      environmentId={environmentId}
+      environmentOptions={environmentOptions}
       isDirty={activeDraft?.dirty ?? false}
       isCreating={isCreating}
       isSaving={savingAutomationId === selectedAutomation?.id}
       onDefinitionChange={changeDefinition}
+      onEnvironmentChange={onEnvironmentChange}
       onCreate={(input) => {
         void create(input);
       }}
@@ -285,6 +306,44 @@ function AutomationsRouteView() {
       selectedAutomationId={selectedAutomation?.id}
       spaces={bootstrap?.spaces ?? []}
       status={status}
+    />
+  );
+}
+
+function AutomationsRouteView() {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const { environments } = useEnvironments();
+  const [requestedEnvironmentId, setRequestedEnvironmentId] = useState(
+    readPreferredAutomationEnvironmentId,
+  );
+  const environmentOptions = useMemo<ReadonlyArray<AutomationEnvironmentOption>>(
+    () =>
+      environments
+        .map((environment) => ({
+          id: environment.environmentId,
+          label: environment.label,
+          isPrimary: environment.entry.target._tag === "PrimaryConnectionTarget",
+        }))
+        .sort((left, right) => Number(right.isPrimary) - Number(left.isPrimary))
+        .map(({ id, label }) => ({ id, label })),
+    [environments],
+  );
+  const environmentId = resolveAutomationEnvironmentId({
+    requestedEnvironmentId,
+    primaryEnvironmentId,
+    environments: environmentOptions,
+  });
+  const selectEnvironment = useCallback((nextEnvironmentId: EnvironmentId) => {
+    setRequestedEnvironmentId(nextEnvironmentId);
+    rememberPreferredAutomationEnvironmentId(nextEnvironmentId);
+  }, []);
+
+  return (
+    <AutomationsEnvironmentRouteView
+      environmentId={environmentId}
+      environmentOptions={environmentOptions}
+      key={environmentId ?? "no-environment"}
+      onEnvironmentChange={selectEnvironment}
     />
   );
 }

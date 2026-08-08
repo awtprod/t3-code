@@ -1,6 +1,7 @@
 "use client";
 
 import type { Automation, Space } from "@command-center/core";
+import type { EnvironmentId } from "@t3tools/contracts";
 import {
   ArrowLeftIcon,
   CheckCircle2Icon,
@@ -12,6 +13,7 @@ import {
   PlusIcon,
   RefreshCwIcon,
   SaveIcon,
+  ServerIcon,
   WorkflowIcon,
   XIcon,
 } from "lucide-react";
@@ -39,6 +41,13 @@ import { automationSpaceName, type AutomationsScreenStatus } from "./Automations
 import { validateAutomationEditorDefinition } from "./logic";
 import type { AutomationEditorDefinition } from "./types";
 
+export interface AutomationEnvironmentOption {
+  readonly id: EnvironmentId;
+  readonly label: string;
+}
+
+const EMPTY_AUTOMATION_ENVIRONMENT_OPTIONS: ReadonlyArray<AutomationEnvironmentOption> = [];
+
 export interface AutomationsScreenProps {
   readonly status: AutomationsScreenStatus;
   readonly automations: ReadonlyArray<Automation>;
@@ -64,6 +73,9 @@ export interface AutomationsScreenProps {
         readonly message?: string | undefined;
       }
     | undefined;
+  readonly environmentId?: EnvironmentId | null | undefined;
+  readonly environmentOptions?: ReadonlyArray<AutomationEnvironmentOption> | undefined;
+  readonly onEnvironmentChange?: ((environmentId: EnvironmentId) => void) | undefined;
 }
 
 function triggerLabel(automation: Automation): string {
@@ -180,6 +192,9 @@ export function AutomationsScreen({
   onSave,
   configCommitSha,
   authoringHealth,
+  environmentId,
+  environmentOptions = EMPTY_AUTOMATION_ENVIRONMENT_OPTIONS,
+  onEnvironmentChange,
 }: AutomationsScreenProps) {
   const [localSelectedAutomationId, setLocalSelectedAutomationId] = useState<string>();
   const [showCreate, setShowCreate] = useState(false);
@@ -215,6 +230,7 @@ export function AutomationsScreen({
     spaces.find((space) => space.kind === "system")?.id ||
     spaces[0]?.id ||
     "";
+  const selectedEnvironment = environmentOptions.find(({ id }) => id === environmentId);
 
   const selectAutomation = (automationId: string) => {
     setLocalSelectedAutomationId(automationId);
@@ -246,6 +262,40 @@ export function AutomationsScreen({
               <LockKeyholeIcon />
               Private config
             </span>
+            {environmentId !== null &&
+            environmentId !== undefined &&
+            environmentOptions.length > 0 ? (
+              <label className="no-drag flex min-w-0 items-center gap-1.5 text-[0.6875rem] text-muted-foreground">
+                <ServerIcon className="size-3.5 shrink-0" />
+                <span className="hidden sm:inline">Runs on</span>
+                <select
+                  aria-label="Automation runtime environment"
+                  className="h-8 min-w-0 max-w-48 rounded-lg border border-input bg-background px-2 text-xs text-foreground"
+                  disabled={
+                    onEnvironmentChange === undefined ||
+                    environmentOptions.length < 2 ||
+                    isCreating ||
+                    isSaving ||
+                    isDirty
+                  }
+                  onChange={(event) =>
+                    onEnvironmentChange?.(event.currentTarget.value as EnvironmentId)
+                  }
+                  title={
+                    isDirty
+                      ? "Save or reload your changes before switching environments"
+                      : "Automations are stored and run by this environment"
+                  }
+                  value={environmentId}
+                >
+                  {environmentOptions.map((environment) => (
+                    <option key={environment.id} value={environment.id}>
+                      {environment.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             {status === "ready" && onCreate && spaces.length > 0 ? (
               <Button
                 disabled={authoringUnavailable}
@@ -254,7 +304,7 @@ export function AutomationsScreen({
                 title={
                   authoringUnavailable
                     ? "Creating automations isn't supported in this environment yet."
-                    : undefined
+                    : `Create on ${selectedEnvironment?.label ?? "the selected environment"}`
                 }
                 variant="outline"
               >
@@ -268,14 +318,14 @@ export function AutomationsScreen({
                   {isDirty ? "Unsaved" : "Committed"}
                 </Badge>
                 <Button
-                  aria-label="Save local automation config commit"
+                  aria-label={`Save automation config commit on ${selectedEnvironment?.label ?? "the selected environment"}`}
                   disabled={saveDisabled}
                   onClick={onSave}
                   size="sm"
                   title={
                     authoringUnavailable
                       ? "Saving automations isn't supported in this environment yet."
-                      : undefined
+                      : `Save on ${selectedEnvironment?.label ?? "the selected environment"}`
                   }
                 >
                   {isSaving ? (
@@ -283,15 +333,15 @@ export function AutomationsScreen({
                   ) : (
                     <SaveIcon />
                   )}
-                  {isSaving ? "Saving" : "Save local commit"}
+                  {isSaving ? "Saving" : "Save commit"}
                 </Button>
               </>
             ) : null}
           </div>
           {authoringUnavailable ? (
             <p className="mt-2 text-xs text-warning" role="status">
-              View and run only. Creating and saving automations isn&apos;t supported in this
-              environment yet.
+              {selectedEnvironment?.label ?? "This environment"} is view and run only. Under Runs
+              on, choose a Linux environment configured for automation authoring to create or save.
             </p>
           ) : null}
           {editorError ? (
@@ -300,7 +350,8 @@ export function AutomationsScreen({
             </p>
           ) : configCommitSha ? (
             <p className="mt-1 truncate text-[0.6875rem] text-muted-foreground">
-              Loaded from local config commit {configCommitSha.slice(0, 10)}
+              Loaded from config commit {configCommitSha.slice(0, 10)} on{" "}
+              {selectedEnvironment?.label ?? "the selected environment"}
             </p>
           ) : null}
           {showCreate && onCreate ? (

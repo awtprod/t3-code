@@ -5,6 +5,13 @@ Local automation creation and editing have a narrower v1 deployment boundary: au
 only on Linux when a trusted system Python interpreter and `renameat2(RENAME_EXCHANGE)` are
 available.
 
+The desktop or web client does not need to run on Linux. The Automations screen's **Runs on**
+selector scopes definition reads, creates, saves, and subsequent runs to one connected environment.
+A Windows client can therefore author against a paired Linux server; the Linux server owns the
+private configuration checkout, performs the atomic commit, and runs the committed automation.
+Changing environments discards no saved data, and the selector is disabled while the current editor
+has unsaved changes so a draft cannot cross environment boundaries.
+
 ## Preflight
 
 Before the editor offers a local save, the server verifies all of the following:

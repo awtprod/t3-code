@@ -1,4 +1,5 @@
 import type { Automation, AutomationNodeKind, Space } from "@command-center/core";
+import type { EnvironmentId } from "@t3tools/contracts";
 
 import type {
   AutomationEditorDefinition,
@@ -19,6 +20,49 @@ export interface ResolveAutomationsScreenStatusInput {
   readonly hasData: boolean;
   readonly hasError: boolean;
   readonly configStatus?: "loaded" | "missing" | "invalid";
+}
+
+export interface AutomationEnvironmentCandidate {
+  readonly id: EnvironmentId;
+}
+
+const PREFERRED_AUTOMATION_ENVIRONMENT_KEY = "t3code:automations:environment";
+
+export function readPreferredAutomationEnvironmentId(): EnvironmentId | null {
+  try {
+    const stored = localStorage.getItem(PREFERRED_AUTOMATION_ENVIRONMENT_KEY)?.trim();
+    return stored ? (stored as EnvironmentId) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function rememberPreferredAutomationEnvironmentId(environmentId: EnvironmentId): void {
+  try {
+    localStorage.setItem(PREFERRED_AUTOMATION_ENVIRONMENT_KEY, environmentId);
+  } catch {
+    // Storage can be unavailable in restricted browser contexts.
+  }
+}
+
+export function resolveAutomationEnvironmentId(input: {
+  readonly requestedEnvironmentId: EnvironmentId | null;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly environments: ReadonlyArray<AutomationEnvironmentCandidate>;
+}): EnvironmentId | null {
+  if (
+    input.requestedEnvironmentId !== null &&
+    input.environments.some(({ id }) => id === input.requestedEnvironmentId)
+  ) {
+    return input.requestedEnvironmentId;
+  }
+  if (
+    input.primaryEnvironmentId !== null &&
+    input.environments.some(({ id }) => id === input.primaryEnvironmentId)
+  ) {
+    return input.primaryEnvironmentId;
+  }
+  return input.environments[0]?.id ?? null;
 }
 
 export function resolveAutomationsScreenStatus({
