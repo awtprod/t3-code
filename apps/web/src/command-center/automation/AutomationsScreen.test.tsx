@@ -5,8 +5,6 @@ import { AutomationsScreen } from "./AutomationsScreen";
 import { projectAutomationForEditor } from "./AutomationsScreen.logic";
 import { SAMPLE_AUTOMATION, SAMPLE_SPACE } from "./AutomationsScreen.test-fixtures";
 
-vi.mock("~/env", () => ({ isElectron: true }));
-
 describe("AutomationsScreen", () => {
   it("keeps toolbar actions clear of desktop window controls", () => {
     const html = renderToStaticMarkup(

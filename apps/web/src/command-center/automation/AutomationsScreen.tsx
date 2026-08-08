@@ -31,9 +31,11 @@ import {
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { SidebarInset } from "~/components/ui/sidebar";
 import { Skeleton } from "~/components/ui/skeleton";
-import { isElectron } from "~/env";
 import { cn } from "~/lib/utils";
-import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
+import {
+  COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+  NATIVE_WINDOW_CONTROLS_TITLEBAR_INSET_CLASS,
+} from "~/workspaceTitlebar";
 
 import { AutomationEditor } from "./AutomationEditor";
 import { automationSpaceName, type AutomationsScreenStatus } from "./AutomationsScreen.logic";
@@ -227,9 +229,8 @@ export function AutomationsScreen({
       <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-slot="automations-screen">
         <header
           className={cn(
-            "flex min-h-[var(--workspace-topbar-height)] shrink-0 flex-col justify-center border-b bg-background px-3 py-2 transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none sm:px-5",
-            isElectron &&
-              "drag-region pr-[max(var(--workspace-native-controls-inset),0.75rem)] sm:pr-[max(var(--workspace-native-controls-inset),1.25rem)]",
+            "drag-region flex min-h-[var(--workspace-topbar-height)] shrink-0 flex-col justify-center border-b bg-background px-3 py-2 transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none sm:px-5",
+            NATIVE_WINDOW_CONTROLS_TITLEBAR_INSET_CLASS,
             COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
           )}
         >

@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark, .dark *));
+@custom-variant electron (&:is(.electron, .electron *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
 @custom-variant wco (&:is(.wco, .wco *));
 
@@ -130,11 +131,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   );
 }
 
-/* Electron can expose native Windows caption buttons without making the
-   Window Controls Overlay API available to the renderer. Keep app-owned
-   titlebar actions clear of the standard three-button caption area until
-   the WCO geometry above is available. */
-:root.electron-windows:not(.wco) {
+/* Electron can expose native Windows or Linux caption buttons without making
+   the Window Controls Overlay API available to the renderer. Keep app-owned
+   titlebar actions clear of the caption area until WCO geometry is available. */
+:root:is(.electron-windows, .electron-linux):not(.wco) {
   --workspace-controls-right: 9.375rem;
   --workspace-native-controls-inset: 9.375rem;
 }

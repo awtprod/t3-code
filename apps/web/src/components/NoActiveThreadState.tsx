@@ -2,7 +2,10 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
 import { isElectron } from "../env";
 import { cn } from "~/lib/utils";
-import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
+import {
+  COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+  NATIVE_WINDOW_CONTROLS_TITLEBAR_INSET_CLASS,
+} from "~/workspaceTitlebar";
 
 export function NoActiveThreadState() {
   return (
@@ -12,13 +15,12 @@ export function NoActiveThreadState() {
           className={cn(
             "border-b border-border px-3 transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none sm:px-5",
             isElectron ? "workspace-topbar drag-region" : "workspace-topbar",
+            isElectron && NATIVE_WINDOW_CONTROLS_TITLEBAR_INSET_CLASS,
             COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
           )}
         >
           {isElectron ? (
-            <span className="text-xs text-muted-foreground/50 wco:pr-[var(--workspace-native-controls-inset)]">
-              No active thread
-            </span>
+            <span className="text-xs text-muted-foreground/50">No active thread</span>
           ) : (
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-foreground md:text-muted-foreground/60">

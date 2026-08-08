@@ -278,6 +278,7 @@ describe("CommandCenterShell", () => {
     expect(html).toContain("Selected");
     expect(html).toContain("max-w-5xl");
     expect(html).toContain("justify-end");
+    expect(html).toContain("pr-[max(var(--workspace-native-controls-inset),0.75rem)]");
   });
 
   it("renders lightweight conversation controls and route summaries", () => {
