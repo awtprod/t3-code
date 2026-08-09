@@ -48,6 +48,7 @@ export function HomeHeader(props: {
   readonly onProjectSortOrderChange: (sortOrder: HomeProjectSortOrder) => void;
   readonly onThreadSortOrderChange: (sortOrder: SidebarThreadSortOrder) => void;
   readonly onOpenSettings: () => void;
+  readonly onOpenPipeline?: (() => void) | undefined;
   readonly onStartNewTask: () => void;
 }) {
   if (Platform.OS === "android") {
@@ -242,6 +243,21 @@ function AndroidHomeHeader(props: HomeHeaderProps) {
                 />
               </Pressable>
             </ControlPillMenu>
+            {props.onOpenPipeline ? (
+              <Pressable
+                accessibilityLabel="Open sales pipeline"
+                accessibilityRole="button"
+                onPress={props.onOpenPipeline}
+                className="size-11 items-center justify-center rounded-full bg-subtle"
+              >
+                <SymbolView
+                  name="chart.bar.doc.horizontal"
+                  size={18}
+                  tintColor={iconColor}
+                  type="monochrome"
+                />
+              </Pressable>
+            ) : null}
             {/* Built identically to the filter button so the two circles
                 match exactly (ControlPill sizes via Tailwind classes and
                 resolves to a different box). */}
@@ -318,6 +334,18 @@ function IosHomeHeader(props: HomeHeaderProps) {
           unstable_headerRightItems:
             Platform.OS === "ios"
               ? () => [
+                  ...(props.onOpenPipeline === undefined
+                    ? []
+                    : [
+                        withNativeGlassHeaderItem({
+                          accessibilityLabel: "Open sales pipeline",
+                          icon: { name: "chart.bar.doc.horizontal", type: "sfSymbol" } as const,
+                          identifier: "home-sales-pipeline",
+                          label: "",
+                          onPress: props.onOpenPipeline,
+                          type: "button",
+                        }),
+                      ]),
                   withNativeGlassHeaderItem({
                     accessibilityLabel: "Open settings",
                     icon: { name: "ellipsis", type: "sfSymbol" } as const,

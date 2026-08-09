@@ -3,7 +3,17 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApprovalId, CommandId, MemoryId, RepositoryId, SpaceId } from "@command-center/core";
+import {
+  ApprovalId,
+  CommandId,
+  MemoryId,
+  RepositoryId,
+  SalesDraftRequestId,
+  SpaceId,
+  type SalesDraftRequest,
+  type SalesProspect,
+  type SalesProspectStage,
+} from "@command-center/core";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 
 import { SidebarInset } from "~/components/ui/sidebar";
@@ -16,6 +26,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { commandCenterEnvironment } from "~/state/commandCenter";
 
 import { CommandCenterShell } from "./CommandCenterShell";
+import { SalesPipelineBoard } from "./SalesPipelineBoard";
 import {
   initialRouteReceipt,
   buildRouteOptions,
@@ -100,12 +111,26 @@ export function CommandCenterHome() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [resolvingNeedsYouId, setResolvingNeedsYouId] = useState<string>();
   const [lastReceipt, setLastReceipt] = useState<LastRouteReceipt | null>(null);
+  const [destination, setDestination] = useState<"command" | "pipeline">("command");
+  const [salesBusy, setSalesBusy] = useState(false);
+  const [salesError, setSalesError] = useState<string>();
+  const [salesStatus, setSalesStatus] = useState<string>();
   const selectedSpaceId =
     routeSelection.spaceId === undefined ? undefined : SpaceId.make(routeSelection.spaceId);
   const bootstrapQuery = useEnvironmentQuery(
     environmentId === null
       ? null
       : commandCenterEnvironment.bootstrap({ environmentId, input: {} }),
+  );
+  const selectedSpace = bootstrapQuery.data?.spaces.find((space) => space.id === selectedSpaceId);
+  const salesEnabled = selectedSpace?.features?.salesPipeline === true;
+  const salesQuery = useEnvironmentQuery(
+    environmentId === null || selectedSpaceId === undefined || !salesEnabled
+      ? null
+      : commandCenterEnvironment.salesProspects({
+          environmentId,
+          input: { spaceId: selectedSpaceId },
+        }),
   );
   const timelineQuery = useEnvironmentQuery(
     environmentId === null
@@ -142,6 +167,25 @@ export function CommandCenterHome() {
   const reviewMemory = useAtomCommand(commandCenterEnvironment.reviewMemory, {
     reportFailure: false,
   });
+  const updateSalesProspect = useAtomCommand(commandCenterEnvironment.updateSalesProspect, {
+    reportFailure: false,
+  });
+  const importSalesProspects = useAtomCommand(commandCenterEnvironment.importSalesProspects, {
+    reportFailure: false,
+  });
+  const requestSalesDraft = useAtomCommand(commandCenterEnvironment.requestSalesDraft, {
+    reportFailure: false,
+  });
+  const decideSalesDraft = useAtomCommand(commandCenterEnvironment.decideSalesDraft, {
+    reportFailure: false,
+  });
+  const createSalesDraft = useAtomCommand(commandCenterEnvironment.createSalesDraft, {
+    reportFailure: false,
+  });
+
+  useEffect(() => {
+    if (!salesEnabled) setDestination("command");
+  }, [salesEnabled]);
 
   const eventSequence = eventQuery.data?.sequence;
   const eventScopeKey = `${environmentId ?? "disconnected"}:${selectedSpaceId ?? "all"}`;
@@ -519,49 +563,219 @@ export function CommandCenterHome() {
         }
       : null;
 
+  const changeSalesStage = useCallback(
+    async (prospect: SalesProspect, stage: SalesProspectStage) => {
+      if (environmentId === null || salesBusy) return;
+      setSalesBusy(true);
+      setSalesError(undefined);
+      const result = await updateSalesProspect({
+        environmentId,
+        input: {
+          prospectId: prospect.id,
+          spaceId: prospect.spaceId,
+          expectedUpdatedAt: prospect.updatedAt,
+          stage,
+        },
+      });
+      if (result._tag === "Success") salesQuery.refresh();
+      else setSalesError(failureMessage(squashAtomCommandFailure(result)));
+      setSalesBusy(false);
+    },
+    [environmentId, salesBusy, salesQuery, updateSalesProspect],
+  );
+
+  const importReadySalesProspects = useCallback(async () => {
+    if (environmentId === null || selectedSpaceId === undefined || salesBusy) return;
+    setSalesBusy(true);
+    setSalesError(undefined);
+    setSalesStatus(undefined);
+    const result = await importSalesProspects({
+      environmentId,
+      input: { spaceId: selectedSpaceId, limit: 10 },
+    });
+    setSalesBusy(false);
+    if (result._tag === "Success") {
+      const { inspected, proposed, duplicates } = result.value;
+      setSalesStatus(
+        proposed > 0
+          ? `Imported ${proposed} ready prospect${proposed === 1 ? "" : "s"}.`
+          : inspected === 0
+            ? "No importable ready records have complete public-contact provenance yet."
+            : `No new prospects imported; ${duplicates} already ${duplicates === 1 ? "exists" : "exist"}.`,
+      );
+      salesQuery.refresh();
+      return;
+    }
+    setSalesError(failureMessage(squashAtomCommandFailure(result)));
+  }, [environmentId, importSalesProspects, salesBusy, salesQuery, selectedSpaceId]);
+
+  const prepareSalesDraft = useCallback(
+    async (prospect: SalesProspect): Promise<SalesDraftRequest | undefined> => {
+      if (environmentId === null || salesBusy || bootstrap === null) return undefined;
+      const connection = bootstrap.connections.find(
+        (candidate) =>
+          candidate.spaceId === prospect.spaceId &&
+          candidate.capabilities.includes("cc.connections.google.gmail.drafts.create"),
+      );
+      if (connection === undefined) {
+        setSalesError(
+          "Enable the Space's dedicated Gmail draft connection before preparing outreach.",
+        );
+        return undefined;
+      }
+      setSalesBusy(true);
+      setSalesError(undefined);
+      const result = await requestSalesDraft({
+        environmentId,
+        input: {
+          requestId: SalesDraftRequestId.make(randomUUID()),
+          prospectId: prospect.id,
+          spaceId: prospect.spaceId,
+          connectionId: connection.id,
+          expectedUpdatedAt: prospect.updatedAt,
+        },
+      });
+      setSalesBusy(false);
+      if (result._tag === "Success") return result.value.request;
+      setSalesError(failureMessage(squashAtomCommandFailure(result)));
+      return undefined;
+    },
+    [bootstrap, environmentId, requestSalesDraft, salesBusy],
+  );
+
+  const decideDraft = useCallback(
+    async (request: SalesDraftRequest, decision: "approved" | "declined") => {
+      if (environmentId === null || salesBusy) return undefined;
+      setSalesBusy(true);
+      setSalesError(undefined);
+      const result = await decideSalesDraft({
+        environmentId,
+        input: {
+          requestId: request.id,
+          spaceId: request.spaceId,
+          payloadDigest: request.payloadDigest,
+          decision,
+        },
+      });
+      setSalesBusy(false);
+      if (result._tag === "Success") return result.value.request;
+      setSalesError(failureMessage(squashAtomCommandFailure(result)));
+      return undefined;
+    },
+    [decideSalesDraft, environmentId, salesBusy],
+  );
+
+  const createDraft = useCallback(
+    async (request: SalesDraftRequest) => {
+      if (environmentId === null || salesBusy) return undefined;
+      setSalesBusy(true);
+      setSalesError(undefined);
+      const result = await createSalesDraft({
+        environmentId,
+        input: {
+          requestId: request.id,
+          spaceId: request.spaceId,
+          payloadDigest: request.payloadDigest,
+        },
+      });
+      setSalesBusy(false);
+      if (result._tag === "Success") {
+        salesQuery.refresh();
+        return result.value.request;
+      }
+      setSalesError(failureMessage(squashAtomCommandFailure(result)));
+      return undefined;
+    },
+    [createSalesDraft, environmentId, salesBusy, salesQuery],
+  );
+
   return (
     <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
-      <CommandCenterShell
-        activeConversationId={activeConversationId}
-        context={projection.context}
-        conversationTitle="Command"
-        commandUnavailable={commandUnavailable}
-        configNotice={configNotice}
-        conversations={projection.conversations}
-        draft={draft}
-        isSubmitting={isSubmitting}
-        messages={messages}
-        onDraftChange={setDraft}
-        onNewConversation={newConversation}
-        onDecideApproval={(approvalId, payloadDigest, decision) => {
-          void resolveApproval(approvalId, payloadDigest, decision);
-        }}
-        onOpenLinkedThread={openLinkedThread}
-        onOpenNeedsYouItem={openNeedsYouItem}
-        onOpenRun={openRun}
-        onOpenTodayItem={openTodayItem}
-        onOpenConnection={() => {
-          void navigate({ to: "/settings/connections" });
-        }}
-        onReviewMemory={(memoryId, spaceId, repositoryId, decision) => {
-          void resolveMemory(memoryId, spaceId, repositoryId, decision);
-        }}
-        onRouteSelectionChange={changeRouteSelection}
-        onSelectConversation={selectConversation}
-        onSelectProject={selectProject}
-        onSelectSpace={selectSpace}
-        onSubmit={(command) => {
-          void submit(command);
-        }}
-        projects={projects}
-        routeReceipt={routeReceipt}
-        routeOptions={routeOptions}
-        routeSelection={routeSelection}
-        resolvingNeedsYouId={resolvingNeedsYouId}
-        selectedProjectId={routeSelection.projectId}
-        selectedSpaceId={selectedSpaceId}
-        spaces={projection.spaces}
-      />
+      {salesEnabled ? (
+        <nav
+          className="absolute left-1/2 top-3 z-40 flex -translate-x-1/2 rounded-full border bg-background/85 p-1 shadow-sm backdrop-blur-md"
+          aria-label="Command Center destinations"
+        >
+          <button
+            className={`rounded-full px-3 py-1 text-xs ${destination === "command" ? "bg-foreground text-background" : "text-muted-foreground"}`}
+            onClick={() => setDestination("command")}
+            type="button"
+          >
+            Command
+          </button>
+          <button
+            className={`rounded-full px-3 py-1 text-xs ${destination === "pipeline" ? "bg-foreground text-background" : "text-muted-foreground"}`}
+            onClick={() => setDestination("pipeline")}
+            type="button"
+          >
+            Pipeline
+          </button>
+        </nav>
+      ) : null}
+      {destination === "pipeline" && salesEnabled ? (
+        <SalesPipelineBoard
+          busy={salesBusy}
+          error={
+            salesError ?? (salesQuery.error === null ? null : failureMessage(salesQuery.error))
+          }
+          loading={salesQuery.isPending}
+          onCreateDraft={createDraft}
+          onDecideDraft={decideDraft}
+          onImport={() => {
+            void importReadySalesProspects();
+          }}
+          onRefresh={salesQuery.refresh}
+          onRequestDraft={prepareSalesDraft}
+          onStageChange={(prospect, stage) => {
+            void changeSalesStage(prospect, stage);
+          }}
+          prospects={salesQuery.data?.prospects ?? []}
+          status={salesStatus}
+          draftRequests={salesQuery.data?.draftRequests ?? []}
+        />
+      ) : (
+        <CommandCenterShell
+          activeConversationId={activeConversationId}
+          context={projection.context}
+          conversationTitle="Command"
+          commandUnavailable={commandUnavailable}
+          configNotice={configNotice}
+          conversations={projection.conversations}
+          draft={draft}
+          isSubmitting={isSubmitting}
+          messages={messages}
+          onDraftChange={setDraft}
+          onNewConversation={newConversation}
+          onDecideApproval={(approvalId, payloadDigest, decision) => {
+            void resolveApproval(approvalId, payloadDigest, decision);
+          }}
+          onOpenLinkedThread={openLinkedThread}
+          onOpenNeedsYouItem={openNeedsYouItem}
+          onOpenRun={openRun}
+          onOpenTodayItem={openTodayItem}
+          onOpenConnection={() => {
+            void navigate({ to: "/settings/connections" });
+          }}
+          onReviewMemory={(memoryId, spaceId, repositoryId, decision) => {
+            void resolveMemory(memoryId, spaceId, repositoryId, decision);
+          }}
+          onRouteSelectionChange={changeRouteSelection}
+          onSelectConversation={selectConversation}
+          onSelectProject={selectProject}
+          onSelectSpace={selectSpace}
+          onSubmit={(command) => {
+            void submit(command);
+          }}
+          projects={projects}
+          routeReceipt={routeReceipt}
+          routeOptions={routeOptions}
+          routeSelection={routeSelection}
+          resolvingNeedsYouId={resolvingNeedsYouId}
+          selectedProjectId={routeSelection.projectId}
+          selectedSpaceId={selectedSpaceId}
+          spaces={projection.spaces}
+        />
+      )}
     </SidebarInset>
   );
 }

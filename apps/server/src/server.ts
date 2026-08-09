@@ -132,6 +132,9 @@ import * as VerifiedScopedShell from "./command-center/automation/VerifiedScoped
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
+import * as SalesPipeline from "./command-center/SalesPipeline.ts";
+import * as ExternalProspectorConnector from "./command-center/ExternalProspectorConnector.ts";
+import * as SalesProspectorRunner from "./command-center/SalesProspectorRunner.ts";
 import * as CommandCenterConfig from "./command-center/Config.ts";
 import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
@@ -421,6 +424,9 @@ const CommandCenterBaseLayerLive = Layer.mergeAll(
   MemorySearchIndex.layer,
   GoogleReadConnectorLayerLive,
   GoogleConnectionSetupLayerLive,
+  ExternalProspectorConnector.layer,
+  SalesProspectorRunner.layer.pipe(Layer.provide(ProcessRunner.layer)),
+  SalesPipeline.layer.pipe(Layer.provide(PersistenceLayerLive)),
   AutomationDefinitionConfigLayerLive,
   AutomationScheduleInterpreterLayerLive,
   AutomationScopedShellLayerLive,

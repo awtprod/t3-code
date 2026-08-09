@@ -253,6 +253,10 @@ const makeMockGoogleConnector = (): MockGoogleConnector => {
         }),
       exportDrive: () => Effect.die("Drive export is unavailable in this acceptance connector."),
       discardExport: () => Effect.void,
+      salesDraftExists: () => Effect.succeed(false),
+      findSalesDraft: () => Effect.succeed(undefined),
+      createSalesDraft: () =>
+        Effect.die("Sales drafts are unavailable in this acceptance connector."),
     }),
   };
 };

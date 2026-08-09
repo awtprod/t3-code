@@ -22,6 +22,7 @@ import {
   parseAutomationAgentRunNodeConfig,
   parseAutomationScopedShellNodeConfig,
 } from "./Definition.ts";
+import type { SalesAutomationActionExecutor } from "./SalesAutomationActions.ts";
 import type { AutomationNodeExecutionContext, AutomationNodeExecutionOutcome } from "./Runtime.ts";
 
 const decodeGoogleReadRequest = Schema.decodeUnknownEffect(GoogleReadRequest);
@@ -67,6 +68,8 @@ export interface AutomationNodeExecutorDependencies {
   readonly runScopedShell: (
     input: AutomationScopedShellRequest,
   ) => Effect.Effect<AutomationScopedShellResult, AutomationScopedShellError>;
+  /** Private fixed-purpose sales actions; no generic write surface is exposed. */
+  readonly executeSalesAutomationAction?: SalesAutomationActionExecutor;
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
@@ -487,6 +490,36 @@ const executeScopedShell = Effect.fn("AutomationNodeExecutor.scopedShell")(funct
   return { type: "succeeded", output } as const;
 });
 
+const executeSalesAutomationAction = Effect.fn("AutomationNodeExecutor.salesAutomationAction")(
+  function* (
+    context: AutomationNodeExecutionContext,
+    dependencies: AutomationNodeExecutorDependencies,
+  ) {
+    const operation = context.node.config.operation;
+    if (typeof operation !== "string" || operation.trim().length === 0) {
+      return permanentFailure(`Sales action node '${context.node.id}' requires an operation.`);
+    }
+    if (dependencies.executeSalesAutomationAction === undefined) {
+      return permanentFailure("Sales automation actions are not configured on this server.");
+    }
+    const result = yield* dependencies
+      .executeSalesAutomationAction({
+        operation,
+        spaceId: context.spaceId,
+        config: renderTemplate(context.node.config, runtimeRoots(context)) as JsonObject,
+      })
+      .pipe(
+        Effect.match({
+          onFailure: (error) => ({ _tag: "Left" as const, error }),
+          onSuccess: (value) => ({ _tag: "Right" as const, value }),
+        }),
+      );
+    return result._tag === "Left"
+      ? ({ type: "retry", error: result.error } as const)
+      : ({ type: "succeeded", output: result.value } as const);
+  },
+);
+
 /**
  * V1 executor for deterministic local nodes and explicitly scoped services.
  * Agent work enters the same durable routing, approval, isolation, and Run
@@ -512,6 +545,8 @@ export function makeSafeAutomationNodeExecutor(dependencies: AutomationNodeExecu
         return executeAgentRun(context, dependencies);
       case "shell.scoped":
         return executeScopedShell(context, dependencies);
+      case "sales.action":
+        return executeSalesAutomationAction(context, dependencies);
       case "delay":
       case "approval":
         return Effect.succeed(
@@ -522,7 +557,15 @@ export function makeSafeAutomationNodeExecutor(dependencies: AutomationNodeExecu
 }
 
 export const AUTOMATION_V1_NODE_POLICY = {
-  automatic: ["condition", "transform", "foreach", "item.mutate", "connector.read", "shell.scoped"],
+  automatic: [
+    "condition",
+    "transform",
+    "foreach",
+    "item.mutate",
+    "connector.read",
+    "shell.scoped",
+    "sales.action",
+  ],
   routed: ["agent.run"],
   runtimeManaged: ["delay", "approval"],
   blocked: [],

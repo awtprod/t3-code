@@ -17,6 +17,7 @@ import { CommandCenterConfig } from "./Config.ts";
 import { ConnectionHealth } from "./ConnectionHealth.ts";
 import {
   GOOGLE_READ_COMMAND_ALLOWLIST,
+  GOOGLE_SALES_DRAFT_COMMAND_ALLOWLIST,
   GoogleReadConnector,
   buildGoogleHelperSearchPath,
   buildGoogleReadInvocation,
@@ -87,6 +88,19 @@ describe("GoogleReadConnector invocation policy", () => {
     expect(args).not.toContain("create");
     expect(args).not.toContain("update");
     expect(args).not.toContain("delete");
+  });
+
+  it("limits private sales Gmail writes to draft create plus draft recovery reads", () => {
+    expect(GOOGLE_SALES_DRAFT_COMMAND_ALLOWLIST).toEqual([
+      "gmail.drafts.create",
+      "gmail.drafts.list",
+      "gmail.drafts.get",
+    ]);
+    expect(
+      GOOGLE_SALES_DRAFT_COMMAND_ALLOWLIST.some((command) =>
+        /send|forward|trash|delete/iu.test(command),
+      ),
+    ).toBe(false);
   });
 
   it("passes user text as one argv value instead of shell syntax", () => {

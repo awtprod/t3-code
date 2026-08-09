@@ -178,6 +178,13 @@ const NODE_PRESENTATION: Record<AutomationEditorNodeKind, NodePresentation> = {
     icon: TerminalIcon,
     accentClassName: "bg-destructive/8 text-destructive-foreground",
   },
+  "sales.action": {
+    label: "Sales action",
+    description: "Run a fixed, deterministic sales operation",
+    category: "Actions",
+    icon: CircleDotIcon,
+    accentClassName: "bg-success/10 text-success-foreground",
+  },
 };
 
 const EMPTY_ISSUES: ReadonlyArray<AutomationEditorValidationIssue> = [];
@@ -228,6 +235,8 @@ function nodeSummary(node: AutomationEditorNode): string {
       return `Decision: ${stringValue(config.approvalKey) || "decision"}`;
     case "shell.scoped":
       return stringValue(config.allowlistId) || "Choose an approved command";
+    case "sales.action":
+      return stringValue(config.operation).replaceAll(".", " ") || "Choose a sales action";
   }
 }
 
@@ -1167,6 +1176,37 @@ function GuidedNodeFields({
           readOnly={readOnly}
           value={stringValue(config.allowlistId)}
         />
+      );
+    case "sales.action":
+      return (
+        <>
+          <Field label="Sales action">
+            <select
+              className={selectClassName()}
+              disabled={readOnly}
+              onChange={(event) => set({ operation: event.currentTarget.value })}
+              value={stringValue(config.operation)}
+            >
+              <option value="prospector.cycle">Run prospect cycle</option>
+              <option value="prospects.list">Select ranked prospects</option>
+              <option value="gmail.drafts.create">Save generated Gmail drafts</option>
+              <option value="gmail.reconcile">Reconcile Gmail lifecycle</option>
+            </select>
+          </Field>
+          {config.operation === "gmail.reconcile" ? (
+            <StringInput
+              help="The Space-scoped Gmail connection used for reads."
+              label="Gmail connection ID"
+              onChange={(value) => set({ connectionId: value })}
+              readOnly={readOnly}
+              value={stringValue(config.connectionId)}
+            />
+          ) : null}
+          <p className="text-xs text-muted-foreground">
+            This operation has a fixed server-side scope. It cannot send, forward, delete, or use
+            arbitrary accounts, recipients, commands, or paths.
+          </p>
+        </>
       );
   }
 }

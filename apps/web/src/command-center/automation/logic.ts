@@ -152,6 +152,7 @@ const NODE_ID_STEMS: Record<AutomationEditorNodeKind, string> = {
   condition: "condition",
   delay: "delay",
   foreach: "foreach",
+  "sales.action": "sales",
   "shell.scoped": "shell",
   transform: "transform",
 };
@@ -174,6 +175,7 @@ const NODE_DEFAULT_CONFIG: Partial<
   delay: { durationMs: 300_000 },
   approval: { approvalKey: "decision" },
   "shell.scoped": { allowlistId: "configured-command-id" },
+  "sales.action": { operation: "prospects.list", minimumScore: 75, limit: 15 },
 };
 
 const nonEmptyString = (value: AutomationEditorJson | undefined): value is string =>
@@ -320,6 +322,25 @@ function guidedConfigProblem(
       return config.approvalKey === undefined || nonEmptyString(config.approvalKey)
         ? undefined
         : "Enter a decision key.";
+    case "sales.action": {
+      const operation = config.operation;
+      if (
+        !["prospector.cycle", "prospects.list", "gmail.drafts.create", "gmail.reconcile"].includes(
+          typeof operation === "string" ? operation : "",
+        )
+      ) {
+        return "Choose a supported sales action.";
+      }
+      if (operation === "gmail.reconcile" && !nonEmptyString(config.connectionId))
+        return "Enter the Gmail read connection ID.";
+      if (
+        operation === "gmail.drafts.create" &&
+        (config.drafts === undefined || !nonEmptyString(config.campaignVersion))
+      ) {
+        return "Connect structured draft output and set a campaign version.";
+      }
+      return undefined;
+    }
   }
 }
 

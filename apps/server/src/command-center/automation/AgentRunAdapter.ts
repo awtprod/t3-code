@@ -228,11 +228,21 @@ export function makeAutomationAgentRunInspector(sql: SqlClient.SqlClient) {
       readonly id: string;
       readonly state: RunStatus;
       readonly resultJson: string | null;
+      readonly assistantText: string | null;
       readonly error: string | null;
       readonly finishedAt: string | null;
     }>`
       SELECT child.id, child.state, child.result_json AS "resultJson",
-        child.error, child.finished_at AS "finishedAt"
+        child.error, child.finished_at AS "finishedAt",
+        (
+          SELECT message.text
+          FROM projection_thread_messages message
+          WHERE message.thread_id = child.thread_id
+            AND message.role = 'assistant'
+            AND message.created_at >= child.started_at
+          ORDER BY message.created_at DESC, message.message_id DESC
+          LIMIT 1
+        ) AS "assistantText"
       FROM command_center_runs child
       WHERE child.id = ${binding.childRunId}
         AND child.command_id = ${binding.commandId}
@@ -254,13 +264,15 @@ export function makeAutomationAgentRunInspector(sql: SqlClient.SqlClient) {
       );
     }
     const result =
-      row.resultJson === null
-        ? null
-        : yield* decodeStoredJson(row.resultJson).pipe(
-            Effect.mapError(() =>
-              permanentFailure("The linked child Run contains an invalid stored result."),
-            ),
-          );
+      row.assistantText !== null && row.assistantText.trim().length > 0
+        ? row.assistantText
+        : row.resultJson === null
+          ? null
+          : yield* decodeStoredJson(row.resultJson).pipe(
+              Effect.mapError(() =>
+                permanentFailure("The linked child Run contains an invalid stored result."),
+              ),
+            );
     return {
       runId: row.id,
       state: row.state,

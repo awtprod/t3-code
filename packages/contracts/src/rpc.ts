@@ -222,6 +222,18 @@ import {
   CommandCenterSpacesSyncResult,
   GoogleReadRequest,
   GoogleReadResult,
+  CommandCenterSalesDraftCreateInput,
+  CommandCenterSalesDraftDecisionInput,
+  CommandCenterSalesDraftRequestInput,
+  CommandCenterSalesDraftResult,
+  CommandCenterSalesProspectDetail,
+  CommandCenterSalesProspectorImportInput,
+  CommandCenterSalesProspectorImportResult,
+  CommandCenterSalesProspectProposeInput,
+  CommandCenterSalesProspectProposeResult,
+  CommandCenterSalesProspectsQueryInput,
+  CommandCenterSalesProspectsQueryResult,
+  CommandCenterSalesProspectUpdateInput,
 } from "./commandCenter.ts";
 import {
   CommandCenterEventEnvelope,
@@ -583,6 +595,69 @@ export const WsCommandCenterGoogleReadRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.g
   success: GoogleReadResult,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
+
+export const WsCommandCenterSalesProspectsQueryRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.salesProspectsQuery,
+  {
+    payload: CommandCenterSalesProspectsQueryInput,
+    success: CommandCenterSalesProspectsQueryResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSalesProspectorImportRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.salesProspectorImport,
+  {
+    payload: CommandCenterSalesProspectorImportInput,
+    success: CommandCenterSalesProspectorImportResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSalesProspectProposeRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.salesProspectPropose,
+  {
+    payload: CommandCenterSalesProspectProposeInput,
+    success: CommandCenterSalesProspectProposeResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSalesProspectUpdateRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.salesProspectUpdate,
+  {
+    payload: CommandCenterSalesProspectUpdateInput,
+    success: CommandCenterSalesProspectDetail,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSalesDraftRequestRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.salesDraftRequest,
+  {
+    payload: CommandCenterSalesDraftRequestInput,
+    success: CommandCenterSalesDraftResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSalesDraftDecisionRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.salesDraftDecision,
+  {
+    payload: CommandCenterSalesDraftDecisionInput,
+    success: CommandCenterSalesDraftResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSalesDraftCreateRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.salesDraftCreate,
+  {
+    payload: CommandCenterSalesDraftCreateInput,
+    success: CommandCenterSalesDraftResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
@@ -1166,6 +1241,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterAutomationRunGetRpc,
   WsCommandCenterAutomationWebhookAdmitRpc,
   WsCommandCenterGoogleReadRpc,
+  WsCommandCenterSalesProspectsQueryRpc,
+  WsCommandCenterSalesProspectorImportRpc,
+  WsCommandCenterSalesProspectProposeRpc,
+  WsCommandCenterSalesProspectUpdateRpc,
+  WsCommandCenterSalesDraftRequestRpc,
+  WsCommandCenterSalesDraftDecisionRpc,
+  WsCommandCenterSalesDraftCreateRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

@@ -17,6 +17,7 @@ import {
   makeSafeAutomationNodeExecutor,
   type AutomationItemCreateRequest,
 } from "./NodeExecutor.ts";
+import type { SalesAutomationActionExecutor } from "./SalesAutomationActions.ts";
 import type { AutomationNodeExecutionContext } from "./Runtime.ts";
 
 function context(
@@ -56,6 +57,7 @@ function dependencies(
     readonly runScopedShell?: (
       input: AutomationScopedShellRequest,
     ) => Effect.Effect<AutomationScopedShellResult, never>;
+    readonly executeSalesAutomationAction?: SalesAutomationActionExecutor;
   } = {},
 ) {
   return {
@@ -109,6 +111,9 @@ function dependencies(
           retryable: false,
           idempotent: false,
         })),
+    ...(overrides.executeSalesAutomationAction === undefined
+      ? {}
+      : { executeSalesAutomationAction: overrides.executeSalesAutomationAction }),
   };
 }
 
@@ -347,6 +352,52 @@ it.effect("fails malformed agent and scope-authoring shell config closed", () =>
     expect(AUTOMATION_V1_NODE_POLICY.routed).toEqual(["agent.run"]);
     expect(AUTOMATION_V1_NODE_POLICY.automatic).toContain("shell.scoped");
     expect(AUTOMATION_V1_NODE_POLICY.blocked).toEqual([]);
+  }),
+);
+
+it.effect("runs only fixed sales actions with rendered predecessor data", () =>
+  Effect.gen(function* () {
+    const calls: Array<{
+      readonly operation: string;
+      readonly spaceId: string;
+      readonly config: unknown;
+    }> = [];
+    const execute = makeSafeAutomationNodeExecutor(
+      dependencies({
+        executeSalesAutomationAction: (input) => {
+          calls.push(input);
+          return Effect.succeed({ created: 1 });
+        },
+      }),
+    );
+    const outcome = yield* execute(
+      context(
+        "sales.action",
+        {
+          operation: "gmail.drafts.create",
+          campaignVersion: "sales-initial-v1",
+          drafts: { $path: "predecessors.copy.terminal.result" },
+        },
+        {
+          predecessorOutputs: {
+            copy: { terminal: { result: { drafts: [{ prospectId: "prospect-1" }] } } },
+          },
+        },
+      ),
+    );
+
+    expect(outcome).toEqual({ type: "succeeded", output: { created: 1 } });
+    expect(calls).toEqual([
+      {
+        operation: "gmail.drafts.create",
+        spaceId: "space-a",
+        config: {
+          operation: "gmail.drafts.create",
+          campaignVersion: "sales-initial-v1",
+          drafts: { drafts: [{ prospectId: "prospect-1" }] },
+        },
+      },
+    ]);
   }),
 );
 

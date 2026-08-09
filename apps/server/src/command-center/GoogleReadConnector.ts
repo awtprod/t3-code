@@ -9,6 +9,7 @@ import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { Artifact, type Artifact as ArtifactType } from "@command-center/core";
+import type { SalesDraftRequest as SalesDraftRequestType } from "@command-center/core";
 import type {
   CommandCenterError,
   GoogleDraftCreateRequest,
@@ -84,6 +85,11 @@ export const GOOGLE_READ_COMMAND_ALLOWLIST = [
   "drive.download",
 ] as const;
 export const GOOGLE_DRAFT_COMMAND_ALLOWLIST = ["gmail.drafts.create"] as const;
+export const GOOGLE_SALES_DRAFT_COMMAND_ALLOWLIST = [
+  "gmail.drafts.create",
+  "gmail.drafts.list",
+  "gmail.drafts.get",
+] as const;
 
 export class GoogleReadConnectorError extends Schema.TaggedErrorClass<GoogleReadConnectorError>()(
   "GoogleReadConnectorError",
@@ -212,6 +218,16 @@ export interface GoogleReadConnectorShape {
     request: GoogleDraftCreateRequest,
     attachmentPaths: ReadonlyArray<string>,
   ) => Effect.Effect<Schema.Json, GoogleReadConnectorError>;
+  readonly salesDraftExists: (
+    selection: GoogleConnectionSelection,
+    draftId: string,
+  ) => Effect.Effect<boolean, GoogleReadConnectorError>;
+  readonly findSalesDraft: (
+    request: SalesDraftRequestType,
+  ) => Effect.Effect<string | undefined, GoogleReadConnectorError>;
+  readonly createSalesDraft: (
+    request: SalesDraftRequestType,
+  ) => Effect.Effect<{ readonly draftId: string }, GoogleReadConnectorError>;
 }
 
 export class GoogleReadConnector extends Context.Service<
@@ -222,6 +238,43 @@ export class GoogleReadConnector extends Context.Service<
 const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeArtifact = Schema.decodeUnknownEffect(Artifact);
 const isConnectorError = Schema.is(GoogleReadConnectorError);
+
+const collectDraftIds = (value: unknown, ids: Set<string>): void => {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectDraftIds(entry, ids);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  for (const [key, entry] of Object.entries(value)) {
+    if ((key === "id" || key === "draftId" || key === "draft_id") && typeof entry === "string")
+      ids.add(entry);
+    collectDraftIds(entry, ids);
+  }
+};
+
+const collectDraftStrings = (value: unknown, strings: string[]): void => {
+  if (typeof value === "string") strings.push(value);
+  else if (Array.isArray(value)) for (const entry of value) collectDraftStrings(entry, strings);
+  else if (value !== null && typeof value === "object")
+    for (const entry of Object.values(value)) collectDraftStrings(entry, strings);
+};
+
+const salesDraftMatches = (value: unknown, request: SalesDraftRequestType): boolean => {
+  const strings: string[] = [];
+  collectDraftStrings(value, strings);
+  const normalized = new Set(strings.map((entry) => entry.replace(/\r\n/gu, "\n").trim()));
+  return (
+    normalized.has(request.recipient.trim()) &&
+    normalized.has(request.subject.trim()) &&
+    normalized.has(request.body.replace(/\r\n/gu, "\n").trim())
+  );
+};
+
+const createdDraftId = (value: unknown): string | undefined => {
+  const ids = new Set<string>();
+  collectDraftIds(value, ids);
+  return ids.values().next().value;
+};
 
 const MIME_BY_EXPORT_FORMAT: Readonly<Record<GoogleDriveExportRequest["format"], string>> = {
   pdf: "application/pdf",
@@ -466,6 +519,123 @@ export const layer = Layer.effect(
       );
     });
 
+    const runSalesDraftJson = Effect.fn("GoogleReadConnector.runSalesDraftJson")(function* (input: {
+      readonly selection: GoogleConnectionSelection;
+      readonly args: (account: string) => ReadonlyArray<string>;
+      readonly stdin?: string | undefined;
+    }) {
+      return yield* withConnectionHealth(
+        input.selection,
+        Effect.gen(function* () {
+          const resolved = yield* resolveAccount(input.selection);
+          yield* verifyBinary();
+          const result = yield* runner
+            .run({
+              command: binary,
+              args: input.args(resolved.accountAlias),
+              ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
+              env: googleEnvironment,
+              extendEnv: false,
+              timeout: "45 seconds",
+              maxOutputBytes: 4 * 1024 * 1024,
+            })
+            .pipe(Effect.mapError(processFailure));
+          if (result.code !== 0) {
+            return yield* new GoogleReadConnectorError({
+              reason: "process",
+              message: result.stderr.trim() || "The Gmail draft request failed.",
+            });
+          }
+          return yield* decodeUnknownJsonString(result.stdout).pipe(
+            Effect.mapError(
+              (cause) =>
+                new GoogleReadConnectorError({
+                  reason: "output",
+                  message: "The Gmail draft response was invalid.",
+                  cause,
+                }),
+            ),
+          );
+        }),
+      );
+    });
+
+    const salesDraftBase = (account: string): ReadonlyArray<string> => [
+      "--account",
+      account,
+      "--gmail-no-send",
+      "--no-input",
+      "--json",
+      "--enable-commands-exact",
+      GOOGLE_SALES_DRAFT_COMMAND_ALLOWLIST.join(","),
+    ];
+
+    const salesDraftExists: GoogleReadConnectorShape["salesDraftExists"] = Effect.fn(
+      "GoogleReadConnector.salesDraftExists",
+    )(function* (selection, draftId) {
+      return yield* runSalesDraftJson({
+        selection,
+        args: (account) => [...salesDraftBase(account), "gmail", "drafts", "get", "--", draftId],
+      }).pipe(
+        Effect.as(true),
+        Effect.catch((cause) =>
+          /not found|404|does not exist/iu.test(cause.message) ? Effect.succeed(false) : cause,
+        ),
+      );
+    });
+
+    const findSalesDraft: GoogleReadConnectorShape["findSalesDraft"] = Effect.fn(
+      "GoogleReadConnector.findSalesDraft",
+    )(function* (request) {
+      const list = yield* runSalesDraftJson({
+        selection: request,
+        args: (account) => [...salesDraftBase(account), "gmail", "drafts", "list", "--max", "100"],
+      });
+      const ids = new Set<string>();
+      collectDraftIds(list, ids);
+      for (const id of ids) {
+        const draft = yield* runSalesDraftJson({
+          selection: request,
+          args: (account) => [...salesDraftBase(account), "gmail", "drafts", "get", "--", id],
+        });
+        if (salesDraftMatches(draft, request)) return id;
+      }
+      return undefined;
+    });
+
+    const createSalesDraft: GoogleReadConnectorShape["createSalesDraft"] = Effect.fn(
+      "GoogleReadConnector.createSalesDraft",
+    )(function* (request) {
+      const output = yield* runSalesDraftJson({
+        selection: request,
+        stdin: request.body,
+        args: (account) => [
+          ...salesDraftBase(account),
+          "gmail",
+          "drafts",
+          "create",
+          "--to",
+          request.recipient,
+          "--subject",
+          request.subject,
+          "--body-file",
+          "-",
+          ...(request.gmailMessageId === undefined
+            ? []
+            : ["--reply-to-message-id", request.gmailMessageId]),
+          ...(request.gmailThreadId === undefined ? [] : ["--thread-id", request.gmailThreadId]),
+        ],
+      });
+      const draftId = createdDraftId(output);
+      if (draftId === undefined) {
+        return yield* new GoogleReadConnectorError({
+          reason: "output",
+          message: "The Gmail draft connector did not return a draft id.",
+        });
+      }
+      return { draftId };
+    });
+
     const discardPath = Effect.fn("GoogleReadConnector.discardPath")(function* (
       absolutePath: string,
     ) {
@@ -583,6 +753,15 @@ export const layer = Layer.effect(
       );
     });
 
-    return GoogleReadConnector.of({ verify, read, exportDrive, discardExport, createDraft });
+    return GoogleReadConnector.of({
+      verify,
+      read,
+      exportDrive,
+      discardExport,
+      createDraft,
+      salesDraftExists,
+      findSalesDraft,
+      createSalesDraft,
+    });
   }),
 );

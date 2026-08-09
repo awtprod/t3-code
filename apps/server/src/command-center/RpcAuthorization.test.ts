@@ -76,6 +76,9 @@ describe("Command Center RPC authorization", () => {
       AuthCommandCenterOperateScope,
     );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.memoryReview)).toBe(AuthCommandCenterOperateScope);
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.salesProspectorImport)).toBe(
+      AuthCommandCenterOperateScope,
+    );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.approvalDecide)).toBe(
       AuthCommandCenterApproveScope,
     );

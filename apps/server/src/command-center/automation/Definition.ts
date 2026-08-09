@@ -33,6 +33,7 @@ export const AutomationFileNodeKind = Schema.Literals([
   "delay",
   "approval",
   "shell.scoped",
+  "sales.action",
 ]);
 export type AutomationFileNodeKind = typeof AutomationFileNodeKind.Type;
 
@@ -139,6 +140,53 @@ export function parseAutomationScopedShellNodeConfig(
     return { ok: false, message: formatSchemaError(decoded.cause) };
   }
   return { ok: true, config: decoded.value };
+}
+
+/**
+ * Sales actions are intentionally a tiny fixed surface. Their runtime inputs
+ * are resolved from the execution and structured predecessor output; Git never
+ * supplies a command, account, recipient, or send operation.
+ */
+const SALES_AUTOMATION_ACTIONS = new Set([
+  "prospector.cycle",
+  "prospects.list",
+  "gmail.drafts.create",
+  "gmail.reconcile",
+]);
+
+export function validateSalesAutomationActionNodeConfig(input: unknown): string | undefined {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return "Sales action node config must be an object.";
+  }
+  const record = input as Readonly<Record<string, unknown>>;
+  if (typeof record.operation !== "string" || !SALES_AUTOMATION_ACTIONS.has(record.operation)) {
+    return "Sales action node must use a supported fixed operation.";
+  }
+  const allowedByOperation: Readonly<Record<string, ReadonlySet<string>>> = {
+    "prospector.cycle": new Set(["operation", "discoveryLimit", "qualificationLimit"]),
+    "prospects.list": new Set(["operation", "minimumScore", "limit"]),
+    "gmail.drafts.create": new Set(["operation", "drafts", "campaignVersion"]),
+    "gmail.reconcile": new Set(["operation", "connectionId"]),
+  };
+  const allowed = allowedByOperation[record.operation];
+  if (Object.keys(record).some((key) => !allowed!.has(key))) {
+    return "Sales action node contains an unsupported configuration field.";
+  }
+  if (
+    record.operation === "gmail.reconcile" &&
+    (typeof record.connectionId !== "string" || record.connectionId.trim().length === 0)
+  ) {
+    return "Gmail reconciliation requires a committed connection ID.";
+  }
+  if (
+    record.operation === "gmail.drafts.create" &&
+    (record.drafts === undefined ||
+      typeof record.campaignVersion !== "string" ||
+      record.campaignVersion.trim().length === 0)
+  ) {
+    return "Gmail draft creation requires structured draft input and a campaign version.";
+  }
+  return undefined;
 }
 
 export const AutomationFileTrigger = Schema.Union([
@@ -338,6 +386,17 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
         issues.push({
           code: "node.config.invalid",
           message: config.message,
+          path: ["nodes", index, "config"],
+          nodeIds: [node.id],
+        });
+      }
+    }
+    if (node.kind === "sales.action") {
+      const message = validateSalesAutomationActionNodeConfig(node.config);
+      if (message !== undefined) {
+        issues.push({
+          code: "node.config.invalid",
+          message,
           path: ["nodes", index, "config"],
           nodeIds: [node.id],
         });

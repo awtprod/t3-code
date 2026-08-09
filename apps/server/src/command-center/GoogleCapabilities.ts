@@ -7,6 +7,7 @@ export type GoogleReadCapability =
   | "cc.connections.google.drive.read";
 
 export type GoogleCapability = GoogleReadCapability | "cc.connections.google.gmail.drafts.create";
+export type GoogleConfiguredCapability = GoogleCapability;
 
 export const GOOGLE_READ_CAPABILITIES: ReadonlyArray<GoogleReadCapability> = [
   "cc.connections.google.gmail.read",

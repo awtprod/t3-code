@@ -17,6 +17,9 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as CommandCenterService from "./Service.ts";
 import { ServerConfig } from "../config.ts";
 import * as GoogleReadConnector from "./GoogleReadConnector.ts";
+import * as ExternalProspectorConnector from "./ExternalProspectorConnector.ts";
+import * as SalesPipeline from "./SalesPipeline.ts";
+import * as SalesProspectorRunner from "./SalesProspectorRunner.ts";
 import { googleCapabilityForDraft, googleCapabilityForOperation } from "./GoogleCapabilities.ts";
 import {
   automationAgentCommandId,
@@ -28,6 +31,7 @@ import {
 } from "./automation/AgentRunAdapter.ts";
 import * as AutomationScopedShell from "./automation/AutomationScopedShell.ts";
 import { makeSafeAutomationNodeExecutor } from "./automation/NodeExecutor.ts";
+import { makeSalesAutomationActionExecutor } from "./automation/SalesAutomationActions.ts";
 import * as AutomationRuntime from "./automation/Runtime.ts";
 
 const decodeExecution = Schema.decodeUnknownEffect(CommandCenterAutomationExecution);
@@ -557,12 +561,23 @@ export const safeRuntimeLayer = Layer.unwrap(
   Effect.gen(function* () {
     const commandCenter = yield* CommandCenterService.CommandCenterService;
     const google = yield* GoogleReadConnector.GoogleReadConnector;
+    const sales = yield* SalesPipeline.SalesPipeline;
+    const prospector = yield* ExternalProspectorConnector.ExternalProspectorConnector;
+    const prospectRunner = yield* SalesProspectorRunner.SalesProspectorRunner;
     const serverConfig = yield* ServerConfig;
     const path = yield* Path.Path;
     const scopedShell = yield* AutomationScopedShell.AutomationScopedShell;
     const startAgentRun = yield* makeLiveAutomationAgentRunAdapter;
+    const executeSalesAutomationAction = makeSalesAutomationActionExecutor({
+      commandCenter,
+      google,
+      sales,
+      prospector,
+      runner: prospectRunner,
+    });
     const executeNode = makeSafeAutomationNodeExecutor({
       startAgentRun,
+      executeSalesAutomationAction,
       runScopedShell: scopedShell.execute,
       createItem: (input) =>
         commandCenter.createItem(input).pipe(

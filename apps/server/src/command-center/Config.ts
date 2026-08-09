@@ -71,6 +71,11 @@ const SpaceConfigFile = Schema.Struct({
     }),
   ),
   connectionIds: Schema.Array(NonEmpty),
+  features: Schema.optional(
+    Schema.Struct({
+      salesPipeline: Schema.optional(Schema.Boolean),
+    }),
+  ),
   policy: Schema.optional(
     Schema.Struct({
       allowedCapabilities: Schema.Array(CapabilityName),
@@ -336,6 +341,7 @@ export const layer = Layer.effect(
           ),
           autoRunRiskLevels: raw.policy?.autoRunRiskLevels ?? ["low", "reversible"],
         },
+        ...(raw.features?.salesPipeline === true ? { features: { salesPipeline: true } } : {}),
         modelDefaults:
           raw.routing.provider === "auto" || raw.routing.model === "auto"
             ? undefined

@@ -305,6 +305,7 @@ export function projectBootstrap(
       id: space.id,
       name: space.displayName,
       kind: space.kind,
+      ...(space.features?.salesPipeline === true ? { salesPipelineEnabled: true } : {}),
       description: space.instructions || undefined,
       unreadCount: bootstrap.needsYou.filter((item) => item.spaceId === space.id).length,
     }),

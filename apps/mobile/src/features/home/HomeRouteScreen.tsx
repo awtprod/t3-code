@@ -7,6 +7,8 @@ import { getCompactBrandHeaderOptions } from "../../components/CompactBrandTitle
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
 import { useProjects, useThreadShells } from "../../state/entities";
 import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
+import { useEnvironmentQuery } from "../../state/query";
+import { commandCenterEnvironment } from "../../state/commandCenter";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
@@ -75,6 +77,18 @@ export function HomeRouteScreen() {
     setThreadSortOrder,
   } = useHomeListOptions(availableEnvironmentIds);
   const selectedEnvironmentId = listOptions.selectedEnvironmentId;
+  const commandCenterEnvironmentId =
+    selectedEnvironmentId ?? environments[0]?.environmentId ?? null;
+  const commandCenter = useEnvironmentQuery(
+    commandCenterEnvironmentId === null
+      ? null
+      : commandCenterEnvironment.bootstrap({
+          environmentId: commandCenterEnvironmentId,
+          input: {},
+        }),
+  );
+  const hasSalesPipeline =
+    commandCenter.data?.spaces.some((space) => space.features?.salesPipeline === true) === true;
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
   const projectFilterOptions = useMemo(
     () =>
@@ -139,6 +153,7 @@ export function HomeRouteScreen() {
           onEnvironmentChange={setSelectedEnvironmentId}
           onProjectChange={setSelectedProjectKey}
           onOpenSettings={() => navigation.navigate("SettingsSheet", { screen: "Settings" })}
+          onOpenPipeline={hasSalesPipeline ? () => navigation.navigate("SalesPipeline") : undefined}
           onProjectSortOrderChange={setProjectSortOrder}
           onSearchQueryChange={setSearchQuery}
           onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}

@@ -20,6 +20,7 @@ export const AUTOMATION_EDITOR_NODE_KINDS = [
   "delay",
   "approval",
   "shell.scoped",
+  "sales.action",
 ] as const;
 
 export type AutomationEditorNodeKind = (typeof AUTOMATION_EDITOR_NODE_KINDS)[number];
@@ -35,6 +36,7 @@ export const AUTOMATION_EDITOR_ADDABLE_NODE_KINDS = [
   "delay",
   "approval",
   "shell.scoped",
+  "sales.action",
 ] as const satisfies ReadonlyArray<AutomationEditorNodeKind>;
 
 export type AutomationEditorJson =

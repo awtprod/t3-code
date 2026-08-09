@@ -4,6 +4,7 @@ export interface CommandCenterSpace {
   readonly id: string;
   readonly name: string;
   readonly kind: CommandCenterSpaceKind;
+  readonly salesPipelineEnabled?: boolean | undefined;
   readonly description?: string | undefined;
   readonly unreadCount?: number | undefined;
 }

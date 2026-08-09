@@ -1,6 +1,8 @@
 import { CommandCenterError } from "@t3tools/contracts";
-import { RepositoryId, SpaceId } from "@command-center/core";
+import { ConnectionId, RepositoryId, SpaceId } from "@command-center/core";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 
 import * as CommandCenterService from "../../../command-center/Service.ts";
 import * as AutomationDefinitionConfig from "../../../command-center/AutomationDefinitionConfig.ts";
@@ -10,6 +12,10 @@ import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import { googleCapabilityForOperation } from "../../../command-center/GoogleCapabilities.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
+import * as SalesPipeline from "../../../command-center/SalesPipeline.ts";
+import * as ExternalProspectorConnector from "../../../command-center/ExternalProspectorConnector.ts";
+import * as SalesProspectorRunner from "../../../command-center/SalesProspectorRunner.ts";
+import { withSalesDraftCreateLock } from "../../../command-center/SalesDraftCreateCoordinator.ts";
 import { commandCenterProviderAvailability } from "../../../command-center/ProviderAvailability.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -20,6 +26,38 @@ const bySpace = <A extends { readonly spaceId: string }>(
   spaceId: string | undefined,
 ): ReadonlyArray<A> =>
   spaceId === undefined ? values : values.filter((value) => value.spaceId === spaceId);
+
+const gmailEvidenceIds = (
+  value: unknown,
+): { readonly messageId?: string; readonly threadId?: string } => {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = gmailEvidenceIds(entry);
+      if (found.messageId !== undefined || found.threadId !== undefined) return found;
+    }
+    return {};
+  }
+  if (value === null || typeof value !== "object") return {};
+  const record = value as Readonly<Record<string, unknown>>;
+  const messageId =
+    typeof record.messageId === "string"
+      ? record.messageId
+      : typeof record.id === "string"
+        ? record.id
+        : undefined;
+  const threadId = typeof record.threadId === "string" ? record.threadId : undefined;
+  if (messageId !== undefined || threadId !== undefined) {
+    return {
+      ...(messageId === undefined ? {} : { messageId }),
+      ...(threadId === undefined ? {} : { threadId }),
+    };
+  }
+  for (const entry of Object.values(record)) {
+    const found = gmailEvidenceIds(entry);
+    if (found.messageId !== undefined || found.threadId !== undefined) return found;
+  }
+  return {};
+};
 
 export const requireScopedSpace = Effect.fn("CommandCenterToolkit.requireScopedSpace")(function* (
   capability: Parameters<typeof McpInvocationContext.requireCommandCenterCapability>[0],
@@ -284,6 +322,418 @@ const handlers = {
       yield* requireScopedSpace("cc.items.write", input.spaceId);
       const service = yield* CommandCenterService.CommandCenterService;
       return yield* service.createItem(input);
+    }),
+  cc_sales_prospects_list: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.sales.read", input.spaceId);
+      const salesOption = yield* Effect.serviceOption(SalesPipeline.SalesPipeline);
+      if (Option.isNone(salesOption)) {
+        return yield* new CommandCenterError({
+          reason: "persistence",
+          message: "The sales pipeline is unavailable.",
+        });
+      }
+      const sales = salesOption.value;
+      return yield* sales.query({ ...input, spaceId: SpaceId.make(scope.spaceId) });
+    }),
+  cc_sales_prospects_propose: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.sales.propose", input.spaceId);
+      const salesOption = yield* Effect.serviceOption(SalesPipeline.SalesPipeline);
+      if (Option.isNone(salesOption)) {
+        return yield* new CommandCenterError({
+          reason: "persistence",
+          message: "The sales pipeline is unavailable.",
+        });
+      }
+      const sales = salesOption.value;
+      return yield* sales.propose({
+        ...input,
+        spaceId: SpaceId.make(scope.spaceId),
+        provenanceKind: "agent",
+        provenanceRef: scope.threadId,
+      });
+    }),
+  cc_sales_prospector_import: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.sales.propose", input.spaceId);
+      const salesOption = yield* Effect.serviceOption(SalesPipeline.SalesPipeline);
+      if (Option.isNone(salesOption)) {
+        return yield* new CommandCenterError({
+          reason: "persistence",
+          message: "The sales pipeline is unavailable.",
+        });
+      }
+      const connectorOption = yield* Effect.serviceOption(
+        ExternalProspectorConnector.ExternalProspectorConnector,
+      );
+      if (Option.isNone(connectorOption)) {
+        return yield* new CommandCenterError({
+          reason: "config",
+          message: "The external prospecting source connector is unavailable.",
+        });
+      }
+      return yield* ExternalProspectorConnector.importReadyProspects(
+        connectorOption.value,
+        salesOption.value,
+        { ...input, spaceId: SpaceId.make(scope.spaceId) },
+      );
+    }),
+  cc_sales_prospect_cycle: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.sales.propose", input.spaceId);
+      const runnerOption = yield* Effect.serviceOption(SalesProspectorRunner.SalesProspectorRunner);
+      const connectorOption = yield* Effect.serviceOption(
+        ExternalProspectorConnector.ExternalProspectorConnector,
+      );
+      const salesOption = yield* Effect.serviceOption(SalesPipeline.SalesPipeline);
+      if (
+        Option.isNone(runnerOption) ||
+        Option.isNone(connectorOption) ||
+        Option.isNone(salesOption)
+      ) {
+        return yield* new CommandCenterError({
+          reason: "config",
+          message: "The sales prospecting cycle is not fully configured.",
+        });
+      }
+      const runnerResult = yield* runnerOption.value
+        .cycle({
+          ...input,
+          spaceId: SpaceId.make(scope.spaceId),
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new CommandCenterError({
+                reason: cause.reason === "configuration" ? "config" : "connector",
+                message: cause.message,
+                cause,
+              }),
+          ),
+        );
+      const imported = yield* ExternalProspectorConnector.importReadyProspects(
+        connectorOption.value,
+        salesOption.value,
+        { spaceId: SpaceId.make(scope.spaceId), limit: input.qualificationLimit ?? 50 },
+      );
+      return SalesProspectorRunner.completeCycleResult(runnerResult, imported);
+    }),
+  cc_sales_gmail_draft_create: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.sales.write", input.spaceId);
+      yield* requireScopedSpace("cc.connections.google.gmail.drafts.create", input.spaceId);
+      const salesOption = yield* Effect.serviceOption(SalesPipeline.SalesPipeline);
+      if (Option.isNone(salesOption)) {
+        return yield* new CommandCenterError({
+          reason: "connector",
+          message: "The sales Gmail draft service is unavailable.",
+        });
+      }
+      const service = yield* CommandCenterService.CommandCenterService;
+      const google = yield* GoogleReadConnector.GoogleReadConnector;
+      const candidates = (yield* service.queryConnections({
+        spaceId: SpaceId.make(scope.spaceId),
+      })).connections.filter((connection) =>
+        connection.capabilities.includes("cc.connections.google.gmail.drafts.create"),
+      );
+      if (candidates.length !== 1) {
+        return yield* new CommandCenterError({
+          reason: "validation",
+          message: "The sales Space must have exactly one enabled Gmail draft connection.",
+        });
+      }
+      const sales = salesOption.value;
+      return yield* withSalesDraftCreateLock(
+        { spaceId: scope.spaceId, requestId: input.idempotencyKey },
+        Effect.gen(function* () {
+          const prepared = yield* sales.prepareAutomatedDraft({
+            ...input,
+            spaceId: SpaceId.make(scope.spaceId),
+            connectionId: candidates[0]!.id,
+          });
+          if (prepared.request.status === "created") return prepared;
+          const toConnectorError = (cause: GoogleReadConnector.GoogleReadConnectorError) =>
+            new CommandCenterError({ reason: "connector" as const, message: cause.message, cause });
+          const existing = yield* google
+            .findSalesDraft(prepared.request)
+            .pipe(Effect.mapError(toConnectorError));
+          const result =
+            existing === undefined
+              ? yield* google
+                  .createSalesDraft(prepared.request)
+                  .pipe(Effect.mapError(toConnectorError))
+              : { draftId: existing };
+          return yield* sales.completeDraftCreate({
+            requestId: prepared.request.id,
+            spaceId: prepared.request.spaceId,
+            payloadDigest: prepared.request.payloadDigest,
+            draftId: result.draftId,
+            reconciled: existing !== undefined,
+          });
+        }),
+      );
+    }),
+  cc_sales_gmail_reconcile: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.sales.write", input.spaceId);
+      yield* requireScopedSpace("cc.connections.google.gmail.read", input.spaceId);
+      const salesOption = yield* Effect.serviceOption(SalesPipeline.SalesPipeline);
+      if (Option.isNone(salesOption)) {
+        return yield* new CommandCenterError({
+          reason: "persistence",
+          message: "The sales pipeline is unavailable.",
+        });
+      }
+      const service = yield* CommandCenterService.CommandCenterService;
+      const google = yield* GoogleReadConnector.GoogleReadConnector;
+      const connections = (yield* service.queryConnections({
+        spaceId: SpaceId.make(scope.spaceId),
+      })).connections;
+      if (
+        !connections.some(
+          (connection) =>
+            connection.id === input.connectionId &&
+            connection.capabilities.includes("cc.connections.google.gmail.read"),
+        )
+      ) {
+        return yield* new CommandCenterError({
+          reason: "validation",
+          message: "The Gmail read connection is not enabled for this Space.",
+        });
+      }
+      const sales = salesOption.value;
+      const externalOption = yield* Effect.serviceOption(
+        ExternalProspectorConnector.ExternalProspectorConnector,
+      );
+      if (Option.isSome(externalOption)) {
+        const current = yield* sales.query({ spaceId: SpaceId.make(scope.spaceId) });
+        const importedIds = new Set<string>(current.draftRequests.map((request) => request.id));
+        const historical = yield* externalOption.value
+          .loadHistoricalDrafts({ spaceId: SpaceId.make(scope.spaceId) })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new CommandCenterError({ reason: "connector", message: cause.message, cause }),
+            ),
+          );
+        for (const record of historical) {
+          if (importedIds.has(`prospector-send-${record.sourceSendId}`)) continue;
+          const wasSent =
+            record.sentAt !== undefined ||
+            record.gmailMessageId !== undefined ||
+            ["sent", "delivered", "opened", "replied", "bounced"].includes(record.status);
+          const draftExists =
+            !wasSent && record.gmailDraftId !== undefined
+              ? yield* google
+                  .salesDraftExists(
+                    {
+                      spaceId: SpaceId.make(scope.spaceId),
+                      connectionId: ConnectionId.make(input.connectionId),
+                    },
+                    record.gmailDraftId,
+                  )
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new CommandCenterError({
+                          reason: "connector",
+                          message: cause.message,
+                          cause,
+                        }),
+                    ),
+                  )
+              : false;
+          yield* sales.importHistoricalDraft({
+            ...record,
+            proposal: { ...record.proposal, spaceId: SpaceId.make(scope.spaceId) },
+            connectionId: input.connectionId,
+            state: wasSent ? "contacted" : draftExists ? "drafted" : "declined",
+          });
+        }
+      }
+      const snapshot = yield* sales.query({
+        spaceId: SpaceId.make(scope.spaceId),
+        stages: ["drafted", "contacted"],
+      });
+      const observedAt = DateTime.formatIso(yield* DateTime.now);
+      let contacted = 0;
+      let replied = 0;
+      let bounced = 0;
+      let deleted = 0;
+      let followUpDrafted = 0;
+      for (const prospect of snapshot.prospects) {
+        if (prospect.contactEmail === undefined) continue;
+        const latest = snapshot.draftRequests.find(
+          (request) => request.prospectId === prospect.id && request.status === "created",
+        );
+        if (latest === undefined) continue;
+        const safeSubject = latest.subject.replaceAll('"', "");
+        const sentResult = yield* google
+          .read({
+            operation: "gmail.search",
+            spaceId: prospect.spaceId,
+            connectionId: ConnectionId.make(input.connectionId),
+            query: `in:sent to:${prospect.contactEmail} subject:"${safeSubject}" newer_than:30d`,
+            limit: 10,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new CommandCenterError({ reason: "connector", message: cause.message, cause }),
+            ),
+          );
+        const sentEvidence =
+          sentResult.operation === "gmail.search" ? gmailEvidenceIds(sentResult.data) : {};
+        const replyResult = yield* google
+          .read({
+            operation: "gmail.search",
+            spaceId: prospect.spaceId,
+            connectionId: ConnectionId.make(input.connectionId),
+            query: `in:inbox from:${prospect.contactEmail} newer_than:30d`,
+            limit: 10,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new CommandCenterError({
+                  reason: "connector",
+                  message: cause.message,
+                  cause,
+                }),
+            ),
+          );
+        const replyEvidence =
+          replyResult?.operation === "gmail.search" ? gmailEvidenceIds(replyResult.data) : {};
+        const bounceResult =
+          prospect.stage === "contacted"
+            ? yield* google
+                .read({
+                  operation: "gmail.search",
+                  spaceId: prospect.spaceId,
+                  connectionId: ConnectionId.make(input.connectionId),
+                  query: `in:anywhere (from:mailer-daemon OR from:postmaster) "${prospect.contactEmail}" newer_than:30d`,
+                  limit: 10,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new CommandCenterError({
+                        reason: "connector",
+                        message: cause.message,
+                        cause,
+                      }),
+                  ),
+                )
+            : undefined;
+        const bounceEvidence =
+          bounceResult?.operation === "gmail.search" ? gmailEvidenceIds(bounceResult.data) : {};
+        const draftStillExists =
+          latest.gmailDraftId !== undefined
+            ? yield* google
+                .salesDraftExists(
+                  {
+                    spaceId: prospect.spaceId,
+                    connectionId: ConnectionId.make(input.connectionId),
+                  },
+                  latest.gmailDraftId,
+                )
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new CommandCenterError({
+                        reason: "connector",
+                        message: cause.message,
+                        cause,
+                      }),
+                  ),
+                )
+            : true;
+        const evidenceMessageId = replyEvidence.messageId ?? sentEvidence.messageId;
+        const evidenceThreadId = replyEvidence.threadId ?? sentEvidence.threadId;
+        const reconciled = yield* sales.reconcileGmailEvidence({
+          prospectId: prospect.id,
+          spaceId: prospect.spaceId,
+          sent: sentEvidence.messageId !== undefined || sentEvidence.threadId !== undefined,
+          replied: replyEvidence.messageId !== undefined || replyEvidence.threadId !== undefined,
+          bounced: bounceEvidence.messageId !== undefined || bounceEvidence.threadId !== undefined,
+          deleted:
+            !draftStillExists &&
+            sentEvidence.messageId === undefined &&
+            sentEvidence.threadId === undefined,
+          draftRequestId: latest.id,
+          campaignStep: latest.campaignStep,
+          ...(evidenceMessageId === undefined ? {} : { messageId: evidenceMessageId }),
+          ...(evidenceThreadId === undefined ? {} : { threadId: evidenceThreadId }),
+          observedAt,
+        });
+        if (prospect.stage === "drafted" && reconciled.prospect.stage === "contacted")
+          contacted += 1;
+        if (prospect.stage === "contacted" && reconciled.prospect.stage === "replied") replied += 1;
+        if (reconciled.prospect.bouncedAt !== undefined && prospect.bouncedAt === undefined)
+          bounced += 1;
+        if (
+          reconciled.prospect.draftDeletedAt !== undefined &&
+          prospect.draftDeletedAt === undefined
+        )
+          deleted += 1;
+        const refreshed = yield* sales.query({
+          spaceId: prospect.spaceId,
+          stages: [reconciled.prospect.stage],
+        });
+        const dueFollowUps = refreshed.draftRequests.filter(
+          (request) =>
+            request.prospectId === prospect.id &&
+            request.campaignStep > 0 &&
+            request.status === "creating",
+        );
+        for (const request of dueFollowUps) {
+          yield* withSalesDraftCreateLock(
+            { spaceId: request.spaceId, requestId: request.id },
+            Effect.gen(function* () {
+              const existing = yield* google.findSalesDraft(request).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new CommandCenterError({
+                      reason: "connector",
+                      message: cause.message,
+                      cause,
+                    }),
+                ),
+              );
+              const result =
+                existing === undefined
+                  ? yield* google.createSalesDraft(request).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new CommandCenterError({
+                            reason: "connector",
+                            message: cause.message,
+                            cause,
+                          }),
+                      ),
+                    )
+                  : { draftId: existing };
+              yield* sales.completeDraftCreate({
+                requestId: request.id,
+                spaceId: request.spaceId,
+                payloadDigest: request.payloadDigest,
+                draftId: result.draftId,
+                reconciled: existing !== undefined,
+              });
+            }),
+          );
+          followUpDrafted += 1;
+        }
+      }
+      return {
+        inspected: snapshot.prospects.length,
+        contacted,
+        replied,
+        bounced,
+        deleted,
+        followUpDrafted,
+      };
     }),
   cc_memory_list: ({ spaceId }) =>
     Effect.gen(function* () {
