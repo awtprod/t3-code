@@ -20,6 +20,7 @@ import { ProcessRunner, type ProcessRunError } from "../processRunner.ts";
 import { ServerConfig } from "../config.ts";
 import { CommandCenterConfig } from "./Config.ts";
 import { ConnectionHealth } from "./ConnectionHealth.ts";
+import { googleKeyringEnvironment } from "./GoogleKeyring.ts";
 
 export const PINNED_GOG_VERSION = "0.15.0";
 export const MAX_GOOGLE_DRIVE_EXPORT_BYTES = 64 * 1024 * 1024;
@@ -250,6 +251,7 @@ export const layer = Layer.effect(
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const crypto = yield* Crypto.Crypto;
+    const keyringEnvironment = yield* googleKeyringEnvironment();
     const verified = yield* Ref.make(false);
     const binary = process.env.COMMAND_CENTER_GOG_BINARY ?? "gog";
     const gogHome = `${serverConfig.secretsDir}/gog`;
@@ -258,12 +260,7 @@ export const layer = Layer.effect(
       HOME: gogHome,
       XDG_CONFIG_HOME: gogHome,
       PATH: buildGoogleHelperSearchPath(binary, process.env.PATH, path),
-      ...(process.env.GOG_KEYRING_PASSWORD === undefined
-        ? {}
-        : { GOG_KEYRING_PASSWORD: process.env.GOG_KEYRING_PASSWORD }),
-      ...(process.env.GOG_KEYRING_BACKEND === undefined
-        ? {}
-        : { GOG_KEYRING_BACKEND: process.env.GOG_KEYRING_BACKEND }),
+      ...keyringEnvironment,
     };
 
     const resolveAccount = Effect.fn("GoogleReadConnector.resolveAccount")(function* (

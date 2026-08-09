@@ -365,11 +365,13 @@ const GoogleReadConnectorLayerLive = GoogleReadConnector.layer.pipe(
   Layer.provideMerge(CommandCenterConfigLayerLive),
   Layer.provide(ConnectionHealthLayerLive),
   Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSecretStore.layer),
 );
 
 const GoogleConnectionSetupLayerLive = GoogleConnectionSetup.layer.pipe(
   Layer.provideMerge(CommandCenterConfigLayerLive),
   Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSecretStore.layer),
 );
 
 const AutomationDefinitionConfigLayerLive = AutomationDefinitionConfig.layer.pipe(

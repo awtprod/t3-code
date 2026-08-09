@@ -8,6 +8,7 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import {
   googleSetupFailureMessage,
@@ -136,6 +137,7 @@ it.effect("runs split remote OAuth and stores only the runtime account binding",
   const testLayer = googleConnectionSetupLayer.pipe(
     Layer.provide(processLayer),
     Layer.provide(configLayer),
+    Layer.provide(ServerSecretStore.layer),
     Layer.provideMerge(
       ServerConfig.ServerConfig.layerTest(process.cwd(), {
         prefix: "command-center-google-setup-test-",
@@ -202,6 +204,8 @@ it.effect("runs split remote OAuth and stores only the runtime account binding",
         expect.objectContaining({
           HOME: expect.stringContaining("/secrets/gog"),
           XDG_CONFIG_HOME: expect.stringContaining("/secrets/gog"),
+          GOG_KEYRING_BACKEND: "file",
+          GOG_KEYRING_PASSWORD: expect.any(String),
         }),
       );
     }

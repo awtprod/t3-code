@@ -12,6 +12,7 @@ import { CommandCenterError, GoogleReadRequest } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { CommandCenterConfig } from "./Config.ts";
 import { ConnectionHealth } from "./ConnectionHealth.ts";
 import {
@@ -343,6 +344,7 @@ const fakeRunnerLayer = Layer.effect(
 
 const connectorTestLayer = googleReadConnectorLayer.pipe(
   Layer.provideMerge(fakeRunnerLayer),
+  Layer.provide(ServerSecretStore.layer),
   Layer.provideMerge(
     Layer.succeed(
       CommandCenterConfig,
@@ -427,6 +429,8 @@ it.effect("stores Drive exports only under runtime attachments and hashes the fi
           HOME: expect.stringContaining("/secrets/gog"),
           XDG_CONFIG_HOME: expect.stringContaining("/secrets/gog"),
           PATH: expect.any(String),
+          GOG_KEYRING_BACKEND: "file",
+          GOG_KEYRING_PASSWORD: expect.any(String),
         }),
       );
       expect(invocation.env).not.toHaveProperty("COMMAND_CENTER_GOG_BINARY");

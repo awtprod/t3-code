@@ -18,6 +18,7 @@ import * as Schema from "effect/Schema";
 import { ServerConfig } from "../config.ts";
 import { ProcessRunner } from "../processRunner.ts";
 import { CommandCenterConfig } from "./Config.ts";
+import { googleKeyringEnvironment } from "./GoogleKeyring.ts";
 import {
   buildGoogleHelperSearchPath,
   hasPinnedGogVersion,
@@ -199,6 +200,7 @@ export const layer = Layer.effect(
     const commandCenterConfig = yield* CommandCenterConfig;
     const crypto = yield* Crypto.Crypto;
     const path = yield* Path.Path;
+    const keyringEnvironment = yield* googleKeyringEnvironment();
     const sessions = yield* Ref.make(new Map<string, SetupSession>());
     const binary = process.env.COMMAND_CENTER_GOG_BINARY ?? "gog";
     const gogHome = `${serverConfig.secretsDir}/gog`;
@@ -206,12 +208,7 @@ export const layer = Layer.effect(
       HOME: gogHome,
       XDG_CONFIG_HOME: gogHome,
       PATH: buildGoogleHelperSearchPath(binary, process.env.PATH, path),
-      ...(process.env.GOG_KEYRING_PASSWORD === undefined
-        ? {}
-        : { GOG_KEYRING_PASSWORD: process.env.GOG_KEYRING_PASSWORD }),
-      ...(process.env.GOG_KEYRING_BACKEND === undefined
-        ? {}
-        : { GOG_KEYRING_BACKEND: process.env.GOG_KEYRING_BACKEND }),
+      ...keyringEnvironment,
     };
 
     const run = Effect.fn("GoogleConnectionSetup.run")(function* (
