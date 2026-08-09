@@ -1,5 +1,13 @@
 import type { Connection, Space } from "@command-center/core";
-import type { CommandCenterAutomationScheduleInterpretResult } from "@t3tools/contracts";
+import type {
+  CommandCenterAutomationScheduleInterpretResult,
+  CommandCenterGoogleConnectionSetupBeginInput,
+  CommandCenterGoogleConnectionSetupBeginResult,
+  CommandCenterGoogleConnectionSetupCompleteInput,
+  CommandCenterGoogleConnectionSetupCompleteResult,
+  CommandCenterGoogleConnectionRemoveInput,
+  CommandCenterGoogleConnectionRemoveResult,
+} from "@t3tools/contracts";
 
 export const AUTOMATION_EDITOR_NODE_KINDS = [
   "agent.run",
@@ -117,5 +125,20 @@ export interface AutomationEditorProps {
         readonly text: string;
         readonly timezone: string;
       }) => Promise<CommandCenterAutomationScheduleInterpretResult>)
+    | undefined;
+  readonly onBeginGoogleConnectionSetup?:
+    | ((
+        input: Omit<CommandCenterGoogleConnectionSetupBeginInput, "spaceId">,
+      ) => Promise<CommandCenterGoogleConnectionSetupBeginResult>)
+    | undefined;
+  readonly onCompleteGoogleConnectionSetup?:
+    | ((
+        input: CommandCenterGoogleConnectionSetupCompleteInput,
+      ) => Promise<CommandCenterGoogleConnectionSetupCompleteResult>)
+    | undefined;
+  readonly onRemoveGoogleConnection?:
+    | ((
+        input: Omit<CommandCenterGoogleConnectionRemoveInput, "spaceId">,
+      ) => Promise<CommandCenterGoogleConnectionRemoveResult>)
     | undefined;
 }

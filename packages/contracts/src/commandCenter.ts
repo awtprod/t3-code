@@ -55,6 +55,9 @@ export const COMMAND_CENTER_WS_METHODS = {
   artifactsQuery: "cc.artifacts.query",
   connectionsQuery: "cc.connections.query",
   connectionsRefresh: "cc.connections.refresh",
+  googleConnectionSetupBegin: "cc.connections.google.setup.begin",
+  googleConnectionSetupComplete: "cc.connections.google.setup.complete",
+  googleConnectionRemove: "cc.connections.google.remove",
   memoryQuery: "cc.memory.query",
   memorySearch: "cc.memory.search",
   itemCreate: "cc.items.create",
@@ -400,6 +403,62 @@ export const CommandCenterConnectionRefreshInput = Schema.Struct({
   connectionId: ConnectionId,
 });
 export type CommandCenterConnectionRefreshInput = typeof CommandCenterConnectionRefreshInput.Type;
+
+export const CommandCenterGoogleConnectionSetupCapability = Schema.Literals([
+  "gmail.read",
+  "gmail.drafts.create",
+]);
+export type CommandCenterGoogleConnectionSetupCapability =
+  typeof CommandCenterGoogleConnectionSetupCapability.Type;
+
+export const CommandCenterGoogleConnectionSetupBeginInput = Schema.Struct({
+  spaceId: SpaceId,
+  email: TrimmedNonEmptyString.check(Schema.isMaxLength(320)),
+  capabilities: Schema.Array(CommandCenterGoogleConnectionSetupCapability).check(
+    Schema.isNonEmpty(),
+  ),
+  oauthClientJson: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(64 * 1024))),
+});
+export type CommandCenterGoogleConnectionSetupBeginInput =
+  typeof CommandCenterGoogleConnectionSetupBeginInput.Type;
+
+export const CommandCenterGoogleConnectionSetupBeginResult = Schema.Struct({
+  sessionId: TrimmedNonEmptyString,
+  authUrl: TrimmedNonEmptyString,
+  expiresAt: Timestamp,
+});
+export type CommandCenterGoogleConnectionSetupBeginResult =
+  typeof CommandCenterGoogleConnectionSetupBeginResult.Type;
+
+export const CommandCenterGoogleConnectionSetupCompleteInput = Schema.Struct({
+  sessionId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  redirectUrl: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(8 * 1024),
+    Schema.isPattern(/^https?:\/\//u),
+  ),
+});
+export type CommandCenterGoogleConnectionSetupCompleteInput =
+  typeof CommandCenterGoogleConnectionSetupCompleteInput.Type;
+
+export const CommandCenterGoogleConnectionSetupCompleteResult = Schema.Struct({
+  connection: Connection,
+});
+export type CommandCenterGoogleConnectionSetupCompleteResult =
+  typeof CommandCenterGoogleConnectionSetupCompleteResult.Type;
+
+export const CommandCenterGoogleConnectionRemoveInput = Schema.Struct({
+  spaceId: SpaceId,
+  connectionId: ConnectionId,
+});
+export type CommandCenterGoogleConnectionRemoveInput =
+  typeof CommandCenterGoogleConnectionRemoveInput.Type;
+
+export const CommandCenterGoogleConnectionRemoveResult = Schema.Struct({
+  connectionId: ConnectionId,
+  removed: Schema.Literal(true),
+});
+export type CommandCenterGoogleConnectionRemoveResult =
+  typeof CommandCenterGoogleConnectionRemoveResult.Type;
 
 export const CommandCenterMemoryQueryInput = Schema.Struct({
   spaceId: Schema.optional(SpaceId),

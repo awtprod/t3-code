@@ -149,6 +149,7 @@ import * as AutomationTriggerCoordinator from "./command-center/automation/Trigg
 import * as AutomationScheduleInterpreter from "./command-center/automation/ScheduleInterpreter.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
@@ -430,6 +431,9 @@ const makeWsRpcLayer = (
       const commandCenterAutomationTriggers = yield* AutomationTriggerCoordinator.make;
       const commandCenterMemorySearch = yield* MemorySearchIndex.MemorySearchIndex;
       const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
+      const googleConnectionSetup = yield* Effect.serviceOption(
+        GoogleConnectionSetup.GoogleConnectionSetup,
+      );
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1072,6 +1076,86 @@ const makeWsRpcLayer = (
               },
               input,
             ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.googleConnectionSetupBegin]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.googleConnectionSetupBegin,
+            Option.match(googleConnectionSetup, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "connector",
+                    message: "Google account setup is unavailable in this environment.",
+                  }),
+                ),
+              onSome: (setup) => setup.begin(input),
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.googleConnectionSetupComplete]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.googleConnectionSetupComplete,
+            Option.match(googleConnectionSetup, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "connector",
+                    message: "Google account setup is unavailable in this environment.",
+                  }),
+                ),
+              onSome: (setup) =>
+                setup.complete(input).pipe(
+                  Effect.tap(() => commandCenter.syncConfiguration({ force: true })),
+                  Effect.tap((selection) =>
+                    googleReadConnector.verify(selection).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new CommandCenterError({
+                            reason: "connector",
+                            message: "The Google account was connected but could not be verified.",
+                            cause,
+                          }),
+                      ),
+                    ),
+                  ),
+                  Effect.flatMap((selection) =>
+                    commandCenter.queryConnections({ spaceId: selection.spaceId }).pipe(
+                      Effect.flatMap(({ connections }) => {
+                        const connection = connections.find(
+                          (candidate) => candidate.id === selection.connectionId,
+                        );
+                        return connection === undefined
+                          ? Effect.fail(
+                              new CommandCenterError({
+                                reason: "not_found",
+                                message: "The connected Google account could not be loaded.",
+                              }),
+                            )
+                          : Effect.succeed({ connection });
+                      }),
+                    ),
+                  ),
+                ),
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.googleConnectionRemove]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.googleConnectionRemove,
+            Option.match(googleConnectionSetup, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "connector",
+                    message: "Google account removal is unavailable in this environment.",
+                  }),
+                ),
+              onSome: (setup) =>
+                setup
+                  .remove(input)
+                  .pipe(Effect.tap(() => commandCenter.syncConfiguration({ force: true }))),
+            }),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.memoryQuery]: (input) =>

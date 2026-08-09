@@ -43,7 +43,7 @@ import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { AutomationEditor } from "./AutomationEditor";
 import { automationSpaceName, type AutomationsScreenStatus } from "./AutomationsScreen.logic";
 import { validateAutomationEditorDefinition } from "./logic";
-import type { AutomationEditorDefinition } from "./types";
+import type { AutomationEditorDefinition, AutomationEditorProps } from "./types";
 
 export interface AutomationEnvironmentOption {
   readonly id: EnvironmentId;
@@ -66,6 +66,9 @@ export interface AutomationsScreenProps {
         readonly timezone: string;
       }) => Promise<CommandCenterAutomationScheduleInterpretResult>)
     | undefined;
+  readonly onBeginGoogleConnectionSetup?: AutomationEditorProps["onBeginGoogleConnectionSetup"];
+  readonly onCompleteGoogleConnectionSetup?: AutomationEditorProps["onCompleteGoogleConnectionSetup"];
+  readonly onRemoveGoogleConnection?: AutomationEditorProps["onRemoveGoogleConnection"];
   readonly onRefresh?: (() => void) | undefined;
   readonly isRefreshing?: boolean | undefined;
   readonly refreshError?: string | null | undefined;
@@ -206,6 +209,9 @@ export function AutomationsScreen({
   connections,
   environmentTimezone,
   onInterpretSchedule,
+  onBeginGoogleConnectionSetup,
+  onCompleteGoogleConnectionSetup,
+  onRemoveGoogleConnection,
   onRefresh,
   isRefreshing = false,
   refreshError,
@@ -559,6 +565,9 @@ export function AutomationsScreen({
                   definition={editorDefinition}
                   environmentTimezone={environmentTimezone}
                   onDefinitionChange={onDefinitionChange}
+                  onBeginGoogleConnectionSetup={onBeginGoogleConnectionSetup}
+                  onCompleteGoogleConnectionSetup={onCompleteGoogleConnectionSetup}
+                  onRemoveGoogleConnection={onRemoveGoogleConnection}
                   onInterpretSchedule={onInterpretSchedule}
                   readOnly={authoringUnavailable}
                   selectedSpace={spaces.find((space) => space.id === editorDefinition.spaceId)}

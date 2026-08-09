@@ -126,6 +126,7 @@ import * as AutomationScopedShell from "./command-center/automation/AutomationSc
 import * as VerifiedScopedShell from "./command-center/automation/VerifiedScopedShell.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
 import * as CommandCenterConfig from "./command-center/Config.ts";
 import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
@@ -366,6 +367,11 @@ const GoogleReadConnectorLayerLive = GoogleReadConnector.layer.pipe(
   Layer.provide(ProcessRunner.layer),
 );
 
+const GoogleConnectionSetupLayerLive = GoogleConnectionSetup.layer.pipe(
+  Layer.provideMerge(CommandCenterConfigLayerLive),
+  Layer.provide(ProcessRunner.layer),
+);
+
 const AutomationDefinitionConfigLayerLive = AutomationDefinitionConfig.layer.pipe(
   Layer.provideMerge(CommandCenterConfigLayerLive),
   Layer.provide(ProcessRunner.layer),
@@ -388,6 +394,7 @@ const CommandCenterBaseLayerLive = Layer.mergeAll(
   CommandCenterEventStream.layer,
   MemorySearchIndex.layer,
   GoogleReadConnectorLayerLive,
+  GoogleConnectionSetupLayerLive,
   AutomationDefinitionConfigLayerLive,
   AutomationScheduleInterpreterLayerLive,
   AutomationScopedShellLayerLive,

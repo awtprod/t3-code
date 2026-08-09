@@ -116,6 +116,17 @@ function AutomationsEnvironmentRouteView({
   const interpretSchedule = useAtomCommand(commandCenterEnvironment.interpretAutomationSchedule, {
     reportFailure: false,
   });
+  const beginGoogleConnectionSetup = useAtomCommand(
+    commandCenterEnvironment.beginGoogleConnectionSetup,
+    { reportFailure: false },
+  );
+  const completeGoogleConnectionSetup = useAtomCommand(
+    commandCenterEnvironment.completeGoogleConnectionSetup,
+    { reportFailure: false },
+  );
+  const removeGoogleConnection = useAtomCommand(commandCenterEnvironment.removeGoogleConnection, {
+    reportFailure: false,
+  });
   const syncSpaces = useAtomCommand(commandCenterEnvironment.syncSpaces, { reportFailure: false });
   const status = resolveAutomationsScreenStatus({
     connected: environmentId !== null,
@@ -359,6 +370,42 @@ function AutomationsEnvironmentRouteView({
       isRefreshing={isRefreshing}
       refreshError={refreshError}
       onDefinitionChange={changeDefinition}
+      onBeginGoogleConnectionSetup={async (input) => {
+        if (environmentId === null || selectedAutomation === undefined) {
+          throw new Error("Choose an automation environment before connecting Google.");
+        }
+        const result = await beginGoogleConnectionSetup({
+          environmentId,
+          input: { ...input, spaceId: selectedAutomation.spaceId },
+        });
+        if (result._tag === "Success") return result.value;
+        throw squashAtomCommandFailure(result);
+      }}
+      onCompleteGoogleConnectionSetup={async (input) => {
+        if (environmentId === null) {
+          throw new Error("Choose an automation environment before connecting Google.");
+        }
+        const result = await completeGoogleConnectionSetup({ environmentId, input });
+        if (result._tag === "Success") {
+          bootstrapQuery.refresh();
+          return result.value;
+        }
+        throw squashAtomCommandFailure(result);
+      }}
+      onRemoveGoogleConnection={async (input) => {
+        if (environmentId === null || selectedAutomation === undefined) {
+          throw new Error("Choose an automation environment before removing Google.");
+        }
+        const result = await removeGoogleConnection({
+          environmentId,
+          input: { ...input, spaceId: selectedAutomation.spaceId },
+        });
+        if (result._tag === "Success") {
+          bootstrapQuery.refresh();
+          return result.value;
+        }
+        throw squashAtomCommandFailure(result);
+      }}
       onEnvironmentChange={onEnvironmentChange}
       onInterpretSchedule={async ({ text, timezone }) => {
         if (environmentId === null || selectedAutomation === undefined) {

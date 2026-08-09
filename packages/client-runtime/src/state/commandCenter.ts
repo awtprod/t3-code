@@ -67,6 +67,35 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.connectionId]),
       },
     }),
+    beginGoogleConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:google-connection-setup-begin",
+      tag: COMMAND_CENTER_WS_METHODS.googleConnectionSetupBegin,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.email]),
+      },
+    }),
+    completeGoogleConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:google-connection-setup-complete",
+      tag: COMMAND_CENTER_WS_METHODS.googleConnectionSetupComplete,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sessionId]),
+      },
+    }),
+    removeGoogleConnection: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:google-connection-remove",
+      tag: COMMAND_CENTER_WS_METHODS.googleConnectionRemove,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.connectionId]),
+      },
+    }),
     eventReplay: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:event-replay",
       tag: COMMAND_CENTER_WS_METHODS.eventsReplay,

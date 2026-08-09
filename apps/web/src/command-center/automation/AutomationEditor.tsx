@@ -36,8 +36,10 @@ import {
   Clock3Icon,
   Maximize2Icon,
   GitBranchIcon,
+  ExternalLinkIcon,
   ListTodoIcon,
   LoaderCircleIcon,
+  MailIcon,
   PencilIcon,
   PlusIcon,
   Repeat2Icon,
@@ -46,6 +48,7 @@ import {
   SparklesIcon,
   TerminalIcon,
   Trash2Icon,
+  UploadIcon,
   XIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -535,37 +538,97 @@ function TextAreaField({
 function ConnectionSelect({
   config,
   connections,
+  label = "Email account",
   readOnly,
   onConfigChange,
+  onRemoveConnection,
+  onRequestSetup,
 }: {
   readonly config: AutomationEditorNode["config"];
   readonly connections: ReadonlyArray<Connection>;
+  readonly label?: string;
   readonly readOnly: boolean;
   readonly onConfigChange: (config: AutomationEditorNode["config"]) => void;
+  readonly onRemoveConnection?: ((connectionId: Connection["id"]) => Promise<void>) | undefined;
+  readonly onRequestSetup?: (() => void) | undefined;
 }) {
   const value = stringValue(config.connectionId);
   const googleConnections = connections.filter((connection) => connection.kind === "google");
+  const selectedConnection = googleConnections.find((connection) => connection.id === value);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string>();
+  const remove = async () => {
+    if (!selectedConnection || !onRemoveConnection) return;
+    if (!window.confirm(`Remove ${selectedConnection.label} from this Space?`)) return;
+    setRemoving(true);
+    setRemoveError(undefined);
+    try {
+      await onRemoveConnection(selectedConnection.id);
+      onConfigChange(patchConfig(config, { connectionId: "" }));
+    } catch (cause) {
+      setRemoveError(cause instanceof Error ? cause.message : "The account could not be removed.");
+    } finally {
+      setRemoving(false);
+    }
+  };
   return (
-    <Field label="Connection">
-      <select
-        className={selectClassName()}
-        disabled={readOnly}
-        onChange={(event) =>
-          onConfigChange(patchConfig(config, { connectionId: event.currentTarget.value }))
-        }
-        value={value}
-      >
-        <option value="">Choose a connection</option>
-        {value && !googleConnections.some((connection) => connection.id === value) ? (
-          <option value={value}>{value}</option>
-        ) : null}
-        {googleConnections.map((connection) => (
-          <option key={connection.id} value={connection.id}>
-            {connection.label}
-            {connection.health === "connected" ? "" : ` · ${connection.health}`}
+    <Field label={label}>
+      <div className="mt-1 space-y-2">
+        <select
+          className={selectClassName()}
+          disabled={readOnly}
+          onChange={(event) =>
+            onConfigChange(patchConfig(config, { connectionId: event.currentTarget.value }))
+          }
+          value={value}
+        >
+          <option value="">
+            {googleConnections.length === 0 ? "No Google account connected" : "Choose an account"}
           </option>
-        ))}
-      </select>
+          {value && !googleConnections.some((connection) => connection.id === value) ? (
+            <option value={value}>{value}</option>
+          ) : null}
+          {googleConnections.map((connection) => (
+            <option key={connection.id} value={connection.id}>
+              {connection.label}
+              {connection.health === "connected" ? "" : ` · ${connection.health}`}
+            </option>
+          ))}
+        </select>
+        {!readOnly && onRequestSetup ? (
+          <Button className="w-full" onClick={onRequestSetup} size="sm" variant="outline">
+            <MailIcon />
+            Connect Gmail account
+          </Button>
+        ) : null}
+        {!readOnly && selectedConnection && onRemoveConnection ? (
+          <Button
+            className="w-full"
+            disabled={removing}
+            onClick={() => void remove()}
+            size="sm"
+            variant="ghost"
+          >
+            {removing ? (
+              <LoaderCircleIcon className="animate-spin motion-reduce:animate-none" />
+            ) : (
+              <Trash2Icon />
+            )}
+            {removing ? "Removing account" : "Remove account from Space"}
+          </Button>
+        ) : null}
+        {removeError ? (
+          <p className="text-xs text-destructive" role="alert">
+            {removeError}
+          </p>
+        ) : null}
+        {googleConnections.length === 0 ? (
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            Connect the Google account this step should use. It will be available only in this Space
+            on the selected environment.
+          </p>
+        ) : null}
+      </div>
     </Field>
   );
 }
@@ -575,7 +638,15 @@ function ConnectorReadFields({
   connections,
   readOnly,
   onChange,
-}: GuidedFieldsProps & { readonly connections: ReadonlyArray<Connection> }) {
+  onRemoveGoogleConnection,
+  onRequestGoogleSetup,
+}: GuidedFieldsProps & {
+  readonly connections: ReadonlyArray<Connection>;
+  readonly onRemoveGoogleConnection?:
+    | ((connectionId: Connection["id"]) => Promise<void>)
+    | undefined;
+  readonly onRequestGoogleSetup?: (() => void) | undefined;
+}) {
   const config = node.config;
   const operation = stringValue(config.operation) || "gmail.search";
   const set = (patch: Readonly<Record<string, AutomationEditorJson | undefined>>) =>
@@ -587,7 +658,10 @@ function ConnectorReadFields({
       <ConnectionSelect
         config={config}
         connections={connections}
+        label={operation.startsWith("gmail.") ? "Email account" : "Google connection"}
         onConfigChange={onChange}
+        onRemoveConnection={onRemoveGoogleConnection}
+        onRequestSetup={operation.startsWith("gmail.") ? onRequestGoogleSetup : undefined}
         readOnly={readOnly}
       />
       <Field label="Read">
@@ -711,7 +785,15 @@ function ConnectorWriteFields({
   connections,
   readOnly,
   onChange,
-}: GuidedFieldsProps & { readonly connections: ReadonlyArray<Connection> }) {
+  onRemoveGoogleConnection,
+  onRequestGoogleSetup,
+}: GuidedFieldsProps & {
+  readonly connections: ReadonlyArray<Connection>;
+  readonly onRemoveGoogleConnection?:
+    | ((connectionId: Connection["id"]) => Promise<void>)
+    | undefined;
+  readonly onRequestGoogleSetup?: (() => void) | undefined;
+}) {
   const config = node.config;
   const set = (patch: Readonly<Record<string, AutomationEditorJson | undefined>>) =>
     onChange(patchConfig(config, { operation: "gmail.draft.create", ...patch }));
@@ -725,6 +807,8 @@ function ConnectorWriteFields({
         config={config}
         connections={connections}
         onConfigChange={onChange}
+        onRemoveConnection={onRemoveGoogleConnection}
+        onRequestSetup={onRequestGoogleSetup}
         readOnly={readOnly}
       />
       <StringInput
@@ -790,9 +874,15 @@ function GuidedNodeFields({
   connections,
   readOnly,
   onChange,
+  onRemoveGoogleConnection,
+  onRequestGoogleSetup,
 }: GuidedFieldsProps & {
   readonly selectedSpace?: Space | undefined;
   readonly connections: ReadonlyArray<Connection>;
+  readonly onRemoveGoogleConnection?:
+    | ((connectionId: Connection["id"]) => Promise<void>)
+    | undefined;
+  readonly onRequestGoogleSetup?: (() => void) | undefined;
 }) {
   const config = node.config;
   const set = (
@@ -863,6 +953,8 @@ function GuidedNodeFields({
           connections={connections}
           node={node}
           onChange={onChange}
+          onRemoveGoogleConnection={onRemoveGoogleConnection}
+          onRequestGoogleSetup={onRequestGoogleSetup}
           readOnly={readOnly}
         />
       );
@@ -872,6 +964,8 @@ function GuidedNodeFields({
           connections={connections}
           node={node}
           onChange={onChange}
+          onRemoveGoogleConnection={onRemoveGoogleConnection}
+          onRequestGoogleSetup={onRequestGoogleSetup}
           readOnly={readOnly}
         />
       );
@@ -1076,6 +1170,219 @@ function GuidedNodeFields({
   }
 }
 
+type GoogleSetupCapability = "gmail.read" | "gmail.drafts.create";
+
+function GoogleConnectionSetupDialog({
+  capabilities,
+  onBegin,
+  onComplete,
+  onConnected,
+  onClose,
+}: {
+  readonly capabilities: ReadonlyArray<GoogleSetupCapability>;
+  readonly onBegin: NonNullable<AutomationEditorProps["onBeginGoogleConnectionSetup"]>;
+  readonly onComplete: NonNullable<AutomationEditorProps["onCompleteGoogleConnectionSetup"]>;
+  readonly onConnected: (connectionId: string) => void;
+  readonly onClose: () => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [oauthClientJson, setOauthClientJson] = useState<string>();
+  const [oauthClientName, setOauthClientName] = useState<string>();
+  const [session, setSession] =
+    useState<
+      Awaited<ReturnType<NonNullable<AutomationEditorProps["onBeginGoogleConnectionSetup"]>>>
+    >();
+  const [redirectUrl, setRedirectUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string>();
+
+  const begin = async () => {
+    if (!email.trim()) return;
+    setBusy(true);
+    setMessage(undefined);
+    try {
+      setSession(
+        await onBegin({
+          email: email.trim(),
+          capabilities: [...capabilities],
+          ...(oauthClientJson === undefined ? {} : { oauthClientJson }),
+        }),
+      );
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : "Google setup could not be started.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const complete = async () => {
+    if (!session || !redirectUrl.trim()) return;
+    setBusy(true);
+    setMessage(undefined);
+    try {
+      const result = await onComplete({
+        sessionId: session.sessionId,
+        redirectUrl: redirectUrl.trim(),
+      });
+      onConnected(result.connection.id);
+      onClose();
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : "Google authorization could not finish.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      aria-label="Connect Gmail account"
+      aria-modal="true"
+      className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
+      role="dialog"
+    >
+      <div className="max-h-[calc(100%-2rem)] w-full max-w-lg overflow-y-auto rounded-2xl border bg-card shadow-2xl">
+        <div className="flex items-center gap-3 border-b px-5 py-4">
+          <span className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+            <MailIcon className="size-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="font-semibold">Connect Gmail</h2>
+            <p className="text-xs text-muted-foreground">
+              This account will be available only in the current Space.
+            </p>
+          </div>
+          <Button aria-label="Close Gmail setup" onClick={onClose} size="icon-sm" variant="ghost">
+            <XIcon />
+          </Button>
+        </div>
+
+        {session === undefined ? (
+          <div className="space-y-4 p-5">
+            <StringInput
+              label="Google account email"
+              onChange={setEmail}
+              placeholder="you@example.com"
+              readOnly={busy}
+              value={email}
+            />
+            <div className="rounded-xl border bg-muted/20 p-3 text-xs">
+              <p className="font-medium">Command Center will request:</p>
+              <ul className="mt-2 list-disc space-y-1 pl-4 text-muted-foreground">
+                <li>Read access to Gmail</li>
+                {capabilities.includes("gmail.drafts.create") ? (
+                  <li>Create Gmail drafts; sending remains blocked</li>
+                ) : null}
+              </ul>
+            </div>
+            <details className="rounded-xl border p-3 text-xs">
+              <summary className="cursor-pointer font-medium">
+                First account on this environment?
+              </summary>
+              <p className="mt-2 leading-relaxed text-muted-foreground">
+                Upload the Desktop OAuth client JSON downloaded from Google Cloud. It is sent only
+                to the selected environment and stored with its runtime credentials.
+              </p>
+              <label className="mt-3 flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed px-3 py-3 font-medium hover:bg-accent">
+                <UploadIcon className="size-4" />
+                {oauthClientName ?? "Choose OAuth client JSON"}
+                <input
+                  accept="application/json,.json"
+                  className="sr-only"
+                  disabled={busy}
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0];
+                    if (!file) return;
+                    if (file.size > 64 * 1024) {
+                      setMessage("OAuth client JSON must be smaller than 64 KB.");
+                      return;
+                    }
+                    void file.text().then((contents) => {
+                      setOauthClientJson(contents);
+                      setOauthClientName(file.name);
+                      setMessage(undefined);
+                    });
+                  }}
+                  type="file"
+                />
+              </label>
+            </details>
+            {message ? (
+              <p
+                className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"
+                role="alert"
+              >
+                {message}
+              </p>
+            ) : null}
+            <Button
+              className="w-full"
+              disabled={busy || !email.trim()}
+              onClick={() => void begin()}
+            >
+              {busy ? (
+                <LoaderCircleIcon className="animate-spin motion-reduce:animate-none" />
+              ) : (
+                <MailIcon />
+              )}
+              {busy ? "Preparing Google" : "Continue"}
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-4 p-5">
+            <div className="rounded-xl border bg-muted/20 p-4">
+              <p className="text-sm font-medium">1. Sign in and approve access</p>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Google will finish at a local address that may show a page-not-found message. That
+                is expected—copy the complete address from the browser afterward.
+              </p>
+              <Button
+                className="mt-3 w-full"
+                render={<a href={session.authUrl} rel="noreferrer" target="_blank" />}
+                variant="outline"
+              >
+                <ExternalLinkIcon />
+                Open Google authorization
+              </Button>
+            </div>
+            <TextAreaField
+              label="2. Paste the final browser address"
+              onChange={setRedirectUrl}
+              placeholder="http://127.0.0.1:…/oauth2/callback?code=…&state=…"
+              readOnly={busy}
+              value={redirectUrl}
+            />
+            {message ? (
+              <p
+                className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"
+                role="alert"
+              >
+                {message}
+              </p>
+            ) : null}
+            <div className="flex gap-2">
+              <Button disabled={busy} onClick={() => setSession(undefined)} variant="outline">
+                Back
+              </Button>
+              <Button
+                className="flex-1"
+                disabled={busy || !redirectUrl.trim()}
+                onClick={() => void complete()}
+              >
+                {busy ? (
+                  <LoaderCircleIcon className="animate-spin motion-reduce:animate-none" />
+                ) : (
+                  <CheckCircle2Icon />
+                )}
+                {busy ? "Connecting" : "Finish connection"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function NodeInspector({
   node,
   definition,
@@ -1085,6 +1392,8 @@ function NodeInspector({
   onClose,
   onDefinitionChange,
   onNodeIdChange,
+  onRemoveGoogleConnection,
+  onRequestGoogleSetup,
 }: {
   readonly node: AutomationEditorNode;
   readonly definition: AutomationEditorDefinition;
@@ -1094,6 +1403,10 @@ function NodeInspector({
   readonly onClose: () => void;
   readonly onDefinitionChange: (definition: AutomationEditorDefinition) => void;
   readonly onNodeIdChange: (nodeId: string) => void;
+  readonly onRemoveGoogleConnection?:
+    | ((connectionId: Connection["id"]) => Promise<void>)
+    | undefined;
+  readonly onRequestGoogleSetup?: ((node: AutomationEditorNode) => void) | undefined;
 }) {
   const presentation = NODE_PRESENTATION[node.kind];
   const Icon = presentation.icon;
@@ -1147,6 +1460,8 @@ function NodeInspector({
           connections={connections}
           node={node}
           onChange={updateConfig}
+          onRemoveGoogleConnection={onRemoveGoogleConnection}
+          onRequestGoogleSetup={onRequestGoogleSetup ? () => onRequestGoogleSetup(node) : undefined}
           readOnly={readOnly}
           selectedSpace={selectedSpace}
         />
@@ -2056,11 +2371,15 @@ function AutomationEditorInner({
   connections = EMPTY_CONNECTIONS,
   environmentTimezone,
   onInterpretSchedule,
+  onBeginGoogleConnectionSetup,
+  onCompleteGoogleConnectionSetup,
+  onRemoveGoogleConnection,
 }: AutomationEditorProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | undefined>();
   const [showNodePicker, setShowNodePicker] = useState(false);
   const [showIssues, setShowIssues] = useState(false);
+  const [googleSetupNodeId, setGoogleSetupNodeId] = useState<string>();
   const localIssues = useMemo(() => validateAutomationEditorDefinition(definition), [definition]);
   const issues = useMemo(
     () => mergeAutomationValidationIssues(localIssues, validationIssues),
@@ -2074,6 +2393,7 @@ function AutomationEditorInner({
   );
   const selectedNode = definition.nodes.find((node) => node.id === selectedNodeId);
   const selectedEdge = definition.edges.find((edge) => edgeId(edge) === selectedEdgeId);
+  const googleSetupNode = definition.nodes.find((node) => node.id === googleSetupNodeId);
   useEffect(() => {
     if (selectedNodeId && !definition.nodes.some((node) => node.id === selectedNodeId))
       setSelectedNodeId(undefined);
@@ -2239,6 +2559,18 @@ function AutomationEditorInner({
             onClose={() => setSelectedNodeId(undefined)}
             onDefinitionChange={publishEdit}
             onNodeIdChange={setSelectedNodeId}
+            onRemoveGoogleConnection={
+              onRemoveGoogleConnection
+                ? async (connectionId) => {
+                    await onRemoveGoogleConnection({ connectionId });
+                  }
+                : undefined
+            }
+            onRequestGoogleSetup={
+              onBeginGoogleConnectionSetup && onCompleteGoogleConnectionSetup
+                ? (node) => setGoogleSetupNodeId(node.id)
+                : undefined
+            }
             readOnly={readOnly}
             selectedSpace={selectedSpace}
           />
@@ -2252,6 +2584,27 @@ function AutomationEditorInner({
               setSelectedEdgeId(undefined);
             }}
             readOnly={readOnly}
+          />
+        ) : null}
+        {googleSetupNode && onBeginGoogleConnectionSetup && onCompleteGoogleConnectionSetup ? (
+          <GoogleConnectionSetupDialog
+            capabilities={
+              googleSetupNode.kind === "connector.write"
+                ? ["gmail.read", "gmail.drafts.create"]
+                : ["gmail.read"]
+            }
+            onBegin={onBeginGoogleConnectionSetup}
+            onClose={() => setGoogleSetupNodeId(undefined)}
+            onComplete={onCompleteGoogleConnectionSetup}
+            onConnected={(connectionId) => {
+              const current = definition.nodes.find((node) => node.id === googleSetupNode.id);
+              if (!current) return;
+              publishEdit(
+                updateAutomationNode(definition, current.id, {
+                  config: patchConfig(current.config, { connectionId }),
+                }),
+              );
+            }}
           />
         ) : null}
       </div>
