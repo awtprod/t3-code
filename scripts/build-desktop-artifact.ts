@@ -269,6 +269,15 @@ export class BuildCommandFailedError extends Schema.TaggedErrorClass<BuildComman
   }
 }
 
+export function isRetryableWindowsNsisOutputLockFailure(error: BuildCommandFailedError): boolean {
+  const output = `${error.stdoutTail ?? ""}\n${error.stderrTail ?? ""}`;
+  return (
+    error.command.includes("electron-builder") &&
+    output.includes("makensis.exe process failed") &&
+    output.includes("Can't open output file")
+  );
+}
+
 export class ResourceMonitorBuildOutputMissingError extends Schema.TaggedErrorClass<ResourceMonitorBuildOutputMissingError>()(
   "ResourceMonitorBuildOutputMissingError",
   {
@@ -2035,16 +2044,42 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     "never",
   ];
   const builderCommand = yield* resolveSpawnCommand("vp", builderArgs, { env: buildEnv });
-  yield* runCommand(
-    ChildProcess.make(builderCommand.command, builderCommand.args, {
-      cwd: repoRoot,
-      env: buildEnv,
-      shell: builderCommand.shell,
-    }),
-    {
-      label: `vp exec --filter @t3tools/desktop -- electron-builder --projectDir ${stageAppDir} ${platformConfig.cliFlag} --${options.arch} --publish never`,
-      verbose: options.verbose,
-    },
+  const builderLabel = `vp exec --filter @t3tools/desktop -- electron-builder --projectDir ${stageAppDir} ${platformConfig.cliFlag} --${options.arch} --publish never`;
+  const runBuilder = Effect.fn("runDesktopArtifactBuilder")(function* () {
+    yield* runCommand(
+      ChildProcess.make(builderCommand.command, builderCommand.args, {
+        cwd: repoRoot,
+        env: buildEnv,
+        shell: builderCommand.shell,
+      }),
+      {
+        label: builderLabel,
+        verbose: options.verbose,
+      },
+    );
+  });
+  const retryBuilderAfterWindowsOutputLock = Effect.fn(
+    "retryDesktopArtifactBuilderAfterWindowsOutputLock",
+  )(function* () {
+    yield* Effect.logWarning(
+      "[desktop-artifact] Windows temporarily locked the NSIS output; retrying packaging once...",
+    );
+    yield* Effect.sleep("5 seconds");
+    yield* fs
+      .remove(path.join(stageAppDir, "dist", `Command-Center-${appVersion}-${options.arch}.exe`), {
+        force: true,
+      })
+      .pipe(Effect.ignore);
+    yield* runBuilder();
+  });
+  yield* runBuilder().pipe(
+    Effect.catchIf(
+      (error) =>
+        options.platform === "win" &&
+        options.target === "nsis" &&
+        isRetryableWindowsNsisOutputLockFailure(error),
+      () => retryBuilderAfterWindowsOutputLock(),
+    ),
   );
 
   const stageDistDir = path.join(stageAppDir, "dist");
