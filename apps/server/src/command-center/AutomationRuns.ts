@@ -599,31 +599,45 @@ export const safeRuntimeLayer = Layer.unwrap(
       googleDraft: (input) =>
         Effect.gen(function* () {
           const requiredCapability = googleCapabilityForDraft(input.operation);
-          const connections = (yield* commandCenter.queryConnections({ spaceId: input.spaceId })).connections;
+          const connections = (yield* commandCenter.queryConnections({ spaceId: input.spaceId }))
+            .connections;
           const connection = connections.find(
-            (candidate) => candidate.id === input.connectionId && candidate.spaceId === input.spaceId &&
-              candidate.kind === "google" && candidate.capabilities.includes(requiredCapability),
+            (candidate) =>
+              candidate.id === input.connectionId &&
+              candidate.spaceId === input.spaceId &&
+              candidate.kind === "google" &&
+              candidate.capabilities.includes(requiredCapability),
           );
           if (connection === undefined) {
-            return yield* Effect.fail(`The requested Google connection does not grant ${requiredCapability}.`);
+            return yield* Effect.fail(
+              `The requested Google connection does not grant ${requiredCapability}.`,
+            );
           }
-          const artifacts = input.attachmentArtifactIds === undefined
-            ? []
-            : (yield* commandCenter.queryArtifacts({ spaceId: input.spaceId, limit: 500 })).artifacts.filter(
-                (artifact) => input.attachmentArtifactIds!.includes(artifact.id),
-              );
+          const artifacts =
+            input.attachmentArtifactIds === undefined
+              ? []
+              : (yield* commandCenter.queryArtifacts({
+                  spaceId: input.spaceId,
+                  limit: 500,
+                })).artifacts.filter((artifact) =>
+                  input.attachmentArtifactIds!.includes(artifact.id),
+                );
           if (artifacts.length !== (input.attachmentArtifactIds?.length ?? 0)) {
             return yield* Effect.fail("A Gmail draft attachment is not available in this Space.");
           }
           const attachmentPaths = artifacts.map((artifact) => {
             const extension = artifact.name.split(".").at(-1);
-            return extension !== undefined && /^[a-z0-9]{1,10}$/iu.test(extension) &&
-              artifact.kind === "export" && artifact.locator === `cc-artifact://${artifact.id}`
+            return extension !== undefined &&
+              /^[a-z0-9]{1,10}$/iu.test(extension) &&
+              artifact.kind === "export" &&
+              artifact.locator === `cc-artifact://${artifact.id}`
               ? path.join(serverConfig.attachmentsDir, "exports", `${artifact.id}.${extension}`)
               : undefined;
           });
           if (attachmentPaths.some((attachmentPath) => attachmentPath === undefined)) {
-            return yield* Effect.fail("Gmail drafts may attach only server-owned export artifacts.");
+            return yield* Effect.fail(
+              "Gmail drafts may attach only server-owned export artifacts.",
+            );
           }
           const resolvedAttachmentPaths = attachmentPaths.filter(
             (attachmentPath): attachmentPath is string => attachmentPath !== undefined,

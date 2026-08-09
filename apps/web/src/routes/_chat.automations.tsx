@@ -115,6 +115,9 @@ function AutomationsEnvironmentRouteView({
   const createDefinition = useAtomCommand(commandCenterEnvironment.createAutomationDefinition, {
     reportFailure: false,
   });
+  const interpretSchedule = useAtomCommand(commandCenterEnvironment.interpretAutomationSchedule, {
+    reportFailure: false,
+  });
   const syncSpaces = useAtomCommand(commandCenterEnvironment.syncSpaces, { reportFailure: false });
   const status = resolveAutomationsScreenStatus({
     connected: environmentId !== null,
@@ -272,7 +275,9 @@ function AutomationsEnvironmentRouteView({
     setRefreshError(null);
     const result = await syncSpaces({ environmentId, input: {} });
     if (result._tag !== "Success") {
-      setRefreshError("Could not recheck the private configuration. Try again after the environment is reachable.");
+      setRefreshError(
+        "Could not recheck the private configuration. Try again after the environment is reachable.",
+      );
       setIsRefreshing(false);
       return;
     }
@@ -292,6 +297,7 @@ function AutomationsEnvironmentRouteView({
     <AutomationsScreen
       authoringHealth={definitionQuery.data?.authoringHealth ?? bootstrap?.authoringHealth}
       automations={bootstrap?.automations ?? []}
+      connections={bootstrap?.connections ?? []}
       configCommitSha={
         activeDraft?.configCommitSha ?? definitionQuery.data?.configCommitSha ?? undefined
       }
@@ -299,6 +305,7 @@ function AutomationsEnvironmentRouteView({
       editorError={saveError ?? definitionQuery.error}
       editorStatus={editorStatus}
       environmentId={environmentId}
+      environmentTimezone={bootstrap?.timezone}
       environmentOptions={environmentOptions}
       hasUnsavedChanges={Object.values(drafts).some(({ dirty }) => dirty)}
       isDirty={activeDraft?.dirty ?? false}
@@ -308,6 +315,17 @@ function AutomationsEnvironmentRouteView({
       refreshError={refreshError}
       onDefinitionChange={changeDefinition}
       onEnvironmentChange={onEnvironmentChange}
+      onInterpretSchedule={async ({ text, timezone }) => {
+        if (environmentId === null || selectedAutomation === undefined) {
+          throw new Error("Choose an automation environment before interpreting a schedule.");
+        }
+        const result = await interpretSchedule({
+          environmentId,
+          input: { spaceId: selectedAutomation.spaceId, text, timezone },
+        });
+        if (result._tag === "Success") return result.value;
+        throw squashAtomCommandFailure(result);
+      }}
       onCreate={(input) => {
         void create(input);
       }}

@@ -12,7 +12,15 @@ const DEFINITION: AutomationEditorDefinition = {
   enabled: false,
   trigger: { kind: "manual" },
   nodes: [
-    { id: "gather", kind: "connector.read", config: { source: "sample" } },
+    {
+      id: "gather",
+      kind: "connector.read",
+      config: {
+        connectionId: "sample-google",
+        operation: "gmail.search",
+        query: "is:unread",
+      },
+    },
     { id: "summarize", kind: "transform", config: { template: "sample-summary" } },
   ],
   edges: [{ from: "gather", to: "summarize" }],
@@ -26,33 +34,21 @@ const DEFINITION: AutomationEditorDefinition = {
 };
 
 describe("AutomationEditor", () => {
-  it("renders typed draggable nodes and SVG connections", () => {
+  it("renders the React Flow canvas and primary workflow controls", () => {
     const html = renderToStaticMarkup(
       <AutomationEditor definition={DEFINITION} onDefinitionChange={vi.fn()} />,
     );
 
     expect(html).toContain('data-slot="automation-editor"');
     expect(html).toContain("@container/automation");
-    expect(html).toContain("@[80rem]/automation:flex-row");
     expect(html).toContain('data-slot="automation-canvas"');
-    expect(html).toContain('data-slot="automation-edges"');
-    expect(html).toContain('data-kind="connector.read"');
-    expect(html).toContain('data-kind="transform"');
-    expect(html).toContain('data-edge="gather:summarize"');
-    expect(html).toContain('aria-label="Move gather"');
-    expect(html).toContain("Valid graph");
-    expect(html).toContain('aria-label="Add Agent node"');
-    expect(html).toContain('aria-label="Add Scoped shell node"');
+    expect(html).toContain('data-testid="rf__wrapper"');
+    expect(html).toContain('aria-label="Control Panel"');
+    expect(html).toContain("Add step");
+    expect(html).toContain('aria-label="Fit workflow"');
+    expect(html).toContain("Ready");
     expect(html).toContain('aria-label="Automation name"');
     expect(html).toContain('aria-label="Automation trigger type"');
-    expect(html).toContain('aria-label="Edit gather"');
-    expect(html).toContain('aria-label="Delete gather"');
-    expect(html).toContain('data-slot="automation-inspector"');
-    expect(html).toContain('aria-label="Node ID for gather"');
-    expect(html).toContain('aria-label="Node type for gather"');
-    expect(html).toContain('aria-label="Config for gather"');
-    expect(html).toContain('aria-label="Connection source node"');
-    expect(html).toContain('aria-label="Remove connection gather to summarize"');
   });
 
   it("exposes local and server validation issues without drawing broken edges", () => {
@@ -75,11 +71,8 @@ describe("AutomationEditor", () => {
       />,
     );
 
-    expect(html).toContain('data-slot="automation-validation"');
-    expect(html).toContain('data-issue-code="graph.unknown-edge-target"');
-    expect(html).toContain('data-issue-code="policy.disallowed-capability"');
-    expect(html).toContain("One node requests a capability outside this Space.");
-    expect(html).not.toContain('data-edge="summarize:missing"');
+    expect(html).toContain("2 issues");
+    expect(html).not.toContain("One node requests a capability outside this Space.");
   });
 
   it("marks malformed agent and scoped-shell drafts invalid", () => {
@@ -95,9 +88,8 @@ describe("AutomationEditor", () => {
       <AutomationEditor definition={unsupported} onDefinitionChange={vi.fn()} />,
     );
 
-    expect(html).toContain('data-issue-code="node.config.invalid"');
     expect(html).toContain("2 issues");
-    expect(html).not.toContain("Valid graph");
+    expect(html).not.toContain("Ready");
   });
 
   it("renders editable schedule and authenticated webhook trigger fields", () => {
@@ -117,8 +109,10 @@ describe("AutomationEditor", () => {
       />,
     );
 
-    expect(schedule).toContain('aria-label="Schedule expression"');
-    expect(schedule).toContain('aria-label="Schedule timezone"');
+    expect(schedule).toContain("When should this run?");
+    expect(schedule).toContain("Timezone");
+    expect(schedule).toContain("Choose manually");
+    expect(schedule).not.toContain("0 9 * * 1");
     expect(webhook).toContain('aria-label="Webhook route"');
     expect(webhook).not.toContain("Webhook triggers are unavailable");
   });
@@ -129,7 +123,6 @@ describe("AutomationEditor", () => {
     );
 
     expect(html).toContain("Read only");
-    expect(html).toMatch(/aria-label="Move gather"[^>]*disabled=""/);
-    expect(html).toMatch(/aria-label="Add Connector read node"[^>]*disabled=""/);
+    expect(html).toMatch(/disabled=""[^>]*>[^<]*<svg[^>]*>.*Add step/s);
   });
 });

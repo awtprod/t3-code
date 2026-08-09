@@ -271,3 +271,36 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
 
   return { prompt, outputSchema };
 }
+
+export function buildAutomationSchedulePrompt(input: {
+  readonly text: string;
+  readonly timezone: string;
+}) {
+  const prompt = [
+    "You translate a user's recurring schedule request into a five-field cron expression.",
+    "Return exactly one of the JSON shapes allowed by the supplied schema.",
+    "Rules:",
+    "- The five fields are minute, hour, day of month, month, and day of week.",
+    "- Use numeric values, *, comma lists, inclusive ranges, or */N steps only.",
+    "- The minimum frequency is once per minute.",
+    "- Interpret times in the supplied IANA timezone.",
+    "- Only recurring schedules are supported; ask for clarification for one-time dates.",
+    "- Ask for clarification instead of guessing when timing, recurrence, or AM/PM is ambiguous.",
+    "- Do not include the timezone inside the cron expression.",
+    "",
+    `Timezone: ${input.timezone}`,
+    "User schedule:",
+    limitSection(input.text, 500),
+  ].join("\n");
+  const outputSchema = Schema.Union([
+    Schema.Struct({
+      status: Schema.Literal("interpreted"),
+      expression: Schema.String,
+    }),
+    Schema.Struct({
+      status: Schema.Literal("needs_clarification"),
+      message: Schema.String,
+    }),
+  ]);
+  return { prompt, outputSchema };
+}

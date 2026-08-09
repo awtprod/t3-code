@@ -1,3 +1,6 @@
+import type { Connection, Space } from "@command-center/core";
+import type { CommandCenterAutomationScheduleInterpretResult } from "@t3tools/contracts";
+
 export const AUTOMATION_EDITOR_NODE_KINDS = [
   "agent.run",
   "connector.read",
@@ -106,4 +109,13 @@ export interface AutomationEditorProps {
   readonly validationIssues?: ReadonlyArray<AutomationEditorValidationIssue>;
   readonly readOnly?: boolean;
   readonly className?: string;
+  readonly selectedSpace?: Space | undefined;
+  readonly connections?: ReadonlyArray<Connection> | undefined;
+  readonly environmentTimezone?: string | null | undefined;
+  readonly onInterpretSchedule?:
+    | ((input: {
+        readonly text: string;
+        readonly timezone: string;
+      }) => Promise<CommandCenterAutomationScheduleInterpretResult>)
+    | undefined;
 }

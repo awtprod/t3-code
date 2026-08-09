@@ -116,6 +116,15 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.automationId]),
       },
     }),
+    interpretAutomationSchedule: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:interpret-automation-schedule",
+      tag: COMMAND_CENTER_WS_METHODS.automationScheduleInterpret,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.spaceId]),
+      },
+    }),
     admitAutomationWebhook: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:admit-automation-webhook",
       tag: COMMAND_CENTER_WS_METHODS.automationWebhookAdmit,

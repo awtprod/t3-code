@@ -22,6 +22,7 @@ export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.automationDefinitionGet, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.automationDefinitionCreate, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.automationDefinitionSave, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.automationScheduleInterpret, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.approvalsQuery, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.artifactsQuery, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.connectionsQuery, AuthCommandCenterReadScope],

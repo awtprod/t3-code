@@ -61,7 +61,9 @@ export interface AutomationNodeExecutorDependencies {
     { readonly operation: string; readonly contentTrust: string; readonly data: unknown },
     string
   >;
-  readonly googleDraft?: (input: import("@t3tools/contracts").GoogleDraftCreateRequest) => Effect.Effect<Schema.Json, string>;
+  readonly googleDraft?: (
+    input: import("@t3tools/contracts").GoogleDraftCreateRequest,
+  ) => Effect.Effect<Schema.Json, string>;
   readonly runScopedShell: (
     input: AutomationScopedShellRequest,
   ) => Effect.Effect<AutomationScopedShellResult, AutomationScopedShellError>;
@@ -340,17 +342,31 @@ const executeConnectorWrite = Effect.fn("AutomationNodeExecutor.connectorWrite")
   }
   const request = yield* decodeGoogleDraftCreateRequest(
     googleRequestConfig(context.node.config, context.spaceId, connectionId),
-  ).pipe(Effect.match({ onFailure: () => ({ _tag: "Left" as const }), onSuccess: (value) => ({ _tag: "Right" as const, value }) }));
-  if (request._tag === "Left") return permanentFailure("The connector write node does not contain a valid Gmail draft request.");
+  ).pipe(
+    Effect.match({
+      onFailure: () => ({ _tag: "Left" as const }),
+      onSuccess: (value) => ({ _tag: "Right" as const, value }),
+    }),
+  );
+  if (request._tag === "Left")
+    return permanentFailure(
+      "The connector write node does not contain a valid Gmail draft request.",
+    );
   if (dependencies.googleDraft === undefined) {
     return permanentFailure("Gmail draft creation is not configured on this server.");
   }
   const drafted = yield* dependencies.googleDraft(request.value).pipe(
-    Effect.match({ onFailure: (error) => ({ _tag: "Left" as const, error }), onSuccess: (value) => ({ _tag: "Right" as const, value }) }),
+    Effect.match({
+      onFailure: (error) => ({ _tag: "Left" as const, error }),
+      onSuccess: (value) => ({ _tag: "Right" as const, value }),
+    }),
   );
   return drafted._tag === "Left"
     ? ({ type: "retry", error: drafted.error } as const)
-    : ({ type: "succeeded", output: { operation: "gmail.draft.create", data: drafted.value } } as const);
+    : ({
+        type: "succeeded",
+        output: { operation: "gmail.draft.create", data: drafted.value },
+      } as const);
 });
 
 const executeAgentRun = Effect.fn("AutomationNodeExecutor.agentRun")(function* (

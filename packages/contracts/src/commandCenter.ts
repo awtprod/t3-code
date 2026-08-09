@@ -50,6 +50,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   automationDefinitionGet: "cc.automations.definition.get",
   automationDefinitionCreate: "cc.automations.definition.create",
   automationDefinitionSave: "cc.automations.definition.save",
+  automationScheduleInterpret: "cc.automations.schedule.interpret",
   approvalsQuery: "cc.approvals.query",
   artifactsQuery: "cc.artifacts.query",
   connectionsQuery: "cc.connections.query",
@@ -344,6 +345,33 @@ export const CommandCenterAutomationDefinitionSaveInput = Schema.Struct({
 });
 export type CommandCenterAutomationDefinitionSaveInput =
   typeof CommandCenterAutomationDefinitionSaveInput.Type;
+
+export const CommandCenterAutomationScheduleInterpretInput = Schema.Struct({
+  spaceId: SpaceId,
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
+  timezone: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+});
+export type CommandCenterAutomationScheduleInterpretInput =
+  typeof CommandCenterAutomationScheduleInterpretInput.Type;
+
+export const CommandCenterAutomationScheduleInterpretResult = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("interpreted"),
+    trigger: Schema.Struct({
+      kind: Schema.Literal("schedule"),
+      expression: TrimmedNonEmptyString,
+      timezone: TrimmedNonEmptyString,
+    }),
+    summary: TrimmedNonEmptyString,
+    nextOccurrences: Schema.Array(Timestamp),
+  }),
+  Schema.Struct({
+    status: Schema.Literal("needs_clarification"),
+    message: TrimmedNonEmptyString,
+  }),
+]);
+export type CommandCenterAutomationScheduleInterpretResult =
+  typeof CommandCenterAutomationScheduleInterpretResult.Type;
 
 export const CommandCenterApprovalsQueryInput = Schema.Struct({
   spaceId: Schema.optional(SpaceId),
@@ -708,9 +736,11 @@ export const GoogleDraftCreateRequest = Schema.Struct({
   threadId: Schema.optional(TrimmedNonEmptyString),
   attachmentArtifactIds: Schema.optional(Schema.Array(ArtifactId)),
 }).check(
-  Schema.makeFilter((value) =>
-    value.body !== undefined || value.bodyHtml !== undefined ||
-    "A Gmail draft requires a plain-text or HTML body.",
+  Schema.makeFilter(
+    (value) =>
+      value.body !== undefined ||
+      value.bodyHtml !== undefined ||
+      "A Gmail draft requires a plain-text or HTML body.",
   ),
 );
 export type GoogleDraftCreateRequest = typeof GoogleDraftCreateRequest.Type;

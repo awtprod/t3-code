@@ -10,6 +10,10 @@ import {
 } from "@command-center/core/domain";
 import { CommandCenterWebhookRoute } from "@t3tools/contracts";
 import { formatSchemaError } from "@t3tools/shared/schemaJson";
+import {
+  isValidAutomationTimeZone,
+  parseAutomationCronExpression,
+} from "@t3tools/shared/automationSchedule";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
@@ -190,6 +194,7 @@ export const AutomationValidationIssueCode = Schema.Literals([
   "graph.unknown-edge-source",
   "graph.unknown-edge-target",
   "graph.cycle",
+  "trigger.invalid",
   "state.unknown-node",
   "node.config.invalid",
   "node.config.private-data",
@@ -289,6 +294,17 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
 
   const graph = analyzeAutomationGraph(decoded.value);
   const issues: AutomationValidationIssue[] = [...graph.issues];
+  if (
+    decoded.value.trigger.kind === "schedule" &&
+    (parseAutomationCronExpression(decoded.value.trigger.expression) === undefined ||
+      !isValidAutomationTimeZone(decoded.value.trigger.timezone))
+  ) {
+    issues.push({
+      code: "trigger.invalid",
+      message: "The recurring schedule or timezone is invalid.",
+      path: ["trigger"],
+    });
+  }
   decoded.value.nodes.forEach((node, index) => {
     if (!automationConfigIsSafeForGit(node.config)) {
       issues.push({
@@ -323,7 +339,9 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
     if (node.kind === "connector.write" && node.config.operation === "gmail.draft.create") {
       const predecessors = graph.predecessorIds[node.id] ?? [];
       const approved = predecessors.some(
-        (predecessorId) => decoded.value.nodes.find((candidate) => candidate.id === predecessorId)?.kind === "approval",
+        (predecessorId) =>
+          decoded.value.nodes.find((candidate) => candidate.id === predecessorId)?.kind ===
+          "approval",
       );
       if (!approved) {
         issues.push({

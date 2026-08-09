@@ -167,6 +167,23 @@ it.effect("rejects malformed committed graphs", () => {
   }).pipe(Effect.provide(gitLayer(definition)));
 });
 
+it.effect("rejects malformed committed schedules authoritatively", () => {
+  const definition = sampleDefinition();
+  definition.trigger = {
+    kind: "schedule",
+    expression: "every weekday",
+    timezone: "Not/AZone",
+  };
+
+  return Effect.gen(function* () {
+    const error = yield* loadCommittedAutomations("/sample/config", [sampleSpace]).pipe(
+      Effect.flip,
+    );
+    expect(error).toBeInstanceOf(CommittedAutomationConfigError);
+    expect(error.message).toContain("schedule");
+  }).pipe(Effect.provide(gitLayer(definition)));
+});
+
 it.effect("loads typed agent definitions from the committed tree", () => {
   const definition = sampleDefinition();
   definition.nodes[1]!.kind = "agent.run";

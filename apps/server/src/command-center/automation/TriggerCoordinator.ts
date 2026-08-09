@@ -5,6 +5,10 @@ import {
   normalizeCommandCenterWebhookRoute,
   type CommandCenterAutomationExecution,
 } from "@t3tools/contracts";
+import {
+  automationScheduleMatches,
+  parseAutomationCronExpression,
+} from "@t3tools/shared/automationSchedule";
 import * as NodeCrypto from "node:crypto";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -16,22 +20,6 @@ import * as Schema from "effect/Schema";
 import * as AutomationRuns from "../AutomationRuns.ts";
 import * as CommandCenterService from "../Service.ts";
 
-const FIELD_LIMITS = [
-  { minimum: 0, maximum: 59 },
-  { minimum: 0, maximum: 23 },
-  { minimum: 1, maximum: 31 },
-  { minimum: 1, maximum: 12 },
-  { minimum: 0, maximum: 7 },
-] as const;
-const WEEKDAYS: Readonly<Record<string, number>> = {
-  Sun: 0,
-  Mon: 1,
-  Tue: 2,
-  Wed: 3,
-  Thu: 4,
-  Fri: 5,
-  Sat: 6,
-};
 const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 export class AutomationTriggerError extends Schema.TaggedErrorClass<AutomationTriggerError>()(
@@ -58,128 +46,8 @@ function triggerError(reason: AutomationTriggerError["reason"], message: string,
   });
 }
 
-function parseInteger(value: string, minimum: number, maximum: number): number | undefined {
-  if (!/^\d+$/u.test(value)) return undefined;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : undefined;
-}
-
-function fieldValues(
-  source: string,
-  minimum: number,
-  maximum: number,
-): ReadonlySet<number> | undefined {
-  const values = new Set<number>();
-  for (const rawPart of source.split(",")) {
-    const [rangeSource, stepSource, ...extra] = rawPart.split("/");
-    if (rangeSource === undefined || extra.length > 0) return undefined;
-    const step = stepSource === undefined ? 1 : parseInteger(stepSource, 1, maximum - minimum + 1);
-    if (step === undefined) return undefined;
-    let start: number;
-    let end: number;
-    if (rangeSource === "*") {
-      start = minimum;
-      end = maximum;
-    } else if (rangeSource.includes("-")) {
-      const [left, right, ...rangeExtra] = rangeSource.split("-");
-      if (left === undefined || right === undefined || rangeExtra.length > 0) return undefined;
-      const parsedLeft = parseInteger(left, minimum, maximum);
-      const parsedRight = parseInteger(right, minimum, maximum);
-      if (parsedLeft === undefined || parsedRight === undefined || parsedLeft > parsedRight) {
-        return undefined;
-      }
-      start = parsedLeft;
-      end = parsedRight;
-    } else {
-      const parsed = parseInteger(rangeSource, minimum, maximum);
-      if (parsed === undefined || stepSource !== undefined) return undefined;
-      start = parsed;
-      end = parsed;
-    }
-    for (let value = start; value <= end; value += step) values.add(value);
-  }
-  return values.size === 0 ? undefined : values;
-}
-
-export interface ParsedCronExpression {
-  readonly fields: readonly [
-    ReadonlySet<number>,
-    ReadonlySet<number>,
-    ReadonlySet<number>,
-    ReadonlySet<number>,
-    ReadonlySet<number>,
-  ];
-  readonly dayOfMonthWildcard: boolean;
-  readonly dayOfWeekWildcard: boolean;
-}
-
-export function parseCronExpression(expression: string): ParsedCronExpression | undefined {
-  const sources = expression.trim().split(/\s+/u);
-  if (sources.length !== FIELD_LIMITS.length) return undefined;
-  const parsed = sources.map((source, index) => {
-    const limits = FIELD_LIMITS[index]!;
-    return fieldValues(source!, limits.minimum, limits.maximum);
-  });
-  if (parsed.some((field) => field === undefined)) return undefined;
-  return {
-    fields: [parsed[0]!, parsed[1]!, parsed[2]!, parsed[3]!, parsed[4]!],
-    dayOfMonthWildcard: sources[2] === "*",
-    dayOfWeekWildcard: sources[4] === "*",
-  };
-}
-
-function zonedParts(at: Date, timezone: string) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    minute: "numeric",
-    hour: "numeric",
-    day: "numeric",
-    month: "numeric",
-    weekday: "short",
-    hourCycle: "h23",
-  }).formatToParts(at);
-  const value = (type: Intl.DateTimeFormatPartTypes) =>
-    parts.find((part) => part.type === type)?.value;
-  const weekday = WEEKDAYS[value("weekday") ?? ""];
-  const minute = Number(value("minute"));
-  const hour = Number(value("hour"));
-  const day = Number(value("day"));
-  const month = Number(value("month"));
-  return weekday === undefined || [minute, hour, day, month].some(Number.isNaN)
-    ? undefined
-    : { minute, hour, day, month, weekday };
-}
-
-export function scheduleMatches(
-  expression: string,
-  timezone: string,
-  scheduledFor: string,
-): boolean {
-  const cron = parseCronExpression(expression);
-  const parsed = DateTime.make(scheduledFor);
-  if (cron === undefined || Option.isNone(parsed)) return false;
-  let parts: ReturnType<typeof zonedParts>;
-  try {
-    parts = zonedParts(DateTime.toDate(parsed.value), timezone);
-  } catch {
-    return false;
-  }
-  if (parts === undefined) return false;
-  const [minutes, hours, days, months, weekdays] = cron.fields;
-  const dayOfMonthMatches = days.has(parts.day);
-  const dayOfWeekMatches = weekdays.has(parts.weekday) || (parts.weekday === 0 && weekdays.has(7));
-  const dayMatches =
-    cron.dayOfMonthWildcard && cron.dayOfWeekWildcard
-      ? true
-      : cron.dayOfMonthWildcard
-        ? dayOfWeekMatches
-        : cron.dayOfWeekWildcard
-          ? dayOfMonthMatches
-          : dayOfMonthMatches || dayOfWeekMatches;
-  return (
-    minutes.has(parts.minute) && hours.has(parts.hour) && months.has(parts.month) && dayMatches
-  );
-}
+export const parseCronExpression = parseAutomationCronExpression;
+export const scheduleMatches = automationScheduleMatches;
 
 export function normalizeWebhookRoute(route: string): string | undefined {
   return normalizeCommandCenterWebhookRoute(route);

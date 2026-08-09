@@ -175,6 +175,8 @@ import {
   CommandCenterAutomationDefinitionCreateInput,
   CommandCenterAutomationDefinitionGetInput,
   CommandCenterAutomationDefinitionSaveInput,
+  CommandCenterAutomationScheduleInterpretInput,
+  CommandCenterAutomationScheduleInterpretResult,
   CommandCenterAutomationDefinitionSnapshot,
   CommandCenterAutomationRunGetInput,
   CommandCenterAutomationRunStartInput,
@@ -421,6 +423,15 @@ export const WsCommandCenterAutomationDefinitionSaveRpc = Rpc.make(
   {
     payload: CommandCenterAutomationDefinitionSaveInput,
     success: CommandCenterAutomationDefinitionSnapshot,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterAutomationScheduleInterpretRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.automationScheduleInterpret,
+  {
+    payload: CommandCenterAutomationScheduleInterpretInput,
+    success: CommandCenterAutomationScheduleInterpretResult,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
@@ -1083,6 +1094,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterAutomationDefinitionGetRpc,
   WsCommandCenterAutomationDefinitionCreateRpc,
   WsCommandCenterAutomationDefinitionSaveRpc,
+  WsCommandCenterAutomationScheduleInterpretRpc,
   WsCommandCenterApprovalsQueryRpc,
   WsCommandCenterArtifactsQueryRpc,
   WsCommandCenterConnectionsQueryRpc,

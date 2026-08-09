@@ -402,27 +402,48 @@ export const layer = Layer.effect(
           );
           const args = [
             ...baseArgs(resolved.accountAlias, GOOGLE_DRAFT_COMMAND_ALLOWLIST),
-            "gmail", "drafts", "create",
-            "--to", request.to.join(","),
-            "--subject", request.subject,
+            "gmail",
+            "drafts",
+            "create",
+            "--to",
+            request.to.join(","),
+            "--subject",
+            request.subject,
             ...(request.cc === undefined ? [] : ["--cc", request.cc.join(",")]),
             ...(request.bcc === undefined ? [] : ["--bcc", request.bcc.join(",")]),
             ...(request.body === undefined ? [] : ["--body", request.body]),
             ...(request.bodyHtml === undefined ? [] : ["--body-html", request.bodyHtml]),
-            ...(request.replyToMessageId === undefined ? [] : ["--reply-to-message-id", request.replyToMessageId]),
+            ...(request.replyToMessageId === undefined
+              ? []
+              : ["--reply-to-message-id", request.replyToMessageId]),
             ...(request.threadId === undefined ? [] : ["--thread-id", request.threadId]),
             ...attachmentPaths.flatMap((attachmentPath) => ["--attach", attachmentPath]),
           ];
-          const result = yield* runner.run({
-            command: binary, args, env: googleEnvironment, extendEnv: false,
-            timeout: "45 seconds", maxOutputBytes: 1024 * 1024,
-          }).pipe(Effect.mapError(processFailure));
-          if (result.code !== 0) return yield* new GoogleReadConnectorError({
-            reason: "process", message: result.stderr.trim() || "The Gmail draft request failed.",
-          });
-          return (yield* decodeUnknownJsonString(result.stdout).pipe(Effect.mapError((cause) =>
-            new GoogleReadConnectorError({ reason: "output", message: "The Gmail draft response was invalid.", cause }),
-          ))) as Schema.Json;
+          const result = yield* runner
+            .run({
+              command: binary,
+              args,
+              env: googleEnvironment,
+              extendEnv: false,
+              timeout: "45 seconds",
+              maxOutputBytes: 1024 * 1024,
+            })
+            .pipe(Effect.mapError(processFailure));
+          if (result.code !== 0)
+            return yield* new GoogleReadConnectorError({
+              reason: "process",
+              message: result.stderr.trim() || "The Gmail draft request failed.",
+            });
+          return (yield* decodeUnknownJsonString(result.stdout).pipe(
+            Effect.mapError(
+              (cause) =>
+                new GoogleReadConnectorError({
+                  reason: "output",
+                  message: "The Gmail draft response was invalid.",
+                  cause,
+                }),
+            ),
+          )) as Schema.Json;
         }),
       );
     });

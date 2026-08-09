@@ -146,6 +146,7 @@ import { refreshCommandCenterConnection } from "./command-center/ConnectionRefre
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
+import * as AutomationScheduleInterpreter from "./command-center/automation/ScheduleInterpreter.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
@@ -422,6 +423,9 @@ const makeWsRpcLayer = (
       const commandCenterEvents = yield* CommandCenterEventStream.CommandCenterEventStream;
       const automationDefinitionConfig =
         yield* AutomationDefinitionConfig.AutomationDefinitionConfig;
+      const automationScheduleInterpreter = yield* Effect.serviceOption(
+        AutomationScheduleInterpreter.AutomationScheduleInterpreter,
+      );
       const commandCenterAutomationRuns = yield* AutomationRuns.AutomationRuns;
       const commandCenterAutomationTriggers = yield* AutomationTriggerCoordinator.make;
       const commandCenterMemorySearch = yield* MemorySearchIndex.MemorySearchIndex;
@@ -1019,6 +1023,25 @@ const makeWsRpcLayer = (
                   ),
                 ),
               ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.automationScheduleInterpret]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.automationScheduleInterpret,
+            commandCenter.querySpaces({ spaceId: input.spaceId }).pipe(
+              Effect.flatMap(() =>
+                Option.match(automationScheduleInterpreter, {
+                  onNone: () =>
+                    Effect.fail(
+                      new CommandCenterError({
+                        reason: "routing",
+                        message: "Schedule interpretation is unavailable in this environment.",
+                      }),
+                    ),
+                  onSome: (interpreter) => interpreter.interpret(input),
+                }),
+              ),
+            ),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.approvalsQuery]: (input) =>

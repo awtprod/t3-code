@@ -24,7 +24,15 @@ function sampleDefinition(): AutomationEditorDefinition {
     enabled: false,
     trigger: { kind: "manual" },
     nodes: [
-      { id: "collect", kind: "connector.read", config: { source: "sample" } },
+      {
+        id: "collect",
+        kind: "connector.read",
+        config: {
+          connectionId: "sample-google",
+          operation: "gmail.search",
+          query: "is:unread",
+        },
+      },
       { id: "draft", kind: "transform", config: { template: "weekly-brief" } },
       { id: "review", kind: "approval", config: { action: "publish" } },
     ],
@@ -63,12 +71,12 @@ describe("automation editor definition edits", () => {
     const withSecondTransform = addAutomationNode(withTransform, "transform");
 
     expect(withSecondTransform.nodes.slice(-2)).toEqual([
-      { id: "transform", kind: "transform", config: {} },
-      { id: "transform-2", kind: "transform", config: {} },
+      { id: "transform", kind: "transform", config: { template: "" } },
+      { id: "transform-2", kind: "transform", config: { template: "" } },
     ]);
     expect(readAutomationNodePosition(withSecondTransform, "transform-2")).toEqual({
-      x: 344,
-      y: 184,
+      x: 408,
+      y: 208,
     });
   });
 
@@ -117,9 +125,9 @@ describe("automation editor definition edits", () => {
 
   it("computes deterministic paths and a canvas that contains every node", () => {
     expect(automationEdgePath({ x: 80, y: 140 }, { x: 380, y: 140 })).toBe(
-      "M 296 184 C 344 184, 332 184, 380 184",
+      "M 360 196 C 408 196, 332 196, 380 196",
     );
-    expect(automationCanvasSize(sampleDefinition())).toEqual({ width: 960, height: 520 });
+    expect(automationCanvasSize(sampleDefinition())).toEqual({ width: 1008, height: 520 });
   });
 });
 

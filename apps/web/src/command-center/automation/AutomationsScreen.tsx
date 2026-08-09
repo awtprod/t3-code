@@ -1,7 +1,11 @@
 "use client";
 
-import type { Automation, Space } from "@command-center/core";
-import type { EnvironmentId, ExecutionEnvironmentPlatformOs } from "@t3tools/contracts";
+import type { Automation, Connection, Space } from "@command-center/core";
+import type {
+  CommandCenterAutomationScheduleInterpretResult,
+  EnvironmentId,
+  ExecutionEnvironmentPlatformOs,
+} from "@t3tools/contracts";
 import {
   ArrowLeftIcon,
   CheckCircle2Icon,
@@ -54,6 +58,14 @@ export interface AutomationsScreenProps {
   readonly status: AutomationsScreenStatus;
   readonly automations: ReadonlyArray<Automation>;
   readonly spaces: ReadonlyArray<Space>;
+  readonly connections?: ReadonlyArray<Connection> | undefined;
+  readonly environmentTimezone?: string | null | undefined;
+  readonly onInterpretSchedule?:
+    | ((input: {
+        readonly text: string;
+        readonly timezone: string;
+      }) => Promise<CommandCenterAutomationScheduleInterpretResult>)
+    | undefined;
   readonly onRefresh?: (() => void) | undefined;
   readonly isRefreshing?: boolean | undefined;
   readonly refreshError?: string | null | undefined;
@@ -120,7 +132,12 @@ interface AutomationEmptyStateProps {
   readonly onNew?: (() => void) | undefined;
 }
 
-function AutomationEmptyState({ status, onRefresh, isRefreshing = false, onNew }: AutomationEmptyStateProps) {
+function AutomationEmptyState({
+  status,
+  onRefresh,
+  isRefreshing = false,
+  onNew,
+}: AutomationEmptyStateProps) {
   const content =
     status === "disconnected"
       ? {
@@ -167,7 +184,9 @@ function AutomationEmptyState({ status, onRefresh, isRefreshing = false, onNew }
         ) : null}
         {onRefresh && status !== "disconnected" ? (
           <Button disabled={isRefreshing} onClick={onRefresh} size="sm" variant="outline">
-            <RefreshCwIcon className={isRefreshing ? "animate-spin motion-reduce:animate-none" : undefined} />
+            <RefreshCwIcon
+              className={isRefreshing ? "animate-spin motion-reduce:animate-none" : undefined}
+            />
             {isRefreshing ? "Checking" : "Check again"}
           </Button>
         ) : null}
@@ -184,6 +203,9 @@ export function AutomationsScreen({
   status,
   automations,
   spaces,
+  connections,
+  environmentTimezone,
+  onInterpretSchedule,
   onRefresh,
   isRefreshing = false,
   refreshError,
@@ -447,7 +469,11 @@ export function AutomationsScreen({
         {status !== "loading" && status !== "ready" ? (
           <AutomationEmptyState isRefreshing={isRefreshing} onRefresh={onRefresh} status={status} />
         ) : null}
-        {refreshError ? <p className="px-4 pt-3 text-sm text-destructive" role="alert">{refreshError}</p> : null}
+        {refreshError ? (
+          <p className="px-4 pt-3 text-sm text-destructive" role="alert">
+            {refreshError}
+          </p>
+        ) : null}
         {status === "ready" && automations.length === 0 ? (
           <main className="flex min-h-0 flex-1">
             <aside className="hidden w-60 shrink-0 border-r bg-sidebar md:block">
@@ -529,9 +555,13 @@ export function AutomationsScreen({
               ) : editorStatus === "ready" && editorDefinition && onDefinitionChange ? (
                 <AutomationEditor
                   className="h-full min-h-[28rem]"
+                  connections={connections}
                   definition={editorDefinition}
+                  environmentTimezone={environmentTimezone}
                   onDefinitionChange={onDefinitionChange}
+                  onInterpretSchedule={onInterpretSchedule}
                   readOnly={authoringUnavailable}
+                  selectedSpace={spaces.find((space) => space.id === editorDefinition.spaceId)}
                 />
               ) : (
                 <div

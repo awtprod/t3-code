@@ -153,7 +153,7 @@ export type EfficiencyPreviewResult = typeof EfficiencyPreviewResult.Type;
 
 export const InternalGenerationUsage = Schema.Struct({
   operationId: TrimmedNonEmptyString,
-  operation: Schema.Literals(["title", "branch", "commit", "pull-request"]),
+  operation: Schema.Literals(["title", "branch", "commit", "pull-request", "schedule"]),
   providerInstanceId: ProviderInstanceId,
   model: TrimmedNonEmptyString,
   options: Schema.optional(ProviderOptionSelections),
