@@ -464,6 +464,25 @@ export function addAutomationEdge(
     : definition;
 }
 
+export function setAutomationEdgeDirection(
+  definition: AutomationEditorDefinition,
+  edge: AutomationEditorEdge,
+): AutomationEditorDefinition {
+  if (
+    definition.edges.some((candidate) => candidate.from === edge.from && candidate.to === edge.to)
+  ) {
+    return definition;
+  }
+
+  const withoutReverse = removeAutomationEdge(definition, {
+    from: edge.to,
+    to: edge.from,
+  });
+  return automationEdgeProblem(withoutReverse, edge) === undefined
+    ? { ...withoutReverse, edges: [...withoutReverse.edges, edge] }
+    : definition;
+}
+
 export function removeAutomationEdge(
   definition: AutomationEditorDefinition,
   edge: AutomationEditorEdge,

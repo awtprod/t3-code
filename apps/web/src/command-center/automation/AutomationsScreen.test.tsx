@@ -9,10 +9,28 @@ import { SAMPLE_AUTOMATION, SAMPLE_SPACE } from "./AutomationsScreen.test-fixtur
 describe("AutomationsScreen", () => {
   const windowsEnvironmentId = EnvironmentId.make("windows-primary");
   const linuxEnvironmentId = EnvironmentId.make("linux-runner");
+  const validEditorDefinition = () => {
+    const definition = projectAutomationForEditor(SAMPLE_AUTOMATION);
+    return {
+      ...definition,
+      nodes: definition.nodes.map((node) =>
+        node.id === "collect"
+          ? {
+              ...node,
+              config: {
+                connectionId: "sample-google",
+                operation: "gmail.search",
+                query: "is:unread",
+              },
+            }
+          : node,
+      ),
+    };
+  };
 
   it("renders the exact source through the local-commit editor", () => {
     const definition = {
-      ...projectAutomationForEditor(SAMPLE_AUTOMATION),
+      ...validEditorDefinition(),
       policy: { requireApprovalForExternalWrites: true },
     };
     const html = renderToStaticMarkup(
@@ -102,6 +120,32 @@ describe("AutomationsScreen", () => {
     expect(html).toContain("Read only");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*New automation/su);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Save now/su);
+  });
+
+  it("explains when validation is blocking autosave", () => {
+    const definition = {
+      ...validEditorDefinition(),
+      nodes: [
+        ...validEditorDefinition().nodes,
+        { id: "broken-agent", kind: "agent.run" as const, config: {} },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <AutomationsScreen
+        automations={[SAMPLE_AUTOMATION]}
+        editorDefinition={definition}
+        editorStatus="ready"
+        isDirty
+        onDefinitionChange={vi.fn()}
+        onSave={vi.fn()}
+        spaces={[SAMPLE_SPACE]}
+        status="ready"
+      />,
+    );
+
+    expect(html).toContain("Fix issues to save");
+    expect(html).not.toContain("Autosave pending");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*title="Fix 1 blocking issue before saving"/u);
   });
 
   it("renders explicit loading and empty committed-definition states", () => {

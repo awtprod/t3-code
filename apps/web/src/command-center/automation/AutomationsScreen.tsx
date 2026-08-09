@@ -262,6 +262,13 @@ export function AutomationsScreen({
     isSaving ||
     blockingIssueCount > 0 ||
     onSave === undefined;
+  const saveStatus = isSaving
+    ? { label: "Saving", variant: "warning" as const }
+    : !isDirty
+      ? { label: "Saved", variant: "success" as const }
+      : blockingIssueCount > 0
+        ? { label: "Fix issues to save", variant: "error" as const }
+        : { label: "Autosave pending", variant: "warning" as const };
   const effectiveNewSpaceId =
     newAutomationSpaceId ||
     spaces.find((space) => space.kind === "system")?.id ||
@@ -362,9 +369,7 @@ export function AutomationsScreen({
             ) : null}
             {selectedAutomation ? (
               <>
-                <Badge variant={isDirty ? "warning" : "success"}>
-                  {isSaving ? "Saving" : isDirty ? "Autosave pending" : "Saved"}
-                </Badge>
+                <Badge variant={saveStatus.variant}>{saveStatus.label}</Badge>
                 <Button
                   aria-label={`Save automation config commit on ${selectedEnvironment?.label ?? "the selected environment"}`}
                   disabled={saveDisabled}
@@ -373,7 +378,9 @@ export function AutomationsScreen({
                   title={
                     authoringUnavailable
                       ? "Saving automations isn't supported in this environment yet."
-                      : `Save immediately on ${selectedEnvironment?.label ?? "the selected environment"}; changes also save automatically`
+                      : blockingIssueCount > 0
+                        ? `Fix ${blockingIssueCount} blocking ${blockingIssueCount === 1 ? "issue" : "issues"} before saving`
+                        : `Save immediately on ${selectedEnvironment?.label ?? "the selected environment"}; changes also save automatically`
                   }
                 >
                   {isSaving ? (

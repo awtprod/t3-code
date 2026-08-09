@@ -13,6 +13,7 @@ import {
   readAutomationNodePosition,
   reconcileAutomationNodePosition,
   setAutomationNodePosition,
+  setAutomationEdgeDirection,
   toSerializableAutomationDefinition,
   validateAutomationEditorDefinition,
 } from "./logic";
@@ -145,6 +146,30 @@ describe("automation editor definition edits", () => {
     expect(removeAutomationEdge(second, { from: "collect", to: "draft" }).edges).toEqual([
       { from: "draft", to: "review" },
     ]);
+  });
+
+  it("reverses an existing connection when its direction is changed", () => {
+    const initial = sampleDefinition();
+    const reversed = setAutomationEdgeDirection(initial, { from: "review", to: "draft" });
+
+    expect(reversed.edges).toEqual([
+      { from: "collect", to: "draft" },
+      { from: "review", to: "draft" },
+    ]);
+    expect(setAutomationEdgeDirection(reversed, { from: "review", to: "draft" })).toBe(reversed);
+  });
+
+  it("keeps the original connection when reversing it would still create a loop", () => {
+    const initial: AutomationEditorDefinition = {
+      ...sampleDefinition(),
+      edges: [
+        { from: "collect", to: "draft" },
+        { from: "draft", to: "review" },
+        { from: "collect", to: "review" },
+      ],
+    };
+
+    expect(setAutomationEdgeDirection(initial, { from: "review", to: "collect" })).toBe(initial);
   });
 
   it("explains rejected connections without validating every node configuration", () => {

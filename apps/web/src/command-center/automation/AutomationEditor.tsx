@@ -81,6 +81,7 @@ import {
   removeAutomationEdge,
   removeAutomationNode,
   renameAutomationNode,
+  setAutomationEdgeDirection,
   setAutomationNodePosition,
   toSerializableAutomationDefinition,
   updateAutomationNode,
@@ -1425,9 +1426,40 @@ function NodeInspector({
 }) {
   const presentation = NODE_PRESENTATION[node.kind];
   const Icon = presentation.icon;
-  const [connectTargetId, setConnectTargetId] = useState("");
+  const [connectionSelection, setConnectionSelection] = useState("");
+  useEffect(() => setConnectionSelection(""), [node.id]);
   const updateConfig = (config: AutomationEditorNode["config"]) =>
     onDefinitionChange(updateAutomationNode(definition, node.id, { config }));
+  const requestedEdge: AutomationEditorEdge | undefined = connectionSelection.startsWith("from:")
+    ? { from: connectionSelection.slice("from:".length), to: node.id }
+    : connectionSelection.startsWith("to:")
+      ? { from: node.id, to: connectionSelection.slice("to:".length) }
+      : undefined;
+  const requestedEdgeExists =
+    requestedEdge !== undefined &&
+    definition.edges.some(
+      (edge) => edge.from === requestedEdge.from && edge.to === requestedEdge.to,
+    );
+  const reverseEdgeExists =
+    requestedEdge !== undefined &&
+    definition.edges.some(
+      (edge) => edge.from === requestedEdge.to && edge.to === requestedEdge.from,
+    );
+  const connectionProblem =
+    requestedEdge === undefined || requestedEdgeExists
+      ? undefined
+      : automationEdgeProblem(
+          reverseEdgeExists
+            ? removeAutomationEdge(definition, {
+                from: requestedEdge.to,
+                to: requestedEdge.from,
+              })
+            : definition,
+          requestedEdge,
+        );
+  const adjacentEdges = definition.edges.filter(
+    (edge) => edge.from === node.id || edge.to === node.id,
+  );
   return (
     <aside
       className="absolute inset-y-0 right-0 z-30 flex w-full max-w-[360px] flex-col border-l bg-card shadow-xl"
@@ -1481,40 +1513,88 @@ function NodeInspector({
           selectedSpace={selectedSpace}
         />
         <Field
-          help="Keyboard and touch alternative to dragging the output handle."
-          label="Connect to…"
+          help="Choose whether another step runs before or after this one."
+          label="Connections"
         >
-          <div className="mt-1 flex gap-2">
+          {adjacentEdges.length > 0 ? (
+            <div className="mt-1 space-y-1.5">
+              {adjacentEdges.map((edge) => (
+                <div
+                  className="flex items-center gap-2 rounded-lg border bg-muted/20 px-2.5 py-1.5 text-xs"
+                  key={edgeId(edge)}
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {humanizeId(edge.from)} → {humanizeId(edge.to)}
+                  </span>
+                  <Button
+                    aria-label={`Delete connection from ${humanizeId(edge.from)} to ${humanizeId(edge.to)}`}
+                    disabled={readOnly}
+                    onClick={() => onDefinitionChange(removeAutomationEdge(definition, edge))}
+                    size="icon-xs"
+                    variant="ghost"
+                  >
+                    <XIcon />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-1 text-xs text-muted-foreground">No connections yet.</p>
+          )}
+          <div className="mt-2 flex gap-2">
             <select
+              aria-label={`Add a connection for ${node.id}`}
               className="h-9 min-w-0 flex-1 rounded-lg border border-input bg-background px-2 text-sm"
               disabled={readOnly}
-              onChange={(event) => setConnectTargetId(event.currentTarget.value)}
-              value={connectTargetId}
+              onChange={(event) => setConnectionSelection(event.currentTarget.value)}
+              value={connectionSelection}
             >
-              <option value="">Choose a later step</option>
-              {definition.nodes
-                .filter((candidate) => candidate.id !== node.id)
-                .map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    {humanizeId(candidate.id)}
-                  </option>
-                ))}
+              <option value="">Choose a step and direction</option>
+              <optgroup label="Runs before this step">
+                {definition.nodes
+                  .filter((candidate) => candidate.id !== node.id)
+                  .map((candidate) => (
+                    <option key={`from:${candidate.id}`} value={`from:${candidate.id}`}>
+                      {humanizeId(candidate.id)} → {humanizeId(node.id)}
+                    </option>
+                  ))}
+              </optgroup>
+              <optgroup label="Runs after this step">
+                {definition.nodes
+                  .filter((candidate) => candidate.id !== node.id)
+                  .map((candidate) => (
+                    <option key={`to:${candidate.id}`} value={`to:${candidate.id}`}>
+                      {humanizeId(node.id)} → {humanizeId(candidate.id)}
+                    </option>
+                  ))}
+              </optgroup>
             </select>
             <Button
-              disabled={readOnly || connectTargetId.length === 0}
+              disabled={
+                readOnly ||
+                requestedEdge === undefined ||
+                requestedEdgeExists ||
+                connectionProblem !== undefined
+              }
               onClick={() => {
-                const next = addAutomationEdge(definition, { from: node.id, to: connectTargetId });
+                if (requestedEdge === undefined) return;
+                const next = setAutomationEdgeDirection(definition, requestedEdge);
                 if (next !== definition) {
                   onDefinitionChange(next);
-                  setConnectTargetId("");
+                  setConnectionSelection("");
                 }
               }}
               size="sm"
               variant="outline"
             >
-              Connect
+              {reverseEdgeExists ? "Reverse" : requestedEdgeExists ? "Connected" : "Connect"}
             </Button>
           </div>
+          {connectionProblem ? (
+            <p className="mt-1.5 text-xs text-destructive" role="alert">
+              {connectionProblem}
+            </p>
+          ) : null}
         </Field>
         <ConfigJsonEditor node={node} onChange={updateConfig} readOnly={readOnly} />
       </div>
