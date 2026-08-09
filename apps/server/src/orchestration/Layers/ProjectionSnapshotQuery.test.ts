@@ -2014,9 +2014,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
       `;
       yield* sql`
         INSERT INTO projection_thread_activities (
-          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at
+          activity_id, thread_id, turn_id, correlated_message_id, tone, kind, summary, payload_json,
+          created_at
         )
-        VALUES (${turn + "-activity"}, 'thread-w', ${turn}, 'tool', 'tool.completed',
+        VALUES (${turn + "-activity"}, 'thread-w', ${turn},
+          ${turn === "turn-4" ? "user-msg-4" : null}, 'tool', 'tool.completed',
           'ran tool', '{"ok":true}', ${at})
       `;
     }
@@ -2093,6 +2095,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
           "turn-5-activity",
           "turnless-activity",
         ]);
+        assert.equal(
+          snapshot.value.thread.activities.find((activity) => activity.id === "turn-4-activity")
+            ?.correlatedMessageId,
+          "user-msg-4",
+        );
         assert.equal(snapshot.value.page?.hasMore, true);
         assert.notEqual(snapshot.value.page?.beforeCursor, null);
         assert.equal(snapshot.value.page?.snapshotSequence, 42);

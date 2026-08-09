@@ -1245,6 +1245,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          correlated_message_id AS "correlatedMessageId",
           tone,
           kind,
           summary,
