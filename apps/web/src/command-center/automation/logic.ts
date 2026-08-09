@@ -85,6 +85,19 @@ const jsonPosition = (
   y: position.y,
 });
 
+export function reconcileAutomationNodePosition(
+  currentPosition: AutomationEditorPosition,
+  previousPersistedPosition: AutomationEditorPosition | undefined,
+  nextPersistedPosition: AutomationEditorPosition,
+  definitionChanged: boolean,
+): AutomationEditorPosition {
+  const persistedPositionChanged =
+    previousPersistedPosition === undefined ||
+    previousPersistedPosition.x !== nextPersistedPosition.x ||
+    previousPersistedPosition.y !== nextPersistedPosition.y;
+  return definitionChanged || persistedPositionChanged ? nextPersistedPosition : currentPosition;
+}
+
 export function moveAutomationNode(
   definition: AutomationEditorDefinition,
   nodeId: string,
@@ -94,9 +107,28 @@ export function moveAutomationNode(
   if (nodeIndex < 0 || !Number.isFinite(delta.x) || !Number.isFinite(delta.y)) return definition;
 
   const current = readAutomationNodePosition(definition, nodeId, nodeIndex);
+  return setAutomationNodePosition(definition, nodeId, {
+    x: current.x + delta.x,
+    y: current.y + delta.y,
+  });
+}
+
+export function setAutomationNodePosition(
+  definition: AutomationEditorDefinition,
+  nodeId: string,
+  position: AutomationEditorPosition,
+): AutomationEditorDefinition {
+  if (
+    !definition.nodes.some((node) => node.id === nodeId) ||
+    !Number.isFinite(position.x) ||
+    !Number.isFinite(position.y)
+  ) {
+    return definition;
+  }
+
   const nextPosition: AutomationEditorPosition = {
-    x: Math.max(AUTOMATION_CANVAS_PADDING / 2, Math.round(current.x + delta.x)),
-    y: Math.max(AUTOMATION_CANVAS_PADDING / 2, Math.round(current.y + delta.y)),
+    x: Math.max(AUTOMATION_CANVAS_PADDING / 2, Math.round(position.x)),
+    y: Math.max(AUTOMATION_CANVAS_PADDING / 2, Math.round(position.y)),
   };
 
   return {

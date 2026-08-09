@@ -49,7 +49,7 @@ import {
   XIcon,
   type LucideIcon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -63,11 +63,12 @@ import {
   addAutomationEdge,
   addAutomationNode,
   mergeAutomationValidationIssues,
-  moveAutomationNode,
   readAutomationNodePosition,
+  reconcileAutomationNodePosition,
   removeAutomationEdge,
   removeAutomationNode,
   renameAutomationNode,
+  setAutomationNodePosition,
   toSerializableAutomationDefinition,
   updateAutomationNode,
   validateAutomationEditorDefinition,
@@ -1639,6 +1640,8 @@ function AutomationCanvas({
   readonly onShowNodePickerChange: (show: boolean) => void;
 }) {
   const { screenToFlowPosition, fitView, setViewport } = useReactFlow();
+  const latestDefinitionRef = useRef(definition);
+  latestDefinitionRef.current = definition;
   const [pendingPosition, setPendingPosition] = useState<AutomationEditorPosition>();
   const [pendingSourceId, setPendingSourceId] = useState<string>();
   const [connectionMessage, setConnectionMessage] = useState<string>();
@@ -1711,7 +1714,35 @@ function AutomationCanvas({
   );
   const [nodes, setNodes, onNodesChange] = useNodesState<AutomationFlowNode>([...flowNodes]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<AutomationFlowEdge>([...flowEdges]);
-  useEffect(() => setNodes([...flowNodes]), [flowNodes, setNodes]);
+  const previousFlowPositionsRef = useRef<
+    ReadonlyMap<string, { readonly x: number; readonly y: number }>
+  >(new Map(flowNodes.map((node) => [node.id, node.position])));
+  const previousDefinitionIdRef = useRef(definition.id);
+  useEffect(() => {
+    const previousPositions = previousFlowPositionsRef.current;
+    const definitionChanged = previousDefinitionIdRef.current !== definition.id;
+    setNodes((currentNodes) => {
+      const currentById = new Map(currentNodes.map((node) => [node.id, node]));
+      return flowNodes.map((nextNode) => {
+        const currentNode = currentById.get(nextNode.id);
+        const previousPosition = previousPositions.get(nextNode.id);
+        return {
+          ...nextNode,
+          position:
+            currentNode === undefined
+              ? nextNode.position
+              : reconcileAutomationNodePosition(
+                  currentNode.position,
+                  previousPosition,
+                  nextNode.position,
+                  definitionChanged,
+                ),
+        };
+      });
+    });
+    previousFlowPositionsRef.current = new Map(flowNodes.map((node) => [node.id, node.position]));
+    previousDefinitionIdRef.current = definition.id;
+  }, [definition.id, flowNodes, setNodes]);
   useEffect(() => setEdges([...flowEdges]), [flowEdges, setEdges]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1846,13 +1877,13 @@ function AutomationCanvas({
           onSelectedEdgeIdChange(undefined);
         }}
         onNodeDragStop={(_event, node) => {
-          const current = readAutomationNodePosition(definition, node.id);
-          publishEdit(
-            moveAutomationNode(definition, node.id, {
-              x: node.position.x - current.x,
-              y: node.position.y - current.y,
-            }),
+          const next = setAutomationNodePosition(
+            latestDefinitionRef.current,
+            node.id,
+            node.position,
           );
+          latestDefinitionRef.current = next;
+          publishEdit(next);
         }}
         onNodesChange={onNodesChange}
         onNodesDelete={(deleted) => {
@@ -1869,13 +1900,16 @@ function AutomationCanvas({
         defaultViewport={defaultViewport}
         onMoveEnd={(_event, viewport) => {
           if (readOnly) return;
-          publishEdit({
-            ...definition,
+          const currentDefinition = latestDefinitionRef.current;
+          const next = {
+            ...currentDefinition,
             layout: {
-              ...definition.layout,
+              ...currentDefinition.layout,
               viewport: { x: viewport.x, y: viewport.y, zoom: viewport.zoom },
             },
-          });
+          };
+          latestDefinitionRef.current = next;
+          publishEdit(next);
         }}
         onReconnect={(oldEdge, connection) => {
           if (readOnly || !connection.source || !connection.target) return;

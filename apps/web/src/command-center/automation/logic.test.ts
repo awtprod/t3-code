@@ -10,6 +10,8 @@ import {
   removeAutomationNode,
   renameAutomationNode,
   readAutomationNodePosition,
+  reconcileAutomationNodePosition,
+  setAutomationNodePosition,
   toSerializableAutomationDefinition,
   validateAutomationEditorDefinition,
 } from "./logic";
@@ -64,6 +66,27 @@ describe("automation editor definition edits", () => {
     expect(serializable.policy).toEqual(initial.policy);
     expect(JSON.parse(JSON.stringify(serializable))).toEqual(serializable);
     expect(serializable).not.toBe(moved);
+  });
+
+  it("persists a dragged node at its absolute final canvas position", () => {
+    const initial = sampleDefinition();
+    const positioned = setAutomationNodePosition(initial, "draft", { x: 742.4, y: 411.6 });
+
+    expect(readAutomationNodePosition(positioned, "draft")).toEqual({ x: 742, y: 412 });
+    expect(readAutomationNodePosition(positioned, "collect")).toEqual({ x: 80, y: 140 });
+    expect(positioned.layout.zoom).toBe(1);
+  });
+
+  it("keeps an in-progress canvas position during presentation-only refreshes", () => {
+    const persisted = { x: 380, y: 140 };
+    const dragged = { x: 740, y: 420 };
+
+    expect(reconcileAutomationNodePosition(dragged, persisted, persisted, false)).toEqual(dragged);
+    expect(reconcileAutomationNodePosition(dragged, persisted, { x: 760, y: 440 }, false)).toEqual({
+      x: 760,
+      y: 440,
+    });
+    expect(reconcileAutomationNodePosition(dragged, persisted, persisted, true)).toEqual(persisted);
   });
 
   it("adds typed nodes with stable unique IDs and persisted positions", () => {
