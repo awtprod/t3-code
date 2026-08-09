@@ -10,8 +10,11 @@ import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import {
+  googleSetupFailureMessage,
   GoogleConnectionSetup,
   layer as googleConnectionSetupLayer,
+  prepareGoogleAuthorizationUrl,
+  validateGoogleCallbackAddress,
 } from "./GoogleConnectionSetup.ts";
 
 const space = Schema.decodeUnknownSync(Space)({
@@ -47,6 +50,42 @@ const output = (stdout: string) => ({
   stderrTruncated: false,
 });
 
+it("targets the entered Google account and validates the matching callback", () => {
+  const prepared = prepareGoogleAuthorizationUrl(
+    "https://accounts.google.test/auth?redirect_uri=http%3A%2F%2F127.0.0.1%3A43123%2Foauth2%2Fcallback&state=state-123",
+    "person@example.com",
+  );
+  expect(prepared).toBeDefined();
+  expect(new URL(prepared?.authUrl ?? "").searchParams.get("login_hint")).toBe(
+    "person@example.com",
+  );
+  expect(
+    validateGoogleCallbackAddress(
+      "http://127.0.0.1:43123/oauth2/callback?code=code&state=state-123",
+      prepared?.expectation ?? { redirectUri: "", state: "" },
+    ),
+  ).toBeUndefined();
+  expect(
+    validateGoogleCallbackAddress(
+      "http://127.0.0.1:43123/oauth2/callback?code=code&state=stale",
+      prepared?.expectation ?? { redirectUri: "", state: "" },
+    ),
+  ).toContain("another or expired");
+});
+
+it("turns Google helper failures into actionable messages without echoing callback secrets", () => {
+  expect(
+    googleSetupFailureMessage("authorized as other@example.com, expected person@example.com"),
+  ).toBe("authorized as other@example.com, expected person@example.com");
+  expect(
+    googleSetupFailureMessage(
+      "exchange code: oauth2: invalid_grant code=secret-code state=secret-state",
+    ),
+  ).toBe(
+    "Google rejected this authorization code. Start again and immediately paste the newest browser address; authorization codes cannot be reused.",
+  );
+});
+
 it.effect("runs split remote OAuth and stores only the runtime account binding", () => {
   const invocations: ProcessRunner.ProcessRunInput[] = [];
   const stored: Array<{
@@ -66,7 +105,9 @@ it.effect("runs split remote OAuth and stores only the runtime account binding",
           if (input.args.at(-1) === "-")
             return output('{"saved":true,"path":"runtime","client":"default"}');
           if (input.args.includes("--step") && input.args.includes("1")) {
-            return output('{"auth_url":"https://accounts.google.test/auth","state_reused":false}');
+            return output(
+              '{"auth_url":"https://accounts.google.test/auth?redirect_uri=http%3A%2F%2F127.0.0.1%3A43123%2Foauth2%2Fcallback&state=state","state_reused":false}',
+            );
           }
           return output(
             '{"stored":true,"email":"person@example.com","services":["gmail"],"client":"default"}',
@@ -113,7 +154,7 @@ it.effect("runs split remote OAuth and stores only the runtime account binding",
     });
     const completed = yield* setup.complete({
       sessionId: begun.sessionId,
-      redirectUrl: "http://127.0.0.1/oauth2/callback?code=code&state=state",
+      redirectUrl: "http://127.0.0.1:43123/oauth2/callback?code=code&state=state",
     });
     expect(
       yield* setup.remove({
@@ -122,7 +163,7 @@ it.effect("runs split remote OAuth and stores only the runtime account binding",
       }),
     ).toEqual({ connectionId: "google-person-example", removed: true });
 
-    expect(begun.authUrl).toBe("https://accounts.google.test/auth");
+    expect(new URL(begun.authUrl).searchParams.get("login_hint")).toBe("person@example.com");
     expect(completed).toEqual({
       spaceId: space.id,
       connectionId: "google-person-example",
@@ -140,6 +181,7 @@ it.effect("runs split remote OAuth and stores only the runtime account binding",
     const completeArgs = invocations.find((entry) => entry.args.includes("2"))?.args ?? [];
     expect(beginArgs).toEqual(expect.arrayContaining(["--remote", "--step", "1"]));
     expect(beginArgs).toContain("https://www.googleapis.com/auth/gmail.compose");
+    expect(beginArgs).toContain("--force-consent");
     const credentialsInvocation = invocations.find((entry) => entry.args.at(-1) === "-");
     expect(credentialsInvocation?.stdin).toBe(
       '{"installed":{"client_id":"client","client_secret":"secret"}}',
@@ -151,7 +193,7 @@ it.effect("runs split remote OAuth and stores only the runtime account binding",
         "--step",
         "2",
         "--auth-url",
-        "http://127.0.0.1/oauth2/callback?code=code&state=state",
+        "http://127.0.0.1:43123/oauth2/callback?code=code&state=state",
       ]),
     );
     for (const invocation of invocations) {

@@ -46,6 +46,8 @@ interface SetupSession {
   readonly email: string;
   readonly capabilities: CommandCenterGoogleConnectionSetupBeginInput["capabilities"];
   readonly replayArgs: ReadonlyArray<string>;
+  readonly expectedRedirectUri: string;
+  readonly expectedState: string;
   readonly expiresAtMs: number;
 }
 
@@ -79,6 +81,102 @@ const connectorError = (message: string, cause?: unknown) =>
     message,
     ...(cause === undefined ? {} : { cause }),
   });
+
+const singleLine = (value: string) => value.replace(/\s+/gu, " ").trim();
+
+export function googleSetupFailureMessage(stderr: string): string {
+  const detail = singleLine(stderr);
+  const normalized = detail.toLowerCase();
+
+  if (normalized.includes("authorized as") && normalized.includes("expected")) {
+    return detail.slice(0, 500);
+  }
+  if (normalized.includes("no code found") || normalized.includes("missing code")) {
+    return "The pasted address does not contain Google's authorization code. Copy the complete 127.0.0.1 address from the browser address bar.";
+  }
+  if (normalized.includes("state mismatch") || normalized.includes("manual auth state")) {
+    return "This browser address belongs to another or expired Google setup attempt. Start again and paste the address from the newly opened authorization tab.";
+  }
+  if (normalized.includes("no refresh token")) {
+    return "Google did not issue a reusable sign-in token. Start again and approve access when Google asks for consent.";
+  }
+  if (normalized.includes("saving the refresh token failed") || normalized.includes("keyring")) {
+    return "Google approved access, but this environment could not securely store the account token. Check the environment credential store and try again.";
+  }
+  if (normalized.includes("fetch authorized email")) {
+    return "Google approved access, but the authorized account identity could not be verified. Make sure the Google People API is available to the OAuth project and try again.";
+  }
+  if (normalized.includes("exchange code") || normalized.includes("invalid_grant")) {
+    return "Google rejected this authorization code. Start again and immediately paste the newest browser address; authorization codes cannot be reused.";
+  }
+
+  return "Google authorization failed after approval. Start again, choose the same account entered in Command Center, and paste the newest complete browser address.";
+}
+
+interface GoogleOAuthExpectation {
+  readonly redirectUri: string;
+  readonly state: string;
+}
+
+export function prepareGoogleAuthorizationUrl(
+  authUrl: string,
+  email: string,
+): { readonly authUrl: string; readonly expectation: GoogleOAuthExpectation } | undefined {
+  try {
+    const url = new URL(authUrl);
+    if (url.protocol !== "https:") return undefined;
+    const redirectUri = url.searchParams.get("redirect_uri")?.trim();
+    const state = url.searchParams.get("state")?.trim();
+    if (!redirectUri || !state) return undefined;
+    const redirect = new URL(redirectUri);
+    if (
+      redirect.protocol !== "http:" ||
+      redirect.hostname !== "127.0.0.1" ||
+      redirect.pathname !== "/oauth2/callback"
+    ) {
+      return undefined;
+    }
+    url.searchParams.set("login_hint", email);
+    return {
+      authUrl: url.toString(),
+      expectation: { redirectUri: redirect.toString(), state },
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export function validateGoogleCallbackAddress(
+  callbackAddress: string,
+  expectation: GoogleOAuthExpectation,
+): string | undefined {
+  try {
+    const callback = new URL(callbackAddress);
+    const expected = new URL(expectation.redirectUri);
+    if (
+      callback.protocol !== expected.protocol ||
+      callback.host !== expected.host ||
+      callback.pathname !== expected.pathname
+    ) {
+      return "Paste the complete 127.0.0.1 address from the browser tab opened by this setup.";
+    }
+    const providerError = callback.searchParams.get("error");
+    if (providerError) {
+      return providerError === "access_denied"
+        ? "Google access was not approved. Start again and approve the requested permissions."
+        : "Google did not approve this authorization request. Start again and review the OAuth app configuration.";
+    }
+    if (callback.searchParams.get("state") !== expectation.state) {
+      return "This browser address belongs to another or expired Google setup attempt. Start again and use the newly opened authorization tab.";
+    }
+    if (!callback.searchParams.get("code")) {
+      return "The pasted address does not contain Google's authorization code. Copy the complete address from the browser address bar.";
+    }
+    return undefined;
+  } catch {
+    return "The pasted browser address is not valid. Copy the complete address from the browser address bar and try again.";
+  }
+}
 
 const decodeOAuthClients = Schema.decodeUnknownEffect(Schema.fromJsonString(OAuthClientsResult));
 const decodeOAuthBegin = Schema.decodeUnknownEffect(Schema.fromJsonString(OAuthBeginResult));
@@ -139,9 +237,7 @@ export const layer = Layer.effect(
           ),
         );
       if (result.code !== 0) {
-        return yield* connectorError(
-          "Google setup did not complete successfully. Check the account and callback address, then try again.",
-        );
+        return yield* connectorError(googleSetupFailureMessage(result.stderr));
       }
       return result.stdout;
     });
@@ -183,6 +279,7 @@ export const layer = Layer.effect(
       ...(capabilities.includes("gmail.drafts.create")
         ? ["--extra-scopes", GMAIL_COMPOSE_SCOPE]
         : ["--readonly"]),
+      "--force-consent",
     ];
 
     const begin = Effect.fn("GoogleConnectionSetup.begin")(function* (
@@ -211,9 +308,9 @@ export const layer = Layer.effect(
         "--step",
         "1",
       ]).pipe(Effect.flatMap((value) => decodeHelperOutput(decodeOAuthBegin, value)));
-      if (!result.auth_url.startsWith("https://")) {
-        return yield* connectorError("Google setup returned an unsafe authorization URL.");
-      }
+      const prepared = prepareGoogleAuthorizationUrl(result.auth_url, input.email);
+      if (prepared === undefined)
+        return yield* connectorError("Google setup returned an invalid authorization URL.");
       const sessionId = yield* crypto.randomUUIDv4.pipe(
         Effect.mapError((cause) =>
           connectorError("Could not create a Google setup session.", cause),
@@ -228,13 +325,15 @@ export const layer = Layer.effect(
           email: input.email,
           capabilities: input.capabilities,
           replayArgs,
+          expectedRedirectUri: prepared.expectation.redirectUri,
+          expectedState: prepared.expectation.state,
           expiresAtMs: DateTime.toEpochMillis(expiresAt),
         });
         return next;
       });
       return {
         sessionId,
-        authUrl: result.auth_url,
+        authUrl: prepared.authUrl,
         expiresAt: DateTime.formatIso(expiresAt),
       };
     });
@@ -249,6 +348,13 @@ export const layer = Layer.effect(
           reason: "validation",
           message: "This Google setup session expired. Start the connection again.",
         });
+      }
+      const callbackError = validateGoogleCallbackAddress(input.redirectUrl, {
+        redirectUri: session.expectedRedirectUri,
+        state: session.expectedState,
+      });
+      if (callbackError !== undefined) {
+        return yield* new CommandCenterError({ reason: "validation", message: callbackError });
       }
       const result = yield* run([
         "--json",
