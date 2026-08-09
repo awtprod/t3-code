@@ -11,13 +11,18 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import { ServerConfig } from "../config.ts";
 import { ProcessRunner } from "../processRunner.ts";
 import { CommandCenterConfig } from "./Config.ts";
-import { hasPinnedGogVersion, PINNED_GOG_VERSION } from "./GoogleReadConnector.ts";
+import {
+  buildGoogleHelperSearchPath,
+  hasPinnedGogVersion,
+  PINNED_GOG_VERSION,
+} from "./GoogleReadConnector.ts";
 
 const GOOGLE_OAUTH_SESSION_TTL_MINUTES = 10;
 const GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
@@ -95,18 +100,14 @@ export const layer = Layer.effect(
     const serverConfig = yield* ServerConfig;
     const commandCenterConfig = yield* CommandCenterConfig;
     const crypto = yield* Crypto.Crypto;
+    const path = yield* Path.Path;
     const sessions = yield* Ref.make(new Map<string, SetupSession>());
     const binary = process.env.COMMAND_CENTER_GOG_BINARY ?? "gog";
     const gogHome = `${serverConfig.secretsDir}/gog`;
-    const executableDirectory = binary.includes("/")
-      ? binary.slice(0, Math.max(0, binary.lastIndexOf("/")))
-      : undefined;
     const env: NodeJS.ProcessEnv = {
       HOME: gogHome,
       XDG_CONFIG_HOME: gogHome,
-      PATH: [executableDirectory, "/usr/local/bin", "/usr/bin", "/bin"]
-        .filter((entry): entry is string => Boolean(entry))
-        .join(":"),
+      PATH: buildGoogleHelperSearchPath(binary, process.env.PATH, path),
       ...(process.env.GOG_KEYRING_PASSWORD === undefined
         ? {}
         : { GOG_KEYRING_PASSWORD: process.env.GOG_KEYRING_PASSWORD }),

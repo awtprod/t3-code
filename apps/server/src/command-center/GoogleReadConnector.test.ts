@@ -17,6 +17,7 @@ import { ConnectionHealth } from "./ConnectionHealth.ts";
 import {
   GOOGLE_READ_COMMAND_ALLOWLIST,
   GoogleReadConnector,
+  buildGoogleHelperSearchPath,
   buildGoogleReadInvocation,
   buildGoogleDriveExportInvocation,
   hasPinnedGogVersion,
@@ -41,6 +42,20 @@ describe("GoogleReadConnector invocation policy", () => {
     expect(hasPinnedGogVersion("gog version 0.15.0 (build example)")).toBe(true);
     expect(hasPinnedGogVersion("gog version 0.15.01")).toBe(false);
     expect(hasPinnedGogVersion("gog version 10.15.0")).toBe(false);
+  });
+
+  it("preserves absolute operator search paths and drops relative entries", () => {
+    const searchPath = buildGoogleHelperSearchPath(
+      "gog",
+      ["/operator/bin", "relative-bin", "/usr/bin"].join(":"),
+      {
+        sep: "/",
+        dirname: (value) => value.slice(0, Math.max(0, value.lastIndexOf("/"))),
+        isAbsolute: (value) => value.startsWith("/"),
+      },
+    );
+
+    expect(searchPath.split(":")).toEqual(["/operator/bin", "/usr/bin", "/usr/local/bin", "/bin"]);
   });
 
   it("drops caller-controlled ambient account selectors at the public contract", () => {

@@ -27,6 +27,30 @@ export const MAX_GOOGLE_DRIVE_EXPORT_BYTES = 64 * 1024 * 1024;
 export const hasPinnedGogVersion = (output: string): boolean =>
   /(?:^|[^0-9.])0\.15\.0(?:$|[^0-9.])/u.test(output);
 
+/**
+ * Keep helper lookup deterministic while honoring the operator-owned PATH used
+ * to launch the server. Relative entries are excluded so a working-directory
+ * change cannot substitute a different executable.
+ */
+export const buildGoogleHelperSearchPath = (
+  binary: string,
+  inheritedPath: string | undefined,
+  path: Pick<Path.Path, "dirname" | "isAbsolute" | "sep">,
+): string => {
+  const delimiter = path.sep === "\\" ? ";" : ":";
+  return Array.from(
+    new Set(
+      [
+        ...(path.isAbsolute(binary) ? [path.dirname(binary)] : []),
+        ...(inheritedPath?.split(delimiter) ?? []),
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+      ].filter((entry) => path.isAbsolute(entry)),
+    ),
+  ).join(delimiter);
+};
+
 export type GoogleDriveExportRequest = Extract<
   GoogleReadRequest,
   { readonly operation: "drive.export" }
@@ -230,13 +254,10 @@ export const layer = Layer.effect(
     const binary = process.env.COMMAND_CENTER_GOG_BINARY ?? "gog";
     const gogHome = `${serverConfig.secretsDir}/gog`;
     const exportsDirectory = path.join(serverConfig.attachmentsDir, "exports");
-    const executableDirectory = path.isAbsolute(binary) ? path.dirname(binary) : undefined;
     const googleEnvironment: NodeJS.ProcessEnv = {
       HOME: gogHome,
       XDG_CONFIG_HOME: gogHome,
-      PATH: [executableDirectory, "/usr/local/bin", "/usr/bin", "/bin"]
-        .filter((entry): entry is string => entry !== undefined)
-        .join(":"),
+      PATH: buildGoogleHelperSearchPath(binary, process.env.PATH, path),
       ...(process.env.GOG_KEYRING_PASSWORD === undefined
         ? {}
         : { GOG_KEYRING_PASSWORD: process.env.GOG_KEYRING_PASSWORD }),
