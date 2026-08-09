@@ -420,22 +420,48 @@ export function removeAutomationNode(
   };
 }
 
+export function automationEdgeProblem(
+  definition: AutomationEditorDefinition,
+  edge: AutomationEditorEdge,
+): string | undefined {
+  if (edge.from === edge.to) return "A step cannot connect to itself.";
+  if (
+    !definition.nodes.some((node) => node.id === edge.from) ||
+    !definition.nodes.some((node) => node.id === edge.to)
+  ) {
+    return "That step is no longer available.";
+  }
+  if (
+    definition.edges.some((candidate) => candidate.from === edge.from && candidate.to === edge.to)
+  ) {
+    return "Those steps are already connected.";
+  }
+
+  const successors = new Map<string, string[]>();
+  for (const candidate of definition.edges) {
+    const current = successors.get(candidate.from) ?? [];
+    current.push(candidate.to);
+    successors.set(candidate.from, current);
+  }
+  const pending = [edge.to];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const nodeId = pending.pop();
+    if (nodeId === undefined || visited.has(nodeId)) continue;
+    if (nodeId === edge.from) return "That connection would create a loop.";
+    visited.add(nodeId);
+    pending.push(...(successors.get(nodeId) ?? []));
+  }
+  return undefined;
+}
+
 export function addAutomationEdge(
   definition: AutomationEditorDefinition,
   edge: AutomationEditorEdge,
 ): AutomationEditorDefinition {
-  if (
-    edge.from === edge.to ||
-    !definition.nodes.some((node) => node.id === edge.from) ||
-    !definition.nodes.some((node) => node.id === edge.to) ||
-    definition.edges.some((candidate) => candidate.from === edge.from && candidate.to === edge.to)
-  ) {
-    return definition;
-  }
-  const next = { ...definition, edges: [...definition.edges, edge] };
-  return validateAutomationEditorDefinition(next).some((issue) => issue.code === "graph.cycle")
-    ? definition
-    : next;
+  return automationEdgeProblem(definition, edge) === undefined
+    ? { ...definition, edges: [...definition.edges, edge] }
+    : definition;
 }
 
 export function removeAutomationEdge(

@@ -357,7 +357,7 @@ export function AutomationsScreen({
             {selectedAutomation ? (
               <>
                 <Badge variant={isDirty ? "warning" : "success"}>
-                  {isDirty ? "Unsaved" : "Committed"}
+                  {isSaving ? "Saving" : isDirty ? "Autosave pending" : "Saved"}
                 </Badge>
                 <Button
                   aria-label={`Save automation config commit on ${selectedEnvironment?.label ?? "the selected environment"}`}
@@ -367,7 +367,7 @@ export function AutomationsScreen({
                   title={
                     authoringUnavailable
                       ? "Saving automations isn't supported in this environment yet."
-                      : `Save on ${selectedEnvironment?.label ?? "the selected environment"}`
+                      : `Save immediately on ${selectedEnvironment?.label ?? "the selected environment"}; changes also save automatically`
                   }
                 >
                   {isSaving ? (
@@ -375,7 +375,7 @@ export function AutomationsScreen({
                   ) : (
                     <SaveIcon />
                   )}
-                  {isSaving ? "Saving" : "Save commit"}
+                  {isSaving ? "Saving" : "Save now"}
                 </Button>
               </>
             ) : null}

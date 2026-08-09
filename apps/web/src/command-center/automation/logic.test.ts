@@ -4,6 +4,7 @@ import {
   addAutomationNode,
   addAutomationEdge,
   automationCanvasSize,
+  automationEdgeProblem,
   automationEdgePath,
   moveAutomationNode,
   removeAutomationEdge,
@@ -144,6 +145,24 @@ describe("automation editor definition edits", () => {
     expect(removeAutomationEdge(second, { from: "collect", to: "draft" }).edges).toEqual([
       { from: "draft", to: "review" },
     ]);
+  });
+
+  it("explains rejected connections without validating every node configuration", () => {
+    const definition = sampleDefinition();
+
+    expect(automationEdgeProblem(definition, { from: "draft", to: "draft" })).toBe(
+      "A step cannot connect to itself.",
+    );
+    expect(automationEdgeProblem(definition, { from: "draft", to: "missing" })).toBe(
+      "That step is no longer available.",
+    );
+    expect(automationEdgeProblem(definition, { from: "draft", to: "review" })).toBe(
+      "Those steps are already connected.",
+    );
+    expect(automationEdgeProblem(definition, { from: "review", to: "collect" })).toBe(
+      "That connection would create a loop.",
+    );
+    expect(automationEdgeProblem(definition, { from: "collect", to: "review" })).toBeUndefined();
   });
 
   it("computes deterministic paths and a canvas that contains every node", () => {

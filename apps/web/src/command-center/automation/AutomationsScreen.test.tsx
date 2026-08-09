@@ -44,8 +44,8 @@ describe("AutomationsScreen", () => {
     expect(html).toContain("Runs on");
     expect(html).toContain('aria-label="Automation runtime environment"');
     expect(html).toContain("Linux box");
-    expect(html).toContain("Unsaved");
-    expect(html).toContain("Save commit");
+    expect(html).toContain("Autosave pending");
+    expect(html).toContain("Save now");
     expect(html).toContain("New automation");
     expect(html).toContain('href="/settings/connections"');
     expect(html).toMatch(
@@ -101,7 +101,7 @@ describe("AutomationsScreen", () => {
     expect(html).toContain('data-slot="automation-editor"');
     expect(html).toContain("Read only");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*New automation/su);
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Save commit/su);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Save now/su);
   });
 
   it("renders explicit loading and empty committed-definition states", () => {

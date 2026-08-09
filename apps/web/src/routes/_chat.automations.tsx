@@ -14,10 +14,13 @@ import {
   AutomationsScreen,
 } from "../command-center/automation/AutomationsScreen";
 import {
+  type AutomationEditorDraft,
   readPreferredAutomationEnvironmentId,
+  reconcileAutomationDraftAfterSave,
   rememberPreferredAutomationEnvironmentId,
   resolveAutomationEnvironmentId,
   resolveAutomationsScreenStatus,
+  shouldAutosaveAutomationDraft,
 } from "../command-center/automation/AutomationsScreen.logic";
 import { validateAutomationEditorDefinition } from "../command-center/automation/logic";
 import type { AutomationEditorDefinition } from "../command-center/automation/types";
@@ -27,13 +30,7 @@ import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
 
 const decodeSourceDefinition = Schema.decodeUnknownSync(CommandCenterAutomationSourceDefinition);
-
-interface AutomationDraft {
-  readonly definition: AutomationEditorDefinition;
-  readonly baseDigest: string;
-  readonly configCommitSha: string;
-  readonly dirty: boolean;
-}
+const AUTOMATION_AUTOSAVE_DELAY_MS = 1_000;
 
 let automationCreateRequestSequence = 0;
 function nextAutomationCreateRequestId(): string {
@@ -65,8 +62,9 @@ function AutomationsEnvironmentRouteView({
   onEnvironmentChange,
 }: AutomationsEnvironmentRouteViewProps) {
   const [selectedAutomationId, setSelectedAutomationId] = useState<string>();
-  const [drafts, setDrafts] = useState<Readonly<Record<string, AutomationDraft>>>({});
+  const [drafts, setDrafts] = useState<Readonly<Record<string, AutomationEditorDraft>>>({});
   const [savingAutomationId, setSavingAutomationId] = useState<string>();
+  const savingAutomationIdRef = useRef<string | undefined>(undefined);
   const [isCreating, setIsCreating] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -139,6 +137,17 @@ function AutomationsEnvironmentRouteView({
         : definitionQuery.isPending
           ? "loading"
           : "unavailable";
+  const activeBlockingIssueCount = useMemo(
+    () =>
+      activeDefinition === null
+        ? 0
+        : validateAutomationEditorDefinition(activeDefinition).filter(
+            (issue) => (issue.severity ?? "error") === "error",
+          ).length,
+    [activeDefinition],
+  );
+  const authoringUnavailable =
+    (definitionQuery.data?.authoringHealth ?? bootstrap?.authoringHealth)?.status === "unavailable";
 
   const changeDefinition = useCallback(
     (definition: AutomationEditorDefinition) => {
@@ -151,6 +160,7 @@ function AutomationsEnvironmentRouteView({
           configCommitSha:
             current[selectedId]?.configCommitSha ?? definitionQuery.data!.configCommitSha,
           dirty: true,
+          revision: (current[selectedId]?.revision ?? 0) + 1,
         },
       }));
       setSaveError(null);
@@ -164,14 +174,11 @@ function AutomationsEnvironmentRouteView({
       selectedAutomation === undefined ||
       activeDefinition === null ||
       definitionQuery.data === null ||
-      savingAutomationId !== undefined
+      savingAutomationIdRef.current !== undefined
     ) {
       return;
     }
-    const blockingIssues = validateAutomationEditorDefinition(activeDefinition).filter(
-      (issue) => (issue.severity ?? "error") === "error",
-    );
-    if (blockingIssues.length > 0) {
+    if (activeBlockingIssueCount > 0) {
       setSaveError("Fix the blocking graph validation issues before saving.");
       return;
     }
@@ -185,42 +192,79 @@ function AutomationsEnvironmentRouteView({
     }
 
     const baseDigest = activeDraft?.baseDigest ?? definitionQuery.data.definitionDigest;
+    const submittedRevision = activeDraft?.revision ?? 0;
+    savingAutomationIdRef.current = selectedAutomation.id;
     setSavingAutomationId(selectedAutomation.id);
     setSaveError(null);
-    const result = await saveDefinition({
-      environmentId,
-      input: {
-        automationId: selectedAutomation.id,
-        spaceId: selectedAutomation.spaceId,
-        expectedDefinitionDigest: baseDigest,
-        definition: sourceDefinition,
-      },
-    });
-    if (result._tag === "Success") {
-      setDrafts((current) => ({
-        ...current,
-        [selectedAutomation.id]: {
-          definition: editorDefinition(result.value),
-          baseDigest: result.value.definitionDigest,
-          configCommitSha: result.value.configCommitSha,
-          dirty: false,
+    try {
+      const result = await saveDefinition({
+        environmentId,
+        input: {
+          automationId: selectedAutomation.id,
+          spaceId: selectedAutomation.spaceId,
+          expectedDefinitionDigest: baseDigest,
+          definition: sourceDefinition,
         },
-      }));
-      definitionQuery.refresh();
-      bootstrapQuery.refresh();
-    } else {
-      setSaveError(saveFailureMessage(squashAtomCommandFailure(result)));
+      });
+      if (result._tag === "Success") {
+        setDrafts((current) => ({
+          ...current,
+          [selectedAutomation.id]: reconcileAutomationDraftAfterSave({
+            currentDraft: current[selectedAutomation.id],
+            submittedRevision,
+            savedDefinition: editorDefinition(result.value),
+            savedDefinitionDigest: result.value.definitionDigest,
+            savedConfigCommitSha: result.value.configCommitSha,
+          }),
+        }));
+        definitionQuery.refresh();
+        bootstrapQuery.refresh();
+      } else {
+        setSaveError(saveFailureMessage(squashAtomCommandFailure(result)));
+      }
+    } catch (cause) {
+      setSaveError(saveFailureMessage(cause));
+    } finally {
+      savingAutomationIdRef.current = undefined;
+      setSavingAutomationId(undefined);
     }
-    setSavingAutomationId(undefined);
   }, [
+    activeBlockingIssueCount,
     activeDefinition,
     activeDraft?.baseDigest,
-    bootstrapQuery,
-    definitionQuery,
+    activeDraft?.revision,
+    bootstrapQuery.refresh,
+    definitionQuery.data,
+    definitionQuery.refresh,
     environmentId,
     saveDefinition,
-    savingAutomationId,
     selectedAutomation,
+  ]);
+
+  useEffect(() => {
+    if (
+      !shouldAutosaveAutomationDraft({
+        dirty: activeDraft?.dirty ?? false,
+        isSaving: savingAutomationId !== undefined,
+        hasBlockingIssues: activeBlockingIssueCount > 0,
+        hasSaveError: saveError !== null,
+        authoringUnavailable,
+      })
+    ) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void save();
+    }, AUTOMATION_AUTOSAVE_DELAY_MS);
+    return () => window.clearTimeout(timeout);
+  }, [
+    activeBlockingIssueCount,
+    activeDraft?.dirty,
+    activeDraft?.revision,
+    authoringUnavailable,
+    save,
+    saveError,
+    savingAutomationId,
   ]);
 
   const create = useCallback(
@@ -258,6 +302,7 @@ function AutomationsEnvironmentRouteView({
             baseDigest: snapshot.definitionDigest,
             configCommitSha: snapshot.configCommitSha,
             dirty: false,
+            revision: 0,
           },
         }));
         bootstrapQuery.refresh();

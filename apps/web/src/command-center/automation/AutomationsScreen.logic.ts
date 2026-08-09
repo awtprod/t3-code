@@ -28,6 +28,54 @@ export interface AutomationEnvironmentCandidate {
   readonly platformOs?: ExecutionEnvironmentPlatformOs;
 }
 
+export interface AutomationEditorDraft {
+  readonly definition: AutomationEditorDefinition;
+  readonly baseDigest: string;
+  readonly configCommitSha: string;
+  readonly dirty: boolean;
+  readonly revision: number;
+}
+
+export function reconcileAutomationDraftAfterSave(input: {
+  readonly currentDraft: AutomationEditorDraft | undefined;
+  readonly submittedRevision: number;
+  readonly savedDefinition: AutomationEditorDefinition;
+  readonly savedDefinitionDigest: string;
+  readonly savedConfigCommitSha: string;
+}): AutomationEditorDraft {
+  if (input.currentDraft && input.currentDraft.revision > input.submittedRevision) {
+    return {
+      ...input.currentDraft,
+      baseDigest: input.savedDefinitionDigest,
+      configCommitSha: input.savedConfigCommitSha,
+      dirty: true,
+    };
+  }
+  return {
+    definition: input.savedDefinition,
+    baseDigest: input.savedDefinitionDigest,
+    configCommitSha: input.savedConfigCommitSha,
+    dirty: false,
+    revision: input.submittedRevision,
+  };
+}
+
+export function shouldAutosaveAutomationDraft(input: {
+  readonly dirty: boolean;
+  readonly isSaving: boolean;
+  readonly hasBlockingIssues: boolean;
+  readonly hasSaveError: boolean;
+  readonly authoringUnavailable: boolean;
+}): boolean {
+  return (
+    input.dirty &&
+    !input.isSaving &&
+    !input.hasBlockingIssues &&
+    !input.hasSaveError &&
+    !input.authoringUnavailable
+  );
+}
+
 const PREFERRED_AUTOMATION_ENVIRONMENT_KEY = "t3code:automations:environment";
 
 export function readPreferredAutomationEnvironmentId(): EnvironmentId | null {

@@ -49,7 +49,16 @@ import {
   XIcon,
   type LucideIcon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -62,6 +71,7 @@ import {
   AUTOMATION_NODE_WIDTH,
   addAutomationEdge,
   addAutomationNode,
+  automationEdgeProblem,
   mergeAutomationValidationIssues,
   readAutomationNodePosition,
   reconcileAutomationNodePosition,
@@ -337,6 +347,23 @@ const NODE_TYPES = { "automation-step": AutomationNodeCard };
 
 function edgeId(edge: AutomationEditorEdge): string {
   return `automation-edge:${encodeURIComponent(edge.from)}:${encodeURIComponent(edge.to)}`;
+}
+
+function automationFlowEdge(
+  edge: AutomationEditorEdge,
+  readOnly: boolean,
+  selectedEdgeId: string | undefined,
+): AutomationFlowEdge {
+  const id = edgeId(edge);
+  return {
+    id,
+    source: edge.from,
+    target: edge.to,
+    type: "smoothstep",
+    selected: id === selectedEdgeId,
+    reconnectable: !readOnly,
+    style: { strokeWidth: 2 },
+  };
 }
 
 function selectClassName(): string {
@@ -1641,7 +1668,20 @@ function AutomationCanvas({
 }) {
   const { screenToFlowPosition, fitView, setViewport } = useReactFlow();
   const latestDefinitionRef = useRef(definition);
-  latestDefinitionRef.current = definition;
+  useLayoutEffect(() => {
+    latestDefinitionRef.current = definition;
+  }, [definition]);
+  const commitCanvasEdit = useCallback(
+    (edit: (current: AutomationEditorDefinition) => AutomationEditorDefinition): boolean => {
+      const current = latestDefinitionRef.current;
+      const next = edit(current);
+      if (next === current) return false;
+      latestDefinitionRef.current = next;
+      publishEdit(next);
+      return true;
+    },
+    [publishEdit],
+  );
   const [pendingPosition, setPendingPosition] = useState<AutomationEditorPosition>();
   const [pendingSourceId, setPendingSourceId] = useState<string>();
   const [connectionMessage, setConnectionMessage] = useState<string>();
@@ -1657,17 +1697,22 @@ function AutomationCanvas({
       zoom: typeof record.zoom === "number" ? record.zoom : 1,
     };
   }, [definition.layout.viewport]);
+  const restoredViewportDefinitionIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
+    if (restoredViewportDefinitionIdRef.current === definition.id) return;
+    restoredViewportDefinitionIdRef.current = definition.id;
     void setViewport(defaultViewport);
   }, [defaultViewport, definition.id, setViewport]);
   const removeNode = useCallback(
     (nodeId: string) => {
-      const connected = definition.edges.some((edge) => edge.from === nodeId || edge.to === nodeId);
+      const connected = latestDefinitionRef.current.edges.some(
+        (edge) => edge.from === nodeId || edge.to === nodeId,
+      );
       if (connected && !window.confirm("Delete this step and its connections?")) return;
-      publishEdit(removeAutomationNode(definition, nodeId));
+      commitCanvasEdit((current) => removeAutomationNode(current, nodeId));
       onSelectedNodeIdChange(undefined);
     },
-    [definition, onSelectedNodeIdChange, publishEdit],
+    [commitCanvasEdit, onSelectedNodeIdChange],
   );
   const flowNodes = useMemo<ReadonlyArray<AutomationFlowNode>>(
     () =>
@@ -1700,16 +1745,7 @@ function AutomationCanvas({
     ],
   );
   const flowEdges = useMemo<ReadonlyArray<AutomationFlowEdge>>(
-    () =>
-      definition.edges.map((edge) => ({
-        id: edgeId(edge),
-        source: edge.from,
-        target: edge.to,
-        type: "smoothstep",
-        selected: edgeId(edge) === selectedEdgeId,
-        reconnectable: !readOnly,
-        style: { strokeWidth: 2 },
-      })),
+    () => definition.edges.map((edge) => automationFlowEdge(edge, readOnly, selectedEdgeId)),
     [definition.edges, readOnly, selectedEdgeId],
   );
   const [nodes, setNodes, onNodesChange] = useNodesState<AutomationFlowNode>([...flowNodes]);
@@ -1762,10 +1798,12 @@ function AutomationCanvas({
         return;
       }
       if (selectedEdgeId) {
-        const selected = definition.edges.find((edge) => edgeId(edge) === selectedEdgeId);
+        const selected = latestDefinitionRef.current.edges.find(
+          (edge) => edgeId(edge) === selectedEdgeId,
+        );
         if (selected) {
           event.preventDefault();
-          publishEdit(removeAutomationEdge(definition, selected));
+          commitCanvasEdit((current) => removeAutomationEdge(current, selected));
           onSelectedEdgeIdChange(undefined);
         }
       }
@@ -1773,52 +1811,68 @@ function AutomationCanvas({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
-    definition,
+    commitCanvasEdit,
     onSelectedEdgeIdChange,
     onShowNodePickerChange,
-    publishEdit,
     readOnly,
     removeNode,
     selectedEdgeId,
     selectedNodeId,
   ]);
-  const validConnection = useCallback(
-    (connection: FlowConnection | Edge) => {
-      if (!connection.source || !connection.target) return false;
-      return (
-        addAutomationEdge(definition, { from: connection.source, to: connection.target }) !==
-        definition
-      );
-    },
-    [definition],
-  );
+  const validConnection = useCallback((connection: FlowConnection | Edge) => {
+    if (!connection.source || !connection.target) return false;
+    return (
+      automationEdgeProblem(latestDefinitionRef.current, {
+        from: connection.source,
+        to: connection.target,
+      }) === undefined
+    );
+  }, []);
   const onConnect = useCallback(
     (connection: FlowConnection) => {
       if (!connection.source || !connection.target || readOnly) return;
-      const next = addAutomationEdge(definition, {
+      const edge = {
         from: connection.source,
         to: connection.target,
-      });
-      if (next === definition)
-        setConnectionMessage(
-          "That connection would duplicate an edge, connect a step to itself, or create a loop.",
+      };
+      const problem = automationEdgeProblem(latestDefinitionRef.current, edge);
+      if (problem !== undefined) {
+        setConnectionMessage(problem);
+      } else {
+        commitCanvasEdit((current) => addAutomationEdge(current, edge));
+        setEdges((current) =>
+          current.some((candidate) => candidate.id === edgeId(edge))
+            ? current
+            : [...current, automationFlowEdge(edge, readOnly, selectedEdgeId)],
         );
-      else {
-        publishEdit(next);
         setConnectionMessage(undefined);
       }
     },
-    [definition, publishEdit, readOnly],
+    [commitCanvasEdit, readOnly, selectedEdgeId, setEdges],
   );
   const onConnectEnd: OnConnectEnd = useCallback(
     (event, connectionState) => {
-      if (
-        readOnly ||
-        connectionState.isValid ||
-        !connectionState.fromNode ||
-        connectionState.toNode
-      )
+      if (readOnly || connectionState.isValid || !connectionState.fromNode) return;
+      if (connectionState.toNode) {
+        if (
+          connectionState.fromHandle?.type !== "source" ||
+          connectionState.toHandle?.type !== "target"
+        ) {
+          setConnectionMessage("Drag from the blue output to the gray input of another step.");
+          return;
+        }
+        setConnectionMessage(
+          automationEdgeProblem(latestDefinitionRef.current, {
+            from: connectionState.fromNode.id,
+            to: connectionState.toNode.id,
+          }) ?? "That connection is not available.",
+        );
         return;
+      }
+      if (connectionState.fromHandle?.type !== "source") {
+        setConnectionMessage("Start connections from the blue output on the right of a step.");
+        return;
+      }
       const point = "changedTouches" in event ? event.changedTouches[0] : event;
       if (!point) return;
       setPendingPosition(screenToFlowPosition({ x: point.clientX, y: point.clientY }));
@@ -1831,11 +1885,14 @@ function AutomationCanvas({
     const position =
       pendingPosition ??
       screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
-    let next = addAutomationNode(definition, kind, position);
-    const addedId = next.nodes.at(-1)?.id;
-    if (pendingSourceId && addedId)
-      next = addAutomationEdge(next, { from: pendingSourceId, to: addedId });
-    publishEdit(next);
+    let addedId: string | undefined;
+    commitCanvasEdit((current) => {
+      let next = addAutomationNode(current, kind, position);
+      addedId = next.nodes.at(-1)?.id;
+      if (pendingSourceId && addedId)
+        next = addAutomationEdge(next, { from: pendingSourceId, to: addedId });
+      return next;
+    });
     onSelectedNodeIdChange(addedId);
     onSelectedEdgeIdChange(undefined);
     setPendingPosition(undefined);
@@ -1845,6 +1902,7 @@ function AutomationCanvas({
   return (
     <div className="relative min-h-0 flex-1 bg-muted/20" data-slot="automation-canvas">
       <ReactFlow
+        connectionRadius={32}
         colorMode="system"
         deleteKeyCode={null}
         edges={edges}
@@ -1866,10 +1924,12 @@ function AutomationCanvas({
         onEdgesChange={onEdgesChange}
         onEdgesDelete={(deleted) => {
           if (readOnly) return;
-          let next = definition;
-          for (const edge of deleted)
-            next = removeAutomationEdge(next, { from: edge.source, to: edge.target });
-          publishEdit(next);
+          commitCanvasEdit((current) => {
+            let next = current;
+            for (const edge of deleted)
+              next = removeAutomationEdge(next, { from: edge.source, to: edge.target });
+            return next;
+          });
           onSelectedEdgeIdChange(undefined);
         }}
         onNodeClick={(_event, node) => {
@@ -1877,20 +1937,16 @@ function AutomationCanvas({
           onSelectedEdgeIdChange(undefined);
         }}
         onNodeDragStop={(_event, node) => {
-          const next = setAutomationNodePosition(
-            latestDefinitionRef.current,
-            node.id,
-            node.position,
-          );
-          latestDefinitionRef.current = next;
-          publishEdit(next);
+          commitCanvasEdit((current) => setAutomationNodePosition(current, node.id, node.position));
         }}
         onNodesChange={onNodesChange}
         onNodesDelete={(deleted) => {
           if (readOnly) return;
-          let next = definition;
-          for (const node of deleted) next = removeAutomationNode(next, node.id);
-          publishEdit(next);
+          commitCanvasEdit((current) => {
+            let next = current;
+            for (const node of deleted) next = removeAutomationNode(next, node.id);
+            return next;
+          });
           onSelectedNodeIdChange(undefined);
         }}
         onPaneClick={() => {
@@ -1900,33 +1956,41 @@ function AutomationCanvas({
         defaultViewport={defaultViewport}
         onMoveEnd={(_event, viewport) => {
           if (readOnly) return;
-          const currentDefinition = latestDefinitionRef.current;
-          const next = {
-            ...currentDefinition,
+          commitCanvasEdit((current) => ({
+            ...current,
             layout: {
-              ...currentDefinition.layout,
+              ...current.layout,
               viewport: { x: viewport.x, y: viewport.y, zoom: viewport.zoom },
             },
-          };
-          latestDefinitionRef.current = next;
-          publishEdit(next);
+          }));
         }}
         onReconnect={(oldEdge, connection) => {
           if (readOnly || !connection.source || !connection.target) return;
-          const without = removeAutomationEdge(definition, {
+          const current = latestDefinitionRef.current;
+          const without = removeAutomationEdge(current, {
             from: oldEdge.source,
             to: oldEdge.target,
           });
-          const next = addAutomationEdge(without, {
+          const edge = {
             from: connection.source,
             to: connection.target,
-          });
-          if (next === without) {
-            setConnectionMessage("That reconnection would create an invalid loop.");
-            setEdges([...flowEdges]);
+          };
+          const problem = automationEdgeProblem(without, edge);
+          if (problem !== undefined) {
+            setConnectionMessage(problem);
+            setEdges(
+              current.edges.map((candidate) =>
+                automationFlowEdge(candidate, readOnly, selectedEdgeId),
+              ),
+            );
             return;
           }
-          publishEdit(next);
+          const next = addAutomationEdge(without, edge);
+          commitCanvasEdit(() => next);
+          setEdges(
+            next.edges.map((candidate) => automationFlowEdge(candidate, readOnly, selectedEdgeId)),
+          );
+          setConnectionMessage(undefined);
         }}
         panOnDrag
         selectionOnDrag
