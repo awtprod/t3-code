@@ -10,12 +10,14 @@ import type { Approval as ApprovalType } from "@command-center/core";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as CommandCenterService from "./Service.ts";
+import { ServerConfig } from "../config.ts";
 import * as GoogleReadConnector from "./GoogleReadConnector.ts";
-import { googleCapabilityForOperation } from "./GoogleCapabilities.ts";
+import { googleCapabilityForDraft, googleCapabilityForOperation } from "./GoogleCapabilities.ts";
 import {
   automationAgentCommandId,
   automationAgentRunResumeKey,
@@ -555,6 +557,8 @@ export const safeRuntimeLayer = Layer.unwrap(
   Effect.gen(function* () {
     const commandCenter = yield* CommandCenterService.CommandCenterService;
     const google = yield* GoogleReadConnector.GoogleReadConnector;
+    const serverConfig = yield* ServerConfig;
+    const path = yield* Path.Path;
     const scopedShell = yield* AutomationScopedShell.AutomationScopedShell;
     const startAgentRun = yield* makeLiveAutomationAgentRunAdapter;
     const executeNode = makeSafeAutomationNodeExecutor({
@@ -592,6 +596,57 @@ export const safeRuntimeLayer = Layer.unwrap(
           ),
           Effect.mapError((cause) => (typeof cause === "string" ? cause : cause.message)),
         ),
+      googleDraft: (input) =>
+        Effect.gen(function* () {
+          const requiredCapability = googleCapabilityForDraft(input.operation);
+          const connections = (yield* commandCenter.queryConnections({ spaceId: input.spaceId }))
+            .connections;
+          const connection = connections.find(
+            (candidate) =>
+              candidate.id === input.connectionId &&
+              candidate.spaceId === input.spaceId &&
+              candidate.kind === "google" &&
+              candidate.capabilities.includes(requiredCapability),
+          );
+          if (connection === undefined) {
+            return yield* Effect.fail(
+              `The requested Google connection does not grant ${requiredCapability}.`,
+            );
+          }
+          const artifacts =
+            input.attachmentArtifactIds === undefined
+              ? []
+              : (yield* commandCenter.queryArtifacts({
+                  spaceId: input.spaceId,
+                  limit: 500,
+                })).artifacts.filter((artifact) =>
+                  input.attachmentArtifactIds!.includes(artifact.id),
+                );
+          if (artifacts.length !== (input.attachmentArtifactIds?.length ?? 0)) {
+            return yield* Effect.fail("A Gmail draft attachment is not available in this Space.");
+          }
+          const attachmentPaths = artifacts.map((artifact) => {
+            const extension = artifact.name.split(".").at(-1);
+            return extension !== undefined &&
+              /^[a-z0-9]{1,10}$/iu.test(extension) &&
+              artifact.kind === "export" &&
+              artifact.locator === `cc-artifact://${artifact.id}`
+              ? path.join(serverConfig.attachmentsDir, "exports", `${artifact.id}.${extension}`)
+              : undefined;
+          });
+          if (attachmentPaths.some((attachmentPath) => attachmentPath === undefined)) {
+            return yield* Effect.fail(
+              "Gmail drafts may attach only server-owned export artifacts.",
+            );
+          }
+          const resolvedAttachmentPaths = attachmentPaths.filter(
+            (attachmentPath): attachmentPath is string => attachmentPath !== undefined,
+          );
+          if (google.createDraft === undefined) {
+            return yield* Effect.fail("Gmail draft creation is not configured on this server.");
+          }
+          return yield* google.createDraft(input, resolvedAttachmentPaths);
+        }).pipe(Effect.mapError((cause) => (typeof cause === "string" ? cause : cause.message))),
     });
     const dependencies = yield* AutomationRuntime.makeDefaultDependencies(executeNode);
     return AutomationRuntime.layer({

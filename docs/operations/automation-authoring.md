@@ -5,6 +5,19 @@ Local automation creation and editing have a narrower v1 deployment boundary: au
 only on Linux when a trusted system Python interpreter and `renameat2(RENAME_EXCHANGE)` are
 available.
 
+The desktop or web client does not need to run on Linux. The Automations screen's **Runs on**
+selector scopes definition reads, creates, saves, and subsequent runs to one connected environment.
+A Windows client can therefore author against a paired Linux server; the Linux server owns the
+private configuration checkout, performs the atomic commit, and runs the committed automation.
+Changing environments discards no saved data, and the selector is disabled while the current editor
+has unsaved changes so a draft cannot cross environment boundaries.
+
+Save and autosave are durability actions, not readiness gates. Incomplete step configuration,
+unfinished schedules, and graph validation issues are committed so authoring work is not lost.
+Those issues remain visible in the editor, and execution validation still prevents an unfinished
+definition from running successfully. Only invalid request shapes, stale-write conflicts, and
+storage or commit failures reject persistence.
+
 ## Preflight
 
 Before the editor offers a local save, the server verifies all of the following:
@@ -20,9 +33,13 @@ committed definitions and running committed automations remain available. The fi
 exchange is checked again at every save and fails closed if the checkout filesystem does not support
 the primitive.
 
+Committed definitions are resolved from the checkout's `HEAD` tree by their definition identity,
+not by assuming the JSON filename matches the automation id. Read-only viewing therefore also works
+from a detached checkout; creation and editing still require a checked-out named branch.
+
 ## Atomic publication and recovery
 
-Authoring stages exact validated bytes under `.git/command-center-recovery/<transaction>/`. A
+Authoring stages exact service-decoded bytes under `.git/command-center-recovery/<transaction>/`. A
 scrubbed, bounded helper opens both the automation parent and recovery directory with
 `O_DIRECTORY | O_NOFOLLOW`, pins their device/inode identities, and exchanges the staged and working
 files with one dirfd-relative `RENAME_EXCHANGE` operation. The target pathname is never absent.

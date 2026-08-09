@@ -7,9 +7,13 @@ import {
   type AutomationEditorPosition,
   type AutomationEditorValidationIssue,
 } from "./types";
+import {
+  isValidAutomationTimeZone,
+  parseAutomationCronExpression,
+} from "@t3tools/shared/automationSchedule";
 
-export const AUTOMATION_NODE_WIDTH = 216;
-export const AUTOMATION_NODE_HEIGHT = 88;
+export const AUTOMATION_NODE_WIDTH = 280;
+export const AUTOMATION_NODE_HEIGHT = 112;
 export const AUTOMATION_CANVAS_PADDING = 48;
 
 const DEFAULT_COLUMN_GAP = 80;
@@ -81,6 +85,19 @@ const jsonPosition = (
   y: position.y,
 });
 
+export function reconcileAutomationNodePosition(
+  currentPosition: AutomationEditorPosition,
+  previousPersistedPosition: AutomationEditorPosition | undefined,
+  nextPersistedPosition: AutomationEditorPosition,
+  definitionChanged: boolean,
+): AutomationEditorPosition {
+  const persistedPositionChanged =
+    previousPersistedPosition === undefined ||
+    previousPersistedPosition.x !== nextPersistedPosition.x ||
+    previousPersistedPosition.y !== nextPersistedPosition.y;
+  return definitionChanged || persistedPositionChanged ? nextPersistedPosition : currentPosition;
+}
+
 export function moveAutomationNode(
   definition: AutomationEditorDefinition,
   nodeId: string,
@@ -90,9 +107,28 @@ export function moveAutomationNode(
   if (nodeIndex < 0 || !Number.isFinite(delta.x) || !Number.isFinite(delta.y)) return definition;
 
   const current = readAutomationNodePosition(definition, nodeId, nodeIndex);
+  return setAutomationNodePosition(definition, nodeId, {
+    x: current.x + delta.x,
+    y: current.y + delta.y,
+  });
+}
+
+export function setAutomationNodePosition(
+  definition: AutomationEditorDefinition,
+  nodeId: string,
+  position: AutomationEditorPosition,
+): AutomationEditorDefinition {
+  if (
+    !definition.nodes.some((node) => node.id === nodeId) ||
+    !Number.isFinite(position.x) ||
+    !Number.isFinite(position.y)
+  ) {
+    return definition;
+  }
+
   const nextPosition: AutomationEditorPosition = {
-    x: Math.max(AUTOMATION_CANVAS_PADDING / 2, Math.round(current.x + delta.x)),
-    y: Math.max(AUTOMATION_CANVAS_PADDING / 2, Math.round(current.y + delta.y)),
+    x: Math.round(position.x),
+    y: Math.round(position.y),
   };
 
   return {
@@ -110,6 +146,7 @@ export function moveAutomationNode(
 const NODE_ID_STEMS: Record<AutomationEditorNodeKind, string> = {
   "agent.run": "agent",
   "connector.read": "connector",
+  "connector.write": "connector-write",
   "item.mutate": "item",
   approval: "approval",
   condition: "condition",
@@ -123,12 +160,173 @@ const NODE_DEFAULT_CONFIG: Partial<
   Record<AutomationEditorNodeKind, Readonly<Record<string, AutomationEditorJson>>>
 > = {
   "agent.run": { prompt: "Describe the scoped agent task" },
+  "connector.read": { operation: "gmail.search", query: "" },
+  "connector.write": {
+    operation: "gmail.draft.create",
+    to: [],
+    subject: "",
+    body: "",
+  },
+  "item.mutate": { operation: "create", title: "", kind: "task", priority: "normal" },
+  condition: { leftPath: "", operator: "truthy" },
+  transform: { template: "" },
+  foreach: { sourcePath: "", template: "{{item}}" },
+  delay: { durationMs: 300_000 },
+  approval: { approvalKey: "decision" },
   "shell.scoped": { allowlistId: "configured-command-id" },
 };
+
+const nonEmptyString = (value: AutomationEditorJson | undefined): value is string =>
+  typeof value === "string" && value.trim().length > 0;
+
+const supportedConditionOperators = new Set([
+  "truthy",
+  "falsy",
+  "equals",
+  "notEquals",
+  "contains",
+  "greaterThan",
+  "greaterThanOrEqual",
+  "lessThan",
+  "lessThanOrEqual",
+]);
+
+function guidedConfigProblem(
+  definition: AutomationEditorDefinition,
+  node: AutomationEditorDefinition["nodes"][number],
+): string | undefined {
+  const config = node.config;
+  switch (node.kind) {
+    case "agent.run":
+    case "shell.scoped":
+      return undefined;
+    case "connector.read": {
+      if (!nonEmptyString(config.connectionId)) return "Choose a connection.";
+      const operation = config.operation;
+      if (!nonEmptyString(operation)) return "Choose what this step should read.";
+      if (["gmail.search", "drive.search"].includes(operation) && !nonEmptyString(config.query)) {
+        return "Enter a search query.";
+      }
+      if (operation === "gmail.get" && !nonEmptyString(config.messageId))
+        return "Enter a Gmail message ID.";
+      if (operation === "gmail.thread.get" && !nonEmptyString(config.threadId))
+        return "Enter a Gmail thread ID.";
+      if (operation === "drive.get" && !nonEmptyString(config.fileId))
+        return "Enter a Drive file ID.";
+      if (
+        ["calendar.events", "calendar.freebusy"].includes(operation) &&
+        (!nonEmptyString(config.from) || !nonEmptyString(config.to))
+      ) {
+        return "Enter the start and end of the calendar window.";
+      }
+      if (
+        operation === "calendar.freebusy" &&
+        (!Array.isArray(config.calendarIds) || config.calendarIds.length === 0)
+      ) {
+        return "Choose at least one calendar.";
+      }
+      if (
+        ![
+          "gmail.search",
+          "gmail.get",
+          "gmail.thread.get",
+          "calendar.events",
+          "calendar.freebusy",
+          "drive.search",
+          "drive.list",
+          "drive.get",
+        ].includes(operation)
+      ) {
+        return "Choose a supported Gmail, Calendar, or Drive read action.";
+      }
+      if (
+        config.limit !== undefined &&
+        (!isFiniteNumber(config.limit) ||
+          !Number.isInteger(config.limit) ||
+          config.limit < 1 ||
+          config.limit > 50)
+      ) {
+        return "Maximum results must be a whole number from 1 to 50.";
+      }
+      return undefined;
+    }
+    case "connector.write": {
+      if (!nonEmptyString(config.connectionId)) return "Choose a Gmail connection.";
+      if (config.operation !== "gmail.draft.create")
+        return "Only Gmail draft creation is supported.";
+      if (!Array.isArray(config.to) || config.to.length === 0 || !config.to.every(nonEmptyString))
+        return "Add at least one recipient.";
+      if (!nonEmptyString(config.subject)) return "Enter a draft subject.";
+      if (!nonEmptyString(config.body) && !nonEmptyString(config.bodyHtml))
+        return "Enter a draft body.";
+      const hasApproval = definition.edges.some(
+        (edge) =>
+          edge.to === node.id &&
+          definition.nodes.some(
+            (candidate) => candidate.id === edge.from && candidate.kind === "approval",
+          ),
+      );
+      return hasApproval ? undefined : "Connect an Approval step directly before this draft.";
+    }
+    case "item.mutate":
+      return !nonEmptyString(config.title)
+        ? "Enter an item title."
+        : !["create", "capture", undefined].includes(config.operation as string | undefined)
+          ? "Choose create or capture."
+          : !["idea", "task", "decision", "alert", "approval", undefined].includes(
+                config.kind as string | undefined,
+              )
+            ? "Choose a supported item type."
+            : !["low", "normal", "high", "urgent", undefined].includes(
+                  config.priority as string | undefined,
+                )
+              ? "Choose a supported priority."
+              : undefined;
+    case "condition": {
+      const operator = nonEmptyString(config.operator) ? config.operator : "truthy";
+      if (!supportedConditionOperators.has(operator)) return "Choose a supported comparison.";
+      if (
+        !nonEmptyString(config.leftPath) &&
+        config.left === undefined &&
+        !nonEmptyString(config.valuePath) &&
+        config.value === undefined
+      )
+        return "Choose the incoming value to compare.";
+      return undefined;
+    }
+    case "transform":
+      return config.template === undefined &&
+        config.output === undefined &&
+        config.value === undefined
+        ? "Enter an output template."
+        : undefined;
+    case "foreach":
+      return !nonEmptyString(config.sourcePath) &&
+        !nonEmptyString(config.itemsPath) &&
+        config.source === undefined &&
+        config.items === undefined
+        ? "Choose the array to repeat over."
+        : undefined;
+    case "delay": {
+      if (nonEmptyString(config.until))
+        return Number.isNaN(Date.parse(config.until)) ? "Enter a valid date and time." : undefined;
+      return isFiniteNumber(config.durationMs) &&
+        config.durationMs >= 0 &&
+        config.durationMs <= 31_536_000_000
+        ? undefined
+        : "Enter a duration between zero minutes and one year.";
+    }
+    case "approval":
+      return config.approvalKey === undefined || nonEmptyString(config.approvalKey)
+        ? undefined
+        : "Enter a decision key.";
+  }
+}
 
 export function addAutomationNode(
   definition: AutomationEditorDefinition,
   kind: AutomationEditorNodeKind,
+  requestedPosition?: AutomationEditorPosition,
 ): AutomationEditorDefinition {
   if (!AUTOMATION_EDITOR_NODE_KINDS.includes(kind)) {
     return definition;
@@ -143,7 +341,7 @@ export function addAutomationNode(
     suffix += 1;
   }
 
-  const position = defaultNodePosition(definition.nodes.length);
+  const position = requestedPosition ?? defaultNodePosition(definition.nodes.length);
   return {
     ...definition,
     nodes: [...definition.nodes, { id: candidate, kind, config: NODE_DEFAULT_CONFIG[kind] ?? {} }],
@@ -222,22 +420,67 @@ export function removeAutomationNode(
   };
 }
 
+export function automationEdgeProblem(
+  definition: AutomationEditorDefinition,
+  edge: AutomationEditorEdge,
+): string | undefined {
+  if (edge.from === edge.to) return "A step cannot connect to itself.";
+  if (
+    !definition.nodes.some((node) => node.id === edge.from) ||
+    !definition.nodes.some((node) => node.id === edge.to)
+  ) {
+    return "That step is no longer available.";
+  }
+  if (
+    definition.edges.some((candidate) => candidate.from === edge.from && candidate.to === edge.to)
+  ) {
+    return "Those steps are already connected.";
+  }
+
+  const successors = new Map<string, string[]>();
+  for (const candidate of definition.edges) {
+    const current = successors.get(candidate.from) ?? [];
+    current.push(candidate.to);
+    successors.set(candidate.from, current);
+  }
+  const pending = [edge.to];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const nodeId = pending.pop();
+    if (nodeId === undefined || visited.has(nodeId)) continue;
+    if (nodeId === edge.from) return "That connection would create a loop.";
+    visited.add(nodeId);
+    pending.push(...(successors.get(nodeId) ?? []));
+  }
+  return undefined;
+}
+
 export function addAutomationEdge(
   definition: AutomationEditorDefinition,
   edge: AutomationEditorEdge,
 ): AutomationEditorDefinition {
+  return automationEdgeProblem(definition, edge) === undefined
+    ? { ...definition, edges: [...definition.edges, edge] }
+    : definition;
+}
+
+export function setAutomationEdgeDirection(
+  definition: AutomationEditorDefinition,
+  edge: AutomationEditorEdge,
+): AutomationEditorDefinition {
   if (
-    edge.from === edge.to ||
-    !definition.nodes.some((node) => node.id === edge.from) ||
-    !definition.nodes.some((node) => node.id === edge.to) ||
     definition.edges.some((candidate) => candidate.from === edge.from && candidate.to === edge.to)
   ) {
     return definition;
   }
-  const next = { ...definition, edges: [...definition.edges, edge] };
-  return validateAutomationEditorDefinition(next).some((issue) => issue.code === "graph.cycle")
-    ? definition
-    : next;
+
+  const withoutReverse = removeAutomationEdge(definition, {
+    from: edge.to,
+    to: edge.from,
+  });
+  return automationEdgeProblem(withoutReverse, edge) === undefined
+    ? { ...withoutReverse, edges: [...withoutReverse.edges, edge] }
+    : definition;
 }
 
 export function removeAutomationEdge(
@@ -305,14 +548,10 @@ export function validateAutomationEditorDefinition(
   }
 
   if (definition.trigger.kind === "schedule") {
-    const fields = definition.trigger.expression.trim().split(/\s+/u);
-    let timezoneValid = true;
-    try {
-      new Intl.DateTimeFormat("en-US", { timeZone: definition.trigger.timezone }).format();
-    } catch {
-      timezoneValid = false;
-    }
-    if (fields.length !== 5 || fields.some((field) => field.length === 0) || !timezoneValid) {
+    if (
+      parseAutomationCronExpression(definition.trigger.expression) === undefined ||
+      !isValidAutomationTimeZone(definition.trigger.timezone)
+    ) {
       issues.push({
         code: "trigger.invalid",
         message: "Schedule triggers require a five-field expression and a valid timezone.",
@@ -394,6 +633,16 @@ export function validateAutomationEditorDefinition(
           severity: "error",
         });
       }
+    }
+    const guidedProblem = guidedConfigProblem(definition, node);
+    if (guidedProblem !== undefined) {
+      issues.push({
+        code: "node.config.invalid",
+        message: `${node.id}: ${guidedProblem}`,
+        nodeIds: [node.id],
+        path: ["nodes", index, "config"],
+        severity: "error",
+      });
     }
     if (node.config.waitForExternalSignal === true) {
       issues.push({

@@ -12,11 +12,13 @@ import { CommandCenterError, GoogleReadRequest } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { CommandCenterConfig } from "./Config.ts";
 import { ConnectionHealth } from "./ConnectionHealth.ts";
 import {
   GOOGLE_READ_COMMAND_ALLOWLIST,
   GoogleReadConnector,
+  buildGoogleHelperSearchPath,
   buildGoogleReadInvocation,
   buildGoogleDriveExportInvocation,
   hasPinnedGogVersion,
@@ -41,6 +43,20 @@ describe("GoogleReadConnector invocation policy", () => {
     expect(hasPinnedGogVersion("gog version 0.15.0 (build example)")).toBe(true);
     expect(hasPinnedGogVersion("gog version 0.15.01")).toBe(false);
     expect(hasPinnedGogVersion("gog version 10.15.0")).toBe(false);
+  });
+
+  it("preserves absolute operator search paths and drops relative entries", () => {
+    const searchPath = buildGoogleHelperSearchPath(
+      "gog",
+      ["/operator/bin", "relative-bin", "/usr/bin"].join(":"),
+      {
+        sep: "/",
+        dirname: (value) => value.slice(0, Math.max(0, value.lastIndexOf("/"))),
+        isAbsolute: (value) => value.startsWith("/"),
+      },
+    );
+
+    expect(searchPath.split(":")).toEqual(["/operator/bin", "/usr/bin", "/usr/local/bin", "/bin"]);
   });
 
   it("drops caller-controlled ambient account selectors at the public contract", () => {
@@ -328,6 +344,7 @@ const fakeRunnerLayer = Layer.effect(
 
 const connectorTestLayer = googleReadConnectorLayer.pipe(
   Layer.provideMerge(fakeRunnerLayer),
+  Layer.provide(ServerSecretStore.layer),
   Layer.provideMerge(
     Layer.succeed(
       CommandCenterConfig,
@@ -412,6 +429,8 @@ it.effect("stores Drive exports only under runtime attachments and hashes the fi
           HOME: expect.stringContaining("/secrets/gog"),
           XDG_CONFIG_HOME: expect.stringContaining("/secrets/gog"),
           PATH: expect.any(String),
+          GOG_KEYRING_BACKEND: "file",
+          GOG_KEYRING_PASSWORD: expect.any(String),
         }),
       );
       expect(invocation.env).not.toHaveProperty("COMMAND_CENTER_GOG_BINARY");

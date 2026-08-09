@@ -63,6 +63,18 @@ describe("Command Center RPC authorization", () => {
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationDefinitionCreate)).toBe(
       AuthCommandCenterOperateScope,
     );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationScheduleInterpret)).toBe(
+      AuthCommandCenterOperateScope,
+    );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.googleConnectionSetupBegin)).toBe(
+      AuthCommandCenterOperateScope,
+    );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.googleConnectionSetupComplete)).toBe(
+      AuthCommandCenterOperateScope,
+    );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.googleConnectionRemove)).toBe(
+      AuthCommandCenterOperateScope,
+    );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.memoryReview)).toBe(AuthCommandCenterOperateScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.approvalDecide)).toBe(
       AuthCommandCenterApproveScope,

@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   expandLegacyGoogleCapabilities,
   googleCapabilitiesFromConfig,
+  googleCapabilityForDraft,
   googleCapabilityForOperation,
 } from "./GoogleCapabilities.ts";
 
@@ -15,6 +16,15 @@ describe("Google capabilities", () => {
       "cc.connections.google.calendar.read",
       "cc.connections.google.drive.read",
     ]);
+    expect(googleCapabilitiesFromConfig(["gmail.drafts.create"])).toEqual([
+      "cc.connections.google.gmail.drafts.create",
+    ]);
+  });
+
+  it("keeps draft creation separate from read authority", () => {
+    expect(googleCapabilityForDraft("gmail.draft.create")).toBe(
+      "cc.connections.google.gmail.drafts.create",
+    );
   });
 
   it("maps every connector operation to its least-privilege grant", () => {

@@ -1,6 +1,11 @@
 "use client";
 
-import type { Automation, Space } from "@command-center/core";
+import type { Automation, Connection, Space } from "@command-center/core";
+import type {
+  CommandCenterAutomationScheduleInterpretResult,
+  EnvironmentId,
+  ExecutionEnvironmentPlatformOs,
+} from "@t3tools/contracts";
 import {
   ArrowLeftIcon,
   CheckCircle2Icon,
@@ -12,10 +17,11 @@ import {
   PlusIcon,
   RefreshCwIcon,
   SaveIcon,
+  ServerIcon,
   WorkflowIcon,
   XIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -36,14 +42,35 @@ import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 import { AutomationEditor } from "./AutomationEditor";
 import { automationSpaceName, type AutomationsScreenStatus } from "./AutomationsScreen.logic";
-import { validateAutomationEditorDefinition } from "./logic";
-import type { AutomationEditorDefinition } from "./types";
+import type { AutomationEditorDefinition, AutomationEditorProps } from "./types";
+
+export interface AutomationEnvironmentOption {
+  readonly id: EnvironmentId;
+  readonly label: string;
+  readonly isPrimary?: boolean;
+  readonly platformOs?: ExecutionEnvironmentPlatformOs;
+}
+
+const EMPTY_AUTOMATION_ENVIRONMENT_OPTIONS: ReadonlyArray<AutomationEnvironmentOption> = [];
 
 export interface AutomationsScreenProps {
   readonly status: AutomationsScreenStatus;
   readonly automations: ReadonlyArray<Automation>;
   readonly spaces: ReadonlyArray<Space>;
+  readonly connections?: ReadonlyArray<Connection> | undefined;
+  readonly environmentTimezone?: string | null | undefined;
+  readonly onInterpretSchedule?:
+    | ((input: {
+        readonly text: string;
+        readonly timezone: string;
+      }) => Promise<CommandCenterAutomationScheduleInterpretResult>)
+    | undefined;
+  readonly onBeginGoogleConnectionSetup?: AutomationEditorProps["onBeginGoogleConnectionSetup"];
+  readonly onCompleteGoogleConnectionSetup?: AutomationEditorProps["onCompleteGoogleConnectionSetup"];
+  readonly onRemoveGoogleConnection?: AutomationEditorProps["onRemoveGoogleConnection"];
   readonly onRefresh?: (() => void) | undefined;
+  readonly isRefreshing?: boolean | undefined;
+  readonly refreshError?: string | null | undefined;
   readonly onCreate?:
     | ((input: { readonly name: string; readonly spaceId: string }) => void)
     | undefined;
@@ -54,6 +81,7 @@ export interface AutomationsScreenProps {
   readonly editorStatus?: "loading" | "ready" | "unavailable" | undefined;
   readonly editorError?: string | null | undefined;
   readonly isDirty?: boolean | undefined;
+  readonly hasUnsavedChanges?: boolean | undefined;
   readonly isSaving?: boolean | undefined;
   readonly onDefinitionChange?: ((definition: AutomationEditorDefinition) => void) | undefined;
   readonly onSave?: (() => void) | undefined;
@@ -64,6 +92,9 @@ export interface AutomationsScreenProps {
         readonly message?: string | undefined;
       }
     | undefined;
+  readonly environmentId?: EnvironmentId | null | undefined;
+  readonly environmentOptions?: ReadonlyArray<AutomationEnvironmentOption> | undefined;
+  readonly onEnvironmentChange?: ((environmentId: EnvironmentId) => void) | undefined;
 }
 
 function triggerLabel(automation: Automation): string {
@@ -99,10 +130,16 @@ function AutomationsLoading() {
 interface AutomationEmptyStateProps {
   readonly status: Exclude<AutomationsScreenStatus, "loading" | "ready"> | "empty";
   readonly onRefresh?: (() => void) | undefined;
+  readonly isRefreshing?: boolean | undefined;
   readonly onNew?: (() => void) | undefined;
 }
 
-function AutomationEmptyState({ status, onRefresh, onNew }: AutomationEmptyStateProps) {
+function AutomationEmptyState({
+  status,
+  onRefresh,
+  isRefreshing = false,
+  onNew,
+}: AutomationEmptyStateProps) {
   const content =
     status === "disconnected"
       ? {
@@ -148,9 +185,11 @@ function AutomationEmptyState({ status, onRefresh, onNew }: AutomationEmptyState
           </Button>
         ) : null}
         {onRefresh && status !== "disconnected" ? (
-          <Button onClick={onRefresh} size="sm" variant="outline">
-            <RefreshCwIcon />
-            Check again
+          <Button disabled={isRefreshing} onClick={onRefresh} size="sm" variant="outline">
+            <RefreshCwIcon
+              className={isRefreshing ? "animate-spin motion-reduce:animate-none" : undefined}
+            />
+            {isRefreshing ? "Checking" : "Check again"}
           </Button>
         ) : null}
         <Button render={<a href="/" />} size="sm" variant="ghost">
@@ -166,7 +205,15 @@ export function AutomationsScreen({
   status,
   automations,
   spaces,
+  connections,
+  environmentTimezone,
+  onInterpretSchedule,
+  onBeginGoogleConnectionSetup,
+  onCompleteGoogleConnectionSetup,
+  onRemoveGoogleConnection,
   onRefresh,
+  isRefreshing = false,
+  refreshError,
   onCreate,
   isCreating = false,
   selectedAutomationId: controlledSelectedAutomationId,
@@ -175,11 +222,15 @@ export function AutomationsScreen({
   editorStatus = "unavailable",
   editorError,
   isDirty = false,
+  hasUnsavedChanges = isDirty,
   isSaving = false,
   onDefinitionChange,
   onSave,
   configCommitSha,
   authoringHealth,
+  environmentId,
+  environmentOptions = EMPTY_AUTOMATION_ENVIRONMENT_OPTIONS,
+  onEnvironmentChange,
 }: AutomationsScreenProps) {
   const [localSelectedAutomationId, setLocalSelectedAutomationId] = useState<string>();
   const [showCreate, setShowCreate] = useState(false);
@@ -188,15 +239,6 @@ export function AutomationsScreen({
   const selectedAutomationId = controlledSelectedAutomationId ?? localSelectedAutomationId;
   const selectedAutomation =
     automations.find((automation) => automation.id === selectedAutomationId) ?? automations[0];
-  const blockingIssueCount = useMemo(
-    () =>
-      editorDefinition === null || editorDefinition === undefined
-        ? 0
-        : validateAutomationEditorDefinition(editorDefinition).filter(
-            (issue) => (issue.severity ?? "error") === "error",
-          ).length,
-    [editorDefinition],
-  );
   const editable =
     editorStatus === "ready" &&
     editorDefinition !== null &&
@@ -204,17 +246,18 @@ export function AutomationsScreen({
     onDefinitionChange !== undefined;
   const authoringUnavailable = authoringHealth?.status === "unavailable";
   const saveDisabled =
-    authoringUnavailable ||
-    !editable ||
-    !isDirty ||
-    isSaving ||
-    blockingIssueCount > 0 ||
-    onSave === undefined;
+    authoringUnavailable || !editable || !isDirty || isSaving || onSave === undefined;
+  const saveStatus = isSaving
+    ? { label: "Saving", variant: "warning" as const }
+    : !isDirty
+      ? { label: "Saved", variant: "success" as const }
+      : { label: "Autosave pending", variant: "warning" as const };
   const effectiveNewSpaceId =
     newAutomationSpaceId ||
     spaces.find((space) => space.kind === "system")?.id ||
     spaces[0]?.id ||
     "";
+  const selectedEnvironment = environmentOptions.find(({ id }) => id === environmentId);
 
   const selectAutomation = (automationId: string) => {
     setLocalSelectedAutomationId(automationId);
@@ -230,7 +273,7 @@ export function AutomationsScreen({
             COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
           )}
         >
-          <div className="flex min-h-8 items-center gap-3">
+          <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-2">
             <Button
               aria-label="Back to Command"
               render={<a href="/" />}
@@ -246,11 +289,61 @@ export function AutomationsScreen({
               <LockKeyholeIcon />
               Private config
             </span>
+            {environmentId !== null &&
+            environmentId !== undefined &&
+            environmentOptions.length > 0 ? (
+              <label className="no-drag flex min-w-0 items-center gap-1.5 text-[0.6875rem] text-muted-foreground">
+                <ServerIcon className="size-3.5 shrink-0" />
+                <span className="hidden sm:inline">Runs on</span>
+                <select
+                  aria-label="Automation runtime environment"
+                  className="h-8 min-w-0 max-w-48 rounded-lg border border-input bg-background px-2 text-xs text-foreground"
+                  disabled={
+                    onEnvironmentChange === undefined ||
+                    environmentOptions.length < 2 ||
+                    isCreating ||
+                    isSaving
+                  }
+                  onChange={(event) => {
+                    const nextEnvironmentId = event.currentTarget.value as EnvironmentId;
+                    if (
+                      hasUnsavedChanges &&
+                      !window.confirm("Discard unsaved automation changes and switch environments?")
+                    ) {
+                      event.currentTarget.value = environmentId;
+                      return;
+                    }
+                    onEnvironmentChange?.(nextEnvironmentId);
+                  }}
+                  title={
+                    hasUnsavedChanges
+                      ? "Switching environments will ask before discarding unsaved changes"
+                      : "Automations are stored and run by this environment"
+                  }
+                  value={environmentId}
+                >
+                  {environmentOptions.map((environment) => (
+                    <option key={environment.id} value={environment.id}>
+                      {environment.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            <Button render={<a href="/settings/connections" />} size="sm" variant="outline">
+              <PlusIcon />
+              Add environment
+            </Button>
             {status === "ready" && onCreate && spaces.length > 0 ? (
               <Button
                 disabled={authoringUnavailable}
                 onClick={() => setShowCreate(true)}
                 size="sm"
+                title={
+                  authoringUnavailable
+                    ? "Creating automations isn't supported in this environment yet."
+                    : `Create on ${selectedEnvironment?.label ?? "the selected environment"}`
+                }
                 variant="outline"
               >
                 <PlusIcon />
@@ -259,30 +352,32 @@ export function AutomationsScreen({
             ) : null}
             {selectedAutomation ? (
               <>
-                <Badge variant={isDirty ? "warning" : "success"}>
-                  {isDirty ? "Unsaved" : "Committed"}
-                </Badge>
+                <Badge variant={saveStatus.variant}>{saveStatus.label}</Badge>
                 <Button
-                  aria-label="Save local automation config commit"
+                  aria-label={`Save automation config commit on ${selectedEnvironment?.label ?? "the selected environment"}`}
                   disabled={saveDisabled}
                   onClick={onSave}
                   size="sm"
+                  title={
+                    authoringUnavailable
+                      ? "Saving automations isn't supported in this environment yet."
+                      : `Save immediately on ${selectedEnvironment?.label ?? "the selected environment"}; changes also save automatically`
+                  }
                 >
                   {isSaving ? (
                     <LoaderCircleIcon className="animate-spin motion-reduce:animate-none" />
                   ) : (
                     <SaveIcon />
                   )}
-                  {isSaving ? "Saving" : "Save local commit"}
+                  {isSaving ? "Saving" : "Save now"}
                 </Button>
               </>
             ) : null}
           </div>
           {authoringUnavailable ? (
             <p className="mt-2 text-xs text-warning" role="status">
-              Automation viewing and runs remain available. Local authoring is unavailable:{" "}
-              {authoringHealth.message ??
-                "this environment does not pass the Linux atomic-exchange preflight"}
+              {selectedEnvironment?.label ?? "This environment"} is view and run only. Under Runs
+              on, choose a Linux environment configured for automation authoring to create or save.
             </p>
           ) : null}
           {editorError ? (
@@ -291,7 +386,8 @@ export function AutomationsScreen({
             </p>
           ) : configCommitSha ? (
             <p className="mt-1 truncate text-[0.6875rem] text-muted-foreground">
-              Local config commit {configCommitSha.slice(0, 10)} · publication is handled separately
+              Loaded from config commit {configCommitSha.slice(0, 10)} on{" "}
+              {selectedEnvironment?.label ?? "the selected environment"}
             </p>
           ) : null}
           {showCreate && onCreate ? (
@@ -365,7 +461,12 @@ export function AutomationsScreen({
 
         {status === "loading" ? <AutomationsLoading /> : null}
         {status !== "loading" && status !== "ready" ? (
-          <AutomationEmptyState onRefresh={onRefresh} status={status} />
+          <AutomationEmptyState isRefreshing={isRefreshing} onRefresh={onRefresh} status={status} />
+        ) : null}
+        {refreshError ? (
+          <p className="px-4 pt-3 text-sm text-destructive" role="alert">
+            {refreshError}
+          </p>
         ) : null}
         {status === "ready" && automations.length === 0 ? (
           <main className="flex min-h-0 flex-1">
@@ -380,6 +481,7 @@ export function AutomationsScreen({
             <AutomationEmptyState
               onNew={onCreate && spaces.length > 0 ? () => setShowCreate(true) : undefined}
               onRefresh={onRefresh}
+              isRefreshing={isRefreshing}
               status="empty"
             />
           </main>
@@ -447,8 +549,16 @@ export function AutomationsScreen({
               ) : editorStatus === "ready" && editorDefinition && onDefinitionChange ? (
                 <AutomationEditor
                   className="h-full min-h-[28rem]"
+                  connections={connections}
                   definition={editorDefinition}
+                  environmentTimezone={environmentTimezone}
                   onDefinitionChange={onDefinitionChange}
+                  onBeginGoogleConnectionSetup={onBeginGoogleConnectionSetup}
+                  onCompleteGoogleConnectionSetup={onCompleteGoogleConnectionSetup}
+                  onRemoveGoogleConnection={onRemoveGoogleConnection}
+                  onInterpretSchedule={onInterpretSchedule}
+                  readOnly={authoringUnavailable}
+                  selectedSpace={spaces.find((space) => space.id === editorDefinition.spaceId)}
                 />
               ) : (
                 <div

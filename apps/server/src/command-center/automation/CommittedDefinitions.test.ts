@@ -154,16 +154,31 @@ it.effect("loads positions written by the visual editor's canonical layout key",
   }).pipe(Effect.provide(gitLayer(definition)));
 });
 
-it.effect("rejects malformed committed graphs", () => {
+it.effect("loads unfinished graphs as disabled drafts", () => {
   const definition = sampleDefinition();
   definition.edges.push({ from: "summarize", to: "collect" });
 
   return Effect.gen(function* () {
-    const error = yield* loadCommittedAutomations("/sample/config", [sampleSpace]).pipe(
-      Effect.flip,
-    );
-    expect(error._tag).toBe("CommittedAutomationConfigError");
-    expect(error.message).toContain("cycle");
+    const snapshot = yield* loadCommittedAutomations("/sample/config", [sampleSpace]);
+    expect(snapshot.automations[0]).toMatchObject({ enabled: false });
+    expect(snapshot.automations[0]?.edges).toHaveLength(2);
+  }).pipe(Effect.provide(gitLayer(definition)));
+});
+
+it.effect("loads unfinished schedules as disabled drafts", () => {
+  const definition = sampleDefinition();
+  definition.trigger = {
+    kind: "schedule",
+    expression: "every weekday",
+    timezone: "Not/AZone",
+  };
+
+  return Effect.gen(function* () {
+    const snapshot = yield* loadCommittedAutomations("/sample/config", [sampleSpace]);
+    expect(snapshot.automations[0]).toMatchObject({
+      enabled: false,
+      trigger: { type: "schedule", expression: "every weekday", timezone: "Not/AZone" },
+    });
   }).pipe(Effect.provide(gitLayer(definition)));
 });
 
@@ -179,7 +194,7 @@ it.effect("loads typed agent definitions from the committed tree", () => {
   }).pipe(Effect.provide(gitLayer(definition)));
 });
 
-it.effect("rejects committed malformed agent and scoped-shell definitions", () =>
+it.effect("loads incomplete action definitions as disabled drafts", () =>
   Effect.forEach(
     [
       { kind: "agent.run", config: { prompt: "Summarize", spaceId: "other-space" } },
@@ -189,15 +204,10 @@ it.effect("rejects committed malformed agent and scoped-shell definitions", () =
       const definition = sampleDefinition();
       definition.nodes[1]!.kind = kind;
       definition.nodes[1]!.config = config as never;
-      return loadCommittedAutomations("/sample/config", [sampleSpace]).pipe(
-        Effect.flip,
-        Effect.tap((error) =>
-          Effect.sync(() => {
-            expect(error).toBeInstanceOf(CommittedAutomationConfigError);
-          }),
-        ),
-        Effect.provide(gitLayer(definition)),
-      );
+      return Effect.gen(function* () {
+        const snapshot = yield* loadCommittedAutomations("/sample/config", [sampleSpace]);
+        expect(snapshot.automations[0]).toMatchObject({ enabled: false });
+      }).pipe(Effect.provide(gitLayer(definition)));
     },
   ),
 );

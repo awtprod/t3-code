@@ -126,10 +126,12 @@ import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
+import * as AutomationScheduleInterpreter from "./command-center/automation/ScheduleInterpreter.ts";
 import * as AutomationScopedShell from "./command-center/automation/AutomationScopedShell.ts";
 import * as VerifiedScopedShell from "./command-center/automation/VerifiedScopedShell.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
 import * as CommandCenterConfig from "./command-center/Config.ts";
 import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
@@ -387,11 +389,23 @@ const GoogleReadConnectorLayerLive = GoogleReadConnector.layer.pipe(
   Layer.provideMerge(CommandCenterConfigLayerLive),
   Layer.provide(ConnectionHealthLayerLive),
   Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSecretStore.layer),
+);
+
+const GoogleConnectionSetupLayerLive = GoogleConnectionSetup.layer.pipe(
+  Layer.provideMerge(CommandCenterConfigLayerLive),
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSecretStore.layer),
 );
 
 const AutomationDefinitionConfigLayerLive = AutomationDefinitionConfig.layer.pipe(
   Layer.provideMerge(CommandCenterConfigLayerLive),
   Layer.provide(ProcessRunner.layer),
+);
+
+const AutomationScheduleInterpreterLayerLive = AutomationScheduleInterpreter.layer.pipe(
+  Layer.provideMerge(TextGeneration.layer),
+  Layer.provide(ServerSettingsLayerLive),
 );
 
 const AutomationScopedShellLayerLive = AutomationScopedShell.AutomationScopedShellLayer.pipe(
@@ -406,7 +420,9 @@ const CommandCenterBaseLayerLive = Layer.mergeAll(
   CommandCenterEventStream.layer,
   MemorySearchIndex.layer,
   GoogleReadConnectorLayerLive,
+  GoogleConnectionSetupLayerLive,
   AutomationDefinitionConfigLayerLive,
+  AutomationScheduleInterpreterLayerLive,
   AutomationScopedShellLayerLive,
 );
 
@@ -496,6 +512,7 @@ const RunRecoveryCoordinatorLayerLive = RunRecoveryCoordinator.layer.pipe(
 );
 
 const CommandCenterLayerLive = Layer.mergeAll(
+  AutomationScheduleInterpreterLayerLive,
   AutomationRunsLayerLive,
   AutomationTriggerCoordinatorLayerLive,
   AutomationScheduleRunnerLayerLive,

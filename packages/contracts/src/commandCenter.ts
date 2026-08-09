@@ -2,6 +2,7 @@ import {
   Approval,
   ApprovalId,
   Artifact,
+  ArtifactId,
   ArtifactKind,
   Automation,
   AutomationId,
@@ -49,10 +50,14 @@ export const COMMAND_CENTER_WS_METHODS = {
   automationDefinitionGet: "cc.automations.definition.get",
   automationDefinitionCreate: "cc.automations.definition.create",
   automationDefinitionSave: "cc.automations.definition.save",
+  automationScheduleInterpret: "cc.automations.schedule.interpret",
   approvalsQuery: "cc.approvals.query",
   artifactsQuery: "cc.artifacts.query",
   connectionsQuery: "cc.connections.query",
   connectionsRefresh: "cc.connections.refresh",
+  googleConnectionSetupBegin: "cc.connections.google.setup.begin",
+  googleConnectionSetupComplete: "cc.connections.google.setup.complete",
+  googleConnectionRemove: "cc.connections.google.remove",
   memoryQuery: "cc.memory.query",
   memorySearch: "cc.memory.search",
   itemCreate: "cc.items.create",
@@ -104,6 +109,13 @@ export const CommandCenterConfigHealth = Schema.Struct({
 });
 export type CommandCenterConfigHealth = typeof CommandCenterConfigHealth.Type;
 
+export const CommandCenterAutomationAuthoringHealth = Schema.Struct({
+  status: Schema.Literals(["available", "unavailable"]),
+  message: Schema.optional(TrimmedNonEmptyString),
+});
+export type CommandCenterAutomationAuthoringHealth =
+  typeof CommandCenterAutomationAuthoringHealth.Type;
+
 export const CommandCenterBootstrap = Schema.Struct({
   timezone: Schema.NullOr(TrimmedNonEmptyString),
   spaces: Schema.Array(Space),
@@ -115,6 +127,7 @@ export const CommandCenterBootstrap = Schema.Struct({
   connections: Schema.Array(Connection),
   memories: Schema.Array(Memory),
   configHealth: CommandCenterConfigHealth,
+  authoringHealth: Schema.optional(CommandCenterAutomationAuthoringHealth),
 });
 export type CommandCenterBootstrap = typeof CommandCenterBootstrap.Type;
 
@@ -248,6 +261,7 @@ export const CommandCenterAutomationSourceTrigger = Schema.Union([
 export const CommandCenterAutomationSourceNodeKind = Schema.Literals([
   "agent.run",
   "connector.read",
+  "connector.write",
   "item.mutate",
   "condition",
   "transform",
@@ -321,12 +335,7 @@ export const CommandCenterAutomationDefinitionSnapshot = Schema.Struct({
   definition: CommandCenterAutomationSourceDefinition,
   definitionDigest: CommandCenterAutomationDefinitionDigest,
   configCommitSha: CommandCenterConfigCommitSha,
-  authoringHealth: Schema.optional(
-    Schema.Struct({
-      status: Schema.Literals(["available", "unavailable"]),
-      message: Schema.optional(TrimmedNonEmptyString),
-    }),
-  ),
+  authoringHealth: Schema.optional(CommandCenterAutomationAuthoringHealth),
 });
 export type CommandCenterAutomationDefinitionSnapshot =
   typeof CommandCenterAutomationDefinitionSnapshot.Type;
@@ -339,6 +348,33 @@ export const CommandCenterAutomationDefinitionSaveInput = Schema.Struct({
 });
 export type CommandCenterAutomationDefinitionSaveInput =
   typeof CommandCenterAutomationDefinitionSaveInput.Type;
+
+export const CommandCenterAutomationScheduleInterpretInput = Schema.Struct({
+  spaceId: SpaceId,
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
+  timezone: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+});
+export type CommandCenterAutomationScheduleInterpretInput =
+  typeof CommandCenterAutomationScheduleInterpretInput.Type;
+
+export const CommandCenterAutomationScheduleInterpretResult = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("interpreted"),
+    trigger: Schema.Struct({
+      kind: Schema.Literal("schedule"),
+      expression: TrimmedNonEmptyString,
+      timezone: TrimmedNonEmptyString,
+    }),
+    summary: TrimmedNonEmptyString,
+    nextOccurrences: Schema.Array(Timestamp),
+  }),
+  Schema.Struct({
+    status: Schema.Literal("needs_clarification"),
+    message: TrimmedNonEmptyString,
+  }),
+]);
+export type CommandCenterAutomationScheduleInterpretResult =
+  typeof CommandCenterAutomationScheduleInterpretResult.Type;
 
 export const CommandCenterApprovalsQueryInput = Schema.Struct({
   spaceId: Schema.optional(SpaceId),
@@ -367,6 +403,62 @@ export const CommandCenterConnectionRefreshInput = Schema.Struct({
   connectionId: ConnectionId,
 });
 export type CommandCenterConnectionRefreshInput = typeof CommandCenterConnectionRefreshInput.Type;
+
+export const CommandCenterGoogleConnectionSetupCapability = Schema.Literals([
+  "gmail.read",
+  "gmail.drafts.create",
+]);
+export type CommandCenterGoogleConnectionSetupCapability =
+  typeof CommandCenterGoogleConnectionSetupCapability.Type;
+
+export const CommandCenterGoogleConnectionSetupBeginInput = Schema.Struct({
+  spaceId: SpaceId,
+  email: TrimmedNonEmptyString.check(Schema.isMaxLength(320)),
+  capabilities: Schema.Array(CommandCenterGoogleConnectionSetupCapability).check(
+    Schema.isNonEmpty(),
+  ),
+  oauthClientJson: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(64 * 1024))),
+});
+export type CommandCenterGoogleConnectionSetupBeginInput =
+  typeof CommandCenterGoogleConnectionSetupBeginInput.Type;
+
+export const CommandCenterGoogleConnectionSetupBeginResult = Schema.Struct({
+  sessionId: TrimmedNonEmptyString,
+  authUrl: TrimmedNonEmptyString,
+  expiresAt: Timestamp,
+});
+export type CommandCenterGoogleConnectionSetupBeginResult =
+  typeof CommandCenterGoogleConnectionSetupBeginResult.Type;
+
+export const CommandCenterGoogleConnectionSetupCompleteInput = Schema.Struct({
+  sessionId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  redirectUrl: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(8 * 1024),
+    Schema.isPattern(/^https?:\/\//u),
+  ),
+});
+export type CommandCenterGoogleConnectionSetupCompleteInput =
+  typeof CommandCenterGoogleConnectionSetupCompleteInput.Type;
+
+export const CommandCenterGoogleConnectionSetupCompleteResult = Schema.Struct({
+  connection: Connection,
+});
+export type CommandCenterGoogleConnectionSetupCompleteResult =
+  typeof CommandCenterGoogleConnectionSetupCompleteResult.Type;
+
+export const CommandCenterGoogleConnectionRemoveInput = Schema.Struct({
+  spaceId: SpaceId,
+  connectionId: ConnectionId,
+});
+export type CommandCenterGoogleConnectionRemoveInput =
+  typeof CommandCenterGoogleConnectionRemoveInput.Type;
+
+export const CommandCenterGoogleConnectionRemoveResult = Schema.Struct({
+  connectionId: ConnectionId,
+  removed: Schema.Literal(true),
+});
+export type CommandCenterGoogleConnectionRemoveResult =
+  typeof CommandCenterGoogleConnectionRemoveResult.Type;
 
 export const CommandCenterMemoryQueryInput = Schema.Struct({
   spaceId: Schema.optional(SpaceId),
@@ -688,3 +780,34 @@ export const GoogleReadResult = Schema.Union([
   }),
 ]);
 export type GoogleReadResult = typeof GoogleReadResult.Type;
+
+/** A Gmail draft is a write, but never an instruction to send email. */
+export const GoogleDraftCreateRequest = Schema.Struct({
+  ...GoogleConnectionSelection,
+  operation: Schema.Literal("gmail.draft.create"),
+  to: Schema.Array(TrimmedNonEmptyString),
+  cc: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  bcc: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  subject: TrimmedNonEmptyString,
+  body: Schema.optional(Schema.String),
+  bodyHtml: Schema.optional(Schema.String),
+  replyToMessageId: Schema.optional(TrimmedNonEmptyString),
+  threadId: Schema.optional(TrimmedNonEmptyString),
+  attachmentArtifactIds: Schema.optional(Schema.Array(ArtifactId)),
+}).check(
+  Schema.makeFilter(
+    (value) =>
+      value.body !== undefined ||
+      value.bodyHtml !== undefined ||
+      "A Gmail draft requires a plain-text or HTML body.",
+  ),
+);
+export type GoogleDraftCreateRequest = typeof GoogleDraftCreateRequest.Type;
+
+export const GoogleDraftCreateResult = Schema.Struct({
+  operation: Schema.Literal("gmail.draft.create"),
+  draftId: TrimmedNonEmptyString,
+  messageId: Schema.optional(TrimmedNonEmptyString),
+  threadId: Schema.optional(TrimmedNonEmptyString),
+});
+export type GoogleDraftCreateResult = typeof GoogleDraftCreateResult.Type;

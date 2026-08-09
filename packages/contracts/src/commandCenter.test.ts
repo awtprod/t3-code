@@ -8,6 +8,9 @@ import {
   CommandCenterAutomationDefinitionSaveInput,
   CommandCenterAutomationDefinitionSnapshot,
   CommandCenterConnectionRefreshInput,
+  CommandCenterGoogleConnectionSetupBeginInput,
+  CommandCenterGoogleConnectionSetupCompleteInput,
+  CommandCenterGoogleConnectionRemoveInput,
   CommandCenterItemUpdateInput,
   CommandCenterRunStartInput,
   CommandCenterRunStartResult,
@@ -21,6 +24,15 @@ const decodeRunStart = Schema.decodeUnknownSync(CommandCenterRunStartInput);
 const decodeRunStartResult = Schema.decodeUnknownSync(CommandCenterRunStartResult);
 const decodeItemUpdate = Schema.decodeUnknownSync(CommandCenterItemUpdateInput);
 const decodeConnectionRefresh = Schema.decodeUnknownSync(CommandCenterConnectionRefreshInput);
+const decodeGoogleSetupBegin = Schema.decodeUnknownSync(
+  CommandCenterGoogleConnectionSetupBeginInput,
+);
+const decodeGoogleSetupComplete = Schema.decodeUnknownSync(
+  CommandCenterGoogleConnectionSetupCompleteInput,
+);
+const decodeGoogleConnectionRemove = Schema.decodeUnknownSync(
+  CommandCenterGoogleConnectionRemoveInput,
+);
 
 const definition = {
   $schema: "../schemas/automation.schema.json",
@@ -148,6 +160,45 @@ describe("Command Center automation definition contracts", () => {
 });
 
 describe("Command Center scoped mutation contracts", () => {
+  it("bounds Google setup credentials and callback input", () => {
+    expect(
+      decodeGoogleSetupBegin({
+        spaceId: "space-example",
+        email: "person@example.com",
+        capabilities: ["gmail.read", "gmail.drafts.create"],
+      }),
+    ).toMatchObject({
+      email: "person@example.com",
+      capabilities: ["gmail.read", "gmail.drafts.create"],
+    });
+    expect(() =>
+      decodeGoogleSetupBegin({
+        spaceId: "space-example",
+        email: "person@example.com",
+        capabilities: ["gmail.read"],
+        oauthClientJson: "x".repeat(64 * 1024 + 1),
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeGoogleSetupComplete({
+        sessionId: "session",
+        redirectUrl: "x".repeat(8 * 1024 + 1),
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeGoogleSetupComplete({ sessionId: "session", redirectUrl: "javascript:alert(1)" }),
+    ).toThrow();
+  });
+
+  it("binds Google connection removal to one Space and connection", () => {
+    expect(
+      decodeGoogleConnectionRemove({
+        spaceId: "space-example",
+        connectionId: "google-person-example",
+      }),
+    ).toEqual({ spaceId: "space-example", connectionId: "google-person-example" });
+  });
+
   it("requires an optimistic token and at least one canonical Item field", () => {
     expect(
       decodeItemUpdate({

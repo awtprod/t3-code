@@ -494,6 +494,7 @@ const readyGate = ReadinessGate.CommandCenterReadinessGate.of({
 });
 
 const unusedAutomationDefinitions = AutomationDefinitionConfig.AutomationDefinitionConfig.of({
+  authoringHealth: Effect.succeed({ status: "available" }),
   create: () => Effect.die("Automation definition creation is not used by this acceptance path."),
   get: () => Effect.die("Automation definition lookup is not used by this acceptance path."),
   save: () => Effect.die("Automation definition saving is not used by this acceptance path."),

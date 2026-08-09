@@ -11,6 +11,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import {
   CommandCenterConfig,
+  RUNTIME_GOOGLE_CONNECTIONS_FILE,
   googleAccountAliasFromCredentialRef,
   layer as commandCenterConfigLayer,
 } from "./Config.ts";
@@ -49,6 +50,92 @@ it("accepts only bounded runtime Google credential references", () => {
   expect(googleAccountAliasFromCredentialRef("runtime:google/../../other-account")).toBeUndefined();
   expect(googleAccountAliasFromCredentialRef("host:google/primary-account")).toBeUndefined();
 });
+
+it.effect(
+  "stores in-product Google bindings in runtime credentials and projects them into a Space",
+  () =>
+    Effect.gen(function* () {
+      const config = yield* CommandCenterConfig;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fs.makeDirectory(path.join(config.configDirectory, "spaces"), { recursive: true });
+      yield* fs.writeFileString(
+        path.join(config.configDirectory, "command-center.json"),
+        encodeJson({
+          schemaVersion: 1,
+          timezone: "Etc/UTC",
+          routing: {
+            mode: "auto",
+            showPreview: true,
+            explicitSelectionWins: true,
+            providerFallback: "first-healthy-compatible",
+          },
+          spaces: [{ id: "example-space", configPath: "spaces/example.json" }],
+          connections: [],
+        }),
+      );
+      yield* fs.writeFileString(
+        path.join(config.configDirectory, "spaces/example.json"),
+        encodeJson({
+          schemaVersion: 1,
+          id: "example-space",
+          name: "Example Space",
+          kind: "personal",
+          aliases: [],
+          instructionsFile: "spaces/example.md",
+          repositories: [],
+          connectionIds: [],
+          routing: { provider: "auto", model: "auto" },
+        }),
+      );
+      yield* fs.writeFileString(
+        path.join(config.configDirectory, "spaces/example.md"),
+        "Example instructions.",
+      );
+
+      const stored = yield* config.upsertRuntimeGoogleConnection!({
+        spaceId: "example-space",
+        accountAlias: "person@example.com",
+        accountLabel: "person@example.com",
+        capabilities: ["gmail.read", "gmail.drafts.create"],
+      });
+      const loaded = yield* config.load;
+
+      expect(stored.connectionId).toContain("google-person-example-com-example-space");
+      expect(loaded.connections).toEqual([
+        expect.objectContaining({
+          id: stored.connectionId,
+          spaceId: "example-space",
+          label: "person@example.com",
+          health: "disconnected",
+          capabilities: [
+            "cc.connections.google.gmail.read",
+            "cc.connections.google.gmail.drafts.create",
+          ],
+        }),
+      ]);
+      expect(loaded.spaces[0]?.connectionIds).toContain(stored.connectionId);
+      expect(
+        yield* config.resolveGoogleAccount({
+          spaceId: "example-space",
+          connectionId: stored.connectionId,
+        }),
+      ).toEqual({ accountAlias: "person@example.com", label: "person@example.com" });
+      expect(
+        yield* fs.exists(path.join(serverConfig.secretsDir, RUNTIME_GOOGLE_CONNECTIONS_FILE)),
+      ).toBe(true);
+      expect(
+        yield* config.removeRuntimeGoogleConnection!({
+          spaceId: "example-space",
+          connectionId: stored.connectionId,
+        }),
+      ).toEqual({ removed: true });
+      const afterRemoval = yield* config.load;
+      expect(afterRemoval.connections).toEqual([]);
+      expect(afterRemoval.spaces[0]?.connectionIds).not.toContain(stored.connectionId);
+    }).pipe(Effect.provide(configTestLayer)),
+);
 
 it.effect("resolves an enabled Google alias only through its exact private Space binding", () =>
   Effect.gen(function* () {

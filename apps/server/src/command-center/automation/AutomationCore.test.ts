@@ -254,6 +254,29 @@ describe("automation digest and planner", () => {
 });
 
 describe("expected-digest save protection", () => {
+  it("saves drafts without applying semantic validation", () => {
+    const incomplete = sampleDefinition();
+    incomplete.nodes[0]!.kind = "connector.write" as never;
+    incomplete.nodes[0]!.config = { operation: "gmail.draft.create" } as never;
+    expect(
+      prepareAutomationSave({
+        expectedDigest: null,
+        currentDefinition: null,
+        nextDefinition: incomplete,
+      }).status,
+    ).toBe("ready");
+
+    const unsafe = sampleDefinition();
+    unsafe.nodes[0]!.config = { apiKey: "must-not-be-committed" } as never;
+    expect(
+      prepareAutomationSave({
+        expectedDigest: null,
+        currentDefinition: null,
+        nextDefinition: unsafe,
+      }).status,
+    ).toBe("ready");
+  });
+
   it("saves typed agent and manifest-only shell definitions", () => {
     const agent = sampleDefinition();
     agent.nodes[0]!.kind = "agent.run" as never;

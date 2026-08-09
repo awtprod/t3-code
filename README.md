@@ -340,7 +340,7 @@ tagged upstream releases can continue to be reviewed and merged.
   actions require both a narrow server-mediated executor and digest-bound approval; because those
   executors are not enabled in v1, command routes for push, merge, deploy, publication,
   communication, money, sharing, deletion, account/security, and secret changes fail closed.
-- Google integration is read-only in v1 and uses an exact command allowlist.
+- Google integration uses exact read and Gmail-draft command allowlists; sending mail remains blocked.
 - Webhook automations require a committed definition and either a paired operate-scoped session or
   an HMAC credential bound to the exact Space and route in runtime secret storage.
 - Audit entries are append-only and hash-chained.

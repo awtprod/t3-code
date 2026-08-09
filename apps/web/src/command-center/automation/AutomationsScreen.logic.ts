@@ -1,4 +1,5 @@
 import type { Automation, AutomationNodeKind, Space } from "@command-center/core";
+import type { EnvironmentId, ExecutionEnvironmentPlatformOs } from "@t3tools/contracts";
 
 import type {
   AutomationEditorDefinition,
@@ -19,6 +20,98 @@ export interface ResolveAutomationsScreenStatusInput {
   readonly hasData: boolean;
   readonly hasError: boolean;
   readonly configStatus?: "loaded" | "missing" | "invalid";
+}
+
+export interface AutomationEnvironmentCandidate {
+  readonly id: EnvironmentId;
+  readonly isPrimary?: boolean;
+  readonly platformOs?: ExecutionEnvironmentPlatformOs;
+}
+
+export interface AutomationEditorDraft {
+  readonly definition: AutomationEditorDefinition;
+  readonly baseDigest: string;
+  readonly configCommitSha: string;
+  readonly dirty: boolean;
+  readonly revision: number;
+}
+
+export function reconcileAutomationDraftAfterSave(input: {
+  readonly currentDraft: AutomationEditorDraft | undefined;
+  readonly submittedRevision: number;
+  readonly savedDefinition: AutomationEditorDefinition;
+  readonly savedDefinitionDigest: string;
+  readonly savedConfigCommitSha: string;
+}): AutomationEditorDraft {
+  if (input.currentDraft && input.currentDraft.revision > input.submittedRevision) {
+    return {
+      ...input.currentDraft,
+      baseDigest: input.savedDefinitionDigest,
+      configCommitSha: input.savedConfigCommitSha,
+      dirty: true,
+    };
+  }
+  return {
+    definition: input.savedDefinition,
+    baseDigest: input.savedDefinitionDigest,
+    configCommitSha: input.savedConfigCommitSha,
+    dirty: false,
+    revision: input.submittedRevision,
+  };
+}
+
+export function shouldAutosaveAutomationDraft(input: {
+  readonly dirty: boolean;
+  readonly isSaving: boolean;
+  readonly hasSaveError: boolean;
+  readonly authoringUnavailable: boolean;
+}): boolean {
+  return input.dirty && !input.isSaving && !input.hasSaveError && !input.authoringUnavailable;
+}
+
+const PREFERRED_AUTOMATION_ENVIRONMENT_KEY = "t3code:automations:environment";
+
+export function readPreferredAutomationEnvironmentId(): EnvironmentId | null {
+  try {
+    const stored = localStorage.getItem(PREFERRED_AUTOMATION_ENVIRONMENT_KEY)?.trim();
+    return stored ? (stored as EnvironmentId) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function rememberPreferredAutomationEnvironmentId(environmentId: EnvironmentId): void {
+  try {
+    localStorage.setItem(PREFERRED_AUTOMATION_ENVIRONMENT_KEY, environmentId);
+  } catch {
+    // Storage can be unavailable in restricted browser contexts.
+  }
+}
+
+export function resolveAutomationEnvironmentId(input: {
+  readonly requestedEnvironmentId: EnvironmentId | null;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly environments: ReadonlyArray<AutomationEnvironmentCandidate>;
+}): EnvironmentId | null {
+  const requested = input.environments.find(({ id }) => id === input.requestedEnvironmentId);
+  const remoteLinux = input.environments.find(
+    ({ isPrimary, platformOs }) => isPrimary === false && platformOs === "linux",
+  );
+  const remote = remoteLinux ?? input.environments.find(({ isPrimary }) => isPrimary === false);
+
+  if (requested !== undefined) {
+    return requested.id;
+  }
+  if (remote !== undefined) {
+    return remote.id;
+  }
+  if (
+    input.primaryEnvironmentId !== null &&
+    input.environments.some(({ id }) => id === input.primaryEnvironmentId)
+  ) {
+    return input.primaryEnvironmentId;
+  }
+  return input.environments[0]?.id ?? null;
 }
 
 export function resolveAutomationsScreenStatus({

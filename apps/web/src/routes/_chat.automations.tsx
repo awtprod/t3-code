@@ -2,28 +2,48 @@ import { createFileRoute } from "@tanstack/react-router";
 import { AutomationNodeId, SpaceId } from "@command-center/core";
 import {
   CommandCenterAutomationSourceDefinition,
+  type EnvironmentId,
   type CommandCenterAutomationDefinitionSnapshot,
 } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { AutomationsScreen } from "../command-center/automation/AutomationsScreen";
-import { resolveAutomationsScreenStatus } from "../command-center/automation/AutomationsScreen.logic";
-import { validateAutomationEditorDefinition } from "../command-center/automation/logic";
+import {
+  type AutomationEnvironmentOption,
+  AutomationsScreen,
+} from "../command-center/automation/AutomationsScreen";
+import {
+  type AutomationEditorDraft,
+  readPreferredAutomationEnvironmentId,
+  reconcileAutomationDraftAfterSave,
+  rememberPreferredAutomationEnvironmentId,
+  resolveAutomationEnvironmentId,
+  resolveAutomationsScreenStatus,
+  shouldAutosaveAutomationDraft,
+} from "../command-center/automation/AutomationsScreen.logic";
 import type { AutomationEditorDefinition } from "../command-center/automation/types";
 import { commandCenterEnvironment } from "../state/commandCenter";
-import { usePrimaryEnvironmentId } from "../state/environments";
+import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
 
 const decodeSourceDefinition = Schema.decodeUnknownSync(CommandCenterAutomationSourceDefinition);
+const AUTOMATION_AUTOSAVE_DELAY_MS = 1_000;
 
-interface AutomationDraft {
-  readonly definition: AutomationEditorDefinition;
-  readonly baseDigest: string;
-  readonly configCommitSha: string;
-  readonly dirty: boolean;
+function automationCommandError(cause: unknown, fallback: string): Error {
+  if (cause instanceof Error && cause.message.trim().length > 0) return cause;
+  if (typeof cause === "string" && cause.trim().length > 0) return new Error(cause);
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "message" in cause &&
+    typeof cause.message === "string" &&
+    cause.message.trim().length > 0
+  ) {
+    return new Error(cause.message);
+  }
+  return new Error(fallback);
 }
 
 let automationCreateRequestSequence = 0;
@@ -41,16 +61,28 @@ function editorDefinition(
 function saveFailureMessage(failure: unknown): string {
   return failure instanceof Error && failure.message.trim().length > 0
     ? failure.message
-    : "The local automation config commit could not be created.";
+    : "The automation config commit could not be created on the selected environment.";
 }
 
-function AutomationsRouteView() {
-  const environmentId = usePrimaryEnvironmentId();
+interface AutomationsEnvironmentRouteViewProps {
+  readonly environmentId: EnvironmentId | null;
+  readonly environmentOptions: ReadonlyArray<AutomationEnvironmentOption>;
+  readonly onEnvironmentChange: (environmentId: EnvironmentId) => void;
+}
+
+function AutomationsEnvironmentRouteView({
+  environmentId,
+  environmentOptions,
+  onEnvironmentChange,
+}: AutomationsEnvironmentRouteViewProps) {
   const [selectedAutomationId, setSelectedAutomationId] = useState<string>();
-  const [drafts, setDrafts] = useState<Readonly<Record<string, AutomationDraft>>>({});
+  const [drafts, setDrafts] = useState<Readonly<Record<string, AutomationEditorDraft>>>({});
   const [savingAutomationId, setSavingAutomationId] = useState<string>();
+  const savingAutomationIdRef = useRef<string | undefined>(undefined);
   const [isCreating, setIsCreating] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const bootstrapQuery = useEnvironmentQuery(
     environmentId === null
       ? null
@@ -95,6 +127,21 @@ function AutomationsRouteView() {
   const createDefinition = useAtomCommand(commandCenterEnvironment.createAutomationDefinition, {
     reportFailure: false,
   });
+  const interpretSchedule = useAtomCommand(commandCenterEnvironment.interpretAutomationSchedule, {
+    reportFailure: false,
+  });
+  const beginGoogleConnectionSetup = useAtomCommand(
+    commandCenterEnvironment.beginGoogleConnectionSetup,
+    { reportFailure: false },
+  );
+  const completeGoogleConnectionSetup = useAtomCommand(
+    commandCenterEnvironment.completeGoogleConnectionSetup,
+    { reportFailure: false },
+  );
+  const removeGoogleConnection = useAtomCommand(commandCenterEnvironment.removeGoogleConnection, {
+    reportFailure: false,
+  });
+  const syncSpaces = useAtomCommand(commandCenterEnvironment.syncSpaces, { reportFailure: false });
   const status = resolveAutomationsScreenStatus({
     connected: environmentId !== null,
     isPending: bootstrapQuery.isPending,
@@ -115,6 +162,8 @@ function AutomationsRouteView() {
         : definitionQuery.isPending
           ? "loading"
           : "unavailable";
+  const authoringUnavailable =
+    (definitionQuery.data?.authoringHealth ?? bootstrap?.authoringHealth)?.status === "unavailable";
 
   const changeDefinition = useCallback(
     (definition: AutomationEditorDefinition) => {
@@ -127,6 +176,7 @@ function AutomationsRouteView() {
           configCommitSha:
             current[selectedId]?.configCommitSha ?? definitionQuery.data!.configCommitSha,
           dirty: true,
+          revision: (current[selectedId]?.revision ?? 0) + 1,
         },
       }));
       setSaveError(null);
@@ -140,18 +190,10 @@ function AutomationsRouteView() {
       selectedAutomation === undefined ||
       activeDefinition === null ||
       definitionQuery.data === null ||
-      savingAutomationId !== undefined
+      savingAutomationIdRef.current !== undefined
     ) {
       return;
     }
-    const blockingIssues = validateAutomationEditorDefinition(activeDefinition).filter(
-      (issue) => (issue.severity ?? "error") === "error",
-    );
-    if (blockingIssues.length > 0) {
-      setSaveError("Fix the blocking graph validation issues before saving.");
-      return;
-    }
-
     let sourceDefinition: CommandCenterAutomationSourceDefinition;
     try {
       sourceDefinition = decodeSourceDefinition(activeDefinition);
@@ -161,42 +203,76 @@ function AutomationsRouteView() {
     }
 
     const baseDigest = activeDraft?.baseDigest ?? definitionQuery.data.definitionDigest;
+    const submittedRevision = activeDraft?.revision ?? 0;
+    savingAutomationIdRef.current = selectedAutomation.id;
     setSavingAutomationId(selectedAutomation.id);
     setSaveError(null);
-    const result = await saveDefinition({
-      environmentId,
-      input: {
-        automationId: selectedAutomation.id,
-        spaceId: selectedAutomation.spaceId,
-        expectedDefinitionDigest: baseDigest,
-        definition: sourceDefinition,
-      },
-    });
-    if (result._tag === "Success") {
-      setDrafts((current) => ({
-        ...current,
-        [selectedAutomation.id]: {
-          definition: editorDefinition(result.value),
-          baseDigest: result.value.definitionDigest,
-          configCommitSha: result.value.configCommitSha,
-          dirty: false,
+    try {
+      const result = await saveDefinition({
+        environmentId,
+        input: {
+          automationId: selectedAutomation.id,
+          spaceId: selectedAutomation.spaceId,
+          expectedDefinitionDigest: baseDigest,
+          definition: sourceDefinition,
         },
-      }));
-      definitionQuery.refresh();
-      bootstrapQuery.refresh();
-    } else {
-      setSaveError(saveFailureMessage(squashAtomCommandFailure(result)));
+      });
+      if (result._tag === "Success") {
+        setDrafts((current) => ({
+          ...current,
+          [selectedAutomation.id]: reconcileAutomationDraftAfterSave({
+            currentDraft: current[selectedAutomation.id],
+            submittedRevision,
+            savedDefinition: editorDefinition(result.value),
+            savedDefinitionDigest: result.value.definitionDigest,
+            savedConfigCommitSha: result.value.configCommitSha,
+          }),
+        }));
+        definitionQuery.refresh();
+        bootstrapQuery.refresh();
+      } else {
+        setSaveError(saveFailureMessage(squashAtomCommandFailure(result)));
+      }
+    } catch (cause) {
+      setSaveError(saveFailureMessage(cause));
+    } finally {
+      savingAutomationIdRef.current = undefined;
+      setSavingAutomationId(undefined);
     }
-    setSavingAutomationId(undefined);
   }, [
     activeDefinition,
     activeDraft?.baseDigest,
-    bootstrapQuery,
-    definitionQuery,
+    activeDraft?.revision,
+    bootstrapQuery.refresh,
+    definitionQuery.data,
+    definitionQuery.refresh,
     environmentId,
     saveDefinition,
-    savingAutomationId,
     selectedAutomation,
+  ]);
+
+  useEffect(() => {
+    if (
+      !shouldAutosaveAutomationDraft({
+        dirty: activeDraft?.dirty ?? false,
+        isSaving: savingAutomationId !== undefined,
+        hasSaveError: saveError !== null,
+        authoringUnavailable,
+      })
+    ) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void save();
+    }, AUTOMATION_AUTOSAVE_DELAY_MS);
+    return () => window.clearTimeout(timeout);
+  }, [
+    activeDraft?.dirty,
+    activeDraft?.revision,
+    authoringUnavailable,
+    save,
+    saveError,
+    savingAutomationId,
   ]);
 
   const create = useCallback(
@@ -234,6 +310,7 @@ function AutomationsRouteView() {
             baseDigest: snapshot.definitionDigest,
             configCommitSha: snapshot.configCommitSha,
             dirty: false,
+            revision: 0,
           },
         }));
         bootstrapQuery.refresh();
@@ -245,7 +322,18 @@ function AutomationsRouteView() {
     [bootstrapQuery, createDefinition, environmentId, isCreating],
   );
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback(async () => {
+    if (isRefreshing || environmentId === null) return;
+    setIsRefreshing(true);
+    setRefreshError(null);
+    const result = await syncSpaces({ environmentId, input: {} });
+    if (result._tag !== "Success") {
+      setRefreshError(
+        "Could not recheck the private configuration. Try again after the environment is reachable.",
+      );
+      setIsRefreshing(false);
+      return;
+    }
     if (selectedId !== undefined) {
       setDrafts((current) => {
         const { [selectedId]: _discarded, ...rest } = current;
@@ -255,22 +343,87 @@ function AutomationsRouteView() {
     setSaveError(null);
     definitionQuery.refresh();
     bootstrapQuery.refresh();
-  }, [bootstrapQuery, definitionQuery, selectedId]);
+    setIsRefreshing(false);
+  }, [bootstrapQuery, definitionQuery, environmentId, isRefreshing, selectedId, syncSpaces]);
 
   return (
     <AutomationsScreen
-      authoringHealth={definitionQuery.data?.authoringHealth}
+      authoringHealth={definitionQuery.data?.authoringHealth ?? bootstrap?.authoringHealth}
       automations={bootstrap?.automations ?? []}
+      connections={bootstrap?.connections ?? []}
       configCommitSha={
         activeDraft?.configCommitSha ?? definitionQuery.data?.configCommitSha ?? undefined
       }
       editorDefinition={activeDefinition}
       editorError={saveError ?? definitionQuery.error}
       editorStatus={editorStatus}
+      environmentId={environmentId}
+      environmentTimezone={bootstrap?.timezone}
+      environmentOptions={environmentOptions}
+      hasUnsavedChanges={Object.values(drafts).some(({ dirty }) => dirty)}
       isDirty={activeDraft?.dirty ?? false}
       isCreating={isCreating}
       isSaving={savingAutomationId === selectedAutomation?.id}
+      isRefreshing={isRefreshing}
+      refreshError={refreshError}
       onDefinitionChange={changeDefinition}
+      onBeginGoogleConnectionSetup={async (input) => {
+        if (environmentId === null || selectedAutomation === undefined) {
+          throw new Error("Choose an automation environment before connecting Google.");
+        }
+        const result = await beginGoogleConnectionSetup({
+          environmentId,
+          input: { ...input, spaceId: selectedAutomation.spaceId },
+        });
+        if (result._tag === "Success") return result.value;
+        throw automationCommandError(
+          squashAtomCommandFailure(result),
+          "Google setup could not be started.",
+        );
+      }}
+      onCompleteGoogleConnectionSetup={async (input) => {
+        if (environmentId === null) {
+          throw new Error("Choose an automation environment before connecting Google.");
+        }
+        const result = await completeGoogleConnectionSetup({ environmentId, input });
+        if (result._tag === "Success") {
+          bootstrapQuery.refresh();
+          return result.value;
+        }
+        throw automationCommandError(
+          squashAtomCommandFailure(result),
+          "Google authorization could not finish.",
+        );
+      }}
+      onRemoveGoogleConnection={async (input) => {
+        if (environmentId === null || selectedAutomation === undefined) {
+          throw new Error("Choose an automation environment before removing Google.");
+        }
+        const result = await removeGoogleConnection({
+          environmentId,
+          input: { ...input, spaceId: selectedAutomation.spaceId },
+        });
+        if (result._tag === "Success") {
+          bootstrapQuery.refresh();
+          return result.value;
+        }
+        throw automationCommandError(
+          squashAtomCommandFailure(result),
+          "The Google account could not be removed.",
+        );
+      }}
+      onEnvironmentChange={onEnvironmentChange}
+      onInterpretSchedule={async ({ text, timezone }) => {
+        if (environmentId === null || selectedAutomation === undefined) {
+          throw new Error("Choose an automation environment before interpreting a schedule.");
+        }
+        const result = await interpretSchedule({
+          environmentId,
+          input: { spaceId: selectedAutomation.spaceId, text, timezone },
+        });
+        if (result._tag === "Success") return result.value;
+        throw squashAtomCommandFailure(result);
+      }}
       onCreate={(input) => {
         void create(input);
       }}
@@ -285,6 +438,48 @@ function AutomationsRouteView() {
       selectedAutomationId={selectedAutomation?.id}
       spaces={bootstrap?.spaces ?? []}
       status={status}
+    />
+  );
+}
+
+function AutomationsRouteView() {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const { environments } = useEnvironments();
+  const [requestedEnvironmentId, setRequestedEnvironmentId] = useState(
+    readPreferredAutomationEnvironmentId,
+  );
+  const environmentOptions = useMemo<ReadonlyArray<AutomationEnvironmentOption>>(
+    () =>
+      environments
+        .map((environment) => ({
+          id: environment.environmentId,
+          label: environment.label,
+          isPrimary: environment.entry.target._tag === "PrimaryConnectionTarget",
+          platformOs: environment.serverConfig?.environment.platform.os ?? "unknown",
+        }))
+        .sort(
+          (left, right) =>
+            Number(left.isPrimary) - Number(right.isPrimary) ||
+            left.label.localeCompare(right.label),
+        ),
+    [environments],
+  );
+  const environmentId = resolveAutomationEnvironmentId({
+    requestedEnvironmentId,
+    primaryEnvironmentId,
+    environments: environmentOptions,
+  });
+  const selectEnvironment = useCallback((nextEnvironmentId: EnvironmentId) => {
+    setRequestedEnvironmentId(nextEnvironmentId);
+    rememberPreferredAutomationEnvironmentId(nextEnvironmentId);
+  }, []);
+
+  return (
+    <AutomationsEnvironmentRouteView
+      environmentId={environmentId}
+      environmentOptions={environmentOptions}
+      key={environmentId ?? "no-environment"}
+      onEnvironmentChange={selectEnvironment}
     />
   );
 }

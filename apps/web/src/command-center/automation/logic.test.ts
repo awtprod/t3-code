@@ -4,12 +4,16 @@ import {
   addAutomationNode,
   addAutomationEdge,
   automationCanvasSize,
+  automationEdgeProblem,
   automationEdgePath,
   moveAutomationNode,
   removeAutomationEdge,
   removeAutomationNode,
   renameAutomationNode,
   readAutomationNodePosition,
+  reconcileAutomationNodePosition,
+  setAutomationNodePosition,
+  setAutomationEdgeDirection,
   toSerializableAutomationDefinition,
   validateAutomationEditorDefinition,
 } from "./logic";
@@ -24,7 +28,15 @@ function sampleDefinition(): AutomationEditorDefinition {
     enabled: false,
     trigger: { kind: "manual" },
     nodes: [
-      { id: "collect", kind: "connector.read", config: { source: "sample" } },
+      {
+        id: "collect",
+        kind: "connector.read",
+        config: {
+          connectionId: "sample-google",
+          operation: "gmail.search",
+          query: "is:unread",
+        },
+      },
       { id: "draft", kind: "transform", config: { template: "weekly-brief" } },
       { id: "review", kind: "approval", config: { action: "publish" } },
     ],
@@ -58,17 +70,45 @@ describe("automation editor definition edits", () => {
     expect(serializable).not.toBe(moved);
   });
 
+  it("persists a dragged node at its absolute final canvas position", () => {
+    const initial = sampleDefinition();
+    const positioned = setAutomationNodePosition(initial, "draft", { x: 742.4, y: 411.6 });
+
+    expect(readAutomationNodePosition(positioned, "draft")).toEqual({ x: 742, y: 412 });
+    expect(readAutomationNodePosition(positioned, "collect")).toEqual({ x: 80, y: 140 });
+    expect(positioned.layout.zoom).toBe(1);
+  });
+
+  it("persists negative canvas positions instead of snapping them back to the origin", () => {
+    const initial = sampleDefinition();
+    const positioned = setAutomationNodePosition(initial, "draft", { x: -217.6, y: -83.4 });
+
+    expect(readAutomationNodePosition(positioned, "draft")).toEqual({ x: -218, y: -83 });
+  });
+
+  it("keeps an in-progress canvas position during presentation-only refreshes", () => {
+    const persisted = { x: 380, y: 140 };
+    const dragged = { x: 740, y: 420 };
+
+    expect(reconcileAutomationNodePosition(dragged, persisted, persisted, false)).toEqual(dragged);
+    expect(reconcileAutomationNodePosition(dragged, persisted, { x: 760, y: 440 }, false)).toEqual({
+      x: 760,
+      y: 440,
+    });
+    expect(reconcileAutomationNodePosition(dragged, persisted, persisted, true)).toEqual(persisted);
+  });
+
   it("adds typed nodes with stable unique IDs and persisted positions", () => {
     const withTransform = addAutomationNode(sampleDefinition(), "transform");
     const withSecondTransform = addAutomationNode(withTransform, "transform");
 
     expect(withSecondTransform.nodes.slice(-2)).toEqual([
-      { id: "transform", kind: "transform", config: {} },
-      { id: "transform-2", kind: "transform", config: {} },
+      { id: "transform", kind: "transform", config: { template: "" } },
+      { id: "transform-2", kind: "transform", config: { template: "" } },
     ]);
     expect(readAutomationNodePosition(withSecondTransform, "transform-2")).toEqual({
-      x: 344,
-      y: 184,
+      x: 408,
+      y: 208,
     });
   });
 
@@ -115,11 +155,53 @@ describe("automation editor definition edits", () => {
     ]);
   });
 
+  it("reverses an existing connection when its direction is changed", () => {
+    const initial = sampleDefinition();
+    const reversed = setAutomationEdgeDirection(initial, { from: "review", to: "draft" });
+
+    expect(reversed.edges).toEqual([
+      { from: "collect", to: "draft" },
+      { from: "review", to: "draft" },
+    ]);
+    expect(setAutomationEdgeDirection(reversed, { from: "review", to: "draft" })).toBe(reversed);
+  });
+
+  it("keeps the original connection when reversing it would still create a loop", () => {
+    const initial: AutomationEditorDefinition = {
+      ...sampleDefinition(),
+      edges: [
+        { from: "collect", to: "draft" },
+        { from: "draft", to: "review" },
+        { from: "collect", to: "review" },
+      ],
+    };
+
+    expect(setAutomationEdgeDirection(initial, { from: "review", to: "collect" })).toBe(initial);
+  });
+
+  it("explains rejected connections without validating every node configuration", () => {
+    const definition = sampleDefinition();
+
+    expect(automationEdgeProblem(definition, { from: "draft", to: "draft" })).toBe(
+      "A step cannot connect to itself.",
+    );
+    expect(automationEdgeProblem(definition, { from: "draft", to: "missing" })).toBe(
+      "That step is no longer available.",
+    );
+    expect(automationEdgeProblem(definition, { from: "draft", to: "review" })).toBe(
+      "Those steps are already connected.",
+    );
+    expect(automationEdgeProblem(definition, { from: "review", to: "collect" })).toBe(
+      "That connection would create a loop.",
+    );
+    expect(automationEdgeProblem(definition, { from: "collect", to: "review" })).toBeUndefined();
+  });
+
   it("computes deterministic paths and a canvas that contains every node", () => {
     expect(automationEdgePath({ x: 80, y: 140 }, { x: 380, y: 140 })).toBe(
-      "M 296 184 C 344 184, 332 184, 380 184",
+      "M 360 196 C 408 196, 332 196, 380 196",
     );
-    expect(automationCanvasSize(sampleDefinition())).toEqual({ width: 960, height: 520 });
+    expect(automationCanvasSize(sampleDefinition())).toEqual({ width: 1008, height: 520 });
   });
 });
 

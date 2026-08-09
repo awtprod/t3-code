@@ -67,6 +67,35 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.connectionId]),
       },
     }),
+    beginGoogleConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:google-connection-setup-begin",
+      tag: COMMAND_CENTER_WS_METHODS.googleConnectionSetupBegin,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.email]),
+      },
+    }),
+    completeGoogleConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:google-connection-setup-complete",
+      tag: COMMAND_CENTER_WS_METHODS.googleConnectionSetupComplete,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sessionId]),
+      },
+    }),
+    removeGoogleConnection: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:google-connection-remove",
+      tag: COMMAND_CENTER_WS_METHODS.googleConnectionRemove,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.connectionId]),
+      },
+    }),
     eventReplay: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:event-replay",
       tag: COMMAND_CENTER_WS_METHODS.eventsReplay,
@@ -114,6 +143,15 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       concurrency: {
         mode: "serial",
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.automationId]),
+      },
+    }),
+    interpretAutomationSchedule: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:interpret-automation-schedule",
+      tag: COMMAND_CENTER_WS_METHODS.automationScheduleInterpret,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.spaceId]),
       },
     }),
     admitAutomationWebhook: createEnvironmentRpcCommand(runtime, {

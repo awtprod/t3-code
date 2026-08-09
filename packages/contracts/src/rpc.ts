@@ -178,6 +178,8 @@ import {
   CommandCenterAutomationDefinitionCreateInput,
   CommandCenterAutomationDefinitionGetInput,
   CommandCenterAutomationDefinitionSaveInput,
+  CommandCenterAutomationScheduleInterpretInput,
+  CommandCenterAutomationScheduleInterpretResult,
   CommandCenterAutomationDefinitionSnapshot,
   CommandCenterAutomationRunGetInput,
   CommandCenterAutomationRunStartInput,
@@ -189,6 +191,12 @@ import {
   CommandCenterCommandSubmitResult,
   CommandCenterConnectionRefreshInput,
   CommandCenterConnectionRefreshResult,
+  CommandCenterGoogleConnectionSetupBeginInput,
+  CommandCenterGoogleConnectionSetupBeginResult,
+  CommandCenterGoogleConnectionSetupCompleteInput,
+  CommandCenterGoogleConnectionSetupCompleteResult,
+  CommandCenterGoogleConnectionRemoveInput,
+  CommandCenterGoogleConnectionRemoveResult,
   CommandCenterConnectionsQueryInput,
   CommandCenterConnectionsQueryResult,
   CommandCenterError,
@@ -429,6 +437,15 @@ export const WsCommandCenterAutomationDefinitionSaveRpc = Rpc.make(
   },
 );
 
+export const WsCommandCenterAutomationScheduleInterpretRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.automationScheduleInterpret,
+  {
+    payload: CommandCenterAutomationScheduleInterpretInput,
+    success: CommandCenterAutomationScheduleInterpretResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsCommandCenterApprovalsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.approvalsQuery, {
   payload: CommandCenterApprovalsQueryInput,
   success: CommandCenterApprovalsQueryResult,
@@ -455,6 +472,33 @@ export const WsCommandCenterConnectionRefreshRpc = Rpc.make(
   {
     payload: CommandCenterConnectionRefreshInput,
     success: CommandCenterConnectionRefreshResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterGoogleConnectionSetupBeginRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.googleConnectionSetupBegin,
+  {
+    payload: CommandCenterGoogleConnectionSetupBeginInput,
+    success: CommandCenterGoogleConnectionSetupBeginResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterGoogleConnectionSetupCompleteRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.googleConnectionSetupComplete,
+  {
+    payload: CommandCenterGoogleConnectionSetupCompleteInput,
+    success: CommandCenterGoogleConnectionSetupCompleteResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterGoogleConnectionRemoveRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.googleConnectionRemove,
+  {
+    payload: CommandCenterGoogleConnectionRemoveInput,
+    success: CommandCenterGoogleConnectionRemoveResult,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
@@ -1102,10 +1146,14 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterAutomationDefinitionGetRpc,
   WsCommandCenterAutomationDefinitionCreateRpc,
   WsCommandCenterAutomationDefinitionSaveRpc,
+  WsCommandCenterAutomationScheduleInterpretRpc,
   WsCommandCenterApprovalsQueryRpc,
   WsCommandCenterArtifactsQueryRpc,
   WsCommandCenterConnectionsQueryRpc,
   WsCommandCenterConnectionRefreshRpc,
+  WsCommandCenterGoogleConnectionSetupBeginRpc,
+  WsCommandCenterGoogleConnectionSetupCompleteRpc,
+  WsCommandCenterGoogleConnectionRemoveRpc,
   WsCommandCenterMemoryQueryRpc,
   WsCommandCenterMemorySearchRpc,
   WsCommandCenterItemCreateRpc,

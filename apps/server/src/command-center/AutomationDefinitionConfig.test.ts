@@ -6,6 +6,7 @@ import {
   CommandCenterAutomationDefinitionGetInput,
   CommandCenterAutomationDefinitionSaveInput,
 } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -15,7 +16,10 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ProcessRunner from "../processRunner.ts";
-import { make as makeAutomationDefinitionConfig } from "./AutomationDefinitionConfig.ts";
+import {
+  make as makeAutomationDefinitionConfig,
+  matchesAutomationRelativePath,
+} from "./AutomationDefinitionConfig.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 
 const decodeSpace = Schema.decodeUnknownSync(Space);
@@ -70,7 +74,40 @@ const createInput = decodeCreate({
   layout: { nodes: { prepare: { x: 80, y: 120 } } },
 });
 
-const makeFixture = Effect.gen(function* () {
+it("compares Git paths with Windows relative paths without weakening escape checks", () => {
+  expect(
+    matchesAutomationRelativePath(
+      "automations\\sample-flow.json",
+      "automations/sample-flow.json",
+      "\\",
+      false,
+    ),
+  ).toBe(true);
+  expect(
+    matchesAutomationRelativePath(
+      "..\\outside\\sample-flow.json",
+      "automations/sample-flow.json",
+      "\\",
+      false,
+    ),
+  ).toBe(false);
+  expect(
+    matchesAutomationRelativePath(
+      "C:\\private\\automations\\sample-flow.json",
+      "automations/sample-flow.json",
+      "\\",
+      true,
+    ),
+  ).toBe(false);
+});
+
+const makeFixtureWithOptions = Effect.fn("AutomationDefinitionConfigTest.makeFixture")(function* (
+  options: {
+    readonly automationFileName?: string;
+    readonly detachedHead?: boolean;
+    readonly hostPlatform?: NodeJS.Platform;
+  } = {},
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const runner = yield* ProcessRunner.make();
@@ -90,7 +127,8 @@ const makeFixture = Effect.gen(function* () {
     prefix: "command-center-automation-config-",
   });
   const automationsDirectory = path.join(configDirectory, "automations");
-  const automationPath = path.join(automationsDirectory, "sample-flow.json");
+  const automationFileName = options.automationFileName ?? "sample-flow.json";
+  const automationPath = path.join(automationsDirectory, automationFileName);
   yield* fs.makeDirectory(automationsDirectory, { recursive: true });
   yield* fs.writeFileString(automationPath, `${encodeUnknownJsonString(sourceDefinition)}\n`);
 
@@ -109,7 +147,7 @@ const makeFixture = Effect.gen(function* () {
   });
 
   yield* git(["init", "--quiet"]);
-  yield* git(["add", "--", "automations/sample-flow.json"]);
+  yield* git(["add", "--", `automations/${automationFileName}`]);
   yield* git([
     "-c",
     "user.name=Fixture",
@@ -120,6 +158,9 @@ const makeFixture = Effect.gen(function* () {
     "-m",
     "Initial fixture",
   ]);
+  if (options.detachedHead === true) {
+    yield* git(["checkout", "--quiet", "--detach", "HEAD"]);
+  }
 
   const loadedConfig = {
     spaces: [fixtureSpace],
@@ -141,6 +182,7 @@ const makeFixture = Effect.gen(function* () {
   });
   const dependencies = Layer.mergeAll(
     Layer.succeed(CommandCenterConfig, configService),
+    Layer.succeed(HostProcessPlatform, options.hostPlatform ?? "linux"),
     Layer.succeed(
       ProcessRunner.ProcessRunner,
       ProcessRunner.ProcessRunner.of({
@@ -175,6 +217,7 @@ const makeFixture = Effect.gen(function* () {
     storeControl,
   };
 });
+const makeFixture = makeFixtureWithOptions();
 
 it.layer(NodeServices.layer)("automation private config editing", (it) => {
   it.effect("creates one disabled committed definition and replays the request idempotently", () =>
@@ -214,7 +257,7 @@ it.layer(NodeServices.layer)("automation private config editing", (it) => {
         (yield* fixture.git(["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"])).trim(),
       ).toBe("automations/weekly-brief.json");
       const authoringGitInvocations = fixture.storeResults.filter((result) =>
-        result.args.includes("-C"),
+        result.args.includes("core.fsyncMethod=fsync"),
       );
       expect(authoringGitInvocations.length).toBeGreaterThan(0);
       for (const invocation of authoringGitInvocations) {
@@ -250,6 +293,70 @@ it.layer(NodeServices.layer)("automation private config editing", (it) => {
       );
       expect(changed).toMatchObject({ _tag: "CommandCenterError", reason: "conflict" });
       expect((yield* fixture.git(["rev-parse", "HEAD"])).trim()).toBe(created.configCommitSha);
+    }),
+  );
+
+  it.effect("loads an exact source whose committed filename differs from its automation id", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixtureWithOptions({
+        automationFileName: "legacy-sample-name.json",
+      });
+      const loaded = yield* fixture.store.get(getInput);
+
+      expect(loaded.automationId).toBe("sample-flow");
+      expect(loaded.definition.name).toBe("Sample flow");
+      expect(loaded.definitionDigest).toMatch(/^sha256:[a-f0-9]{64}$/u);
+      expect(loaded.configCommitSha).toBe((yield* fixture.git(["rev-parse", "HEAD"])).trim());
+    }),
+  );
+
+  it.effect("keeps committed definitions readable from a detached checkout", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixtureWithOptions({ detachedHead: true });
+      const loaded = yield* fixture.store.get(getInput);
+
+      expect(loaded.definition.name).toBe("Sample flow");
+      expect(loaded.authoringHealth).toMatchObject({
+        status: "unavailable",
+        message: expect.stringContaining("detached HEAD"),
+      });
+    }),
+  );
+
+  it.effect("keeps committed definitions readable when Git is too old for authoring", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture;
+      fixture.storeControl.run = (input) =>
+        input.args.at(-1) === "--version"
+          ? Effect.succeed({
+              stdout: "git version 2.35.0\n",
+              stderr: "",
+              code: 0 as ProcessRunner.ProcessRunOutput["code"],
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+            })
+          : fixture.runner.run(input);
+
+      const loaded = yield* fixture.store.get(getInput);
+      expect(loaded.definition.name).toBe("Sample flow");
+      expect(loaded.authoringHealth).toMatchObject({
+        status: "unavailable",
+        message: expect.stringContaining("Git 2.36 or newer"),
+      });
+    }),
+  );
+
+  it.effect("reports Windows authoring as unavailable without blocking definition reads", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixtureWithOptions({ hostPlatform: "win32" });
+      const loaded = yield* fixture.store.get(getInput);
+
+      expect(loaded.definition.name).toBe("Sample flow");
+      expect(yield* fixture.store.authoringHealth).toMatchObject({
+        status: "unavailable",
+        message: expect.stringContaining("Linux renameat2 support is required"),
+      });
     }),
   );
 
@@ -862,6 +969,41 @@ it.layer(NodeServices.layer)("automation private config editing", (it) => {
       expect(committedFile.policy).toEqual({ requireApprovalForExternalWrites: true });
       expect((committedFile.layout as Record<string, unknown>)._commandCenter).toBeUndefined();
       expect((yield* fixture.store.get(getInput)).definitionDigest).toBe(saved.definitionDigest);
+    }),
+  );
+
+  it.effect("commits and reloads an incomplete Gmail action draft", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture;
+      const initial = yield* fixture.store.get(getInput);
+      const saved = yield* fixture.store.save(
+        decodeSave({
+          automationId: "sample-flow",
+          spaceId: "sample-space",
+          expectedDefinitionDigest: initial.definitionDigest,
+          definition: {
+            ...initial.definition,
+            nodes: [
+              {
+                id: "start",
+                kind: "connector.write",
+                config: { operation: "gmail.draft.create" },
+              },
+            ],
+          },
+        }),
+        () => Effect.void,
+      );
+
+      expect(saved.definition.nodes).toEqual([
+        {
+          id: "start",
+          kind: "connector.write",
+          config: { operation: "gmail.draft.create" },
+        },
+      ]);
+      expect((yield* fixture.store.get(getInput)).definition).toEqual(saved.definition);
+      expect(yield* fixture.git(["status", "--porcelain=v1"])).toBe("");
     }),
   );
 

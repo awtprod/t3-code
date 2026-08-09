@@ -88,6 +88,17 @@ export interface ThreadTitleGenerationResult {
   title: string;
 }
 
+export interface AutomationScheduleGenerationInput {
+  cwd: string;
+  text: string;
+  timezone: string;
+  modelSelection: ModelSelection;
+}
+
+export type AutomationScheduleGenerationResult =
+  | { readonly status: "interpreted"; readonly expression: string }
+  | { readonly status: "needs_clarification"; readonly message: string };
+
 export interface TextGenerationService {
   generateCommitMessage(
     input: CommitMessageGenerationInput,
@@ -95,6 +106,9 @@ export interface TextGenerationService {
   generatePrContent(input: PrContentGenerationInput): Promise<PrContentGenerationResult>;
   generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
   generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
+  generateAutomationSchedule(
+    input: AutomationScheduleGenerationInput,
+  ): Promise<AutomationScheduleGenerationResult>;
 }
 
 /**
@@ -128,6 +142,11 @@ export class TextGeneration extends Context.Service<
     readonly generateThreadTitle: (
       input: ThreadTitleGenerationInput,
     ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
+
+    /** Translate a natural-language recurring schedule into the supported cron grammar. */
+    readonly generateAutomationSchedule: (
+      input: AutomationScheduleGenerationInput,
+    ) => Effect.Effect<AutomationScheduleGenerationResult, TextGenerationError>;
   }
 >()("@awtprod/command-center/textGeneration/TextGeneration") {}
 
@@ -138,13 +157,15 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateAutomationSchedule";
 
 const telemetryOperation = {
   generateCommitMessage: "commit",
   generatePrContent: "pull-request",
   generateBranchName: "branch",
   generateThreadTitle: "title",
+  generateAutomationSchedule: "schedule",
 } as const;
 
 function instrumentInternalGeneration<A>(
@@ -250,6 +271,19 @@ export const makeTextGenerationFromRegistry = (
         input,
         resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
           Effect.flatMap((textGeneration) => textGeneration.generateThreadTitle(input)),
+        ),
+        record,
+      ),
+    generateAutomationSchedule: (input) =>
+      instrumentInternalGeneration(
+        "generateAutomationSchedule",
+        input,
+        resolveInstance(
+          registry,
+          "generateAutomationSchedule",
+          input.modelSelection.instanceId,
+        ).pipe(
+          Effect.flatMap((textGeneration) => textGeneration.generateAutomationSchedule(input)),
         ),
         record,
       ),

@@ -10,10 +10,14 @@ import {
 } from "@command-center/core/domain";
 import { CommandCenterWebhookRoute } from "@t3tools/contracts";
 import { formatSchemaError } from "@t3tools/shared/schemaJson";
+import {
+  isValidAutomationTimeZone,
+  parseAutomationCronExpression,
+} from "@t3tools/shared/automationSchedule";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
-import { validateAutomationGraph } from "./Graph.ts";
+import { analyzeAutomationGraph } from "./Graph.ts";
 
 export const AutomationFileTriggerKind = Schema.Literals(["manual", "schedule", "webhook"]);
 export type AutomationFileTriggerKind = typeof AutomationFileTriggerKind.Type;
@@ -21,6 +25,7 @@ export type AutomationFileTriggerKind = typeof AutomationFileTriggerKind.Type;
 export const AutomationFileNodeKind = Schema.Literals([
   "agent.run",
   "connector.read",
+  "connector.write",
   "item.mutate",
   "condition",
   "transform",
@@ -189,9 +194,11 @@ export const AutomationValidationIssueCode = Schema.Literals([
   "graph.unknown-edge-source",
   "graph.unknown-edge-target",
   "graph.cycle",
+  "trigger.invalid",
   "state.unknown-node",
   "node.config.invalid",
   "node.config.private-data",
+  "node.approval.required",
   "v1.unsupported-node",
   "v1.unsupported-external-wait",
 ]);
@@ -270,7 +277,7 @@ export function normalizeAutomationDefinition(
   };
 }
 
-export function validateAutomationDefinition(input: unknown): AutomationValidationResult {
+export function decodeAutomationDefinitionShape(input: unknown): AutomationValidationResult {
   const decoded = decodeAutomationDefinition(input);
   if (Exit.isFailure(decoded)) {
     return {
@@ -285,8 +292,27 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
     };
   }
 
-  const issues: AutomationValidationIssue[] = [...validateAutomationGraph(decoded.value)];
-  decoded.value.nodes.forEach((node, index) => {
+  return { ok: true, definition: decoded.value };
+}
+
+export function validateAutomationDefinition(input: unknown): AutomationValidationResult {
+  const decoded = decodeAutomationDefinitionShape(input);
+  if (!decoded.ok) return decoded;
+
+  const graph = analyzeAutomationGraph(decoded.definition);
+  const issues: AutomationValidationIssue[] = [...graph.issues];
+  if (
+    decoded.definition.trigger.kind === "schedule" &&
+    (parseAutomationCronExpression(decoded.definition.trigger.expression) === undefined ||
+      !isValidAutomationTimeZone(decoded.definition.trigger.timezone))
+  ) {
+    issues.push({
+      code: "trigger.invalid",
+      message: "The recurring schedule or timezone is invalid.",
+      path: ["trigger"],
+    });
+  }
+  decoded.definition.nodes.forEach((node, index) => {
     if (!automationConfigIsSafeForGit(node.config)) {
       issues.push({
         code: "node.config.private-data",
@@ -317,6 +343,22 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
         });
       }
     }
+    if (node.kind === "connector.write" && node.config.operation === "gmail.draft.create") {
+      const predecessors = graph.predecessorIds[node.id] ?? [];
+      const approved = predecessors.some(
+        (predecessorId) =>
+          decoded.definition.nodes.find((candidate) => candidate.id === predecessorId)?.kind ===
+          "approval",
+      );
+      if (!approved) {
+        issues.push({
+          code: "node.approval.required",
+          message: `Gmail draft node '${node.id}' requires an immediately preceding Approval node.`,
+          path: ["nodes", index],
+          nodeIds: [node.id],
+        });
+      }
+    }
     if (node.config.waitForExternalSignal === true) {
       issues.push({
         code: "v1.unsupported-external-wait",
@@ -328,6 +370,6 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
     }
   });
   return issues.length === 0
-    ? { ok: true, definition: normalizeAutomationDefinition(decoded.value) }
+    ? { ok: true, definition: normalizeAutomationDefinition(decoded.definition) }
     : { ok: false, issues };
 }

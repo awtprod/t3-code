@@ -1,13 +1,128 @@
+import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   automationSpaceName,
   projectAutomationForEditor,
+  reconcileAutomationDraftAfterSave,
+  resolveAutomationEnvironmentId,
   resolveAutomationsScreenStatus,
+  shouldAutosaveAutomationDraft,
 } from "./AutomationsScreen.logic";
 import { SAMPLE_AUTOMATION, SAMPLE_SPACE } from "./AutomationsScreen.test-fixtures";
 
 describe("automations route state", () => {
+  it("keeps newer edits dirty when an older save finishes", () => {
+    const submitted = projectAutomationForEditor(SAMPLE_AUTOMATION);
+    const newer = { ...submitted, name: "Edited while saving" };
+    const reconciled = reconcileAutomationDraftAfterSave({
+      currentDraft: {
+        definition: newer,
+        baseDigest: "old-digest",
+        configCommitSha: "old-commit",
+        dirty: true,
+        revision: 2,
+      },
+      submittedRevision: 1,
+      savedDefinition: submitted,
+      savedDefinitionDigest: "new-digest",
+      savedConfigCommitSha: "new-commit",
+    });
+
+    expect(reconciled).toEqual({
+      definition: newer,
+      baseDigest: "new-digest",
+      configCommitSha: "new-commit",
+      dirty: true,
+      revision: 2,
+    });
+
+    expect(
+      reconcileAutomationDraftAfterSave({
+        currentDraft: { ...reconciled, definition: submitted, revision: 1 },
+        submittedRevision: 1,
+        savedDefinition: submitted,
+        savedDefinitionDigest: "settled-digest",
+        savedConfigCommitSha: "settled-commit",
+      }),
+    ).toEqual({
+      definition: submitted,
+      baseDigest: "settled-digest",
+      configCommitSha: "settled-commit",
+      dirty: false,
+      revision: 1,
+    });
+  });
+
+  it("autosaves dirty drafts, including drafts with validation issues", () => {
+    expect(
+      shouldAutosaveAutomationDraft({
+        dirty: true,
+        isSaving: false,
+        hasSaveError: false,
+        authoringUnavailable: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAutosaveAutomationDraft({
+        dirty: true,
+        isSaving: true,
+        hasSaveError: false,
+        authoringUnavailable: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAutosaveAutomationDraft({
+        dirty: true,
+        isSaving: false,
+        hasSaveError: false,
+        authoringUnavailable: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("routes automations to an explicitly selected remote environment", () => {
+    const windows = EnvironmentId.make("windows-primary");
+    const linux = EnvironmentId.make("linux-runner");
+
+    expect(
+      resolveAutomationEnvironmentId({
+        requestedEnvironmentId: linux,
+        primaryEnvironmentId: windows,
+        environments: [
+          { id: windows, isPrimary: true, platformOs: "windows" },
+          { id: linux, isPrimary: false, platformOs: "linux" },
+        ],
+      }),
+    ).toBe(linux);
+    expect(
+      resolveAutomationEnvironmentId({
+        requestedEnvironmentId: EnvironmentId.make("removed-environment"),
+        primaryEnvironmentId: windows,
+        environments: [
+          { id: windows, isPrimary: true, platformOs: "windows" },
+          { id: linux, isPrimary: false, platformOs: "linux" },
+        ],
+      }),
+    ).toBe(linux);
+  });
+
+  it("defaults away from the local primary when a remote automation host is available", () => {
+    const windows = EnvironmentId.make("windows-primary");
+    const linux = EnvironmentId.make("openclaw-server");
+
+    expect(
+      resolveAutomationEnvironmentId({
+        requestedEnvironmentId: null,
+        primaryEnvironmentId: windows,
+        environments: [
+          { id: windows, isPrimary: true, platformOs: "windows" },
+          { id: linux, isPrimary: false, platformOs: "linux" },
+        ],
+      }),
+    ).toBe(linux);
+  });
+
   it("uses safe disconnected, loading, unavailable, and config states", () => {
     expect(
       resolveAutomationsScreenStatus({

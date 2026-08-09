@@ -292,6 +292,11 @@ function createTextGeneration(
       Effect.succeed({
         title: "Update workflow",
       }),
+    generateAutomationSchedule: () =>
+      Effect.succeed({
+        status: "interpreted",
+        expression: "0 9 * * 1-5",
+      }),
     ...overrides,
   };
 
@@ -340,6 +345,7 @@ function createTextGeneration(
             }),
         ),
       ),
+    generateAutomationSchedule: (input) => implementation.generateAutomationSchedule(input),
   };
 }
 

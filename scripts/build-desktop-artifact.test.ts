@@ -19,6 +19,7 @@ import {
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
   InvalidMockUpdateServerPortError,
+  isRetryableWindowsNsisOutputLockFailure,
   UnsupportedDesktopBuildArchitectureError,
   isMacPasskeySigningConfigurationError,
   LinuxIconResizeError,
@@ -85,6 +86,29 @@ function iconResizeSpawnerLayer(
 }
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it("retries only the NSIS output-lock signature", () => {
+    const retryable = new BuildCommandFailedError({
+      command: "vp exec -- electron-builder --win",
+      exitCode: 1,
+      stdoutTail:
+        "makensis.exe process failed ERR_ELECTRON_BUILDER_CANNOT_EXECUTE\nCan't open output file",
+    });
+    const unrelatedNsisFailure = new BuildCommandFailedError({
+      command: "vp exec -- electron-builder --win",
+      exitCode: 1,
+      stdoutTail: "makensis.exe process failed\nError in script on line 42",
+    });
+    const unrelatedCommand = new BuildCommandFailedError({
+      command: "custom packager",
+      exitCode: 1,
+      stderrTail: "makensis.exe process failed\nCan't open output file",
+    });
+
+    assert.isTrue(isRetryableWindowsNsisOutputLockFailure(retryable));
+    assert.isFalse(isRetryableWindowsNsisOutputLockFailure(unrelatedNsisFailure));
+    assert.isFalse(isRetryableWindowsNsisOutputLockFailure(unrelatedCommand));
+  });
+
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");

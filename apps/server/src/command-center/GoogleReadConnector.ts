@@ -9,18 +9,48 @@ import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { Artifact, type Artifact as ArtifactType } from "@command-center/core";
-import type { CommandCenterError, GoogleReadRequest, GoogleReadResult } from "@t3tools/contracts";
+import type {
+  CommandCenterError,
+  GoogleDraftCreateRequest,
+  GoogleReadRequest,
+  GoogleReadResult,
+} from "@t3tools/contracts";
 
 import { ProcessRunner, type ProcessRunError } from "../processRunner.ts";
 import { ServerConfig } from "../config.ts";
 import { CommandCenterConfig } from "./Config.ts";
 import { ConnectionHealth } from "./ConnectionHealth.ts";
+import { googleKeyringEnvironment } from "./GoogleKeyring.ts";
 
 export const PINNED_GOG_VERSION = "0.15.0";
 export const MAX_GOOGLE_DRIVE_EXPORT_BYTES = 64 * 1024 * 1024;
 
 export const hasPinnedGogVersion = (output: string): boolean =>
   /(?:^|[^0-9.])0\.15\.0(?:$|[^0-9.])/u.test(output);
+
+/**
+ * Keep helper lookup deterministic while honoring the operator-owned PATH used
+ * to launch the server. Relative entries are excluded so a working-directory
+ * change cannot substitute a different executable.
+ */
+export const buildGoogleHelperSearchPath = (
+  binary: string,
+  inheritedPath: string | undefined,
+  path: Pick<Path.Path, "dirname" | "isAbsolute" | "sep">,
+): string => {
+  const delimiter = path.sep === "\\" ? ";" : ":";
+  return Array.from(
+    new Set(
+      [
+        ...(path.isAbsolute(binary) ? [path.dirname(binary)] : []),
+        ...(inheritedPath?.split(delimiter) ?? []),
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+      ].filter((entry) => path.isAbsolute(entry)),
+    ),
+  ).join(delimiter);
+};
 
 export type GoogleDriveExportRequest = Extract<
   GoogleReadRequest,
@@ -53,6 +83,7 @@ export const GOOGLE_READ_COMMAND_ALLOWLIST = [
   "drive.get",
   "drive.download",
 ] as const;
+export const GOOGLE_DRAFT_COMMAND_ALLOWLIST = ["gmail.drafts.create"] as const;
 
 export class GoogleReadConnectorError extends Schema.TaggedErrorClass<GoogleReadConnectorError>()(
   "GoogleReadConnectorError",
@@ -63,14 +94,14 @@ export class GoogleReadConnectorError extends Schema.TaggedErrorClass<GoogleRead
   },
 ) {}
 
-const baseArgs = (account: string): ReadonlyArray<string> => [
+const baseArgs = (account: string, allowlist: ReadonlyArray<string>): ReadonlyArray<string> => [
   "--account",
   account,
   "--gmail-no-send",
   "--no-input",
   "--json",
   "--enable-commands",
-  GOOGLE_READ_COMMAND_ALLOWLIST.join(","),
+  allowlist.join(","),
 ];
 
 /**
@@ -81,7 +112,7 @@ const baseArgs = (account: string): ReadonlyArray<string> => [
 export function buildGoogleReadInvocation(
   request: ResolvedGoogleMetadataReadRequest,
 ): ReadonlyArray<string> {
-  const prefix = baseArgs(request.account);
+  const prefix = baseArgs(request.account, GOOGLE_READ_COMMAND_ALLOWLIST);
   switch (request.operation) {
     case "gmail.search":
       return [
@@ -154,7 +185,7 @@ export function buildGoogleDriveExportInvocation(
   serverControlledOutputPath: string,
 ): ReadonlyArray<string> {
   return [
-    ...baseArgs(request.account),
+    ...baseArgs(request.account, GOOGLE_READ_COMMAND_ALLOWLIST),
     "drive",
     "download",
     "--out",
@@ -177,6 +208,10 @@ export interface GoogleReadConnectorShape {
     request: GoogleDriveExportRequest,
   ) => Effect.Effect<GoogleDriveExportedFile, GoogleReadConnectorError>;
   readonly discardExport: (exported: GoogleDriveExportedFile) => Effect.Effect<void>;
+  readonly createDraft?: (
+    request: GoogleDraftCreateRequest,
+    attachmentPaths: ReadonlyArray<string>,
+  ) => Effect.Effect<Schema.Json, GoogleReadConnectorError>;
 }
 
 export class GoogleReadConnector extends Context.Service<
@@ -216,23 +251,16 @@ export const layer = Layer.effect(
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const crypto = yield* Crypto.Crypto;
+    const keyringEnvironment = yield* googleKeyringEnvironment();
     const verified = yield* Ref.make(false);
     const binary = process.env.COMMAND_CENTER_GOG_BINARY ?? "gog";
     const gogHome = `${serverConfig.secretsDir}/gog`;
     const exportsDirectory = path.join(serverConfig.attachmentsDir, "exports");
-    const executableDirectory = path.isAbsolute(binary) ? path.dirname(binary) : undefined;
     const googleEnvironment: NodeJS.ProcessEnv = {
       HOME: gogHome,
       XDG_CONFIG_HOME: gogHome,
-      PATH: [executableDirectory, "/usr/local/bin", "/usr/bin", "/bin"]
-        .filter((entry): entry is string => entry !== undefined)
-        .join(":"),
-      ...(process.env.GOG_KEYRING_PASSWORD === undefined
-        ? {}
-        : { GOG_KEYRING_PASSWORD: process.env.GOG_KEYRING_PASSWORD }),
-      ...(process.env.GOG_KEYRING_BACKEND === undefined
-        ? {}
-        : { GOG_KEYRING_BACKEND: process.env.GOG_KEYRING_BACKEND }),
+      PATH: buildGoogleHelperSearchPath(binary, process.env.PATH, path),
+      ...keyringEnvironment,
     };
 
     const resolveAccount = Effect.fn("GoogleReadConnector.resolveAccount")(function* (
@@ -360,6 +388,84 @@ export const layer = Layer.effect(
       );
     });
 
+    const createDraft = Effect.fn("GoogleReadConnector.createDraft")(function* (
+      request: GoogleDraftCreateRequest,
+      attachmentPaths: ReadonlyArray<string>,
+    ) {
+      return yield* withConnectionHealth(
+        request,
+        Effect.gen(function* () {
+          const resolved = yield* resolveAccount(request);
+          yield* verifyBinary();
+          yield* Effect.forEach(attachmentPaths, (attachmentPath) =>
+            fs.stat(attachmentPath).pipe(
+              Effect.flatMap((info) =>
+                info.type === "File"
+                  ? Effect.void
+                  : new GoogleReadConnectorError({
+                      reason: "output",
+                      message: "A Gmail draft attachment is not a regular server-owned file.",
+                    }),
+              ),
+              Effect.mapError((cause) =>
+                isConnectorError(cause)
+                  ? cause
+                  : new GoogleReadConnectorError({
+                      reason: "output",
+                      message: "A Gmail draft attachment could not be read.",
+                      cause,
+                    }),
+              ),
+            ),
+          );
+          const args = [
+            ...baseArgs(resolved.accountAlias, GOOGLE_DRAFT_COMMAND_ALLOWLIST),
+            "gmail",
+            "drafts",
+            "create",
+            "--to",
+            request.to.join(","),
+            "--subject",
+            request.subject,
+            ...(request.cc === undefined ? [] : ["--cc", request.cc.join(",")]),
+            ...(request.bcc === undefined ? [] : ["--bcc", request.bcc.join(",")]),
+            ...(request.body === undefined ? [] : ["--body", request.body]),
+            ...(request.bodyHtml === undefined ? [] : ["--body-html", request.bodyHtml]),
+            ...(request.replyToMessageId === undefined
+              ? []
+              : ["--reply-to-message-id", request.replyToMessageId]),
+            ...(request.threadId === undefined ? [] : ["--thread-id", request.threadId]),
+            ...attachmentPaths.flatMap((attachmentPath) => ["--attach", attachmentPath]),
+          ];
+          const result = yield* runner
+            .run({
+              command: binary,
+              args,
+              env: googleEnvironment,
+              extendEnv: false,
+              timeout: "45 seconds",
+              maxOutputBytes: 1024 * 1024,
+            })
+            .pipe(Effect.mapError(processFailure));
+          if (result.code !== 0)
+            return yield* new GoogleReadConnectorError({
+              reason: "process",
+              message: result.stderr.trim() || "The Gmail draft request failed.",
+            });
+          return (yield* decodeUnknownJsonString(result.stdout).pipe(
+            Effect.mapError(
+              (cause) =>
+                new GoogleReadConnectorError({
+                  reason: "output",
+                  message: "The Gmail draft response was invalid.",
+                  cause,
+                }),
+            ),
+          )) as Schema.Json;
+        }),
+      );
+    });
+
     const discardPath = Effect.fn("GoogleReadConnector.discardPath")(function* (
       absolutePath: string,
     ) {
@@ -477,6 +583,6 @@ export const layer = Layer.effect(
       );
     });
 
-    return GoogleReadConnector.of({ verify, read, exportDrive, discardExport });
+    return GoogleReadConnector.of({ verify, read, exportDrive, discardExport, createDraft });
   }),
 );

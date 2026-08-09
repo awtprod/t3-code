@@ -1,8 +1,8 @@
-# Google read connector
+# Google connector
 
-Command Center v1 supports Gmail, Calendar, and Drive reads through
+Command Center supports Gmail, Calendar, and Drive reads plus approval-gated Gmail draft creation through
 [`gog` v0.15.0](https://github.com/openclaw/gogcli/releases/tag/v0.15.0). It intentionally exposes no
-Google mutation API.
+send operation.
 
 ## Install and pin
 
@@ -17,12 +17,25 @@ source.
 
 ## Authorize least privilege
 
-Run OAuth setup as the same service account that operates Command Center. Use only the three v1
-services and their read-only scope modes:
+The Automations editor can run the split remote OAuth flow and store a Space-scoped runtime binding.
+The first account on an environment requires a Desktop OAuth client JSON upload. The server passes
+that document to `gog auth credentials` over stdin and stores it only below the runtime credential
+directory.
+
+The editor can also remove an app-created binding from its Space. Removal intentionally leaves the
+underlying `gog` authorization intact because one authorized account can back bindings in multiple
+Spaces. Connections declared in private configuration remain owner-managed and cannot be removed
+from the editor.
+
+Operators can still authorize an account directly as the same service account that operates Command
+Center. Use only the required services and scope modes:
 
 ```console
 gog auth add operator@example.com --services gmail,calendar,drive --readonly --gmail-scope readonly --drive-scope readonly
 ```
+
+Draft creation additionally requires the Gmail compose scope. Runtime invocations retain the exact
+draft-only command allowlist and `--gmail-no-send` restriction.
 
 The runtime places gog's configuration under the Command Center secrets directory by setting
 `XDG_CONFIG_HOME` for the child process. OAuth client JSON, refresh tokens, and any file-keyring
@@ -33,7 +46,7 @@ password belong in runtime credential storage, never either Git repository.
 Every invocation is an argv array—never a shell command—and includes all of these controls:
 
 - `--enable-commands` with the exact v1 read-command list;
-- `--gmail-no-send` and `--no-input`;
+- `--gmail-no-send` and `--no-input` for runtime reads and drafts;
 - an end-of-options boundary before every caller-controlled positional value, preventing a value
   from being reinterpreted as a global account or command flag;
 - a bounded execution timeout and output limit;
@@ -58,10 +71,10 @@ server-generated `--out` path and an allowlisted `--format`: `pdf`, `csv`, `xlsx
 two-minute timeout and 64 MiB file cap, hashes the result, and returns a `cc-artifact://` locator.
 Neither callers nor agents can choose or receive a host filesystem path.
 
-The OAuth scopes are the first boundary, the exact command allowlist is the second, and the scoped
+The OAuth scopes are the first boundary, the exact read or draft command allowlist is the second, and the scoped
 MCP credential is the third. A Command thread must have `cc.connections.google.read`, be bound to a
 Space, and select an enabled connection configured for that same Space.
 
 Live smoke tests are deliberately opt-in. They should cover only search, retrieval, agenda,
 availability, conflict detection, listing, and metadata/export reads, plus negative checks proving
-that send, create, update, share, and delete commands are unavailable.
+that send, update, share, and delete commands are unavailable.

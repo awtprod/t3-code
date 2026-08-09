@@ -15,6 +15,7 @@ import type { KimiRuntimeClient } from "../provider/kimiRuntime.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
+  buildAutomationSchedulePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
@@ -56,7 +57,8 @@ export const makeKimiTextGeneration = Effect.fn("makeKimiTextGeneration")(functi
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateAutomationSchedule";
     readonly cwd: string;
     readonly prompt: string;
     readonly outputSchema: S;
@@ -271,10 +273,23 @@ export const makeKimiTextGeneration = Effect.fn("makeKimiTextGeneration")(functi
       return { title: sanitizeThreadTitle(generated.title) };
     });
 
+  const generateAutomationSchedule: TextGeneration.TextGeneration["Service"]["generateAutomationSchedule"] =
+    Effect.fn("KimiTextGeneration.generateAutomationSchedule")(function* (input) {
+      const built = buildAutomationSchedulePrompt(input);
+      return yield* runJson({
+        operation: "generateAutomationSchedule",
+        cwd: input.cwd,
+        prompt: built.prompt,
+        outputSchema: built.outputSchema,
+        modelSelection: input.modelSelection,
+      });
+    });
+
   return Effect.succeed({
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateAutomationSchedule,
   } satisfies TextGeneration.TextGeneration["Service"]);
 });

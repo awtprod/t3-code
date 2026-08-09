@@ -5,7 +5,7 @@ import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import { describe, expect } from "vite-plus/test";
 
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId, type InternalGenerationUsage } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
@@ -21,6 +21,8 @@ const makeStubTextGeneration = (
     generatePrContent: () => Effect.die("generatePrContent stub not configured for this test"),
     generateBranchName: () => Effect.die("generateBranchName stub not configured for this test"),
     generateThreadTitle: () => Effect.die("generateThreadTitle stub not configured for this test"),
+    generateAutomationSchedule: () =>
+      Effect.die("generateAutomationSchedule stub not configured for this test"),
     ...overrides,
   });
 
@@ -116,6 +118,36 @@ describe("makeTextGenerationFromRegistry", () => {
         expect(result.failure.operation).toBe("generateBranchName");
         expect(result.failure.detail).toContain("missing_instance");
       }
+    }),
+  );
+
+  it.effect("routes schedule interpretation and records schedule usage", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("codex_schedule");
+      const usage: InternalGenerationUsage[] = [];
+      const instance = makeStubInstance(
+        instanceId,
+        makeStubTextGeneration({
+          generateAutomationSchedule: () =>
+            Effect.succeed({ status: "interpreted", expression: "0 9 * * 1-5" }),
+        }),
+      );
+      const tg = TextGeneration.makeTextGenerationFromRegistry(
+        makeStubRegistry([instance]),
+        (entry) => Effect.sync(() => usage.push(entry)).pipe(Effect.asVoid),
+      );
+
+      expect(
+        yield* tg.generateAutomationSchedule({
+          cwd: process.cwd(),
+          text: "weekdays at nine",
+          timezone: "UTC",
+          modelSelection: createModelSelection(instanceId, "gpt-5"),
+        }),
+      ).toEqual({ status: "interpreted", expression: "0 9 * * 1-5" });
+      expect(usage).toEqual([
+        expect.objectContaining({ operation: "schedule", status: "success" }),
+      ]);
     }),
   );
 });

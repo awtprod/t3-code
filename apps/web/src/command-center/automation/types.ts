@@ -1,6 +1,18 @@
+import type { Connection, Space } from "@command-center/core";
+import type {
+  CommandCenterAutomationScheduleInterpretResult,
+  CommandCenterGoogleConnectionSetupBeginInput,
+  CommandCenterGoogleConnectionSetupBeginResult,
+  CommandCenterGoogleConnectionSetupCompleteInput,
+  CommandCenterGoogleConnectionSetupCompleteResult,
+  CommandCenterGoogleConnectionRemoveInput,
+  CommandCenterGoogleConnectionRemoveResult,
+} from "@t3tools/contracts";
+
 export const AUTOMATION_EDITOR_NODE_KINDS = [
   "agent.run",
   "connector.read",
+  "connector.write",
   "item.mutate",
   "condition",
   "transform",
@@ -15,6 +27,7 @@ export type AutomationEditorNodeKind = (typeof AUTOMATION_EDITOR_NODE_KINDS)[num
 export const AUTOMATION_EDITOR_ADDABLE_NODE_KINDS = [
   "agent.run",
   "connector.read",
+  "connector.write",
   "item.mutate",
   "condition",
   "transform",
@@ -104,4 +117,28 @@ export interface AutomationEditorProps {
   readonly validationIssues?: ReadonlyArray<AutomationEditorValidationIssue>;
   readonly readOnly?: boolean;
   readonly className?: string;
+  readonly selectedSpace?: Space | undefined;
+  readonly connections?: ReadonlyArray<Connection> | undefined;
+  readonly environmentTimezone?: string | null | undefined;
+  readonly onInterpretSchedule?:
+    | ((input: {
+        readonly text: string;
+        readonly timezone: string;
+      }) => Promise<CommandCenterAutomationScheduleInterpretResult>)
+    | undefined;
+  readonly onBeginGoogleConnectionSetup?:
+    | ((
+        input: Omit<CommandCenterGoogleConnectionSetupBeginInput, "spaceId">,
+      ) => Promise<CommandCenterGoogleConnectionSetupBeginResult>)
+    | undefined;
+  readonly onCompleteGoogleConnectionSetup?:
+    | ((
+        input: CommandCenterGoogleConnectionSetupCompleteInput,
+      ) => Promise<CommandCenterGoogleConnectionSetupCompleteResult>)
+    | undefined;
+  readonly onRemoveGoogleConnection?:
+    | ((
+        input: Omit<CommandCenterGoogleConnectionRemoveInput, "spaceId">,
+      ) => Promise<CommandCenterGoogleConnectionRemoveResult>)
+    | undefined;
 }
