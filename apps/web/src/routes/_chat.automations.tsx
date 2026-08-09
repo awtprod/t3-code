@@ -32,6 +32,21 @@ import { useAtomCommand } from "../state/use-atom-command";
 const decodeSourceDefinition = Schema.decodeUnknownSync(CommandCenterAutomationSourceDefinition);
 const AUTOMATION_AUTOSAVE_DELAY_MS = 1_000;
 
+function automationCommandError(cause: unknown, fallback: string): Error {
+  if (cause instanceof Error && cause.message.trim().length > 0) return cause;
+  if (typeof cause === "string" && cause.trim().length > 0) return new Error(cause);
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "message" in cause &&
+    typeof cause.message === "string" &&
+    cause.message.trim().length > 0
+  ) {
+    return new Error(cause.message);
+  }
+  return new Error(fallback);
+}
+
 let automationCreateRequestSequence = 0;
 function nextAutomationCreateRequestId(): string {
   automationCreateRequestSequence += 1;
@@ -379,7 +394,10 @@ function AutomationsEnvironmentRouteView({
           input: { ...input, spaceId: selectedAutomation.spaceId },
         });
         if (result._tag === "Success") return result.value;
-        throw squashAtomCommandFailure(result);
+        throw automationCommandError(
+          squashAtomCommandFailure(result),
+          "Google setup could not be started.",
+        );
       }}
       onCompleteGoogleConnectionSetup={async (input) => {
         if (environmentId === null) {
@@ -390,7 +408,10 @@ function AutomationsEnvironmentRouteView({
           bootstrapQuery.refresh();
           return result.value;
         }
-        throw squashAtomCommandFailure(result);
+        throw automationCommandError(
+          squashAtomCommandFailure(result),
+          "Google authorization could not finish.",
+        );
       }}
       onRemoveGoogleConnection={async (input) => {
         if (environmentId === null || selectedAutomation === undefined) {
@@ -404,7 +425,10 @@ function AutomationsEnvironmentRouteView({
           bootstrapQuery.refresh();
           return result.value;
         }
-        throw squashAtomCommandFailure(result);
+        throw automationCommandError(
+          squashAtomCommandFailure(result),
+          "The Google account could not be removed.",
+        );
       }}
       onEnvironmentChange={onEnvironmentChange}
       onInterpretSchedule={async ({ text, timezone }) => {

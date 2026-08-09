@@ -1172,6 +1172,21 @@ function GuidedNodeFields({
 
 type GoogleSetupCapability = "gmail.read" | "gmail.drafts.create";
 
+function googleSetupErrorMessage(cause: unknown, fallback: string): string {
+  if (cause instanceof Error && cause.message.trim().length > 0) return cause.message;
+  if (typeof cause === "string" && cause.trim().length > 0) return cause;
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "message" in cause &&
+    typeof cause.message === "string" &&
+    cause.message.trim().length > 0
+  ) {
+    return cause.message;
+  }
+  return fallback;
+}
+
 function GoogleConnectionSetupDialog({
   capabilities,
   onBegin,
@@ -1209,7 +1224,7 @@ function GoogleConnectionSetupDialog({
         }),
       );
     } catch (cause) {
-      setMessage(cause instanceof Error ? cause.message : "Google setup could not be started.");
+      setMessage(googleSetupErrorMessage(cause, "Google setup could not be started."));
     } finally {
       setBusy(false);
     }
@@ -1227,7 +1242,7 @@ function GoogleConnectionSetupDialog({
       onConnected(result.connection.id);
       onClose();
     } catch (cause) {
-      setMessage(cause instanceof Error ? cause.message : "Google authorization could not finish.");
+      setMessage(googleSetupErrorMessage(cause, "Google authorization could not finish."));
     } finally {
       setBusy(false);
     }
