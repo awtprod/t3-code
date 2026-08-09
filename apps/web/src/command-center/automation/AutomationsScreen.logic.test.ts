@@ -54,12 +54,11 @@ describe("automations route state", () => {
     });
   });
 
-  it("autosaves only valid dirty drafts that are not already saving", () => {
+  it("autosaves dirty drafts, including drafts with validation issues", () => {
     expect(
       shouldAutosaveAutomationDraft({
         dirty: true,
         isSaving: false,
-        hasBlockingIssues: false,
         hasSaveError: false,
         authoringUnavailable: false,
       }),
@@ -68,7 +67,6 @@ describe("automations route state", () => {
       shouldAutosaveAutomationDraft({
         dirty: true,
         isSaving: true,
-        hasBlockingIssues: false,
         hasSaveError: false,
         authoringUnavailable: false,
       }),
@@ -77,11 +75,10 @@ describe("automations route state", () => {
       shouldAutosaveAutomationDraft({
         dirty: true,
         isSaving: false,
-        hasBlockingIssues: true,
         hasSaveError: false,
         authoringUnavailable: false,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("routes automations to an explicitly selected remote environment", () => {

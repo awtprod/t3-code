@@ -1,6 +1,8 @@
 import {
   type AutomationDefinition,
   type AutomationValidationIssue,
+  decodeAutomationDefinitionShape,
+  normalizeAutomationDefinition,
   validateAutomationDefinition,
 } from "./Definition.ts";
 import {
@@ -48,7 +50,7 @@ export function expectedDigestMatches(
 export function prepareAutomationSave(input: AutomationSaveGuardInput): AutomationSaveGuardResult {
   let previousDigest: AutomationDefinitionDigest | null = null;
   if (input.currentDefinition !== null) {
-    const current = validateAutomationDefinition(input.currentDefinition);
+    const current = decodeAutomationDefinitionShape(input.currentDefinition);
     if (!current.ok) return { status: "invalid", target: "current", issues: current.issues };
     previousDigest = digestAutomationDefinition(current.definition);
   }
@@ -61,12 +63,21 @@ export function prepareAutomationSave(input: AutomationSaveGuardInput): Automati
     };
   }
 
-  const next = validateAutomationDefinition(input.nextDefinition);
+  const next = decodeAutomationDefinitionShape(input.nextDefinition);
   if (!next.ok) return { status: "invalid", target: "next", issues: next.issues };
+  const validation = validateAutomationDefinition(next.definition);
+  if (!validation.ok) {
+    const unsafeIssues = validation.issues.filter(
+      (issue) => issue.code === "node.config.private-data",
+    );
+    if (unsafeIssues.length > 0) {
+      return { status: "invalid", target: "next", issues: unsafeIssues };
+    }
+  }
 
   return {
     status: "ready",
-    definition: next.definition,
+    definition: normalizeAutomationDefinition(next.definition),
     previousDigest,
     nextDigest: digestAutomationDefinition(next.definition),
     canonicalJson: canonicalAutomationJson(next.definition),

@@ -15,6 +15,7 @@ import {
 import {
   type AutomationDefinition,
   type AutomationFileTrigger,
+  decodeAutomationDefinitionShape,
   validateAutomationDefinition,
 } from "./Definition.ts";
 import { digestAutomationDefinition } from "./Digest.ts";
@@ -83,13 +84,14 @@ const toCoreAutomation = Effect.fn("CommandCenter.toCoreAutomation")(function* (
   definition: AutomationDefinition,
   commitSha: string,
   committedAt: string,
+  enabled: boolean,
 ) {
   return yield* decodeAutomation({
     id: definition.id,
     spaceId: definition.spaceId,
     name: definition.name,
     version: definition.schemaVersion,
-    enabled: definition.enabled,
+    enabled,
     trigger: coreTrigger(definition.trigger),
     nodes: definition.nodes.map((node, index) => ({
       id: node.id,
@@ -189,23 +191,39 @@ export const loadCommittedAutomations = Effect.fn("CommandCenter.loadCommittedAu
             loadError(`Committed automation '${filePath}' is not valid JSON.`, cause),
           ),
         );
-        const validated = validateAutomationDefinition(parsed);
-        if (!validated.ok) {
-          const details = validated.issues.map((issue) => issue.message).join("; ");
-          return yield* loadError(`Committed automation '${filePath}' is invalid: ${details}`);
+        const decoded = decodeAutomationDefinitionShape(parsed);
+        if (!decoded.ok) {
+          const details = decoded.issues.map((issue) => issue.message).join("; ");
+          return yield* loadError(
+            `Committed automation '${filePath}' has an invalid shape: ${details}`,
+          );
         }
-        if (!spaceIds.has(validated.definition.spaceId)) {
+        if (!spaceIds.has(decoded.definition.spaceId)) {
           return yield* loadError(
             `Committed automation '${filePath}' references an unknown Space.`,
           );
         }
-        if (automationIds.has(validated.definition.id)) {
+        if (automationIds.has(decoded.definition.id)) {
           return yield* loadError(
-            `Committed automation id '${validated.definition.id}' is declared more than once.`,
+            `Committed automation id '${decoded.definition.id}' is declared more than once.`,
           );
         }
-        automationIds.add(validated.definition.id);
-        return yield* toCoreAutomation(validated.definition, commitSha, committedAt);
+        automationIds.add(decoded.definition.id);
+        const validation = validateAutomationDefinition(decoded.definition);
+        if (
+          !validation.ok &&
+          validation.issues.some((issue) => issue.code === "node.config.private-data")
+        ) {
+          return yield* loadError(
+            `Committed automation '${filePath}' contains private data that cannot be exposed.`,
+          );
+        }
+        return yield* toCoreAutomation(
+          decoded.definition,
+          commitSha,
+          committedAt,
+          validation.ok && decoded.definition.enabled,
+        );
       }),
     );
 

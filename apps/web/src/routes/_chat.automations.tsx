@@ -22,7 +22,6 @@ import {
   resolveAutomationsScreenStatus,
   shouldAutosaveAutomationDraft,
 } from "../command-center/automation/AutomationsScreen.logic";
-import { validateAutomationEditorDefinition } from "../command-center/automation/logic";
 import type { AutomationEditorDefinition } from "../command-center/automation/types";
 import { commandCenterEnvironment } from "../state/commandCenter";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -163,15 +162,6 @@ function AutomationsEnvironmentRouteView({
         : definitionQuery.isPending
           ? "loading"
           : "unavailable";
-  const activeBlockingIssueCount = useMemo(
-    () =>
-      activeDefinition === null
-        ? 0
-        : validateAutomationEditorDefinition(activeDefinition).filter(
-            (issue) => (issue.severity ?? "error") === "error",
-          ).length,
-    [activeDefinition],
-  );
   const authoringUnavailable =
     (definitionQuery.data?.authoringHealth ?? bootstrap?.authoringHealth)?.status === "unavailable";
 
@@ -204,11 +194,6 @@ function AutomationsEnvironmentRouteView({
     ) {
       return;
     }
-    if (activeBlockingIssueCount > 0) {
-      setSaveError("Fix the blocking graph validation issues before saving.");
-      return;
-    }
-
     let sourceDefinition: CommandCenterAutomationSourceDefinition;
     try {
       sourceDefinition = decodeSourceDefinition(activeDefinition);
@@ -255,7 +240,6 @@ function AutomationsEnvironmentRouteView({
       setSavingAutomationId(undefined);
     }
   }, [
-    activeBlockingIssueCount,
     activeDefinition,
     activeDraft?.baseDigest,
     activeDraft?.revision,
@@ -272,7 +256,6 @@ function AutomationsEnvironmentRouteView({
       !shouldAutosaveAutomationDraft({
         dirty: activeDraft?.dirty ?? false,
         isSaving: savingAutomationId !== undefined,
-        hasBlockingIssues: activeBlockingIssueCount > 0,
         hasSaveError: saveError !== null,
         authoringUnavailable,
       })
@@ -284,7 +267,6 @@ function AutomationsEnvironmentRouteView({
     }, AUTOMATION_AUTOSAVE_DELAY_MS);
     return () => window.clearTimeout(timeout);
   }, [
-    activeBlockingIssueCount,
     activeDraft?.dirty,
     activeDraft?.revision,
     authoringUnavailable,

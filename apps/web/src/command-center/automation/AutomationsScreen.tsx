@@ -21,7 +21,7 @@ import {
   WorkflowIcon,
   XIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -42,7 +42,6 @@ import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 import { AutomationEditor } from "./AutomationEditor";
 import { automationSpaceName, type AutomationsScreenStatus } from "./AutomationsScreen.logic";
-import { validateAutomationEditorDefinition } from "./logic";
 import type { AutomationEditorDefinition, AutomationEditorProps } from "./types";
 
 export interface AutomationEnvironmentOption {
@@ -240,15 +239,6 @@ export function AutomationsScreen({
   const selectedAutomationId = controlledSelectedAutomationId ?? localSelectedAutomationId;
   const selectedAutomation =
     automations.find((automation) => automation.id === selectedAutomationId) ?? automations[0];
-  const blockingIssueCount = useMemo(
-    () =>
-      editorDefinition === null || editorDefinition === undefined
-        ? 0
-        : validateAutomationEditorDefinition(editorDefinition).filter(
-            (issue) => (issue.severity ?? "error") === "error",
-          ).length,
-    [editorDefinition],
-  );
   const editable =
     editorStatus === "ready" &&
     editorDefinition !== null &&
@@ -256,19 +246,12 @@ export function AutomationsScreen({
     onDefinitionChange !== undefined;
   const authoringUnavailable = authoringHealth?.status === "unavailable";
   const saveDisabled =
-    authoringUnavailable ||
-    !editable ||
-    !isDirty ||
-    isSaving ||
-    blockingIssueCount > 0 ||
-    onSave === undefined;
+    authoringUnavailable || !editable || !isDirty || isSaving || onSave === undefined;
   const saveStatus = isSaving
     ? { label: "Saving", variant: "warning" as const }
     : !isDirty
       ? { label: "Saved", variant: "success" as const }
-      : blockingIssueCount > 0
-        ? { label: "Fix issues to save", variant: "error" as const }
-        : { label: "Autosave pending", variant: "warning" as const };
+      : { label: "Autosave pending", variant: "warning" as const };
   const effectiveNewSpaceId =
     newAutomationSpaceId ||
     spaces.find((space) => space.kind === "system")?.id ||
@@ -378,9 +361,7 @@ export function AutomationsScreen({
                   title={
                     authoringUnavailable
                       ? "Saving automations isn't supported in this environment yet."
-                      : blockingIssueCount > 0
-                        ? `Fix ${blockingIssueCount} blocking ${blockingIssueCount === 1 ? "issue" : "issues"} before saving`
-                        : `Save immediately on ${selectedEnvironment?.label ?? "the selected environment"}; changes also save automatically`
+                      : `Save immediately on ${selectedEnvironment?.label ?? "the selected environment"}; changes also save automatically`
                   }
                 >
                   {isSaving ? (

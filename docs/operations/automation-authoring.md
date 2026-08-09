@@ -12,6 +12,12 @@ private configuration checkout, performs the atomic commit, and runs the committ
 Changing environments discards no saved data, and the selector is disabled while the current editor
 has unsaved changes so a draft cannot cross environment boundaries.
 
+Save and autosave are durability actions, not readiness gates. Incomplete step configuration,
+unfinished schedules, and graph validation issues are committed so authoring work is not lost.
+Those issues remain visible in the editor, and execution validation still prevents an unfinished
+definition from running successfully. Invalid storage shapes and credential- or host-path-shaped
+private data remain rejected rather than being written to Git.
+
 ## Preflight
 
 Before the editor offers a local save, the server verifies all of the following:
@@ -33,7 +39,7 @@ from a detached checkout; creation and editing still require a checked-out named
 
 ## Atomic publication and recovery
 
-Authoring stages exact validated bytes under `.git/command-center-recovery/<transaction>/`. A
+Authoring stages exact service-decoded bytes under `.git/command-center-recovery/<transaction>/`. A
 scrubbed, bounded helper opens both the automation parent and recovery directory with
 `O_DIRECTORY | O_NOFOLLOW`, pins their device/inode identities, and exchanges the staged and working
 files with one dirfd-relative `RENAME_EXCHANGE` operation. The target pathname is never absent.

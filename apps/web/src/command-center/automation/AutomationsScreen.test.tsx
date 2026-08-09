@@ -122,7 +122,7 @@ describe("AutomationsScreen", () => {
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>.*Save now/su);
   });
 
-  it("explains when validation is blocking autosave", () => {
+  it("keeps autosave and manual save available when validation issues remain", () => {
     const definition = {
       ...validEditorDefinition(),
       nodes: [
@@ -143,9 +143,9 @@ describe("AutomationsScreen", () => {
       />,
     );
 
-    expect(html).toContain("Fix issues to save");
-    expect(html).not.toContain("Autosave pending");
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*title="Fix 1 blocking issue before saving"/u);
+    expect(html).toContain("Autosave pending");
+    expect(html).not.toContain("Fix issues to save");
+    expect(html).toMatch(/<button(?![^>]*disabled="")[^>]*title="Save immediately/u);
   });
 
   it("renders explicit loading and empty committed-definition states", () => {

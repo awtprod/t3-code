@@ -254,6 +254,29 @@ describe("automation digest and planner", () => {
 });
 
 describe("expected-digest save protection", () => {
+  it("saves semantically incomplete drafts while keeping private data out of Git", () => {
+    const incomplete = sampleDefinition();
+    incomplete.nodes[0]!.kind = "agent.run" as never;
+    incomplete.nodes[0]!.config = {} as never;
+    expect(
+      prepareAutomationSave({
+        expectedDigest: null,
+        currentDefinition: null,
+        nextDefinition: incomplete,
+      }).status,
+    ).toBe("ready");
+
+    const unsafe = sampleDefinition();
+    unsafe.nodes[0]!.config = { apiKey: "must-not-be-committed" } as never;
+    expect(
+      prepareAutomationSave({
+        expectedDigest: null,
+        currentDefinition: null,
+        nextDefinition: unsafe,
+      }).status,
+    ).toBe("invalid");
+  });
+
   it("saves typed agent and manifest-only shell definitions", () => {
     const agent = sampleDefinition();
     agent.nodes[0]!.kind = "agent.run" as never;

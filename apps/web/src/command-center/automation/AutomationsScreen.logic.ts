@@ -63,17 +63,10 @@ export function reconcileAutomationDraftAfterSave(input: {
 export function shouldAutosaveAutomationDraft(input: {
   readonly dirty: boolean;
   readonly isSaving: boolean;
-  readonly hasBlockingIssues: boolean;
   readonly hasSaveError: boolean;
   readonly authoringUnavailable: boolean;
 }): boolean {
-  return (
-    input.dirty &&
-    !input.isSaving &&
-    !input.hasBlockingIssues &&
-    !input.hasSaveError &&
-    !input.authoringUnavailable
-  );
+  return input.dirty && !input.isSaving && !input.hasSaveError && !input.authoringUnavailable;
 }
 
 const PREFERRED_AUTOMATION_ENVIRONMENT_KEY = "t3code:automations:environment";

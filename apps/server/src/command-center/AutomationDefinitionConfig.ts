@@ -44,6 +44,7 @@ import {
 import {
   type AutomationDefinitionDigest,
   canonicalJson,
+  decodeAutomationDefinitionShape,
   digestAutomationDefinition,
   prepareAutomationSave,
   validateAutomationDefinition,
@@ -944,12 +945,21 @@ export const make = Effect.gen(function* () {
           ),
         );
         if (definition.id !== input.automationId || definition.spaceId !== input.spaceId) continue;
-        const validated = validateAutomationDefinition(parsed);
-        if (!validated.ok) {
+        const decoded = decodeAutomationDefinitionShape(parsed);
+        if (!decoded.ok) {
           return yield* configError(
-            `The committed automation definition is invalid: ${validated.issues
+            `The committed automation definition has an invalid shape: ${decoded.issues
               .map((issue) => issue.message)
               .join("; ")}`,
+          );
+        }
+        const validation = validateAutomationDefinition(decoded.definition);
+        if (
+          !validation.ok &&
+          validation.issues.some((issue) => issue.code === "node.config.private-data")
+        ) {
+          return yield* configError(
+            "The committed automation definition contains private data that cannot be exposed.",
           );
         }
         matches.push({
@@ -959,7 +969,7 @@ export const make = Effect.gen(function* () {
           commitSha,
           blobSha: entry.blobSha,
           definition,
-          definitionDigest: digestAutomationDefinition(validated.definition),
+          definitionDigest: digestAutomationDefinition(decoded.definition),
           originalContents,
         });
       }
@@ -1799,14 +1809,14 @@ export const make = Effect.gen(function* () {
           persistenceError("The committed automation definition has an invalid shape.", cause),
         ),
       );
-      const committedValidation = validateAutomationDefinition(committedParsed);
-      if (!committedValidation.ok) {
+      const committedShape = decodeAutomationDefinitionShape(committedParsed);
+      if (!committedShape.ok) {
         return yield* persistenceError(
-          "The local commit contains an invalid automation definition.",
+          "The local commit contains an automation definition with an invalid shape.",
         );
       }
       if (
-        digestAutomationDefinition(committedValidation.definition) !== prepared.nextDigest ||
+        digestAutomationDefinition(committedShape.definition) !== prepared.nextDigest ||
         committedDefinition.$schema !== source.definition.$schema ||
         canonicalJson(committedDefinition.policy) !== canonicalJson(source.definition.policy)
       ) {

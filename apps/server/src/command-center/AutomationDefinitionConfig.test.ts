@@ -972,6 +972,29 @@ it.layer(NodeServices.layer)("automation private config editing", (it) => {
     }),
   );
 
+  it.effect("commits and reloads an incomplete action draft", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture;
+      const initial = yield* fixture.store.get(getInput);
+      const saved = yield* fixture.store.save(
+        decodeSave({
+          automationId: "sample-flow",
+          spaceId: "sample-space",
+          expectedDefinitionDigest: initial.definitionDigest,
+          definition: {
+            ...initial.definition,
+            nodes: [{ id: "start", kind: "agent.run", config: {} }],
+          },
+        }),
+        () => Effect.void,
+      );
+
+      expect(saved.definition.nodes).toEqual([{ id: "start", kind: "agent.run", config: {} }]);
+      expect((yield* fixture.store.get(getInput)).definition).toEqual(saved.definition);
+      expect(yield* fixture.git(["status", "--porcelain=v1"])).toBe("");
+    }),
+  );
+
   it.effect("serializes only decoded service-owned source fields", () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture;
