@@ -2316,8 +2316,6 @@ function AutomationCanvas({
         colorMode="system"
         deleteKeyCode={null}
         edges={edges}
-        fitView
-        fitViewOptions={{ padding: 0.24, maxZoom: 1 }}
         isValidConnection={validConnection}
         maxZoom={1.5}
         minZoom={0.2}

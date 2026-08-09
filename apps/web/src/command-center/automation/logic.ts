@@ -127,8 +127,8 @@ export function setAutomationNodePosition(
   }
 
   const nextPosition: AutomationEditorPosition = {
-    x: Math.max(AUTOMATION_CANVAS_PADDING / 2, Math.round(position.x)),
-    y: Math.max(AUTOMATION_CANVAS_PADDING / 2, Math.round(position.y)),
+    x: Math.round(position.x),
+    y: Math.round(position.y),
   };
 
   return {

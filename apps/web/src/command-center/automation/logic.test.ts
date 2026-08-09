@@ -79,6 +79,13 @@ describe("automation editor definition edits", () => {
     expect(positioned.layout.zoom).toBe(1);
   });
 
+  it("persists negative canvas positions instead of snapping them back to the origin", () => {
+    const initial = sampleDefinition();
+    const positioned = setAutomationNodePosition(initial, "draft", { x: -217.6, y: -83.4 });
+
+    expect(readAutomationNodePosition(positioned, "draft")).toEqual({ x: -218, y: -83 });
+  });
+
   it("keeps an in-progress canvas position during presentation-only refreshes", () => {
     const persisted = { x: 380, y: 140 };
     const dragged = { x: 740, y: 420 };
