@@ -254,10 +254,10 @@ describe("automation digest and planner", () => {
 });
 
 describe("expected-digest save protection", () => {
-  it("saves semantically incomplete drafts while keeping private data out of Git", () => {
+  it("saves drafts without applying semantic validation", () => {
     const incomplete = sampleDefinition();
-    incomplete.nodes[0]!.kind = "agent.run" as never;
-    incomplete.nodes[0]!.config = {} as never;
+    incomplete.nodes[0]!.kind = "connector.write" as never;
+    incomplete.nodes[0]!.config = { operation: "gmail.draft.create" } as never;
     expect(
       prepareAutomationSave({
         expectedDigest: null,
@@ -274,7 +274,7 @@ describe("expected-digest save protection", () => {
         currentDefinition: null,
         nextDefinition: unsafe,
       }).status,
-    ).toBe("invalid");
+    ).toBe("ready");
   });
 
   it("saves typed agent and manifest-only shell definitions", () => {

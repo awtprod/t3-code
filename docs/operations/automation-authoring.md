@@ -15,8 +15,8 @@ has unsaved changes so a draft cannot cross environment boundaries.
 Save and autosave are durability actions, not readiness gates. Incomplete step configuration,
 unfinished schedules, and graph validation issues are committed so authoring work is not lost.
 Those issues remain visible in the editor, and execution validation still prevents an unfinished
-definition from running successfully. Invalid storage shapes and credential- or host-path-shaped
-private data remain rejected rather than being written to Git.
+definition from running successfully. Only invalid request shapes, stale-write conflicts, and
+storage or commit failures reject persistence.
 
 ## Preflight
 

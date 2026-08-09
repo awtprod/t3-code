@@ -3,7 +3,6 @@ import {
   type AutomationValidationIssue,
   decodeAutomationDefinitionShape,
   normalizeAutomationDefinition,
-  validateAutomationDefinition,
 } from "./Definition.ts";
 import {
   canonicalAutomationJson,
@@ -65,15 +64,6 @@ export function prepareAutomationSave(input: AutomationSaveGuardInput): Automati
 
   const next = decodeAutomationDefinitionShape(input.nextDefinition);
   if (!next.ok) return { status: "invalid", target: "next", issues: next.issues };
-  const validation = validateAutomationDefinition(next.definition);
-  if (!validation.ok) {
-    const unsafeIssues = validation.issues.filter(
-      (issue) => issue.code === "node.config.private-data",
-    );
-    if (unsafeIssues.length > 0) {
-      return { status: "invalid", target: "next", issues: unsafeIssues };
-    }
-  }
 
   return {
     status: "ready",

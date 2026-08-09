@@ -972,7 +972,7 @@ it.layer(NodeServices.layer)("automation private config editing", (it) => {
     }),
   );
 
-  it.effect("commits and reloads an incomplete action draft", () =>
+  it.effect("commits and reloads an incomplete Gmail action draft", () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture;
       const initial = yield* fixture.store.get(getInput);
@@ -983,13 +983,25 @@ it.layer(NodeServices.layer)("automation private config editing", (it) => {
           expectedDefinitionDigest: initial.definitionDigest,
           definition: {
             ...initial.definition,
-            nodes: [{ id: "start", kind: "agent.run", config: {} }],
+            nodes: [
+              {
+                id: "start",
+                kind: "connector.write",
+                config: { operation: "gmail.draft.create" },
+              },
+            ],
           },
         }),
         () => Effect.void,
       );
 
-      expect(saved.definition.nodes).toEqual([{ id: "start", kind: "agent.run", config: {} }]);
+      expect(saved.definition.nodes).toEqual([
+        {
+          id: "start",
+          kind: "connector.write",
+          config: { operation: "gmail.draft.create" },
+        },
+      ]);
       expect((yield* fixture.store.get(getInput)).definition).toEqual(saved.definition);
       expect(yield* fixture.git(["status", "--porcelain=v1"])).toBe("");
     }),
