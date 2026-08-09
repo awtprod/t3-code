@@ -39,6 +39,28 @@ const PRESENTATION = {
   requiresNewThreadForModelChange: true,
 } as const;
 
+/**
+ * Read-only mounts the isolation smoke test needs to exec anything at all.
+ * Must stay in sync with the equivalent binds in `buildKimiAutomationBwrapArgs`:
+ * on usrmerged systems /lib and /lib64 are symlinks into /usr, so omitting them
+ * leaves the ELF loader unreachable and the probe fails a sandbox the real
+ * launcher would have run successfully.
+ */
+export const KIMI_ISOLATION_PROBE_ROOT_BINDS: ReadonlyArray<string> = [
+  "--ro-bind",
+  "/usr",
+  "/usr",
+  "--ro-bind-try",
+  "/bin",
+  "/bin",
+  "--ro-bind-try",
+  "/lib",
+  "/lib",
+  "--ro-bind-try",
+  "/lib64",
+  "/lib64",
+];
+
 export const probeKimiCommandCenterIsolation = Effect.fn("probeKimiCommandCenterIsolation")(
   function* (settings: KimiSettings, environment: NodeJS.ProcessEnv) {
     if (NodeProcess.platform !== "linux") return false;
@@ -89,12 +111,7 @@ export const probeKimiCommandCenterIsolation = Effect.fn("probeKimiCommandCenter
             "--cap-drop",
             "ALL",
             "--clearenv",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind-try",
-            "/bin",
-            "/bin",
+            ...KIMI_ISOLATION_PROBE_ROOT_BINDS,
             "--proc",
             "/proc",
             "--dev",
