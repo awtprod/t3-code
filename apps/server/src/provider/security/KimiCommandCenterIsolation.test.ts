@@ -8,7 +8,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { probeKimiCommandCenterIsolation } from "../Layers/KimiProvider.ts";
+import {
+  KIMI_ISOLATION_PROBE_ROOT_BINDS,
+  probeKimiCommandCenterIsolation,
+} from "../Layers/KimiProvider.ts";
 
 import {
   buildKimiAutomationBwrapArgs,
@@ -74,6 +77,29 @@ describe("KimiCommandCenterIsolation", () => {
     });
     const writableWorkspaceIndex = writable.indexOf("/worktrees/run");
     NodeAssert.equal(writable[writableWorkspaceIndex - 1], "--bind");
+  });
+
+  it("gives the isolation probe every root bind the real launcher mounts", () => {
+    // Regression: the probe once bound only /usr and /bin. On usrmerged systems
+    // /lib and /lib64 are symlinks into /usr, so its `/usr/bin/true` smoke test
+    // could not reach the ELF loader — reporting commandCenterAutomation:false
+    // for a sandbox the launcher below runs without trouble.
+    const launcher = buildKimiAutomationBwrapArgs({
+      executablePath: "/opt/kimi/kimi",
+      hostHomePath: "/state/kimi/thread",
+      workspacePath: "/worktrees/run",
+      writable: false,
+    });
+    for (const mount of ["/usr", "/bin", "/lib", "/lib64"]) {
+      NodeAssert.ok(
+        launcher.includes(mount),
+        `launcher is expected to mount ${mount}; update the probe binds if this changed`,
+      );
+      NodeAssert.ok(
+        KIMI_ISOLATION_PROBE_ROOT_BINDS.includes(mount),
+        `isolation probe must also mount ${mount} or it will reject working setups`,
+      );
+    }
   });
 });
 
