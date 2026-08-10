@@ -39,6 +39,7 @@ export interface CommandCenterMessage {
   readonly authorLabel?: string | undefined;
   readonly linkedRunId?: string | undefined;
   readonly linkedThreadId?: string | undefined;
+  readonly linkedEnvironmentId?: string | undefined;
   readonly receipt?: CommandCenterRouteReceipt | undefined;
 }
 
@@ -75,6 +76,7 @@ export interface CommandCenterRouteReceipt {
   readonly projectName?: string | undefined;
   readonly providerName: string;
   readonly modelName: string;
+  readonly executionTargetName?: string | undefined;
   readonly capabilities: readonly string[];
   readonly sources: CommandCenterRouteSources;
   readonly risk: CommandCenterRisk;
@@ -232,5 +234,5 @@ export interface CommandCenterShellProps {
   readonly onOpenRun?: ((runId: string) => void) | undefined;
   readonly onOpenTodayItem?: ((itemId: string) => void) | undefined;
   readonly onOpenConnection?: ((connectionId: string) => void) | undefined;
-  readonly onOpenLinkedThread?: ((threadId: string) => void) | undefined;
+  readonly onOpenLinkedThread?: ((threadId: string, environmentId?: string) => void) | undefined;
 }

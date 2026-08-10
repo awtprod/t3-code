@@ -133,6 +133,7 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
                     : "Route ready"}
         </span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground">
+          {receipt.executionTargetName !== undefined ? `${receipt.executionTargetName} · ` : ""}
           {receipt.spaceName}
           {receipt.repositoryName ? ` / ${receipt.repositoryName}` : ""} · {receipt.providerName} ·{" "}
           {receipt.modelName}
@@ -167,7 +168,10 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
             {RISK_LABEL[receipt.risk]}
           </Badge>
         </div>
-        <div className="mt-2 grid min-w-0 grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="mt-2 grid min-w-0 grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
+          {receipt.executionTargetName !== undefined && (
+            <RouteFact label="Runs on" source="classifier" value={receipt.executionTargetName} />
+          )}
           <RouteFact label="Space" source={receipt.sources.space} value={receipt.spaceName} />
           {receipt.repositoryName !== undefined && (
             <RouteFact
@@ -225,7 +229,7 @@ export function Messages({
 }: {
   readonly messages: readonly CommandCenterMessage[];
   readonly receipt: CommandCenterRouteReceipt;
-  readonly onOpenLinkedThread?: ((threadId: string) => void) | undefined;
+  readonly onOpenLinkedThread?: ((threadId: string, environmentId?: string) => void) | undefined;
   readonly onClearTranscript?: (() => void) | undefined;
   readonly context?: CommandCenterContext | undefined;
   readonly conversations?: CommandCenterShellProps["conversations"] | undefined;
@@ -329,7 +333,7 @@ export function Messages({
                 <Button
                   onClick={() => {
                     if (message.linkedThreadId !== undefined) {
-                      onOpenLinkedThread?.(message.linkedThreadId);
+                      onOpenLinkedThread?.(message.linkedThreadId, message.linkedEnvironmentId);
                     }
                   }}
                   size="xs"

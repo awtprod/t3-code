@@ -1,6 +1,5 @@
 "use client";
 
-import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -12,17 +11,27 @@ import {
   SpaceId,
 } from "@command-center/core";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import { SidebarInset } from "~/components/ui/sidebar";
-import { randomUUID } from "~/lib/utils";
-import { usePrimaryEnvironmentId } from "~/state/environments";
+import { newMessageId, newThreadId, randomUUID } from "~/lib/utils";
+import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useProjects } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
-import { primaryServerProvidersAtom } from "~/state/server";
+import { useThreadDetail } from "~/state/queries";
+import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { commandCenterEnvironment } from "~/state/commandCenter";
 
 import { CommandCenterShell } from "./CommandCenterShell";
+import {
+  classifyCommandCenterExecutionTarget,
+  resolveCommandCenterRouterEnvironmentId,
+  resolveDesktopExecutionEnvironment,
+  resolveDesktopWorkerModelSelection,
+  resolveDesktopWorkerProject,
+  type CommandCenterEnvironmentCandidate,
+} from "./CommandCenterExecution.logic";
 import {
   initialRouteReceipt,
   buildRouteOptions,
@@ -95,11 +104,40 @@ interface LastRouteReceipt {
   readonly runId?: string | undefined;
 }
 
+interface DelegatedDesktopRun {
+  readonly environmentId: EnvironmentId;
+  readonly environmentLabel: string;
+  readonly threadId: ThreadId;
+}
+
 export function CommandCenterHome() {
   const navigate = useNavigate();
-  const environmentId = usePrimaryEnvironmentId();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const { environments } = useEnvironments();
   const environmentProjects = useProjects();
-  const providers = useAtomValue(primaryServerProvidersAtom);
+  const environmentCandidates = useMemo<readonly CommandCenterEnvironmentCandidate[]>(
+    () =>
+      environments.map((environment) => ({
+        id: environment.environmentId,
+        label: environment.label,
+        isPrimary: environment.entry.target._tag === "PrimaryConnectionTarget",
+        platformOs: environment.serverConfig?.environment.platform.os ?? "unknown",
+        connected: environment.connection.phase === "connected",
+      })),
+    [environments],
+  );
+  const environmentId = resolveCommandCenterRouterEnvironmentId({
+    primaryEnvironmentId,
+    environments: environmentCandidates,
+  });
+  const routerEnvironment = environments.find(
+    (environment) => environment.environmentId === environmentId,
+  );
+  const providers = routerEnvironment?.serverConfig?.providers ?? [];
+  const desktopEnvironment = resolveDesktopExecutionEnvironment(
+    environmentCandidates,
+    environmentId,
+  );
   const [routeSelection, setRouteSelection] = useState<CommandCenterRouteSelection>({});
   const [conversationRoute, setConversationRoute] = useState<CommandCenterRouteSelection>({});
   const [spaceFilterId, setSpaceFilterId] = useState<string>();
@@ -111,6 +149,11 @@ export function CommandCenterHome() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [resolvingNeedsYouId, setResolvingNeedsYouId] = useState<string>();
   const [lastReceipt, setLastReceipt] = useState<LastRouteReceipt | null>(null);
+  const [delegatedDesktopRun, setDelegatedDesktopRun] = useState<DelegatedDesktopRun | null>(null);
+  const delegatedThread = useThreadDetail(
+    delegatedDesktopRun?.environmentId ?? null,
+    delegatedDesktopRun?.threadId ?? null,
+  );
   const selectedSpaceId = spaceFilterId === undefined ? undefined : SpaceId.make(spaceFilterId);
   const bootstrapQuery = useEnvironmentQuery(
     environmentId === null
@@ -155,6 +198,8 @@ export function CommandCenterHome() {
   const createItem = useAtomCommand(commandCenterEnvironment.createItem, {
     reportFailure: false,
   });
+  const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
+  const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
   const updateItem = useAtomCommand(commandCenterEnvironment.updateItem, {
     reportFailure: false,
   });
@@ -216,10 +261,64 @@ export function CommandCenterHome() {
     () => timelineMessages(visibleTimeline, bootstrap, routeDisplay),
     [bootstrap, routeDisplay, visibleTimeline],
   );
-  const messages = useMemo(
-    () => mergeAuthoritativeMessages(authoritativeMessages, optimisticMessages),
-    [authoritativeMessages, optimisticMessages],
+  const delegatedMessages = useMemo<readonly CommandCenterMessage[]>(
+    () =>
+      delegatedThread.data?.messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => ({
+          id: `desktop:${message.id}`,
+          author: "assistant" as const,
+          authorLabel: delegatedDesktopRun?.environmentLabel ?? "Desktop worker",
+          body: message.text,
+          createdAtLabel: new Date(message.createdAt).toLocaleTimeString(undefined, {
+            hour: "numeric",
+            minute: "2-digit",
+          }),
+          ...(delegatedDesktopRun === null
+            ? {}
+            : {
+                linkedThreadId: delegatedDesktopRun.threadId,
+                linkedEnvironmentId: delegatedDesktopRun.environmentId,
+              }),
+        })) ?? [],
+    [delegatedDesktopRun, delegatedThread.data?.messages],
   );
+  const messages = useMemo(
+    () =>
+      mergeAuthoritativeMessages(
+        [...authoritativeMessages, ...delegatedMessages],
+        optimisticMessages,
+      ),
+    [authoritativeMessages, delegatedMessages, optimisticMessages],
+  );
+  useEffect(() => {
+    const thread = delegatedThread.data;
+    const session = thread?.session;
+    if (delegatedDesktopRun === null || thread === null || thread === undefined) return;
+    const status =
+      thread.latestTurn?.state === "error" || session?.status === "error"
+        ? "failed"
+        : thread.latestTurn?.state === "completed"
+          ? "complete"
+          : "running";
+    setLastReceipt((current) =>
+      current?.receipt.executionTargetName !== delegatedDesktopRun.environmentLabel
+        ? current
+        : {
+            ...current,
+            receipt: {
+              ...current.receipt,
+              status,
+              summary:
+                status === "complete"
+                  ? `Desktop work completed on ${delegatedDesktopRun.environmentLabel}.`
+                  : status === "failed"
+                    ? (session?.lastError ?? "The desktop worker failed.")
+                    : current.receipt.summary,
+            },
+          },
+    );
+  }, [delegatedDesktopRun, delegatedThread.data]);
   const routeReceipt = useMemo(() => {
     if (lastReceipt !== null) {
       const timelineEntry =
@@ -314,11 +413,13 @@ export function CommandCenterHome() {
   );
 
   const openLinkedThread = useCallback(
-    (threadId: string) => {
-      if (environmentId === null) return;
+    (threadId: string, linkedEnvironmentId?: string) => {
+      const targetEnvironmentId =
+        linkedEnvironmentId === undefined ? environmentId : (linkedEnvironmentId as EnvironmentId);
+      if (targetEnvironmentId === null) return;
       void navigate({
         to: "/$environmentId/$threadId",
-        params: { environmentId, threadId },
+        params: { environmentId: targetEnvironmentId, threadId },
       });
     },
     [environmentId, navigate],
@@ -444,6 +545,7 @@ export function CommandCenterHome() {
     setTranscriptAfterSequence(timelineQuery.data?.nextSequence ?? 0);
     setDraft("");
     setLastReceipt(null);
+    setDelegatedDesktopRun(null);
   }, [timelineQuery.data?.nextSequence]);
 
   const dismissNeedsYouItems = useCallback(
@@ -538,6 +640,178 @@ export function CommandCenterHome() {
         },
       ]);
 
+      const executionTarget = classifyCommandCenterExecutionTarget(text);
+      if (executionTarget === "desktop") {
+        if (desktopEnvironment === null) {
+          const message =
+            "This request needs the desktop, but no connected desktop environment is available.";
+          setLastReceipt({ receipt: blockedReceipt(message) });
+          setOptimisticMessages((current) => [
+            ...current,
+            {
+              id: `${commandId}:desktop-unavailable`,
+              author: "system",
+              authorLabel: "Desktop unavailable",
+              body: `${message} Connect the desktop and retry this command.`,
+              createdAtLabel: currentTimeLabel(),
+            },
+          ]);
+          setIsSubmitting(false);
+          return;
+        }
+
+        const selectedProject = environmentProjects.find(
+          (project) =>
+            project.environmentId === environmentId && project.id === routeSelection.projectId,
+        );
+        const workerProject = resolveDesktopWorkerProject({
+          desktopEnvironmentId: desktopEnvironment.id,
+          projects: environmentProjects,
+          ...(selectedProject === undefined ? {} : { selectedProject }),
+        });
+        const desktopProviders =
+          environments.find((environment) => environment.environmentId === desktopEnvironment.id)
+            ?.serverConfig?.providers ?? [];
+        const modelSelection =
+          workerProject === null
+            ? null
+            : resolveDesktopWorkerModelSelection({
+                project: workerProject,
+                providers: desktopProviders,
+              });
+        if (workerProject === null || modelSelection === null) {
+          const message =
+            workerProject === null
+              ? "No desktop workspace is available for the local worker."
+              : "No usable desktop agent provider is available for the local worker.";
+          setLastReceipt({ receipt: blockedReceipt(message) });
+          setOptimisticMessages((current) => [
+            ...current,
+            {
+              id: `${commandId}:desktop-worker-unavailable`,
+              author: "system",
+              authorLabel: "Desktop worker unavailable",
+              body: message,
+              createdAtLabel: currentTimeLabel(),
+            },
+          ]);
+          setIsSubmitting(false);
+          return;
+        }
+
+        const threadId = newThreadId();
+        const createdAt = new Date().toISOString();
+        const title = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+        const createResult = await createThread({
+          environmentId: desktopEnvironment.id,
+          input: {
+            threadId,
+            projectId: workerProject.id,
+            title,
+            modelSelection,
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+          },
+        });
+        if (createResult._tag === "Failure") {
+          const message = failureMessage(squashAtomCommandFailure(createResult));
+          setLastReceipt({ receipt: blockedReceipt(message) });
+          setOptimisticMessages((current) => [
+            ...current,
+            {
+              id: `${commandId}:desktop-create-failed`,
+              author: "system",
+              authorLabel: "Desktop delegation failed",
+              body: message,
+              createdAtLabel: currentTimeLabel(),
+            },
+          ]);
+          setIsSubmitting(false);
+          return;
+        }
+
+        const receipt: CommandCenterRouteReceipt = {
+          spaceName:
+            bootstrap.spaces.find((space) => space.id === routeSelection.spaceId)?.displayName ??
+            "Command Center",
+          projectName: workerProject.title,
+          providerName:
+            desktopProviders.find((provider) => provider.instanceId === modelSelection.instanceId)
+              ?.displayName ?? modelSelection.instanceId,
+          modelName: modelSelection.model,
+          executionTargetName: desktopEnvironment.label,
+          capabilities: ["desktop.local"],
+          sources: {
+            space: routeSelection.spaceId === undefined ? "fallback" : "explicit",
+            repository: "unresolved",
+            project: selectedProject === undefined ? "fallback" : "classifier",
+            provider: "provider-default",
+            model: "provider-default",
+          },
+          risk: "low",
+          status: "running",
+          summary: `Command Center delegated this work to ${desktopEnvironment.label}.`,
+        };
+        setDelegatedDesktopRun({
+          environmentId: desktopEnvironment.id,
+          environmentLabel: desktopEnvironment.label,
+          threadId,
+        });
+        setLastReceipt({ receipt });
+        setOptimisticMessages((current) => [
+          ...current,
+          {
+            id: `${commandId}:desktop-route`,
+            author: "system",
+            authorLabel: "Desktop worker started",
+            body: `Running on ${desktopEnvironment.label}. Open the worker thread for full activity and approvals.`,
+            createdAtLabel: currentTimeLabel(),
+            linkedThreadId: threadId,
+            linkedEnvironmentId: desktopEnvironment.id,
+            receipt,
+          },
+        ]);
+        const startResult = await startThreadTurn({
+          environmentId: desktopEnvironment.id,
+          input: {
+            threadId,
+            message: {
+              messageId: newMessageId(),
+              role: "user",
+              text: `You are a desktop worker delegated by Command Center on OpenClaw. Work only on this desktop machine and its local resources. Complete the following request, asking for approval or clarification when appropriate:\n\n${text}`,
+              attachments: [],
+            },
+            modelSelection,
+            titleSeed: title,
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            createdAt,
+          },
+        });
+        if (startResult._tag === "Failure") {
+          const message = failureMessage(squashAtomCommandFailure(startResult));
+          setDelegatedDesktopRun(null);
+          setLastReceipt({ receipt: { ...receipt, status: "failed", summary: message } });
+          setOptimisticMessages((current) => [
+            ...current,
+            {
+              id: `${commandId}:desktop-start-failed`,
+              author: "system",
+              authorLabel: "Desktop worker failed",
+              body: message,
+              createdAtLabel: currentTimeLabel(),
+              linkedThreadId: threadId,
+              linkedEnvironmentId: desktopEnvironment.id,
+            },
+          ]);
+        }
+        setIsSubmitting(false);
+        return;
+      }
+
       const result = await submitCommand({
         environmentId,
         input: {
@@ -549,7 +823,12 @@ export function CommandCenterHome() {
       });
 
       if (result._tag === "Success") {
-        const receipt = routeReceiptFromResult(result.value, bootstrap, routeDisplay);
+        const receipt = {
+          ...routeReceiptFromResult(result.value, bootstrap, routeDisplay),
+          ...(routerEnvironment === undefined
+            ? {}
+            : { executionTargetName: routerEnvironment.label }),
+        };
         setLastReceipt({ receipt, runId: result.value.run.id });
         setActiveConversationId(result.value.run.id);
         setConversationRoute({
@@ -609,12 +888,18 @@ export function CommandCenterHome() {
     [
       bootstrap,
       conversationRoute,
+      createThread,
+      desktopEnvironment,
+      environmentProjects,
+      environments,
       bootstrapQuery,
       environmentId,
       isSubmitting,
       routeDisplay,
       routeSelection,
+      routerEnvironment,
       startRun,
+      startThreadTurn,
       submitCommand,
       timelineQuery,
     ],
@@ -691,7 +976,12 @@ export function CommandCenterHome() {
           void submit(command);
         }}
         projects={projects}
-        routeReceipt={routeReceipt}
+        routeReceipt={{
+          ...routeReceipt,
+          ...(routeReceipt.executionTargetName !== undefined || routerEnvironment === undefined
+            ? {}
+            : { executionTargetName: routerEnvironment.label }),
+        }}
         routeOptions={routeOptions}
         routeSelection={routeSelection}
         resolvingNeedsYouId={resolvingNeedsYouId}
