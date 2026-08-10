@@ -10,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildRouteOptions,
   commandRouteOverrides,
+  defaultCommandCenterRouteSelection,
   initialRouteReceipt,
   mergeAuthoritativeMessages,
   nextRouteSelection,
@@ -220,6 +221,20 @@ const PROVIDERS = [
 ] as unknown as readonly ServerProvider[];
 
 describe("CommandCenterHome projection", () => {
+  it("defaults the router to Terra while preserving the provider instance", () => {
+    expect(
+      defaultCommandCenterRouteSelection({
+        models: [
+          { id: "gpt-5.6-sol", label: "Sol", providerId: "codex-work" },
+          { id: "gpt-5.6-terra", label: "Terra", providerId: "codex-personal" },
+        ],
+        projects: [],
+        providers: [],
+        repositories: [],
+      }),
+    ).toEqual({ providerId: "codex-personal", modelId: "gpt-5.6-terra" });
+  });
+
   it("projects bootstrap data into live shell context", () => {
     const projection = projectBootstrap(BOOTSTRAP, new Date("2026-01-15T10:00:00.000Z"));
 

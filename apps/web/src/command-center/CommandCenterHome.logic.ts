@@ -39,6 +39,20 @@ const EMPTY_ROUTE_OPTIONS: CommandCenterRouteOptions = {
   models: [],
 };
 
+export const DEFAULT_COMMAND_CENTER_MODEL = "gpt-5.6-terra";
+
+export function defaultCommandCenterRouteSelection(
+  options: CommandCenterRouteOptions,
+): CommandCenterRouteSelection | null {
+  const model = options.models.find(
+    (candidate) =>
+      candidate.id === DEFAULT_COMMAND_CENTER_MODEL && candidate.providerId !== undefined,
+  );
+  return model?.providerId === undefined
+    ? null
+    : { providerId: model.providerId, modelId: model.id };
+}
+
 export interface CommandCenterRouteDisplayContext {
   readonly projects: readonly CommandCenterProject[];
   readonly options: CommandCenterRouteOptions;
@@ -206,19 +220,15 @@ export function buildRouteOptions(
     selectedProviderId === undefined
       ? healthyProviders
       : healthyProviders.filter((provider) => provider.instanceId === selectedProviderId);
-  const seenModels = new Set<string>();
   const models = modelProviders.flatMap((provider) =>
-    provider.models.flatMap((model): CommandCenterRouteOption[] => {
-      if (seenModels.has(model.slug)) return [];
-      seenModels.add(model.slug);
-      return [
-        {
-          id: model.slug,
-          label: model.shortName ?? model.name,
-          detail: providerLabel(provider),
-        },
-      ];
-    }),
+    provider.models.map(
+      (model): CommandCenterRouteOption => ({
+        id: model.slug,
+        label: model.shortName ?? model.name,
+        detail: providerLabel(provider),
+        providerId: provider.instanceId,
+      }),
+    ),
   );
 
   return {
@@ -445,7 +455,11 @@ export function initialRouteReceipt(
   const selectedProvider = display.options.providers.find(
     (provider) => provider.id === selection.providerId,
   );
-  const selectedModel = display.options.models.find((model) => model.id === selection.modelId);
+  const selectedModel = display.options.models.find(
+    (model) =>
+      model.id === selection.modelId &&
+      (model.providerId === undefined || model.providerId === selection.providerId),
+  );
   const sources = {
     space: selection.spaceId === undefined ? ("auto" as const) : ("explicit" as const),
     repository: selection.repositoryId === undefined ? ("auto" as const) : ("explicit" as const),
@@ -542,7 +556,11 @@ export function routeReceiptFromRoute(
   const routedProvider = display.options.providers.find(
     (provider) => provider.id === route.providerId,
   );
-  const routedModel = display.options.models.find((model) => model.id === route.modelId);
+  const routedModel = display.options.models.find(
+    (model) =>
+      model.id === route.modelId &&
+      (model.providerId === undefined || model.providerId === route.providerId),
+  );
   const status: CommandCenterRouteReceipt["status"] =
     route.status === "blocked" ? "blocked" : routeStatusFromRunStatus(runStatus);
   const reasonSummary =

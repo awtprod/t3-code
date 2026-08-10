@@ -59,6 +59,18 @@ export {
 } from "./RepositoryProvisioningPolicy.ts";
 
 export const COMMAND_CENTER_SYSTEM_PROJECT_ID = ProjectId.make("command-center:system");
+export const COMMAND_CENTER_DEFAULT_MODEL = "gpt-5.6-terra";
+
+export const commandCenterModelSelection = (input: {
+  readonly providerId: string;
+  readonly modelId: string;
+}) => ({
+  instanceId: ProviderInstanceId.make(input.providerId),
+  model: input.modelId,
+  ...(input.modelId === COMMAND_CENTER_DEFAULT_MODEL
+    ? { options: [{ id: "reasoningEffort", value: "high" as const }] }
+    : {}),
+});
 
 const decodeRoute = Schema.decodeUnknownEffect(RouteDecisionSchema);
 const decodeCommand = Schema.decodeUnknownEffect(CommandCenterCommandSubmitInput);
@@ -428,6 +440,7 @@ export const renderThreadMessage = (input: {
   readonly route: RouteDecision;
   readonly commandText: string;
   readonly priorContext?: ReadonlyArray<PriorCommandContext>;
+  readonly routerRole?: boolean;
 }): string => {
   const routeReceipt = [
     "Command Center route receipt",
@@ -445,8 +458,15 @@ export const renderThreadMessage = (input: {
   const priorContext = selectPriorContext(input.priorContext ?? []).map(
     (entry, index) => `Previous ${index + 1} — user\n${entry}`,
   );
+  const routerRole = input.routerRole
+    ? [
+        "Command Center router role",
+        "You are the user's main router. Do not carry out repository or machine work directly in this thread. Read and diagnose when that is sufficient. Before a mutation, present one concise confirmation; when a meaningful choice exists, present 2–3 clear options instead. Coding work must always ask whether to use an isolated worktree or the shared workspace. After the user decides, use the scoped Command Center tools to start and monitor the child work, then summarize the outcome and link the child thread. Ask again only if the work discovers a destructive action, external side effect, credential change, or material expansion of scope.",
+      ]
+    : [];
   return [
     routeReceipt,
+    ...routerRole,
     ...(instructions.length === 0 ? [] : ["Space instructions", instructions]),
     ...(priorContext.length === 0
       ? []
@@ -729,10 +749,10 @@ const validateAuthorizedRoute = Effect.fn("RunDispatcher.validateAuthorizedRoute
   return {
     route,
     space,
-    modelSelection: {
-      instanceId: ProviderInstanceId.make(route.providerId),
-      model: String(route.modelId),
-    },
+    modelSelection: commandCenterModelSelection({
+      providerId: route.providerId,
+      modelId: String(route.modelId),
+    }),
   };
 });
 
@@ -934,6 +954,7 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
                 route,
                 commandText: run.command.text,
                 priorContext,
+                routerRole: run.parentRunId === null,
               }),
               attachments,
             },

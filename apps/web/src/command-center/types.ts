@@ -154,6 +154,7 @@ export interface CommandCenterRouteOption {
   readonly id: string;
   readonly label: string;
   readonly detail?: string | undefined;
+  readonly providerId?: string | undefined;
 }
 
 export interface CommandCenterRouteOptions {
@@ -202,6 +203,14 @@ export interface CommandCenterShellProps {
   readonly onSelectConversation?: ((conversationId: string) => void) | undefined;
   readonly onRouteSelectionChange?:
     | ((control: CommandCenterRouteControl, value: string | undefined) => void)
+    | undefined;
+  readonly onModelSelectionChange?: ((providerId: string, modelId: string) => void) | undefined;
+  readonly onCapture?:
+    | ((input: {
+        readonly spaceId: string;
+        readonly kind: "idea" | "task";
+        readonly title: string;
+      }) => Promise<boolean>)
     | undefined;
   readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
   readonly onDecideApproval?:

@@ -20,8 +20,8 @@ import {
   initialRouteReceipt,
   buildRouteOptions,
   commandRouteOverrides,
+  defaultCommandCenterRouteSelection,
   mergeAuthoritativeMessages,
-  nextRouteSelection,
   projectBootstrap,
   projectEnvironmentProjects,
   routeReceiptFromResult,
@@ -33,7 +33,6 @@ import {
 import type {
   CommandCenterConfigNotice,
   CommandCenterMessage,
-  CommandCenterRouteControl,
   CommandCenterRouteReceipt,
   CommandCenterRouteSelection,
 } from "./types";
@@ -94,14 +93,15 @@ export function CommandCenterHome() {
   const environmentProjects = useProjects();
   const providers = useAtomValue(primaryServerProvidersAtom);
   const [routeSelection, setRouteSelection] = useState<CommandCenterRouteSelection>({});
+  const [conversationRoute, setConversationRoute] = useState<CommandCenterRouteSelection>({});
+  const [spaceFilterId, setSpaceFilterId] = useState<string>();
   const [activeConversationId, setActiveConversationId] = useState<string>();
   const [optimisticMessages, setOptimisticMessages] = useState<CommandCenterMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [resolvingNeedsYouId, setResolvingNeedsYouId] = useState<string>();
   const [lastReceipt, setLastReceipt] = useState<LastRouteReceipt | null>(null);
-  const selectedSpaceId =
-    routeSelection.spaceId === undefined ? undefined : SpaceId.make(routeSelection.spaceId);
+  const selectedSpaceId = spaceFilterId === undefined ? undefined : SpaceId.make(spaceFilterId);
   const bootstrapQuery = useEnvironmentQuery(
     environmentId === null
       ? null
@@ -142,6 +142,9 @@ export function CommandCenterHome() {
   const reviewMemory = useAtomCommand(commandCenterEnvironment.reviewMemory, {
     reportFailure: false,
   });
+  const createItem = useAtomCommand(commandCenterEnvironment.createItem, {
+    reportFailure: false,
+  });
 
   const eventSequence = eventQuery.data?.sequence;
   const eventScopeKey = `${environmentId ?? "disconnected"}:${selectedSpaceId ?? "all"}`;
@@ -167,9 +170,14 @@ export function CommandCenterHome() {
     [bootstrap, environmentId, environmentProjects],
   );
   const routeOptions = useMemo(
-    () => buildRouteOptions(bootstrap, projects, providers, routeSelection.providerId),
-    [bootstrap, projects, providers, routeSelection.providerId],
+    () => buildRouteOptions(bootstrap, projects, providers),
+    [bootstrap, projects, providers],
   );
+  useEffect(() => {
+    if (routeSelection.providerId !== undefined && routeSelection.modelId !== undefined) return;
+    const selection = defaultCommandCenterRouteSelection(routeOptions);
+    if (selection !== null) setRouteSelection(selection);
+  }, [routeOptions.models, routeSelection.modelId, routeSelection.providerId]);
   const routeDisplay = useMemo(
     () => ({ options: routeOptions, projects }),
     [projects, routeOptions],
@@ -218,31 +226,30 @@ export function CommandCenterHome() {
     timelineQuery.error,
   ]);
 
-  const changeRouteSelection = useCallback(
-    (control: CommandCenterRouteControl, value: string | undefined) => {
-      setRouteSelection((current) =>
-        nextRouteSelection(current, control, value, projects, bootstrap, providers),
-      );
-      setOptimisticMessages([]);
-      setLastReceipt(null);
-    },
-    [bootstrap, projects, providers],
-  );
+  const changeModelSelection = useCallback((providerId: string, modelId: string) => {
+    setRouteSelection({ providerId, modelId });
+    setLastReceipt(null);
+  }, []);
 
   const selectSpace = useCallback(
     (spaceId: string) => {
+      if (spaceId.length === 0) {
+        setSpaceFilterId(undefined);
+        return;
+      }
       if (!bootstrap?.spaces.some((space) => space.id === spaceId)) return;
-      changeRouteSelection("space", spaceId);
+      setSpaceFilterId(spaceId);
     },
-    [bootstrap, changeRouteSelection],
+    [bootstrap],
   );
 
   const selectProject = useCallback(
     (projectId: string) => {
       if (!projects.some((project) => project.id === projectId)) return;
-      changeRouteSelection("project", projectId);
+      const project = projects.find((candidate) => candidate.id === projectId);
+      if (project?.spaceId !== undefined) setSpaceFilterId(project.spaceId);
     },
-    [changeRouteSelection, projects],
+    [projects],
   );
 
   const selectConversation = useCallback(
@@ -257,13 +264,13 @@ export function CommandCenterHome() {
           });
           return;
         }
-        setRouteSelection({
+        setSpaceFilterId(run.spaceId);
+        setConversationRoute({
           spaceId: run.spaceId,
           repositoryId: run.repositoryId,
           projectId: run.projectId,
-          providerId: run.providerId,
-          modelId: run.modelId,
         });
+        setRouteSelection({ providerId: run.providerId, modelId: run.modelId });
         setOptimisticMessages([]);
         setLastReceipt(null);
       }
@@ -395,10 +402,40 @@ export function CommandCenterHome() {
   const newConversation = useCallback(() => {
     setActiveConversationId(undefined);
     setRouteSelection({});
+    setConversationRoute({});
+    setSpaceFilterId(undefined);
     setOptimisticMessages([]);
     setDraft("");
     setLastReceipt(null);
   }, []);
+
+  const capture = useCallback(
+    async (input: {
+      readonly spaceId: string;
+      readonly kind: "idea" | "task";
+      readonly title: string;
+    }) => {
+      if (environmentId === null) return false;
+      const result = await createItem({
+        environmentId,
+        input: {
+          requestId: randomUUID(),
+          spaceId: SpaceId.make(input.spaceId),
+          kind: input.kind,
+          priority: "normal",
+          title: input.title,
+        },
+      });
+      if (result._tag !== "Success") {
+        recordNeedsYouFailure(`capture:${Date.now()}`, squashAtomCommandFailure(result));
+        return false;
+      }
+      bootstrapQuery.refresh();
+      timelineQuery.refresh();
+      return true;
+    },
+    [bootstrapQuery, createItem, environmentId, recordNeedsYouFailure, timelineQuery],
+  );
 
   const submit = useCallback(
     async (text: string) => {
@@ -430,6 +467,7 @@ export function CommandCenterHome() {
         input: {
           commandId,
           text,
+          ...commandRouteOverrides(conversationRoute),
           ...commandRouteOverrides(routeSelection),
         },
       });
@@ -438,6 +476,15 @@ export function CommandCenterHome() {
         const receipt = routeReceiptFromResult(result.value, bootstrap, routeDisplay);
         setLastReceipt({ receipt, runId: result.value.run.id });
         setActiveConversationId(result.value.run.id);
+        setConversationRoute({
+          ...(result.value.route.spaceId === null ? {} : { spaceId: result.value.route.spaceId }),
+          ...(result.value.route.repositoryId === null
+            ? {}
+            : { repositoryId: result.value.route.repositoryId }),
+          ...(result.value.route.projectId === null
+            ? {}
+            : { projectId: result.value.route.projectId }),
+        });
         setOptimisticMessages((current) => [
           ...current,
           routeTimelineMessage(result.value, receipt, currentTimeLabel()),
@@ -485,6 +532,7 @@ export function CommandCenterHome() {
     },
     [
       bootstrap,
+      conversationRoute,
       bootstrapQuery,
       environmentId,
       isSubmitting,
@@ -496,12 +544,17 @@ export function CommandCenterHome() {
     ],
   );
 
+  const selectedModelAvailable = routeOptions.models.some(
+    (model) =>
+      model.id === routeSelection.modelId && model.providerId === routeSelection.providerId,
+  );
   const commandUnavailable =
     isSubmitting ||
     bootstrapQuery.isPending ||
     timelineQuery.isPending ||
     environmentId === null ||
-    bootstrap?.configHealth.status !== "loaded";
+    bootstrap?.configHealth.status !== "loaded" ||
+    !selectedModelAvailable;
 
   // Surface a missing/invalid configuration as an explicit setup notice so the
   // composer can explain why sending is disabled instead of freezing silently.
@@ -532,6 +585,7 @@ export function CommandCenterHome() {
         isSubmitting={isSubmitting}
         messages={messages}
         onDraftChange={setDraft}
+        onCapture={capture}
         onNewConversation={newConversation}
         onDecideApproval={(approvalId, payloadDigest, decision) => {
           void resolveApproval(approvalId, payloadDigest, decision);
@@ -546,7 +600,7 @@ export function CommandCenterHome() {
         onReviewMemory={(memoryId, spaceId, repositoryId, decision) => {
           void resolveMemory(memoryId, spaceId, repositoryId, decision);
         }}
-        onRouteSelectionChange={changeRouteSelection}
+        onModelSelectionChange={changeModelSelection}
         onSelectConversation={selectConversation}
         onSelectProject={selectProject}
         onSelectSpace={selectSpace}

@@ -93,7 +93,9 @@ const FIXTURE: CommandCenterShellProps = {
     },
   ],
   onDraftChange: vi.fn(),
+  onCapture: vi.fn(async () => true),
   onDecideApproval: vi.fn(),
+  onModelSelectionChange: vi.fn(),
   onOpenLinkedThread: vi.fn(),
   onSubmit: vi.fn(),
   projects: [
@@ -124,13 +126,22 @@ const FIXTURE: CommandCenterShellProps = {
     summary: "Review the project and prepare a reversible local draft.",
   },
   routeOptions: {
-    models: [{ id: "balanced", label: "Balanced" }],
+    models: [
+      {
+        id: "balanced",
+        label: "Balanced",
+        detail: "Example Provider",
+        providerId: "provider-example",
+      },
+    ],
     projects: [{ id: "project-studio", label: "Studio Project", detail: "Studio App" }],
     providers: [{ id: "provider-example", label: "Example Provider", detail: "Ready" }],
     repositories: [{ id: "studio-repository", label: "Studio App", detail: "Studio" }],
   },
   routeSelection: {
+    modelId: "balanced",
     projectId: "project-studio",
+    providerId: "provider-example",
     repositoryId: "studio-repository",
     spaceId: "studio",
   },
@@ -280,17 +291,20 @@ describe("CommandCenterShell", () => {
     expect(html).toContain("justify-end");
   });
 
-  it("renders lightweight conversation controls and route summaries", () => {
+  it("renders persistent shortcuts and a model-only composer", () => {
     const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} />);
 
     expect(html).toContain('aria-label="Open recent Command Center conversations"');
     expect(html).toContain('aria-label="Open live context"');
-    expect(html).toContain('aria-label="Space route selection"');
-    expect(html).toContain('aria-label="Repo route selection"');
-    expect(html).toContain('aria-label="Project route selection"');
-    expect(html).toContain('aria-label="Provider route selection"');
-    expect(html).toContain('aria-label="Model route selection"');
-    expect(html).toContain("Route this command");
+    expect(html).toContain('aria-label="Command Center shortcuts"');
+    expect(html).toContain('aria-label="Space shortcuts"');
+    expect(html).toContain("All Spaces");
+    expect(html).toContain("Command");
+    expect(html).toContain("Capture");
+    expect(html).toContain('aria-label="Model selection"');
+    expect(html).not.toContain('aria-label="Space route selection"');
+    expect(html).not.toContain('aria-label="Provider route selection"');
+    expect(html).not.toContain("Route this command");
     expect(html).toContain("chat-composer-glass");
     expect(html).toContain("Explicit route");
     expect(html).toContain("Ask anything, @tag files/folders, $use skills, or / for commands");

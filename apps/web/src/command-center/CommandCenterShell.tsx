@@ -9,8 +9,9 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   Clock3Icon,
+  CommandIcon,
+  InboxIcon,
   PanelRightIcon,
-  SlidersHorizontalIcon,
   SparklesIcon,
   TriangleAlertIcon,
   WifiIcon,
@@ -18,7 +19,7 @@ import {
   WorkflowIcon,
   XIcon,
 } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -34,8 +35,6 @@ import type {
   CommandCenterMessage,
   CommandCenterNeedsYouItem,
   CommandCenterRisk,
-  CommandCenterRouteControl,
-  CommandCenterRouteOption,
   CommandCenterRouteReceipt,
   CommandCenterRouteSource,
   CommandCenterShellProps,
@@ -64,8 +63,6 @@ const RISK_VARIANT: Record<CommandCenterRisk, "error" | "success" | "warning"> =
   low: "success",
   reversible: "warning",
 };
-
-const AUTO_ROUTE_VALUE = "__command_center_auto__";
 
 export function shouldSubmitCommandComposerOnKeyDown(input: {
   readonly key: string;
@@ -302,66 +299,6 @@ export function Messages({
   );
 }
 
-function RouteSelector({
-  control,
-  label,
-  onChange,
-  options,
-  value,
-}: {
-  readonly control: CommandCenterRouteControl;
-  readonly label: string;
-  readonly onChange?:
-    | ((control: CommandCenterRouteControl, value: string | undefined) => void)
-    | undefined;
-  readonly options: readonly CommandCenterRouteOption[];
-  readonly value?: string | undefined;
-}) {
-  const selected = options.find((option) => option.id === value);
-  return (
-    <Select
-      disabled={onChange === undefined}
-      modal={false}
-      onValueChange={(nextValue) =>
-        onChange?.(
-          control,
-          nextValue === null || nextValue === AUTO_ROUTE_VALUE ? undefined : nextValue,
-        )
-      }
-      value={value ?? AUTO_ROUTE_VALUE}
-    >
-      <SelectTrigger
-        aria-label={`${label} route selection`}
-        className="h-7 min-h-7 w-auto max-w-full min-w-0 gap-1 rounded-md px-2 text-[0.6875rem] font-medium"
-        size="xs"
-      >
-        <span className="truncate text-muted-foreground">{label}:</span>
-        <span className="max-w-28 truncate">{selected?.label ?? "Auto"}</span>
-      </SelectTrigger>
-      <SelectPopup align="start" alignItemWithTrigger={false} className="min-w-56">
-        <SelectItem value={AUTO_ROUTE_VALUE}>
-          <span className="flex flex-col">
-            <span>Auto</span>
-            <span className="text-[0.6875rem] text-muted-foreground">Use routing policy</span>
-          </span>
-        </SelectItem>
-        {options.map((option) => (
-          <SelectItem key={option.id} value={option.id}>
-            <span className="flex min-w-0 flex-col">
-              <span className="truncate">{option.label}</span>
-              {option.detail !== undefined && (
-                <span className="truncate text-[0.6875rem] text-muted-foreground">
-                  {option.detail}
-                </span>
-              )}
-            </span>
-          </SelectItem>
-        ))}
-      </SelectPopup>
-    </Select>
-  );
-}
-
 function Composer({
   draft,
   isSubmitting,
@@ -369,11 +306,10 @@ function Composer({
   configNotice,
   routeOptions,
   routeSelection,
-  receipt,
-  spaces,
   onDraftChange,
-  onRouteSelectionChange,
+  onModelSelectionChange,
   onSubmit,
+  inputRef,
 }: Pick<
   CommandCenterShellProps,
   | "draft"
@@ -382,16 +318,21 @@ function Composer({
   | "configNotice"
   | "onDraftChange"
   | "onSubmit"
-  | "onRouteSelectionChange"
+  | "onModelSelectionChange"
   | "routeOptions"
   | "routeSelection"
-  | "spaces"
-> & { readonly receipt: CommandCenterRouteReceipt }) {
-  const selectedSpace = spaces.find((space) => space.id === routeSelection.spaceId);
-  const selectedProvider = routeOptions.providers.find(
-    (provider) => provider.id === routeSelection.providerId,
+> & {
+  readonly inputRef: RefObject<HTMLTextAreaElement | null>;
+}) {
+  const selectedModel = routeOptions.models.find(
+    (model) =>
+      model.id === routeSelection.modelId &&
+      (model.providerId === undefined || model.providerId === routeSelection.providerId),
   );
-  const selectedModel = routeOptions.models.find((model) => model.id === routeSelection.modelId);
+  const modelValue =
+    routeSelection.providerId !== undefined && routeSelection.modelId !== undefined
+      ? `${routeSelection.providerId}\u0000${routeSelection.modelId}`
+      : null;
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const command = draft.trim();
@@ -441,67 +382,53 @@ function Composer({
             event.currentTarget.form?.requestSubmit();
           }}
           placeholder="Ask anything, @tag files/folders, $use skills, or / for commands"
+          ref={inputRef}
           rows={2}
           unstyled
           value={draft}
         />
         <div className="flex items-end justify-between gap-3 px-2 pb-2 sm:px-3 sm:pb-3">
           <div className="flex min-w-0 flex-1 items-center gap-2 overflow-visible">
-            <details className="group/route relative">
-              <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground [&::-webkit-details-marker]:hidden">
-                <SlidersHorizontalIcon className="size-3.5" />
-                <span>{selectedSpace?.name ?? "Auto route"}</span>
-                <ChevronDownIcon className="size-3 transition-transform group-open/route:rotate-180" />
-              </summary>
-              <div className="absolute bottom-9 left-0 z-30 w-[min(30rem,calc(100vw-3rem))] rounded-xl border bg-popover p-2 text-popover-foreground shadow-lg">
-                <div className="px-1 pb-2 text-xs font-medium">Route this command</div>
-                <div className="flex flex-wrap gap-1">
-                  <RouteSelector
-                    control="space"
-                    label="Space"
-                    onChange={onRouteSelectionChange}
-                    options={spaces.map((space) => ({ id: space.id, label: space.name }))}
-                    value={routeSelection.spaceId}
-                  />
-                  <RouteSelector
-                    control="repository"
-                    label="Repo"
-                    onChange={onRouteSelectionChange}
-                    options={routeOptions.repositories}
-                    value={routeSelection.repositoryId}
-                  />
-                  <RouteSelector
-                    control="project"
-                    label="Project"
-                    onChange={onRouteSelectionChange}
-                    options={routeOptions.projects}
-                    value={routeSelection.projectId}
-                  />
-                  <RouteSelector
-                    control="provider"
-                    label="Provider"
-                    onChange={onRouteSelectionChange}
-                    options={routeOptions.providers}
-                    value={routeSelection.providerId}
-                  />
-                  <RouteSelector
-                    control="model"
-                    label="Model"
-                    onChange={onRouteSelectionChange}
-                    options={routeOptions.models}
-                    value={routeSelection.modelId}
-                  />
-                </div>
-              </div>
-            </details>
-            <span aria-hidden="true" className="hidden h-5 w-px shrink-0 bg-border sm:block" />
-            <span className="hidden min-w-0 truncate px-1 text-xs text-muted-foreground sm:block">
-              {selectedProvider?.label ?? receipt.providerName} ·{" "}
-              {selectedModel?.label ?? receipt.modelName}
-            </span>
-            <Badge className="hidden md:inline-flex" size="sm" variant={RISK_VARIANT[receipt.risk]}>
-              {RISK_LABEL[receipt.risk]}
-            </Badge>
+            <Select
+              disabled={onModelSelectionChange === undefined || routeOptions.models.length === 0}
+              modal={false}
+              onValueChange={(value) => {
+                if (value === null) return;
+                const separator = value.indexOf("\u0000");
+                if (separator <= 0) return;
+                onModelSelectionChange?.(value.slice(0, separator), value.slice(separator + 1));
+              }}
+              value={modelValue}
+            >
+              <SelectTrigger
+                aria-label="Model selection"
+                className="h-8 min-h-8 w-auto max-w-64 gap-1.5 rounded-lg px-2.5 text-xs font-medium"
+                size="xs"
+              >
+                <span className="truncate">{selectedModel?.label ?? "Choose model"}</span>
+              </SelectTrigger>
+              <SelectPopup align="start" alignItemWithTrigger={false} className="min-w-64">
+                {routeOptions.models.map((model) => {
+                  const providerId = model.providerId ?? routeSelection.providerId;
+                  if (providerId === undefined) return null;
+                  return (
+                    <SelectItem
+                      key={`${providerId}:${model.id}`}
+                      value={`${providerId}\u0000${model.id}`}
+                    >
+                      <span className="flex min-w-0 flex-col">
+                        <span className="truncate">{model.label}</span>
+                        {model.detail !== undefined ? (
+                          <span className="truncate text-[0.6875rem] text-muted-foreground">
+                            {model.detail}
+                          </span>
+                        ) : null}
+                      </span>
+                    </SelectItem>
+                  );
+                })}
+              </SelectPopup>
+            </Select>
           </div>
           <Button
             aria-label={isSubmitting ? "Sending command" : "Send command"}
@@ -515,6 +442,152 @@ function Composer({
         </div>
       </form>
     </div>
+  );
+}
+
+function CommandCenterShortcuts({
+  context,
+  onCapture,
+  onCommand,
+  onSelectSpace,
+  selectedSpaceId,
+  spaces,
+}: Pick<
+  CommandCenterShellProps,
+  "context" | "onCapture" | "onSelectSpace" | "selectedSpaceId" | "spaces"
+> & { readonly onCommand: () => void }) {
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const [captureKind, setCaptureKind] = useState<"idea" | "task">("idea");
+  const [captureSpaceId, setCaptureSpaceId] = useState(selectedSpaceId ?? spaces[0]?.id ?? "");
+  const [captureTitle, setCaptureTitle] = useState("");
+  const [capturing, setCapturing] = useState(false);
+
+  const submitCapture = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const title = captureTitle.trim();
+    if (!title || !captureSpaceId || onCapture === undefined || capturing) return;
+    setCapturing(true);
+    const saved = await onCapture({ kind: captureKind, spaceId: captureSpaceId, title });
+    setCapturing(false);
+    if (!saved) return;
+    setCaptureTitle("");
+    setCaptureOpen(false);
+  };
+
+  return (
+    <section
+      aria-label="Command Center shortcuts"
+      className="shrink-0 border-b border-border/65 bg-background px-4 pb-3 pt-14 sm:px-6"
+    >
+      <div className="mx-auto w-full max-w-5xl">
+        <div className="flex items-center gap-2">
+          <Button onClick={onCommand} size="sm" type="button" variant="outline">
+            <CommandIcon />
+            Command
+          </Button>
+          <Button
+            aria-expanded={captureOpen}
+            disabled={spaces.length === 0 || onCapture === undefined}
+            onClick={() =>
+              setCaptureOpen((open) => {
+                if (!open) setCaptureSpaceId(selectedSpaceId ?? spaces[0]?.id ?? "");
+                return !open;
+              })
+            }
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <InboxIcon />
+            Capture
+          </Button>
+        </div>
+
+        <div aria-label="Space shortcuts" className="mt-3 flex gap-2 overflow-x-auto pb-1">
+          <button
+            aria-pressed={selectedSpaceId === undefined}
+            className={cn(
+              "shrink-0 rounded-xl border px-3 py-2 text-left transition-colors hover:bg-accent",
+              selectedSpaceId === undefined && "border-foreground/25 bg-accent",
+            )}
+            onClick={() => onSelectSpace?.("")}
+            type="button"
+          >
+            <span className="block text-xs font-semibold">All Spaces</span>
+            <span className="mt-0.5 block text-[0.6875rem] text-muted-foreground">
+              {context.needsYou.length} need you · {context.activeRuns.length} active
+            </span>
+          </button>
+          {spaces.map((space) => {
+            const activeCount = context.activeRuns.filter(
+              (run) => run.spaceName === space.name,
+            ).length;
+            return (
+              <button
+                aria-pressed={selectedSpaceId === space.id}
+                className={cn(
+                  "min-w-36 shrink-0 rounded-xl border px-3 py-2 text-left transition-colors hover:bg-accent",
+                  selectedSpaceId === space.id && "border-foreground/25 bg-accent",
+                )}
+                key={space.id}
+                onClick={() => onSelectSpace?.(space.id)}
+                type="button"
+              >
+                <span className="block truncate text-xs font-semibold">{space.name}</span>
+                <span className="mt-0.5 block text-[0.6875rem] text-muted-foreground">
+                  {space.unreadCount ?? 0} need you · {activeCount} active
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {captureOpen ? (
+          <form
+            aria-label="Quick capture"
+            className="mt-3 grid gap-2 rounded-xl border bg-card p-3 sm:grid-cols-[8rem_10rem_1fr_auto]"
+            onSubmit={(event) => void submitCapture(event)}
+          >
+            <select
+              aria-label="Capture type"
+              className="h-9 rounded-lg border bg-background px-2 text-xs"
+              onChange={(event) => setCaptureKind(event.target.value as "idea" | "task")}
+              value={captureKind}
+            >
+              <option value="idea">Idea</option>
+              <option value="task">Task</option>
+            </select>
+            <select
+              aria-label="Capture Space"
+              className="h-9 rounded-lg border bg-background px-2 text-xs"
+              onChange={(event) => setCaptureSpaceId(event.target.value)}
+              value={captureSpaceId}
+            >
+              {spaces.map((space) => (
+                <option key={space.id} value={space.id}>
+                  {space.name}
+                </option>
+              ))}
+            </select>
+            <input
+              aria-label="Capture title"
+              autoFocus
+              className="h-9 min-w-0 rounded-lg border bg-background px-3 text-sm outline-none focus:border-ring"
+              onChange={(event) => setCaptureTitle(event.target.value)}
+              placeholder={captureKind === "idea" ? "Capture an idea" : "Capture a task"}
+              value={captureTitle}
+            />
+            <Button
+              disabled={!captureTitle.trim() || !captureSpaceId || capturing}
+              size="sm"
+              type="submit"
+            >
+              {capturing ? "Saving…" : "Save"}
+            </Button>
+          </form>
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -890,6 +963,7 @@ function ContextRail({
 
 export function CommandCenterShell(props: CommandCenterShellProps) {
   const [contextOpen, setContextOpen] = useState(false);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const hasExplicitRoute = Object.values(props.routeSelection).some((value) => value !== undefined);
 
   return (
@@ -929,6 +1003,15 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
           </Button>
         </header>
 
+        <CommandCenterShortcuts
+          context={props.context}
+          onCapture={props.onCapture}
+          onCommand={() => composerInputRef.current?.focus()}
+          onSelectSpace={props.onSelectSpace}
+          selectedSpaceId={props.selectedSpaceId}
+          spaces={props.spaces}
+        />
+
         <ScrollArea className="min-h-0 flex-1" scrollFade>
           <Messages
             messages={props.messages}
@@ -943,12 +1026,11 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
           draft={props.draft}
           isSubmitting={props.isSubmitting}
           onDraftChange={props.onDraftChange}
-          onRouteSelectionChange={props.onRouteSelectionChange}
+          onModelSelectionChange={props.onModelSelectionChange}
           onSubmit={props.onSubmit}
-          receipt={props.routeReceipt}
+          inputRef={composerInputRef}
           routeOptions={props.routeOptions}
           routeSelection={props.routeSelection}
-          spaces={props.spaces}
         />
       </main>
 
