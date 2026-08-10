@@ -214,15 +214,43 @@ export function Messages({
   receipt,
   onOpenLinkedThread,
   onClearTranscript,
+  context,
+  conversations,
+  onOpenNeedsYouItem,
+  onOpenRun,
+  onOpenTodayItem,
+  onUseSuggestion,
+  selectedSpaceId,
   selectedSpaceName,
 }: {
   readonly messages: readonly CommandCenterMessage[];
   readonly receipt: CommandCenterRouteReceipt;
   readonly onOpenLinkedThread?: ((threadId: string) => void) | undefined;
   readonly onClearTranscript?: (() => void) | undefined;
+  readonly context?: CommandCenterContext | undefined;
+  readonly conversations?: CommandCenterShellProps["conversations"] | undefined;
+  readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
+  readonly onOpenRun?: ((runId: string) => void) | undefined;
+  readonly onOpenTodayItem?: ((itemId: string) => void) | undefined;
+  readonly onUseSuggestion?: ((prompt: string) => void) | undefined;
+  readonly selectedSpaceId?: string | undefined;
   readonly selectedSpaceName?: string | undefined;
 }) {
   if (messages.length === 0) {
+    if (context !== undefined && conversations !== undefined) {
+      return (
+        <CommandCenterOverview
+          context={context}
+          conversations={conversations}
+          onOpenNeedsYouItem={onOpenNeedsYouItem}
+          onOpenRun={onOpenRun}
+          onOpenTodayItem={onOpenTodayItem}
+          onUseSuggestion={onUseSuggestion}
+          selectedSpaceId={selectedSpaceId}
+          selectedSpaceName={selectedSpaceName}
+        />
+      );
+    }
     return (
       <div className="mx-auto flex h-full w-full min-w-0 max-w-lg flex-col items-center justify-center overflow-hidden px-6 text-center">
         <span className="mb-4 flex size-12 items-center justify-center rounded-2xl border bg-card shadow-sm">
@@ -316,6 +344,245 @@ export function Messages({
           </article>
         );
       })}
+    </div>
+  );
+}
+
+interface CommandCenterSuggestion {
+  readonly label: string;
+  readonly detail: string;
+  readonly prompt: string;
+}
+
+export function buildCommandCenterSuggestions(input: {
+  readonly needsYouCount: number;
+  readonly activeRunCount: number;
+  readonly todayCount: number;
+  readonly failedRunCount: number;
+  readonly unhealthyConnectionCount: number;
+}): readonly CommandCenterSuggestion[] {
+  const suggestions: CommandCenterSuggestion[] = [];
+  if (input.needsYouCount > 0) {
+    suggestions.push({
+      label: `Prioritize ${input.needsYouCount} attention item${input.needsYouCount === 1 ? "" : "s"}`,
+      detail: "Review what is blocked and recommend the best order to handle it.",
+      prompt:
+        "Review everything that needs my attention, prioritize it, and tell me what to handle first.",
+    });
+  }
+  if (input.failedRunCount > 0) {
+    suggestions.push({
+      label: `Recover ${input.failedRunCount} failed run${input.failedRunCount === 1 ? "" : "s"}`,
+      detail: "Diagnose what failed and propose the safest recovery path.",
+      prompt:
+        "Review my failed Command Center runs, explain the likely causes, and offer recovery options.",
+    });
+  }
+  if (input.activeRunCount > 0) {
+    suggestions.push({
+      label: "Summarize active work",
+      detail: "Get a concise progress report and identify anything stalled.",
+      prompt:
+        "Give me a concise status update on active work and flag anything that looks stalled.",
+    });
+  }
+  if (input.todayCount > 0) {
+    suggestions.push({
+      label: "Plan the rest of today",
+      detail: "Turn today’s commitments into a realistic order of operations.",
+      prompt: "Review what is scheduled or due today and help me make a practical plan.",
+    });
+  }
+  if (input.unhealthyConnectionCount > 0) {
+    suggestions.push({
+      label: "Check connection health",
+      detail: "Identify degraded integrations and what they may be blocking.",
+      prompt: "Check my Command Center connections, explain what is unhealthy, and suggest fixes.",
+    });
+  }
+
+  const evergreen: readonly CommandCenterSuggestion[] = [
+    {
+      label: "Recommend my next move",
+      detail: "Review current context and identify the highest-value next action.",
+      prompt:
+        "Review my current Command Center context and recommend the most valuable thing to do next.",
+    },
+    {
+      label: "Find something to automate",
+      detail: "Look for recurring work that could run without manual effort.",
+      prompt: "Review my current work and suggest one useful recurring task I should automate.",
+    },
+    {
+      label: "Run a quick health check",
+      detail: "Look for stale work, failures, or configuration that deserves attention.",
+      prompt: "Run a quick Command Center health check and surface anything I should know about.",
+    },
+  ];
+  for (const suggestion of evergreen) {
+    if (suggestions.length >= 3) break;
+    suggestions.push(suggestion);
+  }
+  return suggestions.slice(0, 3);
+}
+
+function OverviewList({
+  empty,
+  items,
+  onOpen,
+  title,
+}: {
+  readonly empty: string;
+  readonly items: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly detail: string;
+  }[];
+  readonly onOpen?: ((id: string) => void) | undefined;
+  readonly title: string;
+}) {
+  return (
+    <section className="min-w-0 rounded-2xl border border-border/70 bg-card/45 p-4">
+      <h3 className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        {title}
+      </h3>
+      {items.length === 0 ? (
+        <p className="mt-3 text-sm text-muted-foreground">{empty}</p>
+      ) : (
+        <div className="mt-2 space-y-1">
+          {items.slice(0, 3).map((item) => (
+            <button
+              className="group flex w-full items-start gap-2 rounded-xl px-2 py-2 text-left hover:bg-accent"
+              key={item.id}
+              onClick={() => onOpen?.(item.id)}
+              type="button"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="line-clamp-1 block text-sm font-medium">{item.title}</span>
+                <span className="mt-0.5 line-clamp-1 block text-xs text-muted-foreground">
+                  {item.detail}
+                </span>
+              </span>
+              <ChevronRightIcon className="mt-1 size-3.5 shrink-0 text-muted-foreground opacity-50 group-hover:opacity-100" />
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CommandCenterOverview({
+  context,
+  conversations,
+  onOpenNeedsYouItem,
+  onOpenRun,
+  onOpenTodayItem,
+  onUseSuggestion,
+  selectedSpaceId,
+  selectedSpaceName,
+}: {
+  readonly context: CommandCenterContext;
+  readonly conversations: CommandCenterShellProps["conversations"];
+  readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
+  readonly onOpenRun?: ((runId: string) => void) | undefined;
+  readonly onOpenTodayItem?: ((itemId: string) => void) | undefined;
+  readonly onUseSuggestion?: ((prompt: string) => void) | undefined;
+  readonly selectedSpaceId?: string | undefined;
+  readonly selectedSpaceName?: string | undefined;
+}) {
+  const needsYou = context.needsYou.filter(
+    (item) => selectedSpaceId === undefined || item.spaceId === selectedSpaceId,
+  );
+  const activeRuns = context.activeRuns.filter(
+    (run) => selectedSpaceName === undefined || run.spaceName === selectedSpaceName,
+  );
+  const today = context.today.filter(
+    (item) => selectedSpaceId === undefined || item.spaceId === selectedSpaceId,
+  );
+  const failedRunCount = conversations.filter(
+    (conversation) =>
+      conversation.status === "failed" &&
+      (selectedSpaceId === undefined || conversation.spaceId === selectedSpaceId),
+  ).length;
+  const suggestions = buildCommandCenterSuggestions({
+    needsYouCount: needsYou.length,
+    activeRunCount: activeRuns.length,
+    todayCount: today.length,
+    failedRunCount,
+    unhealthyConnectionCount: context.connections.filter(
+      (connection) => connection.status !== "healthy",
+    ).length,
+  });
+
+  return (
+    <div className="mx-auto w-full max-w-5xl px-5 pb-10 pt-7 sm:px-8">
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">
+            {selectedSpaceName ?? "Across all Spaces"}
+          </p>
+          <h2 className="mt-1 font-heading text-xl font-semibold">A useful place to start</h2>
+        </div>
+        <span className="hidden text-xs text-muted-foreground sm:block">
+          Updated from live context
+        </span>
+      </div>
+
+      <section className="mt-5 rounded-2xl border border-primary/20 bg-primary/[0.035] p-4">
+        <div className="flex items-center gap-2">
+          <SparklesIcon className="size-4 text-primary" />
+          <h3 className="text-sm font-semibold">Suggested by Command</h3>
+        </div>
+        <div className="mt-3 grid gap-2 md:grid-cols-3">
+          {suggestions.map((suggestion) => (
+            <button
+              className="rounded-xl border border-border/70 bg-background/70 p-3 text-left transition-colors hover:bg-accent"
+              key={suggestion.label}
+              onClick={() => onUseSuggestion?.(suggestion.prompt)}
+              type="button"
+            >
+              <span className="block text-sm font-medium">{suggestion.label}</span>
+              <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
+                {suggestion.detail}
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <OverviewList
+          empty="Nothing needs your attention."
+          items={needsYou.map((item) => ({
+            id: item.id,
+            title: item.title,
+            detail: `${item.spaceName} · ${item.detail ?? item.reason}`,
+          }))}
+          onOpen={onOpenNeedsYouItem}
+          title={`Needs you · ${needsYou.length}`}
+        />
+        <OverviewList
+          empty="No work is currently running."
+          items={activeRuns.map((run) => ({
+            id: run.id,
+            title: run.title,
+            detail: `${run.spaceName} · ${run.detail ?? run.status}`,
+          }))}
+          onOpen={onOpenRun}
+          title={`In progress · ${activeRuns.length}`}
+        />
+        <OverviewList
+          empty="Nothing else is scheduled today."
+          items={today.map((item) => ({
+            id: item.id,
+            title: item.title,
+            detail: item.timeLabel,
+          }))}
+          onOpen={onOpenTodayItem}
+          title={`Today · ${today.length}`}
+        />
+      </div>
     </div>
   );
 }
@@ -1083,10 +1350,20 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
 
         <ScrollArea className="min-h-0 flex-1" scrollFade>
           <Messages
+            context={props.context}
+            conversations={props.conversations}
             messages={props.messages}
             onClearTranscript={props.onClearTranscript}
             onOpenLinkedThread={props.onOpenLinkedThread}
+            onOpenNeedsYouItem={props.onOpenNeedsYouItem}
+            onOpenRun={props.onOpenRun}
+            onOpenTodayItem={props.onOpenTodayItem}
+            onUseSuggestion={(prompt) => {
+              props.onDraftChange(prompt);
+              requestAnimationFrame(() => composerInputRef.current?.focus());
+            }}
             receipt={props.routeReceipt}
+            selectedSpaceId={props.selectedSpaceId}
             selectedSpaceName={selectedSpaceName}
           />
         </ScrollArea>

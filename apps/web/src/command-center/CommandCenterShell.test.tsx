@@ -6,6 +6,7 @@ import {
   ContextRail,
   Messages,
   NeedsYouRows,
+  buildCommandCenterSuggestions,
   shouldSubmitCommandComposerOnKeyDown,
 } from "./CommandCenterShell";
 import type {
@@ -338,11 +339,32 @@ describe("CommandCenterShell", () => {
     expect(railHtml).toContain("Dismiss all");
   });
 
-  it("makes a selected Space visible when its transcript is empty", () => {
+  it("renders a useful, Space-scoped briefing when the transcript is empty", () => {
     const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} messages={[]} />);
 
-    expect(html).toContain("Studio is ready");
-    expect(html).toContain("Your next command will be routed to this Space");
+    expect(html).toContain("A useful place to start");
+    expect(html).toContain("Suggested by Command");
+    expect(html).toContain("Studio");
+    expect(html).toContain("Needs you · 1");
+    expect(html).toContain("In progress · 1");
+    expect(html).toContain("Today · 1");
+  });
+
+  it("fills proactive suggestions from live context and evergreen opportunities", () => {
+    const suggestions = buildCommandCenterSuggestions({
+      needsYouCount: 2,
+      activeRunCount: 0,
+      todayCount: 0,
+      failedRunCount: 1,
+      unhealthyConnectionCount: 0,
+    });
+
+    expect(suggestions).toHaveLength(3);
+    expect(suggestions.map((suggestion) => suggestion.label)).toEqual([
+      "Prioritize 2 attention items",
+      "Recover 1 failed run",
+      "Recommend my next move",
+    ]);
   });
 
   it("disables submission while the composer is empty", () => {
