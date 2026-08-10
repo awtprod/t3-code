@@ -155,6 +155,7 @@ export interface CommandCenterRouteOption {
   readonly label: string;
   readonly detail?: string | undefined;
   readonly providerId?: string | undefined;
+  readonly disabled?: boolean | undefined;
 }
 
 export interface CommandCenterRouteOptions {
@@ -206,6 +207,7 @@ export interface CommandCenterShellProps {
     | ((control: CommandCenterRouteControl, value: string | undefined) => void)
     | undefined;
   readonly onModelSelectionChange?: ((providerId: string, modelId: string) => void) | undefined;
+  readonly onOpenProviderSettings?: (() => void) | undefined;
   readonly onCapture?:
     | ((input: {
         readonly spaceId: string;

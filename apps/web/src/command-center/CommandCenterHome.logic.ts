@@ -46,7 +46,9 @@ export function defaultCommandCenterRouteSelection(
 ): CommandCenterRouteSelection | null {
   const model = options.models.find(
     (candidate) =>
-      candidate.id === DEFAULT_COMMAND_CENTER_MODEL && candidate.providerId !== undefined,
+      candidate.id === DEFAULT_COMMAND_CENTER_MODEL &&
+      candidate.providerId !== undefined &&
+      candidate.disabled !== true,
   );
   return model?.providerId === undefined
     ? null
@@ -201,6 +203,19 @@ function providerLabel(provider: ServerProvider): string {
   return provider.displayName ?? provider.driver ?? provider.instanceId;
 }
 
+function supportsCommandCenterRouting(provider: ServerProvider): boolean {
+  return provider.driver === "codex" || provider.capabilities?.commandCenterAutomation === true;
+}
+
+function isUsableCommandCenterProvider(provider: ServerProvider): boolean {
+  return (
+    provider.enabled &&
+    provider.installed &&
+    provider.availability !== "unavailable" &&
+    (provider.status === "ready" || provider.status === "warning")
+  );
+}
+
 export function buildRouteOptions(
   bootstrap: CommandCenterBootstrap | null,
   projects: readonly CommandCenterProject[],
@@ -217,25 +232,21 @@ export function buildRouteOptions(
         }),
       ),
     ) ?? [];
-  const healthyProviders = providers.filter(
-    (provider) =>
-      provider.enabled &&
-      provider.installed &&
-      provider.availability !== "unavailable" &&
-      provider.status !== "disabled" &&
-      provider.status !== "error",
-  );
+  const routingProviders = providers.filter(supportsCommandCenterRouting);
   const modelProviders =
     selectedProviderId === undefined
-      ? healthyProviders
-      : healthyProviders.filter((provider) => provider.instanceId === selectedProviderId);
+      ? routingProviders
+      : routingProviders.filter((provider) => provider.instanceId === selectedProviderId);
   const models = modelProviders.flatMap((provider) =>
     provider.models.map(
       (model): CommandCenterRouteOption => ({
         id: model.slug,
         label: model.shortName ?? model.name,
-        detail: providerLabel(provider),
+        detail: isUsableCommandCenterProvider(provider)
+          ? providerLabel(provider)
+          : `${providerLabel(provider)} · ${provider.message ?? "Unavailable"}`,
         providerId: provider.instanceId,
+        disabled: !isUsableCommandCenterProvider(provider),
       }),
     ),
   );
@@ -247,10 +258,11 @@ export function buildRouteOptions(
       label: project.name,
       detail: project.repositoryName,
     })),
-    providers: healthyProviders.map((provider) => ({
+    providers: routingProviders.map((provider) => ({
       id: provider.instanceId,
       label: providerLabel(provider),
-      detail: provider.status === "ready" ? "Ready" : titleCase(provider.status),
+      detail: isUsableCommandCenterProvider(provider) ? "Ready" : titleCase(provider.status),
+      disabled: !isUsableCommandCenterProvider(provider),
     })),
     models,
   };

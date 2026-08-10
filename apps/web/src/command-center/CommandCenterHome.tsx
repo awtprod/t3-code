@@ -673,6 +673,9 @@ export function CommandCenterHome() {
           void dismissNeedsYouItems(itemIds);
         }}
         onOpenRun={openRun}
+        onOpenProviderSettings={() => {
+          void navigate({ to: "/settings/providers" });
+        }}
         onOpenTodayItem={openTodayItem}
         onOpenConnection={() => {
           void navigate({ to: "/settings/connections" });

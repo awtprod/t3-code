@@ -596,6 +596,7 @@ function Composer({
   routeSelection,
   onDraftChange,
   onModelSelectionChange,
+  onOpenProviderSettings,
   onSubmit,
   inputRef,
 }: Pick<
@@ -607,6 +608,7 @@ function Composer({
   | "onDraftChange"
   | "onSubmit"
   | "onModelSelectionChange"
+  | "onOpenProviderSettings"
   | "routeOptions"
   | "routeSelection"
 > & {
@@ -677,46 +679,59 @@ function Composer({
         />
         <div className="flex items-end justify-between gap-3 px-2 pb-2 sm:px-3 sm:pb-3">
           <div className="flex min-w-0 flex-1 items-center gap-2 overflow-visible">
-            <Select
-              disabled={onModelSelectionChange === undefined || routeOptions.models.length === 0}
-              modal={false}
-              onValueChange={(value) => {
-                if (value === null) return;
-                const separator = value.indexOf("\u0000");
-                if (separator <= 0) return;
-                onModelSelectionChange?.(value.slice(0, separator), value.slice(separator + 1));
-              }}
-              value={modelValue}
-            >
-              <SelectTrigger
-                aria-label="Model selection"
-                className="h-8 min-h-8 w-auto max-w-64 gap-1.5 rounded-lg px-2.5 text-xs font-medium"
-                size="xs"
+            {routeOptions.models.length === 0 ? (
+              <Button
+                aria-label="Set up Codex provider"
+                className="h-8 min-h-8 rounded-lg px-2.5 text-xs font-medium"
+                onClick={onOpenProviderSettings}
+                type="button"
+                variant="outline"
               >
-                <span className="truncate">{selectedModel?.label ?? "Choose model"}</span>
-              </SelectTrigger>
-              <SelectPopup align="start" alignItemWithTrigger={false} className="min-w-64">
-                {routeOptions.models.map((model) => {
-                  const providerId = model.providerId ?? routeSelection.providerId;
-                  if (providerId === undefined) return null;
-                  return (
-                    <SelectItem
-                      key={`${providerId}:${model.id}`}
-                      value={`${providerId}\u0000${model.id}`}
-                    >
-                      <span className="flex min-w-0 flex-col">
-                        <span className="truncate">{model.label}</span>
-                        {model.detail !== undefined ? (
-                          <span className="truncate text-[0.6875rem] text-muted-foreground">
-                            {model.detail}
-                          </span>
-                        ) : null}
-                      </span>
-                    </SelectItem>
-                  );
-                })}
-              </SelectPopup>
-            </Select>
+                Codex unavailable
+              </Button>
+            ) : (
+              <Select
+                disabled={onModelSelectionChange === undefined}
+                modal={false}
+                onValueChange={(value) => {
+                  if (value === null) return;
+                  const separator = value.indexOf("\u0000");
+                  if (separator <= 0) return;
+                  onModelSelectionChange?.(value.slice(0, separator), value.slice(separator + 1));
+                }}
+                value={modelValue}
+              >
+                <SelectTrigger
+                  aria-label="Model selection"
+                  className="h-8 min-h-8 w-auto max-w-64 gap-1.5 rounded-lg px-2.5 text-xs font-medium"
+                  size="xs"
+                >
+                  <span className="truncate">{selectedModel?.label ?? "Choose model"}</span>
+                </SelectTrigger>
+                <SelectPopup align="start" alignItemWithTrigger={false} className="min-w-64">
+                  {routeOptions.models.map((model) => {
+                    const providerId = model.providerId ?? routeSelection.providerId;
+                    if (providerId === undefined) return null;
+                    return (
+                      <SelectItem
+                        disabled={model.disabled}
+                        key={`${providerId}:${model.id}`}
+                        value={`${providerId}\u0000${model.id}`}
+                      >
+                        <span className="flex min-w-0 flex-col">
+                          <span className="truncate">{model.label}</span>
+                          {model.detail !== undefined ? (
+                            <span className="truncate text-[0.6875rem] text-muted-foreground">
+                              {model.detail}
+                            </span>
+                          ) : null}
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectPopup>
+              </Select>
+            )}
           </div>
           <Button
             aria-label={isSubmitting ? "Sending command" : "Send command"}
@@ -1375,6 +1390,7 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
           isSubmitting={props.isSubmitting}
           onDraftChange={props.onDraftChange}
           onModelSelectionChange={props.onModelSelectionChange}
+          onOpenProviderSettings={props.onOpenProviderSettings}
           onSubmit={props.onSubmit}
           inputRef={composerInputRef}
           routeOptions={props.routeOptions}
