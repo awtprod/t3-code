@@ -63,8 +63,17 @@ const ACTIVE_RUN_STATUSES = new Set<Run["status"]>([
   "running",
   "waiting_approval",
   "waiting",
-  "failed",
 ]);
+
+export function visibleTimelineEntries(
+  entries: ReadonlyArray<CommandCenterTimelineEntry>,
+  afterSequence: number,
+  selectedRunId?: string,
+): readonly CommandCenterTimelineEntry[] {
+  return selectedRunId === undefined
+    ? entries.filter((entry) => entry.sequence > afterSequence)
+    : entries.filter((entry) => entry.runId === selectedRunId);
+}
 
 function titleCase(value: string): string {
   return value

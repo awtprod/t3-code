@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   CommandCenterShell,
+  ContextRail,
   Messages,
+  NeedsYouRows,
   shouldSubmitCommandComposerOnKeyDown,
 } from "./CommandCenterShell";
 import type {
@@ -94,7 +96,9 @@ const FIXTURE: CommandCenterShellProps = {
   ],
   onDraftChange: vi.fn(),
   onCapture: vi.fn(async () => true),
+  onClearTranscript: vi.fn(),
   onDecideApproval: vi.fn(),
+  onDismissNeedsYouItems: vi.fn(),
   onModelSelectionChange: vi.fn(),
   onOpenLinkedThread: vi.fn(),
   onSubmit: vi.fn(),
@@ -301,6 +305,7 @@ describe("CommandCenterShell", () => {
     expect(html).toContain("All Spaces");
     expect(html).toContain("Command");
     expect(html).toContain("Capture");
+    expect(html).toContain('aria-label="Clear command transcript"');
     expect(html).toContain('aria-label="Model selection"');
     expect(html).not.toContain('aria-label="Space route selection"');
     expect(html).not.toContain('aria-label="Provider route selection"');
@@ -308,6 +313,36 @@ describe("CommandCenterShell", () => {
     expect(html).toContain("chat-composer-glass");
     expect(html).toContain("Explicit route");
     expect(html).toContain("Ask anything, @tag files/folders, $use skills, or / for commands");
+  });
+
+  it("offers dismissal for generic attention items", () => {
+    const genericItems = ["one", "two"].map((id) => ({
+      id,
+      reason: "blocked" as const,
+      spaceId: "studio",
+      spaceName: "Studio",
+      title: `Blocked item ${id}`,
+    }));
+    const html = renderToStaticMarkup(
+      <NeedsYouRows items={genericItems} onDismissNeedsYouItems={FIXTURE.onDismissNeedsYouItems} />,
+    );
+
+    expect(html.match(/>Dismiss<\/button>/g)).toHaveLength(2);
+
+    const railHtml = renderToStaticMarkup(
+      <ContextRail
+        context={{ ...FIXTURE.context, needsYou: genericItems }}
+        onDismissNeedsYouItems={FIXTURE.onDismissNeedsYouItems}
+      />,
+    );
+    expect(railHtml).toContain("Dismiss all");
+  });
+
+  it("makes a selected Space visible when its transcript is empty", () => {
+    const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} messages={[]} />);
+
+    expect(html).toContain("Studio is ready");
+    expect(html).toContain("Your next command will be routed to this Space");
   });
 
   it("disables submission while the composer is empty", () => {

@@ -213,10 +213,14 @@ export function Messages({
   messages,
   receipt,
   onOpenLinkedThread,
+  onClearTranscript,
+  selectedSpaceName,
 }: {
   readonly messages: readonly CommandCenterMessage[];
   readonly receipt: CommandCenterRouteReceipt;
   readonly onOpenLinkedThread?: ((threadId: string) => void) | undefined;
+  readonly onClearTranscript?: (() => void) | undefined;
+  readonly selectedSpaceName?: string | undefined;
 }) {
   if (messages.length === 0) {
     return (
@@ -225,11 +229,14 @@ export function Messages({
           <SparklesIcon className="size-5 text-primary" />
         </span>
         <h2 className="max-w-full text-pretty font-heading text-lg font-semibold">
-          What do you want to move forward?
+          {selectedSpaceName === undefined
+            ? "What do you want to move forward?"
+            : `${selectedSpaceName} is ready`}
         </h2>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          Start with a question, a task, or an idea. Command Center will show where it plans to
-          route the work before it begins.
+          {selectedSpaceName === undefined
+            ? "Start with a question, a task, or an idea. Command Center will show where it plans to route the work before it begins."
+            : "Your next command will be routed to this Space. Start with a question, task, or idea."}
         </p>
       </div>
     );
@@ -237,6 +244,20 @@ export function Messages({
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col px-5 pb-10 pt-7 sm:px-8">
+      {onClearTranscript !== undefined ? (
+        <div className="mb-4 flex justify-end">
+          <Button
+            aria-label="Clear command transcript"
+            onClick={onClearTranscript}
+            size="xs"
+            type="button"
+            variant="ghost"
+          >
+            <XIcon />
+            Clear
+          </Button>
+        </div>
+      ) : null}
       {messages.map((message) => {
         if (message.author === "user") {
           return (
@@ -503,7 +524,10 @@ function CommandCenterShortcuts({
           </Button>
         </div>
 
-        <div aria-label="Space shortcuts" className="mt-3 flex gap-2 overflow-x-auto pb-1">
+        <div
+          aria-label="Space shortcuts"
+          className="mt-3 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
           <button
             aria-pressed={selectedSpaceId === undefined}
             className={cn(
@@ -614,15 +638,17 @@ function ContextButton({
   );
 }
 
-function NeedsYouRows({
+export function NeedsYouRows({
   items,
   onOpen,
+  onDismissNeedsYouItems,
   onDecideApproval,
   onReviewMemory,
   resolvingId,
 }: {
   readonly items: readonly CommandCenterNeedsYouItem[];
   readonly onOpen?: ((itemId: string) => void) | undefined;
+  readonly onDismissNeedsYouItems?: CommandCenterShellProps["onDismissNeedsYouItems"];
   readonly onDecideApproval?: CommandCenterShellProps["onDecideApproval"];
   readonly onReviewMemory?: CommandCenterShellProps["onReviewMemory"];
   readonly resolvingId?: string | undefined;
@@ -647,9 +673,26 @@ function NeedsYouRows({
     );
     if (item.action === undefined) {
       return (
-        <ContextButton key={item.id} onClick={() => onOpen?.(item.id)}>
-          {content}
-        </ContextButton>
+        <article className="rounded-xl hover:bg-accent" key={item.id}>
+          <button
+            className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left"
+            onClick={() => onOpen?.(item.id)}
+            type="button"
+          >
+            {content}
+          </button>
+          <div className="flex justify-end px-3 pb-2.5">
+            <Button
+              disabled={resolvingId === item.id || resolvingId === "dismiss-all"}
+              onClick={() => onDismissNeedsYouItems?.([item.id])}
+              size="xs"
+              type="button"
+              variant="ghost"
+            >
+              Dismiss
+            </Button>
+          </div>
+        </article>
       );
     }
 
@@ -850,6 +893,7 @@ interface ContextRailProps {
   readonly onClose?: (() => void) | undefined;
   readonly onDecideApproval?: CommandCenterShellProps["onDecideApproval"];
   readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
+  readonly onDismissNeedsYouItems?: CommandCenterShellProps["onDismissNeedsYouItems"];
   readonly onOpenRun?: ((runId: string) => void) | undefined;
   readonly onOpenTodayItem?: ((itemId: string) => void) | undefined;
   readonly onOpenConnection?: ((connectionId: string) => void) | undefined;
@@ -857,11 +901,12 @@ interface ContextRailProps {
   readonly resolvingNeedsYouId?: string | undefined;
 }
 
-function ContextRail({
+export function ContextRail({
   context,
   onClose,
   onDecideApproval,
   onOpenNeedsYouItem,
+  onDismissNeedsYouItems,
   onOpenRun,
   onOpenTodayItem,
   onOpenConnection,
@@ -869,6 +914,9 @@ function ContextRail({
   resolvingNeedsYouId,
 }: ContextRailProps) {
   const [activeView, setActiveView] = useState<"needs-you" | "runs" | "context">("needs-you");
+  const dismissibleNeedsYouIds = context.needsYou
+    .filter((item) => item.action === undefined)
+    .map((item) => item.id);
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-card-foreground">
       <div className="drag-region flex h-[var(--workspace-topbar-height)] shrink-0 items-end border-b px-2">
@@ -924,8 +972,25 @@ function ContextRail({
             id="command-center-context-needs-you"
             role="tabpanel"
           >
+            {dismissibleNeedsYouIds.length > 1 ? (
+              <div className="mb-1 flex items-center justify-between px-3 py-2">
+                <span className="text-[0.6875rem] text-muted-foreground">
+                  {dismissibleNeedsYouIds.length} dismissible items
+                </span>
+                <Button
+                  disabled={resolvingNeedsYouId !== undefined}
+                  onClick={() => onDismissNeedsYouItems?.(dismissibleNeedsYouIds)}
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  Dismiss all
+                </Button>
+              </div>
+            ) : null}
             <NeedsYouRows
               items={context.needsYou}
+              onDismissNeedsYouItems={onDismissNeedsYouItems}
               onDecideApproval={onDecideApproval}
               onOpen={onOpenNeedsYouItem}
               onReviewMemory={onReviewMemory}
@@ -965,6 +1030,7 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
   const [contextOpen, setContextOpen] = useState(false);
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const hasExplicitRoute = Object.values(props.routeSelection).some((value) => value !== undefined);
+  const selectedSpaceName = props.spaces.find((space) => space.id === props.selectedSpaceId)?.name;
 
   return (
     <div
@@ -1006,7 +1072,10 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
         <CommandCenterShortcuts
           context={props.context}
           onCapture={props.onCapture}
-          onCommand={() => composerInputRef.current?.focus()}
+          onCommand={() => {
+            props.onNewConversation?.();
+            requestAnimationFrame(() => composerInputRef.current?.focus());
+          }}
           onSelectSpace={props.onSelectSpace}
           selectedSpaceId={props.selectedSpaceId}
           spaces={props.spaces}
@@ -1015,8 +1084,10 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
         <ScrollArea className="min-h-0 flex-1" scrollFade>
           <Messages
             messages={props.messages}
+            onClearTranscript={props.onClearTranscript}
             onOpenLinkedThread={props.onOpenLinkedThread}
             receipt={props.routeReceipt}
+            selectedSpaceName={selectedSpaceName}
           />
         </ScrollArea>
 
@@ -1042,6 +1113,7 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
         >
           <ContextRail
             context={props.context}
+            onDismissNeedsYouItems={props.onDismissNeedsYouItems}
             onClose={() => setContextOpen(false)}
             onDecideApproval={props.onDecideApproval}
             onOpenConnection={props.onOpenConnection}

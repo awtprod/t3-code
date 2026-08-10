@@ -198,6 +198,7 @@ export interface CommandCenterShellProps {
   readonly onDraftChange: (draft: string) => void;
   readonly onSubmit: (draft: string) => void;
   readonly onNewConversation?: (() => void) | undefined;
+  readonly onClearTranscript?: (() => void) | undefined;
   readonly onSelectSpace?: ((spaceId: string) => void) | undefined;
   readonly onSelectProject?: ((projectId: string) => void) | undefined;
   readonly onSelectConversation?: ((conversationId: string) => void) | undefined;
@@ -213,6 +214,7 @@ export interface CommandCenterShellProps {
       }) => Promise<boolean>)
     | undefined;
   readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
+  readonly onDismissNeedsYouItems?: ((itemIds: readonly string[]) => void) | undefined;
   readonly onDecideApproval?:
     | ((approvalId: string, payloadDigest: string, decision: "approved" | "declined") => void)
     | undefined;

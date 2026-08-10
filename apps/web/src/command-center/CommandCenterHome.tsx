@@ -3,7 +3,14 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApprovalId, CommandId, MemoryId, RepositoryId, SpaceId } from "@command-center/core";
+import {
+  ApprovalId,
+  CommandId,
+  ItemId,
+  MemoryId,
+  RepositoryId,
+  SpaceId,
+} from "@command-center/core";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 
 import { SidebarInset } from "~/components/ui/sidebar";
@@ -28,6 +35,7 @@ import {
   routeReceiptFromTimelineEntry,
   routeTimelineMessage,
   timelineMessages,
+  visibleTimelineEntries,
   waitForRouteReceiptPaint,
 } from "./CommandCenterHome.logic";
 import type {
@@ -96,6 +104,8 @@ export function CommandCenterHome() {
   const [conversationRoute, setConversationRoute] = useState<CommandCenterRouteSelection>({});
   const [spaceFilterId, setSpaceFilterId] = useState<string>();
   const [activeConversationId, setActiveConversationId] = useState<string>();
+  const [selectedTranscriptRunId, setSelectedTranscriptRunId] = useState<string>();
+  const [transcriptAfterSequence, setTranscriptAfterSequence] = useState<number | null>(null);
   const [optimisticMessages, setOptimisticMessages] = useState<CommandCenterMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -145,6 +155,9 @@ export function CommandCenterHome() {
   const createItem = useAtomCommand(commandCenterEnvironment.createItem, {
     reportFailure: false,
   });
+  const updateItem = useAtomCommand(commandCenterEnvironment.updateItem, {
+    reportFailure: false,
+  });
 
   const eventSequence = eventQuery.data?.sequence;
   const eventScopeKey = `${environmentId ?? "disconnected"}:${selectedSpaceId ?? "all"}`;
@@ -186,9 +199,22 @@ export function CommandCenterHome() {
     () => (bootstrap === null ? EMPTY_BOOTSTRAP_PROJECTION : projectBootstrap(bootstrap)),
     [bootstrap],
   );
+  useEffect(() => {
+    if (transcriptAfterSequence !== null || timelineQuery.data === null) return;
+    setTranscriptAfterSequence(timelineQuery.data.nextSequence);
+  }, [timelineQuery.data, transcriptAfterSequence]);
+  const visibleTimeline = useMemo(
+    () =>
+      visibleTimelineEntries(
+        timelineQuery.data?.entries ?? [],
+        transcriptAfterSequence ?? Number.MAX_SAFE_INTEGER,
+        selectedTranscriptRunId,
+      ),
+    [selectedTranscriptRunId, timelineQuery.data?.entries, transcriptAfterSequence],
+  );
   const authoritativeMessages = useMemo(
-    () => timelineMessages(timelineQuery.data?.entries ?? [], bootstrap, routeDisplay),
-    [bootstrap, routeDisplay, timelineQuery.data?.entries],
+    () => timelineMessages(visibleTimeline, bootstrap, routeDisplay),
+    [bootstrap, routeDisplay, visibleTimeline],
   );
   const messages = useMemo(
     () => mergeAuthoritativeMessages(authoritativeMessages, optimisticMessages),
@@ -233,14 +259,22 @@ export function CommandCenterHome() {
 
   const selectSpace = useCallback(
     (spaceId: string) => {
+      setActiveConversationId(undefined);
+      setSelectedTranscriptRunId(undefined);
+      setTranscriptAfterSequence(timelineQuery.data?.nextSequence ?? 0);
+      setOptimisticMessages([]);
+      setLastReceipt(null);
+      setDraft("");
       if (spaceId.length === 0) {
         setSpaceFilterId(undefined);
+        setConversationRoute({});
         return;
       }
       if (!bootstrap?.spaces.some((space) => space.id === spaceId)) return;
       setSpaceFilterId(spaceId);
+      setConversationRoute({ spaceId });
     },
-    [bootstrap],
+    [bootstrap, timelineQuery.data?.nextSequence],
   );
 
   const selectProject = useCallback(
@@ -255,6 +289,7 @@ export function CommandCenterHome() {
   const selectConversation = useCallback(
     (conversationId: string) => {
       setActiveConversationId(conversationId);
+      setSelectedTranscriptRunId(conversationId);
       const run = bootstrap?.runs.find((candidate) => candidate.id === conversationId);
       if (run !== undefined) {
         if (environmentId !== null && run.threadId !== undefined) {
@@ -405,9 +440,49 @@ export function CommandCenterHome() {
     setConversationRoute({});
     setSpaceFilterId(undefined);
     setOptimisticMessages([]);
+    setSelectedTranscriptRunId(undefined);
+    setTranscriptAfterSequence(timelineQuery.data?.nextSequence ?? 0);
     setDraft("");
     setLastReceipt(null);
-  }, []);
+  }, [timelineQuery.data?.nextSequence]);
+
+  const dismissNeedsYouItems = useCallback(
+    async (itemIds: readonly string[]) => {
+      if (environmentId === null || resolvingNeedsYouId !== undefined) return;
+      const items = itemIds.flatMap((itemId) => {
+        const item = bootstrap?.needsYou.find((candidate) => candidate.id === itemId);
+        return item === undefined ? [] : [item];
+      });
+      if (items.length === 0) return;
+      setResolvingNeedsYouId(items.length === 1 ? items[0]!.id : "dismiss-all");
+      for (const item of items) {
+        const result = await updateItem({
+          environmentId,
+          input: {
+            itemId: ItemId.make(item.id),
+            spaceId: SpaceId.make(item.spaceId),
+            expectedUpdatedAt: item.updatedAt,
+            patch: { status: "canceled" },
+          },
+        });
+        if (result._tag !== "Success") {
+          recordNeedsYouFailure(item.id, squashAtomCommandFailure(result));
+        }
+      }
+      bootstrapQuery.refresh();
+      timelineQuery.refresh();
+      setResolvingNeedsYouId(undefined);
+    },
+    [
+      bootstrap,
+      bootstrapQuery,
+      environmentId,
+      recordNeedsYouFailure,
+      resolvingNeedsYouId,
+      timelineQuery,
+      updateItem,
+    ],
+  );
 
   const capture = useCallback(
     async (input: {
@@ -451,6 +526,7 @@ export function CommandCenterHome() {
       const commandId = CommandId.make(randomUUID());
       const createdAtLabel = currentTimeLabel();
       setIsSubmitting(true);
+      setSelectedTranscriptRunId(undefined);
       setDraft("");
       setOptimisticMessages((current) => [
         ...current,
@@ -586,12 +662,16 @@ export function CommandCenterHome() {
         messages={messages}
         onDraftChange={setDraft}
         onCapture={capture}
+        onClearTranscript={newConversation}
         onNewConversation={newConversation}
         onDecideApproval={(approvalId, payloadDigest, decision) => {
           void resolveApproval(approvalId, payloadDigest, decision);
         }}
         onOpenLinkedThread={openLinkedThread}
         onOpenNeedsYouItem={openNeedsYouItem}
+        onDismissNeedsYouItems={(itemIds) => {
+          void dismissNeedsYouItems(itemIds);
+        }}
         onOpenRun={openRun}
         onOpenTodayItem={openTodayItem}
         onOpenConnection={() => {

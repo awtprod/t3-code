@@ -21,6 +21,7 @@ import {
   routeReceiptFromTimelineEntry,
   routeTimelineMessage,
   timelineMessages,
+  visibleTimelineEntries,
   waitForRouteReceiptPaint,
 } from "./CommandCenterHome.logic";
 
@@ -255,6 +256,29 @@ describe("CommandCenterHome projection", () => {
       detail: "Read-only",
     });
     expect(projection.context.today).toHaveLength(1);
+  });
+
+  it("does not count failed runs as active work", () => {
+    const failedBootstrap = {
+      ...BOOTSTRAP,
+      runs: BOOTSTRAP.runs.map((run) => ({ ...run, status: "failed" })),
+    } as unknown as CommandCenterBootstrap;
+
+    expect(projectBootstrap(failedBootstrap).context.activeRuns).toEqual([]);
+  });
+
+  it("hides old transcript entries until History explicitly selects a run", () => {
+    const entries = [
+      { sequence: 4, runId: "old-run" },
+      { sequence: 6, runId: "new-run" },
+    ] as unknown as readonly CommandCenterTimelineEntry[];
+
+    expect(visibleTimelineEntries([...entries], 4).map((entry) => entry.runId)).toEqual([
+      "new-run",
+    ]);
+    expect(visibleTimelineEntries([...entries], 99, "old-run").map((entry) => entry.runId)).toEqual(
+      ["old-run"],
+    );
   });
 
   it("surfaces private configuration health without exposing its path", () => {
