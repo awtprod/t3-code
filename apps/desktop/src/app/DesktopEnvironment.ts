@@ -13,6 +13,7 @@ import * as Path from "effect/Path";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
+import { isRemoteOnlyDesktopBuild } from "./remoteOnlyBuild.ts";
 import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
 
 export interface MakeDesktopEnvironmentInput {
@@ -25,6 +26,7 @@ export interface MakeDesktopEnvironmentInput {
   readonly isPackaged: boolean;
   readonly resourcesPath: string;
   readonly runningUnderArm64Translation: boolean;
+  readonly remoteOnlyBuild?: boolean;
 }
 
 export class DesktopEnvironment extends Context.Service<
@@ -51,6 +53,8 @@ export class DesktopEnvironment extends Context.Service<
     readonly browserArtifactsDir: string;
     readonly rootDir: string;
     readonly appRoot: string;
+    readonly localClientRoot: string;
+    readonly remoteOnlyBuild: boolean;
     readonly backendEntryPath: string;
     readonly backendCwd: string;
     readonly preloadPath: string;
@@ -138,6 +142,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
 ): Effect.fn.Return<DesktopEnvironment["Service"], Config.ConfigError, Path.Path> {
   const path = yield* Path.Path;
   const config = yield* DesktopConfig.DesktopConfig;
+  const remoteOnlyBuild = input.remoteOnlyBuild ?? isRemoteOnlyDesktopBuild;
   const homeDirectory = input.homeDirectory;
   const devServerUrl = config.devServerUrl;
   const isDevelopment = Option.isSome(devServerUrl);
@@ -153,7 +158,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     ? config.commandCenterHome
     : config.t3Home;
   const baseDir = Option.getOrElse(configuredBaseDir, () =>
-    path.join(homeDirectory, ".command-center"),
+    path.join(homeDirectory, remoteOnlyBuild ? ".command-center-remote-only" : ".command-center"),
   );
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
@@ -166,8 +171,16 @@ const make = Effect.fn("desktop.environment.make")(function* (
     baseDir,
     isDevelopment && Option.isNone(configuredBaseDir) ? "dev" : "userdata",
   );
-  const userDataDirName = isDevelopment ? "command-center-dev" : "command-center";
-  const legacyUserDataDirNames = isDevelopment
+  const userDataDirName = remoteOnlyBuild
+    ? isDevelopment
+      ? "command-center-remote-only-dev"
+      : "command-center-remote-only"
+    : isDevelopment
+      ? "command-center-dev"
+      : "command-center";
+  const legacyUserDataDirNames = remoteOnlyBuild
+    ? []
+    : isDevelopment
     ? ["t3code-dev", "T3 Code (Dev)"]
     : ["t3code", "T3 Code (Alpha)", "Command Center (Alpha)"];
   const linuxApplicationsDir = path.join(
@@ -198,6 +211,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
     browserArtifactsDir: path.join(stateDir, "browser-artifacts"),
     rootDir,
     appRoot,
+    localClientRoot: path.join(appRoot, "apps/desktop/client"),
+    remoteOnlyBuild,
     backendEntryPath: path.join(appRoot, "apps/server/dist/bin.mjs"),
     backendCwd: input.isPackaged ? homeDirectory : appRoot,
     preloadPath: path.join(input.dirname, "preload.cjs"),
@@ -213,7 +228,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.awtprod.commandcenter.dev" : "com.awtprod.commandcenter",
+      remoteOnlyBuild
+        ? "com.awtprod.commandcenter.remote-only"
+        : isDevelopment
+          ? "com.awtprod.commandcenter.dev"
+          : "com.awtprod.commandcenter",
     ),
     linuxDesktopEntryName: isDevelopment ? "commandcenter-dev.desktop" : "command-center.desktop",
     linuxWmClass: isDevelopment ? "commandcenter-dev" : "command-center",
@@ -221,7 +240,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
     appImagePath: config.appImagePath,
     userDataDirName,
     legacyUserDataDirNames,
-    defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),
+    defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(
+      input.appVersion,
+      remoteOnlyBuild,
+    ),
     runtimeInfo: resolveDesktopRuntimeInfo({
       platform: input.platform,
       processArch: input.processArch,

@@ -469,8 +469,7 @@ export const make = Effect.gen(function* () {
     return Option.some(encoded);
   });
 
-  return DesktopConnectionCatalogStore.of({
-    get: Effect.gen(function* () {
+  const getCatalog = Effect.gen(function* () {
       const document = yield* readDocument(fileSystem, catalogPath);
       if (Option.isNone(document)) {
         return yield* migrateLegacyCatalog;
@@ -493,7 +492,23 @@ export const make = Effect.gen(function* () {
         ),
       );
       return Option.some(decrypted);
-    }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get")),
+    }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get"));
+
+  const get = environment.remoteOnlyBuild
+    ? getCatalog.pipe(
+        Effect.catchTag("DesktopConnectionCatalogStoreProtectionError", (error) =>
+          error.operation === "decrypt-catalog"
+            ? Effect.logWarning(
+                "Ignoring an unreadable remote-only connection catalog; reconnecting will replace it.",
+                { catalogPath },
+              ).pipe(Effect.as(Option.none<string>()))
+            : Effect.fail(error),
+        ),
+      )
+    : getCatalog;
+
+  return DesktopConnectionCatalogStore.of({
+    get,
     set: Effect.fn("desktop.connectionCatalogStore.set")(function* (catalog) {
       if (!(yield* encryptionAvailable)) {
         return false;

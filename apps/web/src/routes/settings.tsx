@@ -14,6 +14,7 @@ import { SettingsBreadcrumb } from "../components/settings/SettingsBreadcrumb";
 import { Button } from "../components/ui/button";
 import { SidebarInset } from "../components/ui/sidebar";
 import { isElectron } from "../env";
+import { isRemoteOnlyBuild } from "../hostedPairing";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
@@ -130,7 +131,7 @@ export const Route = createFileRoute("/settings")({
     }
 
     if (location.pathname === "/settings") {
-      throw redirect({ to: "/settings/general", replace: true });
+      throw redirect({ to: isRemoteOnlyBuild() ? "/settings/connections" : "/settings/general", replace: true });
     }
   },
   component: SettingsRouteLayout,
