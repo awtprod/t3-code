@@ -372,10 +372,24 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
         undefined,
       );
+      const remoteOnlyWin = yield* createBuildConfig(
+        "win",
+        "nsis",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+        true,
+      );
 
       assert.notProperty(mac, "asarUnpack");
       assert.notProperty(linux, "asarUnpack");
       assert.deepStrictEqual(win.asarUnpack, WINDOWS_ASAR_UNPACK);
+      assert.equal(remoteOnlyWin.appId, "com.awtprod.commandcenter.remote");
+      assert.equal(remoteOnlyWin.productName, "Command Center Remote");
+      assert.equal(remoteOnlyWin.artifactName, "Command-Center-Remote-1.2.3-${arch}.${ext}");
+      assert.notProperty(remoteOnlyWin, "asarUnpack");
       // Linux must register the renderer schemes so the generated .desktop
       // entry advertises MimeType=x-scheme-handler/t3code; for OAuth deep links.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [

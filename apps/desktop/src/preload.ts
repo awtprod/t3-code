@@ -96,6 +96,11 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(IpcChannels.SET_WSL_BACKEND_ENABLED_CHANNEL, enabled),
   setWslDistro: (distro) => ipcRenderer.invoke(IpcChannels.SET_WSL_DISTRO_CHANNEL, distro),
   setWslOnly: (enabled) => ipcRenderer.invoke(IpcChannels.SET_WSL_ONLY_CHANNEL, enabled),
+  getPrimaryBackendState: () => ipcRenderer.invoke(IpcChannels.GET_PRIMARY_BACKEND_STATE_CHANNEL),
+  setPrimaryBackend: (input) => ipcRenderer.invoke(IpcChannels.SET_PRIMARY_BACKEND_CHANNEL, input),
+  retryRemotePrimary: (remoteHttpBaseUrl) =>
+    ipcRenderer.invoke(IpcChannels.RETRY_REMOTE_PRIMARY_CHANNEL, remoteHttpBaseUrl),
+  startLocalExecutionOnce: () => ipcRenderer.invoke(IpcChannels.START_LOCAL_EXECUTION_ONCE_CHANNEL),
   pickFolder: (options) => ipcRenderer.invoke(IpcChannels.PICK_FOLDER_CHANNEL, options),
   pickThemeFiles: () => ipcRenderer.invoke(IpcChannels.PICK_THEME_FILES_CHANNEL, undefined),
   confirm: (message) => ipcRenderer.invoke(IpcChannels.CONFIRM_CHANNEL, message),

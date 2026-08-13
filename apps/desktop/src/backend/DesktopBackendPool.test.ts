@@ -114,7 +114,7 @@ describe("DesktopBackendPool", () => {
       assert.lengthOf(all, 2);
       // First instance becomes primary in layerTest so single-instance
       // stubs don't have to wire an explicit primary.
-      assert.equal(resolvedPrimary.id, DesktopBackendPool.PRIMARY_INSTANCE_ID);
+      assert.equal(Option.getOrThrow(resolvedPrimary).id, DesktopBackendPool.PRIMARY_INSTANCE_ID);
     }).pipe(
       Effect.provide(
         DesktopBackendPool.layerTest([
@@ -125,12 +125,12 @@ describe("DesktopBackendPool", () => {
     ),
   );
 
-  it.effect("layerTest dies when no instances are supplied", () =>
-    Effect.exit(
-      Effect.gen(function* () {
-        yield* DesktopBackendPool.DesktopBackendPool;
-      }).pipe(Effect.provide(DesktopBackendPool.layerTest([]))),
-    ).pipe(Effect.map((exit) => assert.equal(exit._tag, "Failure"))),
+  it.effect("layerTest supports an empty remote-only pool", () =>
+    Effect.gen(function* () {
+      const pool = yield* DesktopBackendPool.DesktopBackendPool;
+      assert.deepEqual(yield* pool.list, []);
+      assert.isTrue(Option.isNone(yield* pool.primary));
+    }).pipe(Effect.provide(DesktopBackendPool.layerTest([]))),
   );
 
   it.effect("resolves the primary label lazily after pool layer construction", () =>
@@ -144,7 +144,7 @@ describe("DesktopBackendPool", () => {
 
         yield* Ref.set(labelRef, "WSL (Ubuntu)");
 
-        assert.equal(yield* primary.label, "WSL (Ubuntu)");
+        assert.equal(yield* Option.getOrThrow(primary).label, "WSL (Ubuntu)");
       }),
     ),
   );

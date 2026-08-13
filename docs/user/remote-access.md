@@ -12,6 +12,29 @@ That gives you:
 - transport security at the network layer
 - less exposure than opening the server to the public internet
 
+## Use a Remote Server as the Desktop Primary
+
+The Electron desktop can use a paired remote environment as its primary backend without starting a
+local Windows or WSL server.
+
+1. Pair the remote environment from **Settings** → **Connections** → **Add environment**.
+2. In **Desktop execution**, choose **Remote server** and enter its HTTP or HTTPS base URL.
+3. Test the connection, then choose **Make remote primary and restart**.
+
+Remote-primary mode persists across ordinary launches. The desktop loads its web bundle from the
+remote server and sends HTTP and WebSocket traffic directly to it using the saved pairing session.
+It does not reserve a Windows backend port or start local Node, provider, terminal, resource-monitor,
+or sandbox children.
+
+If the remote server is unavailable, Command Center shows a local recovery window. It never falls
+back to Windows automatically. You can retry, edit the endpoint, quit, or select **Start local for
+this launch**. The last option relaunches with a conspicuous local-override indicator and leaves the
+persisted Remote preference unchanged, so the next ordinary launch returns to remote-only mode.
+
+Switching the primary back to **Windows local** or **WSL** is always an explicit Connections setting
+change followed by a restart. Native folder picking is disabled while a remote server is primary;
+choose projects and paths in the remote environment instead.
+
 ## Enabling Network Access
 
 There are two ways to expose your server for remote connections: from the desktop app or from the CLI.

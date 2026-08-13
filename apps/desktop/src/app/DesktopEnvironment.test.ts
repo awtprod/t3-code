@@ -116,6 +116,20 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
+  it.effect("keeps remote-only builds out of ordinary desktop state", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment({ remoteOnlyBuild: true });
+      const expectedBaseDir = environment.path.join("/user-home", ".command-center-remote-only");
+
+      assert.equal(environment.remoteOnlyBuild, true);
+      assert.equal(environment.baseDir, expectedBaseDir);
+      assert.equal(environment.stateDir, environment.path.join(expectedBaseDir, "userdata"));
+      assert.equal(environment.userDataDirName, "command-center-remote-only");
+      assert.deepEqual(environment.legacyUserDataDirNames, []);
+      assert.equal(environment.appUserModelId, "com.awtprod.commandcenter.remote-only");
+    }),
+  );
+
   it.effect("prefers the Command Center runtime directory over the legacy override", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(

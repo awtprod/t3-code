@@ -39,6 +39,8 @@ import {
 } from "../ui/sidebar";
 import { T3ConnectSidebarAvatar, T3ConnectSidebarSignIn } from "../clerk/T3ConnectSidebarSignIn";
 import { scrollToSettingsTarget } from "./settingsLayout";
+import { isRemoteOnlyBuild } from "../../hostedPairing";
+import { useEnvironments } from "../../state/environments";
 import {
   searchSettings,
   SETTINGS_SECTION_LABELS,
@@ -87,7 +89,16 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [activeResultIndex, setActiveResultIndex] = useState(0);
-  const results = useMemo(() => searchSettings(query), [query]);
+  const { environments, isReady: environmentsReady } = useEnvironments();
+  const remoteOnlyDisconnected =
+    isRemoteOnlyBuild() && environmentsReady && environments.length === 0;
+  const results = useMemo(
+    () =>
+      searchSettings(query).filter(
+        (item) => !remoteOnlyDisconnected || item.to === "/settings/connections",
+      ),
+    [query, remoteOnlyDisconnected],
+  );
   const isSearching = query.trim().length > 0;
   const hasResults = results.length > 0;
 
@@ -287,7 +298,9 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 ))
-              : SETTINGS_NAV_ITEMS.map((item) => {
+              : SETTINGS_NAV_ITEMS.filter(
+                  (item) => !remoteOnlyDisconnected || item.to === "/settings/connections",
+                ).map((item) => {
                   const Icon = item.icon;
                   const isActive = pathname === item.to;
                   return (
