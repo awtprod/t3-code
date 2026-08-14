@@ -44,6 +44,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "com.awtprod.commandcenter";
+const REMOTE_ONLY_DESKTOP_APP_ID = "com.awtprod.commandcenter.remote";
+const REMOTE_ONLY_DESKTOP_PRODUCT_NAME = "Command Center Remote";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -277,7 +279,10 @@ export class BuildCommandFailedError extends Schema.TaggedErrorClass<BuildComman
   }
 }
 
-export function isRetryableWindowsNsisOutputLockFailure(error: BuildCommandFailedError): boolean {
+const isBuildCommandFailedError = Schema.is(BuildCommandFailedError);
+
+export function isRetryableWindowsNsisOutputLockFailure(error: unknown): boolean {
+  if (!isBuildCommandFailedError(error)) return false;
   const output = `${error.stdoutTail ?? ""}\n${error.stderrTail ?? ""}`;
   return (
     error.command.includes("electron-builder") &&
@@ -383,6 +388,7 @@ const DesktopBuildInputArtifact = Schema.Literals([
   "desktop-resources",
   "server-dist",
   "bundled-server-client",
+  "web-dist",
 ]);
 type DesktopBuildInputArtifact = typeof DesktopBuildInputArtifact.Type;
 const desktopBuildInputArtifactNames = {
@@ -390,6 +396,7 @@ const desktopBuildInputArtifactNames = {
   "desktop-resources": "desktopResources",
   "server-dist": "serverDist",
   "bundled-server-client": "bundled server client",
+  "web-dist": "web client",
 } satisfies Record<DesktopBuildInputArtifact, string>;
 
 /**
@@ -1864,6 +1871,10 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "Command Center");
 }
 
+export function resolveDesktopArtifactName(version: string, remoteOnlyBuild: boolean): string {
+  return `${remoteOnlyBuild ? "Command-Center-Remote" : "Command-Center"}-${version}-\${arch}.\${ext}`;
+}
+
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
@@ -1877,11 +1888,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         readonly provisioningProfilePath: string;
       }
     | undefined,
+  remoteOnlyBuild = false,
 ) {
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
-    artifactName: "Command-Center-${version}-${arch}.${ext}",
+    appId: remoteOnlyBuild ? REMOTE_ONLY_DESKTOP_APP_ID : DESKTOP_APP_ID,
+    productName: remoteOnlyBuild
+      ? REMOTE_ONLY_DESKTOP_PRODUCT_NAME
+      : resolveDesktopProductName(version),
+    artifactName: resolveDesktopArtifactName(version, remoteOnlyBuild),
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [...DESKTOP_FILE_EXCLUSIONS],
     directories: {
@@ -1890,7 +1904,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     // Only the Windows WSL backend needs files outside the asar (see
     // WINDOWS_ASAR_UNPACK); macOS and Linux stay packed — smart unpack
     // extracts native libraries, which fff-node finds in app.asar.unpacked.
-    ...(platform === "win" ? { asarUnpack: [...WINDOWS_ASAR_UNPACK] } : {}),
+    ...(platform === "win" && !remoteOnlyBuild ? { asarUnpack: [...WINDOWS_ASAR_UNPACK] } : {}),
     extraResources: DESKTOP_EXTRA_RESOURCES,
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
@@ -2080,9 +2094,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   const electronVersion = desktopPackageJson.dependencies.electron;
+  const remoteOnlyBuild = process.env.VITE_REMOTE_ONLY?.trim() === "1";
 
   const serverDependencies = serverPackageJson.dependencies;
-  if (!serverDependencies || Object.keys(serverDependencies).length === 0) {
+  if (!remoteOnlyBuild && (!serverDependencies || Object.keys(serverDependencies).length === 0)) {
     return yield* new MissingServerProductionDependenciesError({
       manifestPath: "apps/server/package.json",
     });
@@ -2098,15 +2113,17 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       }),
   });
 
-  const resolvedServerDependencies = yield* Effect.try({
-    try: () => resolveCatalogDependencies(serverDependencies, workspaceCatalog, "apps/server"),
-    catch: (cause) =>
-      new DesktopBuildDependencyResolutionError({
-        kind: "server-production",
-        manifestPath: "apps/server/package.json",
-        cause,
-      }),
-  });
+  const resolvedServerDependencies = remoteOnlyBuild
+    ? {}
+    : yield* Effect.try({
+        try: () => resolveCatalogDependencies(serverDependencies!, workspaceCatalog, "apps/server"),
+        catch: (cause) =>
+          new DesktopBuildDependencyResolutionError({
+            kind: "server-production",
+            manifestPath: "apps/server/package.json",
+            cause,
+          }),
+      });
   const resolvedDesktopRuntimeDependencies = yield* Effect.try({
     try: () => resolveDesktopRuntimeDependencies(desktopPackageJson.dependencies, workspaceCatalog),
     catch: (cause) =>
@@ -2131,25 +2148,42 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     desktopDist: path.join(repoRoot, "apps/desktop/dist-electron"),
     desktopResources: path.join(repoRoot, "apps/desktop/resources"),
     serverDist: path.join(repoRoot, "apps/server/dist"),
+    webDist: path.join(repoRoot, "apps/web/dist"),
   };
   const bundledClientEntry = path.join(distDirs.serverDist, "client/index.html");
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    const spawnCommand = yield* resolveSpawnCommand("vp", ["run", "build:desktop"]);
-    yield* runCommand(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        cwd: repoRoot,
-        shell: spawnCommand.shell,
-      }),
-      { label: "vp run build:desktop", verbose: options.verbose },
-    );
+    const runBuild = Effect.fn("buildDesktopArtifact.build")(function* (
+      args: ReadonlyArray<string>,
+      label: string,
+    ) {
+      const command = yield* resolveSpawnCommand("vp", args);
+      yield* runCommand(
+        ChildProcess.make(command.command, command.args, {
+          cwd: repoRoot,
+          shell: command.shell,
+        }),
+        { label, verbose: options.verbose },
+      );
+    });
+    if (remoteOnlyBuild) {
+      yield* runBuild(["run", "--filter", "@t3tools/web", "build"], "vp run --filter @t3tools/web build");
+      yield* runBuild(
+        ["run", "--filter", "@t3tools/desktop", "build"],
+        "vp run --filter @t3tools/desktop build",
+      );
+    } else {
+      yield* runBuild(["run", "build:desktop"], "vp run build:desktop");
+    }
   }
 
   const requiredBuildInputs = [
     { artifact: "desktop-dist", artifactPath: distDirs.desktopDist },
     { artifact: "desktop-resources", artifactPath: distDirs.desktopResources },
-    { artifact: "server-dist", artifactPath: distDirs.serverDist },
+    ...(remoteOnlyBuild
+      ? ([{ artifact: "web-dist", artifactPath: distDirs.webDist }] as const)
+      : ([{ artifact: "server-dist", artifactPath: distDirs.serverDist }] as const)),
   ] as const;
   for (const input of requiredBuildInputs) {
     if (!(yield* fs.exists(input.artifactPath))) {
@@ -2167,7 +2201,11 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // still passed. An inlined native loader resolves its prebuilds relative to
   // the bundle and quietly falls back to a slower pure-JS path, so this fails
   // the build rather than shipping a silent regression.
-  {
+  //
+  // A remote-only build never produces distDirs.serverDist (see
+  // requiredBuildInputs above), so this scan has nothing to read and is
+  // skipped entirely for that build shape.
+  if (!remoteOnlyBuild) {
     const chunkNames = (yield* fs.readDirectory(distDirs.serverDist)).filter((entry) =>
       entry.endsWith(".mjs"),
     );
@@ -2222,7 +2260,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     }
   }
 
-  if (!(yield* fs.exists(bundledClientEntry))) {
+  if (!remoteOnlyBuild && !(yield* fs.exists(bundledClientEntry))) {
     return yield* new MissingDesktopBuildInputError({
       artifact: "bundled-server-client",
       artifactPath: bundledClientEntry,
@@ -2231,17 +2269,30 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   const webAssetBrand = resolveDesktopWebAssetBrand(appVersion);
-  yield* applyWebBrandAssets(webAssetBrand, "apps/server/dist/client");
+  yield* applyWebBrandAssets(
+    webAssetBrand,
+    remoteOnlyBuild ? "apps/web/dist" : "apps/server/dist/client",
+  );
   yield* Effect.log(`[desktop-artifact] Applied ${webAssetBrand} web client branding.`);
-  yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
+  yield* validateBundledClientAssets(
+    remoteOnlyBuild ? distDirs.webDist : path.dirname(bundledClientEntry),
+  );
 
   yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop"), { recursive: true });
-  yield* fs.makeDirectory(path.join(stageAppDir, "apps/server"), { recursive: true });
+  if (remoteOnlyBuild) {
+    yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop/client"), { recursive: true });
+  } else {
+    yield* fs.makeDirectory(path.join(stageAppDir, "apps/server"), { recursive: true });
+  }
 
   yield* Effect.log("[desktop-artifact] Staging release app...");
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
-  yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  if (remoteOnlyBuild) {
+    yield* fs.copy(distDirs.webDist, path.join(stageAppDir, "apps/desktop/client"));
+  } else {
+    yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  }
   yield* stageResourceMonitor({
     repoRoot,
     stageResourcesDir,
@@ -2295,16 +2346,18 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const stageDependencies = {
     ...resolvedServerDependencies,
     ...resolvedDesktopRuntimeDependencies,
-    ...resolveFffNativeDependencies(
-      options.platform,
-      options.arch,
-      serverPackageJson.dependencies["@ff-labs/fff-node"],
-    ),
+    ...(remoteOnlyBuild
+      ? {}
+      : resolveFffNativeDependencies(
+          options.platform,
+          options.arch,
+          serverPackageJson.dependencies["@ff-labs/fff-node"],
+        )),
     // Windows artifacts also bundle the same-architecture WSL Linux backend, which loads the
     // fff native binary through ffi-rs. The platform fff binary above is the
     // host's (win32), so promote the matching Linux fff binaries too; without
     // them file-finding in WSL fails to load its Linux native package.
-    ...(options.platform === "win"
+    ...(!remoteOnlyBuild && options.platform === "win"
       ? resolveFffNativeDependencies(
           "linux",
           options.arch,
@@ -2339,6 +2392,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
             provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
           }
         : undefined,
+      remoteOnlyBuild,
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -2378,7 +2432,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
   // WSL is Windows-only, so only the Windows artifact carries the Linux backend
   // binary; other platforms ignore the prebuild input.
-  if (options.platform === "win") {
+  if (!remoteOnlyBuild && options.platform === "win") {
     yield* stageWslNodePtyPrebuild({
       stageAppDir,
       arch: options.arch,

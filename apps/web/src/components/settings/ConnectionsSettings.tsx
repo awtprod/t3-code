@@ -31,6 +31,7 @@ import {
   type EnvironmentId,
 } from "@t3tools/contracts";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
+import { isRemoteOnlyBuild } from "../../hostedPairing";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -1841,6 +1842,7 @@ function DesktopPrimaryBackendSettings() {
 }
 
 export function ConnectionsSettings() {
+  const remoteOnlyBuild = isRemoteOnlyBuild();
   const desktopBridge = window.desktopBridge;
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
@@ -3112,8 +3114,8 @@ export function ConnectionsSettings() {
 
   return (
     <SettingsPageContainer>
-      {desktopBridge ? <DesktopPrimaryBackendSettings /> : null}
-      {canManageLocalBackend ? (
+      {desktopBridge && !remoteOnlyBuild ? <DesktopPrimaryBackendSettings /> : null}
+      {canManageLocalBackend && !remoteOnlyBuild ? (
         <>
           <SettingsSection title="This environment">
             {primaryVersionMismatch || primaryServerUpdateState.status !== "idle" ? (

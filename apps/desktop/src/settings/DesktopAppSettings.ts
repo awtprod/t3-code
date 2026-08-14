@@ -220,9 +220,13 @@ export class DesktopAppSettings extends Context.Service<
   }
 >()("@t3tools/desktop/settings/DesktopAppSettings") {}
 
-export function resolveDefaultDesktopSettings(appVersion: string): DesktopSettings {
+export function resolveDefaultDesktopSettings(
+  appVersion: string,
+  remoteOnlyBuild = false,
+): DesktopSettings {
   return {
     ...DEFAULT_DESKTOP_SETTINGS,
+    ...(remoteOnlyBuild ? { primaryBackendMode: "remote" as const } : {}),
     updateChannel: resolveDefaultDesktopUpdateChannel(appVersion),
   };
 }

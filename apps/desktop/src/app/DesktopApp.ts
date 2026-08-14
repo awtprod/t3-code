@@ -235,6 +235,23 @@ const bootstrap = Effect.gen(function* () {
   const desktopWindow = yield* DesktopWindow.DesktopWindow;
   yield* logBootstrapInfo("bootstrap start");
 
+  if (environment.remoteOnlyBuild) {
+    const electronProtocol = yield* ElectronProtocol.ElectronProtocol;
+    yield* installDesktopIpcHandlers();
+    const staticClientOrigin = new URL("https://remote-only-client.invalid/");
+    yield* electronProtocol.registerDesktopProtocol({
+      scheme: ElectronProtocol.getDesktopScheme(environment.isDevelopment),
+      targetOrigin: staticClientOrigin,
+      backendOrigin: staticClientOrigin,
+      clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
+      staticClientRoot: environment.localClientRoot,
+    });
+    yield* logBootstrapInfo("bootstrap remote-only shell ready");
+    yield* desktopWindow.handleBackendReady(staticClientOrigin);
+    return;
+  }
+
+
   const settings = yield* desktopSettings.get;
   const startupPlan = DesktopAppSettings.resolveDesktopStartupPlan(settings);
   if (startupPlan.remoteOnly) {
@@ -401,7 +418,7 @@ const startup = Effect.gen(function* () {
 
   const settings = yield* desktopSettings.load;
   const startupPlan = DesktopAppSettings.resolveDesktopStartupPlan(settings);
-  if (!startupPlan.remoteOnly) {
+  if (!environment.remoteOnlyBuild && !startupPlan.remoteOnly) {
     yield* shellEnvironment.installIntoProcess;
   }
   const hasCommandLinePasswordStore =

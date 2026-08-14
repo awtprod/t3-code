@@ -97,6 +97,7 @@ import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import { isRemoteOnlyDesktopBuild } from "../app/remoteOnlyBuild.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
@@ -274,7 +275,7 @@ export const layer = Layer.effect(
       },
     );
 
-    const primary = !startupPlan.constructLocalPrimary
+    const primary = isRemoteOnlyDesktopBuild || !startupPlan.constructLocalPrimary
       ? Option.none<DesktopBackendInstance>()
       : Option.some(
           yield* DesktopBackendManager.makeBackendInstance({
