@@ -9,9 +9,13 @@ describe("server bundle dependencies", () => {
     expect(shouldBundleCliDependency("@command-center/core/domain")).toBe(true);
   });
 
-  it("keeps registry runtime dependencies external", () => {
-    expect(shouldBundleCliDependency("effect")).toBe(false);
-    expect(shouldBundleCliDependency("@effect/platform-node")).toBe(false);
+  it("bundles registry runtime dependencies under the inverted scheme", () => {
+    // Upstream inverted the bundling scheme: everything is inlined except the
+    // packages in scripts/lib/cli-external-packages.ts that genuinely cannot be.
+    expect(shouldBundleCliDependency("effect")).toBe(true);
+    expect(shouldBundleCliDependency("@effect/platform-node")).toBe(true);
+    expect(shouldBundleCliDependency("node-pty")).toBe(false);
+    expect(shouldBundleCliDependency("node:fs")).toBe(false);
   });
 
   it("does not expose private workspace packages as runtime dependencies", () => {

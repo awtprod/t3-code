@@ -19,21 +19,6 @@ function isIpLiteral(host: string): boolean {
   }
 }
 
-function isIpLiteral(host: string): boolean {
-  try {
-    const hostname = new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, "");
-    if (hostname.includes(":")) return true;
-
-    const octets = hostname.split(".");
-    return (
-      octets.length === 4 &&
-      octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
-    );
-  } catch {
-    return false;
-  }
-}
-
 export class PairingQrPayloadEmptyError extends Schema.TaggedErrorClass<PairingQrPayloadEmptyError>()(
   "PairingQrPayloadEmptyError",
   {},

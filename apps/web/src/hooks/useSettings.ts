@@ -30,7 +30,6 @@ import {
   isAtomCommandInterrupted,
 } from "@t3tools/client-runtime/state/runtime";
 import { APP_STAGE_LABEL } from "~/branding";
-import { resolveSidebarV2Enabled } from "~/branding.logic";
 import { ensureLocalApi } from "~/localApi";
 import {
   getThemeDefinition,

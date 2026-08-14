@@ -60,7 +60,7 @@ describe("PreviewEmptyState", () => {
       { url: "http://localhost:5173/", lastVisitedAt: Date.now(), title: "Recent Local" },
     ]);
     expect(html).toContain("Recently used");
-    expect(html).toContain("Local servers");
+    expect(html).toContain("Environment servers");
     expect(html).toContain("myapp.test/admin#users");
     expect(html).toContain("Admin");
     expect(html).toContain("Recent Local");
@@ -71,7 +71,7 @@ describe("PreviewEmptyState", () => {
     mocks.servers = [];
     const html = render([{ url: "https://myapp.test/", lastVisitedAt: 0 }]);
     expect(html).toContain("Recently used");
-    expect(html).not.toContain("Local servers");
+    expect(html).not.toContain("Environment servers");
   });
 
   it("keeps the original empty state when both groups are empty", () => {

@@ -407,6 +407,7 @@ it.effect("ProviderServiceLive propagates targeted-interrupt directory persisten
       Layer.provide(directoryLayer),
       Layer.provide(defaultServerSettingsLayer),
       Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(serverConfigTestLayer),
       Layer.provide(
         Layer.succeed(
           ProviderEventLoggers.ProviderEventLoggers,
@@ -462,6 +463,7 @@ it.effect("ProviderServiceLive propagates targeted-interrupt registry failures",
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
         Layer.provideMerge(AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -775,6 +777,7 @@ const makeContinuationCompatEnv = ({ keyA, keyB }: { keyA: string; keyB: string 
     Layer.provide(directoryLayer),
     Layer.provide(defaultServerSettingsLayer),
     Layer.provide(AnalyticsService.layerTest),
+    Layer.provide(serverConfigTestLayer),
     Layer.provide(
       Layer.succeed(
         ProviderEventLoggers.ProviderEventLoggers,

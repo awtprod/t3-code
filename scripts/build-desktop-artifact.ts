@@ -2473,6 +2473,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       (error) =>
         options.platform === "win" &&
         options.target === "nsis" &&
+        error._tag === "BuildCommandFailedError" &&
         isRetryableWindowsNsisOutputLockFailure(error),
       () => retryBuilderAfterWindowsOutputLock(),
     ),
