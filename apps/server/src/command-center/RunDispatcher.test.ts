@@ -25,6 +25,7 @@ import type * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import {
   type DispatcherDependencies,
   RunDispatcherError,
+  commandCenterModelSelection,
   type StoredRun,
   type StoredSpace,
   isManagedRepositoryWorkspacePath,
@@ -43,6 +44,37 @@ const fixtureTime = "2026-01-01T00:00:00.000Z";
 const runId = RunId.make("run-example");
 const spaceId = SpaceId.make("space-example");
 const repositoryId = RepositoryId.make("repository-example");
+
+it("uses high reasoning for the Command Center Terra default", () => {
+  expect(commandCenterModelSelection({ providerId: "codex", modelId: "gpt-5.6-terra" })).toEqual({
+    instanceId: "codex",
+    model: "gpt-5.6-terra",
+    options: [{ id: "reasoningEffort", value: "high" }],
+  });
+  expect(commandCenterModelSelection({ providerId: "claude", modelId: "sonnet" })).toEqual({
+    instanceId: "claude",
+    model: "sonnet",
+  });
+});
+
+it("gives only top-level interactive runs the router policy", () => {
+  const topLevel = renderThreadMessage({
+    space,
+    route: readyRoute,
+    commandText: "Fix the project",
+    routerRole: true,
+  });
+  const child = renderThreadMessage({
+    space,
+    route: readyRoute,
+    commandText: "Fix the project",
+    routerRole: false,
+  });
+
+  expect(topLevel).toContain("Command Center router role");
+  expect(topLevel).toContain("isolated worktree or the shared workspace");
+  expect(child).not.toContain("Command Center router role");
+});
 
 const readyRoute = decodeRoute({
   commandId: "command-example",

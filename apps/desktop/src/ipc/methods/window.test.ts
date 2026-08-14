@@ -8,6 +8,7 @@ import type * as Electron from "electron";
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
+import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
 import { getLocalEnvironmentBootstraps, getWindowFullscreenState } from "./window.ts";
 
 const readyWslConfig: DesktopBackendManager.DesktopBackendStartConfig = {
@@ -49,7 +50,35 @@ const defaultWslInstance: DesktopBackendManager.DesktopBackendInstance = {
   waitForReady: () => Effect.succeed(true),
 };
 
+const desktopSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
+  get: Effect.succeed(DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS),
+} as unknown as DesktopAppSettings.DesktopAppSettings["Service"]);
+
+const withDesktopSettings = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(Effect.provide(desktopSettingsLayer));
+
 describe("getLocalEnvironmentBootstraps", () => {
+  it.effect("synthesizes the remote primary bootstrap from settings with an empty pool", () => {
+    const remoteSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
+      get: Effect.succeed({
+        ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+        primaryBackendMode: "remote",
+        remoteBackendUrl: "https://remote.example.test/base/",
+      }),
+    } as unknown as DesktopAppSettings.DesktopAppSettings["Service"]);
+    return Effect.gen(function* () {
+      assert.deepEqual(yield* getLocalEnvironmentBootstraps.handler(), [
+        {
+          id: "primary",
+          label: "remote.example.test",
+          runningDistro: null,
+          httpBaseUrl: "https://remote.example.test/base/",
+          wsBaseUrl: "wss://remote.example.test/base/",
+        },
+      ]);
+    }).pipe(Effect.provide(Layer.merge(DesktopBackendPool.layerTest([]), remoteSettingsLayer)));
+  });
+
   it.effect("publishes the concrete running distro without replacing the stable instance id", () =>
     Effect.gen(function* () {
       const result = yield* getLocalEnvironmentBootstraps.handler();
@@ -64,7 +93,10 @@ describe("getLocalEnvironmentBootstraps", () => {
           bootstrapToken: "bootstrap-token",
         },
       ]);
-    }).pipe(Effect.provide(DesktopBackendPool.layerTest([defaultWslInstance]))),
+    }).pipe(
+      Effect.provide(DesktopBackendPool.layerTest([defaultWslInstance])),
+      withDesktopSettings,
+    ),
   );
 
   it.effect("publishes a pending bootstrap only while a transient retry is scheduled", () => {
@@ -99,7 +131,7 @@ describe("getLocalEnvironmentBootstraps", () => {
           wsBaseUrl: null,
         },
       ]);
-    }).pipe(Effect.provide(DesktopBackendPool.layerTest([retryingInstance])));
+    }).pipe(Effect.provide(DesktopBackendPool.layerTest([retryingInstance])), withDesktopSettings);
   });
 
   it.effect("omits a bounded transient bootstrap after retries stop", () => {
@@ -127,7 +159,7 @@ describe("getLocalEnvironmentBootstraps", () => {
     return Effect.gen(function* () {
       const result = yield* getLocalEnvironmentBootstraps.handler();
       assert.deepEqual(result, []);
-    }).pipe(Effect.provide(DesktopBackendPool.layerTest([stoppedInstance])));
+    }).pipe(Effect.provide(DesktopBackendPool.layerTest([stoppedInstance])), withDesktopSettings);
   });
 });
 

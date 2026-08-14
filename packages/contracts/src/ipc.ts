@@ -499,6 +499,30 @@ export const DesktopWslStateSchema = Schema.Struct({
   preflightError: Schema.NullOr(Schema.String),
 });
 
+export const DesktopPrimaryBackendMode = Schema.Literals(["windows", "wsl", "remote"]);
+export type DesktopPrimaryBackendMode = typeof DesktopPrimaryBackendMode.Type;
+
+export const DesktopRemotePrimaryConfig = Schema.Struct({
+  httpBaseUrl: Schema.String,
+});
+export type DesktopRemotePrimaryConfig = typeof DesktopRemotePrimaryConfig.Type;
+
+export const DesktopPrimaryBackendState = Schema.Struct({
+  mode: DesktopPrimaryBackendMode,
+  remoteHttpBaseUrl: Schema.NullOr(Schema.String),
+  connectivity: Schema.Literals(["unknown", "checking", "connected", "unavailable"]),
+  localExecutionOverride: Schema.Boolean,
+  restartRequired: Schema.Boolean,
+});
+export type DesktopPrimaryBackendState = typeof DesktopPrimaryBackendState.Type;
+
+export const DesktopPrimaryBackendUpdate = Schema.Struct({
+  mode: DesktopPrimaryBackendMode,
+  remoteHttpBaseUrl: Schema.optionalKey(Schema.String),
+  restart: Schema.optionalKey(Schema.Boolean),
+});
+export type DesktopPrimaryBackendUpdate = typeof DesktopPrimaryBackendUpdate.Type;
+
 /**
  * Renderer-facing snapshot of a desktop preview tab. Mirrors the main-process
  * PreviewTabState shape but uses serialisable primitives only.
@@ -1024,7 +1048,7 @@ export interface DesktopBridge {
   // info (omits instances whose backend hasn't produced a config yet).
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
-  getLocalEnvironmentBearerToken: () => Promise<string>;
+  getLocalEnvironmentBearerToken: () => Promise<string | null>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   getConnectionCatalog?: () => Promise<string | null>;
@@ -1059,6 +1083,10 @@ export interface DesktopBridge {
   setWslBackendEnabled: (enabled: boolean) => Promise<DesktopWslState>;
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
+  getPrimaryBackendState: () => Promise<DesktopPrimaryBackendState>;
+  setPrimaryBackend: (input: DesktopPrimaryBackendUpdate) => Promise<DesktopPrimaryBackendState>;
+  retryRemotePrimary: (remoteHttpBaseUrl?: string) => Promise<DesktopPrimaryBackendState>;
+  startLocalExecutionOnce: () => Promise<void>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   /**
    * Multi-select JSON file picker that opens in the VS Code extensions

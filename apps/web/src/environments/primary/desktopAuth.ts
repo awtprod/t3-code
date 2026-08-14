@@ -1,4 +1,4 @@
-let desktopBearerTokenPromise: Promise<string> | null = null;
+let desktopBearerTokenPromise: Promise<string | null> | null = null;
 
 export function readDesktopPrimaryBearerToken(): Promise<string | null> {
   if (typeof window === "undefined") {

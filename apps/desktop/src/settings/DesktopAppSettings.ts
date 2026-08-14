@@ -1,6 +1,8 @@
 import {
+  DesktopPrimaryBackendMode as DesktopPrimaryBackendModeSchema,
   DesktopServerExposureModeSchema,
   DesktopUpdateChannelSchema,
+  type DesktopPrimaryBackendMode,
   type DesktopServerExposureMode,
   type DesktopUpdateChannel,
 } from "@t3tools/contracts";
@@ -48,11 +50,38 @@ export interface DesktopSettings {
   // this requires a desktop restart because the pool's primary spec is
   // chosen once at layer init.
   readonly wslOnly: boolean;
+  readonly primaryBackendMode: DesktopPrimaryBackendMode;
+  readonly remoteBackendUrl: string | null;
 }
 
 export interface DesktopSettingsChange {
   readonly settings: DesktopSettings;
   readonly changed: boolean;
+}
+
+export const LOCAL_EXECUTION_ONCE_SWITCH = "--local-execution-once";
+
+export interface DesktopStartupPlan {
+  readonly remoteOnly: boolean;
+  readonly constructLocalPrimary: boolean;
+  readonly scanLocalPort: boolean;
+  readonly reconcileWsl: boolean;
+  readonly automaticLocalFallback: false;
+}
+
+export function resolveDesktopStartupPlan(
+  settings: DesktopSettings,
+  argv: ReadonlyArray<string> = process.argv,
+): DesktopStartupPlan {
+  const remoteOnly =
+    settings.primaryBackendMode === "remote" && !argv.includes(LOCAL_EXECUTION_ONCE_SWITCH);
+  return {
+    remoteOnly,
+    constructLocalPrimary: !remoteOnly,
+    scanLocalPort: !remoteOnly,
+    reconcileWsl: !remoteOnly,
+    automaticLocalFallback: false,
+  };
 }
 
 export const DEFAULT_TAILSCALE_SERVE_PORT = 443;
@@ -84,6 +113,8 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   wslBackendEnabled: false,
   wslDistro: null,
   wslOnly: false,
+  primaryBackendMode: "windows",
+  remoteBackendUrl: null,
 };
 
 const DesktopWindowBoundsDocument = Schema.Struct({
@@ -109,6 +140,8 @@ const DesktopSettingsDocument = Schema.Struct({
   wslMode: Schema.optionalKey(Schema.Literals(["local", "wsl"])),
   wslDistro: Schema.optionalKey(Schema.NullOr(Schema.String)),
   wslOnly: Schema.optionalKey(Schema.Boolean),
+  primaryBackendMode: Schema.optionalKey(DesktopPrimaryBackendModeSchema),
+  remoteBackendUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 
 type DesktopSettingsDocument = typeof DesktopSettingsDocument.Type;
@@ -175,6 +208,10 @@ export class DesktopAppSettings extends Context.Service<
     readonly setWslOnly: (
       enabled: boolean,
     ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+    readonly setPrimaryBackend: (input: {
+      readonly mode: DesktopPrimaryBackendMode;
+      readonly remoteBackendUrl?: string;
+    }) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
     readonly applyWslWindowsFallback: Effect.Effect<
       DesktopSettingsChange,
       DesktopSettingsWriteError
@@ -200,6 +237,19 @@ function normalizeWslDistro(value: unknown): string | null {
   return typeof value === "string" && isValidDistroName(value) ? value : null;
 }
 
+export function normalizeRemoteBackendUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (url.username || url.password || url.search || url.hash) return null;
+    url.pathname = url.pathname.replace(/\/*$/, "/");
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 export function normalizeMainWindowBounds(value: unknown): DesktopWindowBounds | null {
   return Option.getOrNull(decodeDesktopWindowBounds(value));
 }
@@ -222,6 +272,8 @@ function normalizeDesktopSettingsDocument(
   const wslBackendEnabled =
     parsed.wslBackendEnabled === true ||
     (parsed.wslBackendEnabled === undefined && parsed.wslMode === "wsl");
+  const primaryBackendMode =
+    parsed.primaryBackendMode ?? (parsed.wslOnly === true && wslBackendEnabled ? "wsl" : "windows");
 
   return {
     linuxPasswordStore: normalizeLinuxPasswordStorePreference(parsed.linuxPasswordStore),
@@ -237,7 +289,9 @@ function normalizeDesktopSettingsDocument(
     updateChannelConfiguredByUser,
     wslBackendEnabled,
     wslDistro: normalizeWslDistro(parsed.wslDistro),
-    wslOnly: parsed.wslOnly === true,
+    wslOnly: primaryBackendMode === "wsl",
+    primaryBackendMode,
+    remoteBackendUrl: normalizeRemoteBackendUrl(parsed.remoteBackendUrl),
   };
 }
 
@@ -279,6 +333,12 @@ function toDesktopSettingsDocument(
   }
   if (settings.wslOnly !== defaults.wslOnly) {
     document.wslOnly = settings.wslOnly;
+  }
+  if (settings.primaryBackendMode !== defaults.primaryBackendMode) {
+    document.primaryBackendMode = settings.primaryBackendMode;
+  }
+  if (settings.remoteBackendUrl !== defaults.remoteBackendUrl) {
+    document.remoteBackendUrl = settings.remoteBackendUrl;
   }
 
   return document;
@@ -362,12 +422,41 @@ function setWslDistro(settings: DesktopSettings, distro: string | null): Desktop
 }
 
 function setWslOnly(settings: DesktopSettings, enabled: boolean): DesktopSettings {
-  return settings.wslOnly === enabled
+  const primaryBackendMode = enabled ? "wsl" : "windows";
+  return settings.wslOnly === enabled && settings.primaryBackendMode === primaryBackendMode
     ? settings
     : {
         ...settings,
         wslOnly: enabled,
+        primaryBackendMode,
       };
+}
+
+function setPrimaryBackend(
+  settings: DesktopSettings,
+  input: { readonly mode: DesktopPrimaryBackendMode; readonly remoteBackendUrl?: string },
+): DesktopSettings {
+  const remoteBackendUrl =
+    input.remoteBackendUrl === undefined
+      ? settings.remoteBackendUrl
+      : normalizeRemoteBackendUrl(input.remoteBackendUrl);
+  const wslOnly = input.mode === "wsl";
+  const wslBackendEnabled = input.mode === "wsl" ? true : settings.wslBackendEnabled;
+  if (
+    settings.primaryBackendMode === input.mode &&
+    settings.remoteBackendUrl === remoteBackendUrl &&
+    settings.wslOnly === wslOnly &&
+    settings.wslBackendEnabled === wslBackendEnabled
+  ) {
+    return settings;
+  }
+  return {
+    ...settings,
+    primaryBackendMode: input.mode,
+    remoteBackendUrl,
+    wslOnly,
+    wslBackendEnabled,
+  };
 }
 
 function applyWslWindowsFallback(settings: DesktopSettings): DesktopSettings {
@@ -544,6 +633,12 @@ export const make = Effect.gen(function* () {
       persist((settings) => setWslOnly(settings, enabled)).pipe(
         Effect.withSpan("desktop.settings.setWslOnly", { attributes: { enabled } }),
       ),
+    setPrimaryBackend: (input) =>
+      persist((settings) => setPrimaryBackend(settings, input)).pipe(
+        Effect.withSpan("desktop.settings.setPrimaryBackend", {
+          attributes: { mode: input.mode },
+        }),
+      ),
     applyWslWindowsFallback: persist(applyWslWindowsFallback).pipe(
       Effect.withSpan("desktop.settings.applyWslWindowsFallback"),
     ),
@@ -585,6 +680,7 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
           update((settings) => setWslBackendEnabled(settings, enabled)),
         setWslDistro: (distro) => update((settings) => setWslDistro(settings, distro)),
         setWslOnly: (enabled) => update((settings) => setWslOnly(settings, enabled)),
+        setPrimaryBackend: (input) => update((settings) => setPrimaryBackend(settings, input)),
         applyWslWindowsFallback: update(applyWslWindowsFallback),
         applyWslWindowsFallbackInMemory: update(applyWslWindowsFallback),
       });

@@ -34,6 +34,8 @@ const DesktopSettingsPatch = Schema.Struct({
   wslMode: Schema.optionalKey(Schema.Literals(["local", "wsl"])),
   wslDistro: Schema.optionalKey(Schema.NullOr(Schema.String)),
   wslOnly: Schema.optionalKey(Schema.Boolean),
+  primaryBackendMode: Schema.optionalKey(Schema.Literals(["windows", "wsl", "remote"])),
+  remoteBackendUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 
 const decodeDesktopSettingsPatch = Schema.decodeEffect(Schema.fromJsonString(DesktopSettingsPatch));
@@ -91,6 +93,84 @@ function writeSettingsPatch(patch: typeof DesktopSettingsPatch.Type) {
 }
 
 describe("DesktopSettings", () => {
+  it("plans remote startup without local construction, port scanning, WSL, or fallback", () => {
+    const remote = DesktopAppSettings.resolveDesktopStartupPlan(
+      {
+        ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+        primaryBackendMode: "remote",
+        remoteBackendUrl: "https://remote.example.test/",
+      },
+      ["command-center.exe"],
+    );
+    assert.deepEqual(remote, {
+      remoteOnly: true,
+      constructLocalPrimary: false,
+      scanLocalPort: false,
+      reconcileWsl: false,
+      automaticLocalFallback: false,
+    });
+  });
+
+  it("plans local execution only for the explicit one-launch override", () => {
+    const settings = {
+      ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+      primaryBackendMode: "remote" as const,
+      remoteBackendUrl: "https://remote.example.test/",
+    };
+    const override = DesktopAppSettings.resolveDesktopStartupPlan(settings, [
+      "command-center.exe",
+      DesktopAppSettings.LOCAL_EXECUTION_ONCE_SWITCH,
+    ]);
+    assert.isFalse(override.remoteOnly);
+    assert.isTrue(override.constructLocalPrimary);
+    assert.isTrue(override.scanLocalPort);
+  });
+
+  it("normalizes HTTP remote endpoints and rejects unsafe URL forms", () => {
+    assert.equal(
+      DesktopAppSettings.normalizeRemoteBackendUrl(" https://server.example.test/command-center "),
+      "https://server.example.test/command-center/",
+    );
+    assert.isNull(DesktopAppSettings.normalizeRemoteBackendUrl("ssh://server.example.test"));
+    assert.isNull(DesktopAppSettings.normalizeRemoteBackendUrl("https://user@server.example.test"));
+    assert.isNull(DesktopAppSettings.normalizeRemoteBackendUrl("https://server.example.test/?x=1"));
+    assert.isNull(DesktopAppSettings.normalizeRemoteBackendUrl("not a url"));
+  });
+
+  it.effect("migrates legacy WSL-only settings and defaults all other installs to Windows", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        yield* writeSettingsPatch({ wslBackendEnabled: true, wslOnly: true });
+        assert.equal((yield* settings.load).primaryBackendMode, "wsl");
+
+        yield* writeSettingsPatch({ wslBackendEnabled: true, wslOnly: false });
+        assert.equal((yield* settings.load).primaryBackendMode, "windows");
+      }),
+    ),
+  );
+
+  it.effect("persists the remote primary representation without legacy account switching", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        const changed = yield* settings.setPrimaryBackend({
+          mode: "remote",
+          remoteBackendUrl: "https://server.example.test",
+        });
+        assert.equal(changed.settings.primaryBackendMode, "remote");
+        assert.equal(changed.settings.remoteBackendUrl, "https://server.example.test/");
+        const persisted = yield* decodeDesktopSettingsPatch(
+          yield* fileSystem.readFileString(environment.desktopSettingsPath),
+        );
+        assert.equal(persisted.primaryBackendMode, "remote");
+        assert.equal(persisted.remoteBackendUrl, "https://server.example.test/");
+      }),
+    ),
+  );
+
   it.effect("loads defaults when no settings file exists", () =>
     withSettings(
       Effect.gen(function* () {
@@ -105,6 +185,8 @@ describe("DesktopSettings", () => {
     assert.deepEqual(
       DesktopAppSettings.resolveDefaultDesktopSettings("0.0.17-nightly.20260415.1"),
       {
+        primaryBackendMode: "windows",
+        remoteBackendUrl: null,
         linuxPasswordStore: "auto",
         mainWindowBounds: null,
         mainWindowMaximized: false,
@@ -134,6 +216,8 @@ describe("DesktopSettings", () => {
         });
 
         assert.deepEqual(yield* settings.load, {
+          primaryBackendMode: "windows",
+          remoteBackendUrl: null,
           linuxPasswordStore: "gnome-libsecret",
           mainWindowBounds: null,
           mainWindowMaximized: false,
@@ -241,6 +325,8 @@ describe("DesktopSettings", () => {
         );
 
         assert.deepEqual(yield* settings.load, {
+          primaryBackendMode: "windows",
+          remoteBackendUrl: null,
           linuxPasswordStore: "auto",
           mainWindowBounds: { x: 120, y: 80, width: 1280, height: 900 },
           mainWindowMaximized: false,
@@ -297,6 +383,8 @@ describe("DesktopSettings", () => {
           );
 
           assert.deepEqual(yield* settings.load, {
+            primaryBackendMode: "windows",
+            remoteBackendUrl: null,
             linuxPasswordStore: "auto",
             mainWindowBounds: null,
             mainWindowMaximized: false,
@@ -345,6 +433,8 @@ describe("DesktopSettings", () => {
         });
 
         assert.deepEqual(yield* settings.load, {
+          primaryBackendMode: "windows",
+          remoteBackendUrl: null,
           linuxPasswordStore: "auto",
           mainWindowBounds: null,
           mainWindowMaximized: false,
@@ -373,6 +463,8 @@ describe("DesktopSettings", () => {
         });
 
         assert.deepEqual(yield* settings.load, {
+          primaryBackendMode: "windows",
+          remoteBackendUrl: null,
           linuxPasswordStore: "auto",
           mainWindowBounds: null,
           mainWindowMaximized: false,
@@ -400,6 +492,8 @@ describe("DesktopSettings", () => {
         });
 
         assert.deepEqual(yield* settings.load, {
+          primaryBackendMode: "windows",
+          remoteBackendUrl: null,
           linuxPasswordStore: "auto",
           mainWindowBounds: null,
           mainWindowMaximized: false,

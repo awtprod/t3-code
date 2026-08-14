@@ -9,8 +9,9 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   Clock3Icon,
+  CommandIcon,
+  InboxIcon,
   PanelRightIcon,
-  SlidersHorizontalIcon,
   SparklesIcon,
   TriangleAlertIcon,
   WifiIcon,
@@ -18,7 +19,7 @@ import {
   WorkflowIcon,
   XIcon,
 } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -34,8 +35,6 @@ import type {
   CommandCenterMessage,
   CommandCenterNeedsYouItem,
   CommandCenterRisk,
-  CommandCenterRouteControl,
-  CommandCenterRouteOption,
   CommandCenterRouteReceipt,
   CommandCenterRouteSource,
   CommandCenterShellProps,
@@ -64,8 +63,6 @@ const RISK_VARIANT: Record<CommandCenterRisk, "error" | "success" | "warning"> =
   low: "success",
   reversible: "warning",
 };
-
-const AUTO_ROUTE_VALUE = "__command_center_auto__";
 
 export function shouldSubmitCommandComposerOnKeyDown(input: {
   readonly key: string;
@@ -136,6 +133,7 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
                     : "Route ready"}
         </span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground">
+          {receipt.executionTargetName !== undefined ? `${receipt.executionTargetName} · ` : ""}
           {receipt.spaceName}
           {receipt.repositoryName ? ` / ${receipt.repositoryName}` : ""} · {receipt.providerName} ·{" "}
           {receipt.modelName}
@@ -170,7 +168,10 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
             {RISK_LABEL[receipt.risk]}
           </Badge>
         </div>
-        <div className="mt-2 grid min-w-0 grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="mt-2 grid min-w-0 grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
+          {receipt.executionTargetName !== undefined && (
+            <RouteFact label="Runs on" source="classifier" value={receipt.executionTargetName} />
+          )}
           <RouteFact label="Space" source={receipt.sources.space} value={receipt.spaceName} />
           {receipt.repositoryName !== undefined && (
             <RouteFact
@@ -216,23 +217,58 @@ export function Messages({
   messages,
   receipt,
   onOpenLinkedThread,
+  onClearTranscript,
+  context,
+  conversations,
+  onOpenNeedsYouItem,
+  onOpenRun,
+  onOpenTodayItem,
+  onUseSuggestion,
+  selectedSpaceId,
+  selectedSpaceName,
 }: {
   readonly messages: readonly CommandCenterMessage[];
   readonly receipt: CommandCenterRouteReceipt;
-  readonly onOpenLinkedThread?: ((threadId: string) => void) | undefined;
+  readonly onOpenLinkedThread?: ((threadId: string, environmentId?: string) => void) | undefined;
+  readonly onClearTranscript?: (() => void) | undefined;
+  readonly context?: CommandCenterContext | undefined;
+  readonly conversations?: CommandCenterShellProps["conversations"] | undefined;
+  readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
+  readonly onOpenRun?: ((runId: string) => void) | undefined;
+  readonly onOpenTodayItem?: ((itemId: string) => void) | undefined;
+  readonly onUseSuggestion?: ((prompt: string) => void) | undefined;
+  readonly selectedSpaceId?: string | undefined;
+  readonly selectedSpaceName?: string | undefined;
 }) {
   if (messages.length === 0) {
+    if (context !== undefined && conversations !== undefined) {
+      return (
+        <CommandCenterOverview
+          context={context}
+          conversations={conversations}
+          onOpenNeedsYouItem={onOpenNeedsYouItem}
+          onOpenRun={onOpenRun}
+          onOpenTodayItem={onOpenTodayItem}
+          onUseSuggestion={onUseSuggestion}
+          selectedSpaceId={selectedSpaceId}
+          selectedSpaceName={selectedSpaceName}
+        />
+      );
+    }
     return (
       <div className="mx-auto flex h-full w-full min-w-0 max-w-lg flex-col items-center justify-center overflow-hidden px-6 text-center">
         <span className="mb-4 flex size-12 items-center justify-center rounded-2xl border bg-card shadow-sm">
           <SparklesIcon className="size-5 text-primary" />
         </span>
         <h2 className="max-w-full text-pretty font-heading text-lg font-semibold">
-          What do you want to move forward?
+          {selectedSpaceName === undefined
+            ? "What do you want to move forward?"
+            : `${selectedSpaceName} is ready`}
         </h2>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          Start with a question, a task, or an idea. Command Center will show where it plans to
-          route the work before it begins.
+          {selectedSpaceName === undefined
+            ? "Start with a question, a task, or an idea. Command Center will show where it plans to route the work before it begins."
+            : "Your next command will be routed to this Space. Start with a question, task, or idea."}
         </p>
       </div>
     );
@@ -240,6 +276,20 @@ export function Messages({
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col px-5 pb-10 pt-7 sm:px-8">
+      {onClearTranscript !== undefined ? (
+        <div className="mb-4 flex justify-end">
+          <Button
+            aria-label="Clear command transcript"
+            onClick={onClearTranscript}
+            size="xs"
+            type="button"
+            variant="ghost"
+          >
+            <XIcon />
+            Clear
+          </Button>
+        </div>
+      ) : null}
       {messages.map((message) => {
         if (message.author === "user") {
           return (
@@ -283,7 +333,7 @@ export function Messages({
                 <Button
                   onClick={() => {
                     if (message.linkedThreadId !== undefined) {
-                      onOpenLinkedThread?.(message.linkedThreadId);
+                      onOpenLinkedThread?.(message.linkedThreadId, message.linkedEnvironmentId);
                     }
                   }}
                   size="xs"
@@ -302,63 +352,242 @@ export function Messages({
   );
 }
 
-function RouteSelector({
-  control,
-  label,
-  onChange,
-  options,
-  value,
-}: {
-  readonly control: CommandCenterRouteControl;
+interface CommandCenterSuggestion {
   readonly label: string;
-  readonly onChange?:
-    | ((control: CommandCenterRouteControl, value: string | undefined) => void)
-    | undefined;
-  readonly options: readonly CommandCenterRouteOption[];
-  readonly value?: string | undefined;
+  readonly detail: string;
+  readonly prompt: string;
+}
+
+export function buildCommandCenterSuggestions(input: {
+  readonly needsYouCount: number;
+  readonly activeRunCount: number;
+  readonly todayCount: number;
+  readonly failedRunCount: number;
+  readonly unhealthyConnectionCount: number;
+}): readonly CommandCenterSuggestion[] {
+  const suggestions: CommandCenterSuggestion[] = [];
+  if (input.needsYouCount > 0) {
+    suggestions.push({
+      label: `Prioritize ${input.needsYouCount} attention item${input.needsYouCount === 1 ? "" : "s"}`,
+      detail: "Review what is blocked and recommend the best order to handle it.",
+      prompt:
+        "Review everything that needs my attention, prioritize it, and tell me what to handle first.",
+    });
+  }
+  if (input.failedRunCount > 0) {
+    suggestions.push({
+      label: `Recover ${input.failedRunCount} failed run${input.failedRunCount === 1 ? "" : "s"}`,
+      detail: "Diagnose what failed and propose the safest recovery path.",
+      prompt:
+        "Review my failed Command Center runs, explain the likely causes, and offer recovery options.",
+    });
+  }
+  if (input.activeRunCount > 0) {
+    suggestions.push({
+      label: "Summarize active work",
+      detail: "Get a concise progress report and identify anything stalled.",
+      prompt:
+        "Give me a concise status update on active work and flag anything that looks stalled.",
+    });
+  }
+  if (input.todayCount > 0) {
+    suggestions.push({
+      label: "Plan the rest of today",
+      detail: "Turn today’s commitments into a realistic order of operations.",
+      prompt: "Review what is scheduled or due today and help me make a practical plan.",
+    });
+  }
+  if (input.unhealthyConnectionCount > 0) {
+    suggestions.push({
+      label: "Check connection health",
+      detail: "Identify degraded integrations and what they may be blocking.",
+      prompt: "Check my Command Center connections, explain what is unhealthy, and suggest fixes.",
+    });
+  }
+
+  const evergreen: readonly CommandCenterSuggestion[] = [
+    {
+      label: "Recommend my next move",
+      detail: "Review current context and identify the highest-value next action.",
+      prompt:
+        "Review my current Command Center context and recommend the most valuable thing to do next.",
+    },
+    {
+      label: "Find something to automate",
+      detail: "Look for recurring work that could run without manual effort.",
+      prompt: "Review my current work and suggest one useful recurring task I should automate.",
+    },
+    {
+      label: "Run a quick health check",
+      detail: "Look for stale work, failures, or configuration that deserves attention.",
+      prompt: "Run a quick Command Center health check and surface anything I should know about.",
+    },
+  ];
+  for (const suggestion of evergreen) {
+    if (suggestions.length >= 3) break;
+    suggestions.push(suggestion);
+  }
+  return suggestions.slice(0, 3);
+}
+
+function OverviewList({
+  empty,
+  items,
+  onOpen,
+  title,
+}: {
+  readonly empty: string;
+  readonly items: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly detail: string;
+  }[];
+  readonly onOpen?: ((id: string) => void) | undefined;
+  readonly title: string;
 }) {
-  const selected = options.find((option) => option.id === value);
   return (
-    <Select
-      disabled={onChange === undefined}
-      modal={false}
-      onValueChange={(nextValue) =>
-        onChange?.(
-          control,
-          nextValue === null || nextValue === AUTO_ROUTE_VALUE ? undefined : nextValue,
-        )
-      }
-      value={value ?? AUTO_ROUTE_VALUE}
-    >
-      <SelectTrigger
-        aria-label={`${label} route selection`}
-        className="h-7 min-h-7 w-auto max-w-full min-w-0 gap-1 rounded-md px-2 text-[0.6875rem] font-medium"
-        size="xs"
-      >
-        <span className="truncate text-muted-foreground">{label}:</span>
-        <span className="max-w-28 truncate">{selected?.label ?? "Auto"}</span>
-      </SelectTrigger>
-      <SelectPopup align="start" alignItemWithTrigger={false} className="min-w-56">
-        <SelectItem value={AUTO_ROUTE_VALUE}>
-          <span className="flex flex-col">
-            <span>Auto</span>
-            <span className="text-[0.6875rem] text-muted-foreground">Use routing policy</span>
-          </span>
-        </SelectItem>
-        {options.map((option) => (
-          <SelectItem key={option.id} value={option.id}>
-            <span className="flex min-w-0 flex-col">
-              <span className="truncate">{option.label}</span>
-              {option.detail !== undefined && (
-                <span className="truncate text-[0.6875rem] text-muted-foreground">
-                  {option.detail}
+    <section className="min-w-0 rounded-2xl border border-border/70 bg-card/45 p-4">
+      <h3 className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        {title}
+      </h3>
+      {items.length === 0 ? (
+        <p className="mt-3 text-sm text-muted-foreground">{empty}</p>
+      ) : (
+        <div className="mt-2 space-y-1">
+          {items.slice(0, 3).map((item) => (
+            <button
+              className="group flex w-full items-start gap-2 rounded-xl px-2 py-2 text-left hover:bg-accent"
+              key={item.id}
+              onClick={() => onOpen?.(item.id)}
+              type="button"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="line-clamp-1 block text-sm font-medium">{item.title}</span>
+                <span className="mt-0.5 line-clamp-1 block text-xs text-muted-foreground">
+                  {item.detail}
                 </span>
-              )}
-            </span>
-          </SelectItem>
-        ))}
-      </SelectPopup>
-    </Select>
+              </span>
+              <ChevronRightIcon className="mt-1 size-3.5 shrink-0 text-muted-foreground opacity-50 group-hover:opacity-100" />
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CommandCenterOverview({
+  context,
+  conversations,
+  onOpenNeedsYouItem,
+  onOpenRun,
+  onOpenTodayItem,
+  onUseSuggestion,
+  selectedSpaceId,
+  selectedSpaceName,
+}: {
+  readonly context: CommandCenterContext;
+  readonly conversations: CommandCenterShellProps["conversations"];
+  readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
+  readonly onOpenRun?: ((runId: string) => void) | undefined;
+  readonly onOpenTodayItem?: ((itemId: string) => void) | undefined;
+  readonly onUseSuggestion?: ((prompt: string) => void) | undefined;
+  readonly selectedSpaceId?: string | undefined;
+  readonly selectedSpaceName?: string | undefined;
+}) {
+  const needsYou = context.needsYou.filter(
+    (item) => selectedSpaceId === undefined || item.spaceId === selectedSpaceId,
+  );
+  const activeRuns = context.activeRuns.filter(
+    (run) => selectedSpaceName === undefined || run.spaceName === selectedSpaceName,
+  );
+  const today = context.today.filter(
+    (item) => selectedSpaceId === undefined || item.spaceId === selectedSpaceId,
+  );
+  const failedRunCount = conversations.filter(
+    (conversation) =>
+      conversation.status === "failed" &&
+      (selectedSpaceId === undefined || conversation.spaceId === selectedSpaceId),
+  ).length;
+  const suggestions = buildCommandCenterSuggestions({
+    needsYouCount: needsYou.length,
+    activeRunCount: activeRuns.length,
+    todayCount: today.length,
+    failedRunCount,
+    unhealthyConnectionCount: context.connections.filter(
+      (connection) => connection.status !== "healthy",
+    ).length,
+  });
+
+  return (
+    <div className="mx-auto w-full max-w-5xl px-5 pb-10 pt-7 sm:px-8">
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <p className="text-xs font-medium text-muted-foreground">
+            {selectedSpaceName ?? "Across all Spaces"}
+          </p>
+          <h2 className="mt-1 font-heading text-xl font-semibold">A useful place to start</h2>
+        </div>
+        <span className="hidden text-xs text-muted-foreground sm:block">
+          Updated from live context
+        </span>
+      </div>
+
+      <section className="mt-5 rounded-2xl border border-primary/20 bg-primary/[0.035] p-4">
+        <div className="flex items-center gap-2">
+          <SparklesIcon className="size-4 text-primary" />
+          <h3 className="text-sm font-semibold">Suggested by Command</h3>
+        </div>
+        <div className="mt-3 grid gap-2 md:grid-cols-3">
+          {suggestions.map((suggestion) => (
+            <button
+              className="rounded-xl border border-border/70 bg-background/70 p-3 text-left transition-colors hover:bg-accent"
+              key={suggestion.label}
+              onClick={() => onUseSuggestion?.(suggestion.prompt)}
+              type="button"
+            >
+              <span className="block text-sm font-medium">{suggestion.label}</span>
+              <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
+                {suggestion.detail}
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <OverviewList
+          empty="Nothing needs your attention."
+          items={needsYou.map((item) => ({
+            id: item.id,
+            title: item.title,
+            detail: `${item.spaceName} · ${item.detail ?? item.reason}`,
+          }))}
+          onOpen={onOpenNeedsYouItem}
+          title={`Needs you · ${needsYou.length}`}
+        />
+        <OverviewList
+          empty="No work is currently running."
+          items={activeRuns.map((run) => ({
+            id: run.id,
+            title: run.title,
+            detail: `${run.spaceName} · ${run.detail ?? run.status}`,
+          }))}
+          onOpen={onOpenRun}
+          title={`In progress · ${activeRuns.length}`}
+        />
+        <OverviewList
+          empty="Nothing else is scheduled today."
+          items={today.map((item) => ({
+            id: item.id,
+            title: item.title,
+            detail: item.timeLabel,
+          }))}
+          onOpen={onOpenTodayItem}
+          title={`Today · ${today.length}`}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -369,11 +598,11 @@ function Composer({
   configNotice,
   routeOptions,
   routeSelection,
-  receipt,
-  spaces,
   onDraftChange,
-  onRouteSelectionChange,
+  onModelSelectionChange,
+  onOpenProviderSettings,
   onSubmit,
+  inputRef,
 }: Pick<
   CommandCenterShellProps,
   | "draft"
@@ -382,16 +611,22 @@ function Composer({
   | "configNotice"
   | "onDraftChange"
   | "onSubmit"
-  | "onRouteSelectionChange"
+  | "onModelSelectionChange"
+  | "onOpenProviderSettings"
   | "routeOptions"
   | "routeSelection"
-  | "spaces"
-> & { readonly receipt: CommandCenterRouteReceipt }) {
-  const selectedSpace = spaces.find((space) => space.id === routeSelection.spaceId);
-  const selectedProvider = routeOptions.providers.find(
-    (provider) => provider.id === routeSelection.providerId,
+> & {
+  readonly inputRef: RefObject<HTMLTextAreaElement | null>;
+}) {
+  const selectedModel = routeOptions.models.find(
+    (model) =>
+      model.id === routeSelection.modelId &&
+      (model.providerId === undefined || model.providerId === routeSelection.providerId),
   );
-  const selectedModel = routeOptions.models.find((model) => model.id === routeSelection.modelId);
+  const modelValue =
+    routeSelection.providerId !== undefined && routeSelection.modelId !== undefined
+      ? `${routeSelection.providerId}\u0000${routeSelection.modelId}`
+      : null;
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const command = draft.trim();
@@ -441,67 +676,66 @@ function Composer({
             event.currentTarget.form?.requestSubmit();
           }}
           placeholder="Ask anything, @tag files/folders, $use skills, or / for commands"
+          ref={inputRef}
           rows={2}
           unstyled
           value={draft}
         />
         <div className="flex items-end justify-between gap-3 px-2 pb-2 sm:px-3 sm:pb-3">
           <div className="flex min-w-0 flex-1 items-center gap-2 overflow-visible">
-            <details className="group/route relative">
-              <summary className="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground [&::-webkit-details-marker]:hidden">
-                <SlidersHorizontalIcon className="size-3.5" />
-                <span>{selectedSpace?.name ?? "Auto route"}</span>
-                <ChevronDownIcon className="size-3 transition-transform group-open/route:rotate-180" />
-              </summary>
-              <div className="absolute bottom-9 left-0 z-30 w-[min(30rem,calc(100vw-3rem))] rounded-xl border bg-popover p-2 text-popover-foreground shadow-lg">
-                <div className="px-1 pb-2 text-xs font-medium">Route this command</div>
-                <div className="flex flex-wrap gap-1">
-                  <RouteSelector
-                    control="space"
-                    label="Space"
-                    onChange={onRouteSelectionChange}
-                    options={spaces.map((space) => ({ id: space.id, label: space.name }))}
-                    value={routeSelection.spaceId}
-                  />
-                  <RouteSelector
-                    control="repository"
-                    label="Repo"
-                    onChange={onRouteSelectionChange}
-                    options={routeOptions.repositories}
-                    value={routeSelection.repositoryId}
-                  />
-                  <RouteSelector
-                    control="project"
-                    label="Project"
-                    onChange={onRouteSelectionChange}
-                    options={routeOptions.projects}
-                    value={routeSelection.projectId}
-                  />
-                  <RouteSelector
-                    control="provider"
-                    label="Provider"
-                    onChange={onRouteSelectionChange}
-                    options={routeOptions.providers}
-                    value={routeSelection.providerId}
-                  />
-                  <RouteSelector
-                    control="model"
-                    label="Model"
-                    onChange={onRouteSelectionChange}
-                    options={routeOptions.models}
-                    value={routeSelection.modelId}
-                  />
-                </div>
-              </div>
-            </details>
-            <span aria-hidden="true" className="hidden h-5 w-px shrink-0 bg-border sm:block" />
-            <span className="hidden min-w-0 truncate px-1 text-xs text-muted-foreground sm:block">
-              {selectedProvider?.label ?? receipt.providerName} ·{" "}
-              {selectedModel?.label ?? receipt.modelName}
-            </span>
-            <Badge className="hidden md:inline-flex" size="sm" variant={RISK_VARIANT[receipt.risk]}>
-              {RISK_LABEL[receipt.risk]}
-            </Badge>
+            {routeOptions.models.length === 0 ? (
+              <Button
+                aria-label="Set up Codex provider"
+                className="h-8 min-h-8 rounded-lg px-2.5 text-xs font-medium"
+                onClick={onOpenProviderSettings}
+                type="button"
+                variant="outline"
+              >
+                Codex unavailable
+              </Button>
+            ) : (
+              <Select
+                disabled={onModelSelectionChange === undefined}
+                modal={false}
+                onValueChange={(value) => {
+                  if (value === null) return;
+                  const separator = value.indexOf("\u0000");
+                  if (separator <= 0) return;
+                  onModelSelectionChange?.(value.slice(0, separator), value.slice(separator + 1));
+                }}
+                value={modelValue}
+              >
+                <SelectTrigger
+                  aria-label="Model selection"
+                  className="h-8 min-h-8 w-auto max-w-64 gap-1.5 rounded-lg px-2.5 text-xs font-medium"
+                  size="xs"
+                >
+                  <span className="truncate">{selectedModel?.label ?? "Choose model"}</span>
+                </SelectTrigger>
+                <SelectPopup align="start" alignItemWithTrigger={false} className="min-w-64">
+                  {routeOptions.models.map((model) => {
+                    const providerId = model.providerId ?? routeSelection.providerId;
+                    if (providerId === undefined) return null;
+                    return (
+                      <SelectItem
+                        disabled={model.disabled}
+                        key={`${providerId}:${model.id}`}
+                        value={`${providerId}\u0000${model.id}`}
+                      >
+                        <span className="flex min-w-0 flex-col">
+                          <span className="truncate">{model.label}</span>
+                          {model.detail !== undefined ? (
+                            <span className="truncate text-[0.6875rem] text-muted-foreground">
+                              {model.detail}
+                            </span>
+                          ) : null}
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectPopup>
+              </Select>
+            )}
           </div>
           <Button
             aria-label={isSubmitting ? "Sending command" : "Send command"}
@@ -515,6 +749,155 @@ function Composer({
         </div>
       </form>
     </div>
+  );
+}
+
+function CommandCenterShortcuts({
+  context,
+  onCapture,
+  onCommand,
+  onSelectSpace,
+  selectedSpaceId,
+  spaces,
+}: Pick<
+  CommandCenterShellProps,
+  "context" | "onCapture" | "onSelectSpace" | "selectedSpaceId" | "spaces"
+> & { readonly onCommand: () => void }) {
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const [captureKind, setCaptureKind] = useState<"idea" | "task">("idea");
+  const [captureSpaceId, setCaptureSpaceId] = useState(selectedSpaceId ?? spaces[0]?.id ?? "");
+  const [captureTitle, setCaptureTitle] = useState("");
+  const [capturing, setCapturing] = useState(false);
+
+  const submitCapture = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const title = captureTitle.trim();
+    if (!title || !captureSpaceId || onCapture === undefined || capturing) return;
+    setCapturing(true);
+    const saved = await onCapture({ kind: captureKind, spaceId: captureSpaceId, title });
+    setCapturing(false);
+    if (!saved) return;
+    setCaptureTitle("");
+    setCaptureOpen(false);
+  };
+
+  return (
+    <section
+      aria-label="Command Center shortcuts"
+      className="shrink-0 border-b border-border/65 bg-background px-4 pb-3 pt-14 sm:px-6"
+    >
+      <div className="mx-auto w-full max-w-5xl">
+        <div className="flex items-center gap-2">
+          <Button onClick={onCommand} size="sm" type="button" variant="outline">
+            <CommandIcon />
+            Command
+          </Button>
+          <Button
+            aria-expanded={captureOpen}
+            disabled={spaces.length === 0 || onCapture === undefined}
+            onClick={() =>
+              setCaptureOpen((open) => {
+                if (!open) setCaptureSpaceId(selectedSpaceId ?? spaces[0]?.id ?? "");
+                return !open;
+              })
+            }
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <InboxIcon />
+            Capture
+          </Button>
+        </div>
+
+        <div
+          aria-label="Space shortcuts"
+          className="mt-3 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          <button
+            aria-pressed={selectedSpaceId === undefined}
+            className={cn(
+              "shrink-0 rounded-xl border px-3 py-2 text-left transition-colors hover:bg-accent",
+              selectedSpaceId === undefined && "border-foreground/25 bg-accent",
+            )}
+            onClick={() => onSelectSpace?.("")}
+            type="button"
+          >
+            <span className="block text-xs font-semibold">All Spaces</span>
+            <span className="mt-0.5 block text-[0.6875rem] text-muted-foreground">
+              {context.needsYou.length} need you · {context.activeRuns.length} active
+            </span>
+          </button>
+          {spaces.map((space) => {
+            const activeCount = context.activeRuns.filter(
+              (run) => run.spaceName === space.name,
+            ).length;
+            return (
+              <button
+                aria-pressed={selectedSpaceId === space.id}
+                className={cn(
+                  "min-w-36 shrink-0 rounded-xl border px-3 py-2 text-left transition-colors hover:bg-accent",
+                  selectedSpaceId === space.id && "border-foreground/25 bg-accent",
+                )}
+                key={space.id}
+                onClick={() => onSelectSpace?.(space.id)}
+                type="button"
+              >
+                <span className="block truncate text-xs font-semibold">{space.name}</span>
+                <span className="mt-0.5 block text-[0.6875rem] text-muted-foreground">
+                  {space.unreadCount ?? 0} need you · {activeCount} active
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {captureOpen ? (
+          <form
+            aria-label="Quick capture"
+            className="mt-3 grid gap-2 rounded-xl border bg-card p-3 sm:grid-cols-[8rem_10rem_1fr_auto]"
+            onSubmit={(event) => void submitCapture(event)}
+          >
+            <select
+              aria-label="Capture type"
+              className="h-9 rounded-lg border bg-background px-2 text-xs"
+              onChange={(event) => setCaptureKind(event.target.value as "idea" | "task")}
+              value={captureKind}
+            >
+              <option value="idea">Idea</option>
+              <option value="task">Task</option>
+            </select>
+            <select
+              aria-label="Capture Space"
+              className="h-9 rounded-lg border bg-background px-2 text-xs"
+              onChange={(event) => setCaptureSpaceId(event.target.value)}
+              value={captureSpaceId}
+            >
+              {spaces.map((space) => (
+                <option key={space.id} value={space.id}>
+                  {space.name}
+                </option>
+              ))}
+            </select>
+            <input
+              aria-label="Capture title"
+              autoFocus
+              className="h-9 min-w-0 rounded-lg border bg-background px-3 text-sm outline-none focus:border-ring"
+              onChange={(event) => setCaptureTitle(event.target.value)}
+              placeholder={captureKind === "idea" ? "Capture an idea" : "Capture a task"}
+              value={captureTitle}
+            />
+            <Button
+              disabled={!captureTitle.trim() || !captureSpaceId || capturing}
+              size="sm"
+              type="submit"
+            >
+              {capturing ? "Saving…" : "Save"}
+            </Button>
+          </form>
+        ) : null}
+      </div>
+    </section>
   );
 }
 
@@ -541,15 +924,17 @@ function ContextButton({
   );
 }
 
-function NeedsYouRows({
+export function NeedsYouRows({
   items,
   onOpen,
+  onDismissNeedsYouItems,
   onDecideApproval,
   onReviewMemory,
   resolvingId,
 }: {
   readonly items: readonly CommandCenterNeedsYouItem[];
   readonly onOpen?: ((itemId: string) => void) | undefined;
+  readonly onDismissNeedsYouItems?: CommandCenterShellProps["onDismissNeedsYouItems"];
   readonly onDecideApproval?: CommandCenterShellProps["onDecideApproval"];
   readonly onReviewMemory?: CommandCenterShellProps["onReviewMemory"];
   readonly resolvingId?: string | undefined;
@@ -574,9 +959,26 @@ function NeedsYouRows({
     );
     if (item.action === undefined) {
       return (
-        <ContextButton key={item.id} onClick={() => onOpen?.(item.id)}>
-          {content}
-        </ContextButton>
+        <article className="rounded-xl hover:bg-accent" key={item.id}>
+          <button
+            className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left"
+            onClick={() => onOpen?.(item.id)}
+            type="button"
+          >
+            {content}
+          </button>
+          <div className="flex justify-end px-3 pb-2.5">
+            <Button
+              disabled={resolvingId === item.id || resolvingId === "dismiss-all"}
+              onClick={() => onDismissNeedsYouItems?.([item.id])}
+              size="xs"
+              type="button"
+              variant="ghost"
+            >
+              Dismiss
+            </Button>
+          </div>
+        </article>
       );
     }
 
@@ -777,6 +1179,7 @@ interface ContextRailProps {
   readonly onClose?: (() => void) | undefined;
   readonly onDecideApproval?: CommandCenterShellProps["onDecideApproval"];
   readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
+  readonly onDismissNeedsYouItems?: CommandCenterShellProps["onDismissNeedsYouItems"];
   readonly onOpenRun?: ((runId: string) => void) | undefined;
   readonly onOpenTodayItem?: ((itemId: string) => void) | undefined;
   readonly onOpenConnection?: ((connectionId: string) => void) | undefined;
@@ -784,11 +1187,12 @@ interface ContextRailProps {
   readonly resolvingNeedsYouId?: string | undefined;
 }
 
-function ContextRail({
+export function ContextRail({
   context,
   onClose,
   onDecideApproval,
   onOpenNeedsYouItem,
+  onDismissNeedsYouItems,
   onOpenRun,
   onOpenTodayItem,
   onOpenConnection,
@@ -796,6 +1200,9 @@ function ContextRail({
   resolvingNeedsYouId,
 }: ContextRailProps) {
   const [activeView, setActiveView] = useState<"needs-you" | "runs" | "context">("needs-you");
+  const dismissibleNeedsYouIds = context.needsYou
+    .filter((item) => item.action === undefined)
+    .map((item) => item.id);
   return (
     <div className="flex h-full min-h-0 flex-col bg-card text-card-foreground">
       <div className="drag-region flex h-[var(--workspace-topbar-height)] shrink-0 items-end border-b px-2">
@@ -851,8 +1258,25 @@ function ContextRail({
             id="command-center-context-needs-you"
             role="tabpanel"
           >
+            {dismissibleNeedsYouIds.length > 1 ? (
+              <div className="mb-1 flex items-center justify-between px-3 py-2">
+                <span className="text-[0.6875rem] text-muted-foreground">
+                  {dismissibleNeedsYouIds.length} dismissible items
+                </span>
+                <Button
+                  disabled={resolvingNeedsYouId !== undefined}
+                  onClick={() => onDismissNeedsYouItems?.(dismissibleNeedsYouIds)}
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  Dismiss all
+                </Button>
+              </div>
+            ) : null}
             <NeedsYouRows
               items={context.needsYou}
+              onDismissNeedsYouItems={onDismissNeedsYouItems}
               onDecideApproval={onDecideApproval}
               onOpen={onOpenNeedsYouItem}
               onReviewMemory={onReviewMemory}
@@ -890,7 +1314,9 @@ function ContextRail({
 
 export function CommandCenterShell(props: CommandCenterShellProps) {
   const [contextOpen, setContextOpen] = useState(false);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const hasExplicitRoute = Object.values(props.routeSelection).some((value) => value !== undefined);
+  const selectedSpaceName = props.spaces.find((space) => space.id === props.selectedSpaceId)?.name;
 
   return (
     <div
@@ -929,11 +1355,35 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
           </Button>
         </header>
 
+        <CommandCenterShortcuts
+          context={props.context}
+          onCapture={props.onCapture}
+          onCommand={() => {
+            props.onNewConversation?.();
+            requestAnimationFrame(() => composerInputRef.current?.focus());
+          }}
+          onSelectSpace={props.onSelectSpace}
+          selectedSpaceId={props.selectedSpaceId}
+          spaces={props.spaces}
+        />
+
         <ScrollArea className="min-h-0 flex-1" scrollFade>
           <Messages
+            context={props.context}
+            conversations={props.conversations}
             messages={props.messages}
+            onClearTranscript={props.onClearTranscript}
             onOpenLinkedThread={props.onOpenLinkedThread}
+            onOpenNeedsYouItem={props.onOpenNeedsYouItem}
+            onOpenRun={props.onOpenRun}
+            onOpenTodayItem={props.onOpenTodayItem}
+            onUseSuggestion={(prompt) => {
+              props.onDraftChange(prompt);
+              requestAnimationFrame(() => composerInputRef.current?.focus());
+            }}
             receipt={props.routeReceipt}
+            selectedSpaceId={props.selectedSpaceId}
+            selectedSpaceName={selectedSpaceName}
           />
         </ScrollArea>
 
@@ -943,12 +1393,12 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
           draft={props.draft}
           isSubmitting={props.isSubmitting}
           onDraftChange={props.onDraftChange}
-          onRouteSelectionChange={props.onRouteSelectionChange}
+          onModelSelectionChange={props.onModelSelectionChange}
+          onOpenProviderSettings={props.onOpenProviderSettings}
           onSubmit={props.onSubmit}
-          receipt={props.routeReceipt}
+          inputRef={composerInputRef}
           routeOptions={props.routeOptions}
           routeSelection={props.routeSelection}
-          spaces={props.spaces}
         />
       </main>
 
@@ -960,6 +1410,7 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
         >
           <ContextRail
             context={props.context}
+            onDismissNeedsYouItems={props.onDismissNeedsYouItems}
             onClose={() => setContextOpen(false)}
             onDecideApproval={props.onDecideApproval}
             onOpenConnection={props.onOpenConnection}

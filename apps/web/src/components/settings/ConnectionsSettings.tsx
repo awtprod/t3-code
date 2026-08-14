@@ -6,7 +6,7 @@ import {
   TerminalIcon,
 } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
-import { type ReactNode, memo, useCallback, useId, useMemo, useState } from "react";
+import { type ReactNode, memo, useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
@@ -24,6 +24,8 @@ import {
   type AdvertisedEndpoint,
   type DesktopDiscoveredSshHost,
   type DesktopSshEnvironmentTarget,
+  type DesktopPrimaryBackendMode,
+  type DesktopPrimaryBackendState,
   type DesktopServerExposureState,
   type DesktopWslState,
   type EnvironmentId,
@@ -1724,6 +1726,120 @@ function CloudRemoteEnvironmentRows({
   ) : null;
 }
 
+function DesktopPrimaryBackendSettings() {
+  const bridge = window.desktopBridge;
+  const [state, setState] = useState<DesktopPrimaryBackendState | null>(null);
+  const [mode, setMode] = useState<DesktopPrimaryBackendMode>("windows");
+  const [endpoint, setEndpoint] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    void bridge?.getPrimaryBackendState().then((next) => {
+      if (!mounted) return;
+      setState(next);
+      setMode(next.mode);
+      setEndpoint(next.remoteHttpBaseUrl ?? "");
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [bridge]);
+
+  if (!bridge) return null;
+
+  const apply = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await bridge.setPrimaryBackend({
+        mode,
+        ...(endpoint.trim() ? { remoteHttpBaseUrl: endpoint.trim() } : {}),
+        restart: true,
+      });
+      setState(next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not change desktop execution.");
+      setBusy(false);
+    }
+  };
+
+  const testConnection = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await bridge.retryRemotePrimary(endpoint.trim());
+      setState(next);
+      if (next.connectivity !== "connected") setError("Remote endpoint is unavailable.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Remote endpoint is unavailable.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <SettingsSection title="Desktop execution">
+      <SettingsRow
+        title="Primary backend"
+        description="Choose where the Windows desktop runs Command Center work. Changes take effect after restart."
+        control={
+          <Select
+            value={mode}
+            onValueChange={(value) => setMode(value as DesktopPrimaryBackendMode)}
+          >
+            <SelectTrigger aria-label="Primary backend" className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              <SelectItem value="windows">Windows local</SelectItem>
+              <SelectItem value="wsl">WSL</SelectItem>
+              <SelectItem value="remote">Remote server</SelectItem>
+            </SelectPopup>
+          </Select>
+        }
+      />
+      <SettingsRow
+        title="Remote endpoint"
+        description={
+          state?.connectivity === "connected"
+            ? "Connected."
+            : state?.connectivity === "unavailable"
+              ? "Unavailable. Windows will not fall back automatically."
+              : "Pair this environment first, then make it primary."
+        }
+        status={error ? <span className="block text-destructive">{error}</span> : null}
+        control={
+          <div className="flex min-w-80 flex-col gap-2">
+            <Input
+              aria-label="Remote Command Center endpoint"
+              value={endpoint}
+              onChange={(event) => setEndpoint(event.target.value)}
+              placeholder="https://server.example.ts.net"
+            />
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                disabled={busy || !endpoint.trim()}
+                onClick={() => void testConnection()}
+              >
+                Test connection
+              </Button>
+              <Button
+                disabled={busy || (mode === "remote" && !endpoint.trim())}
+                onClick={() => void apply()}
+              >
+                {mode === "remote" ? "Make remote primary and restart" : "Apply and restart"}
+              </Button>
+            </div>
+          </div>
+        }
+      />
+    </SettingsSection>
+  );
+}
+
 export function ConnectionsSettings() {
   const desktopBridge = window.desktopBridge;
   const { environments } = useEnvironments();
@@ -2996,6 +3112,7 @@ export function ConnectionsSettings() {
 
   return (
     <SettingsPageContainer>
+      {desktopBridge ? <DesktopPrimaryBackendSettings /> : null}
       {canManageLocalBackend ? (
         <>
           <SettingsSection title="This environment">

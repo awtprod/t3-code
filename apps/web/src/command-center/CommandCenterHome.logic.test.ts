@@ -10,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildRouteOptions,
   commandRouteOverrides,
+  defaultCommandCenterRouteSelection,
   initialRouteReceipt,
   mergeAuthoritativeMessages,
   nextRouteSelection,
@@ -20,6 +21,7 @@ import {
   routeReceiptFromTimelineEntry,
   routeTimelineMessage,
   timelineMessages,
+  visibleTimelineEntries,
   waitForRouteReceiptPaint,
 } from "./CommandCenterHome.logic";
 
@@ -202,7 +204,7 @@ const PROJECTS = [
 const PROVIDERS = [
   {
     instanceId: "provider-1",
-    driver: "example-provider",
+    driver: "codex",
     displayName: "Example Provider",
     enabled: true,
     installed: true,
@@ -220,6 +222,20 @@ const PROVIDERS = [
 ] as unknown as readonly ServerProvider[];
 
 describe("CommandCenterHome projection", () => {
+  it("defaults the router to Terra while preserving the provider instance", () => {
+    expect(
+      defaultCommandCenterRouteSelection({
+        models: [
+          { id: "gpt-5.6-sol", label: "Sol", providerId: "codex-work" },
+          { id: "gpt-5.6-terra", label: "Terra", providerId: "codex-personal" },
+        ],
+        projects: [],
+        providers: [],
+        repositories: [],
+      }),
+    ).toEqual({ providerId: "codex-personal", modelId: "gpt-5.6-terra" });
+  });
+
   it("projects bootstrap data into live shell context", () => {
     const projection = projectBootstrap(BOOTSTRAP, new Date("2026-01-15T10:00:00.000Z"));
 
@@ -240,6 +256,29 @@ describe("CommandCenterHome projection", () => {
       detail: "Read-only",
     });
     expect(projection.context.today).toHaveLength(1);
+  });
+
+  it("does not count failed runs as active work", () => {
+    const failedBootstrap = {
+      ...BOOTSTRAP,
+      runs: BOOTSTRAP.runs.map((run) => ({ ...run, status: "failed" })),
+    } as unknown as CommandCenterBootstrap;
+
+    expect(projectBootstrap(failedBootstrap).context.activeRuns).toEqual([]);
+  });
+
+  it("hides old transcript entries until History explicitly selects a run", () => {
+    const entries = [
+      { sequence: 4, runId: "old-run" },
+      { sequence: 6, runId: "new-run" },
+    ] as unknown as readonly CommandCenterTimelineEntry[];
+
+    expect(visibleTimelineEntries([...entries], 4).map((entry) => entry.runId)).toEqual([
+      "new-run",
+    ]);
+    expect(visibleTimelineEntries([...entries], 99, "old-run").map((entry) => entry.runId)).toEqual(
+      ["old-run"],
+    );
   });
 
   it("surfaces private configuration health without exposing its path", () => {
@@ -324,6 +363,50 @@ describe("CommandCenterHome projection", () => {
       modelName: "Example Model",
       sources: { space: "auto", project: "explicit", provider: "explicit", model: "explicit" },
     });
+  });
+
+  it("excludes ordinary chat providers from Command Center routing", () => {
+    const projects = projectEnvironmentProjects(PROJECTS, BOOTSTRAP);
+    const claude = {
+      ...PROVIDERS[0],
+      instanceId: "claude-agent",
+      driver: "claudeAgent",
+      displayName: "Claude",
+      models: [{ ...PROVIDERS[0]!.models[0], slug: "claude-opus", name: "Claude Opus" }],
+    } as unknown as ServerProvider;
+
+    const options = buildRouteOptions(BOOTSTRAP, projects, [claude, ...PROVIDERS]);
+
+    expect(options.models).toMatchObject([{ id: "model-1", label: "Example Model" }]);
+    expect(options.models.some((model) => model.id === "claude-opus")).toBe(false);
+  });
+
+  it("shows an unhealthy Codex model but does not select it by default", () => {
+    const projects = projectEnvironmentProjects(PROJECTS, BOOTSTRAP);
+    const unavailable = {
+      ...PROVIDERS[0],
+      instanceId: "codex",
+      status: "error",
+      message: "Authentication required",
+      models: [
+        {
+          ...PROVIDERS[0]!.models[0],
+          slug: "gpt-5.6-terra",
+          name: "GPT-5.6 Terra",
+        },
+      ],
+    } as unknown as ServerProvider;
+
+    const options = buildRouteOptions(BOOTSTRAP, projects, [unavailable]);
+
+    expect(options.models).toMatchObject([
+      {
+        id: "gpt-5.6-terra",
+        disabled: true,
+        detail: "Example Provider · Authentication required",
+      },
+    ]);
+    expect(defaultCommandCenterRouteSelection(options)).toBeNull();
   });
 
   it("turns a submit result into a visible route receipt and timeline event", () => {
