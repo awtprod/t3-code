@@ -1,0 +1,4 @@
+[includeIf "gitdir:/srv/command-center/workspaces/awtprod/"]
+    path = /var/lib/command-center/gitconfig-awtprod
+[includeIf "gitdir:/srv/command-center/workspaces/ccn/"]
+    path = /var/lib/command-center/gitconfig-ccn

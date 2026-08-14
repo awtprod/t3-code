@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+case "${PWD:-}" in
+  /srv/command-center/workspaces/awtprod|/srv/command-center/workspaces/awtprod/*)
+    workspace_identity=awtprod
+    ;;
+  /srv/command-center/workspaces/ccn|/srv/command-center/workspaces/ccn/*)
+    workspace_identity=ccn
+    ;;
+  *)
+    workspace_identity=
+    ;;
+esac
+
+requested_identity=${COMMAND_CENTER_GITHUB_IDENTITY:-}
+provisioning_identity=${COMMAND_CENTER_GITHUB_PROVISIONING_IDENTITY:-}
+
+if [ -n "$workspace_identity" ]; then
+  if [ -n "$requested_identity" ] && [ "$requested_identity" != "$workspace_identity" ]; then
+    echo "gh: provider identity '$requested_identity' does not match workspace identity '$workspace_identity'" >&2
+    exit 77
+  fi
+  identity=$workspace_identity
+elif [ -n "$provisioning_identity" ]; then
+  identity=$provisioning_identity
+else
+  echo "gh: refusing GitHub access outside an identity-mapped workspace" >&2
+  exit 77
+fi
+
+case "$identity" in
+  awtprod) GH_CONFIG_DIR=/var/lib/command-center/gh/awtprod ;;
+  ccn) GH_CONFIG_DIR=/var/lib/command-center/gh/ccn ;;
+  *) echo "gh: unknown GitHub identity '$identity'" >&2; exit 77 ;;
+esac
+
+export GH_CONFIG_DIR COMMAND_CENTER_GITHUB_IDENTITY=$identity
+exec /usr/bin/gh "$@"

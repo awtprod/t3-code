@@ -1,0 +1,39 @@
+[Unit]
+Description=Command Center dedicated remote execution service
+Documentation=https://github.com/awtprod/t3-code
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=commandcenter
+Group=commandcenter
+WorkingDirectory=/opt/command-center/current
+UMask=0077
+Environment=HOME=/var/lib/command-center
+Environment=COMMAND_CENTER_HOME=/var/lib/command-center/runtime
+Environment=COMMAND_CENTER_CONFIG_DIR=/var/lib/command-center/config
+Environment=PATH=/opt/command-center/bin:/opt/command-center/provider-cli/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/node /opt/command-center/current/apps/server/dist/bin.mjs serve --base-dir /var/lib/command-center/runtime --host 127.0.0.1 --port 3773 --no-browser
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/command-center/runtime /var/lib/command-center/config /var/lib/command-center/gh /var/lib/command-center/providers /srv/command-center/workspaces
+
+[Install]
+WantedBy=multi-user.target

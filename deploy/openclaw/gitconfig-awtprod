@@ -1,0 +1,6 @@
+[user]
+    name = atryan
+    email = atryan@users.noreply.github.com
+[credential "https://github.com"]
+    helper =
+    helper = !/opt/command-center/bin/git-credential-gh awtprod
