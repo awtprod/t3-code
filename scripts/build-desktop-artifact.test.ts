@@ -746,6 +746,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         mockUpdates: Option.none(),
         mockUpdateServerPort: Option.none(),
         wslPrebuild: Option.none(),
+        remoteOnly: Option.none(),
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -769,6 +770,66 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  it.effect("resolves remoteOnly from the --remote-only flag without VITE_REMOTE_ONLY", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveBuildOptions({
+        platform: Option.some("win"),
+        target: Option.none(),
+        arch: Option.none(),
+        buildVersion: Option.none(),
+        outputDir: Option.none(),
+        skipBuild: Option.none(),
+        keepStage: Option.none(),
+        signed: Option.none(),
+        verbose: Option.none(),
+        mockUpdates: Option.none(),
+        mockUpdateServerPort: Option.none(),
+        wslPrebuild: Option.none(),
+        remoteOnly: Option.some(true),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(HostProcessPlatform, "win32"),
+            Layer.succeed(HostProcessArchitecture, "x64"),
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+          ),
+        ),
+      );
+
+      assert.equal(resolved.remoteOnly, true);
+    }),
+  );
+
+  it.effect("defaults remoteOnly to false when neither the flag nor env is set", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveBuildOptions({
+        platform: Option.some("win"),
+        target: Option.none(),
+        arch: Option.none(),
+        buildVersion: Option.none(),
+        outputDir: Option.none(),
+        skipBuild: Option.none(),
+        keepStage: Option.none(),
+        signed: Option.none(),
+        verbose: Option.none(),
+        mockUpdates: Option.none(),
+        mockUpdateServerPort: Option.none(),
+        wslPrebuild: Option.none(),
+        remoteOnly: Option.none(),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(HostProcessPlatform, "win32"),
+            Layer.succeed(HostProcessArchitecture, "x64"),
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+          ),
+        ),
+      );
+
+      assert.equal(resolved.remoteOnly, false);
+    }),
+  );
+
   it.effect("rejects universal builds on Linux and Windows before staging binaries", () =>
     Effect.gen(function* () {
       for (const platform of ["linux", "win"] as const) {
@@ -786,6 +847,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             mockUpdates: Option.none(),
             mockUpdateServerPort: Option.none(),
             wslPrebuild: Option.none(),
+            remoteOnly: Option.none(),
           }),
         );
 
@@ -810,6 +872,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         mockUpdates: Option.some(false),
         mockUpdateServerPort: Option.none(),
         wslPrebuild: Option.none(),
+        remoteOnly: Option.none(),
       }).pipe(
         Effect.provide(
           ConfigProvider.layer(

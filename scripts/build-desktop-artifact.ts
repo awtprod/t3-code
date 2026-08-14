@@ -155,6 +155,7 @@ interface BuildCliInput {
   readonly mockUpdates: Option.Option<boolean>;
   readonly mockUpdateServerPort: Option.Option<number>;
   readonly wslPrebuild: Option.Option<string>;
+  readonly remoteOnly: Option.Option<boolean>;
 }
 
 function detectHostBuildPlatform(hostPlatform: string): typeof BuildPlatform.Type | undefined {
@@ -676,6 +677,7 @@ interface ResolvedBuildOptions {
   readonly mockUpdates: boolean;
   readonly mockUpdateServerPort: number | undefined;
   readonly wslPrebuild: string | undefined;
+  readonly remoteOnly: boolean;
 }
 
 interface StagePackageJson {
@@ -1118,6 +1120,11 @@ const BuildEnvConfig = Config.all({
   // into the staged node-pty so the WSL backend ships a ready binary and never
   // compiles on the user's machine.
   wslPrebuild: Config.string("T3CODE_DESKTOP_WSL_PREBUILD").pipe(Config.option),
+  // A remote-only build ships no local/WSL backend and connects to a remote
+  // server. `VITE_REMOTE_ONLY` is still honoured (below) for backward
+  // compatibility, but that env var does not survive every `vp run` env
+  // forwarding path, so this dedicated flag/env is the reliable switch.
+  remoteOnly: Config.boolean("T3CODE_DESKTOP_REMOTE_ONLY").pipe(Config.withDefault(false)),
 });
 
 const MockUpdateServerPortSchema = Schema.NumberFromString.check(
@@ -1212,6 +1219,10 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const wslPrebuild =
     Option.getOrUndefined(input.wslPrebuild) ?? Option.getOrUndefined(env.wslPrebuild);
 
+  const remoteOnly =
+    resolveBooleanFlag(input.remoteOnly, env.remoteOnly) ||
+    process.env.VITE_REMOTE_ONLY?.trim() === "1";
+
   return {
     platform,
     target,
@@ -1225,6 +1236,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     mockUpdates,
     mockUpdateServerPort,
     wslPrebuild,
+    remoteOnly,
   } satisfies ResolvedBuildOptions;
 });
 
@@ -2094,7 +2106,16 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   const electronVersion = desktopPackageJson.dependencies.electron;
-  const remoteOnlyBuild = process.env.VITE_REMOTE_ONLY?.trim() === "1";
+  const remoteOnlyBuild = options.remoteOnly;
+  // The web and desktop vite sub-builds each key their remote-only behaviour off
+  // `process.env.VITE_REMOTE_ONLY` (apps/web/vite.config.ts,
+  // apps/desktop/vite.config.ts, which bakes __T3CODE_REMOTE_ONLY__ from it).
+  // `--remote-only` / T3CODE_DESKTOP_REMOTE_ONLY resolve into `options.remoteOnly`
+  // but do not set that env var, so normalise it here — otherwise the packer
+  // would skip the server while the client bundles were still built full.
+  if (remoteOnlyBuild) {
+    process.env.VITE_REMOTE_ONLY = "1";
+  }
 
   const serverDependencies = serverPackageJson.dependencies;
   if (!remoteOnlyBuild && (!serverDependencies || Object.keys(serverDependencies).length === 0)) {
@@ -2552,8 +2573,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // resolver has no such ambiguity: it either finds every import or it does not.
   //
   // Only Windows unpacks anything; macOS and Linux keep the whole tree inside
-  // the asar, where this check has nothing to look at.
-  if (options.platform === "win") {
+  // the asar, where this check has nothing to look at. A remote-only build has
+  // no WSL backend and stages no server bundle, so there is nothing to prove
+  // self-contained — skip it there as with the server-bundle checks above.
+  if (options.platform === "win" && !remoteOnlyBuild) {
     yield* verifyPackagedBundleIsSelfContained({ stageDistDir, verbose: options.verbose });
   }
 
@@ -2639,6 +2662,12 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   wslPrebuild: Flag.string("wsl-prebuild").pipe(
     Flag.withDescription(
       "Path to a prebuilt Linux node-pty (pty.node) for the target arch, staged for the WSL backend (env: T3CODE_DESKTOP_WSL_PREBUILD).",
+    ),
+    Flag.optional,
+  ),
+  remoteOnly: Flag.boolean("remote-only").pipe(
+    Flag.withDescription(
+      "Build the remote-only variant: no local/WSL backend, connects to a remote server (env: T3CODE_DESKTOP_REMOTE_ONLY or VITE_REMOTE_ONLY=1).",
     ),
     Flag.optional,
   ),
