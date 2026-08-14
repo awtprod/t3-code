@@ -5,8 +5,8 @@ import {
   type InternalGenerationUsageBreakdown,
   type UsageBreakdown,
   type UsagePricingOverride,
-  type UsageSummary,
-  type UsageTokenTotals,
+  type UsageQuerySummary,
+  type UsageQueryTokenTotals,
 } from "@t3tools/contracts";
 import { BarChart3Icon, RefreshCwIcon } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -21,7 +21,7 @@ import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSet
 
 const RANGES = [7, 30, 90] as const;
 
-function tokenTotal(tokens: UsageTokenTotals): number | null {
+function tokenTotal(tokens: UsageQueryTokenTotals): number | null {
   const values = [
     tokens.uncachedInputTokens,
     tokens.cacheReadInputTokens,
@@ -35,7 +35,7 @@ function number(value: number | null): string {
   return value === null ? "Unavailable" : new Intl.NumberFormat().format(value);
 }
 
-function cost(summary: UsageSummary): string {
+function cost(summary: UsageQuerySummary): string {
   return summary.cost.microUsd === null
     ? "Unavailable"
     : `$${(summary.cost.microUsd / 1_000_000).toFixed(2)}`;
