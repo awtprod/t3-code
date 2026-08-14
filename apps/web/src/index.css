@@ -76,6 +76,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 :root {
+  /* Chat transcript/composer column: fills most of the pane, capped for
+     very wide windows. Consumed by the timeline rows, composer shell, and
+     context strip so they stay in lockstep. */
+  --chat-column-max-width: min(88%, 75rem);
   --app-scrollbar-width: 6px;
   --app-scrollbar-thumb: rgb(217 217 217);
   --app-scrollbar-thumb-hover: rgb(191 191 191);
