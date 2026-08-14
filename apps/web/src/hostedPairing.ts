@@ -36,13 +36,6 @@ function originFromUrl(value: string): string | null {
 }
 
 export function isHostedStaticApp(url: URL = new URL(window.location.href)): boolean {
-  // A remote-only desktop is a local, static client. Its configured endpoint is
-  // intentionally not a primary environment: Connections owns the one-time
-  // pairing exchange and persists the resulting bearer session instead.
-  if (isRemoteOnlyBuild()) {
-    return true;
-  }
-
   if (configuredBackendUrl()) {
     return false;
   }

@@ -41,7 +41,7 @@ const DesktopSettingsPatch = Schema.Struct({
 const decodeDesktopSettingsPatch = Schema.decodeEffect(Schema.fromJsonString(DesktopSettingsPatch));
 const encodeDesktopSettingsPatch = Schema.encodeEffect(Schema.fromJsonString(DesktopSettingsPatch));
 
-function makeEnvironmentLayer(baseDir: string, appVersion = "0.0.17") {
+function makeEnvironmentLayer(baseDir: string, appVersion = "0.0.17", remoteOnlyBuild = false) {
   return DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
     homeDirectory: baseDir,
@@ -52,6 +52,7 @@ function makeEnvironmentLayer(baseDir: string, appVersion = "0.0.17") {
     isPackaged: true,
     resourcesPath: "/missing/resources",
     runningUnderArm64Translation: false,
+    remoteOnlyBuild,
   }).pipe(
     Layer.provide(
       Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({ T3CODE_HOME: baseDir })),
@@ -65,7 +66,7 @@ const withSettings = <A, E, R>(
     E,
     R | DesktopAppSettings.DesktopAppSettings | DesktopEnvironment.DesktopEnvironment
   >,
-  options?: { readonly appVersion?: string },
+  options?: { readonly appVersion?: string; readonly remoteOnlyBuild?: boolean },
 ) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -75,7 +76,9 @@ const withSettings = <A, E, R>(
     return yield* effect.pipe(
       Effect.provide(
         DesktopAppSettings.layer.pipe(
-          Layer.provideMerge(makeEnvironmentLayer(baseDir, options?.appVersion)),
+          Layer.provideMerge(
+            makeEnvironmentLayer(baseDir, options?.appVersion, options?.remoteOnlyBuild),
+          ),
           Layer.provideMerge(NodeServices.layer),
         ),
       ),
@@ -93,6 +96,30 @@ function writeSettingsPatch(patch: typeof DesktopSettingsPatch.Type) {
 }
 
 describe("DesktopSettings", () => {
+  it("starts remote-only branded builds on the local computer", () => {
+    assert.equal(
+      DesktopAppSettings.resolveDefaultDesktopSettings("0.0.17").primaryBackendMode,
+      "windows",
+    );
+  });
+
+  it.effect("migrates a remote-only build's persisted remote primary to local", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        yield* writeSettingsPatch({
+          primaryBackendMode: "remote",
+          remoteBackendUrl: "https://openclaw-server.example.test/",
+        });
+
+        const loaded = yield* settings.load;
+        assert.equal(loaded.primaryBackendMode, "windows");
+        assert.equal(loaded.remoteBackendUrl, "https://openclaw-server.example.test/");
+      }),
+      { remoteOnlyBuild: true },
+    ),
+  );
+
   it("plans remote startup without local construction, port scanning, WSL, or fallback", () => {
     const remote = DesktopAppSettings.resolveDesktopStartupPlan(
       {

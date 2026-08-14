@@ -81,12 +81,12 @@ describe("hostedPairing", () => {
     expect(isHostedStaticApp(new URL("https://preview.t3.codes/"))).toBe(false);
   });
 
-  it("treats a remote-only build as a disconnected shell even with a configured endpoint", () => {
+  it("uses the configured local backend in a remote-only branded build", () => {
     vi.stubEnv("VITE_REMOTE_ONLY", "1");
     vi.stubEnv("VITE_HTTP_URL", "https://backend.example.com");
     vi.stubEnv("VITE_WS_URL", "wss://backend.example.com");
 
-    expect(isHostedStaticApp(new URL("commandcenter://app/"))).toBe(true);
+    expect(isHostedStaticApp(new URL("commandcenter://app/"))).toBe(false);
   });
 
   it("detects hosted channel aliases as static apps", () => {

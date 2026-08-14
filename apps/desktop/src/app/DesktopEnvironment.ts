@@ -181,8 +181,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
   const legacyUserDataDirNames = remoteOnlyBuild
     ? []
     : isDevelopment
-    ? ["t3code-dev", "T3 Code (Dev)"]
-    : ["t3code", "T3 Code (Alpha)", "Command Center (Alpha)"];
+      ? ["t3code-dev", "T3 Code (Dev)"]
+      : ["t3code", "T3 Code (Alpha)", "Command Center (Alpha)"];
   const linuxApplicationsDir = path.join(
     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
     "applications",
@@ -240,10 +240,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     appImagePath: config.appImagePath,
     userDataDirName,
     legacyUserDataDirNames,
-    defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(
-      input.appVersion,
-      remoteOnlyBuild,
-    ),
+    defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),
     runtimeInfo: resolveDesktopRuntimeInfo({
       platform: input.platform,
       processArch: input.processArch,

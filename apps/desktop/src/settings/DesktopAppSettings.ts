@@ -220,13 +220,9 @@ export class DesktopAppSettings extends Context.Service<
   }
 >()("@t3tools/desktop/settings/DesktopAppSettings") {}
 
-export function resolveDefaultDesktopSettings(
-  appVersion: string,
-  remoteOnlyBuild = false,
-): DesktopSettings {
+export function resolveDefaultDesktopSettings(appVersion: string): DesktopSettings {
   return {
     ...DEFAULT_DESKTOP_SETTINGS,
-    ...(remoteOnlyBuild ? { primaryBackendMode: "remote" as const } : {}),
     updateChannel: resolveDefaultDesktopUpdateChannel(appVersion),
   };
 }
@@ -592,11 +588,20 @@ export const make = Effect.gen(function* () {
   return DesktopAppSettings.of({
     get: SynchronizedRef.get(settingsRef),
     load: Effect.gen(function* () {
-      const settings = yield* readSettings(
+      const loadedSettings = yield* readSettings(
         fileSystem,
         environment.desktopSettingsPath,
         environment.appVersion,
       );
+      // Earlier remote-only builds persisted `primaryBackendMode: "remote"`
+      // because they could not launch a local backend. These builds now keep
+      // the saved remote connection as a secondary environment and use the
+      // local computer as their primary, which makes both targets available in
+      // the composer environment picker.
+      const settings =
+        environment.remoteOnlyBuild && loadedSettings.primaryBackendMode === "remote"
+          ? { ...loadedSettings, primaryBackendMode: "windows" as const, wslOnly: false }
+          : loadedSettings;
       return yield* SynchronizedRef.setAndGet(settingsRef, settings);
     }).pipe(Effect.withSpan("desktop.settings.load")),
     setMainWindowBounds: (bounds, isMaximized) =>
