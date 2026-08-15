@@ -36,8 +36,8 @@ const WINDOW_OPTIONS = [
 
 export function UsagePage() {
   const [windowSelection, setWindowSelection] = useState(() => ({
-    days: 30,
-    window: makeWindow(30),
+    days: 1,
+    window: makeWindow(1, undefined, "hour"),
   }));
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
