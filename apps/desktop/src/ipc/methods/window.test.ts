@@ -50,6 +50,27 @@ const defaultWslInstance: DesktopBackendManager.DesktopBackendInstance = {
   waitForReady: () => Effect.succeed(true),
 };
 
+const { runningDistro: _runningDistro, ...readyConfigWithoutDistro } = readyWslConfig;
+const windowsSecondaryInstance: DesktopBackendManager.DesktopBackendInstance = {
+  ...defaultWslInstance,
+  id: DesktopBackendPool.WINDOWS_SECONDARY_INSTANCE_ID,
+  label: Effect.succeed("Windows"),
+  currentConfig: Effect.succeed(
+    Option.some({
+      ...readyConfigWithoutDistro,
+      executablePath: "electron.exe",
+      args: ["server.mjs"],
+      entryPath: "server.mjs",
+      bootstrap: {
+        ...readyWslConfig.bootstrap,
+        port: 3773,
+        host: "127.0.0.1",
+      },
+      httpBaseUrl: new URL("http://127.0.0.1:3773"),
+    }),
+  ),
+};
+
 const desktopSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
   get: Effect.succeed(DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS),
 } as unknown as DesktopAppSettings.DesktopAppSettings["Service"]);
@@ -77,6 +98,39 @@ describe("getLocalEnvironmentBootstraps", () => {
         },
       ]);
     }).pipe(Effect.provide(Layer.merge(DesktopBackendPool.layerTest([]), remoteSettingsLayer)));
+  });
+
+  it.effect("publishes Windows as a secondary while the remote server remains primary", () => {
+    const remoteSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
+      get: Effect.succeed({
+        ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+        primaryBackendMode: "remote",
+        remoteBackendUrl: "https://remote.example.test/",
+      }),
+    } as unknown as DesktopAppSettings.DesktopAppSettings["Service"]);
+    return Effect.gen(function* () {
+      assert.deepEqual(yield* getLocalEnvironmentBootstraps.handler(), [
+        {
+          id: "primary",
+          label: "remote.example.test",
+          runningDistro: null,
+          httpBaseUrl: "https://remote.example.test/",
+          wsBaseUrl: "wss://remote.example.test/",
+        },
+        {
+          id: "windows:local",
+          label: "Windows",
+          runningDistro: null,
+          httpBaseUrl: "http://127.0.0.1:3773/",
+          wsBaseUrl: "ws://127.0.0.1:3773/",
+          bootstrapToken: "bootstrap-token",
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(DesktopBackendPool.layerTest([windowsSecondaryInstance]), remoteSettingsLayer),
+      ),
+    );
   });
 
   it.effect("publishes the concrete running distro without replacing the stable instance id", () =>
