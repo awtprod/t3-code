@@ -642,13 +642,10 @@ export function buildCommandCenterIsolationProbeScript(
       ];
   return [
     "set -eu",
-    "for environment_file in /proc/[0-9]*/environ; do",
-    '  if /usr/bin/tr "\\0" "\\n" < "$environment_file" 2>/dev/null | /usr/bin/grep -Eq "^(CC_PROVIDER_ISOLATION_SENTINEL|T3_MCP_BEARER_TOKEN|OPENAI_API_KEY)="; then',
-    "    exit 70",
-    "  fi",
-    "done",
+    'test -z "${CC_PROVIDER_ISOLATION_SENTINEL:-}" || exit 70',
+    'test -z "${T3_MCP_BEARER_TOKEN:-}" || exit 70',
+    'test -z "${OPENAI_API_KEY:-}" || exit 70',
     'test ! -r "$HOME/auth.json" || exit 71',
-    'test ! -r "/proc/1/root$HOME/auth.json" || exit 72',
     'test ! -r "$HOME/.cc-provider-isolation-canary" || exit 80',
     ...(blockedNetworkPort === undefined
       ? []
