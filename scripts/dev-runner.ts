@@ -19,6 +19,7 @@ import * as Schema from "effect/Schema";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { ChildProcess } from "effect/unstable/process";
 
+import * as DevProcessGuard from "./lib/dev-process-guard.ts";
 import { type DevShareError, shareDevServer, unshareDevServer } from "./lib/dev-share.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 
@@ -68,7 +69,7 @@ export function isProxiableBindHost(host: string): boolean {
 }
 
 export const DEFAULT_T3_HOME = Effect.map(Effect.service(Path.Path), (path) =>
-  path.join(NodeOS.homedir(), ".t3"),
+  path.join(NodeOS.homedir(), ".command-center"),
 );
 
 const MODE_ARGS = {
@@ -76,14 +77,21 @@ const MODE_ARGS = {
     "run",
     "--filter=@t3tools/contracts",
     "--filter=@t3tools/web",
-    "--filter=t3",
+    "--filter=@awtprod/command-center",
     "--parallel",
     "dev",
   ],
-  "dev:server": ["run", "--filter=t3", "dev"],
+  "dev:server": ["run", "--filter=@awtprod/command-center", "dev"],
   "dev:web": ["run", "--filter=@t3tools/web", "dev"],
   "dev:desktop": ["run", "--filter=@t3tools/desktop", "--filter=@t3tools/web", "dev"],
+  // Production-build daily driver: no Vite dev server at all. The backend
+  // serves apps/web/dist itself (see resolveStaticDir/staticAndDevRouteLayer),
+  // so app, /api, and /ws share one origin.
+  serve: ["run", "--filter=@awtprod/command-center", "dev"],
 } as const satisfies Record<string, ReadonlyArray<string>>;
+
+/** Web build that `serve` mode runs before starting the backend. */
+const SERVE_BUILD_ARGS = ["run", "--filter=@t3tools/web", "build"] as const;
 
 type DevMode = keyof typeof MODE_ARGS;
 /**
@@ -151,7 +159,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
   "DevRunnerProcessError",
   {
     operation: Schema.Literals(["spawn", "wait-for-exit"]),
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "serve"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,
@@ -166,7 +174,7 @@ export class DevRunnerProcessError extends Schema.TaggedErrorClass<DevRunnerProc
 export class DevRunnerProcessExitError extends Schema.TaggedErrorClass<DevRunnerProcessExitError>()(
   "DevRunnerProcessExitError",
   {
-    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop"]),
+    mode: Schema.Literals(["dev", "dev:server", "dev:web", "dev:desktop", "serve"]),
     executable: Schema.Literal("vp"),
     argumentCount: Schema.Number,
     shell: Schema.Boolean,
@@ -302,6 +310,7 @@ interface CreateDevRunnerEnvInput {
   readonly host: string | undefined;
   readonly port: number | undefined;
   readonly devUrl: URL | undefined;
+  readonly tailscaleServe?: boolean | undefined;
 }
 
 export function createDevRunnerEnv({
@@ -316,6 +325,7 @@ export function createDevRunnerEnv({
   host,
   port,
   devUrl,
+  tailscaleServe,
 }: CreateDevRunnerEnvInput): Effect.Effect<NodeJS.ProcessEnv, never, Path.Path> {
   return Effect.gen(function* () {
     const serverPort = port ?? BASE_SERVER_PORT + serverOffset;
@@ -325,6 +335,7 @@ export function createDevRunnerEnv({
     const configuredBaseDir = t3Home?.trim() || undefined;
     const resolvedBaseDir = yield* resolveBaseDir(configuredBaseDir);
     const isDesktopMode = mode === "dev:desktop";
+    const isServeMode = mode === "serve";
 
     const output: NodeJS.ProcessEnv = {
       ...baseEnv,
@@ -334,21 +345,35 @@ export function createDevRunnerEnv({
         `http://${isDesktopMode ? DESKTOP_DEV_LOOPBACK_HOST : "localhost"}:${webPort}`,
     };
 
+    // `serve` runs the built app straight off the backend. VITE_DEV_SERVER_URL
+    // must be absent or the server 302-redirects every request to a dev server
+    // that isn't running (apps/server/src/http.ts) and never resolves staticDir
+    // (apps/server/src/cli/config.ts). VITE_HTTP_URL/VITE_WS_URL must be absent
+    // too: they are baked into the bundle at build time, and a hardcoded
+    // `localhost:<port>` target would break every non-loopback client (Tailscale,
+    // LAN). With all three unset the app falls back to its own window origin, so
+    // app + /api + /ws are same-origin from wherever it is reached.
+    if (isServeMode) {
+      delete output.VITE_DEV_SERVER_URL;
+      delete output.VITE_HTTP_URL;
+      delete output.VITE_WS_URL;
+      delete output.PORT;
+    }
+
     if (configuredBaseDir !== undefined) {
       output.T3CODE_HOME = resolvedBaseDir;
     } else {
       delete output.T3CODE_HOME;
     }
 
-    // A dev-runner server is never launcher-managed. When the shell that runs
-    // this script was itself spawned by the machine's managed t3 service (an
-    // agent working inside T3 Code), these leak through and the child server
-    // fails startup with "The service launcher started a different t3 version"
-    // (serviceLauncherClient.ts resolveStartup).
+    // Dev-runner servers are never launcher-managed. Do not inherit service
+    // metadata from a parent Command Center process.
     delete output.T3_SERVICE_LAUNCHER_CONTEXT;
     delete output.T3_BOOT_SERVICE_UNIT;
 
-    if (!isDesktopMode) {
+    if (isServeMode) {
+      output.T3CODE_PORT = String(serverPort);
+    } else if (!isDesktopMode) {
       output.T3CODE_PORT = String(serverPort);
       // HOST is Vite's own bind address, and the desktop branch below is the
       // only place we set it. An inherited one (an exported HOST, a container,
@@ -415,9 +440,17 @@ export function createDevRunnerEnv({
       delete output.T3CODE_DESKTOP_WS_URL;
     }
 
-    if (mode === "dev:server" || mode === "dev:web") {
+    if (mode === "dev:server" || mode === "dev:web" || isServeMode) {
       output.T3CODE_MODE = "web";
       delete output.T3CODE_DESKTOP_WS_URL;
+    }
+
+    // The server points Tailscale Serve at whatever port it listens on
+    // (apps/server/src/server.ts), so enabling it here is what moves the
+    // tailnet origin off the Vite port and onto the backend — the whole point
+    // of serve mode being same-origin.
+    if (tailscaleServe !== undefined) {
+      output.T3CODE_TAILSCALE_SERVE = tailscaleServe ? "1" : "0";
     }
 
     if (isDesktopMode) {
@@ -427,6 +460,19 @@ export function createDevRunnerEnv({
 
     return output;
   });
+}
+
+/**
+ * Environment for the `serve` web build. Sourcemaps default to `hidden` here:
+ * a full sourcemap build is 37 MB of `.map` next to 17 MB of JS, all of which
+ * `apps/web/dist` then carries around for a build nobody debugs from source.
+ * `T3CODE_WEB_SOURCEMAP` still wins when set explicitly.
+ */
+export function serveBuildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    T3CODE_WEB_SOURCEMAP: env.T3CODE_WEB_SOURCEMAP?.trim() || "hidden",
+  };
 }
 
 function portPairForOffset(offset: number): {
@@ -591,7 +637,9 @@ export function resolveModePortOffsets<R = NetService.NetService>({
       return { serverOffset: startOffset, webOffset };
     }
 
-    if (mode === "dev:server") {
+    // `serve` runs no Vite dev server, so like `dev:server` it only needs the
+    // backend port to be free.
+    if (mode === "dev:server" || mode === "serve") {
       if (hasExplicitServerPort) {
         return { serverOffset: startOffset, webOffset: startOffset };
       }
@@ -626,6 +674,8 @@ interface DevRunnerCliInput {
   readonly port: number | undefined;
   readonly devUrl: URL | undefined;
   readonly dryRun: boolean;
+  readonly skipBuild: boolean;
+  readonly tailscaleServe: boolean | undefined;
   readonly share: boolean;
   readonly runArgs: ReadonlyArray<string>;
 }
@@ -697,6 +747,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       host: input.host,
       port: input.port,
       devUrl: input.devUrl,
+      tailscaleServe: input.tailscaleServe,
     });
 
     const selectionSuffix =
@@ -709,12 +760,50 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       `[dev-runner] mode=${input.mode} source=${source}${selectionSuffix} serverPort=${String(env.T3CODE_PORT)} webPort=${String(env.PORT)} baseDir=${baseDir}`,
     );
 
+    // deriveServerPaths (apps/server/src/config.ts) picks `dev/` vs `userdata/`
+    // from whether a dev URL is set, unless the base dir is explicit. `serve`
+    // sets no dev URL, so without an explicit base dir it silently reads a
+    // different SQLite database than `pnpm dev` does. Say so rather than let a
+    // user wonder where their threads went.
+    if (input.mode === "serve" && env.T3CODE_HOME === undefined) {
+      yield* Effect.logWarning(
+        `[dev-runner] serve mode has no explicit --home-dir/T3CODE_HOME, so it uses ${baseDir}/userdata — ` +
+          `\`pnpm dev\` without one uses ${baseDir}/dev. Pass --home-dir to share a single data directory.`,
+      );
+    }
+
     // Before the share block: --dry-run only resolves and prints. Sharing would
     // replace, then tear down, whatever mapping the port already had — a
     // surprising side effect from a command documented as inert.
     if (input.dryRun) {
       return;
     }
+
+    // Reap a stale dev tree for this same data directory before launching a new
+    // one. Without this, killing only the previous dev-runner pid leaves its
+    // `node --watch` watcher orphaned, respawning a server against this DB — the
+    // source of duplicate/leaked dev servers. Same-home only: a runner on a
+    // different --home-dir is a different DB and is left alone (its lock lives
+    // under its own userdata). See scripts/lib/dev-process-guard.ts.
+    const lockPath = DevProcessGuard.devRunnerLockPath(baseDir);
+    const staleLock = yield* Effect.sync(() => {
+      const existing = DevProcessGuard.readLock(lockPath);
+      return existing === undefined ? undefined : DevProcessGuard.staleRunnerFromLock(existing);
+    });
+    if (staleLock !== undefined) {
+      yield* Effect.logInfo(
+        `[dev-runner] reaping stale dev tree pgid=${staleLock.pgid} pid=${staleLock.pid} for ${baseDir}`,
+      );
+      yield* Effect.promise(() => DevProcessGuard.reapProcessGroup(staleLock.pgid));
+    }
+    yield* Effect.sync(() =>
+      DevProcessGuard.writeLock(lockPath, {
+        pid: process.pid,
+        pgid: DevProcessGuard.currentProcessGroupId(),
+        homeDir: baseDir,
+        startedAt: DevProcessGuard.nowIso(),
+      }),
+    );
 
     const sharedWebPort = BASE_WEB_PORT + webOffset;
     if (input.share) {
@@ -801,56 +890,67 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
       }
     }
 
-    const spawnCommand = yield* resolveSpawnCommand(
-      "vp",
-      [...MODE_ARGS[input.mode], ...input.runArgs],
-      { env },
-    );
-    const processContext = {
-      mode: input.mode,
-      executable: "vp" as const,
-      argumentCount: spawnCommand.args.length,
-      shell: spawnCommand.shell,
-    } as const;
-    const child = yield* ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-      env,
-      extendEnv: false,
-      shell: spawnCommand.shell,
-      // Keep Vite+ in the same process group so terminal signals (Ctrl+C)
-      // reach it directly. Effect defaults to detached: true on non-Windows,
-      // which would put the runner in a new group and require manual forwarding.
-      detached: false,
-      forceKillAfter: "1500 millis",
-    }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new DevRunnerProcessError({
-            ...processContext,
-            operation: "spawn",
-            cause,
-          }),
-      ),
-    );
+    const spawnAndWait = (args: ReadonlyArray<string>, spawnEnv: NodeJS.ProcessEnv) =>
+      Effect.gen(function* () {
+        const spawnCommand = yield* resolveSpawnCommand("vp", args, { env: spawnEnv });
+        const processContext = {
+          mode: input.mode,
+          executable: "vp" as const,
+          argumentCount: spawnCommand.args.length,
+          shell: spawnCommand.shell,
+        } as const;
+        const child = yield* ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+          env: spawnEnv,
+          extendEnv: false,
+          shell: spawnCommand.shell,
+          // Keep Vite+ in the same process group so terminal signals (Ctrl+C)
+          // reach it directly. Effect defaults to detached: true on non-Windows,
+          // which would put the runner in a new group and require manual forwarding.
+          detached: false,
+          forceKillAfter: "1500 millis",
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new DevRunnerProcessError({
+                ...processContext,
+                operation: "spawn",
+                cause,
+              }),
+          ),
+        );
 
-    const exitCode = yield* child.exitCode.pipe(
-      Effect.mapError(
-        (cause) =>
-          new DevRunnerProcessError({
+        const exitCode = yield* child.exitCode.pipe(
+          Effect.mapError(
+            (cause) =>
+              new DevRunnerProcessError({
+                ...processContext,
+                operation: "wait-for-exit",
+                cause,
+              }),
+          ),
+        );
+        if (exitCode !== 0) {
+          return yield* new DevRunnerProcessExitError({
             ...processContext,
-            operation: "wait-for-exit",
-            cause,
-          }),
-      ),
-    );
-    if (exitCode !== 0) {
-      return yield* new DevRunnerProcessExitError({
-        ...processContext,
-        exitCode,
+            exitCode,
+          });
+        }
       });
-    }
+
+    const launch = Effect.gen(function* () {
+      if (input.mode === "serve" && !input.skipBuild) {
+        yield* Effect.logInfo("[dev-runner] building apps/web for static serving…");
+        yield* spawnAndWait(SERVE_BUILD_ARGS, serveBuildEnv(env));
+      }
+      yield* spawnAndWait([...MODE_ARGS[input.mode], ...input.runArgs], env);
+    });
+
+    // Drop our lock whenever this launch ends — clean exit, error, or interrupt —
+    // so a stale record never points a future launch at a pid we no longer own.
+    yield* launch.pipe(Effect.ensuring(Effect.sync(() => DevProcessGuard.removeLock(lockPath))));
   });
 }
 
@@ -898,6 +998,18 @@ const devRunnerCli = Command.make("dev-runner", {
   ),
   dryRun: Flag.boolean("dry-run").pipe(
     Flag.withDescription("Resolve mode/ports/env and print, but do not spawn Vite+."),
+    Flag.withDefault(false),
+  ),
+  tailscaleServe: Flag.boolean("tailscale-serve").pipe(
+    Flag.withDescription(
+      "Point Tailscale Serve at this server's port (forwards to T3CODE_TAILSCALE_SERVE). Use with `serve` so the tailnet origin carries app, /api, and /ws together.",
+    ),
+    Flag.withFallbackConfig(optionalBooleanConfig("T3CODE_TAILSCALE_SERVE")),
+  ),
+  skipBuild: Flag.boolean("skip-build").pipe(
+    Flag.withDescription(
+      "In `serve` mode, start the server against the existing apps/web/dist instead of rebuilding first.",
+    ),
     Flag.withDefault(false),
   ),
   share: Flag.boolean("share").pipe(

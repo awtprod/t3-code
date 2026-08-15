@@ -31,10 +31,12 @@ import {
   ArrowLeftIcon,
   CornerLeftUpIcon,
   FileSearchIcon,
+  FileTextIcon,
   FolderIcon,
   FolderPlusIcon,
   LinkIcon,
   MessageSquareIcon,
+  BrainIcon,
   PaletteIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -57,6 +59,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useActiveProjectTarget } from "../hooks/useActiveProjectTarget";
 import { useClientSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { readLocalApi } from "../localApi";
@@ -69,7 +72,8 @@ import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useProjects, useThreadShells } from "../state/entities";
-import { useThreadSearch } from "../state/queries";
+import { useProjectContentSearch, useProjectPathSearch, useThreadSearch } from "../state/queries";
+import { commandCenterEnvironment } from "../state/commandCenter";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
 import {
   appendBrowsePathSegment,
@@ -124,9 +128,14 @@ import { ProjectFavicon } from "./ProjectFavicon";
 import { ProjectFilePicker } from "./files/ProjectFilePicker";
 import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog";
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
+import { ThreadCommandSubtitle } from "./ThreadCommandSubtitle";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
-import { resolveDefaultProviderModelSelection } from "../providerInstances";
+import {
+  deriveProviderInstanceEntries,
+  resolveDefaultProviderModelSelection,
+  type ProviderInstanceEntry,
+} from "../providerInstances";
 import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
 import { CommandDialog, CommandDialogPopup } from "./ui/command";
 import { Button } from "./ui/button";
@@ -141,6 +150,7 @@ import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
 } from "../sidebarProjectGrouping";
+import { projectEnvironmentProjects } from "../command-center/CommandCenterHome.logic";
 import type { Project } from "../types";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
@@ -150,6 +160,7 @@ function projectFavicon(project: Project) {
     <ProjectFavicon
       environmentId={project.environmentId}
       cwd={project.workspaceRoot}
+      faviconPath={project.faviconPath}
       className={ITEM_ICON_CLASS}
     />
   );
@@ -577,12 +588,25 @@ function OpenCommandPaletteDialog(props: {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
+  const activeProjectTarget = useActiveProjectTarget();
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { theme, themeHalves, resolvedTheme } = useTheme();
   const providers = useAtomValue(primaryServerProvidersAtom);
+  const providerEntryByEnvironmentAndInstanceId = useMemo(() => {
+    const map = new Map<string, ProviderInstanceEntry>();
+    for (const environment of environments) {
+      const environmentProviders =
+        environment.serverConfig?.providers ??
+        (environment.environmentId === primaryEnvironmentId ? providers : []);
+      for (const entry of deriveProviderInstanceEntries(environmentProviders)) {
+        map.set(`${environment.environmentId}:${entry.instanceId}`, entry);
+      }
+    }
+    return map;
+  }, [environments, primaryEnvironmentId, providers]);
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
   const environmentIds = useMemo(
@@ -815,6 +839,10 @@ function OpenCommandPaletteDialog(props: {
       new Map<ProjectId, string>(projects.map((project) => [project.id, project.workspaceRoot])),
     [projects],
   );
+  const projectFaviconPathById = useMemo(
+    () => new Map(projects.map((project) => [project.id, project.faviconPath ?? null] as const)),
+    [projects],
+  );
   const projectTitleById = useMemo(
     () => new Map<ProjectId, string>(projects.map((project) => [project.id, project.title])),
     [projects],
@@ -831,6 +859,69 @@ function OpenCommandPaletteDialog(props: {
     browseEnvironmentId && currentProjectEnvironmentId === browseEnvironmentId
       ? currentProjectCwd
       : null;
+  const unifiedSearchQuery =
+    currentView === null && !isActionsOnly && deferredQuery.trim().length >= 2
+      ? deferredQuery.trim()
+      : "";
+  const workspaceFileSearch = useProjectPathSearch(
+    {
+      environmentId: activeProjectTarget?.environmentId ?? null,
+      cwd: activeProjectTarget?.cwd ?? null,
+      query: unifiedSearchQuery,
+      kind: "file",
+    },
+    20,
+  );
+  const projectContentSearch = useProjectContentSearch({
+    environmentId: activeProjectTarget?.environmentId ?? null,
+    cwd: activeProjectTarget?.cwd ?? null,
+    query: unifiedSearchQuery,
+    caseSensitive: false,
+    wholeWord: false,
+    useRegex: false,
+  });
+  const commandCenterBootstrap = useEnvironmentQuery(
+    activeProjectTarget === null
+      ? null
+      : commandCenterEnvironment.bootstrap({
+          environmentId: activeProjectTarget.environmentId,
+          input: {},
+        }),
+  );
+  const activeCommandCenterScope = useMemo(() => {
+    if (activeProjectTarget === null || currentProjectId === null) return null;
+    const linkedProject = projectEnvironmentProjects(
+      projects.filter((project) => project.environmentId === activeProjectTarget.environmentId),
+      commandCenterBootstrap.data,
+    ).find((project) => project.id === currentProjectId);
+    if (linkedProject?.spaceId === undefined) return null;
+    const space = commandCenterBootstrap.data?.spaces.find(
+      (candidate) => String(candidate.id) === String(linkedProject.spaceId),
+    );
+    if (!space) return null;
+    const repository = space.repositories.find(
+      (candidate) => String(candidate.id) === String(linkedProject.repositoryId),
+    );
+    return { spaceId: space.id, repositoryId: repository?.id };
+  }, [activeProjectTarget, commandCenterBootstrap.data, currentProjectId, projects]);
+  const memorySearch = useEnvironmentQuery(
+    activeProjectTarget !== null &&
+      activeCommandCenterScope !== null &&
+      unifiedSearchQuery.length > 0
+      ? commandCenterEnvironment.memorySearch({
+          environmentId: activeProjectTarget.environmentId,
+          input: {
+            query: unifiedSearchQuery,
+            spaceId: activeCommandCenterScope.spaceId,
+            ...(activeCommandCenterScope.repositoryId === undefined
+              ? {}
+              : { repositoryId: activeCommandCenterScope.repositoryId }),
+            includeArchives: true,
+            limit: 12,
+          },
+        })
+      : null,
+  );
   const getBrowseCwdForEnvironment = useCallback(
     (environmentId: EnvironmentId | null): string | null =>
       environmentId && currentProjectEnvironmentId === environmentId ? currentProjectCwd : null,
@@ -999,6 +1090,29 @@ function OpenCommandPaletteDialog(props: {
         icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
         renderLeadingContent: (thread) => <ThreadRowLeadingStatus thread={thread} />,
         renderTrailingContent: (thread) => <ThreadRowTrailingStatus thread={thread} />,
+        renderDescription: (thread, { projectTitle }) => {
+          const modelInstanceId =
+            thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+          const providerEntry =
+            providerEntryByEnvironmentAndInstanceId.get(
+              `${thread.environmentId}:${modelInstanceId}`,
+            ) ?? null;
+          return (
+            <ThreadCommandSubtitle
+              environmentId={thread.environmentId}
+              projectCwd={projectCwdById.get(thread.projectId) ?? null}
+              projectFaviconPath={projectFaviconPathById.get(thread.projectId) ?? null}
+              projectTitle={projectTitle ?? null}
+              branch={thread.branch}
+              worktreePath={thread.worktreePath}
+              isCurrent={thread.id === activeThreadId}
+              driverKind={providerEntry?.driverKind ?? null}
+              providerDisplayName={
+                thread.session?.providerName ?? providerEntry?.displayName ?? modelInstanceId
+              }
+            />
+          );
+        },
         getContentMatch: (thread) => {
           const match = threadContentMatchByKey.get(
             threadSearchMatchKey({
@@ -1025,13 +1139,111 @@ function OpenCommandPaletteDialog(props: {
       activeThreadId,
       clientSettings.sidebarThreadSortOrder,
       navigate,
+      projectCwdById,
+      projectFaviconPathById,
       projectTitleById,
+      providerEntryByEnvironmentAndInstanceId,
       threadContentMatchByKey,
       threadSearchQuery,
       threads,
     ],
   );
   const recentThreadItems = allThreadItems.slice(0, RECENT_THREAD_LIMIT);
+
+  const unifiedSearchGroups = useMemo<CommandPaletteView["groups"]>(() => {
+    if (unifiedSearchQuery.length === 0 || activeProjectTarget === null) return [];
+
+    const fileItems: CommandPaletteActionItem[] = workspaceFileSearch.entries
+      .slice(0, 12)
+      .map((entry) => ({
+        kind: "action",
+        value: `workspace-file:${entry.path}`,
+        searchTerms: [entry.path],
+        title: entry.path.split(/[\\/]/u).at(-1) ?? entry.path,
+        description: entry.path,
+        icon: <FileSearchIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          useRightPanelStore.getState().openFile(activeProjectTarget.threadRef, entry.path);
+        },
+      }));
+    const contentItems: CommandPaletteActionItem[] = projectContentSearch.matches
+      .slice(0, 12)
+      .map((match) => ({
+        kind: "action",
+        value: `project-content:${match.path}:${match.lineNumber}`,
+        searchTerms: [match.path, match.lineContent],
+        title: `${match.path}:${match.lineNumber}`,
+        description: match.lineContent.trim(),
+        icon: <FileTextIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          useRightPanelStore
+            .getState()
+            .openFile(activeProjectTarget.threadRef, match.path, match.lineNumber);
+        },
+      }));
+    const memoryItems: CommandPaletteActionItem[] = (memorySearch.data?.results ?? []).map(
+      (result) => {
+        const provenance =
+          typeof result.provenance === "object" &&
+          result.provenance !== null &&
+          "kind" in result.provenance &&
+          typeof result.provenance.kind === "string"
+            ? result.provenance.kind
+            : "recorded";
+        const labels = [
+          result.trust === "trusted" ? "trusted" : "archive · untrusted",
+          `${Math.round(result.confidence * 100)}% confidence`,
+          provenance,
+          result.scope,
+        ];
+        return {
+          kind: "action",
+          value: `governed-memory:${result.memoryId}`,
+          searchTerms: [result.content, result.kind, ...labels],
+          title: result.content,
+          description: labels.join(" · "),
+          icon: <BrainIcon className={ITEM_ICON_CLASS} />,
+          run: async () => {
+            await navigate({ to: "/" });
+          },
+        };
+      },
+    );
+
+    return [
+      ...(fileItems.length > 0
+        ? [{ value: "workspace-files-search", label: "Files", items: fileItems, preFiltered: true }]
+        : []),
+      ...(contentItems.length > 0
+        ? [
+            {
+              value: "project-content-search",
+              label: "Project Content",
+              items: contentItems,
+              preFiltered: true,
+            },
+          ]
+        : []),
+      ...(activeCommandCenterScope !== null && memoryItems.length > 0
+        ? [
+            {
+              value: "governed-memory-search",
+              label: "Governed Memory",
+              items: memoryItems,
+              preFiltered: true,
+            },
+          ]
+        : []),
+    ];
+  }, [
+    activeCommandCenterScope,
+    activeProjectTarget,
+    memorySearch.data?.results,
+    navigate,
+    projectContentSearch.matches,
+    unifiedSearchQuery,
+    workspaceFileSearch.entries,
+  ]);
 
   const pushPaletteView = useCallback(
     (view: CommandPaletteView): void => {
@@ -1505,6 +1717,33 @@ function OpenCommandPaletteDialog(props: {
     },
   });
 
+  // There is no projects listing page; the action targets the contextual
+  // project (active thread/draft, falling back to the first sidebar group).
+  const contextualProjectGroup =
+    (contextualProjectRef
+      ? projectGroupByTargetKey.get(
+          `${contextualProjectRef.environmentId}:${contextualProjectRef.projectId}`,
+        )
+      : null) ??
+    projectGroups[0] ??
+    null;
+  if (contextualProjectGroup) {
+    actionItems.push({
+      kind: "action",
+      value: "action:project-settings",
+      searchTerms: ["project", "settings", "scripts", "model", "grouping", "checkout"],
+      title: "Project settings",
+      description: contextualProjectGroup.displayName,
+      icon: <FolderIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({
+          to: "/projects/$projectKey",
+          params: { projectKey: contextualProjectGroup.projectKey },
+        });
+      },
+    });
+  }
+
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
   const sourceSelectionViewValue =
     addProjectEnvironmentId === null ? null : `sources:${addProjectEnvironmentId}`;
@@ -1524,6 +1763,7 @@ function OpenCommandPaletteDialog(props: {
     isInSubmenu: currentView !== null,
     projectSearchItems: projectSearchItems,
     threadSearchItems: allThreadItems,
+    additionalSearchGroups: unifiedSearchGroups,
   });
 
   const handleAddProjectForEnvironment = useCallback(

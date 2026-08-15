@@ -35,7 +35,7 @@ const makeDesktopClerkLayer = (isDevelopment = true, events: string[] = []) => {
     isDevelopment,
     appDataDirectory: "/tmp/app-data",
     userDataDirName: isDevelopment ? "t3code-dev" : "t3code",
-    legacyUserDataDirName: isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)",
+    legacyUserDataDirNames: [isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)"],
     path: { join: (...parts: ReadonlyArray<string>) => parts.join("/") },
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
 
@@ -91,7 +91,8 @@ describe("DesktopClerk", () => {
           {
             storage: storageAdapter,
             passkeys: true,
-            renderer: { scheme: "t3code-dev", host: "app" },
+            registerRendererScheme: false,
+            renderer: { scheme: "commandcenter-dev", host: "app" },
           },
         ],
       ]);
@@ -210,8 +211,8 @@ describe("DesktopClerk", () => {
   });
 
   it.each([
-    { isDevelopment: true, scheme: "t3code-dev" },
-    { isDevelopment: false, scheme: "t3code" },
+    { isDevelopment: true, scheme: "commandcenter-dev" },
+    { isDevelopment: false, scheme: "commandcenter" },
   ])("configures the SDK with the $scheme renderer origin", ({ isDevelopment, scheme }) => {
     const bridge = { cleanup: vi.fn(), isPrimaryInstance: true };
     storageMock.mockReturnValue(storageAdapter);
@@ -224,6 +225,7 @@ describe("DesktopClerk", () => {
         {
           storage: storageAdapter,
           passkeys: true,
+          registerRendererScheme: false,
           renderer: { scheme, host: "app" },
         },
       ],

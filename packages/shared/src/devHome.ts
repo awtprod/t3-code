@@ -38,7 +38,7 @@ const pointsAtLinkedWorktree = (gitFileContents: string, path: Path.Path): boole
   // match as a substring. Trailing separators normalize away first.
   const segments = path
     .normalize(gitdir.replaceAll("\\", "/"))
-    .split(/[/\\]/)
+    .split("/")
     .filter((segment) => segment.length > 0);
   // `<common-dir>/worktrees/<name>`: `worktrees` is the penultimate segment,
   // and something must precede it. This excludes `<git-dir>/modules/<name>`.

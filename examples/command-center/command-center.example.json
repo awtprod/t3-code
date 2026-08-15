@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "routing": {
+    "mode": "auto",
+    "showPreview": true,
+    "explicitSelectionWins": true,
+    "providerFallback": "first-healthy-compatible"
+  },
+  "spaces": [
+    {
+      "id": "personal",
+      "configPath": "spaces/personal.json"
+    },
+    {
+      "id": "example-studio",
+      "configPath": "spaces/example-studio.json"
+    }
+  ],
+  "connections": [
+    {
+      "id": "primary-google",
+      "kind": "google",
+      "accountLabel": "Primary account",
+      "credentialRef": "runtime:google/primary",
+      "capabilities": ["gmail.read", "calendar.read", "drive.read"],
+      "enabled": false
+    }
+  ]
+}

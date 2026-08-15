@@ -9,6 +9,7 @@
 import {
   EventId,
   IsoDateTime,
+  MessageId,
   NonNegativeInt,
   OrchestrationThreadActivityTone,
   ThreadId,
@@ -24,6 +25,7 @@ export const ProjectionThreadActivity = Schema.Struct({
   activityId: EventId,
   threadId: ThreadId,
   turnId: Schema.NullOr(TurnId),
+  correlatedMessageId: Schema.optional(MessageId),
   tone: OrchestrationThreadActivityTone,
   kind: Schema.String,
   summary: Schema.String,
@@ -81,4 +83,6 @@ export interface ProjectionThreadActivityRepositoryShape {
 export class ProjectionThreadActivityRepository extends Context.Service<
   ProjectionThreadActivityRepository,
   ProjectionThreadActivityRepositoryShape
->()("t3/persistence/Services/ProjectionThreadActivities/ProjectionThreadActivityRepository") {}
+>()(
+  "@awtprod/command-center/persistence/Services/ProjectionThreadActivities/ProjectionThreadActivityRepository",
+) {}

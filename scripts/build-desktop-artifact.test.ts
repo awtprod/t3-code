@@ -1,6 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -19,6 +21,7 @@ import {
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
   InvalidMockUpdateServerPortError,
+  isRetryableWindowsNsisOutputLockFailure,
   UnsupportedDesktopBuildArchitectureError,
   isMacPasskeySigningConfigurationError,
   LinuxIconResizeError,
@@ -43,6 +46,8 @@ import {
   stageLinuxIconSize,
   STAGE_INSTALL_ARGS,
   WINDOWS_ASAR_UNPACK,
+  ancestorNodeModulesPaths,
+  copyDirectoryPreservingSymlinks,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -85,14 +90,40 @@ function iconResizeSpawnerLayer(
 }
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it("retries only the NSIS output-lock signature", () => {
+    const retryable = new BuildCommandFailedError({
+      command: "vp exec -- electron-builder --win",
+      exitCode: 1,
+      stdoutTail:
+        "makensis.exe process failed ERR_ELECTRON_BUILDER_CANNOT_EXECUTE\nCan't open output file",
+    });
+    const unrelatedNsisFailure = new BuildCommandFailedError({
+      command: "vp exec -- electron-builder --win",
+      exitCode: 1,
+      stdoutTail: "makensis.exe process failed\nError in script on line 42",
+    });
+    const unrelatedCommand = new BuildCommandFailedError({
+      command: "custom packager",
+      exitCode: 1,
+      stderrTail: "makensis.exe process failed\nCan't open output file",
+    });
+
+    assert.isTrue(isRetryableWindowsNsisOutputLockFailure(retryable));
+    assert.isFalse(isRetryableWindowsNsisOutputLockFailure(unrelatedNsisFailure));
+    assert.isFalse(isRetryableWindowsNsisOutputLockFailure(unrelatedCommand));
+  });
+
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code (Alpha)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
+    assert.equal(resolveDesktopProductName("0.0.17"), "Command Center");
+    assert.equal(
+      resolveDesktopProductName("0.0.17-nightly.20260413.42"),
+      "Command Center (Nightly)",
+    );
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -121,7 +152,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
+                T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/commandcenter",
               },
             }),
           ),
@@ -132,7 +163,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                GITHUB_REPOSITORY: "pingdotgg/t3code",
+                GITHUB_REPOSITORY: "pingdotgg/commandcenter",
               },
             }),
           ),
@@ -142,13 +173,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual(latestConfig, {
         provider: "github",
         owner: "pingdotgg",
-        repo: "t3code",
+        repo: "commandcenter",
         releaseType: "release",
       });
       assert.deepStrictEqual(nightlyConfig, {
         provider: "github",
         owner: "pingdotgg",
-        repo: "t3code",
+        repo: "commandcenter",
         releaseType: "prerelease",
         channel: "nightly",
       });
@@ -345,10 +376,24 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
         undefined,
       );
+      const remoteOnlyWin = yield* createBuildConfig(
+        "win",
+        "nsis",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+        true,
+      );
 
       assert.notProperty(mac, "asarUnpack");
       assert.notProperty(linux, "asarUnpack");
       assert.deepStrictEqual(win.asarUnpack, WINDOWS_ASAR_UNPACK);
+      assert.equal(remoteOnlyWin.appId, "com.awtprod.commandcenter.remote");
+      assert.equal(remoteOnlyWin.productName, "Command Center Remote");
+      assert.equal(remoteOnlyWin.artifactName, "Command-Center-Remote-1.2.3-${arch}.${ext}");
+      assert.notProperty(remoteOnlyWin, "asarUnpack");
       // Linux must register the renderer schemes so the generated .desktop
       // entry advertises MimeType=x-scheme-handler/t3code; for OAuth deep links.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
@@ -404,22 +449,22 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it("derives macOS passkey signing configuration from the Clerk publishable key", () => {
     const configuration = resolveMacPasskeySigningConfiguration({
       T3CODE_APPLE_TEAM_ID: "abc1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/commandcenter.provisionprofile",
       T3CODE_CLERK_PUBLISHABLE_KEY: `pk_test_${btoa("example.clerk.accounts.dev$")}`,
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "com.t3tools.t3code",
+      appId: "com.awtprod.commandcenter",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
-      provisioningProfilePath: "/tmp/t3code.provisionprofile",
+      provisioningProfilePath: "/tmp/commandcenter.provisionprofile",
     });
   });
 
   it("normalizes explicit macOS passkey RP domains and renders required entitlements", () => {
     const configuration = resolveMacPasskeySigningConfiguration({
       T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/commandcenter.provisionprofile",
       T3CODE_CLERK_PASSKEY_RP_DOMAINS:
         " Clerk.Example.com,example.clerk.accounts.dev,clerk.example.com ",
     });
@@ -429,7 +474,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code</string>");
+    assert.include(entitlements, "<string>ABC1234567.com.awtprod.commandcenter</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
@@ -459,7 +504,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "https://domain-user:domain-secret@example.clerk.accounts.dev/path?token=query-secret";
     const invalidDomainError = captureError({
       T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/commandcenter.provisionprofile",
       T3CODE_CLERK_PASSKEY_RP_DOMAINS: unsafeDomain,
     });
     assert.instanceOf(invalidDomainError, InvalidMacPasskeyRpDomainError);
@@ -477,14 +522,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       () =>
         resolveMacPasskeySigningConfiguration({
           T3CODE_APPLE_TEAM_ID: "ABC1234567",
-          T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+          T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/commandcenter.provisionprofile",
           T3CODE_CLERK_PASSKEY_RP_DOMAINS: "example.clerk.accounts.dev:8443",
         }),
       /Invalid passkey RP domain/u,
     );
     const invalidPublishableKeyError = captureError({
       T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
+      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/commandcenter.provisionprofile",
       T3CODE_CLERK_PUBLISHABLE_KEY: "pk_test_%",
     });
     assert.instanceOf(invalidPublishableKeyError, InvalidMacPasskeyPublishableKeyError);
@@ -520,17 +565,39 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     Effect.gen(function* () {
       const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
         entitlementsPath: "/tmp/entitlements.mac.plist",
-        provisioningProfilePath: "/tmp/t3code.provisionprofile",
+        provisioningProfilePath: "/tmp/commandcenter.provisionprofile",
       });
 
       const mac = config.mac as Record<string, unknown>;
-      assert.equal(config.appId, "com.t3tools.t3code");
+      assert.equal(config.appId, "com.awtprod.commandcenter");
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
-      assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
+      assert.equal(mac.provisioningProfile, "/tmp/commandcenter.provisionprofile");
       assert.deepStrictEqual(mac.protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "Command Center", schemes: ["commandcenter", "commandcenter-dev"] },
       ]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("uses the canonical Linux executable and window class", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.0.0",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const linux = config.linux as {
+        readonly executableName: string;
+        readonly desktop: { readonly entry: { readonly StartupWMClass: string } };
+      };
+
+      assert.equal(config.appId, "com.awtprod.commandcenter");
+      assert.equal(linux.executableName, "command-center");
+      assert.equal(linux.desktop.entry.StartupWMClass, "command-center");
+    }),
   );
 
   it.effect("keeps executable resource editing enabled for unsigned Windows builds", () =>
@@ -679,6 +746,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         mockUpdates: Option.none(),
         mockUpdateServerPort: Option.none(),
         wslPrebuild: Option.none(),
+        remoteOnly: Option.none(),
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -702,6 +770,66 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  it.effect("resolves remoteOnly from the --remote-only flag without VITE_REMOTE_ONLY", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveBuildOptions({
+        platform: Option.some("win"),
+        target: Option.none(),
+        arch: Option.none(),
+        buildVersion: Option.none(),
+        outputDir: Option.none(),
+        skipBuild: Option.none(),
+        keepStage: Option.none(),
+        signed: Option.none(),
+        verbose: Option.none(),
+        mockUpdates: Option.none(),
+        mockUpdateServerPort: Option.none(),
+        wslPrebuild: Option.none(),
+        remoteOnly: Option.some(true),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(HostProcessPlatform, "win32"),
+            Layer.succeed(HostProcessArchitecture, "x64"),
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+          ),
+        ),
+      );
+
+      assert.equal(resolved.remoteOnly, true);
+    }),
+  );
+
+  it.effect("defaults remoteOnly to false when neither the flag nor env is set", () =>
+    Effect.gen(function* () {
+      const resolved = yield* resolveBuildOptions({
+        platform: Option.some("win"),
+        target: Option.none(),
+        arch: Option.none(),
+        buildVersion: Option.none(),
+        outputDir: Option.none(),
+        skipBuild: Option.none(),
+        keepStage: Option.none(),
+        signed: Option.none(),
+        verbose: Option.none(),
+        mockUpdates: Option.none(),
+        mockUpdateServerPort: Option.none(),
+        wslPrebuild: Option.none(),
+        remoteOnly: Option.none(),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(HostProcessPlatform, "win32"),
+            Layer.succeed(HostProcessArchitecture, "x64"),
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+          ),
+        ),
+      );
+
+      assert.equal(resolved.remoteOnly, false);
+    }),
+  );
+
   it.effect("rejects universal builds on Linux and Windows before staging binaries", () =>
     Effect.gen(function* () {
       for (const platform of ["linux", "win"] as const) {
@@ -719,6 +847,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             mockUpdates: Option.none(),
             mockUpdateServerPort: Option.none(),
             wslPrebuild: Option.none(),
+            remoteOnly: Option.none(),
           }),
         );
 
@@ -743,6 +872,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         mockUpdates: Option.some(false),
         mockUpdateServerPort: Option.none(),
         wslPrebuild: Option.none(),
+        remoteOnly: Option.none(),
       }).pipe(
         Effect.provide(
           ConfigProvider.layer(
@@ -765,5 +895,96 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(resolved.verbose, false);
       assert.equal(resolved.mockUpdates, false);
     }),
+  );
+});
+
+// The self-containment check runs the packaged tree in a scratch directory. Its
+// own node_modules holds the unpacked externals and must be ignored, but any
+// node_modules *above* it would let Node's parent walk satisfy an import that is
+// missing from the package, so the probe refuses to run in that case.
+it("lists ancestor node_modules, nearest first, excluding the start directory", () => {
+  const separator = String.fromCharCode(92);
+  const driveRoot = ["C:", ""].join(separator);
+  assert.deepStrictEqual(
+    ancestorNodeModulesPaths(["C:", "tmp", "probe", "app"].join(separator), separator),
+    [
+      ["C:", "tmp", "probe", "node_modules"].join(separator),
+      ["C:", "tmp", "node_modules"].join(separator),
+      `${driveRoot}node_modules`,
+    ],
+  );
+});
+
+it("includes the filesystem root for posix paths", () => {
+  assert.deepStrictEqual(ancestorNodeModulesPaths("/tmp/probe", "/"), [
+    "/tmp/node_modules",
+    "/node_modules",
+  ]);
+});
+
+// A network-share root must keep its server/share prefix. Rebuilding it from segments
+// produced relative paths, which fs.exists resolves against the build cwd, so
+// the guard checked directories that do not exist and silently passed.
+it("keeps the prefix of a UNC path instead of going relative", () => {
+  const separator = String.fromCharCode(92);
+  const shareRoot = ["", "", "server", "share"].join(separator);
+  const paths = ancestorNodeModulesPaths([shareRoot, "tmp", "app"].join(separator), separator);
+  for (const candidate of paths) {
+    assert.ok(candidate.startsWith(shareRoot), candidate);
+  }
+  assert.deepStrictEqual(paths[0], [shareRoot, "tmp", "node_modules"].join(separator));
+});
+
+it.effect("rebases packaged links into the isolated tree", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-copy-symlinks-" });
+    const source = path.join(root, "source");
+    const destination = path.join(root, "destination");
+    const packageDir = path.join(source, "node_modules/.pnpm/example@1/node_modules/example");
+    const relativePackageLink = path.join(source, "node_modules/example-relative");
+    const absolutePackageLink = path.join(source, "node_modules/example-absolute");
+
+    yield* fs.makeDirectory(packageDir, { recursive: true });
+    yield* fs.writeFileString(path.join(packageDir, "index.js"), "module.exports = true;\n");
+    yield* fs.symlink(
+      path.join(".pnpm", "example@1", "node_modules", "example"),
+      relativePackageLink,
+    );
+    yield* fs.symlink(packageDir, absolutePackageLink);
+
+    yield* copyDirectoryPreservingSymlinks(source, destination);
+
+    const copiedPackage = path.join(
+      destination,
+      "node_modules/.pnpm/example@1/node_modules/example",
+    );
+    const resolvedCopiedPackage = yield* fs.realPath(copiedPackage);
+    assert.equal(
+      yield* fs.readLink(path.join(destination, "node_modules/example-relative")),
+      copiedPackage,
+    );
+    assert.equal(
+      yield* fs.readLink(path.join(destination, "node_modules/example-absolute")),
+      copiedPackage,
+    );
+    assert.equal(
+      yield* fs.realPath(path.join(destination, "node_modules/example-relative")),
+      resolvedCopiedPackage,
+    );
+    assert.equal(
+      yield* fs.realPath(path.join(destination, "node_modules/example-absolute")),
+      resolvedCopiedPackage,
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it("ignores trailing separators", () => {
+  const separator = String.fromCharCode(92);
+  const startDir = ["C:", "tmp", "probe", "app"].join(separator);
+  assert.deepStrictEqual(
+    ancestorNodeModulesPaths(`${startDir}${separator}`, separator),
+    ancestorNodeModulesPaths(startDir, separator),
   );
 });

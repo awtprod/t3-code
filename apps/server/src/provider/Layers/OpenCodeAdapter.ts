@@ -1477,6 +1477,13 @@ export function makeOpenCodeAdapter(
           payload: {
             model: modelSelection?.model ?? context.session.model,
             ...(variant ? { effort: variant } : {}),
+            // Echo the requesting event's sequence so the projector adopts the
+            // placeholder this turn was started for. Only on a real turn
+            // boundary: a steer folds into a turn whose placeholder was
+            // already consumed.
+            ...(input.turnRequestSequence !== undefined
+              ? { turnRequestSequence: input.turnRequestSequence }
+              : {}),
           },
         });
       }
@@ -1529,6 +1536,11 @@ export function makeOpenCodeAdapter(
       return {
         threadId: input.threadId,
         turnId,
+        // A steer emitted no `turn.started` above, so nothing downstream will
+        // consume this send's pending turn-start placeholder. Report the fold so
+        // the reactor consumes it explicitly instead of leaving a delivered
+        // message looking like one that was never sent.
+        ...(steeringTurnId === undefined ? {} : { steered: true }),
         // Re-surface the durable cursor on every turn so the persisted binding
         // is refreshed alongside last-seen/runtime state (mirrors Grok/Codex).
         ...(context.session.resumeCursor !== undefined
@@ -1540,6 +1552,28 @@ export function makeOpenCodeAdapter(
     const interruptTurn: OpenCodeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
       function* (threadId, turnId) {
         const context = yield* ensureSessionContext(sessions, threadId);
+        // Scoped to the named turn when the caller named one. `session.abort`
+        // is the bluntest of the adapters' interrupts — it aborts the whole
+        // OpenCode session, not one turn — so issuing it on behalf of a turn
+        // that has already finished tears down the turn that REPLACED it. The
+        // reactor's post-send fence can reach here holding a stop that covered
+        // request A while message B is the one actually running; aborting then
+        // destroys work the user never asked to stop.
+        //
+        // An undefined `turnId` still means "whatever is running" — the
+        // session-stop and watchdog path, where thread-wide is the intent.
+        if (
+          turnId !== undefined &&
+          context.activeTurnId !== undefined &&
+          context.activeTurnId !== turnId
+        ) {
+          yield* Effect.logDebug("opencode-adapter.interrupt-turn.stale-target", {
+            threadId,
+            requestedTurnId: turnId,
+            activeTurnId: context.activeTurnId,
+          });
+          return;
+        }
         yield* runOpenCodeSdk("session.abort", () =>
           context.client.session.abort({ sessionID: context.openCodeSessionId }),
         ).pipe(Effect.mapError(toRequestError));

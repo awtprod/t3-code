@@ -6,8 +6,8 @@ import {
   ThreadId,
   type OrchestrationEvent,
 } from "@t3tools/contracts";
+import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { describe, expect, it } from "vite-plus/test";
 
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
 
@@ -238,110 +238,394 @@ describe("orchestration projector", () => {
     expect(next.threads).toEqual([]);
   });
 
-  it("tracks latest turn id from session lifecycle events", async () => {
+  it("settles only the exact named latest turn", async () => {
     const createdAt = "2026-02-23T08:00:00.000Z";
-    const startedAt = "2026-02-23T08:00:05.000Z";
-    const model = createEmptyReadModel(createdAt);
-
-    const afterCreate = await Effect.runPromise(
-      projectEvent(
-        model,
-        makeEvent({
-          sequence: 1,
-          type: "thread.created",
-          aggregateKind: "thread",
-          aggregateId: "thread-1",
-          occurredAt: createdAt,
-          commandId: "cmd-create",
-          payload: {
-            threadId: "thread-1",
-            projectId: "project-1",
-            title: "demo",
-            modelSelection: {
-              provider: ProviderDriverKind.make("codex"),
-              model: "gpt-5.3-codex",
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const afterCreate = yield* projectEvent(
+          createEmptyReadModel(createdAt),
+          makeEvent({
+            sequence: 1,
+            type: "thread.created",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: createdAt,
+            commandId: "cmd-create",
+            payload: {
+              threadId: "thread-1",
+              projectId: "project-1",
+              title: "demo",
+              modelSelection: {
+                provider: ProviderDriverKind.make("codex"),
+                model: "gpt-5.3-codex",
+              },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt,
+              updatedAt: createdAt,
             },
-            runtimeMode: "full-access",
-            branch: null,
-            worktreePath: null,
-            createdAt,
-            updatedAt: createdAt,
-          },
-        }),
-      ),
-    );
+          }),
+        );
 
-    const settledAt = "2026-02-23T08:01:00.000Z";
-    const [afterRunning, afterReady] = await Effect.runPromise(
-      Effect.flatMap(
-        projectEvent(
+        const sessionEvent = (input: {
+          sequence: number;
+          occurredAt: string;
+          status: "running" | "ready";
+          activeTurnId: string | null;
+          settledTurnId?: string;
+        }) =>
+          makeEvent({
+            sequence: input.sequence,
+            type: "thread.session-set",
+            aggregateKind: "thread",
+            aggregateId: "thread-1",
+            occurredAt: input.occurredAt,
+            commandId: `cmd-session-${input.sequence}`,
+            payload: {
+              threadId: "thread-1",
+              pendingTurnStartAdoption: "none",
+              ...(input.settledTurnId === undefined
+                ? {}
+                : {
+                    settledTurnId: input.settledTurnId,
+                    terminalTurnTransition: {
+                      turnId: input.settledTurnId,
+                      state: "completed" as const,
+                    },
+                  }),
+              session: {
+                threadId: "thread-1",
+                status: input.status,
+                providerName: "codex",
+                runtimeMode: "approval-required",
+                activeTurnId: input.activeTurnId,
+                lastError: null,
+                updatedAt: input.occurredAt,
+              },
+            },
+          });
+
+        const afterFirstRunning = yield* projectEvent(
+          afterCreate,
+          sessionEvent({
+            sequence: 2,
+            occurredAt: "2026-02-23T08:00:05.000Z",
+            status: "running",
+            activeTurnId: "turn-1",
+          }),
+        );
+        const afterUncorrelatedReady = yield* projectEvent(
+          afterFirstRunning,
+          sessionEvent({
+            sequence: 3,
+            occurredAt: "2026-02-23T08:00:20.000Z",
+            status: "ready",
+            activeTurnId: null,
+          }),
+        );
+        expect(afterUncorrelatedReady.threads[0]?.latestTurn).toMatchObject({
+          turnId: "turn-1",
+          state: "running",
+          completedAt: null,
+        });
+
+        const afterCurrentRunning = yield* projectEvent(
+          afterUncorrelatedReady,
+          sessionEvent({
+            sequence: 4,
+            occurredAt: "2026-02-23T08:00:30.000Z",
+            status: "running",
+            activeTurnId: "turn-2",
+          }),
+        );
+        const afterDelayedOldSettlement = yield* projectEvent(
+          afterCurrentRunning,
+          sessionEvent({
+            sequence: 5,
+            occurredAt: "2026-02-23T08:00:40.000Z",
+            status: "ready",
+            activeTurnId: null,
+            settledTurnId: "turn-1",
+          }),
+        );
+        expect(afterDelayedOldSettlement.threads[0]?.latestTurn).toMatchObject({
+          turnId: "turn-2",
+          state: "running",
+          completedAt: null,
+        });
+
+        const settledAt = "2026-02-23T08:01:00.000Z";
+        const afterExactSettlement = yield* projectEvent(
+          afterDelayedOldSettlement,
+          sessionEvent({
+            sequence: 6,
+            occurredAt: settledAt,
+            status: "ready",
+            activeTurnId: null,
+            settledTurnId: "turn-2",
+          }),
+        );
+        expect(afterExactSettlement.threads[0]?.latestTurn).toMatchObject({
+          turnId: "turn-2",
+          state: "completed",
+          completedAt: settledAt,
+        });
+      }),
+    );
+  });
+
+  it("does not resurrect an interrupted turn from a duplicate running update", async () => {
+    const createdAt = "2026-02-23T09:00:00.000Z";
+    const interruptedAt = "2026-02-23T09:00:30.000Z";
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const afterCreate = yield* projectEvent(
+          createEmptyReadModel(createdAt),
+          makeEvent({
+            sequence: 1,
+            type: "thread.created",
+            aggregateKind: "thread",
+            aggregateId: "thread-terminal",
+            occurredAt: createdAt,
+            commandId: "cmd-terminal-create",
+            payload: {
+              threadId: "thread-terminal",
+              projectId: "project-1",
+              title: "terminal turn",
+              modelSelection: {
+                provider: ProviderDriverKind.make("codex"),
+                model: "gpt-5.3-codex",
+              },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt,
+              updatedAt: createdAt,
+            },
+          }),
+        );
+        const runningEvent = (sequence: number, occurredAt: string) =>
+          makeEvent({
+            sequence,
+            type: "thread.session-set",
+            aggregateKind: "thread",
+            aggregateId: "thread-terminal",
+            occurredAt,
+            commandId: `cmd-terminal-${sequence}`,
+            payload: {
+              threadId: "thread-terminal",
+              pendingTurnStartAdoption: "none",
+              session: {
+                threadId: "thread-terminal",
+                status: "running",
+                providerName: "codex",
+                runtimeMode: "full-access",
+                activeTurnId: "turn-terminal",
+                lastError: null,
+                updatedAt: occurredAt,
+              },
+            },
+          });
+
+        const afterRunning = yield* projectEvent(
+          afterCreate,
+          runningEvent(2, "2026-02-23T09:00:05.000Z"),
+        );
+        const afterInterrupted = yield* projectEvent(
+          afterRunning,
+          makeEvent({
+            sequence: 3,
+            type: "thread.session-set",
+            aggregateKind: "thread",
+            aggregateId: "thread-terminal",
+            occurredAt: interruptedAt,
+            commandId: "cmd-terminal-interrupted",
+            payload: {
+              threadId: "thread-terminal",
+              pendingTurnStartAdoption: "none",
+              settledTurnId: "turn-terminal",
+              terminalTurnTransition: {
+                turnId: "turn-terminal",
+                state: "interrupted",
+              },
+              session: {
+                threadId: "thread-terminal",
+                status: "interrupted",
+                providerName: "codex",
+                runtimeMode: "full-access",
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: interruptedAt,
+              },
+            },
+          }),
+        );
+        const afterDuplicateSettlement = yield* projectEvent(
+          afterInterrupted,
+          makeEvent({
+            sequence: 4,
+            type: "thread.session-set",
+            aggregateKind: "thread",
+            aggregateId: "thread-terminal",
+            occurredAt: "2026-02-23T09:00:40.000Z",
+            commandId: "cmd-terminal-settle-again",
+            payload: {
+              threadId: "thread-terminal",
+              pendingTurnStartAdoption: "none",
+              settledTurnId: "turn-terminal",
+              terminalTurnTransition: {
+                turnId: "turn-terminal",
+                state: "completed",
+              },
+              session: {
+                threadId: "thread-terminal",
+                status: "ready",
+                providerName: "codex",
+                runtimeMode: "full-access",
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: "2026-02-23T09:00:40.000Z",
+              },
+            },
+          }),
+        );
+        const afterDuplicateRunning = yield* projectEvent(
+          afterDuplicateSettlement,
+          runningEvent(5, "2026-02-23T09:00:45.000Z"),
+        );
+
+        expect(afterDuplicateRunning.threads[0]?.latestTurn).toMatchObject({
+          turnId: "turn-terminal",
+          state: "interrupted",
+          completedAt: interruptedAt,
+        });
+      }),
+    );
+  });
+
+  it.effect(
+    "projects simultaneous superseded and active exact transitions onto the active turn",
+    () => {
+      const createdAt = "2026-02-23T10:00:00.000Z";
+      const transitionedAt = "2026-02-23T10:00:20.000Z";
+      return Effect.gen(function* () {
+        const afterCreate = yield* projectEvent(
+          createEmptyReadModel(createdAt),
+          makeEvent({
+            sequence: 1,
+            type: "thread.created",
+            aggregateKind: "thread",
+            aggregateId: "thread-atomic",
+            occurredAt: createdAt,
+            commandId: "cmd-atomic-create",
+            payload: {
+              threadId: "thread-atomic",
+              projectId: "project-1",
+              title: "atomic turns",
+              modelSelection: {
+                provider: ProviderDriverKind.make("codex"),
+                model: "gpt-5.3-codex",
+              },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt,
+              updatedAt: createdAt,
+            },
+          }),
+        );
+        const afterSupersededRunning = yield* projectEvent(
           afterCreate,
           makeEvent({
             sequence: 2,
             type: "thread.session-set",
             aggregateKind: "thread",
-            aggregateId: "thread-1",
-            occurredAt: startedAt,
-            commandId: "cmd-running",
+            aggregateId: "thread-atomic",
+            occurredAt: "2026-02-23T10:00:05.000Z",
+            commandId: "cmd-atomic-running-a",
             payload: {
-              threadId: "thread-1",
+              threadId: "thread-atomic",
+              pendingTurnStartAdoption: "none",
               session: {
-                threadId: "thread-1",
+                threadId: "thread-atomic",
                 status: "running",
                 providerName: "codex",
-                providerSessionId: "session-1",
-                providerThreadId: "provider-thread-1",
-                runtimeMode: "approval-required",
-                activeTurnId: "turn-1",
+                runtimeMode: "full-access",
+                activeTurnId: "turn-a",
                 lastError: null,
-                updatedAt: startedAt,
+                updatedAt: "2026-02-23T10:00:05.000Z",
               },
             },
           }),
-        ),
-        (running) =>
-          Effect.map(
-            projectEvent(
-              running,
-              makeEvent({
-                sequence: 3,
-                type: "thread.session-set",
-                aggregateKind: "thread",
-                aggregateId: "thread-1",
-                occurredAt: settledAt,
-                commandId: "cmd-ready",
-                payload: {
-                  threadId: "thread-1",
-                  session: {
-                    threadId: "thread-1",
-                    status: "ready",
-                    providerName: "codex",
-                    providerSessionId: "session-1",
-                    providerThreadId: "provider-thread-1",
-                    runtimeMode: "approval-required",
-                    activeTurnId: null,
-                    lastError: null,
-                    updatedAt: settledAt,
-                  },
-                },
-              }),
-            ),
-            (ready) => [running, ready] as const,
-          ),
-      ),
-    );
+        );
+        const afterAtomicTransition = yield* projectEvent(
+          afterSupersededRunning,
+          makeEvent({
+            sequence: 3,
+            type: "thread.session-set",
+            aggregateKind: "thread",
+            aggregateId: "thread-atomic",
+            occurredAt: transitionedAt,
+            commandId: "cmd-atomic-start-b",
+            payload: {
+              threadId: "thread-atomic",
+              pendingTurnStartAdoption: "exact",
+              turnRequestSequence: 12,
+              terminalTurnTransitions: [
+                { turnId: "turn-a", state: "interrupted" },
+                { turnId: "turn-b", state: "interrupted" },
+              ],
+              terminalTurnTransition: {
+                turnId: "turn-b",
+                state: "interrupted",
+              },
+              session: {
+                threadId: "thread-atomic",
+                status: "running",
+                providerName: "codex",
+                runtimeMode: "full-access",
+                activeTurnId: "turn-b",
+                lastError: null,
+                updatedAt: transitionedAt,
+              },
+            },
+          }),
+        );
+        const afterDuplicateRunning = yield* projectEvent(
+          afterAtomicTransition,
+          makeEvent({
+            sequence: 4,
+            type: "thread.session-set",
+            aggregateKind: "thread",
+            aggregateId: "thread-atomic",
+            occurredAt: "2026-02-23T10:00:30.000Z",
+            commandId: "cmd-atomic-running-b-again",
+            payload: {
+              threadId: "thread-atomic",
+              pendingTurnStartAdoption: "none",
+              terminalTurnTransitions: [{ turnId: "turn-unrelated", state: "completed" }],
+              session: {
+                threadId: "thread-atomic",
+                status: "running",
+                providerName: "codex",
+                runtimeMode: "full-access",
+                activeTurnId: "turn-b",
+                lastError: null,
+                updatedAt: "2026-02-23T10:00:30.000Z",
+              },
+            },
+          }),
+        );
 
-    const thread = afterRunning.threads[0];
-    expect(thread?.latestTurn?.turnId).toBe("turn-1");
-    expect(thread?.session?.status).toBe("running");
-
-    // Leaving the "running" session status settles the running turn with the
-    // session timestamp as the turn end.
-    const settledThread = afterReady.threads[0];
-    expect(settledThread?.latestTurn?.turnId).toBe("turn-1");
-    expect(settledThread?.latestTurn?.state).toBe("completed");
-    expect(settledThread?.latestTurn?.completedAt).toBe(settledAt);
-  });
+        expect(afterDuplicateRunning.threads[0]?.latestTurn).toMatchObject({
+          turnId: "turn-b",
+          state: "interrupted",
+          completedAt: transitionedAt,
+        });
+      });
+    },
+  );
 
   it("updates canonical thread runtime mode from thread.runtime-mode-set", async () => {
     const createdAt = "2026-02-23T08:00:00.000Z";

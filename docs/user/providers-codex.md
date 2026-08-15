@@ -28,6 +28,30 @@ Log in with Codex normally:
 codex login
 ```
 
+## Command Center Chats
+
+When a connected remote Linux environment is available, Command Center keeps its main conversation
+and ordinary work there. Requests that clearly concern the local computer—such as the desktop app,
+Windows or macOS settings, installed applications, browsers, or attached devices—start a worker task
+on the connected desktop instead. The route receipt always names the machine doing the work, and the
+desktop worker's replies appear in the main Command Center conversation. Open the linked worker task
+when it needs an approval or you want its full activity history.
+
+User-started desktop worker tasks run directly on macOS and Windows; Windows does not require WSL.
+The first native Windows task may ask for administrator approval while Codex prepares its stronger
+sandbox. Approve that prompt: the non-administrator Windows sandbox cannot enforce the workspace-only
+filesystem policy Command Center requires, so T3 Code will not fall back to it or run the provider
+without isolation.
+
+Keep Codex current if Command Center reports that native sandbox setup or packaged helper files are
+missing. Expand the Codex provider in Settings and choose **Update or reinstall**; the action remains
+available even when the installed version number is already current so it can repair missing native
+files. T3 Code blocks the chat when the installed runtime cannot prove the required isolation and
+shows the setup problem without a diagnostic stack trace.
+
+Scheduled and unattended Command Center automation still requires a Linux host. This limitation
+does not apply to a chat you start yourself on macOS or Windows.
+
 ## I Want Work And Personal Codex Accounts
 
 Use one real Codex home and one shadow home.

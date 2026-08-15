@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/contracts",
-  "version": "0.0.31",
+  "version": "0.0.33",
   "private": true,
   "files": [
     "dist"
@@ -25,6 +25,7 @@
     "test": "vp test run"
   },
   "dependencies": {
+    "@command-center/core": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

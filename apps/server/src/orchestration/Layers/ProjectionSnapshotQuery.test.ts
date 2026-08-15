@@ -87,6 +87,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           pending_approval_count,
           pending_user_input_count,
           has_actionable_proposed_plan,
+          pinned_at,
+          pin_order_key,
           created_at,
           updated_at,
           deleted_at
@@ -105,6 +107,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           1,
           0,
           0,
+          '2026-02-24T00:00:01.000Z',
+          'gm',
           '2026-02-24T00:00:02.000Z',
           '2026-02-24T00:00:03.000Z',
           NULL
@@ -187,6 +191,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           provider_name,
           provider_session_id,
           provider_thread_id,
+          session_generation,
           runtime_mode,
           active_turn_id,
           last_error,
@@ -198,6 +203,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'codex',
           'provider-session-1',
           'provider-thread-1',
+          'gen-1',
           'approval-required',
           'turn-1',
           NULL,
@@ -271,6 +277,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5-codex",
           },
+          faviconPath: null,
           scripts: [
             {
               id: "script-1",
@@ -280,6 +287,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               runOnWorktreeCreate: false,
             },
           ],
+          defaultThreadEnvMode: null,
           createdAt: "2026-02-24T00:00:00.000Z",
           updatedAt: "2026-02-24T00:00:01.000Z",
           deletedAt: null,
@@ -295,6 +303,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             model: "gpt-5-codex",
           },
           interactionMode: "default",
+          routingMode: "manual",
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
@@ -317,7 +326,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           settledAt: null,
           snoozedUntil: null,
           snoozedAt: null,
-          pinnedAt: null,
+          pinnedAt: "2026-02-24T00:00:01.000Z",
+          pinOrderKey: "gm",
           titleRegeneration: null,
           deletedAt: null,
           messages: [
@@ -368,6 +378,14 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             threadId: ThreadId.make("thread-1"),
             status: "running",
             providerName: "codex",
+            // The per-runtime generation nonce must survive the FULL snapshot,
+            // not just the shell/detail paths. The stale-exit guard compares an
+            // event's generation against the projection's, so a snapshot that
+            // drops it downgrades that consumer to instance-id-only
+            // correlation — which cannot distinguish a restarted runtime from
+            // its predecessor, since the instance id is a routing key rather
+            // than a per-start identity.
+            sessionGeneration: "gen-1",
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
@@ -388,6 +406,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5-codex",
           },
+          faviconPath: null,
           scripts: [
             {
               id: "script-1",
@@ -397,6 +416,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               runOnWorktreeCreate: false,
             },
           ],
+          defaultThreadEnvMode: null,
           createdAt: "2026-02-24T00:00:00.000Z",
           updatedAt: "2026-02-24T00:00:01.000Z",
         },
@@ -411,6 +431,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             model: "gpt-5-codex",
           },
           interactionMode: "default",
+          routingMode: "manual",
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
@@ -433,12 +454,14 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           settledAt: null,
           snoozedUntil: null,
           snoozedAt: null,
-          pinnedAt: null,
+          pinnedAt: "2026-02-24T00:00:01.000Z",
+          pinOrderKey: "gm",
           titleRegeneration: null,
           session: {
             threadId: ThreadId.make("thread-1"),
             status: "running",
             providerName: "codex",
+            sessionGeneration: "gen-1",
             runtimeMode: "approval-required",
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
@@ -2001,9 +2024,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
       `;
       yield* sql`
         INSERT INTO projection_thread_activities (
-          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at
+          activity_id, thread_id, turn_id, correlated_message_id, tone, kind, summary, payload_json,
+          created_at
         )
-        VALUES (${turn + "-activity"}, 'thread-w', ${turn}, 'tool', 'tool.completed',
+        VALUES (${turn + "-activity"}, 'thread-w', ${turn},
+          ${turn === "turn-4" ? "user-msg-4" : null}, 'tool', 'tool.completed',
           'ran tool', '{"ok":true}', ${at})
       `;
     }
@@ -2080,6 +2105,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
           "turn-5-activity",
           "turnless-activity",
         ]);
+        assert.equal(
+          snapshot.value.thread.activities.find((activity) => activity.id === "turn-4-activity")
+            ?.correlatedMessageId,
+          "user-msg-4",
+        );
         assert.equal(snapshot.value.page?.hasMore, true);
         assert.notEqual(snapshot.value.page?.beforeCursor, null);
         assert.equal(snapshot.value.page?.snapshotSequence, 42);

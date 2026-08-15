@@ -54,8 +54,8 @@ describe("codex multi-agent wire capture", () => {
     assert.equal(fixture.capturedWith.model, "gpt-5.6-luna");
     assert.equal(childThreadIds.size, 2);
     const paths = subAgentActivityItems().map((item) => item.agentPath);
-    assert.include(paths, "/root/alpha");
-    assert.include(paths, "/root/beta");
+    assert.include(paths, "/agents/alpha");
+    assert.include(paths, "/agents/beta");
   });
 
   it("emits child traffic BEFORE the item that registers the child", () => {

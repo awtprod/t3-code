@@ -6,7 +6,7 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { Thread, ThreadShell } from "../types";
 import {
@@ -19,13 +19,17 @@ import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
+  ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
   getStartedThreadModelChangeBlockReason,
+  hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
+  loadComposerImagesForRetry,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
+  scheduleEnvironmentReconnectWarning,
   startNewThreadForProject,
   shouldShowBranchMismatchBanner,
   shouldWriteThreadErrorToCurrentServerThread,
@@ -35,6 +39,92 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+describe("loadComposerImagesForRetry", () => {
+  it("restores every prior attachment as a sendable composer image", async () => {
+    const requestedUrls: string[] = [];
+    const images = await loadComposerImagesForRetry(
+      [
+        {
+          type: "image",
+          id: "image-1",
+          name: "context.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+          previewUrl: "https://example.test/assets/image-1",
+        },
+      ],
+      {
+        fetchAttachment: async (url) => {
+          requestedUrls.push(url);
+          return new Blob([new Uint8Array([1, 2, 3, 4])], { type: "image/png" });
+        },
+        createPreviewUrl: () => "blob:retry-image-1",
+      },
+    );
+
+    expect(requestedUrls).toEqual(["https://example.test/assets/image-1"]);
+    expect(images).toHaveLength(1);
+    expect(images[0]).toMatchObject({
+      id: "image-1",
+      name: "context.png",
+      mimeType: "image/png",
+      sizeBytes: 4,
+      previewUrl: "blob:retry-image-1",
+    });
+    expect(images[0]?.file).toBeInstanceOf(File);
+  });
+
+  it("rejects instead of silently dropping an unavailable attachment", async () => {
+    await expect(
+      loadComposerImagesForRetry([
+        {
+          type: "image",
+          id: "image-1",
+          name: "missing.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+        },
+      ]),
+    ).rejects.toThrow("missing.png");
+  });
+});
+
+describe("environment reconnect warning grace", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("shows a persistent reconnect after the grace period", () => {
+    vi.useFakeTimers();
+    const showWarning = vi.fn();
+
+    scheduleEnvironmentReconnectWarning(showWarning);
+    vi.advanceTimersByTime(ENVIRONMENT_RECONNECT_WARNING_GRACE_MS - 1);
+    expect(showWarning).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(showWarning).toHaveBeenCalledOnce();
+  });
+
+  it("cancels the warning when the connection recovers during the grace period", () => {
+    vi.useFakeTimers();
+    const showWarning = vi.fn();
+
+    const cancel = scheduleEnvironmentReconnectWarning(showWarning);
+    cancel();
+    vi.advanceTimersByTime(ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
+
+    expect(showWarning).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse elapsed grace from another environment", () => {
+    const anotherEnvironmentId = EnvironmentId.make("environment-remote");
+
+    expect(hasEnvironmentReconnectWarningGraceElapsed(environmentId, environmentId)).toBe(true);
+    expect(hasEnvironmentReconnectWarningGraceElapsed(anotherEnvironmentId, environmentId)).toBe(
+      false,
+    );
+  });
+});
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return {

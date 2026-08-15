@@ -27,6 +27,19 @@ export class OrchestrationCommandDecodeError extends Schema.TaggedErrorClass<Orc
   }
 }
 
+/**
+ * The `detail` the engine uses when a decider accepted a command but produced
+ * no events.
+ *
+ * `OrchestrationCommandInvariantError` is raised for both benign and genuine
+ * outcomes, so callers that want to treat "there was nothing to do" as success
+ * cannot key off the tag alone — they would also swallow real failures that
+ * share it. Matching this exact detail is how they tell the two apart, which
+ * only works if the raise site and the match site agree; hence one constant
+ * rather than two string literals.
+ */
+export const COMMAND_PRODUCED_NO_EVENTS_DETAIL = "Command produced no events.";
+
 export class OrchestrationCommandInvariantError extends Schema.TaggedErrorClass<OrchestrationCommandInvariantError>()(
   "OrchestrationCommandInvariantError",
   {

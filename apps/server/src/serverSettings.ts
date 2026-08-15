@@ -16,6 +16,7 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_SERVER_SETTINGS,
   type ModelSelection,
+  type DatabaseConnection,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
   ProviderDriverKind,
@@ -83,6 +84,10 @@ function providerEnvironmentSecretName(input: {
   return `provider-env-${Buffer.from(input.instanceId, "utf8").toString("base64url")}-${Buffer.from(input.name, "utf8").toString("base64url")}`;
 }
 
+function databaseConnectionSecretName(projectId: string): string {
+  return `database-supabase-${Buffer.from(projectId, "utf8").toString("base64url")}`;
+}
+
 function redactProviderEnvironmentVariable(
   variable: ProviderInstanceEnvironmentVariable,
 ): ProviderInstanceEnvironmentVariable {
@@ -94,6 +99,16 @@ function redactProviderEnvironmentVariable(
     ...variable,
     value: "",
     ...(variable.value.length > 0 || variable.valueRedacted ? { valueRedacted: true } : {}),
+  };
+}
+
+function redactDatabaseConnection(connection: DatabaseConnection): DatabaseConnection {
+  return {
+    ...connection,
+    accessToken: "",
+    ...(connection.accessToken.length > 0 || connection.accessTokenRedacted
+      ? { accessTokenRedacted: true }
+      : {}),
   };
 }
 
@@ -109,7 +124,17 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
         : instance,
     ]),
   );
-  return { ...settings, providerInstances };
+  const databaseConnections = Object.fromEntries(
+    Object.entries(settings.databaseConnections).map(([projectId, connection]) => [
+      projectId,
+      redactDatabaseConnection(connection),
+    ]),
+  );
+  return {
+    ...settings,
+    providerInstances,
+    databaseConnections: databaseConnections as ServerSettings["databaseConnections"],
+  };
 }
 
 export class ServerSettingsService extends Context.Service<
@@ -139,7 +164,7 @@ export class ServerSettingsService extends Context.Service<
      */
     readonly subscribeChanges: Effect.Effect<Stream.Stream<ServerSettings>, never, Scope.Scope>;
   }
->()("t3/serverSettings/ServerSettingsService") {
+>()("@awtprod/command-center/serverSettings/ServerSettingsService") {
   /** @deprecated Import and use `layerTest` from this module. */
   static readonly layerTest = (overrides: DeepPartial<ServerSettings> = {}) => layerTest(overrides);
 }
@@ -362,11 +387,13 @@ const make = Effect.gen(function* () {
     changes.pipe(
       Stream.mapEffect((settings) =>
         materializeProviderEnvironmentSecrets(settings).pipe(
+          Effect.flatMap(materializeDatabaseConnectionSecrets),
           Effect.catch((error: ServerSettingsError) =>
-            Effect.logWarning("failed to materialize provider environment secrets", {
+            Effect.logWarning("failed to materialize server settings secrets", {
               operation: error.operation,
               providerInstanceId: error.providerInstanceId,
               environmentVariable: error.environmentVariable,
+              databaseProjectId: error.databaseProjectId,
               cause: error.cause,
             }).pipe(Effect.as(settings)),
           ),
@@ -476,6 +503,111 @@ const make = Effect.gen(function* () {
       };
     });
 
+  const materializeDatabaseConnectionSecrets = (
+    settings: ServerSettings,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    Effect.gen(function* () {
+      const databaseConnections: Record<string, DatabaseConnection> = {
+        ...settings.databaseConnections,
+      };
+      for (const [projectId, connection] of Object.entries(settings.databaseConnections)) {
+        if (!connection.accessTokenRedacted) continue;
+        const secret = yield* secretStore.get(databaseConnectionSecretName(projectId)).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ServerSettingsError({
+                settingsPath,
+                operation: "read-secret",
+                databaseProjectId: projectId,
+                cause,
+              }),
+          ),
+        );
+        databaseConnections[projectId] = {
+          ...connection,
+          accessToken: Option.isSome(secret) ? textDecoder.decode(secret.value) : "",
+        };
+      }
+      return {
+        ...settings,
+        databaseConnections: databaseConnections as ServerSettings["databaseConnections"],
+      };
+    });
+
+  const persistDatabaseConnectionSecrets = (
+    current: ServerSettings,
+    next: ServerSettings,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    Effect.gen(function* () {
+      const databaseConnections: Record<string, DatabaseConnection> = {};
+      const nextSecretKeys = new Set<string>();
+
+      for (const [projectId, connection] of Object.entries(next.databaseConnections)) {
+        const secretName = databaseConnectionSecretName(projectId);
+        if (connection.accessTokenRedacted) {
+          nextSecretKeys.add(secretName);
+          databaseConnections[projectId] = redactDatabaseConnection(connection);
+          continue;
+        }
+
+        if (connection.accessToken.length > 0) {
+          yield* secretStore.set(secretName, textEncoder.encode(connection.accessToken)).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({
+                  settingsPath,
+                  operation: "write-secret",
+                  databaseProjectId: projectId,
+                  cause,
+                }),
+            ),
+          );
+          nextSecretKeys.add(secretName);
+          databaseConnections[projectId] = {
+            ...connection,
+            accessToken: "",
+            accessTokenRedacted: true,
+          };
+          continue;
+        }
+
+        yield* secretStore.remove(secretName).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ServerSettingsError({
+                settingsPath,
+                operation: "remove-secret",
+                databaseProjectId: projectId,
+                cause,
+              }),
+          ),
+        );
+        const { accessTokenRedacted: _omit, ...withoutRedaction } = connection;
+        databaseConnections[projectId] = withoutRedaction;
+      }
+
+      for (const projectId of Object.keys(current.databaseConnections)) {
+        const secretName = databaseConnectionSecretName(projectId);
+        if (nextSecretKeys.has(secretName)) continue;
+        yield* secretStore.remove(secretName).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ServerSettingsError({
+                settingsPath,
+                operation: "remove-stale-secret",
+                databaseProjectId: projectId,
+                cause,
+              }),
+          ),
+        );
+      }
+
+      return {
+        ...next,
+        databaseConnections: databaseConnections as ServerSettings["databaseConnections"],
+      };
+    });
+
   const writeSettingsAtomically = Effect.fnUntraced(
     function* (settings: ServerSettings) {
       const sparseSettingsJson = yield* encodeServerSettingsJson(
@@ -573,21 +705,28 @@ const make = Effect.gen(function* () {
     ready: Deferred.await(startedDeferred),
     getSettings: getSettingsFromCache.pipe(
       Effect.flatMap(materializeProviderEnvironmentSecrets),
+      Effect.flatMap(materializeDatabaseConnectionSecrets),
       Effect.map(resolveTextGenerationProvider),
     ),
     updateSettings: (patch) =>
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
-          const nextPersisted = yield* persistProviderEnvironmentSecrets(
+          const nextWithProviderSecrets = yield* persistProviderEnvironmentSecrets(
             current,
             applyServerSettingsPatch(current, patch),
+          );
+          const nextPersisted = yield* persistDatabaseConnectionSecrets(
+            current,
+            nextWithProviderSecrets,
           );
           const next = yield* normalizeServerSettings(nextPersisted);
           yield* writeSettingsAtomically(next);
           yield* Cache.set(settingsCache, cacheKey, next);
           yield* emitChange(next);
-          const materialized = yield* materializeProviderEnvironmentSecrets(next);
+          const materialized = yield* materializeProviderEnvironmentSecrets(next).pipe(
+            Effect.flatMap(materializeDatabaseConnectionSecrets),
+          );
           return resolveTextGenerationProvider(materialized);
         }),
       ),

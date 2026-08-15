@@ -4,9 +4,15 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
+import { AsyncResult } from "effect/unstable/reactivity";
+import * as Cause from "effect/Cause";
 import { describe, expect, it } from "vite-plus/test";
 
-import { mergeEnvironmentSettings, resolveEnvironmentIdentificationMode } from "./useSettings";
+import {
+  isSettingsWritePersisted,
+  mergeEnvironmentSettings,
+  resolveEnvironmentIdentificationMode,
+} from "./useSettings";
 
 describe("resolveEnvironmentIdentificationMode", () => {
   it("keeps identification hidden until client settings hydrate", () => {
@@ -16,6 +22,37 @@ describe("resolveEnvironmentIdentificationMode", () => {
     expect(resolveEnvironmentIdentificationMode({ mode: "pill", settingsHydrated: true })).toBe(
       "pill",
     );
+  });
+
+  it("uses a pill instead of artwork with a palette theme", () => {
+    expect(
+      resolveEnvironmentIdentificationMode({
+        mode: "artwork",
+        settingsHydrated: true,
+        paletteThemeActive: true,
+      }),
+    ).toBe("pill");
+  });
+
+  it("respects none with a palette theme", () => {
+    expect(
+      resolveEnvironmentIdentificationMode({
+        mode: "none",
+        settingsHydrated: true,
+        paletteThemeActive: true,
+      }),
+    ).toBe("none");
+  });
+
+  it("keeps artwork when the palette theme opts into it", () => {
+    expect(
+      resolveEnvironmentIdentificationMode({
+        mode: "artwork",
+        settingsHydrated: true,
+        paletteThemeActive: true,
+        paletteThemeAllowsArtwork: true,
+      }),
+    ).toBe("artwork");
   });
 });
 
@@ -44,5 +81,25 @@ describe("mergeEnvironmentSettings", () => {
 
     expect(settings.providerInstances).toBe(serverSettings.providerInstances);
     expect(settings.favorites).toBe(clientSettings.favorites);
+  });
+});
+
+describe("isSettingsWritePersisted", () => {
+  it("treats a successful write as persisted", () => {
+    expect(isSettingsWritePersisted(AsyncResult.success(undefined))).toBe(true);
+  });
+
+  it("treats an interrupt-only failure as persisted (no false rollback)", () => {
+    // A superseded/unmounted write resolves interrupt-only; it must NOT roll
+    // back the optimistic value or toast an error — the write already landed or
+    // a newer one will report its own outcome.
+    const interrupted = AsyncResult.failure(Cause.interrupt(1));
+    expect(Cause.hasInterruptsOnly(interrupted.cause)).toBe(true);
+    expect(isSettingsWritePersisted(interrupted)).toBe(true);
+  });
+
+  it("treats a genuine (non-interrupt) failure as not persisted", () => {
+    const failed = AsyncResult.failure(Cause.fail(new Error("server rejected")));
+    expect(isSettingsWritePersisted(failed)).toBe(false);
   });
 });

@@ -36,6 +36,7 @@ import * as CliState from "../cloud/CliState.ts";
 import * as CliTokenManager from "../cloud/CliTokenManager.ts";
 import {
   CLOUD_LINKED_USER_ID,
+  isAgentActivityPublishingEnabledValue,
   PUBLISH_AGENT_ACTIVITY_SECRET,
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
@@ -142,7 +143,7 @@ function stringToBytes(value: string): Uint8Array {
 }
 
 export function isPublishAgentActivityEnabledValue(value: string | null): boolean {
-  return value === "true";
+  return isAgentActivityPublishingEnabledValue(value);
 }
 
 interface CloudCliStatus {
@@ -400,6 +401,21 @@ const disconnectCloud = Effect.fn("cloud.cli.disconnect")(function* (options: {
   if (options.clearAuthorization) {
     const tokens = yield* CliTokenManager.CloudCliTokenManager;
     yield* tokens.clear;
+
+    // uninstall itself no-ops when nothing is installed (and on non-Linux),
+    // so no status pre-check that could mask a real removal failure.
+    const bootService = yield* BootService.BootService;
+    yield* bootService.uninstall.pipe(
+      Effect.tap((removed) =>
+        removed ? Console.log("Removed the Command Center background service.") : Effect.void,
+      ),
+      Effect.catchTag("BootServiceUnsupportedError", () => Effect.succeed(false)),
+      Effect.catch((error) =>
+        Console.warn(`Could not remove the background service: ${error.message}`).pipe(
+          Effect.as(false),
+        ),
+      ),
+    );
   }
 
   yield* reportCloudDisconnectResults({
@@ -410,7 +426,7 @@ const disconnectCloud = Effect.fn("cloud.cli.disconnect")(function* (options: {
 
   if (options.clearAuthorization) {
     yield* Console.log(
-      "Signed out of T3 Connect locally.\nThe background service is managed separately with `t3 service`.",
+      "Signed out of T3 Connect locally.\nThe background service is managed separately with `command-center service`.",
     );
   }
 });
@@ -447,7 +463,7 @@ const runCloudCommand = Effect.fn("cloud.cli.run_cloud_command")(function* <A, E
     ),
     RelayClient.layerCloudflared({ baseDir: config.baseDir }),
     EnvironmentAuth.runtimeLayer,
-    ServerEnvironment.layer,
+    ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer)),
     bootServiceLayer(config),
     headlessRelayClientTracingLayer,
   ).pipe(
@@ -695,7 +711,7 @@ export const connectCommand = Command.make("connect", {
         const background = yield* recoverServiceOnboardingOffer(offerServiceDuringOnboarding);
         if (background) {
           yield* Console.log(
-            "\n✓ Background service ready\n\nT3 Code will stay reachable after you log out.",
+            "\n✓ Background service ready\n\nCommand Center will stay reachable after you log out.",
           );
           return;
         }

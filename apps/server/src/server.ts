@@ -21,6 +21,9 @@ import {
 import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
+import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
+import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
+import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
@@ -30,6 +33,7 @@ import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRe
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
+import { StalledTurnWatchdogLive } from "./orchestration/Layers/StalledTurnWatchdog.ts";
 import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
@@ -42,9 +46,11 @@ import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/Provide
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
+import * as SupabaseMcpConnector from "./database/SupabaseMcpConnector.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
+import { makePreviewGatewayRoutesLayer } from "./preview/gatewayRoute.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -101,7 +107,13 @@ import * as NativeTelemetryClient from "./resourceTelemetry/NativeTelemetryClien
 import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts";
 import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinary.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
-import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import * as UsageService from "./usage/UsageService.ts";
+import {
+  OrchestrationLayerLive,
+  OrchestrationRuntimeStateLayerLive,
+} from "./orchestration/runtimeLayer.ts";
+import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
+import { OrchestrationProjectionSnapshotQueryLive } from "./orchestration/Layers/ProjectionSnapshotQuery.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -111,6 +123,26 @@ import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
+import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
+import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
+import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
+import * as AutomationScheduleInterpreter from "./command-center/automation/ScheduleInterpreter.ts";
+import * as AutomationScopedShell from "./command-center/automation/AutomationScopedShell.ts";
+import * as VerifiedScopedShell from "./command-center/automation/VerifiedScopedShell.ts";
+import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
+import * as CommandCenterConfig from "./command-center/Config.ts";
+import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
+import * as RunDispatcher from "./command-center/RunDispatcher.ts";
+import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator.ts";
+import * as RunLifecycle from "./command-center/RunLifecycle.ts";
+import * as ReadinessGate from "./command-center/ReadinessGate.ts";
+import { webhookHttpRouteLayer } from "./command-center/WebhookHttp.ts";
 import { forkParked, ServerActivation } from "./serverActivation.ts";
 
 // Effect's default preemptive shutdown waits 20s before finalizing request scopes.
@@ -157,6 +189,8 @@ const BackgroundLayerLive = BackgroundPolicy.layer.pipe(
   Layer.provide(HostPowerMonitorLayerLive),
   Layer.provideMerge(ServerSettingsLayerLive),
 );
+
+const UsageLayerLive = UsageService.layer.pipe(Layer.provide(ServerSettingsLayerLive));
 
 const ResourceDiagnosticsLayerLive = Layer.mergeAll(
   ResourceTelemetryLayerLive,
@@ -218,6 +252,59 @@ const HttpServerLive = Layer.unwrap(
   }),
 );
 
+/**
+ * The preview gateway's own listener.
+ *
+ * It cannot share the main server: the gateway is mounted at `/` (dev servers
+ * emit absolute URLs that would 404 under a path prefix), and `/` on the main
+ * server is already claimed by the static/dev catch-all route. Always loopback —
+ * reachability from another machine is Tailscale Serve's job, not the socket's.
+ */
+const PreviewGatewayHttpServerLive = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    if (typeof Bun !== "undefined") {
+      const BunHttpServer = yield* Effect.promise(
+        () => import("@effect/platform-bun/BunHttpServer"),
+      );
+      return BunHttpServer.layer({
+        port: config.previewGatewayPort,
+        hostname: "127.0.0.1",
+        gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
+      });
+    }
+    const [NodeHttpServer, NodeHttp] = yield* Effect.all([
+      Effect.promise(() => import("@effect/platform-node/NodeHttpServer")),
+      Effect.promise(() => import("node:http")),
+    ]);
+    return NodeHttpServer.layer(NodeHttp.createServer, {
+      host: "127.0.0.1",
+      port: config.previewGatewayPort,
+      gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
+    });
+  }),
+);
+
+/**
+ * Serve the preview gateway's routes on their own listener.
+ *
+ * `Layer.fresh` is the load-bearing part. `HttpRouter.serve` builds its router
+ * from the module-level `HttpRouter.layer`, and layers are memoized by identity
+ * within a single build — so without it the gateway registers its routes into
+ * the *main app's* router. Both mount a catch-all at `/`, and startup dies with
+ * `Method 'GET' already declared for route '/*'`. (Observed on a live boot with
+ * `--preview-gateway`; a control boot without the flag started clean.)
+ *
+ * The listener is a parameter so a test can supply an ephemeral one and still
+ * exercise this exact composition rather than a copy of it.
+ */
+export const makePreviewGatewayServedLayer = <A extends HttpServer.HttpServer, E, R>(
+  httpServerLayer: Layer.Layer<A, E, R>,
+) =>
+  HttpRouter.serve(makePreviewGatewayRoutesLayer, { disableLogger: true }).pipe(
+    Layer.fresh,
+    Layer.provide(httpServerLayer),
+  );
 const PlatformServicesLive = Layer.unwrap(
   Effect.gen(function* () {
     if (typeof Bun !== "undefined") {
@@ -291,6 +378,90 @@ const SourceControlRepositoryServiceLayerLive = SourceControlRepositoryService.l
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
 );
 
+const RunDispatcherLayerLive = RunDispatcher.layer.pipe(
+  Layer.provide(GitWorkflowLayerLive),
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(PersistenceLayerLive),
+  Layer.provide(SourceControlRepositoryServiceLayerLive),
+);
+
+const ConnectionHealthLayerLive = ConnectionHealth.layer.pipe(Layer.provide(PersistenceLayerLive));
+
+const CommandCenterConfigLayerLive = CommandCenterConfig.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+);
+
+const GoogleReadConnectorLayerLive = GoogleReadConnector.layer.pipe(
+  Layer.provideMerge(CommandCenterConfigLayerLive),
+  Layer.provide(ConnectionHealthLayerLive),
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSecretStore.layer),
+);
+
+const GoogleConnectionSetupLayerLive = GoogleConnectionSetup.layer.pipe(
+  Layer.provideMerge(CommandCenterConfigLayerLive),
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSecretStore.layer),
+);
+
+const AutomationDefinitionConfigLayerLive = AutomationDefinitionConfig.layer.pipe(
+  Layer.provideMerge(CommandCenterConfigLayerLive),
+  Layer.provide(ProcessRunner.layer),
+);
+
+const AutomationScheduleInterpreterLayerLive = AutomationScheduleInterpreter.layer.pipe(
+  Layer.provideMerge(TextGeneration.layer),
+  Layer.provide(ServerSettingsLayerLive),
+);
+
+const AutomationScopedShellLayerLive = AutomationScopedShell.AutomationScopedShellLayer.pipe(
+  Layer.provide(VerifiedScopedShell.VerifiedLinuxScopedShellLayer),
+  Layer.provide(CommandCenterConfigLayerLive),
+  Layer.provide(RepositoryIdentityResolver.layer),
+  Layer.provide(PersistenceLayerLive),
+);
+
+const CommandCenterBaseLayerLive = Layer.mergeAll(
+  CommandCenterService.runtimeLayer,
+  CommandCenterEventStream.layer,
+  MemorySearchIndex.layer,
+  GoogleReadConnectorLayerLive,
+  GoogleConnectionSetupLayerLive,
+  AutomationDefinitionConfigLayerLive,
+  AutomationScheduleInterpreterLayerLive,
+  AutomationScopedShellLayerLive,
+);
+
+const CommandCenterCoreLayerLive = Layer.mergeAll(
+  CommandCenterBaseLayerLive,
+  AutomationRuns.safeRuntimeLayer.pipe(Layer.provide(CommandCenterBaseLayerLive)),
+);
+
+const AutomationRunsLayerLive = AutomationRuns.layer.pipe(
+  Layer.provideMerge(CommandCenterCoreLayerLive),
+);
+
+const AutomationTriggerCoordinatorLayerLive = AutomationTriggerCoordinator.layer.pipe(
+  Layer.provide(AutomationRunsLayerLive),
+);
+
+const AutomationScheduleRunnerLayerLive = AutomationScheduleRunner.layer.pipe(
+  Layer.provide(AutomationTriggerCoordinatorLayerLive),
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
+const AutomationRecoveryCoordinatorLayerLive = AutomationRecoveryCoordinator.layer.pipe(
+  Layer.provide(AutomationRunsLayerLive),
+);
+
+const RunLifecycleLayerLive = RunLifecycle.layer.pipe(
+  Layer.provide(ProviderLayerLive),
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(OrchestrationLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
 const ReviewLayerLive = ReviewService.layer.pipe(
   Layer.provideMerge(GitVcsDriver.layer),
   Layer.provideMerge(VcsDriverRegistryLayerLive),
@@ -317,6 +488,45 @@ const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(PtyAdapterLive),
   Layer.provide(PortScannerLayerLive),
 );
+
+const ProjectSetupScriptRunnerLayerLive = ProjectSetupScriptRunner.layer.pipe(
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(TerminalLayerLive),
+);
+
+const OrchestrationCommandDispatcherLayerLive = OrchestrationCommandDispatcher.layer.pipe(
+  Layer.provide(GitWorkflowLayerLive),
+  Layer.provide(OrchestrationLayerLive),
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(ProviderRegistryLive),
+  Layer.provide(ProjectSetupScriptRunnerLayerLive),
+  Layer.provide(ServerSettingsLayerLive),
+  Layer.provide(VcsStatusBroadcaster.layer.pipe(Layer.provide(GitWorkflowLayerLive))),
+  Layer.provide(WorkspacePaths.layer),
+);
+
+const CommandCenterRunDispatchLayerLive = Layer.mergeAll(
+  RunDispatcherLayerLive,
+  OrchestrationCommandDispatcherLayerLive,
+);
+
+const RunRecoveryCoordinatorLayerLive = RunRecoveryCoordinator.layer.pipe(
+  Layer.provide(CommandCenterRunDispatchLayerLive),
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(ProviderRegistryLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
+const CommandCenterLayerLive = Layer.mergeAll(
+  AutomationScheduleInterpreterLayerLive,
+  AutomationRunsLayerLive,
+  AutomationTriggerCoordinatorLayerLive,
+  AutomationScheduleRunnerLayerLive,
+  AutomationRecoveryCoordinatorLayerLive,
+  CommandCenterRunDispatchLayerLive,
+  RunRecoveryCoordinatorLayerLive,
+  RunLifecycleLayerLive,
+).pipe(Layer.provide(OrchestrationProjectionSnapshotQueryLive));
 
 const PreviewLayerLive = Layer.empty.pipe(
   Layer.provideMerge(PreviewManager.layer),
@@ -354,20 +564,24 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
   ),
 );
 
-const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
-  Layer.provideMerge(ProviderLayerLive),
-  Layer.provideMerge(OrchestrationLayerLive),
-);
+const ProviderRuntimeLayerLive = Layer.mergeAll(
+  ProviderSessionReaperLive,
+  StalledTurnWatchdogLive,
+).pipe(Layer.provideMerge(ProviderLayerLive), Layer.provideMerge(OrchestrationLayerLive));
 
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
-  Layer.provideMerge(ServerSettingsLayerLive),
+  Layer.provideMerge(Layer.mergeAll(OrchestrationRuntimeStateLayerLive, ServerSettingsLayerLive)),
   Layer.provideMerge(CheckpointingLayerLive),
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
+  Layer.provideMerge(
+    Layer.mergeAll(PreviewLayerLive, CommandCenterLayerLive).pipe(
+      Layer.provideMerge(TerminalLayerLive),
+    ),
+  ),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(Keybindings.layer),
   Layer.provideMerge(ProviderRegistryLive),
@@ -408,8 +622,12 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
+  Layer.provideMerge(ReadinessGate.layer),
+  Layer.provideMerge(ProcessDiagnostics.layer),
+  Layer.provideMerge(ProcessResourceMonitor.layer),
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
+  Layer.provideMerge(UsageLayerLive),
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(AnalyticsService.layer),
   Layer.provideMerge(ExternalLauncher.layer),
@@ -425,22 +643,37 @@ const commandReadinessLayer = HttpRouter.middleware(
   { global: true },
 );
 
+const PullRequestServiceLive = PullRequestService.layer.pipe(
+  // One registry entry per supported host; the service only knows the registry.
+  Layer.provide(PullRequestProviderRegistry.layer),
+  Layer.provide(SourceControlProviderRegistryLayerLive),
+  Layer.provide(VcsProcess.layer),
+);
+
 export const makeRoutesLayer = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(authHttpApiLayer),
       Layer.provide(connectHttpApiLayer),
       Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(pullRequestHttpApiLayer),
       Layer.provide(serverEnvironmentHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),
     ),
     otlpTracesProxyRouteLayer,
     assetRouteLayer,
     staticAndDevRouteLayer,
+    webhookHttpRouteLayer,
     websocketRpcRouteLayer,
   ),
-  McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
+  McpHttpServer.layer.pipe(
+    Layer.provide(SupabaseMcpConnector.layer),
+    Layer.provide(McpSessionRegistry.layer),
+  ),
 ).pipe(
+  // Both transports consume the same service instance, so caches single-flight across clients
+  // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
+  Layer.provide(PullRequestServiceLive),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer),
   Layer.provide(commandReadinessLayer),
@@ -554,6 +787,50 @@ export const makeServerLayer = Layer.unwrap(
           ),
         )
       : Layer.empty;
+    // The gateway is a second listener, so it needs its own Serve mapping on its
+    // own HTTPS port. It is published from the configured port rather than the
+    // bound address because the gateway server lives in a sibling layer scope.
+    const previewGatewayTailscaleServeLayer =
+      config.tailscaleServeEnabled && config.previewGatewayEnabled && config.previewGatewayPort > 0
+        ? Layer.effectDiscard(
+            Effect.acquireRelease(
+              ensureTailscaleServe({
+                localPort: config.previewGatewayPort,
+                servePort: config.previewGatewayServePort,
+                localHost: "127.0.0.1",
+              }).pipe(
+                Effect.as({ servePort: config.previewGatewayServePort }),
+                Effect.tap(() =>
+                  Effect.logInfo("Tailscale Serve configured for preview gateway", {
+                    localPort: config.previewGatewayPort,
+                    servePort: config.previewGatewayServePort,
+                  }),
+                ),
+                Effect.catch((cause) =>
+                  Effect.logWarning("Failed to configure Tailscale Serve for preview gateway", {
+                    cause,
+                    localPort: config.previewGatewayPort,
+                    servePort: config.previewGatewayServePort,
+                  }).pipe(Effect.as(null)),
+                ),
+              ),
+              (configured) =>
+                configured
+                  ? disableTailscaleServe({ servePort: configured.servePort }).pipe(
+                      Effect.catch((cause) =>
+                        Effect.logWarning("Failed to disable Tailscale Serve for preview gateway", {
+                          cause,
+                          servePort: configured.servePort,
+                        }),
+                      ),
+                    )
+                  : Effect.void,
+            ),
+          )
+        : Layer.empty;
+    const previewGatewayLayer = config.previewGatewayEnabled
+      ? makePreviewGatewayServedLayer(PreviewGatewayHttpServerLive)
+      : Layer.empty;
     const cloudDesiredLinkReconcileLayer = Layer.effectDiscard(
       Effect.gen(function* () {
         if (!hasCloudPublicConfig) {
@@ -646,6 +923,8 @@ export const makeServerLayer = Layer.unwrap(
       httpListeningLayer,
       runtimeStateLayer,
       tailscaleServeLayer,
+      previewGatewayLayer,
+      previewGatewayTailscaleServeLayer,
       cloudDesiredLinkReconcileLayer,
     );
 
@@ -657,6 +936,7 @@ export const makeServerLayer = Layer.unwrap(
       Layer.provide(ApplicationObservabilityLive),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provideMerge(VcsProcess.layer),
+      Layer.provide(OrchestrationRuntimeStateLayerLive),
       Layer.provideMerge(PlatformServicesLive),
     );
   }),

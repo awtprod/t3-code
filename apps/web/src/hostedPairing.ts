@@ -10,6 +10,10 @@ export interface HostedPairingRequest {
 
 export type HostedAppChannel = "latest" | "nightly";
 
+export function isRemoteOnlyBuild(): boolean {
+  return import.meta.env.VITE_REMOTE_ONLY?.trim() === "1";
+}
+
 export function configuredHostedAppUrl(): string {
   return import.meta.env.VITE_HOSTED_APP_URL?.trim() || DEFAULT_HOSTED_APP_URL;
 }
@@ -32,6 +36,13 @@ function originFromUrl(value: string): string | null {
 }
 
 export function isHostedStaticApp(url: URL = new URL(window.location.href)): boolean {
+  // A remote-only desktop is a local, static client. Its configured endpoint is
+  // intentionally not a primary environment: Connections owns the one-time
+  // pairing exchange and persists the resulting bearer session instead.
+  if (isRemoteOnlyBuild()) {
+    return true;
+  }
+
   if (configuredBackendUrl()) {
     return false;
   }

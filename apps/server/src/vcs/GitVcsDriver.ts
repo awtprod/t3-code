@@ -144,6 +144,36 @@ export interface GitFetchPullRequestBranchInput {
   branch: string;
 }
 
+export interface GitFetchPullRequestHeadCommitInput {
+  cwd: string;
+  prNumber: number;
+}
+
+export interface GitResolveCommitInput {
+  cwd: string;
+  revision: string;
+}
+
+export interface GitResolveCommitResult {
+  commitSha: string;
+}
+
+export interface GitRefreshCheckedOutBranchInput {
+  cwd: string;
+  targetCommit: string;
+  /**
+   * Commit the checkout is allowed to be hard-reset away from: the upstream commit read before
+   * the fetch. HEAD sitting there means the checkout holds no work of its own.
+   */
+  resetWhenHeadCommit?: string | null | undefined;
+}
+
+export interface GitRefreshCheckedOutBranchResult {
+  headCommit: string;
+  moved: boolean;
+  onTarget: boolean;
+}
+
 export interface GitEnsureRemoteInput {
   cwd: string;
   preferredName: string;
@@ -245,6 +275,17 @@ export class GitVcsDriver extends Context.Service<
     readonly fetchPullRequestBranch: (
       input: GitFetchPullRequestBranchInput,
     ) => Effect.Effect<void, GitCommandError>;
+    /** Fetches `refs/pull/<n>/head` without writing a branch, for heads that exist nowhere else. */
+    readonly fetchPullRequestHeadCommit: (
+      input: GitFetchPullRequestHeadCommitInput,
+    ) => Effect.Effect<GitResolveCommitResult, GitCommandError>;
+    readonly resolveCommit: (
+      input: GitResolveCommitInput,
+    ) => Effect.Effect<GitResolveCommitResult, GitCommandError>;
+    /** Moves the branch checked out in `cwd` onto `targetCommit`, from inside that worktree. */
+    readonly refreshCheckedOutBranch: (
+      input: GitRefreshCheckedOutBranchInput,
+    ) => Effect.Effect<GitRefreshCheckedOutBranchResult, GitCommandError>;
     readonly ensureRemote: (input: GitEnsureRemoteInput) => Effect.Effect<string, GitCommandError>;
     readonly resolvePrimaryRemoteName: (cwd: string) => Effect.Effect<string, GitCommandError>;
     readonly fetchRemote: (input: GitFetchRemoteInput) => Effect.Effect<void, GitCommandError>;
@@ -276,7 +317,7 @@ export class GitVcsDriver extends Context.Service<
     readonly initRepo: (input: VcsInitInput) => Effect.Effect<void, GitCommandError>;
     readonly listLocalBranchNames: (cwd: string) => Effect.Effect<string[], GitCommandError>;
   }
->()("t3/vcs/GitVcsDriver") {}
+>()("@awtprod/command-center/vcs/GitVcsDriver") {}
 
 const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const GIT_CHECK_IGNORE_MAX_STDIN_BYTES = 256 * 1024;
@@ -669,9 +710,9 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       const commitEnv: NodeJS.ProcessEnv = {
         ...process.env,
         GIT_INDEX_FILE: tempIndexPath,
-        GIT_AUTHOR_NAME: "T3 Code",
+        GIT_AUTHOR_NAME: "Command Center",
         GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
-        GIT_COMMITTER_NAME: "T3 Code",
+        GIT_COMMITTER_NAME: "Command Center",
         GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
       };
 

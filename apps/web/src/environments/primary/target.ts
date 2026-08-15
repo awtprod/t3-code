@@ -141,6 +141,34 @@ export function isLoopbackHostname(hostname: string): boolean {
   return LOOPBACK_HOSTNAMES.has(normalizeHostname(hostname));
 }
 
+// `localhost`, `127.0.0.1`, and `[::1]` all name the same machine, so an exact
+// `origin` string comparison reports a mismatch for URLs that are in fact the
+// same server. Treat them as interchangeable when the protocol and port agree
+// (`URL.port` is `""` for a protocol's default port, so that stays symmetric).
+function isSameLoopbackOrigin(left: URL, right: URL): boolean {
+  if (left.origin === right.origin) {
+    return true;
+  }
+  if (!isLoopbackHostname(left.hostname) || !isLoopbackHostname(right.hostname)) {
+    return false;
+  }
+  return left.protocol === right.protocol && left.port === right.port;
+}
+
+// Whether this document was served by the vite dev server, which proxies
+// `/api`, `/ws`, `/attachments`, and `/.well-known` to the backend. When it
+// was, routing through the current origin is always correct — including when
+// the dev server is reached over a non-loopback host (a Tailscale name, a LAN
+// IP), where the origin string cannot match the loopback `VITE_DEV_SERVER_URL`.
+// `import.meta.env.DEV` is false in a production build, so this never widens
+// behaviour for the static-served app.
+function isDocumentServedByDevServer(currentUrl: URL, devServerUrl: URL): boolean {
+  if (currentUrl.protocol !== "http:" && currentUrl.protocol !== "https:") {
+    return false;
+  }
+  return isSameLoopbackOrigin(currentUrl, devServerUrl) || import.meta.env.DEV;
+}
+
 function resolveHttpRequestBaseUrl(primaryTarget: PrimaryEnvironmentTarget): string {
   const httpBaseUrl = primaryTarget.target.httpBaseUrl;
   const configuredDevServerUrl = import.meta.env.VITE_DEV_SERVER_URL?.trim();
@@ -165,20 +193,53 @@ function resolveHttpRequestBaseUrl(primaryTarget: PrimaryEnvironmentTarget): str
     urlKind: "development-server-url",
   });
 
-  const isCurrentOriginDevServer =
-    (currentUrl.protocol === "http:" || currentUrl.protocol === "https:") &&
-    currentUrl.origin === devServerUrl.origin;
-
   if (
-    !isCurrentOriginDevServer ||
-    currentUrl.origin === targetUrl.origin ||
-    !isLoopbackHostname(currentUrl.hostname) ||
+    !isDocumentServedByDevServer(currentUrl, devServerUrl) ||
+    isSameLoopbackOrigin(currentUrl, targetUrl) ||
     !isLoopbackHostname(targetUrl.hostname)
   ) {
     return httpBaseUrl;
   }
 
   return currentUrl.origin;
+}
+
+export function resolvePrimaryEnvironmentWebSocketBaseUrl(
+  primaryTarget: PrimaryEnvironmentTarget,
+): string {
+  const wsBaseUrl = primaryTarget.target.wsBaseUrl;
+  const configuredDevServerUrl = import.meta.env.VITE_DEV_SERVER_URL?.trim();
+  if (!configuredDevServerUrl) {
+    return wsBaseUrl;
+  }
+
+  const currentUrl = parseTargetUrl({
+    rawValue: window.location.href,
+    source: "window-origin",
+    urlKind: "window-location-url",
+  });
+  const targetUrl = parseTargetUrl({
+    rawValue: wsBaseUrl,
+    source: primaryTarget.source,
+    urlKind: "websocket-base-url",
+  });
+  const devServerUrl = parseTargetUrl({
+    rawValue: configuredDevServerUrl,
+    baseUrl: currentUrl.origin,
+    source: "configured",
+    urlKind: "development-server-url",
+  });
+
+  if (
+    !isDocumentServedByDevServer(currentUrl, devServerUrl) ||
+    !isLoopbackHostname(targetUrl.hostname)
+  ) {
+    return wsBaseUrl;
+  }
+
+  const proxyUrl = new URL(currentUrl.origin);
+  proxyUrl.protocol = currentUrl.protocol === "https:" ? "wss:" : "ws:";
+  return proxyUrl.toString();
 }
 
 function resolveConfiguredPrimaryTarget(): PrimaryEnvironmentTarget | null {
@@ -286,9 +347,23 @@ export function resolvePrimaryEnvironmentHttpUrl(
 }
 
 export function readPrimaryEnvironmentTarget(): PrimaryEnvironmentTarget {
-  return (
+  const primaryTarget =
     resolveDesktopPrimaryTarget() ??
     resolveConfiguredPrimaryTarget() ??
-    resolveWindowOriginPrimaryTarget()
-  );
+    resolveWindowOriginPrimaryTarget();
+
+  return {
+    ...primaryTarget,
+    target: {
+      ...primaryTarget.target,
+      // In dev, route HTTP through the same (vite) origin so requests that read
+      // the target directly — notably environment discovery
+      // (`/.well-known/t3/environment`) — go through the vite proxy instead of
+      // hitting the backend origin cross-origin (which the browser blocks,
+      // surfacing as ConnectionTransientError "network"). Kept symmetric with
+      // the wsBaseUrl rewrite below; both are no-ops outside the dev server.
+      httpBaseUrl: resolveHttpRequestBaseUrl(primaryTarget),
+      wsBaseUrl: resolvePrimaryEnvironmentWebSocketBaseUrl(primaryTarget),
+    },
+  };
 }

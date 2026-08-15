@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { hardenedGitSpawningCliEnvironment } from "../vcs/HostGitSecurity.ts";
 import {
   decodeAzureDevOpsPullRequestJson,
   decodeAzureDevOpsPullRequestListJson,
@@ -247,7 +248,7 @@ export class AzureDevOpsCli extends Context.Service<
       readonly remoteName?: string;
     }) => Effect.Effect<void, AzureDevOpsCliError>;
   }
->()("t3/sourceControl/AzureDevOpsCli") {}
+>()("@awtprod/command-center/sourceControl/AzureDevOpsCli") {}
 
 function normalizeChangeRequestId(reference: string): string {
   const trimmed = reference.trim().replace(/^#/, "");
@@ -337,13 +338,23 @@ function decodeAzureDevOpsJson<S extends Schema.Top>(
 export const make = Effect.gen(function* () {
   const process = yield* VcsProcess.VcsProcess;
 
-  const execute: AzureDevOpsCli["Service"]["execute"] = (input) =>
-    process
+  const execute: AzureDevOpsCli["Service"]["execute"] = (input) => {
+    const launchesGit =
+      input.args[0] === "repos" && input.args[1] === "pr" && input.args[2] === "checkout";
+    return process
       .run({
         operation: "AzureDevOpsCli.execute",
         command: "az",
         args: input.args,
         cwd: input.cwd,
+        ...(launchesGit
+          ? {
+              env: hardenedGitSpawningCliEnvironment("azure-devops", [globalThis.process.env], {
+                writableRoots: [input.cwd],
+              }),
+              extendEnv: false,
+            }
+          : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       })
       .pipe(
@@ -359,6 +370,7 @@ export const make = Effect.gen(function* () {
           ),
         ),
       );
+  };
 
   const executeJson = (input: Parameters<AzureDevOpsCli["Service"]["execute"]>[0]) =>
     execute({

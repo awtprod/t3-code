@@ -15,12 +15,74 @@ import {
 } from "../CodexDeveloperInstructions.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
+  buildCommandCenterDarwinIsolationProbeScript,
+  buildCommandCenterWindowsIsolationProbeScript,
   buildTurnStartParams,
+  ensureCommandCenterWindowsSandbox,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("Command Center native sandbox admission", () => {
+  it.effect("skips Windows setup when Codex reports the sandbox ready", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      yield* ensureCommandCenterWindowsSandbox({
+        client: {
+          request: (method) =>
+            Effect.sync(() => {
+              calls.push(method);
+              return { status: "ready" };
+            }),
+        },
+        cwd: "C:\\workspace",
+        mode: "elevated",
+        setupCompleted: Effect.never,
+      });
+
+      NodeAssert.deepStrictEqual(calls, ["windowsSandbox/readiness"]);
+    }),
+  );
+
+  it.effect("reports failed elevated setup without offering an unsafe fallback", () =>
+    Effect.gen(function* () {
+      const error = yield* ensureCommandCenterWindowsSandbox({
+        client: {
+          request: (method) =>
+            Effect.succeed(
+              method === "windowsSandbox/readiness"
+                ? { status: "notConfigured" }
+                : { started: true },
+            ),
+        },
+        cwd: "C:\\workspace",
+        mode: "elevated",
+        setupCompleted: Effect.succeed({
+          mode: "elevated",
+          success: false,
+          error: "administrator approval was unavailable",
+        }),
+      }).pipe(Effect.flip);
+
+      NodeAssert.equal(error.mode, "elevated");
+      NodeAssert.match(error.issue, /administrator-approved Windows sandbox/u);
+      NodeAssert.match(error.issue, /administrator approval was unavailable/u);
+    }),
+  );
+
+  it("builds native probes without Linux-only process assumptions", () => {
+    const darwin = buildCommandCenterDarwinIsolationProbeScript(true);
+    const windows = buildCommandCenterWindowsIsolationProbeScript(false);
+
+    NodeAssert.doesNotMatch(darwin, /\/proc\//u);
+    NodeAssert.match(darwin, /HOME\/auth\.json/u);
+    NodeAssert.match(windows, /USERPROFILE/u);
+    NodeAssert.match(windows, /WriteAllText/u);
+    NodeAssert.match(windows, /exit 73/u);
+  });
+});
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {
@@ -48,16 +110,20 @@ function makeThreadOpenResponse(
     modelProvider: "openai",
     approvalPolicy: "never",
     approvalsReviewer: "user",
-    sandbox: { type: "danger-full-access" },
+    sandbox: { type: "dangerFullAccess" },
     thread: {
       id: threadId,
-      createdAt: "2026-04-18T00:00:00.000Z",
-      source: { session: "cli" },
+      cliVersion: "0.0.0-test",
+      createdAt: 1_776_470_400,
+      cwd: "/tmp/project",
+      ephemeral: false,
+      modelProvider: "openai",
+      preview: "",
+      sessionId: "session-test",
+      updatedAt: 1_776_470_400,
+      source: "cli",
       turns: [],
-      status: {
-        state: "idle",
-        activeFlags: [],
-      },
+      status: { type: "idle" },
     },
   } as unknown as CodexRpc.ClientRequestResponsesByMethod["thread/start"];
 }
@@ -254,7 +320,7 @@ describe("buildCodexDeveloperInstructions", () => {
     });
 
     NodeAssert.ok(instructions.startsWith(CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS));
-    NodeAssert.match(instructions, /T3 Code/);
+    NodeAssert.match(instructions, /Command Center/);
     NodeAssert.match(instructions, /Codex harness/);
     NodeAssert.match(instructions, /as gpt-5\.3-codex with high reasoning effort/);
   });
@@ -398,10 +464,7 @@ describe("openCodexThread", () => {
       const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
       const started = makeThreadOpenResponse("fresh-thread");
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
-          method: M,
-          payload: CodexRpc.ClientRequestParamsByMethod[M],
-        ) => {
+        request: (method: "thread/start" | "thread/resume", payload: unknown) => {
           calls.push({ method, payload });
           if (method === "thread/resume") {
             return Effect.fail(
@@ -411,7 +474,7 @@ describe("openCodexThread", () => {
               }),
             );
           }
-          return Effect.succeed(started as CodexRpc.ClientRequestResponsesByMethod[M]);
+          return Effect.succeed(started);
         },
       };
 
@@ -436,10 +499,7 @@ describe("openCodexThread", () => {
   it.effect("propagates non-recoverable resume failures", () =>
     Effect.gen(function* () {
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
-          method: M,
-          _payload: CodexRpc.ClientRequestParamsByMethod[M],
-        ) => {
+        request: (method: "thread/start" | "thread/resume", _payload: unknown) => {
           if (method === "thread/resume") {
             return Effect.fail(
               new CodexErrors.CodexAppServerRequestError({
@@ -448,9 +508,7 @@ describe("openCodexThread", () => {
               }),
             );
           }
-          return Effect.succeed(
-            makeThreadOpenResponse("fresh-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
-          );
+          return Effect.succeed(makeThreadOpenResponse("fresh-thread"));
         },
       };
 

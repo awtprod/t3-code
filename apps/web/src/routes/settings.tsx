@@ -10,9 +10,11 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { useSettingsRestore } from "../components/settings/SettingsPanels";
+import { SettingsBreadcrumb } from "../components/settings/SettingsBreadcrumb";
 import { Button } from "../components/ui/button";
 import { SidebarInset } from "../components/ui/sidebar";
 import { isElectron } from "../env";
+import { isRemoteOnlyBuild } from "../hostedPairing";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
@@ -69,7 +71,7 @@ function SettingsContentLayout() {
   }, [navigateBackWithinApp]);
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background text-foreground">
         {!isElectron && (
           <header
@@ -79,7 +81,7 @@ function SettingsContentLayout() {
             )}
           >
             <div className="flex w-full items-center gap-2">
-              <span className="text-sm font-medium text-foreground">Settings</span>
+              <SettingsBreadcrumb pathname={location.pathname} />
               {showRestoreDefaults ? (
                 <div className="ms-auto flex items-center gap-2">
                   <RestoreDefaultsButton onRestored={handleRestored} />
@@ -92,18 +94,18 @@ function SettingsContentLayout() {
         {isElectron && (
           <div
             className={cn(
-              "drag-region flex h-[52px] shrink-0 items-center px-5 transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]",
+              "drag-region flex h-[52px] shrink-0 items-center px-5 transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none wco:h-[env(titlebar-area-height)]",
               COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
             )}
           >
-            <span className="text-xs font-medium tracking-wide text-muted-foreground/70">
-              Settings
-            </span>
-            {showRestoreDefaults ? (
-              <div className="ms-auto flex items-center gap-2">
-                <RestoreDefaultsButton onRestored={handleRestored} />
-              </div>
-            ) : null}
+            <div className="flex w-full items-center gap-2">
+              <SettingsBreadcrumb pathname={location.pathname} />
+              {showRestoreDefaults ? (
+                <div className="ms-auto flex items-center gap-2">
+                  <RestoreDefaultsButton onRestored={handleRestored} />
+                </div>
+              ) : null}
+            </div>
           </div>
         )}
 
@@ -129,7 +131,10 @@ export const Route = createFileRoute("/settings")({
     }
 
     if (location.pathname === "/settings") {
-      throw redirect({ to: "/settings/general", replace: true });
+      throw redirect({
+        to: isRemoteOnlyBuild() ? "/settings/connections" : "/settings/general",
+        replace: true,
+      });
     }
   },
   component: SettingsRouteLayout,

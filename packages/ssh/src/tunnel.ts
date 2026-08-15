@@ -422,6 +422,9 @@ if [ -n "$T3_NODE_SCRIPT_PATH" ]; then
   fi
   exec node "$T3_NODE_SCRIPT_PATH" "$@"
 fi
+if command -v command-center >/dev/null 2>&1; then
+  exec command-center "$@"
+fi
 if command -v t3 >/dev/null 2>&1; then
   exec t3 "$@"
 fi
@@ -431,15 +434,15 @@ fi
 if command -v npm >/dev/null 2>&1; then
   exec npm exec --yes @@T3_PACKAGE_SPEC@@ -- "$@"
 fi
-printf 'Remote host is missing the t3 CLI and could not install @@T3_PACKAGE_SPEC@@ because node/npm/npx are unavailable on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
+printf 'Remote host is missing the Command Center CLI and could not install @@T3_PACKAGE_SPEC@@ because node/npm/npx are unavailable on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
 exit 1
 `;
 
 export const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@T3_NODE_ENV_SCRIPT@@
 STATE_KEY="$1"
-STATE_DIR="$HOME/.t3/ssh-launch/$STATE_KEY"
-DEFAULT_SERVER_HOME="$HOME/.t3"
+STATE_DIR="$HOME/.command-center/ssh-launch/$STATE_KEY"
+DEFAULT_SERVER_HOME="$HOME/.command-center"
 DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"
 PORT_FILE="$STATE_DIR/port"
 PID_FILE="$STATE_DIR/pid"
@@ -579,7 +582,7 @@ if [ -z "$REMOTE_PORT" ]; then
   printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
   printf 'managed\\n' >"$MANAGED_FILE"
   if ! wait_ready "@@T3_READY_TIMEOUT_MS@@"; then
-    printf 'Remote T3 server did not become ready on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
+    printf 'Remote Command Center server did not become ready on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
     tail -n 80 "$LOG_FILE" >&2 2>/dev/null || true
     kill "$REMOTE_PID" 2>/dev/null || true
     wait_for_pid_exit "$REMOTE_PID"
@@ -591,7 +594,7 @@ printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGE
 `;
 
 export const REMOTE_PAIRING_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+STATE_DIR="$HOME/.command-center/ssh-launch/@@T3_STATE_KEY@@"
 DEFAULT_SERVER_HOME="$HOME/.t3"
 RUNNER_FILE="$STATE_DIR/run-t3.sh"
 mkdir -p "$STATE_DIR"
@@ -604,7 +607,7 @@ PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
 `;
 
 export const REMOTE_STOP_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+STATE_DIR="$HOME/.command-center/ssh-launch/@@T3_STATE_KEY@@"
 PID_FILE="$STATE_DIR/pid"
 PORT_FILE="$STATE_DIR/port"
 MANAGED_FILE="$STATE_DIR/managed"
@@ -623,7 +626,7 @@ printf '{"stopped":true}\\n'
 `;
 
 const REMOTE_LOG_TAIL_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+STATE_DIR="$HOME/.command-center/ssh-launch/@@T3_STATE_KEY@@"
 LOG_FILE="$STATE_DIR/server.log"
 if [ -f "$LOG_FILE" ]; then
   tail -n 80 "$LOG_FILE" 2>/dev/null || true
@@ -631,7 +634,9 @@ fi
 `;
 
 export function buildRemoteT3RunnerScript(input?: RemoteT3RunnerOptions): string {
-  const packageSpec = shellSingleQuote(input?.packageSpec?.trim() || "t3@latest");
+  const packageSpec = shellSingleQuote(
+    input?.packageSpec?.trim() || "@awtprod/command-center@latest",
+  );
   const nodeScriptPath = input?.nodeScriptPath?.trim() || "";
   return stripTrailingNewlines(
     applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {

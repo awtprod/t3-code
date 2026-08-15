@@ -31,7 +31,6 @@ import {
   setUpdateChannel,
 } from "./methods/updates.ts";
 import {
-  confirm,
   getAppBranding,
   getLocalEnvironmentBootstraps,
   getLocalEnvironmentBearerToken,
@@ -44,6 +43,12 @@ import {
 } from "./methods/window.ts";
 import * as PreviewIpc from "./methods/preview.ts";
 import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
+import {
+  getPrimaryBackendState,
+  retryRemotePrimary,
+  setPrimaryBackend,
+  startLocalExecutionOnce,
+} from "./methods/primaryBackend.ts";
 
 export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers")(function* () {
   const ipc = yield* DesktopIpc.DesktopIpc;
@@ -78,10 +83,13 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(setWslBackendEnabled);
   yield* ipc.handle(setWslDistro);
   yield* ipc.handle(setWslOnly);
+  yield* ipc.handle(getPrimaryBackendState);
+  yield* ipc.handle(setPrimaryBackend);
+  yield* ipc.handle(retryRemotePrimary);
+  yield* ipc.handle(startLocalExecutionOnce);
 
   yield* ipc.handle(pickFolder);
   yield* ipc.handle(pickThemeFiles);
-  yield* ipc.handle(confirm);
   yield* ipc.handle(setTheme);
   yield* ipc.handle(showContextMenu);
   yield* ipc.handle(openExternal);

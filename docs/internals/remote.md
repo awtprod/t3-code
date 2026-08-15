@@ -136,7 +136,7 @@ how the server got started or who manages the process.
 
 ### Direct WebSocket access
 
-`wss://t3.example.com` or `ws://10.0.0.15:3773`, paired as a bearer target. This is the base model.
+`wss://t3.example.com` or `ws://192.0.2.15:3773`, paired as a bearer target. This is the base model.
 It works for desktop, mobile, and web with no client-side process management. Browser security rules
 are part of it: a hosted HTTPS client cannot connect to plain `ws://` or `http://` LAN backends.
 

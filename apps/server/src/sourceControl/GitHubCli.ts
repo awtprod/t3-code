@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { hardenedGitSpawningCliEnvironment } from "../vcs/HostGitSecurity.ts";
 import {
   decodeGitHubPullRequestJson,
   decodeGitHubPullRequestListJson,
@@ -44,6 +45,19 @@ export class GitHubCliAuthenticationError extends Schema.TaggedErrorClass<GitHub
 ) {
   get detail(): string {
     return "GitHub CLI is not authenticated. Run `gh auth login` and retry.";
+  }
+
+  override get message(): string {
+    return `GitHub CLI failed in execute: ${this.detail}`;
+  }
+}
+
+export class GitHubCliRateLimitError extends Schema.TaggedErrorClass<GitHubCliRateLimitError>()(
+  "GitHubCliRateLimitError",
+  gitHubCliFailureFields,
+) {
+  get detail(): string {
+    return "GitHub API rate limit exceeded. Run `gh api rate_limit` to inspect the quota and reset time.";
   }
 
   override get message(): string {
@@ -138,6 +152,7 @@ export class GitHubRepositoryDecodeError extends Schema.TaggedErrorClass<GitHubR
 export const GitHubCliError = Schema.Union([
   GitHubCliUnavailableError,
   GitHubCliAuthenticationError,
+  GitHubCliRateLimitError,
   GitHubPullRequestNotFoundError,
   GitHubCliCommandError,
   GitHubPullRequestListDecodeError,
@@ -169,6 +184,9 @@ export function fromVcsError(
   if (error._tag === "VcsProcessExitError") {
     if (error.failureKind === "authentication") {
       return new GitHubCliAuthenticationError({ ...context, cause: error });
+    }
+    if (error.failureKind === "rate-limited") {
+      return new GitHubCliRateLimitError({ ...context, cause: error });
     }
     if (error.failureKind === "not-found") {
       return new GitHubPullRequestNotFoundError({ ...context, cause: error });
@@ -203,6 +221,9 @@ export class GitHubCli extends Context.Service<
       readonly cwd: string;
       readonly args: ReadonlyArray<string>;
       readonly timeoutMs?: number;
+      /** Piped to the child's stdin, for payloads that must never appear in argv. */
+      readonly stdin?: string;
+      readonly maxOutputBytes?: number;
     }) => Effect.Effect<VcsProcess.VcsProcessOutput, GitHubCliError>;
 
     readonly listOpenPullRequests: (input: {
@@ -245,7 +266,7 @@ export class GitHubCli extends Context.Service<
       readonly force?: boolean;
     }) => Effect.Effect<void, GitHubCliError>;
   }
->()("t3/sourceControl/GitHubCli") {}
+>()("@awtprod/command-center/sourceControl/GitHubCli") {}
 
 const RawGitHubRepositoryCloneUrlsSchema = Schema.Struct({
   nameWithOwner: TrimmedNonEmptyString,
@@ -306,16 +327,28 @@ function deriveRepositoryCloneUrlsFromCreateOutput(
 export const make = Effect.gen(function* () {
   const process = yield* VcsProcess.VcsProcess;
 
-  const execute: GitHubCli["Service"]["execute"] = (input) =>
-    process
+  const execute: GitHubCli["Service"]["execute"] = (input) => {
+    const launchesGit = input.args[0] === "pr" && input.args[1] === "checkout";
+    return process
       .run({
         operation: "GitHubCli.execute",
         command: "gh",
         args: input.args,
         cwd: input.cwd,
+        ...(launchesGit
+          ? {
+              env: hardenedGitSpawningCliEnvironment("github", [globalThis.process.env], {
+                writableRoots: [input.cwd],
+              }),
+              extendEnv: false,
+            }
+          : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
+        ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
       })
       .pipe(Effect.mapError((error) => fromVcsError({ command: "gh", cwd: input.cwd }, error)));
+  };
 
   return GitHubCli.of({
     execute,

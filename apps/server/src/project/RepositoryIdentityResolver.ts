@@ -11,6 +11,11 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
 import * as ProcessRunner from "../processRunner.ts";
+import {
+  hardenedHostGitArguments,
+  hardenedHostGitEnvironment,
+  resolveTrustedHostExecutable,
+} from "../vcs/HostGitSecurity.ts";
 
 const DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY = 512;
 const DEFAULT_POSITIVE_CACHE_TTL = Duration.minutes(1);
@@ -27,7 +32,7 @@ export class RepositoryIdentityResolver extends Context.Service<
   {
     readonly resolve: (cwd: string) => Effect.Effect<RepositoryIdentity | null>;
   }
->()("t3/project/RepositoryIdentityResolver") {}
+>()("@awtprod/command-center/project/RepositoryIdentityResolver") {}
 
 function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   const remotes = new Map<string, string>();
@@ -91,13 +96,17 @@ const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.
   function* (cwd: string) {
     const processRunner = yield* ProcessRunner.ProcessRunner;
     let cacheKey = cwd;
+    const gitExecutable = resolveTrustedHostExecutable("git", { writableRoots: [cwd] });
+    if (gitExecutable === undefined) return cacheKey;
 
     // git is a real executable on every platform — no cmd.exe shell mode, which
     // would split paths containing spaces during cmd's re-tokenization.
     const topLevelResult = yield* processRunner
       .run({
-        command: "git",
-        args: ["-C", cwd, "rev-parse", "--show-toplevel"],
+        command: gitExecutable,
+        args: hardenedHostGitArguments(["-C", cwd, "rev-parse", "--show-toplevel"]),
+        env: hardenedHostGitEnvironment([], { writableRoots: [cwd] }),
+        extendEnv: false,
         timeoutBehavior: "timedOutResult",
       })
       .pipe(Effect.option);
@@ -120,10 +129,14 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
   cacheKey: string,
 ): Effect.fn.Return<RepositoryIdentity | null, never, ProcessRunner.ProcessRunner> {
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const gitExecutable = resolveTrustedHostExecutable("git", { writableRoots: [cacheKey] });
+  if (gitExecutable === undefined) return null;
   const remoteResult = yield* processRunner
     .run({
-      command: "git",
-      args: ["-C", cacheKey, "remote", "-v"],
+      command: gitExecutable,
+      args: hardenedHostGitArguments(["-C", cacheKey, "remote", "-v"]),
+      env: hardenedHostGitEnvironment([], { writableRoots: [cacheKey] }),
+      extendEnv: false,
       timeoutBehavior: "timedOutResult",
     })
     .pipe(Effect.option);

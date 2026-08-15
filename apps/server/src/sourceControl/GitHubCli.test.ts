@@ -6,6 +6,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { VcsProcessExitError, VcsProcessSpawnError } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { hardenedGitSpawningCliEnvironment } from "../vcs/HostGitSecurity.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 
 const processOutput = (stdout: string): VcsProcess.VcsProcessOutput => ({
@@ -344,6 +345,25 @@ describe("GitHubCli.layer", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  it.effect("uses an exact child-Git environment when checking out pull requests", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(Effect.succeed(processOutput("")));
+
+      const gh = yield* GitHubCli.GitHubCli;
+      yield* gh.checkoutPullRequest({ cwd: "/repo", reference: "42", force: true });
+
+      expect(mockRun).toHaveBeenCalledWith({
+        operation: "GitHubCli.execute",
+        command: "gh",
+        args: ["pr", "checkout", "42", "--force"],
+        cwd: "/repo",
+        env: hardenedGitSpawningCliEnvironment("github"),
+        extendEnv: false,
+        timeoutMs: 30_000,
+      });
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("surfaces a friendly error when the pull request is not found", () =>
     Effect.gen(function* () {
       const cause = new VcsProcessExitError({
@@ -371,6 +391,36 @@ describe("GitHubCli.layer", () => {
       assert.strictEqual(error.cwd, "/repo");
       assert.strictEqual(error.cause, cause);
       assert.equal(error.message.includes(cause.detail), false);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("surfaces an actionable rate-limit error without exposing provider stderr", () =>
+    Effect.gen(function* () {
+      const cause = new VcsProcessExitError({
+        operation: "GitHubCli.execute",
+        command: "gh",
+        cwd: "/repo",
+        exitCode: 1,
+        failureKind: "rate-limited",
+        detail: "API rate limit exceeded.",
+        stderrLength: 82,
+        stderrTruncated: false,
+      });
+      mockRun.mockReturnValueOnce(Effect.fail(cause));
+
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh
+        .listOpenPullRequests({
+          cwd: "/repo",
+          headSelector: "feature/rate-limited",
+        })
+        .pipe(Effect.flip);
+
+      assert.strictEqual(error._tag, "GitHubCliRateLimitError");
+      assert.include(error.detail, "GitHub API rate limit exceeded");
+      assert.include(error.detail, "gh api rate_limit");
+      assert.strictEqual(error.cause, cause);
+      assert.notInclude(error.message, "user ID");
     }).pipe(Effect.provide(layer)),
   );
 });

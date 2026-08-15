@@ -8,6 +8,7 @@
  */
 import {
   CommandId,
+  EfficiencyTier,
   IsoDateTime,
   ModelSelection,
   NonNegativeInt,
@@ -15,6 +16,7 @@ import {
   ProviderInteractionMode,
   RuntimeMode,
   ThreadId,
+  ThreadRoutingMode,
   TurnId,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -29,6 +31,8 @@ export const ProjectionThread = Schema.Struct({
   projectId: ProjectId,
   title: Schema.String,
   modelSelection: ModelSelection,
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(Schema.NullOr(EfficiencyTier)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
@@ -42,6 +46,7 @@ export const ProjectionThread = Schema.Struct({
   snoozedUntil: Schema.NullOr(IsoDateTime),
   snoozedAt: Schema.NullOr(IsoDateTime),
   pinnedAt: Schema.NullOr(IsoDateTime),
+  pinOrderKey: Schema.optional(Schema.NullOr(Schema.String)),
   titleRegenerationRequestId: Schema.optional(Schema.NullOr(CommandId)),
   titleRegenerationStartedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
@@ -108,4 +113,4 @@ export interface ProjectionThreadRepositoryShape {
 export class ProjectionThreadRepository extends Context.Service<
   ProjectionThreadRepository,
   ProjectionThreadRepositoryShape
->()("t3/persistence/Services/ProjectionThreads/ProjectionThreadRepository") {}
+>()("@awtprod/command-center/persistence/Services/ProjectionThreads/ProjectionThreadRepository") {}

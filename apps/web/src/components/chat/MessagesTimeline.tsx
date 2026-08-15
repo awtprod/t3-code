@@ -6,6 +6,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import type { AgentPanelModel } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   emptyAgentPanelModel,
@@ -38,7 +39,7 @@ import {
   workEntryIndicatesToolSuccess,
   workLogEntryIsToolLike,
 } from "../../session-logic";
-import { type TurnDiffSummary } from "../../types";
+import { type ChatImageAttachment, type TurnDiffSummary } from "../../types";
 import {
   getRenderablePatch,
   resolveDiffThemeName,
@@ -57,6 +58,7 @@ import {
   MessageCircleIcon,
   MousePointerClickIcon,
   PaintbrushIcon,
+  RotateCcwIcon,
   MinusIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -74,6 +76,7 @@ import { MessageCopyButton } from "./MessageCopyButton";
 import {
   computeStableMessagesTimelineRows,
   deriveMessagesTimelineRows,
+  deriveWorkingIndicatorStatus,
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
@@ -83,10 +86,12 @@ import {
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
+  resolveWorkingSilenceStart,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
   TIMELINE_MINIMAP_MIN_ITEMS,
   type TimelineLatestTurn,
+  type WorkingIndicatorStatus,
 } from "./MessagesTimeline.logic";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -138,6 +143,12 @@ interface TimelineRowSharedState {
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onPrepareTierRetry: (input: {
+    readonly text: string;
+    readonly turnId: TurnId;
+    readonly attachments: ReadonlyArray<ChatImageAttachment>;
+  }) => void | Promise<void>;
+  canRetryOneTierHigher: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
@@ -173,7 +184,7 @@ function TimelineLoadEarlierHeader({
 }) {
   return (
     <div className={fade ? "pt-10 sm:pt-12" : "pt-3 sm:pt-4"}>
-      <div className="mx-auto w-full max-w-3xl pb-2">
+      <div className="mx-auto w-full max-w-(--chat-column-max-width) pb-2">
         <button
           type="button"
           onClick={onLoadEarlier}
@@ -188,6 +199,11 @@ function TimelineLoadEarlierHeader({
 }
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const NOOP_PREPARE_TIER_RETRY = (_input: {
+  readonly text: string;
+  readonly turnId: TurnId;
+  readonly attachments: ReadonlyArray<ChatImageAttachment>;
+}) => {};
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   animated: false,
   on: {
@@ -208,6 +224,14 @@ interface MessagesTimelineProps {
   workingStepLabel?: string | null;
   activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
+  /**
+   * Transport state of the thread's environment, so the working indicator can
+   * stop claiming progress while the socket is down. `null` for a local draft,
+   * which has no environment connection.
+   */
+  connectionPhase?: EnvironmentConnectionPhase | null;
+  /** Thread `updatedAt` — times the "stalled" label from the silence, not the turn. */
+  lastActivityAt?: string | null;
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
   latestTurn: TimelineLatestTurn | null;
@@ -217,6 +241,12 @@ interface MessagesTimelineProps {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onPrepareTierRetry?: (input: {
+    readonly text: string;
+    readonly turnId: TurnId;
+    readonly attachments: ReadonlyArray<ChatImageAttachment>;
+  }) => void | Promise<void>;
+  canRetryOneTierHigher?: boolean;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -252,6 +282,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   workingStepLabel = null,
   activeTurnInProgress,
   activeTurnStartedAt,
+  connectionPhase,
+  lastActivityAt,
   agentPanelModel = EMPTY_AGENT_PANEL_MODEL,
   onOpenAgents = NOOP_OPEN_AGENTS,
   listRef,
@@ -263,6 +295,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  onPrepareTierRetry = NOOP_PREPARE_TIER_RETRY,
+  canRetryOneTierHigher = false,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -403,6 +437,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         expandedWorkGroupIds,
         isWorking,
         activeTurnStartedAt,
+        connectionPhase,
+        lastActivityAt,
         turnDiffSummaryByAssistantMessageId,
         revertTurnCountByUserMessageId,
       }),
@@ -414,6 +450,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       expandedWorkGroupIds,
       isWorking,
       activeTurnStartedAt,
+      connectionPhase,
+      lastActivityAt,
       turnDiffSummaryByAssistantMessageId,
       revertTurnCountByUserMessageId,
     ],
@@ -511,6 +549,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      onPrepareTierRetry,
+      canRetryOneTierHigher,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -527,6 +567,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      onPrepareTierRetry,
+      canRetryOneTierHigher,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -550,7 +592,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip" data-timeline-root="true">
+      <div
+        className="mx-auto w-full min-w-0 max-w-(--chat-column-max-width) overflow-x-clip"
+        data-timeline-root="true"
+      >
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -610,7 +655,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           />
           <TimelineMinimap
             items={minimapItems}
-            bottomInset={contentInsetEndAdjustment}
             hasPersistentGutter={minimapHasPersistentGutter}
             hitStripWidth={minimapHitStripWidth}
             stripMap={minimapStripMap}
@@ -712,14 +756,12 @@ function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
 }
 
 function TimelineMinimap({
-  bottomInset,
   hasPersistentGutter,
   hitStripWidth,
   items,
   stripMap,
   onSelect,
 }: {
-  bottomInset: number;
   hasPersistentGutter: boolean;
   hitStripWidth: number;
   items: ReadonlyArray<TimelineMinimapItem>;
@@ -779,19 +821,16 @@ function TimelineMinimap({
     return null;
   }
 
-  const safeBottomInset = Math.max(0, Math.ceil(bottomInset));
-
   return (
     <div
       className={cn(
-        "group/minimap pointer-events-none absolute top-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
+        "group/minimap pointer-events-none absolute inset-y-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
         hasPersistentGutter
           ? "opacity-100"
           : "opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100",
       )}
       data-testid="timeline-minimap"
       data-persistent-gutter={hasPersistentGutter ? "true" : "false"}
-      style={{ bottom: safeBottomInset }}
     >
       <div className="relative h-full w-full select-none">
         <button
@@ -960,6 +999,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
   const userImages = row.message.attachments ?? [];
   const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
   const terminalContexts = displayedUserMessage.contexts;
@@ -982,7 +1022,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
 
   return (
     <div className="group flex flex-col items-end gap-1">
-      <div className="relative max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
+      <div className="relative max-w-[min(80%,40rem)] rounded-2xl bg-message p-3 text-message-foreground">
         {regularImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
             {regularImages.map((image: NonNullable<TimelineMessage["attachments"]>[number]) => (
@@ -1040,7 +1080,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           markdownCwd={ctx.markdownCwd}
         />
       </div>
-      <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
+      <div className="flex w-full max-w-[min(80%,40rem)] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
         <div className="flex shrink-0 items-center gap-2">
           <Tooltip>
             <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
@@ -1052,6 +1092,31 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           </Tooltip>
           <div className="flex items-center gap-0.5">
             {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
+            {ctx.canRetryOneTierHigher && row.message.turnId ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      disabled={activity.isWorking}
+                      onClick={() =>
+                        void ctx.onPrepareTierRetry({
+                          text: displayedUserMessage.copyText ?? row.message.text,
+                          turnId: row.message.turnId!,
+                          attachments: userImages,
+                        })
+                      }
+                      aria-label="Retry one tier higher"
+                    />
+                  }
+                >
+                  <RotateCcwIcon className="size-3" />
+                </TooltipTrigger>
+                <TooltipPopup side="top">Prepare retry one tier higher</TooltipPopup>
+              </Tooltip>
+            ) : null}
             {displayedUserMessage.copyText && (
               <MessageCopyButton text={displayedUserMessage.copyText} variant="ghost" />
             )}
@@ -1285,22 +1350,42 @@ const TurnPlanTimelineRow = memo(function TurnPlanTimelineRow({
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
   const { workingStepLabel } = use(TimelineRowActivityCtx);
+  // The status is derived here rather than in ChatView because it depends on
+  // wall-clock time: a turn crosses into "stalled" purely by the passage of
+  // seconds, with no state change upstream to trigger a re-render. Ticking in
+  // ChatView would re-render the entire view every few seconds; ticking here
+  // re-renders one row, consistent with the self-ticking labels below.
+  const status = useWorkingIndicatorStatus(row.connectionPhase, row.lastActivityAt, row.createdAt);
+  // The same instant the threshold is measured from, so the label and the
+  // status can never disagree about how long the silence has run.
+  const silenceStartedAt = resolveWorkingSilenceStart(row.lastActivityAt, row.createdAt);
+
+  // The dots keep pulsing in every state — the turn genuinely may still be
+  // running server-side — but the label stops claiming we can see progress.
+  const dotClassName =
+    status === "working" ? "bg-muted-foreground/30" : "bg-amber-500/50 dark:bg-amber-400/50";
+
   return (
     <div className="py-0.5 pl-1.5">
-      <div className="flex min-w-0 items-center gap-2 pt-1 text-secondary-label text-[11px] tabular-nums">
+      <div
+        className="flex min-w-0 items-center gap-2 pt-1 text-[11px] text-muted-foreground/70 tabular-nums"
+        data-working-status={status}
+      >
         <span className="inline-flex items-center gap-[3px]">
-          <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse" />
-          <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:200ms]" />
-          <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:400ms]" />
+          <span className={`h-1 w-1 rounded-full animate-status-pulse ${dotClassName}`} />
+          <span
+            className={`h-1 w-1 rounded-full animate-status-pulse [animation-delay:200ms] ${dotClassName}`}
+          />
+          <span
+            className={`h-1 w-1 rounded-full animate-status-pulse [animation-delay:400ms] ${dotClassName}`}
+          />
         </span>
         <span className="shrink-0">
-          {row.createdAt ? (
-            <>
-              Working for <WorkingTimer createdAt={row.createdAt} />
-            </>
-          ) : (
-            "Working..."
-          )}
+          <WorkingRowLabel
+            status={status}
+            createdAt={row.createdAt}
+            silenceStartedAt={silenceStartedAt}
+          />
         </span>
         {workingStepLabel ? (
           <span className="min-w-0 truncate text-muted-foreground/55">· {workingStepLabel}</span>
@@ -1308,6 +1393,89 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
       </div>
     </div>
   );
+}
+
+/**
+ * Re-evaluates the indicator status as silence accumulates.
+ *
+ * Only re-renders on an actual status *change*, not on every tick: the interval
+ * is coarse (the threshold is minutes, so second-level precision buys nothing)
+ * and the setState is a no-op while the status holds steady. The interval is
+ * dropped entirely once "stalled" is reached, since nothing further can change
+ * it without new props.
+ */
+function useWorkingIndicatorStatus(
+  connectionPhase: EnvironmentConnectionPhase | null,
+  lastActivityAt: string | null,
+  workStartedAt: string | null,
+): WorkingIndicatorStatus {
+  const evaluateStatus = useCallback(
+    () =>
+      deriveWorkingIndicatorStatus({
+        connectionPhase,
+        lastActivityAt,
+        workStartedAt,
+        nowMs: Date.now(),
+      }),
+    [connectionPhase, lastActivityAt, workStartedAt],
+  );
+  const [status, setStatus] = useState<WorkingIndicatorStatus>(evaluateStatus);
+
+  useEffect(() => {
+    const evaluate = evaluateStatus;
+
+    // Props changed — resync immediately rather than waiting out the interval,
+    // so a socket drop is reflected at once.
+    const initial = evaluate();
+    setStatus(initial);
+    if (initial === "stalled") return;
+
+    const id = setInterval(() => {
+      const next = evaluate();
+      setStatus(next);
+      if (next === "stalled") clearInterval(id);
+    }, WORKING_STATUS_POLL_MS);
+    return () => clearInterval(id);
+  }, [evaluateStatus]);
+
+  return status;
+}
+
+/** How often the working row re-checks whether silence has crossed the threshold. */
+const WORKING_STATUS_POLL_MS = 5_000;
+
+function WorkingRowLabel({
+  status,
+  createdAt,
+  silenceStartedAt,
+}: {
+  status: WorkingIndicatorStatus;
+  createdAt: string | null;
+  silenceStartedAt: string | null;
+}) {
+  switch (status) {
+    case "reconnecting":
+      // Deliberately not an error: a turn survives a client disconnect, so the
+      // work is probably still happening — we just cannot see it right now.
+      return <>Reconnecting… this turn keeps running on the server</>;
+    case "stalled":
+      // Timed from the last activity, not from the turn start.
+      return silenceStartedAt ? (
+        <>
+          No response for <WorkingTimer createdAt={silenceStartedAt} /> — may be stuck
+        </>
+      ) : (
+        <>No response yet — may be stuck</>
+      );
+    case "working":
+      return createdAt ? (
+        <>
+          Working for <WorkingTimer createdAt={createdAt} />
+        </>
+      ) : (
+        <>Working...</>
+      );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2115,6 +2283,53 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
   return capitalizePhrase(normalizeCompactToolLabel(workEntry.toolTitle));
 }
 
+function SubagentWorkEntryRow({ workEntry }: { workEntry: TimelineWorkEntry }) {
+  const data =
+    workEntry.toolData && typeof workEntry.toolData === "object"
+      ? (workEntry.toolData as Record<string, unknown>)
+      : null;
+  const state = typeof data?.state === "string" ? data.state : "running";
+  const name =
+    (typeof data?.name === "string" && data.name) ||
+    (typeof data?.agentType === "string" && data.agentType) ||
+    "Subagent";
+  const provider = typeof data?.provider === "string" ? data.provider : "provider";
+  const summary =
+    (typeof data?.resultSummary === "string" && data.resultSummary) ||
+    (typeof data?.errorSummary === "string" && data.errorSummary) ||
+    (typeof data?.description === "string" && data.description) ||
+    workEntry.detail;
+  const statusClass =
+    state === "failed"
+      ? "text-destructive"
+      : state === "completed"
+        ? "text-emerald-600 dark:text-emerald-400"
+        : state === "suspended"
+          ? "text-amber-600 dark:text-amber-400"
+          : "text-sky-600 dark:text-sky-400";
+  return (
+    <div className="my-1 flex gap-2 rounded-lg border border-border/55 bg-muted/20 px-2.5 py-2">
+      <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-accent/55">
+        <BotIcon className="size-3.5" aria-hidden />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="truncate font-medium text-foreground/90">{name}</span>
+          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {provider}
+          </span>
+          <span className={cn("ms-auto text-[10px] font-medium capitalize", statusClass)}>
+            {state}
+          </span>
+        </div>
+        {summary ? (
+          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{summary}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 const stopRowToggle = (e: { stopPropagation: () => void }) => e.stopPropagation();
 
 /**
@@ -2230,6 +2445,9 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   const { workEntry, workspaceRoot } = props;
   const activity = use(TimelineRowActivityCtx);
   const [expanded, setExpanded] = useState(false);
+  if (workEntry.itemType === "collab_agent_tool_call") {
+    return <SubagentWorkEntryRow workEntry={workEntry} />;
+  }
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);

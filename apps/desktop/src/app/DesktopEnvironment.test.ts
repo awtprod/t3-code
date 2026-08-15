@@ -9,13 +9,13 @@ import * as DesktopConfig from "./DesktopConfig.ts";
 
 const defaultInput = {
   dirname: "/repo/apps/desktop/dist-electron",
-  homeDirectory: "/Users/alice",
+  homeDirectory: "/user-home",
   platform: "darwin",
   processArch: "arm64",
   appVersion: "0.0.22",
-  appPath: "/Applications/T3 Code.app/Contents/Resources/app.asar",
+  appPath: "/Applications/Command Center.app/Contents/Resources/app.asar",
   isPackaged: false,
-  resourcesPath: "/Applications/T3 Code.app/Contents/Resources",
+  resourcesPath: "/Applications/Command Center.app/Contents/Resources",
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
@@ -51,7 +51,7 @@ describe("DesktopEnvironment", () => {
       );
 
       assert.equal(environment.isDevelopment, true);
-      assert.equal(environment.appDataDirectory, "/Users/alice/Library/Application Support");
+      assert.equal(environment.appDataDirectory, "/user-home/Library/Application Support");
       assert.equal(environment.baseDir, "/tmp/t3");
       assert.equal(environment.stateDir, "/tmp/t3/userdata");
       assert.equal(environment.desktopSettingsPath, "/tmp/t3/userdata/desktop-settings.json");
@@ -67,8 +67,8 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.appRoot, "/repo");
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
-      assert.equal(environment.appUserModelId, "com.t3tools.t3code.dev");
-      assert.equal(environment.linuxWmClass, "t3code-dev");
+      assert.equal(environment.appUserModelId, "com.awtprod.commandcenter.dev");
+      assert.equal(environment.linuxWmClass, "commandcenter-dev");
       assert.deepEqual(
         Option.map(environment.devServerUrl, (url) => url.href),
         Option.some("http://localhost:5173/"),
@@ -106,8 +106,42 @@ describe("DesktopEnvironment", () => {
       );
       const production = yield* makeEnvironment();
 
-      assert.equal(development.stateDir, "/Users/alice/.t3/dev");
-      assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
+      assert.equal(development.stateDir, "/user-home/.command-center/dev");
+      assert.equal(production.stateDir, "/user-home/.command-center/userdata");
+      assert.equal(production.displayName, "Command Center");
+      assert.equal(production.branding.stageLabel, "Latest");
+      assert.equal(production.appUserModelId, "com.awtprod.commandcenter");
+      assert.equal(production.linuxDesktopEntryName, "command-center.desktop");
+      assert.equal(production.linuxWmClass, "command-center");
+    }),
+  );
+
+  it.effect("keeps remote-only builds out of ordinary desktop state", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment({ remoteOnlyBuild: true });
+      const expectedBaseDir = environment.path.join("/user-home", ".command-center-remote-only");
+
+      assert.equal(environment.remoteOnlyBuild, true);
+      assert.equal(environment.baseDir, expectedBaseDir);
+      assert.equal(environment.stateDir, environment.path.join(expectedBaseDir, "userdata"));
+      assert.equal(environment.userDataDirName, "command-center-remote-only");
+      assert.deepEqual(environment.legacyUserDataDirNames, []);
+      assert.equal(environment.appUserModelId, "com.awtprod.commandcenter.remote-only");
+    }),
+  );
+
+  it.effect("prefers the Command Center runtime directory over the legacy override", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment(
+        {},
+        {
+          COMMAND_CENTER_HOME: "/tmp/command-center",
+          T3CODE_HOME: "/tmp/legacy-t3",
+        },
+      );
+
+      assert.equal(environment.baseDir, "/tmp/command-center");
+      assert.equal(environment.stateDir, "/tmp/command-center/userdata");
     }),
   );
 
@@ -116,12 +150,12 @@ describe("DesktopEnvironment", () => {
       const environment = yield* makeEnvironment(
         {},
         {
-          T3CODE_DESKTOP_APP_USER_MODEL_ID: " com.t3tools.t3code.dev.local ",
+          T3CODE_DESKTOP_APP_USER_MODEL_ID: " com.awtprod.commandcenter.dev.local ",
           VITE_DEV_SERVER_URL: "http://localhost:5173",
         },
       );
 
-      assert.equal(environment.appUserModelId, "com.t3tools.t3code.dev.local");
+      assert.equal(environment.appUserModelId, "com.awtprod.commandcenter.dev.local");
     }),
   );
 
@@ -136,11 +170,11 @@ describe("DesktopEnvironment", () => {
       );
       assert.deepEqual(
         environment.resolvePickFolderDefaultPath({ initialPath: "~" }),
-        Option.some("/Users/alice"),
+        Option.some("/user-home"),
       );
       assert.deepEqual(
         environment.resolvePickFolderDefaultPath({ initialPath: "~/project" }),
-        Option.some("/Users/alice/project"),
+        Option.some("/user-home/project"),
       );
     }),
   );

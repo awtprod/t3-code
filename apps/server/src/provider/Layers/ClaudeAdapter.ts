@@ -476,6 +476,8 @@ function claudeTotalProcessedTokens(value: unknown): number | undefined {
 function makeClaudeTokenUsageSnapshot(input: {
   readonly activeTokens: number;
   readonly inputTokens?: number;
+  readonly cacheReadInputTokens?: number;
+  readonly cacheWriteInputTokens?: number;
   readonly outputTokens?: number;
   readonly contextWindow?: number;
   readonly totalProcessedTokens?: number;
@@ -495,6 +497,8 @@ function makeClaudeTokenUsageSnapshot(input: {
   const totalProcessedTokens = finiteNonNegativeInteger(input.totalProcessedTokens);
   const inputTokens = finiteNonNegativeInteger(input.inputTokens);
   const outputTokens = finiteNonNegativeInteger(input.outputTokens);
+  const cacheReadInputTokens = finiteNonNegativeInteger(input.cacheReadInputTokens);
+  const cacheWriteInputTokens = finiteNonNegativeInteger(input.cacheWriteInputTokens);
 
   return {
     usedTokens,
@@ -503,7 +507,17 @@ function makeClaudeTokenUsageSnapshot(input: {
       ? { totalProcessedTokens }
       : {}),
     ...(inputTokens !== undefined && inputTokens > 0 ? { inputTokens } : {}),
+    ...(cacheReadInputTokens !== undefined ? { cachedInputTokens: cacheReadInputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined
+      ? { cacheWriteInputTokens: cacheWriteInputTokens }
+      : {}),
     ...(outputTokens !== undefined && outputTokens > 0 ? { outputTokens } : {}),
+    ...(inputTokens !== undefined ? { lastInputTokens: inputTokens } : {}),
+    ...(cacheReadInputTokens !== undefined ? { lastCachedInputTokens: cacheReadInputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined
+      ? { lastCacheWriteInputTokens: cacheWriteInputTokens }
+      : {}),
+    ...(outputTokens !== undefined ? { lastOutputTokens: outputTokens } : {}),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(input.compactsAutomatically !== undefined
       ? { compactsAutomatically: input.compactsAutomatically }
@@ -524,6 +538,8 @@ function normalizeClaudeActiveTokenUsage(
   const activeUsage = lastClaudeUsageIteration(usage) ?? usage;
   const inputTokens = claudeUsageInputTokens(activeUsage);
   const outputTokens = claudeUsageOutputTokens(activeUsage);
+  const cacheReadInputTokens = finiteNonNegativeInteger(activeUsage.cache_read_input_tokens);
+  const cacheWriteInputTokens = finiteNonNegativeInteger(activeUsage.cache_creation_input_tokens);
   const activeTokens = claudeTotalProcessedTokens(activeUsage) ?? inputTokens + outputTokens;
   if (activeTokens <= 0) {
     return undefined;
@@ -532,6 +548,8 @@ function normalizeClaudeActiveTokenUsage(
   return makeClaudeTokenUsageSnapshot({
     activeTokens,
     inputTokens,
+    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
+    ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
     outputTokens,
     ...(contextWindow !== undefined ? { contextWindow } : {}),
     ...(totalProcessedTokens !== undefined ? { totalProcessedTokens } : {}),
@@ -2241,31 +2259,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
         : undefined);
 
+    const finalUsageSnapshot =
+      usageSnapshot && typeof result?.total_cost_usd === "number"
+        ? { ...usageSnapshot, costUsd: result.total_cost_usd, costKind: "reported" as const }
+        : usageSnapshot;
     const turnState = context.turnState;
     if (!turnState) {
-      yield* emitThreadTokenUsage(context, usageSnapshot, {
+      yield* emitThreadTokenUsage(context, finalUsageSnapshot, {
         rawMethod: "claude/result",
         rawPayload: result ?? { status },
       });
 
-      const stamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "turn.completed",
-        eventId: stamp.eventId,
-        provider: PROVIDER,
-        createdAt: stamp.createdAt,
+      // A result with no local turn is never a turn this adapter started:
+      // real turns get turnState in sendTurn, and assistant messages that
+      // arrive outside a turn auto-start a synthetic one. What lands here is
+      // the resume handshake (system/init + result(num_turns: 0)), a late
+      // result for a turn already completed locally (steer auto-close,
+      // stream teardown), or a stream failure with no turn in flight. The
+      // untargeted turn.completed this branch used to emit carried no turnId,
+      // so ingestion could not attribute it — and whenever the projection had
+      // no active turn (a pending turn start included) it flipped the session
+      // lifecycle for a turn that never existed. Keep the usage emission,
+      // drop the lifecycle event, and leave a tripwire so the upstream
+      // trigger stays measurable in the field.
+      yield* Effect.logInfo("claude.turn.result-without-active-turn", {
         threadId: context.session.threadId,
-        payload: {
-          state: status,
-          ...(result?.stop_reason !== undefined ? { stopReason: result.stop_reason } : {}),
-          ...(result?.usage ? { usage: result.usage } : {}),
-          ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
-          ...(typeof result?.total_cost_usd === "number"
-            ? { totalCostUsd: result.total_cost_usd }
-            : {}),
-          ...(errorMessage ? { errorMessage } : {}),
-        },
-        providerRefs: {},
+        status,
+        numTurns: result?.num_turns,
+        hasUsage: result?.usage !== undefined,
+        ...(errorMessage ? { errorMessage } : {}),
       });
       return;
     }
@@ -2317,7 +2339,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       items: [...turnState.items],
     });
 
-    yield* emitThreadTokenUsage(context, usageSnapshot, {
+    yield* emitThreadTokenUsage(context, finalUsageSnapshot, {
       rawMethod: "claude/result",
       rawPayload: result ?? { status },
     });
@@ -4090,6 +4112,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(ultracode ? { ultracode: true } : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      // The attachments dir grant lets the agent Read/copy pasted images at
+      // the paths ProviderService injects into the turn text, without an
+      // approval prompt. It is a leaf directory holding only attachment
+      // files; siblings like secrets/ and state.sqlite stay ungranted.
+      const additionalDirectories = [
+        ...(input.cwd ? [input.cwd] : []),
+        serverConfig.attachmentsDir,
+      ];
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -4113,7 +4143,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         includePartialMessages: true,
         canUseTool,
         env: claudeEnvironment,
-        ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
+        additionalDirectories,
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
           ? {
@@ -4148,7 +4178,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.resume": existingResumeSessionId ?? "",
         "claude.query.session_id": newSessionId ?? "",
         "claude.query.include_partial_messages": true,
-        "claude.query.additional_directories": input.cwd ? [input.cwd] : [],
+        "claude.query.additional_directories": additionalDirectories,
         "claude.query.setting_sources": [...CLAUDE_SETTING_SOURCES],
         "claude.query.settings_json": encodeJsonStringForDiagnostics(settings) ?? "",
         "claude.query.extra_args_json": encodeJsonStringForDiagnostics(extraArgs) ?? "",
@@ -4377,7 +4407,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         createdAt: turnStartedStamp.createdAt,
         threadId: context.session.threadId,
         turnId,
-        payload: modelSelection?.model ? { model: modelSelection.model } : {},
+        payload: {
+          ...(modelSelection?.model ? { model: modelSelection.model } : {}),
+          // Echo the requesting event's sequence so the projector adopts the
+          // placeholder this turn was started for. Only on a real turn
+          // boundary: a steer folds into a turn whose placeholder was already
+          // consumed, and the synthetic-turn emitter above has no requesting
+          // event at all.
+          ...(input.turnRequestSequence !== undefined
+            ? { turnRequestSequence: input.turnRequestSequence }
+            : {}),
+        },
         providerRefs: {},
       });
     }
@@ -4399,12 +4439,38 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.session.resumeCursor !== undefined
         ? { resumeCursor: context.session.resumeCursor }
         : {}),
+      // A steer emitted no `turn.started` above, so nothing downstream will
+      // consume this send's pending turn-start placeholder. Report the fold so
+      // the reactor consumes it explicitly instead of leaving a delivered
+      // message looking like one that was never sent.
+      ...(steeringTurnState === null ? {} : { steered: true }),
     };
   });
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
-    function* (threadId, _turnId) {
+    function* (threadId, turnId) {
       const context = yield* requireSession(threadId);
+      // Scoped to the named turn when the caller named one. `query.interrupt()`
+      // is thread-wide — it stops whatever the agent is doing now — so calling
+      // it for a turn that has already finished kills the turn that REPLACED
+      // it. That is not hypothetical: the reactor's post-send fence can decide
+      // a stop covered request A, and by the time it says so a later message B
+      // may be the one running. Interrupting on A's behalf then destroys work
+      // the user never asked to stop, which is strictly worse than the missed
+      // stop the fence exists to prevent.
+      //
+      // An undefined `turnId` still means "whatever is running" — that is the
+      // session-stop and watchdog path, where thread-wide is the intent.
+      const activeTurnId = context.turnState?.turnId;
+      if (turnId !== undefined && activeTurnId !== undefined && activeTurnId !== turnId) {
+        yield* Effect.logDebug("claude-adapter.interrupt-turn.stale-target", {
+          threadId,
+          requestedTurnId: turnId,
+          activeTurnId,
+        });
+        return;
+      }
+
       // Stop-everything semantics: users reach for Stop precisely when a
       // fleet ran away. interrupt() alone only ends the parent turn —
       // background subagents/shells keep running and keep burning tokens.

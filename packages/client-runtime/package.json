@@ -51,6 +51,10 @@
       "types": "./src/state/connections.ts",
       "default": "./src/state/connections.ts"
     },
+    "./state/command-center": {
+      "types": "./src/state/commandCenter.ts",
+      "default": "./src/state/commandCenter.ts"
+    },
     "./state/entities": {
       "types": "./src/state/entities.ts",
       "default": "./src/state/entities.ts"
@@ -82,6 +86,10 @@
     "./state/projects": {
       "types": "./src/state/projects.ts",
       "default": "./src/state/projects.ts"
+    },
+    "./state/pull-requests": {
+      "types": "./src/state/pullRequests.ts",
+      "default": "./src/state/pullRequests.ts"
     },
     "./state/project-grouping": {
       "types": "./src/state/projectGrouping.ts",

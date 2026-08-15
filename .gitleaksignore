@@ -1,0 +1,52 @@
+# Exact false-positive fingerprints inherited from the pinned public T3 Code baseline.
+# Never add a Command Center finding here; investigate and remove it instead.
+7a820abfddbf77166d16614bb9bcabe8fcd2c829:apps/server/src/cloud/CliTokenManager.test.ts:generic-api-key:22
+e95b57dc268471c882f734546fdcd92e9a833e45:apps/mobile/src/features/cloud/linkEnvironment.test.ts:generic-api-key:58
+5ae77c0d63ece1a3e3fa5a70bc7717aa7c342756:apps/server/src/cloud/publicConfig.test.ts:generic-api-key:48
+5ae77c0d63ece1a3e3fa5a70bc7717aa7c342756:apps/server/src/cloud/publicConfig.test.ts:generic-api-key:65
+5ae77c0d63ece1a3e3fa5a70bc7717aa7c342756:apps/server/src/cloud/publicConfig.test.ts:generic-api-key:69
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/examples/cloudflare-dev/test/integ.test.ts:generic-api-key:70
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/examples/cloudflare-dev/src/NotifyWorkflow.ts:generic-api-key:11
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/packages/alchemy/src/Cloudflare/Auth/AuthProvider.ts:generic-api-key:705
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/packages/alchemy/test/KeyPair.test.ts:private-key:19
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/packages/alchemy/test/AWS/IAM/fixtures.ts:private-key:19
+e3f14058847dbd36695277aab941fefa94e21e5f:.repos/effect-smol/packages/effect/src/Config.ts:generic-api-key:1301
+e3f14058847dbd36695277aab941fefa94e21e5f:.repos/effect-smol/packages/effect/HTTPAPI.md:curl-auth-header:1039
+e3f14058847dbd36695277aab941fefa94e21e5f:.repos/effect-smol/packages/effect/test/unstable/eventlog/EventLogIdentityDerivation.test.ts:generic-api-key:6
+e3f14058847dbd36695277aab941fefa94e21e5f:.repos/effect-smol/cookbooks/schedule.md:generic-api-key:21154
+b7559c467803f923e59a287c112b4c92b96e15c7:apps/server/src/auth/Layers/BootstrapCredentialService.ts:generic-api-key:33
+
+# Exact false-positive fingerprints in the preserved pinned upstream history. The merged test
+# fixture replaces these credential-shaped UUIDs with a descriptive placeholder.
+08993a5ec8fbe5c55a2a4fa8f5fb37f870e87cf6:packages/effect-codex-app-server/src/protocol.test.ts:generic-api-key:117
+08993a5ec8fbe5c55a2a4fa8f5fb37f870e87cf6:packages/effect-codex-app-server/src/protocol.test.ts:generic-api-key:121
+
+# Exact staged false-positive fingerprints from the pinned public Alchemy reference corpus.
+# These paths are immutable integration fixtures under `.repos/`; never add application findings.
+.repos/alchemy-effect/packages/alchemy/src/AWS/ACMPCA/CertificateAuthority.ts:generic-api-key:238
+.repos/alchemy-effect/packages/alchemy/src/AWS/WAFv2/APIKeys.ts:generic-api-key:62
+.repos/alchemy-effect/packages/alchemy/test/AWS/ACM/fixtures/import-cert.ts:private-key:29
+.repos/alchemy-effect/packages/alchemy/test/AWS/Amplify/Branch.test.ts:generic-api-key:19
+.repos/alchemy-effect/packages/alchemy/test/AWS/ECS/ServiceDomain.test.ts:private-key:45
+.repos/alchemy-effect/packages/alchemy/test/AWS/ELBv2/fixtures/certs.ts:private-key:35
+.repos/alchemy-effect/packages/alchemy/test/AWS/ELBv2/fixtures/certs.ts:private-key:89
+.repos/alchemy-effect/packages/alchemy/test/AWS/ELBv2/fixtures/certs.ts:private-key:143
+.repos/alchemy-effect/packages/alchemy/test/AWS/PaymentCryptography/handler.ts:generic-api-key:77
+.repos/alchemy-effect/packages/alchemy/test/AWS/PaymentCryptography/handler.ts:generic-api-key:90
+.repos/alchemy-effect/packages/alchemy/test/AWS/PaymentCryptography/handler.ts:generic-api-key:104
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/CustomCertificate/fixtures/key1.pem:private-key:1
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/CustomCertificate/fixtures/key2.pem:private-key:1
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Dns/ZoneTransferPeer.test.ts:generic-api-key:20
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Dns/ZoneTransferTsig.test.ts:generic-api-key:20
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Dns/ZoneTransferTsig.test.ts:generic-api-key:22
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/MtlsCertificate/fixtures/certs.ts:private-key:86
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:37
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:90
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:143
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:196
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:249
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:302
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:362
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:415
+.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:468
+.repos/alchemy-effect/packages/alchemy/test/Output.test.ts:generic-api-key:851

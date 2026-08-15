@@ -11,18 +11,54 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  public_safety:
+    name: Public repository safety
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Scan Git history for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Enforce the public/private boundary
+        run: vp run public:check
+        env:
+          COMMAND_CENTER_PUBLIC_DENYLIST: ${{ secrets.COMMAND_CENTER_PUBLIC_DENYLIST }}
+
+      - name: Require the private identifier denylist on trusted changes
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          COMMAND_CENTER_PUBLIC_DENYLIST: ${{ secrets.COMMAND_CENTER_PUBLIC_DENYLIST }}
+        run: |
+          if [ -z "$COMMAND_CENTER_PUBLIC_DENYLIST" ]; then
+            echo "Configure the COMMAND_CENTER_PUBLIC_DENYLIST Actions secret before publishing." >&2
+            exit 1
+          fi
+
   check:
     name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
@@ -59,16 +95,11 @@ jobs:
 
   test:
     name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
@@ -110,27 +141,50 @@ jobs:
       - name: Test resource monitor
         run: cargo test --locked --manifest-path native/resource-monitor/Cargo.toml
 
-  mobile_native_static_analysis:
-    name: Mobile Native Static Analysis
-    runs-on: blacksmith-6vcpu-macos-26
+  command_center_native_isolation:
+    name: Command Center Native Isolation (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS
+            os: macos-26
+          - label: Windows
+            os: windows-2025
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
           cache: true
-          run-install: |
-            args:
-              - --filter=@t3tools/scripts...
+          run-install: true
+
+      - name: Test native Command Center isolation
+        run: >-
+          vp test run
+          apps/server/src/provider/security/CommandCenterProviderIsolation.test.ts
+          apps/server/src/provider/Layers/CodexSessionRuntime.test.ts
+          apps/server/src/command-center/RunDispatcher.test.ts
+
+  mobile_native_static_analysis:
+    name: Mobile Native Static Analysis
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
 
       - name: Install mobile native static analysis tools
         run: brew bundle install --file apps/mobile/Brewfile
@@ -140,25 +194,18 @@ jobs:
 
   release_smoke:
     name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
           cache: true
-          run-install: |
-            args:
-              - --filter=@t3tools/scripts...
+          run-install: true
 
       - name: Exercise release-only workflow steps
         run: node scripts/release-smoke.ts

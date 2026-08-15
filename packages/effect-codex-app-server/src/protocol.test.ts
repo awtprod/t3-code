@@ -114,11 +114,11 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
 
       assert.deepEqual(
         yield* decodeConsumeRateLimitResetCreditParams({
-          idempotencyKey: "8ae96ff3-3425-4f4c-8772-b6fd61502868",
+          idempotencyKey: "test-idempotency-key",
           creditId: "RateLimitResetCredit_1",
         }),
         {
-          idempotencyKey: "8ae96ff3-3425-4f4c-8772-b6fd61502868",
+          idempotencyKey: "test-idempotency-key",
           creditId: "RateLimitResetCredit_1",
         },
       );

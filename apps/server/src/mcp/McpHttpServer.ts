@@ -13,6 +13,18 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { requiredCapabilityFromMeta } from "./ToolCapability.ts";
+import {
+  MODEL_RESULT_LIMITS,
+  capFirst,
+  capNewest,
+  capOpaqueResult,
+  capText,
+} from "./ToolResultBudget.ts";
+import { CommandCenterToolkitHandlersLive } from "./toolkits/command-center/handlers.ts";
+import { CommandCenterToolkit } from "./toolkits/command-center/tools.ts";
+import { SupabaseToolkitHandlersLive } from "./toolkits/supabase/handlers.ts";
+import { SupabaseToolkit } from "./toolkits/supabase/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -36,6 +48,21 @@ const unauthorized = HttpServerResponse.jsonUnsafe(
     },
   },
 );
+
+export const toolVisibleToCapabilities = (
+  tool: McpSchema.Tool,
+  capabilities: ReadonlySet<McpInvocationContext.McpCapability>,
+): boolean => {
+  const required = requiredCapabilityFromMeta(tool._meta);
+  if (required === undefined) return true;
+  if (required === "cc.connections.google.read") {
+    return (
+      capabilities.has(required) ||
+      Array.from(capabilities).some((capability) => capability.startsWith("cc.connections.google."))
+    );
+  }
+  return capabilities.has(required);
+};
 
 type AuthenticatedHttpEffect = Effect.Effect<
   HttpServerResponse.HttpServerResponse,
@@ -85,6 +112,9 @@ const makeMcpAuthMiddleware = McpSessionRegistry.McpSessionRegistry.pipe(
         }
         return yield* httpEffect.pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpServer.McpListToolFilter, (tool) =>
+            toolVisibleToCapabilities(tool, invocation.capabilities),
+          ),
           Effect.map(normalizeMcpHttpResponse),
         );
       }),
@@ -132,6 +162,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const built = yield* PreviewSnapshotToolkit;
   const tool = PreviewSnapshotTool;
+  const toolMeta = Context.getOrUndefined(tool.annotations, Tool.Meta);
   yield* server.addTool({
     tool: new McpSchema.Tool({
       name: tool.name,
@@ -147,6 +178,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
         idempotentHint: Context.get(tool.annotations, Tool.Idempotent),
         openWorldHint: Context.get(tool.annotations, Tool.OpenWorld),
       },
+      _meta: toolMeta,
     }),
     annotations: tool.annotations,
     handle: (payload) =>
@@ -174,8 +206,37 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                 readonly [key: string]: unknown;
               };
               const { screenshot, ...page } = snapshot;
+              const visibleText = capText(
+                typeof page.visibleText === "string" ? page.visibleText : "",
+                MODEL_RESULT_LIMITS.previewVisibleTextChars,
+              );
+              const interactiveElements = capFirst(
+                Array.isArray(page.interactiveElements) ? page.interactiveElements : [],
+                MODEL_RESULT_LIMITS.previewInteractiveElements,
+              );
+              const accessibilityTree = capOpaqueResult(page.accessibilityTree, {
+                maxChars: MODEL_RESULT_LIMITS.previewAccessibilityTreeChars,
+              });
+              const consoleEntries = capNewest(
+                Array.isArray(page.consoleEntries) ? page.consoleEntries : [],
+                MODEL_RESULT_LIMITS.previewHistoryEntries,
+              );
+              const networkEntries = capNewest(
+                Array.isArray(page.networkEntries) ? page.networkEntries : [],
+                MODEL_RESULT_LIMITS.previewHistoryEntries,
+              );
+              const actionTimeline = capNewest(
+                Array.isArray(page.actionTimeline) ? page.actionTimeline : [],
+                MODEL_RESULT_LIMITS.previewHistoryEntries,
+              );
               const metadata = {
                 ...page,
+                visibleText,
+                interactiveElements,
+                accessibilityTree,
+                consoleEntries,
+                networkEntries,
+                actionTimeline,
                 screenshot: {
                   mimeType: screenshot.mimeType,
                   width: screenshot.width,
@@ -216,11 +277,25 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
   PreviewSnapshotRegistrationLive,
 );
 
+export const CommandCenterToolkitRegistrationLive = McpServer.toolkit(CommandCenterToolkit).pipe(
+  Layer.provide(CommandCenterToolkitHandlersLive),
+);
+
+export const SupabaseToolkitRegistrationLive = McpServer.toolkit(SupabaseToolkit).pipe(
+  Layer.provide(SupabaseToolkitHandlersLive),
+);
+
+const ToolkitRegistrationLive = Layer.mergeAll(
+  PreviewToolkitRegistrationLive,
+  CommandCenterToolkitRegistrationLive,
+  SupabaseToolkitRegistrationLive,
+);
+
 const McpTransportLive = McpServer.layerHttp({
-  name: "T3 Code",
+  name: "Command Center",
   version: packageJson.version,
   path: "/mcp",
   protocols: [McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
-export const layer = PreviewToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));
+export const layer = ToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));

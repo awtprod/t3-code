@@ -39,7 +39,8 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
     return {
       headline: "Disabled",
       detail:
-        provider.message ?? "This provider is installed but disabled for new sessions in T3 Code.",
+        provider.message ??
+        "This provider is installed but disabled for new sessions in Command Center.",
     };
   }
   if (!provider.installed) {
@@ -114,4 +115,13 @@ export function getProviderVersionAdvisoryPresentation(
     updateCommand: advisory.updateCommand,
     emphasis: "normal" as const,
   };
+}
+
+export function getProviderMaintenancePresentation(
+  advisory: ServerProviderVersionAdvisory | undefined,
+): { readonly updateCommand: string } | null {
+  if (advisory?.canUpdate !== true || advisory.updateCommand === null) {
+    return null;
+  }
+  return { updateCommand: advisory.updateCommand };
 }

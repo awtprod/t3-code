@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+instance=$(basename "$0")
+case "$instance" in
+  codex-primary|codex-secondary) provider=codex ;;
+  claude-primary|claude-secondary) provider=claude ;;
+  kimi-primary|kimi-secondary) provider=kimi ;;
+  *) echo "provider-instance: unsupported wrapper name '$instance'" >&2; exit 77 ;;
+esac
+
+binary=/opt/command-center/provider-cli/node_modules/.bin/$provider
+if [ ! -x "$binary" ]; then
+  echo "provider-instance: $provider is not installed at $binary" >&2
+  exit 127
+fi
+
+exec /opt/command-center/bin/provider-run "$instance" "$binary" "$@"

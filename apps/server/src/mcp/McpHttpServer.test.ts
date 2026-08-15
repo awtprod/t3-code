@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentId, PreviewTabId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -11,6 +12,10 @@ import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/uns
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { CommandCenterToolkit } from "./toolkits/command-center/tools.ts";
+import { PreviewToolkit } from "./toolkits/preview/tools.ts";
+import { SupabaseToolkit } from "./toolkits/supabase/tools.ts";
+import { Tool } from "effect/unstable/ai";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -49,6 +54,25 @@ it("normalizes empty successful notification responses to accepted", () => {
     HttpServerResponse.jsonUnsafe({ jsonrpc: "2.0", id: 1, result: {} }),
   );
   expect(resultResponse.status).toBe(200);
+});
+
+it("discovers exactly the 14 preview tools for a preview-only scope", () => {
+  const allTools = [PreviewToolkit, CommandCenterToolkit, SupabaseToolkit]
+    .flatMap((toolkit) => Object.values(toolkit.tools))
+    .map(
+      (tool) =>
+        new McpSchema.Tool({
+          name: tool.name,
+          description: Tool.getDescription(tool),
+          inputSchema: Tool.getJsonSchema(tool),
+          _meta: Context.getOrUndefined(tool.annotations, Tool.Meta),
+        }),
+    );
+  const visible = allTools.filter((tool) =>
+    McpHttpServer.toolVisibleToCapabilities(tool, new Set(["preview"])),
+  );
+  expect(visible.map((tool) => tool.name)).toEqual(Object.keys(PreviewToolkit.tools));
+  expect(visible).toHaveLength(14);
 });
 
 it.effect("returns bounded structural preview snapshot failures", () =>

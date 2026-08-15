@@ -86,6 +86,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -98,7 +101,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
                   T3CODE_MODE: "desktop",
                   T3CODE_PORT: "4001",
                   T3CODE_HOST: "0.0.0.0",
-                  T3CODE_HOME: baseDir,
+                  COMMAND_CENTER_HOME: baseDir,
+                  T3CODE_HOME: join(NodeOS.tmpdir(), "ignored-legacy-base"),
                   VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
                   T3CODE_DEV_ALLOWED_ORIGINS:
                     "https://host.example.ts.net, https://phone.example.ts.net ",
@@ -132,6 +136,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        previewGatewayEnabled: false,
+        previewGatewayPort: 0,
+        previewGatewayServePort: 8445,
       });
       assert.equal(resolved.stateDir, join(baseDir, "userdata"));
     }),
@@ -159,6 +166,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.some(true),
           tailscaleServeEnabled: Option.some(true),
           tailscaleServePort: Option.some(8443),
+          previewGatewayEnabled: Option.some(true),
+          previewGatewayPort: Option.some(8446),
+          previewGatewayServePort: Option.some(8447),
         },
         Option.some("Debug"),
       ).pipe(
@@ -202,6 +212,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: true,
         tailscaleServePort: 8443,
+        previewGatewayEnabled: true,
+        previewGatewayPort: 8446,
+        previewGatewayServePort: 8447,
       });
       assert.equal(resolved.dbPath, join(baseDir, "userdata", "state.sqlite"));
     }),
@@ -237,6 +250,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.some(false),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -275,6 +291,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: false,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        previewGatewayEnabled: false,
+        previewGatewayPort: 0,
+        previewGatewayServePort: 8445,
       });
     }),
   );
@@ -314,6 +333,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -354,6 +376,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: false,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        previewGatewayEnabled: false,
+        previewGatewayPort: 0,
+        previewGatewayServePort: 8445,
       });
       assert.equal(join(baseDir, "userdata"), resolved.stateDir);
       assert.equal(resolved.desktopTelemetryFd, 4);
@@ -382,6 +407,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -444,6 +472,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.some("Debug"),
       ).pipe(
@@ -484,6 +515,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: true,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        previewGatewayEnabled: false,
+        previewGatewayPort: 0,
+        previewGatewayServePort: 8445,
       });
     }),
   );
@@ -520,6 +554,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -553,6 +590,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: false,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        previewGatewayEnabled: false,
+        previewGatewayPort: 0,
+        previewGatewayServePort: 8445,
       });
     }),
   );
@@ -577,6 +617,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.none(),
         {
@@ -616,6 +659,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: false,
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
+        previewGatewayEnabled: false,
+        previewGatewayPort: 0,
+        previewGatewayServePort: 8445,
       });
     }),
   );

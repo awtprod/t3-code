@@ -232,7 +232,7 @@ describe("desktop update UI helpers", () => {
         availableVersion: "1.1.0",
         downloadedVersion: "1.1.1",
       }),
-    ).toContain("Install update 1.1.1 and restart T3 Code?");
+    ).toContain("Install update 1.1.1 and restart Command Center?");
   });
 
   it("falls back to generic install confirmation copy when no version is available", () => {
@@ -241,7 +241,33 @@ describe("desktop update UI helpers", () => {
         availableVersion: null,
         downloadedVersion: null,
       }),
-    ).toContain("Install update and restart T3 Code?");
+    ).toContain("Install update and restart Command Center?");
+  });
+
+  it("warns Windows users that a silent installation can take several minutes", () => {
+    const message = getDesktopUpdateInstallConfirmationMessage(
+      {
+        availableVersion: "1.1.0",
+        downloadedVersion: "1.1.0",
+      },
+      "Win32",
+    );
+
+    expect(message).toContain("may remain closed for several minutes");
+    expect(message).toContain("no installer window may appear");
+    expect(message).toContain("will reopen automatically");
+  });
+
+  it("keeps the additional silent installation warning Windows-specific", () => {
+    const message = getDesktopUpdateInstallConfirmationMessage(
+      {
+        availableVersion: "1.1.0",
+        downloadedVersion: "1.1.0",
+      },
+      "MacIntel",
+    );
+
+    expect(message).not.toContain("may remain closed for several minutes");
   });
 
   it("warns Windows users that a silent installation can take several minutes", () => {

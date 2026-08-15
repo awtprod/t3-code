@@ -1,6 +1,5 @@
 export const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
 export const PICK_THEME_FILES_CHANNEL = "desktop:pick-theme-files";
-export const CONFIRM_CHANNEL = "desktop:confirm";
 export const SET_THEME_CHANNEL = "desktop:set-theme";
 export const CONTEXT_MENU_CHANNEL = "desktop:context-menu";
 export const OPEN_EXTERNAL_CHANNEL = "desktop:open-external";
@@ -39,6 +38,10 @@ export const GET_WSL_STATE_CHANNEL = "desktop:get-wsl-state";
 export const SET_WSL_BACKEND_ENABLED_CHANNEL = "desktop:set-wsl-backend-enabled";
 export const SET_WSL_DISTRO_CHANNEL = "desktop:set-wsl-distro";
 export const SET_WSL_ONLY_CHANNEL = "desktop:set-wsl-only";
+export const GET_PRIMARY_BACKEND_STATE_CHANNEL = "desktop:get-primary-backend-state";
+export const SET_PRIMARY_BACKEND_CHANNEL = "desktop:set-primary-backend";
+export const RETRY_REMOTE_PRIMARY_CHANNEL = "desktop:retry-remote-primary";
+export const START_LOCAL_EXECUTION_ONCE_CHANNEL = "desktop:start-local-execution-once";
 export const SSH_PASSWORD_PROMPT_CANCELLED_RESULT = "ssh-password-prompt-cancelled";
 export const PREVIEW_CREATE_TAB_CHANNEL = "desktop:preview-create-tab";
 export const PREVIEW_CLOSE_TAB_CHANNEL = "desktop:preview-close-tab";

@@ -11,7 +11,10 @@ import {
   ArchiveIcon,
   ArrowLeftIcon,
   BotIcon,
+  DatabaseIcon,
+  ChartNoAxesCombinedIcon,
   FlaskConicalIcon,
+  GaugeIcon,
   GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
@@ -36,12 +39,16 @@ import {
 } from "../ui/sidebar";
 import { T3ConnectSidebarAvatar, T3ConnectSidebarSignIn } from "../clerk/T3ConnectSidebarSignIn";
 import { scrollToSettingsTarget } from "./settingsLayout";
+import { isRemoteOnlyBuild } from "../../hostedPairing";
+import { useEnvironments } from "../../state/environments";
 import {
   searchSettings,
   SETTINGS_SECTION_LABELS,
   type SettingsPath,
   type SettingsSearchItem,
 } from "./settingsSearch";
+
+export type SettingsSectionPath = SettingsPath;
 
 const SETTINGS_SECTION_ICONS: Readonly<
   Record<SettingsPath, ComponentType<{ className?: string }>>
@@ -50,9 +57,11 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/appearance": PaletteIcon,
   "/settings/keybindings": KeyboardIcon,
   "/settings/providers": BotIcon,
+  "/settings/usage": ChartNoAxesCombinedIcon,
+  "/settings/efficiency": GaugeIcon,
   "/settings/source-control": GitBranchIcon,
+  "/settings/databases": DatabaseIcon,
   "/settings/connections": Link2Icon,
-  "/settings/beta": FlaskConicalIcon,
   "/settings/archived": ArchiveIcon,
 };
 
@@ -79,7 +88,16 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [activeResultIndex, setActiveResultIndex] = useState(0);
-  const results = useMemo(() => searchSettings(query), [query]);
+  const { environments, isReady: environmentsReady } = useEnvironments();
+  const remoteOnlyDisconnected =
+    isRemoteOnlyBuild() && environmentsReady && environments.length === 0;
+  const results = useMemo(
+    () =>
+      searchSettings(query).filter(
+        (item) => !remoteOnlyDisconnected || item.to === "/settings/connections",
+      ),
+    [query, remoteOnlyDisconnected],
+  );
   const isSearching = query.trim().length > 0;
   const hasResults = results.length > 0;
 
@@ -234,9 +252,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                 <XIcon className="size-3" />
               </Button>
             ) : (
-              <Kbd className="mr-px h-4 min-w-0 rounded-sm bg-sidebar-control-surface px-1.5 text-[10px] text-sidebar-muted-foreground ring-1 ring-sidebar-border">
-                /
-              </Kbd>
+              <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px]">/</Kbd>
             )}
           </div>
           {isSearching && results.length === 0 ? (
@@ -279,9 +295,11 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 ))
-              : SETTINGS_NAV_ITEMS.map((item) => {
+              : SETTINGS_NAV_ITEMS.filter(
+                  (item) => !remoteOnlyDisconnected || item.to === "/settings/connections",
+                ).map((item) => {
                   const Icon = item.icon;
-                  const isActive = pathname === item.to;
+                  const isActive = pathname === item.to || pathname.startsWith(`${item.to}/`);
                   return (
                     <SidebarMenuItem key={item.to}>
                       <SidebarMenuButton

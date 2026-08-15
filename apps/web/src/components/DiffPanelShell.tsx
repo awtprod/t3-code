@@ -13,7 +13,7 @@ function getDiffPanelHeaderRowClassName(mode: DiffPanelMode) {
     "flex items-center justify-between gap-2",
     mode === "embedded" ? "px-2" : "px-4",
     shouldUseDragRegion
-      ? "drag-region h-[52px] border-b border-border wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
+      ? "drag-region h-[52px] border-b border-border wco:h-[env(titlebar-area-height)]"
       : "surface-subheader",
   );
 }

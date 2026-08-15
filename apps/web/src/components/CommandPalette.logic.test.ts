@@ -241,6 +241,36 @@ describe("buildThreadActionItems", () => {
     expect(groups[0]?.items.map((item) => item.value)).toEqual(["thread:project-context-only"]);
   });
 
+  it("keeps separately trusted server search groups and their server ranking", () => {
+    const files: CommandPaletteGroup = {
+      value: "workspace-files-search",
+      label: "Files",
+      preFiltered: true,
+      items: [
+        {
+          kind: "action",
+          value: "file:fuzzy-result.ts",
+          searchTerms: ["fuzzy-result.ts"],
+          title: "fuzzy-result.ts",
+          icon: null,
+          run: async () => undefined,
+        },
+      ],
+    };
+
+    const groups = filterCommandPaletteGroups({
+      activeGroups: [],
+      query: "fzrt",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [],
+      additionalSearchGroups: [files],
+    });
+
+    expect(groups.map((group) => group.label)).toEqual(["Files"]);
+    expect(groups[0]?.items.map((item) => item.value)).toEqual(["file:fuzzy-result.ts"]);
+  });
+
   it("keeps message excerpts searchable without replacing thread metadata", () => {
     const [item] = buildThreadActionItems({
       threads: [makeThread({ branch: "feat/search" })],
@@ -262,6 +292,20 @@ describe("buildThreadActionItems", () => {
       query: "reconnect",
     });
     expect(item?.description).toBe("T3 Code · #feat/search");
+  });
+
+  it("prefers renderDescription when provided", () => {
+    const [item] = buildThreadActionItems({
+      threads: [makeThread({ branch: "feat/search", worktreePath: "/tmp/wt" })],
+      projectTitleById: new Map([[PROJECT_ID, "T3 Code"]]),
+      sortOrder: "updated_at",
+      icon: null,
+      renderDescription: (thread, { projectTitle }) =>
+        `${projectTitle}:${thread.branch}:${thread.worktreePath ? "wt" : "local"}`,
+      runThread: async (_thread) => undefined,
+    });
+
+    expect(item?.description).toBe("T3 Code:feat/search:wt");
   });
 
   it("filters archived threads out of thread search items", () => {
@@ -300,7 +344,7 @@ describe("buildBrowseGroups", () => {
         }),
     );
     const groups = buildBrowseGroups({
-      browseEntries: [{ name: "Downloads", fullPath: "/Users/test/Downloads" }],
+      browseEntries: [{ name: "Downloads", fullPath: "/opt/example/Downloads" }],
       browseQuery: "~/",
       canBrowseUp: false,
       upIcon: null,

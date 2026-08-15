@@ -4,6 +4,7 @@ import {
   buildConnectAuthorizeRequestUrl,
   buildConnectClerkAuthorizeUrl,
   connectCallbackUrl,
+  connectLoopbackRedirectUri,
   encodeConnectAuthCode,
   parseConnectAuthCode,
   readConnectAuthorizeRequest,
@@ -12,13 +13,13 @@ import {
 describe("connectAuth", () => {
   it("round-trips state and challenge through the authorize URL fragment", () => {
     const url = buildConnectAuthorizeRequestUrl({
-      hostedAppUrl: "https://app.t3.codes",
+      hostedAppUrl: "https://awtprod-command-center.vercel.app",
       state: "q7mK9xV2pL4nR8sT6wYzAQ",
       challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
     });
     const parsed = new URL(url);
 
-    expect(parsed.origin).toBe("https://app.t3.codes");
+    expect(parsed.origin).toBe("https://awtprod-command-center.vercel.app");
     expect(parsed.pathname).toBe("/connect");
     expect(parsed.search).toBe("");
     expect(readConnectAuthorizeRequest(parsed)).toEqual({
@@ -35,6 +36,31 @@ describe("connectAuth", () => {
     expect(
       readConnectAuthorizeRequest(new URL("https://app.t3.codes/connect#challenge=abc")),
     ).toBeNull();
+  });
+
+  it("round-trips the loopback port through the authorize URL fragment", () => {
+    const url = buildConnectAuthorizeRequestUrl({
+      hostedAppUrl: "https://app.t3.codes",
+      state: "state-1",
+      challenge: "challenge-1",
+      loopbackPort: 34338,
+    });
+
+    expect(readConnectAuthorizeRequest(new URL(url))).toEqual({
+      state: "state-1",
+      challenge: "challenge-1",
+      loopbackPort: 34338,
+    });
+    expect(connectLoopbackRedirectUri(34338)).toBe("http://127.0.0.1:34338/callback");
+  });
+
+  it("rejects authorize requests whose loopback port is corrupted", () => {
+    for (const port of ["", "abc", "-1", "0", "65536", "34338x", "34 38"]) {
+      const url = new URL(
+        `https://app.t3.codes/connect#state=state-1&challenge=challenge-1&port=${encodeURIComponent(port)}`,
+      );
+      expect(readConnectAuthorizeRequest(url), port).toBeNull();
+    }
   });
 
   it("builds a PKCE authorize URL against the Clerk endpoint", () => {

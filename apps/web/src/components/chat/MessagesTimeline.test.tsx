@@ -683,3 +683,85 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('aria-label="Tool call failed"');
   });
 });
+
+describe("MessagesTimeline working indicator", () => {
+  // Renders the real component, so these assertions fail if the props are not
+  // wired end-to-end — a logic-only test would pass on a dead code path.
+  async function renderWorkingRow(props: {
+    connectionPhase?: "connected" | "reconnecting" | "offline" | "available" | null;
+    lastActivityAt?: string | null;
+    startedMsAgo?: number;
+  }) {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    return renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        isWorking
+        activeTurnInProgress
+        activeTurnStartedAt={new Date(Date.now() - (props.startedMsAgo ?? 30_000)).toISOString()}
+        connectionPhase={props.connectionPhase ?? null}
+        lastActivityAt={props.lastActivityAt ?? null}
+        timelineEntries={[]}
+      />,
+    );
+  }
+
+  it("claims progress only while connected and receiving activity", async () => {
+    const markup = await renderWorkingRow({
+      connectionPhase: "connected",
+      lastActivityAt: new Date().toISOString(),
+    });
+
+    expect(markup).toContain('data-working-status="working"');
+    expect(markup).toContain("Working for");
+    expect(markup).not.toContain("may be stuck");
+  });
+
+  it("says it is reconnecting instead of claiming progress when the socket is down", async () => {
+    const markup = await renderWorkingRow({
+      connectionPhase: "reconnecting",
+      lastActivityAt: new Date().toISOString(),
+    });
+
+    expect(markup).toContain('data-working-status="reconnecting"');
+    expect(markup).toContain("Reconnecting");
+    // The turn survives a client disconnect, so the copy must not imply loss.
+    expect(markup).toContain("keeps running on the server");
+    expect(markup).not.toContain("Working for");
+  });
+
+  it("flags a silent turn as possibly stuck instead of counting up forever", async () => {
+    const markup = await renderWorkingRow({
+      connectionPhase: "connected",
+      lastActivityAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      startedMsAgo: 12 * 60 * 1000,
+    });
+
+    expect(markup).toContain('data-working-status="stalled"');
+    expect(markup).toContain("may be stuck");
+    expect(markup).not.toContain("Working for");
+    // Timed from the last activity (10m), not from the turn start (12m) — the
+    // thread has been unresponsive for 10 minutes, and saying 12 overstates it.
+    expect(markup).toContain('No response for <span class="tabular-nums">10m</span>');
+  });
+
+  it("leaves a local draft (no environment connection) claiming progress", async () => {
+    const markup = await renderWorkingRow({ connectionPhase: null, lastActivityAt: null });
+
+    expect(markup).toContain('data-working-status="working"');
+  });
+
+  it("does not call a freshly started turn stalled just because the thread was idle before it", async () => {
+    // `updatedAt` still reflects the previous turn until the new turn's first
+    // activity lands. Measuring silence from it alone would flash "no response
+    // for 10m" the instant the user pressed enter.
+    const markup = await renderWorkingRow({
+      connectionPhase: "connected",
+      lastActivityAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      startedMsAgo: 5_000,
+    });
+
+    expect(markup).toContain('data-working-status="working"');
+    expect(markup).not.toContain("may be stuck");
+  });
+});

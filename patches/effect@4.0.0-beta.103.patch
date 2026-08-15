@@ -1,8 +1,31 @@
+diff --git a/dist/unstable/ai/McpServer.d.ts b/dist/unstable/ai/McpServer.d.ts
+index 58e3fd6cf9c4e4c3d3c970ebef5ae2e44a16da35..9c5b7a7dacd177a4cff48d12f308b6c13ff1561b 100644
+--- a/dist/unstable/ai/McpServer.d.ts
++++ b/dist/unstable/ai/McpServer.d.ts
+@@ -28,6 +28,8 @@ import { CallToolResult, ElicitationDeclined, GetPromptResult, InternalError, In
+ import type { CallTool, ClientCapabilities, Complete, CompleteResult, GetPrompt, Param, PromptMessage, ReadResourceResult } from "./McpSchema.ts";
+ import * as Tool from "./Tool.ts";
+ import type * as Toolkit from "./Toolkit.ts";
++export type McpListToolFilter = (tool: McpTool) => boolean;
++export declare const McpListToolFilter: Context.Reference<McpListToolFilter>;
+ type CompletionContext = typeof Complete.payloadSchema.Type["context"];
+ declare const McpServer_base: Context.ServiceClass<McpServer, "effect/ai/McpServer", {
+     readonly notifications: RpcClient.RpcClient<RpcGroup.Rpcs<typeof ServerNotificationRpcs>>;
 diff --git a/dist/unstable/ai/McpServer.js b/dist/unstable/ai/McpServer.js
-index 755e41c..dc431aa 100644
+index 755e41c143ace01604487266c91b6ca331e35e71..22e24de90cd47f3dac62bc32af4397c48a95f846 100644
 --- a/dist/unstable/ai/McpServer.js
 +++ b/dist/unstable/ai/McpServer.js
-@@ -262,6 +262,26 @@ const runWithProtocolState = /*#__PURE__*/Effect.fnUntraced(function* (options,
+@@ -43,6 +43,9 @@ import * as AiError from "./AiError.js";
+ import * as McpProtocolRegistry from "./internal/mcpProtocolRegistry.js";
+ import { CallToolResult, CancelledNotification, ClientRpcs, Elicit, ElicitationDeclined, EnabledWhen, GetPromptResult, InternalError, INVALID_REQUEST_ERROR_CODE, InvalidParams, InvalidRequest, isParam, ListPromptsResult, ListResourcesResult, ListResourceTemplatesResult, ListToolsResult, LoggingMessageNotification, McpErrorBase, McpServerClient, McpServerClientMiddleware, MethodNotFound, ParseError, Prompt, Resource, ResourceTemplate, ResourceUpdatedNotification, ServerNotificationRpcs, TextContent, Tool as McpTool } from "./McpSchema.js";
+ import * as Tool from "./Tool.js";
++export const McpListToolFilter = /*#__PURE__*/Context.Reference("effect/ai/McpServer/McpListToolFilter", {
++  defaultValue: () => () => true
++});
+ /**
+  * Service that stores and serves an MCP server's registered tools, resources,
+  * prompts, completions, and outgoing notifications.
+@@ -262,6 +265,26 @@ const runWithProtocolState = /*#__PURE__*/Effect.fnUntraced(function* (options,
    const server = yield* McpServer;
    const isHttp = Option.isSome(yield* Effect.serviceOption(HttpRouter.HttpRouter));
    const sessions = protocolState.sessions;
@@ -29,7 +52,7 @@ index 755e41c..dc431aa 100644
    const clientProtocols = new Map();
    const cancelledRequests = new Map();
    const handlers = yield* Layer.build(layerHandlers(options, {
-@@ -719,7 +739,7 @@ export const layerHttp = options => {
+@@ -719,7 +742,7 @@ export const layerHttp = options => {
    const methodNotAllowed = request => Effect.succeed(request.headers.origin !== undefined && !options.allowedOrigins?.includes(request.headers.origin) ? HttpServerResponse.empty({
      status: 403
    }) : methodNotAllowedResponse);
@@ -38,8 +61,22 @@ index 755e41c..dc431aa 100644
    return Layer.merge(layerWithProtocolState(options), routes).pipe(Layer.provide(layerMcpProtocolHttp(options)), Layer.provide(protocolState), Layer.provide(RpcSerialization.layerJsonRpc()));
  };
  const layerMcpProtocolHttp = options => Layer.effect(RpcServer.Protocol)(Effect.gen(function* () {
+@@ -1368,10 +1391,11 @@ const layerHandlers = (serverInfo, options) => Layer.effectContext(Effect.gen(fu
+       "tools/list": (_, {
+         client,
+         headers
+-      }) => Effect.sync(() => {
++      }) => Effect.gen(function* () {
++        const listToolFilter = yield* McpListToolFilter;
+         const initialized = getClientSession(options.sessions, client.id, headers)?.initializePayload;
+         return new ListToolsResult({
+-          tools: filterByClient(initialized, server.tools, "tool")
++          tools: filterByClient(initialized, server.tools, "tool").filter(listToolFilter)
+         });
+       }),
+       // Notifications
 diff --git a/dist/unstable/rpc/RpcClient.d.ts b/dist/unstable/rpc/RpcClient.d.ts
-index aba2779..581d267 100644
+index aba2779fb0703c06e476bd3c30a1156ea4b35dbb..581d267eb13d3c34fae2f98bc523f188f921a9be 100644
 --- a/dist/unstable/rpc/RpcClient.d.ts
 +++ b/dist/unstable/rpc/RpcClient.d.ts
 @@ -2,6 +2,7 @@ import * as Cause from "../../Cause.ts";
@@ -92,7 +129,7 @@ index aba2779..581d267 100644
  /**
   * Represents optional client protocol hooks that run when a transport connects
 diff --git a/dist/unstable/rpc/RpcClient.js b/dist/unstable/rpc/RpcClient.js
-index b536d0a..12ffac0 100644
+index b536d0a720c13678ccfc2c55c612ee6b61fbedaa..2b0cbb3873cab351134c66c90c57f1045ae7fa7d 100644
 --- a/dist/unstable/rpc/RpcClient.js
 +++ b/dist/unstable/rpc/RpcClient.js
 @@ -47,6 +47,7 @@ export const makeNoSerialization = /*#__PURE__*/Effect.fnUntraced(function* (gro
@@ -293,22 +330,20 @@ index b536d0a..12ffac0 100644
      latch.closeUnsafe();
    };
 -  const onPong = () => {
--    recievedPong = true;
--  };
 +  const onPong = Effect.sync(() => {
-+    recievedPong = true;
+     recievedPong = true;
+-  };
 +    missedPongs = 0;
 +  }).pipe(Effect.andThen(hooks?.onPong ?? Effect.void));
    yield* Effect.suspend(() => {
 -    if (!recievedPong) return latch.open;
--    recievedPong = false;
--    return writePing;
 +    if (!recievedPong) {
 +      missedPongs += 1;
 +      if (missedPongs >= 3) return latch.open;
 +      return (hooks?.onPing ?? Effect.void).pipe(Effect.andThen(writePing));
 +    }
-+    recievedPong = false;
+     recievedPong = false;
+-    return writePing;
 +    missedPongs = 0;
 +    return (hooks?.onPing ?? Effect.void).pipe(Effect.andThen(writePing));
    }).pipe(Effect.delay("5 seconds"), Effect.ignore, Effect.forever, Effect.interruptible, Effect.forkScoped);

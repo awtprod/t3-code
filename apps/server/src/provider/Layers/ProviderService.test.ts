@@ -8,6 +8,7 @@ import type {
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
+  ProviderTurnTargetIdentity,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import {
@@ -38,6 +39,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
+  ProviderSessionDirectoryPersistenceError,
   ProviderUnsupportedError,
   ProviderValidationError,
   type ProviderAdapterError,
@@ -55,11 +57,15 @@ import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
 } from "../../persistence/Layers/Sqlite.ts";
+import * as ServerConfig from "../../config.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
+const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
+  Layer.provide(NodeServices.layer),
+);
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
@@ -98,6 +104,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
           : {}),
         status: "ready",
         runtimeMode: input.runtimeMode,
+        sessionGeneration: `generation-${String(input.threadId)}`,
         threadId: input.threadId,
         resumeCursor: input.resumeCursor ?? {
           opaque: `resume-${String(input.threadId)}`,
@@ -132,8 +139,11 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   );
 
   const interruptTurn = vi.fn(
-    (_threadId: ThreadId, _turnId?: TurnId): Effect.Effect<void, ProviderAdapterError> =>
-      Effect.void,
+    (
+      _threadId: ThreadId,
+      _turnId?: TurnId,
+      _target?: ProviderTurnTargetIdentity,
+    ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
   );
 
   const respondToRequest = vi.fn(
@@ -292,6 +302,7 @@ function makeProviderServiceLayer() {
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
         Layer.provideMerge(AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -343,6 +354,7 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
         Layer.provideMerge(AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -363,6 +375,130 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
 
     assert.equal(Exit.isSuccess(closeExit), true);
     assert.equal(codex.stopAll.mock.calls.length, 1);
+  }),
+);
+
+it.effect("ProviderServiceLive propagates targeted-interrupt directory persistence failures", () =>
+  Effect.gen(function* () {
+    const persistenceError = new ProviderSessionDirectoryPersistenceError({
+      operation: "getBinding",
+      detail: "simulated directory read failure",
+    });
+    const codex = makeFakeCodexAdapter();
+    const registry = makeAdapterRegistryMock({
+      [CODEX_DRIVER]: codex.adapter,
+    });
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      registry,
+    );
+    const directoryLayer = Layer.succeed(
+      ProviderSessionDirectory.ProviderSessionDirectory,
+      ProviderSessionDirectory.ProviderSessionDirectory.of({
+        upsert: () => Effect.void,
+        getProvider: () => Effect.fail(persistenceError),
+        getBinding: () => Effect.fail(persistenceError),
+        listThreadIds: () => Effect.succeed([]),
+        listBindings: () => Effect.succeed([]),
+      }),
+    );
+    const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(providerAdapterLayer),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(serverConfigTestLayer),
+      Layer.provide(
+        Layer.succeed(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      ),
+    );
+
+    const failure = yield* Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      return yield* provider.interruptTurn({
+        threadId: asThreadId("thread-targeted-interrupt-directory-failure"),
+        turnId: asTurnId("turn-historical"),
+        target: {
+          sessionGeneration: "generation-historical",
+          resumeCursor: { opaque: "provider-thread-historical" },
+        },
+      });
+    }).pipe(Effect.provide(providerLayer), Effect.flip);
+
+    assert.equal(failure._tag, "ProviderSessionDirectoryPersistenceError");
+    if (failure._tag === "ProviderSessionDirectoryPersistenceError") {
+      assert.equal(failure.operation, "getBinding");
+    }
+    assert.equal(codex.interruptTurn.mock.calls.length, 0);
+  }),
+);
+
+it.effect("ProviderServiceLive propagates targeted-interrupt registry failures", () =>
+  Effect.gen(function* () {
+    const registryError = new ProviderUnsupportedError({
+      provider: CODEX_DRIVER,
+    });
+    const codex = makeFakeCodexAdapter();
+    const registryBase = makeAdapterRegistryMock({
+      [CODEX_DRIVER]: codex.adapter,
+    });
+    const registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
+      ...registryBase,
+      getByInstance: () => Effect.fail(registryError),
+      listInstances: () => Effect.succeed([codexInstanceId]),
+    };
+    const providerAdapterLayer = Layer.succeed(
+      ProviderAdapterRegistry.ProviderAdapterRegistry,
+      registry,
+    );
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = Layer.mergeAll(
+      makeProviderServiceLive().pipe(
+        Layer.provide(providerAdapterLayer),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provideMerge(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      ),
+      directoryLayer,
+      runtimeRepositoryLayer,
+      NodeServices.layer,
+    );
+    const threadId = asThreadId("thread-targeted-interrupt-registry-failure");
+
+    const failure = yield* Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      yield* directory.upsert({
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+      const provider = yield* ProviderService.ProviderService;
+      return yield* provider.interruptTurn({
+        threadId,
+        turnId: asTurnId("turn-historical"),
+        target: {
+          sessionGeneration: "generation-historical",
+          resumeCursor: { opaque: "provider-thread-historical" },
+        },
+      });
+    }).pipe(Effect.provide(providerLayer), Effect.flip);
+
+    assert.strictEqual(failure, registryError);
+    assert.equal(codex.interruptTurn.mock.calls.length, 0);
   }),
 );
 
@@ -402,6 +538,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled providers", () 
       Layer.provide(providerAdapterLayer),
       Layer.provide(directoryLayer),
       Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(serverConfigTestLayer),
       Layer.provide(AnalyticsService.layerTest),
       Layer.provide(
         Layer.succeed(
@@ -486,6 +623,7 @@ it.effect(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(serverSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -556,6 +694,7 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
       Layer.provide(providerAdapterLayer),
       Layer.provide(directoryLayer),
       Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(serverConfigTestLayer),
       Layer.provide(AnalyticsService.layerTest),
       Layer.provide(
         Layer.succeed(
@@ -581,6 +720,161 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
     assert.include(failure.issue, "Provider instance 'codex_personal' is disabled");
     assert.equal(codex.startSession.mock.calls.length, 0);
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+// Builds a two-codex-instance environment (A + B) over a shared in-memory
+// directory, letting a test seed a persisted binding on B and then start a
+// session that resolves to A. `keyA`/`keyB` set each instance's continuation
+// key: equal keys make the switch continuation-compatible (cursor inherited),
+// distinct keys make it incompatible (cursor dropped) — the exact rule
+// ProviderService.startSession uses to decide whether the persisted binding's
+// resume cursor/cwd still apply to the resolved instance.
+const makeContinuationCompatEnv = ({ keyA, keyB }: { keyA: string; keyB: string }) => {
+  const instanceA = ProviderInstanceId.make("codex_a");
+  const instanceB = ProviderInstanceId.make("codex_b");
+  const driverKind = CODEX_DRIVER;
+  const codexA = makeFakeCodexAdapter();
+  const codexB = makeFakeCodexAdapter();
+  const unsupported = () => new ProviderUnsupportedError({ provider: driverKind });
+  const infoFor = (id: ProviderInstanceId, key: string) =>
+    ({
+      instanceId: id,
+      driverKind,
+      displayName: `Codex ${String(id)}`,
+      enabled: true,
+      continuationIdentity: { driverKind, continuationKey: key },
+    }) as const;
+  const registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
+    getByInstance: (id) =>
+      id === instanceA
+        ? Effect.succeed(codexA.adapter)
+        : id === instanceB
+          ? Effect.succeed(codexB.adapter)
+          : Effect.fail(unsupported()),
+    getInstanceInfo: (id) =>
+      id === instanceA
+        ? Effect.succeed(infoFor(instanceA, keyA))
+        : id === instanceB
+          ? Effect.succeed(infoFor(instanceB, keyB))
+          : Effect.fail(unsupported()),
+    listInstances: () => Effect.succeed([instanceA, instanceB]),
+    listProviders: () => Effect.succeed([driverKind] as const),
+    streamChanges: Stream.empty,
+    subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+      PubSub.subscribe(pubsub),
+    ),
+  };
+  const providerAdapterLayer = Layer.succeed(
+    ProviderAdapterRegistry.ProviderAdapterRegistry,
+    registry,
+  );
+  const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+    Layer.provide(SqlitePersistenceMemory),
+  );
+  const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+  const providerLayer = makeProviderServiceLive().pipe(
+    Layer.provide(providerAdapterLayer),
+    Layer.provide(directoryLayer),
+    Layer.provide(defaultServerSettingsLayer),
+    Layer.provide(AnalyticsService.layerTest),
+    Layer.provide(serverConfigTestLayer),
+    Layer.provide(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
+  );
+  // Merge the directory back in so the test can seed a binding on the SAME
+  // in-memory DB the provider reads (layers are memoized by reference).
+  return {
+    instanceA,
+    instanceB,
+    codexA,
+    codexB,
+    testLayer: Layer.merge(providerLayer, directoryLayer),
+  };
+};
+
+it.effect(
+  "ProviderServiceLive inherits the persisted cursor across a continuation-compatible instance switch",
+  () =>
+    Effect.gen(function* () {
+      const { instanceA, instanceB, codexA, testLayer } = makeContinuationCompatEnv({
+        keyA: "codex:/shared/home",
+        keyB: "codex:/shared/home",
+      });
+      const threadId = asThreadId("thread-continuation-compat");
+      const seededCursor = { opaque: "seeded-cursor-b" };
+
+      yield* Effect.gen(function* () {
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const provider = yield* ProviderService.ProviderService;
+        // A prior turn ran on instance B and left a resume cursor + cwd behind.
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: instanceB,
+          resumeCursor: seededCursor,
+          runtimePayload: { cwd: "/tmp/seeded-b" },
+          runtimeMode: "full-access",
+        });
+        // The resume resolves to instance A, which shares B's continuation key.
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: instanceA,
+          threadId,
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(testLayer));
+
+      assert.equal(codexA.startSession.mock.calls.length, 1);
+      const startInput = codexA.startSession.mock.calls[0]?.[0];
+      // Compatible switch: B's persisted cursor + cwd flow to the resolved
+      // instance A, so the resume continues the same conversation.
+      assert.deepEqual(startInput?.resumeCursor, seededCursor);
+      assert.equal(startInput?.cwd, "/tmp/seeded-b");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "ProviderServiceLive drops the persisted cursor when the instance switch is not continuation-compatible",
+  () =>
+    Effect.gen(function* () {
+      const { instanceA, instanceB, codexA, testLayer } = makeContinuationCompatEnv({
+        keyA: "codex:/home-a",
+        keyB: "codex:/home-b",
+      });
+      const threadId = asThreadId("thread-continuation-incompat");
+      const seededCursor = { opaque: "seeded-cursor-b" };
+
+      yield* Effect.gen(function* () {
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const provider = yield* ProviderService.ProviderService;
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: instanceB,
+          resumeCursor: seededCursor,
+          runtimePayload: { cwd: "/tmp/seeded-b" },
+          runtimeMode: "full-access",
+        });
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: instanceA,
+          threadId,
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(testLayer));
+
+      assert.equal(codexA.startSession.mock.calls.length, 1);
+      const startInput = codexA.startSession.mock.calls[0]?.[0];
+      // Incompatible switch: A does not share B's continuation key, so B's
+      // cursor/cwd must NOT leak — resuming would silently start a fresh
+      // conversation on A. The adapter receives no inherited cursor/cwd.
+      assert.notDeepEqual(startInput?.resumeCursor, seededCursor);
+      assert.equal(startInput?.cwd, undefined);
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 const routing = makeProviderServiceLayer();
@@ -611,6 +905,7 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
       Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
       Layer.provide(directoryLayer),
       Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(serverConfigTestLayer),
       Layer.provide(AnalyticsService.layerTest),
       Layer.provide(
         Layer.succeed(
@@ -671,6 +966,7 @@ it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", (
       Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
       Layer.provide(directoryLayer),
       Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(serverConfigTestLayer),
       Layer.provide(AnalyticsService.layerTest),
       Layer.provide(
         Layer.succeed(
@@ -737,6 +1033,7 @@ it.effect(
         ),
         Layer.provide(firstDirectoryLayer),
         Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -796,6 +1093,7 @@ it.effect(
         ),
         Layer.provide(secondDirectoryLayer),
         Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -924,6 +1222,141 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.threadId, session.threadId);
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("forwards a matching historical interrupt target to the active adapter", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-targeted-interrupt-forwarding");
+      const turnId = asTurnId("turn-historical");
+      const session = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-targeted-interrupt",
+        runtimeMode: "full-access",
+      });
+      const target: ProviderTurnTargetIdentity = {
+        sessionGeneration: session.sessionGeneration ?? "missing-generation",
+        ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+      };
+
+      routing.codex.interruptTurn.mockClear();
+      yield* provider.interruptTurn({ threadId, turnId, target });
+
+      assert.deepEqual(routing.codex.interruptTurn.mock.calls, [[threadId, turnId, target]]);
+    }),
+  );
+
+  it.effect("does not recover or call the adapter for inactive and mismatched targets", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-targeted-interrupt-noop");
+      const session = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-targeted-interrupt-noop",
+        runtimeMode: "full-access",
+      });
+      const target: ProviderTurnTargetIdentity = {
+        sessionGeneration: session.sessionGeneration ?? "missing-generation",
+        resumeCursor: { opaque: "different-native-thread" },
+      };
+
+      routing.codex.startSession.mockClear();
+      routing.codex.interruptTurn.mockClear();
+      yield* provider.interruptTurn({
+        threadId,
+        turnId: asTurnId("turn-mismatched"),
+        target,
+      });
+      assert.equal(routing.codex.interruptTurn.mock.calls.length, 0);
+
+      yield* routing.codex.stopSession(threadId);
+      yield* provider.interruptTurn({
+        threadId,
+        turnId: asTurnId("turn-inactive"),
+        target: {
+          sessionGeneration: session.sessionGeneration ?? "missing-generation",
+          ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+        },
+      });
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.equal(routing.codex.interruptTurn.mock.calls.length, 0);
+
+      yield* provider.interruptTurn({
+        threadId: asThreadId("thread-targeted-interrupt-unbound"),
+        turnId: asTurnId("turn-unbound"),
+        target,
+      });
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.equal(routing.codex.interruptTurn.mock.calls.length, 0);
+
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const missingInstanceThreadId = asThreadId("thread-targeted-interrupt-missing-instance");
+      yield* directory.upsert({
+        threadId: missingInstanceThreadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: ProviderInstanceId.make("missing-codex-instance"),
+        runtimeMode: "full-access",
+      });
+      yield* provider.interruptTurn({
+        threadId: missingInstanceThreadId,
+        turnId: asTurnId("turn-missing-instance"),
+        target,
+      });
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.equal(routing.codex.interruptTurn.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("appends attachment file paths to the turn input text", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+
+      const session = yield* provider.startSession(asThreadId("thread-attach"), {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("thread-attach"),
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const attachment = {
+        type: "image" as const,
+        id: "thread-attach-12345678-1234-1234-1234-123456789abc",
+        name: "screenshot.png",
+        mimeType: "image/png",
+        sizeBytes: 123,
+      };
+
+      routing.codex.sendTurn.mockClear();
+      yield* provider.sendTurn({
+        threadId: session.threadId,
+        input: "use this screenshot",
+        attachments: [attachment],
+      });
+
+      const turnInput = routing.codex.sendTurn.mock.calls[0]?.[0] as ProviderSendTurnInput;
+      assert.equal(typeof turnInput.input, "string");
+      const turnText = turnInput.input ?? "";
+      assert.equal(turnText.startsWith("use this screenshot"), true);
+      assert.include(turnText, '[Attached image "screenshot.png" is saved at: ');
+      assert.equal(turnText.endsWith(`${attachment.id}.png]`), true);
+
+      // An attachment-only turn stays valid and the injected line becomes the
+      // whole input text, so the agent still learns the path.
+      routing.codex.sendTurn.mockClear();
+      yield* provider.sendTurn({
+        threadId: session.threadId,
+        attachments: [attachment],
+      });
+      const imageOnlyInput = routing.codex.sendTurn.mock.calls[0]?.[0] as ProviderSendTurnInput;
+      assert.equal(imageOnlyInput.input?.startsWith('[Attached image "screenshot.png"'), true);
+
+      yield* provider.stopSession({ threadId: session.threadId });
     }),
   );
 
@@ -1307,6 +1740,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         ),
         Layer.provide(firstDirectoryLayer),
         Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -1345,6 +1779,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         ),
         Layer.provide(secondDirectoryLayer),
         Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
           Layer.succeed(
@@ -1413,6 +1848,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
           ),
           Layer.provide(firstDirectoryLayer),
           Layer.provide(defaultServerSettingsLayer),
+          Layer.provide(serverConfigTestLayer),
           Layer.provide(AnalyticsService.layerTest),
           Layer.provide(
             Layer.succeed(
@@ -1446,6 +1882,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
           ),
           Layer.provide(secondDirectoryLayer),
           Layer.provide(defaultServerSettingsLayer),
+          Layer.provide(serverConfigTestLayer),
           Layer.provide(AnalyticsService.layerTest),
           Layer.provide(
             Layer.succeed(

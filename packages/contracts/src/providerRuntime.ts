@@ -4,6 +4,7 @@ import {
   EventId,
   IsoDateTime,
   NonNegativeInt,
+  ProjectId,
   ProviderItemId,
   PositiveInt,
   RuntimeItemId,
@@ -26,6 +27,7 @@ const RuntimeEventRawSource = Schema.Union([
   Schema.Literal("claude.sdk.permission"),
   Schema.Literal("codex.sdk.thread-event"),
   Schema.Literal("opencode.sdk.event"),
+  Schema.Literal("kimi.web.event"),
   Schema.Literal("acp.jsonrpc"),
   Schema.TemplateLiteral(["acp.", Schema.String, ".extension"]),
 ]);
@@ -154,6 +156,7 @@ const ProviderRuntimeEventType = Schema.Literals([
   "thread.state.changed",
   "thread.metadata.updated",
   "thread.token-usage.updated",
+  "turn.usage.recorded",
   "thread.realtime.started",
   "thread.realtime.item-added",
   "thread.realtime.audio.delta",
@@ -205,6 +208,7 @@ const ThreadStartedType = Schema.Literal("thread.started");
 const ThreadStateChangedType = Schema.Literal("thread.state.changed");
 const ThreadMetadataUpdatedType = Schema.Literal("thread.metadata.updated");
 const ThreadTokenUsageUpdatedType = Schema.Literal("thread.token-usage.updated");
+const TurnUsageRecordedType = Schema.Literal("turn.usage.recorded");
 const ThreadRealtimeStartedType = Schema.Literal("thread.realtime.started");
 const ThreadRealtimeItemAddedType = Schema.Literal("thread.realtime.item-added");
 const ThreadRealtimeAudioDeltaType = Schema.Literal("thread.realtime.audio.delta");
@@ -254,6 +258,8 @@ const ProviderRuntimeEventBase = Schema.Struct({
   // for the routing-key-vs-driver-id distinction. Once every emitter
   // populates it (post-slice-4), routing flips to instance-id-only.
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  // Per-runtime-start nonce carried through from ProviderEvent. See provider.ts.
+  sessionGeneration: Schema.optional(Schema.String),
   threadId: ThreadId,
   createdAt: IsoDateTime,
   turnId: Schema.optional(TurnId),
@@ -312,23 +318,108 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   maxTokens: Schema.optional(PositiveInt),
   inputTokens: Schema.optional(NonNegativeInt),
   cachedInputTokens: Schema.optional(NonNegativeInt),
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
   outputTokens: Schema.optional(NonNegativeInt),
   reasoningOutputTokens: Schema.optional(NonNegativeInt),
   lastUsedTokens: Schema.optional(NonNegativeInt),
   lastInputTokens: Schema.optional(NonNegativeInt),
   lastCachedInputTokens: Schema.optional(NonNegativeInt),
+  lastCacheWriteInputTokens: Schema.optional(NonNegativeInt),
   lastOutputTokens: Schema.optional(NonNegativeInt),
   lastReasoningOutputTokens: Schema.optional(NonNegativeInt),
   toolUses: Schema.optional(NonNegativeInt),
   durationMs: Schema.optional(NonNegativeInt),
+  costUsd: Schema.optional(Schema.Number),
+  costKind: Schema.optional(Schema.Literals(["reported", "estimated", "api-equivalent-estimate"])),
   compactsAutomatically: Schema.optional(Schema.Boolean),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
+
+export const CacheTelemetryCapability = Schema.Literals(["none", "read", "read-write"]);
+export type CacheTelemetryCapability = typeof CacheTelemetryCapability.Type;
+
+export const SubagentLifecycleState = Schema.Literals([
+  "spawned",
+  "running",
+  "suspended",
+  "completed",
+  "failed",
+]);
+export type SubagentLifecycleState = typeof SubagentLifecycleState.Type;
+
+export const SubagentUsage = Schema.Struct({
+  uncachedInputTokens: Schema.optional(NonNegativeInt),
+  cacheReadInputTokens: Schema.optional(NonNegativeInt),
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
+  outputTokens: Schema.optional(NonNegativeInt),
+  reasoningOutputTokens: Schema.optional(NonNegativeInt),
+  durationMs: Schema.optional(NonNegativeInt),
+  costUsd: Schema.optional(Schema.Number),
+});
+export type SubagentUsage = typeof SubagentUsage.Type;
+
+/** Provider-neutral data carried by collab_agent_tool_call activities. */
+export const SubagentActivityData = Schema.Struct({
+  provider: ProviderDriverKind,
+  providerAgentId: TrimmedNonEmptyStringSchema,
+  name: Schema.optional(TrimmedNonEmptyStringSchema),
+  agentType: Schema.optional(TrimmedNonEmptyStringSchema),
+  description: Schema.optional(TrimmedNonEmptyStringSchema),
+  parentToolCallId: Schema.optional(TrimmedNonEmptyStringSchema),
+  swarmIndex: Schema.optional(NonNegativeInt),
+  swarmSize: Schema.optional(PositiveInt),
+  mode: Schema.Literals(["foreground", "background"]),
+  state: SubagentLifecycleState,
+  resultSummary: Schema.optional(TrimmedNonEmptyStringSchema),
+  errorSummary: Schema.optional(TrimmedNonEmptyStringSchema),
+  usage: Schema.optional(SubagentUsage),
+});
+export type SubagentActivityData = typeof SubagentActivityData.Type;
+
+export const TurnUsageComponent = Schema.Struct({
+  kind: Schema.Literals(["main", "subagent"]),
+  id: TrimmedNonEmptyStringSchema,
+  name: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type TurnUsageComponent = typeof TurnUsageComponent.Type;
+
+export const TurnUsageQuality = Schema.Literals(["reported", "derived", "partial"]);
+export type TurnUsageQuality = typeof TurnUsageQuality.Type;
+
+export const TurnUsageWorkload = Schema.Literals(["interactive", "automation"]);
+export type TurnUsageWorkload = typeof TurnUsageWorkload.Type;
+
+export const TurnUsageRecord = Schema.Struct({
+  component: TurnUsageComponent,
+  projectId: Schema.optional(ProjectId),
+  model: Schema.optional(TrimmedNonEmptyStringSchema),
+  workload: TurnUsageWorkload,
+  quality: TurnUsageQuality,
+  uncachedInputTokens: Schema.optional(NonNegativeInt),
+  cacheReadInputTokens: Schema.optional(NonNegativeInt),
+  cacheWriteInputTokens: Schema.optional(NonNegativeInt),
+  outputTokens: Schema.optional(NonNegativeInt),
+  /** Subset of outputTokens; never add this field to output when totaling. */
+  reasoningOutputTokens: Schema.optional(NonNegativeInt),
+  contextUsedTokens: Schema.optional(NonNegativeInt),
+  contextLimitTokens: Schema.optional(PositiveInt),
+  durationMs: Schema.optional(NonNegativeInt),
+  toolUses: Schema.optional(NonNegativeInt),
+  providerReportedCostUsd: Schema.optional(Schema.Number),
+  billingMode: Schema.optional(Schema.Literals(["api", "subscription", "unknown"])),
+  completedAt: IsoDateTime,
+});
+export type TurnUsageRecord = typeof TurnUsageRecord.Type;
 
 const ThreadTokenUsageUpdatedPayload = Schema.Struct({
   usage: ThreadTokenUsageSnapshot,
 });
 export type ThreadTokenUsageUpdatedPayload = typeof ThreadTokenUsageUpdatedPayload.Type;
+
+const TurnUsageRecordedPayload = Schema.Struct({
+  usage: TurnUsageRecord,
+});
+export type TurnUsageRecordedPayload = typeof TurnUsageRecordedPayload.Type;
 
 const ThreadRealtimeStartedPayload = Schema.Struct({
   realtimeSessionId: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -358,6 +449,22 @@ export type ThreadRealtimeClosedPayload = typeof ThreadRealtimeClosedPayload.Typ
 const TurnStartedPayload = Schema.Struct({
   model: Schema.optional(TrimmedNonEmptyStringSchema),
   effort: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * Sequence of the `thread.turn-start-requested` this turn was started for,
+   * echoed back from `ProviderSendTurnInput.turnRequestSequence`.
+   *
+   * This is the correlation the projector needs to adopt the RIGHT pending
+   * placeholder. Turn ids are minted by the adapter and mean nothing to the
+   * orchestration layer until this event arrives, so pending metadata may only
+   * be adopted when this sequence exactly matches its requesting event.
+   *
+   * Optional: adapter-internal and provider-notification turns may have no
+   * requesting event. A sequence-less `turn.started` requests the legacy
+   * oldest-pending strategy. Ingestion persists and adopts that strategy only
+   * when the provider directory identifies the event turn and an acceptable
+   * pending row exists; otherwise it persists `none`.
+   */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
 });
 export type TurnStartedPayload = typeof TurnStartedPayload.Type;
 
@@ -574,7 +681,7 @@ const taskAgentLinkageFields = {
   attempt: Schema.optional(NonNegativeInt),
   runHandles: Schema.optional(TaskRunHandles),
   outputFile: Schema.optional(TrimmedNonEmptyStringSchema),
-  /** Codex agent hierarchy path, e.g. "/root/marlow". */
+  /** Codex agent hierarchy path, e.g. "/agents/marlow". */
   agentPath: Schema.optional(TrimmedNonEmptyStringSchema),
   /**
    * Set on provider-synthesized child-agent events (Codex) whose activity
@@ -836,6 +943,15 @@ const ProviderRuntimeThreadTokenUsageUpdatedEvent = Schema.Struct({
 });
 export type ProviderRuntimeThreadTokenUsageUpdatedEvent =
   typeof ProviderRuntimeThreadTokenUsageUpdatedEvent.Type;
+
+const ProviderRuntimeTurnUsageRecordedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: TurnUsageRecordedType,
+  turnId: TurnId,
+  payload: TurnUsageRecordedPayload,
+});
+export type ProviderRuntimeTurnUsageRecordedEvent =
+  typeof ProviderRuntimeTurnUsageRecordedEvent.Type;
 
 const ProviderRuntimeThreadRealtimeStartedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
@@ -1145,6 +1261,7 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeThreadStateChangedEvent,
   ProviderRuntimeThreadMetadataUpdatedEvent,
   ProviderRuntimeThreadTokenUsageUpdatedEvent,
+  ProviderRuntimeTurnUsageRecordedEvent,
   ProviderRuntimeThreadRealtimeStartedEvent,
   ProviderRuntimeThreadRealtimeItemAddedEvent,
   ProviderRuntimeThreadRealtimeAudioDeltaEvent,

@@ -86,7 +86,7 @@
           "id": "call_S2JPiq0sMnJYS7kswVdvzEjB",
           "kind": "started",
           "agentThreadId": "019fcfd6-2883-77e0-9013-4410ede70371",
-          "agentPath": "/root/alpha"
+          "agentPath": "/agents/alpha"
         },
         "threadId": "019fcfd6-17bb-72f0-ae12-a1f2dee6e3e5",
         "turnId": "019fcfd6-1806-7de1-8564-de69fd55bffb",
@@ -162,7 +162,7 @@
           "id": "call_A2U7sfjmdGlUn5bn6gUNI0rl",
           "kind": "started",
           "agentThreadId": "019fcfd6-2ef7-7932-9ff5-dea6ad6f4daf",
-          "agentPath": "/root/beta"
+          "agentPath": "/agents/beta"
         },
         "threadId": "019fcfd6-17bb-72f0-ae12-a1f2dee6e3e5",
         "turnId": "019fcfd6-1806-7de1-8564-de69fd55bffb",

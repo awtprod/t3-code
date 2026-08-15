@@ -216,7 +216,7 @@ export interface ThreadTitlePromptInput {
 
 // Keep shared editorial rules in these two prompts in sync. Regeneration
 // intentionally adds guidance for thread history and the previous title.
-const INITIAL_THREAD_TITLE_PROMPT = `Generate a title that will help the user recognize this T3 Code thread weeks later.
+const INITIAL_THREAD_TITLE_PROMPT = `Generate a title that will help the user recognize this Command Center thread weeks later.
 Return JSON with exactly one key: title.
 
 Before answering, silently reduce the request to:
@@ -241,7 +241,7 @@ Editorial rules:
 - When a URL or attachment is the only source of the subject, use available tools to inspect it. If it cannot be resolved, remain accurate rather than guessing.`;
 
 function regenerateThreadTitlePrompt(previousTitle: string): string {
-  return `Regenerate the title for an existing T3 Code thread so the user can recognize it weeks later.
+  return `Regenerate the title for an existing Command Center thread so the user can recognize it weeks later.
 The previous title was ${JSON.stringify(previousTitle)}.
 Return JSON with exactly one key: title.
 
@@ -314,5 +314,38 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
     title: Schema.String,
   });
 
+  return { prompt, outputSchema };
+}
+
+export function buildAutomationSchedulePrompt(input: {
+  readonly text: string;
+  readonly timezone: string;
+}) {
+  const prompt = [
+    "You translate a user's recurring schedule request into a five-field cron expression.",
+    "Return exactly one of the JSON shapes allowed by the supplied schema.",
+    "Rules:",
+    "- The five fields are minute, hour, day of month, month, and day of week.",
+    "- Use numeric values, *, comma lists, inclusive ranges, or */N steps only.",
+    "- The minimum frequency is once per minute.",
+    "- Interpret times in the supplied IANA timezone.",
+    "- Only recurring schedules are supported; ask for clarification for one-time dates.",
+    "- Ask for clarification instead of guessing when timing, recurrence, or AM/PM is ambiguous.",
+    "- Do not include the timezone inside the cron expression.",
+    "",
+    `Timezone: ${input.timezone}`,
+    "User schedule:",
+    limitSection(input.text, 500),
+  ].join("\n");
+  const outputSchema = Schema.Union([
+    Schema.Struct({
+      status: Schema.Literal("interpreted"),
+      expression: Schema.String,
+    }),
+    Schema.Struct({
+      status: Schema.Literal("needs_clarification"),
+      message: Schema.String,
+    }),
+  ]);
   return { prompt, outputSchema };
 }

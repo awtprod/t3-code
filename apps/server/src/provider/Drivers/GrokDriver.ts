@@ -72,6 +72,7 @@ const withInstanceIdentity =
     ...(input.displayName ? { displayName: input.displayName } : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     continuation: { groupKey: input.continuationGroupKey },
+    capabilities: { cacheTelemetry: "none", nativeSubagents: true, usageTelemetry: true },
   });
 
 export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {

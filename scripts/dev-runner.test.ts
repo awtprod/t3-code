@@ -12,9 +12,11 @@ import {
 import { assert, describe, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -29,6 +31,7 @@ import {
   resolveModePortOffsets,
   resolveOffset,
   runDevRunnerWithInput,
+  serveBuildEnv,
 } from "./dev-runner.ts";
 
 const emptyConfigLayer = ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }));
@@ -67,13 +70,43 @@ const devServerInput = {
   host: undefined,
   port: 13_773,
   devUrl: undefined,
+  tailscaleServe: undefined,
   dryRun: false,
+  skipBuild: false,
   share: false,
   runArgs: ["--inspect", "secret-token-value"],
 } as const;
 
+/**
+ * Only the scripts this test asserts on. Everything else in the manifest is
+ * ignored on purpose, so an unrelated field added to the server package cannot
+ * fail this test.
+ */
+const ServerPackageJson = Schema.fromJsonString(
+  Schema.Struct({
+    scripts: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  }),
+);
+
+const decodeServerPackageJson = Schema.decodeUnknownEffect(ServerPackageJson);
+
 it.layer(NodeServices.layer)("dev-runner", (it) => {
   describe("getDevRunnerModeArgs", () => {
+    it.effect("keeps the server stable by default and makes watch mode explicit", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const packagePath = yield* path.fromFileUrl(
+          new URL("../apps/server/package.json", import.meta.url),
+        );
+        const raw = yield* fileSystem.readFileString(packagePath);
+        const serverPackage = yield* decodeServerPackageJson(raw);
+
+        assert.equal(serverPackage.scripts?.dev, "node src/bin.ts");
+        assert.equal(serverPackage.scripts?.["dev:watch"], "node --watch src/bin.ts");
+      }),
+    );
+
     it.effect("lets Vite+ honor the desktop dev task graph", () =>
       Effect.sync(() => {
         assert.deepStrictEqual(getDevRunnerModeArgs("dev:desktop"), [
@@ -85,13 +118,23 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
+    it.effect("runs only the backend in serve mode — no Vite dev server", () =>
+      Effect.sync(() => {
+        assert.deepStrictEqual(getDevRunnerModeArgs("serve"), [
+          "run",
+          "--filter=@awtprod/command-center",
+          "dev",
+        ]);
+      }),
+    );
+
     it.effect("places Vite+ run flags before the task name", () =>
       Effect.sync(() => {
         assert.deepStrictEqual(getDevRunnerModeArgs("dev"), [
           "run",
           "--filter=@t3tools/contracts",
           "--filter=@t3tools/web",
-          "--filter=t3",
+          "--filter=@awtprod/command-center",
           "--parallel",
           "dev",
         ]);
@@ -151,6 +194,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: undefined,
           port: undefined,
           devUrl: undefined,
+          tailscaleServe: undefined,
         });
 
         assert.equal(env.T3CODE_HOME, undefined);
@@ -172,6 +216,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: undefined,
           port: undefined,
           devUrl: undefined,
+          tailscaleServe: undefined,
         });
 
         assert.equal(env.T3CODE_NO_BROWSER, "0");
@@ -192,6 +237,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: undefined,
           port: undefined,
           devUrl: undefined,
+          tailscaleServe: undefined,
         });
 
         assert.equal(env.T3CODE_NO_BROWSER, "1");
@@ -213,6 +259,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: "0.0.0.0",
           port: 4222,
           devUrl: new URL("http://localhost:7331"),
+          tailscaleServe: undefined,
         });
 
         assert.equal(env.T3CODE_HOME, path.resolve("/tmp/custom-t3"));
@@ -267,6 +314,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: undefined,
           port: undefined,
           devUrl: undefined,
+          tailscaleServe: undefined,
         });
 
         assert.equal(env.T3CODE_MODE, "web");
@@ -290,6 +338,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: undefined,
           port: undefined,
           devUrl: undefined,
+          tailscaleServe: undefined,
         });
 
         assert.equal(env.T3CODE_LOG_WS_EVENTS, "0");
@@ -311,6 +360,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: undefined,
           port: undefined,
           devUrl: undefined,
+          tailscaleServe: undefined,
         });
 
         assert.equal(env.T3CODE_HOME, path.resolve("/tmp/my-t3"));
@@ -339,6 +389,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: "127.0.0.1",
           port: 4222,
           devUrl: undefined,
+          tailscaleServe: undefined,
         });
 
         assert.equal(env.T3CODE_HOME, path.resolve("/tmp/my-t3"));
@@ -368,6 +419,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           host: undefined,
           port: undefined,
           devUrl: undefined,
+          tailscaleServe: undefined,
         });
 
         assert.equal(env.T3CODE_PORT, "13773");
@@ -540,6 +592,117 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
         assert.equal(env.VITE_HTTP_URL, "http://127.0.0.1:13773");
         assert.equal(env.VITE_WS_URL, "ws://127.0.0.1:13773");
+      }),
+    );
+
+    // The server only serves apps/web/dist when no dev URL is configured
+    // (apps/server/src/cli/config.ts resolves staticDir behind `devUrl ?`, and
+    // apps/server/src/http.ts 302-redirects to the dev URL otherwise), so serve
+    // mode has to clear an inherited VITE_DEV_SERVER_URL rather than just not
+    // set one.
+    it.effect("clears the dev server url so the backend serves the built app", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "serve",
+          baseEnv: {
+            VITE_DEV_SERVER_URL: "http://localhost:5733",
+            PORT: "5733",
+          },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+          tailscaleServe: undefined,
+        });
+
+        assert.equal(env.VITE_DEV_SERVER_URL, undefined);
+        assert.equal(env.PORT, undefined);
+        assert.equal(env.T3CODE_PORT, "13773");
+        assert.equal(env.T3CODE_MODE, "web");
+      }),
+    );
+
+    // VITE_HTTP_URL/VITE_WS_URL are baked into the bundle at build time, so a
+    // loopback value would pin every client — including a Windows desktop over
+    // Tailscale — at `localhost:<port>` on its own machine. Leaving them unset
+    // makes the app fall back to its own window origin.
+    it.effect("leaves the built app's backend urls unset so it uses its own origin", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "serve",
+          baseEnv: {
+            VITE_HTTP_URL: "http://localhost:13773",
+            VITE_WS_URL: "ws://localhost:13773",
+          },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: 4222,
+          devUrl: undefined,
+          tailscaleServe: undefined,
+        });
+
+        assert.equal(env.VITE_HTTP_URL, undefined);
+        assert.equal(env.VITE_WS_URL, undefined);
+        assert.equal(env.T3CODE_PORT, "4222");
+      }),
+    );
+
+    // The server points Tailscale Serve at the port it listens on, so this flag
+    // is what moves the tailnet origin off the Vite port onto the backend. An
+    // undefined flag must leave whatever the server config already decided
+    // alone — forwarding "0" would silently disable an inherited setting.
+    it.effect("forwards the tailscale serve choice only when one was made", () =>
+      Effect.gen(function* () {
+        const base = {
+          mode: "serve",
+          baseEnv: { T3CODE_TAILSCALE_SERVE: "1" },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        } as const;
+
+        const inherited = yield* createDevRunnerEnv({ ...base, tailscaleServe: undefined });
+        assert.equal(inherited.T3CODE_TAILSCALE_SERVE, "1");
+
+        const enabled = yield* createDevRunnerEnv({ ...base, tailscaleServe: true });
+        assert.equal(enabled.T3CODE_TAILSCALE_SERVE, "1");
+
+        const disabled = yield* createDevRunnerEnv({ ...base, tailscaleServe: false });
+        assert.equal(disabled.T3CODE_TAILSCALE_SERVE, "0");
+      }),
+    );
+  });
+
+  describe("serveBuildEnv", () => {
+    it.effect("defaults the served build to hidden sourcemaps", () =>
+      Effect.sync(() => {
+        assert.equal(serveBuildEnv({}).T3CODE_WEB_SOURCEMAP, "hidden");
+        assert.equal(serveBuildEnv({ T3CODE_WEB_SOURCEMAP: "  " }).T3CODE_WEB_SOURCEMAP, "hidden");
+      }),
+    );
+
+    it.effect("honors an explicit sourcemap choice", () =>
+      Effect.sync(() => {
+        assert.equal(
+          serveBuildEnv({ T3CODE_WEB_SOURCEMAP: "false" }).T3CODE_WEB_SOURCEMAP,
+          "false",
+        );
       }),
     );
   });
@@ -785,6 +948,24 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
+    // serve mode binds no web port, so a busy 5733 (a `pnpm dev` still running)
+    // must not push the backend off 13773 and orphan an existing Tailscale Serve
+    // mapping.
+    it.effect("ignores the web port for serve mode", () =>
+      Effect.gen(function* () {
+        const taken = new Set([5733]);
+        const offsets = yield* resolveModePortOffsets({
+          mode: "serve",
+          startOffset: 0,
+          hasExplicitServerPort: false,
+          hasExplicitDevUrl: false,
+          checkPortAvailability: (port) => Effect.succeed(!taken.has(port)),
+        });
+
+        assert.deepStrictEqual(offsets, { serverOffset: 0, webOffset: 0 });
+      }),
+    );
+
     it.effect("respects explicit dev-url override for dev:web", () =>
       Effect.gen(function* () {
         const offsets = yield* resolveModePortOffsets({
@@ -882,7 +1063,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
           mode: "dev",
-          baseEnv: { T3CODE_HOME: "/home/user/.t3" },
+          baseEnv: { T3CODE_HOME: "/opt/example/.t3" },
           serverOffset: 0,
           webOffset: 0,
           t3Home: undefined,
@@ -1218,6 +1399,10 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         }),
         (root) => Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
       );
+      const makePlainDirectory = Effect.acquireRelease(
+        Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-devrunner-home-"))),
+        (root) => Effect.sync(() => NodeFS.rmSync(root, { recursive: true, force: true })),
+      );
 
       const spawnedHome = (input: {
         readonly t3Home: string | undefined;
@@ -1258,7 +1443,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           const home = yield* spawnedHome({
             t3Home: "/tmp/explicit-home",
             cwd: root,
-            ambientHome: "/home/user/.t3",
+            ambientHome: "/opt/example/.t3",
           });
           assert.equal(home, path.resolve("/tmp/explicit-home"));
         }).pipe(Effect.scoped),
@@ -1271,7 +1456,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           const home = yield* spawnedHome({
             t3Home: "   ",
             cwd: root,
-            ambientHome: "/home/user/.t3",
+            ambientHome: "/opt/example/.t3",
           });
           assert.equal(home, path.join(path.resolve(root), ".t3"));
         }).pipe(Effect.scoped),
@@ -1284,7 +1469,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           const home = yield* spawnedHome({
             t3Home: undefined,
             cwd: root,
-            ambientHome: "/home/user/.t3",
+            ambientHome: "/opt/example/.t3",
           });
           assert.equal(home, path.join(path.resolve(root), ".t3"));
         }).pipe(Effect.scoped),
@@ -1293,23 +1478,32 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       it.effect("falls back to an ambient T3CODE_HOME outside a worktree", () =>
         Effect.gen(function* () {
           const path = yield* Path.Path;
+          const ambientHome = yield* makePlainDirectory;
           const home = yield* spawnedHome({
             t3Home: undefined,
             cwd: NodeOS.tmpdir(),
-            ambientHome: "/home/user/.t3",
+            ambientHome,
           });
-          assert.equal(home, path.resolve("/home/user/.t3"));
-        }),
+          assert.equal(home, path.resolve(ambientHome));
+        }).pipe(Effect.scoped),
       );
 
       it.effect("leaves the home implicit with no worktree and no ambient value", () =>
         Effect.gen(function* () {
-          const home = yield* spawnedHome({
+          const env = yield* createDevRunnerEnv({
+            mode: "dev",
+            baseEnv: {},
+            serverOffset: 0,
+            webOffset: 0,
             t3Home: undefined,
-            cwd: NodeOS.tmpdir(),
-            ambientHome: undefined,
+            browser: undefined,
+            autoBootstrapProjectFromCwd: undefined,
+            logWebSocketEvents: undefined,
+            host: undefined,
+            port: undefined,
+            devUrl: undefined,
           });
-          assert.equal(home, undefined);
+          assert.equal(env.T3CODE_HOME, undefined);
         }),
       );
     });

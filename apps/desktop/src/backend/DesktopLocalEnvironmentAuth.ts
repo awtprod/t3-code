@@ -1,4 +1,8 @@
 import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
+import {
+  ConnectionCatalogDocument,
+  type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
+} from "@t3tools/client-runtime/platform";
 import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -10,6 +14,9 @@ import * as Semaphore from "effect/Semaphore";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
+import * as DesktopConnectionCatalogStore from "../app/DesktopConnectionCatalogStore.ts";
+import { isLocalExecutionOverride } from "../ipc/methods/primaryBackend.ts";
+import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 
 export class DesktopLocalEnvironmentAuthBackendNotConfiguredError extends Schema.TaggedErrorClass<DesktopLocalEnvironmentAuthBackendNotConfiguredError>()(
   "DesktopLocalEnvironmentAuthBackendNotConfiguredError",
@@ -38,12 +45,14 @@ export type DesktopLocalEnvironmentAuthError = typeof DesktopLocalEnvironmentAut
 export class DesktopLocalEnvironmentAuth extends Context.Service<
   DesktopLocalEnvironmentAuth,
   {
-    readonly getBearerToken: Effect.Effect<string, DesktopLocalEnvironmentAuthError>;
+    readonly getBearerToken: Effect.Effect<string | null, DesktopLocalEnvironmentAuthError>;
   }
 >()("@t3tools/desktop/backend/DesktopLocalEnvironmentAuth") {}
 
 export const make = Effect.gen(function* () {
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
+  const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
+  const connectionCatalogStore = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
   const httpClient = yield* HttpClient.HttpClient;
   const tokenRef = yield* Ref.make(Option.none<string>());
   const mutex = yield* Semaphore.make(1);
@@ -54,6 +63,56 @@ export const make = Effect.gen(function* () {
         const cached = yield* Ref.get(tokenRef);
         if (Option.isSome(cached)) {
           return cached.value;
+        }
+
+        const settings = yield* appSettings.get;
+        if (settings.primaryBackendMode === "remote" && !isLocalExecutionOverride()) {
+          const remoteHttpBaseUrl = DesktopAppSettings.normalizeRemoteBackendUrl(
+            settings.remoteBackendUrl,
+          );
+          if (remoteHttpBaseUrl === null) {
+            return null;
+          }
+          const encodedCatalog = yield* connectionCatalogStore.get.pipe(
+            Effect.mapError(
+              (cause) => new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause }),
+            ),
+          );
+          if (Option.isNone(encodedCatalog)) {
+            return null;
+          }
+          const decodeCatalog = Schema.decodeEffect(
+            Schema.fromJsonString(ConnectionCatalogDocument),
+          );
+          const catalog: ConnectionCatalogDocumentType = yield* decodeCatalog(
+            encodedCatalog.value,
+          ).pipe(
+            Effect.mapError(
+              (cause) => new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause }),
+            ),
+          );
+          const profile = catalog.profiles.find(
+            (candidate: ConnectionCatalogDocumentType["profiles"][number]) =>
+              candidate._tag === "BearerConnectionProfile" &&
+              DesktopAppSettings.normalizeRemoteBackendUrl(candidate.httpBaseUrl) ===
+                remoteHttpBaseUrl,
+          );
+          if (profile === undefined) {
+            return null;
+          }
+          const storedCredential = catalog.credentials.find(
+            (candidate: ConnectionCatalogDocumentType["credentials"][number]) =>
+              candidate.connectionId === profile.connectionId,
+          );
+          if (
+            storedCredential === undefined ||
+            storedCredential.credential._tag !== "BearerConnectionCredential"
+          ) {
+            return null;
+          }
+          const token = storedCredential.credential.token;
+          yield* Ref.set(tokenRef, Option.some(token));
+          return token;
         }
 
         const instances = yield* pool.list;
@@ -71,7 +130,7 @@ export const make = Effect.gen(function* () {
           httpBaseUrl: config.httpBaseUrl.href,
           credential,
           clientMetadata: {
-            label: "T3 Code Desktop",
+            label: "Command Center Desktop",
             deviceType: "desktop",
           },
         }).pipe(

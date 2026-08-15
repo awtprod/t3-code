@@ -90,6 +90,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   Struct.assign({
     payload: Schema.fromJsonString(Schema.Unknown),
+    correlatedMessageId: Schema.NullOr(MessageId),
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
@@ -299,6 +300,7 @@ function mapSessionRow(
     status: row.status,
     providerName: row.providerName,
     ...(row.providerInstanceId !== null ? { providerInstanceId: row.providerInstanceId } : {}),
+    ...(row.sessionGeneration !== null ? { sessionGeneration: row.sessionGeneration } : {}),
     runtimeMode: row.runtimeMode,
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
@@ -316,6 +318,8 @@ function mapProjectShellRow(
     workspaceRoot: row.workspaceRoot,
     repositoryIdentity,
     defaultModelSelection: row.defaultModelSelection,
+    defaultThreadEnvMode: row.defaultThreadEnvMode,
+    faviconPath: row.faviconPath ?? null,
     scripts: row.scripts,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -391,6 +395,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
+          default_thread_env_mode AS "defaultThreadEnvMode",
+          favicon_path AS "faviconPath",
           scripts_json AS "scripts",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -410,6 +416,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          routing_mode AS "routingMode",
+          efficiency_tier AS "efficiencyTier",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -423,6 +431,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
           latest_user_message_at AS "latestUserMessageAt",
@@ -445,6 +454,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          routing_mode AS "routingMode",
+          efficiency_tier AS "efficiencyTier",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -458,6 +469,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
           latest_user_message_at AS "latestUserMessageAt",
@@ -482,6 +494,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          routing_mode AS "routingMode",
+          efficiency_tier AS "efficiencyTier",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -495,6 +509,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
           latest_user_message_at AS "latestUserMessageAt",
@@ -557,6 +572,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          correlated_message_id AS "correlatedMessageId",
           tone,
           kind,
           summary,
@@ -582,6 +598,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           status,
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
+          session_generation AS "sessionGeneration",
           provider_session_id AS "providerSessionId",
           provider_thread_id AS "providerThreadId",
           runtime_mode AS "runtimeMode",
@@ -603,6 +620,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
+          sessions.session_generation AS "sessionGeneration",
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
@@ -628,6 +646,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
+          sessions.session_generation AS "sessionGeneration",
           sessions.provider_session_id AS "providerSessionId",
           sessions.provider_thread_id AS "providerThreadId",
           sessions.runtime_mode AS "runtimeMode",
@@ -841,6 +860,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
+          default_thread_env_mode AS "defaultThreadEnvMode",
+          favicon_path AS "faviconPath",
           scripts_json AS "scripts",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -863,6 +884,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           workspace_root AS "workspaceRoot",
           default_model_selection_json AS "defaultModelSelection",
+          default_thread_env_mode AS "defaultThreadEnvMode",
+          favicon_path AS "faviconPath",
           scripts_json AS "scripts",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -919,6 +942,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           model_selection_json AS "modelSelection",
+          routing_mode AS "routingMode",
+          efficiency_tier AS "efficiencyTier",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -932,6 +957,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
           pinned_at AS "pinnedAt",
+          pin_order_key AS "pinOrderKey",
           title_regeneration_request_id AS "titleRegenerationRequestId",
           title_regeneration_started_at AS "titleRegenerationStartedAt",
           latest_user_message_at AS "latestUserMessageAt",
@@ -997,6 +1023,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          correlated_message_id AS "correlatedMessageId",
           tone,
           kind,
           summary,
@@ -1022,6 +1049,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           status,
           provider_name AS "providerName",
           provider_instance_id AS "providerInstanceId",
+          session_generation AS "sessionGeneration",
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
           last_error AS "lastError",
@@ -1229,6 +1257,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          correlated_message_id AS "correlatedMessageId",
           tone,
           kind,
           summary,
@@ -1454,6 +1483,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   summary: row.summary,
                   payload: row.payload,
                   turnId: row.turnId,
+                  ...(row.correlatedMessageId !== null
+                    ? { correlatedMessageId: row.correlatedMessageId }
+                    : {}),
                   ...(row.sequence !== null ? { sequence: row.sequence } : {}),
                   createdAt: row.createdAt,
                 });
@@ -1513,18 +1545,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               for (const row of sessionRows) {
                 updatedAt = maxIso(updatedAt, row.updatedAt);
-                sessionsByThread.set(row.threadId, {
-                  threadId: row.threadId,
-                  status: row.status,
-                  providerName: row.providerName,
-                  ...(row.providerInstanceId !== null
-                    ? { providerInstanceId: row.providerInstanceId }
-                    : {}),
-                  runtimeMode: row.runtimeMode,
-                  activeTurnId: row.activeTurnId,
-                  lastError: row.lastError,
-                  updatedAt: row.updatedAt,
-                });
+                // Built via the shared mapper rather than inline. This site had
+                // hand-rolled its own copy and silently omitted
+                // `sessionGeneration`, so full snapshots downgraded every
+                // consumer on this path to instance-id-only correlation — which
+                // cannot tell a restarted runtime from its predecessor, because
+                // the instance id is a routing key, not a per-start identity.
+                // One mapper means the next column added to the row cannot go
+                // missing on one path and not the others.
+                sessionsByThread.set(row.threadId, mapSessionRow(row));
               }
 
               const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(
@@ -1538,6 +1567,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 workspaceRoot: row.workspaceRoot,
                 repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
                 defaultModelSelection: row.defaultModelSelection,
+                defaultThreadEnvMode: row.defaultThreadEnvMode,
+                faviconPath: row.faviconPath ?? null,
                 scripts: row.scripts,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
@@ -1549,6 +1580,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 projectId: row.projectId,
                 title: row.title,
                 modelSelection: row.modelSelection,
+                routingMode: row.routingMode ?? "manual",
+                ...(row.efficiencyTier == null ? {} : { efficiencyTier: row.efficiencyTier }),
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -1562,6 +1595,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 snoozedUntil: row.snoozedUntil,
                 snoozedAt: row.snoozedAt,
                 pinnedAt: row.pinnedAt,
+                pinOrderKey: row.pinOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
@@ -1666,6 +1700,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   title: row.title,
                   workspaceRoot: row.workspaceRoot,
                   defaultModelSelection: row.defaultModelSelection,
+                  defaultThreadEnvMode: row.defaultThreadEnvMode,
+                  faviconPath: row.faviconPath ?? null,
                   scripts: row.scripts,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -1753,6 +1789,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   projectId: row.projectId,
                   title: row.title,
                   modelSelection: row.modelSelection,
+                  routingMode: row.routingMode ?? "manual",
+                  ...(row.efficiencyTier == null ? {} : { efficiencyTier: row.efficiencyTier }),
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
@@ -1766,6 +1804,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   snoozedUntil: row.snoozedUntil,
                   snoozedAt: row.snoozedAt,
                   pinnedAt: row.pinnedAt,
+                  pinOrderKey: row.pinOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
                   deletedAt: row.deletedAt,
                   messages: [],
@@ -1888,6 +1927,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                       projectId: row.projectId,
                       title: row.title,
                       modelSelection: row.modelSelection,
+                      routingMode: row.routingMode ?? "manual",
+                      ...(row.efficiencyTier == null ? {} : { efficiencyTier: row.efficiencyTier }),
                       runtimeMode: row.runtimeMode,
                       interactionMode: row.interactionMode,
                       branch: row.branch,
@@ -1901,6 +1942,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                       snoozedUntil: row.snoozedUntil,
                       snoozedAt: row.snoozedAt,
                       pinnedAt: row.pinnedAt,
+                      pinOrderKey: row.pinOrderKey ?? null,
                       titleRegeneration: mapTitleRegeneration(row),
                       session: sessionByThread.get(row.threadId) ?? null,
                       latestUserMessageAt: row.latestUserMessageAt,
@@ -2032,6 +2074,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   projectId: row.projectId,
                   title: row.title,
                   modelSelection: row.modelSelection,
+                  routingMode: row.routingMode ?? "manual",
+                  ...(row.efficiencyTier == null ? {} : { efficiencyTier: row.efficiencyTier }),
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
@@ -2045,6 +2089,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   snoozedUntil: row.snoozedUntil,
                   snoozedAt: row.snoozedAt,
                   pinnedAt: row.pinnedAt,
+                  pinOrderKey: row.pinOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
                   session: sessionByThread.get(row.threadId) ?? null,
                   latestUserMessageAt: row.latestUserMessageAt,
@@ -2154,6 +2199,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                     workspaceRoot: option.value.workspaceRoot,
                     repositoryIdentity,
                     defaultModelSelection: option.value.defaultModelSelection,
+                    defaultThreadEnvMode: option.value.defaultThreadEnvMode,
+                    faviconPath: option.value.faviconPath ?? null,
                     scripts: option.value.scripts,
                     createdAt: option.value.createdAt,
                     updatedAt: option.value.updatedAt,
@@ -2308,6 +2355,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
+        routingMode: threadRow.value.routingMode ?? "manual",
+        ...(threadRow.value.efficiencyTier == null
+          ? {}
+          : { efficiencyTier: threadRow.value.efficiencyTier }),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
@@ -2321,6 +2372,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         snoozedUntil: threadRow.value.snoozedUntil,
         snoozedAt: threadRow.value.snoozedAt,
         pinnedAt: threadRow.value.pinnedAt,
+        pinOrderKey: threadRow.value.pinOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
@@ -2428,6 +2480,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
+        routingMode: threadRow.value.routingMode ?? "manual",
+        ...(threadRow.value.efficiencyTier == null
+          ? {}
+          : { efficiencyTier: threadRow.value.efficiencyTier }),
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
@@ -2441,6 +2497,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         snoozedUntil: threadRow.value.snoozedUntil,
         snoozedAt: threadRow.value.snoozedAt,
         pinnedAt: threadRow.value.pinnedAt,
+        pinOrderKey: threadRow.value.pinOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
         deletedAt: null,
         messages: messageRows.map((row) => {
@@ -2469,6 +2526,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             turnId: row.turnId,
             createdAt: row.createdAt,
           };
+          if (row.correlatedMessageId !== null) {
+            Object.assign(activity, { correlatedMessageId: row.correlatedMessageId });
+          }
           if (row.sequence !== null) {
             return Object.assign(activity, { sequence: row.sequence });
           }

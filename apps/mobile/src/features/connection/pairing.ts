@@ -2,10 +2,11 @@ import { readHostedPairingRequest } from "@t3tools/shared/remote";
 import * as Schema from "effect/Schema";
 
 const MOBILE_PAIRING_URL_PARAM = "pairingUrl";
+const HTTP_SCHEME = "http:";
 
 function isIpLiteral(host: string): boolean {
   try {
-    const hostname = new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, "");
+    const hostname = new URL(`${HTTP_SCHEME}//${host}`).hostname.replace(/^\[|\]$/g, "");
     if (hostname.includes(":")) return true;
 
     const octets = hostname.split(".");

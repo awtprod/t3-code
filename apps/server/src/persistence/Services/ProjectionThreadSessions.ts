@@ -26,6 +26,7 @@ export const ProjectionThreadSession = Schema.Struct({
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(Schema.String),
   providerInstanceId: Schema.NullOr(ProviderInstanceId),
+  sessionGeneration: Schema.NullOr(Schema.String),
   runtimeMode: RuntimeMode,
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(Schema.String),
@@ -75,4 +76,6 @@ export interface ProjectionThreadSessionRepositoryShape {
 export class ProjectionThreadSessionRepository extends Context.Service<
   ProjectionThreadSessionRepository,
   ProjectionThreadSessionRepositoryShape
->()("t3/persistence/Services/ProjectionThreadSessions/ProjectionThreadSessionRepository") {}
+>()(
+  "@awtprod/command-center/persistence/Services/ProjectionThreadSessions/ProjectionThreadSessionRepository",
+) {}

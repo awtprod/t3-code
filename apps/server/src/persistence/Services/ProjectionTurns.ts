@@ -8,8 +8,10 @@
  */
 import {
   CheckpointRef,
+  EfficiencyDecision,
   IsoDateTime,
   MessageId,
+  ModelSelection,
   NonNegativeInt,
   OrchestrationProposedPlanId,
   OrchestrationCheckpointFile,
@@ -42,12 +44,14 @@ export const ProjectionTurn = Schema.Struct({
   assistantMessageId: Schema.NullOr(MessageId),
   state: ProjectionTurnState,
   requestedAt: IsoDateTime,
+  requestSequence: Schema.NullOr(NonNegativeInt),
   startedAt: Schema.NullOr(IsoDateTime),
   completedAt: Schema.NullOr(IsoDateTime),
   checkpointTurnCount: Schema.NullOr(NonNegativeInt),
   checkpointRef: Schema.NullOr(CheckpointRef),
   checkpointStatus: Schema.NullOr(OrchestrationCheckpointStatus),
   checkpointFiles: Schema.Array(OrchestrationCheckpointFile),
+  efficiencyDecision: Schema.optional(Schema.NullOr(EfficiencyDecision)),
 });
 export type ProjectionTurn = typeof ProjectionTurn.Type;
 
@@ -60,12 +64,14 @@ export const ProjectionTurnById = Schema.Struct({
   assistantMessageId: Schema.NullOr(MessageId),
   state: ProjectionTurnState,
   requestedAt: IsoDateTime,
+  requestSequence: Schema.NullOr(NonNegativeInt),
   startedAt: Schema.NullOr(IsoDateTime),
   completedAt: Schema.NullOr(IsoDateTime),
   checkpointTurnCount: Schema.NullOr(NonNegativeInt),
   checkpointRef: Schema.NullOr(CheckpointRef),
   checkpointStatus: Schema.NullOr(OrchestrationCheckpointStatus),
   checkpointFiles: Schema.Array(OrchestrationCheckpointFile),
+  efficiencyDecision: Schema.optional(Schema.NullOr(EfficiencyDecision)),
 });
 export type ProjectionTurnById = typeof ProjectionTurnById.Type;
 
@@ -75,6 +81,28 @@ export const ProjectionPendingTurnStart = Schema.Struct({
   sourceProposedPlanThreadId: Schema.NullOr(ThreadId),
   sourceProposedPlanId: Schema.NullOr(OrchestrationProposedPlanId),
   requestedAt: IsoDateTime,
+  /**
+   * Globally-monotonic sequence of the originating turn-start-requested event.
+   * Lets the reactor's supersession guard order same-millisecond re-requests
+   * without the ties that `requestedAt` alone suffers.
+   */
+  requestSequence: NonNegativeInt,
+  /**
+   * Model selection of the originating turn-start-requested event, or null when
+   * the start used the thread default. A session-exit auto-resume prefers this
+   * over the provider session binding (which describes the older, last-sent
+   * turn) so a pending steer resumes on the model the user chose for it.
+   */
+  modelSelection: Schema.NullOr(ModelSelection),
+  efficiencyDecision: Schema.optional(Schema.NullOr(EfficiencyDecision)),
+  /**
+   * True when a user `thread.turn.interrupt` landed on this pending start before
+   * the provider reported `turn.started` (an id-less interrupt the projection
+   * could not otherwise attribute to a turn). The pending-start consumer births
+   * the resulting turn `interrupted` rather than `running`, so the ensuing
+   * session exit does not auto-resume work the user deliberately stopped.
+   */
+  pendingInterruptRequested: Schema.Boolean,
 });
 export type ProjectionPendingTurnStart = typeof ProjectionPendingTurnStart.Type;
 
@@ -93,6 +121,18 @@ export const GetProjectionPendingTurnStartInput = Schema.Struct({
   threadId: ThreadId,
 });
 export type GetProjectionPendingTurnStartInput = typeof GetProjectionPendingTurnStartInput.Type;
+
+export const DeleteProjectionPendingTurnStartInput = Schema.Struct({
+  threadId: ThreadId,
+  /**
+   * Identifies WHICH queued placeholder to remove. A thread can hold several at
+   * once (one per turn-start-requested), so deleting by thread alone would drop
+   * messages the provider has not run yet.
+   */
+  requestSequence: NonNegativeInt,
+});
+export type DeleteProjectionPendingTurnStartInput =
+  typeof DeleteProjectionPendingTurnStartInput.Type;
 
 export const DeleteProjectionTurnsByThreadInput = Schema.Struct({
   threadId: ThreadId,
@@ -115,23 +155,70 @@ export interface ProjectionTurnRepositoryShape {
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
-   * Replaces any existing pending-start placeholder rows for a thread with exactly one latest pending-start row.
+   * Records one pending-start placeholder, keyed by its originating event's
+   * `requestSequence`.
+   *
+   * Placeholders ACCUMULATE: queueing a second message while the first has not
+   * yet reported `turn.started` leaves both rows in place. The previous
+   * behavior — delete-all-then-insert — made this a single slot per thread, so
+   * the second request evicted the first, a delayed `turn.started` then adopted
+   * the wrong row's message/model/plan/interrupt metadata, and consuming it
+   * erased the queued message with nothing left for reconciliation to find.
+   *
+   * Idempotent under replay: re-applying the same event is a no-op rather than
+   * a duplicate row, because `requestSequence` is the row's identity.
    */
-  readonly replacePendingTurnStart: (
+  readonly appendPendingTurnStart: (
     row: ProjectionPendingTurnStart,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
-   * Returns the newest pending-start placeholder for a thread; this is expected to be at most one row after replacement writes.
+   * Returns the OLDEST outstanding pending-start placeholder for a thread — the
+   * next one a provider `turn.started` should consume.
+   *
+   * Oldest, not newest: the provider runs queued messages in the order they were
+   * sent, so the earliest unconsumed placeholder is the one the next reported
+   * turn belongs to. Returns `None` when the thread has nothing queued.
    */
   readonly getPendingTurnStartByThreadId: (
     input: GetProjectionPendingTurnStartInput,
   ) => Effect.Effect<Option.Option<ProjectionPendingTurnStart>, ProjectionRepositoryError>;
 
   /**
-   * Deletes only pending-start placeholder rows (`turnId = null`) for a thread and leaves concrete turn rows untouched.
+   * Returns every outstanding pending-start placeholder for a thread, oldest
+   * first. Used by paths that must account for the whole queue rather than just
+   * its head — notably crash reconciliation, which has to surface each stranded
+   * message instead of only the first.
+   */
+  readonly listPendingTurnStartsByThreadId: (
+    input: GetProjectionPendingTurnStartInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionPendingTurnStart>, ProjectionRepositoryError>;
+
+  /**
+   * Deletes ONE pending-start placeholder, identified by its `requestSequence`.
+   *
+   * Consuming a placeholder must not disturb the rest of the queue: a
+   * `turn.started` settles the one request it corresponds to and leaves any
+   * later queued messages waiting for their own turns.
+   */
+  readonly deletePendingTurnStart: (
+    input: DeleteProjectionPendingTurnStartInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Deletes ALL pending-start placeholder rows (`turnId = null`) for a thread and leaves concrete turn rows untouched.
+   * Reserved for whole-thread teardown; per-request consumption uses `deletePendingTurnStart`.
    */
   readonly deletePendingTurnStartByThreadId: (
+    input: GetProjectionPendingTurnStartInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Flags the thread's pending-start placeholder row(s) as interrupted, recording that a
+   * user interrupt arrived before the provider reported `turn.started`. A no-op when no
+   * pending start exists (nothing is running to interrupt via this id-less path).
+   */
+  readonly markPendingTurnStartInterrupted: (
     input: GetProjectionPendingTurnStartInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
@@ -167,4 +254,4 @@ export interface ProjectionTurnRepositoryShape {
 export class ProjectionTurnRepository extends Context.Service<
   ProjectionTurnRepository,
   ProjectionTurnRepositoryShape
->()("t3/persistence/Services/ProjectionTurns/ProjectionTurnRepository") {}
+>()("@awtprod/command-center/persistence/Services/ProjectionTurns/ProjectionTurnRepository") {}

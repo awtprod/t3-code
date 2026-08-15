@@ -4,7 +4,7 @@ import * as SchemaIssue from "effect/SchemaIssue";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Struct from "effect/Struct";
 import { ProviderOptionSelections } from "./model.ts";
-import { RepositoryIdentity } from "./environment.ts";
+import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import {
   ApprovalRequestId,
   CheckpointRef,
@@ -22,6 +22,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { EfficiencyDecision, EfficiencyTier, ThreadRoutingMode } from "./efficiency.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -211,12 +212,23 @@ export const ProjectScript = Schema.Struct({
 });
 export type ProjectScript = typeof ProjectScript.Type;
 
+export const ProjectFaviconPath = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(1024),
+  Schema.isPattern(/\.(?:avif|gif|ico|jpe?g|png|svg|webp)$/i),
+);
+export type ProjectFaviconPath = typeof ProjectFaviconPath.Type;
+
 export const OrchestrationProject = Schema.Struct({
   id: ProjectId,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
+  // Per-project override for where new threads start. Null/absent means
+  // "no override": clients fall back to t3.json, then the global setting.
+  defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
+  // Optional on the wire so cached snapshots from older servers still decode.
+  faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -255,10 +267,11 @@ export const OrchestrationProposedPlan = Schema.Struct({
 });
 export type OrchestrationProposedPlan = typeof OrchestrationProposedPlan.Type;
 
-const SourceProposedPlanReference = Schema.Struct({
+export const SourceProposedPlanReference = Schema.Struct({
   threadId: ThreadId,
   planId: OrchestrationProposedPlanId,
 });
+export type SourceProposedPlanReference = typeof SourceProposedPlanReference.Type;
 
 export const OrchestrationSessionStatus = Schema.Literals([
   "idle",
@@ -276,6 +289,9 @@ export const OrchestrationSession = Schema.Struct({
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  // Per-runtime-start nonce recorded on session.started. Lets ingestion reject a
+  // terminal event from a superseded runtime generation that reused this instance.
+  sessionGeneration: Schema.optional(Schema.String),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
@@ -320,6 +336,7 @@ export const OrchestrationThreadActivity = Schema.Struct({
   summary: TrimmedNonEmptyString,
   payload: Schema.Unknown,
   turnId: Schema.NullOr(TurnId),
+  correlatedMessageId: Schema.optional(MessageId),
   sequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
 });
@@ -355,6 +372,8 @@ export const OrchestrationThread = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -379,6 +398,11 @@ export const OrchestrationThread = Schema.Struct({
   // thread renders in the pinned block and never classifies into a shelf.
   // Optional so payloads from pre-pinning servers still decode.
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  // Fractional index for user-arranged pinned order. Keyed threads sort by
+  // string comparison ahead of keyless ones (which keep creation order), so
+  // servers never need each other's threads to agree on the merged list.
+  // Optional so payloads from pre-reorder servers still decode.
+  pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -406,6 +430,9 @@ export const OrchestrationProjectShell = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
+  defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
+  // Optional on the wire so cached snapshots from older servers still decode.
+  faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -417,6 +444,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -434,6 +463,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
@@ -617,6 +647,9 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+  // Absent = leave unchanged; null = clear the override.
+  defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
+  faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
 });
 
@@ -634,6 +667,8 @@ const ThreadCreateCommand = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -702,12 +737,27 @@ const ThreadPinCommand = Schema.Struct({
   type: Schema.Literal("thread.pin"),
   commandId: CommandId,
   threadId: ThreadId,
+  // Initial slot in the user-arranged pinned order (see ThreadPinReorderCommand).
+  // Optional: clients on pre-reorder servers omit it, and the pinned block
+  // falls back to creation order for keyless threads.
+  orderKey: Schema.optional(TrimmedNonEmptyString),
 });
 
 const ThreadUnpinCommand = Schema.Struct({
   type: Schema.Literal("thread.unpin"),
   commandId: CommandId,
   threadId: ThreadId,
+});
+
+const ThreadPinReorderCommand = Schema.Struct({
+  type: Schema.Literal("thread.pin.reorder"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  // Fractional index key: pinned threads sort by plain string comparison of
+  // these keys, so a drag writes one key to one thread — neighbors (possibly
+  // on other servers) are never touched. Clients compute a key that sorts
+  // between the dropped position's neighbors.
+  orderKey: TrimmedNonEmptyString,
 });
 
 const ThreadMetaUpdateCommand = Schema.Struct({
@@ -717,6 +767,8 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   regenerateTitle: Schema.optional(Schema.Literal(true)),
   modelSelection: Schema.optional(ModelSelection),
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -748,6 +800,8 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
@@ -781,6 +835,10 @@ export const ThreadTurnStartCommand = Schema.Struct({
     attachments: Schema.Array(ChatAttachment),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
+  efficiencyDecision: Schema.optional(EfficiencyDecision),
+  retryOfTurnId: Schema.optional(TurnId),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -802,6 +860,9 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     attachments: Schema.Array(UploadChatAttachment),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
+  retryOfTurnId: Schema.optional(TurnId),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -815,6 +876,29 @@ const ThreadTurnInterruptCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
+  createdAt: IsoDateTime,
+});
+
+// Server-internal only: re-issues an interrupted turn for an existing user message
+// (no duplicate `thread.message-sent`) after a provider session exits mid-turn.
+export const ThreadTurnResumeCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn.resume"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  // The interrupted turn's effective model selection, carried so the restarted
+  // session resolves to the same provider instance/model (and thus recovers the
+  // persisted resume cursor). Omitted when the interrupted turn used the thread
+  // default, in which case the reactor falls back to `thread.modelSelection`.
+  modelSelection: Schema.optional(ModelSelection),
+  // The interrupted turn's source proposed-plan reference, carried so a resumed
+  // plan-implementation turn re-associates with (and can mark implemented) its
+  // originating plan. When the superseded pending start belonged to a plan
+  // implementation, dropping this here leaves the plan permanently unmarked
+  // because the resume replaces the pending row and the reactor skips the
+  // original `thread.turn-start-requested`.
+  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  reason: Schema.optional(Schema.String),
   createdAt: IsoDateTime,
 });
 
@@ -848,7 +932,77 @@ const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
   threadId: ThreadId,
+  /**
+   * Highest request sequence this stop is allowed to cancel.
+   *
+   * Absent for a stop the user pressed, which cancels everything queued at the
+   * moment it is accepted and therefore needs no cutoff beyond its own position
+   * in the log. Present only when the stop is an ESCALATION of an earlier,
+   * narrower cancellation — an interrupt whose delivery failed and had to be
+   * widened to the session — in which case it carries that interrupt's sequence
+   * so the widening does not also swallow work the user submitted in between.
+   *
+   * Without it the escalation dates itself to when it gave up rather than to
+   * what the user actually stopped: a message typed during the interrupt's
+   * retry delay sits at a LOWER sequence than the escalated stop and is
+   * retroactively canceled by it, silently, having been submitted after the
+   * user's stop and therefore explicitly wanted.
+   *
+   * SERVER-ONLY. Absent from `ClientThreadSessionStopCommand`, which is what
+   * the client union admits, so a remote caller cannot choose the cutoff of a
+   * stop it requests. See that schema for what a client-chosen value would buy.
+   */
+  canceledThroughSequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
+  // Settle-cleanup stops are conditional: the decider drops the stop if the
+  // thread was re-engaged (unsettled, session starting/running, or a queued
+  // turn start) between the settle and this command. Guarding in the decider
+  // closes the race a post-settle snapshot read cannot: commands are decided
+  // serially against the authoritative read model.
+  onlyIfSettled: Schema.optional(Schema.Boolean),
+});
+
+/**
+ * The stop a client may ask for: everything queued as of the moment the server
+ * accepts it.
+ *
+ * `canceledThroughSequence` is omitted rather than optional, and the omission
+ * is a security boundary, not tidiness. The field is only ever correct when the
+ * reactor derives it from an interrupt it is escalating; a value that arrived
+ * over the wire has no such provenance, and both directions of a wrong one are
+ * durable:
+ *
+ * - A cutoff BELOW the stop's own sequence under-cancels. Requests already
+ *   queued pass both the durable barrier and the event-log guard, and a
+ *   turn-start that survives a stop resurrects the session it was stopping —
+ *   `sendTurn` to a stopped session resolves with `allowRecovery: true`.
+ *   Sending `0` turns any stop into a no-op while the UI reports it as done.
+ * - A cutoff ABOVE it poisons the thread. The barrier raise is monotonic by
+ *   design (an out-of-order interrupt must not un-cancel earlier work), so a
+ *   large value cannot be lowered by anything: every later request is refused
+ *   at the claim until the thread's own sequence climbs past it. The event-log
+ *   guard, which scans only events after a request, never sees that old stop
+ *   for those later requests — so the two gates disagree, one silently
+ *   refusing what the other allows.
+ *
+ * A stop the user pressed needs no cutoff: its position in the log already says
+ * when it happened, and `processSessionStopRequested` falls back to
+ * `event.sequence` for exactly that reason. So nothing is lost by withholding
+ * the field, and the escalation path — the only caller that legitimately sets
+ * it — builds `ThreadSessionStopCommand` inside the server and never crosses
+ * this boundary.
+ */
+const ClientThreadSessionStopCommand = Schema.Struct({
+  type: Schema.Literal("thread.session.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+  // Settle-cleanup stops are conditional: the decider drops the stop if the
+  // thread was re-engaged (unsettled, session starting/running, or a queued
+  // turn start) between the settle and this command. Guarding in the decider
+  // closes the race a post-settle snapshot read cannot: commands are decided
+  // serially against the authoritative read model.
+  onlyIfSettled: Schema.optional(Schema.Boolean),
 });
 
 const DispatchableClientOrchestrationCommand = Schema.Union([
@@ -865,6 +1019,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUnsnoozeCommand,
   ThreadPinCommand,
   ThreadUnpinCommand,
+  ThreadPinReorderCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
@@ -892,6 +1047,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUnsnoozeCommand,
   ThreadPinCommand,
   ThreadUnpinCommand,
+  ThreadPinReorderCommand,
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
@@ -900,15 +1056,106 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
-  ThreadSessionStopCommand,
+  ClientThreadSessionStopCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
+
+export const ThreadSessionPendingTurnStartAdoption = Schema.Literals([
+  "none",
+  "exact",
+  "oldest-pending",
+]);
+export type ThreadSessionPendingTurnStartAdoption =
+  typeof ThreadSessionPendingTurnStartAdoption.Type;
+
+export const ThreadSessionTerminalTurnTransition = Schema.Struct({
+  turnId: TurnId,
+  state: Schema.Literals(["completed", "interrupted", "error"]),
+});
+export type ThreadSessionTerminalTurnTransition = typeof ThreadSessionTerminalTurnTransition.Type;
 
 const ThreadSessionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.session.set"),
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  createdAt: IsoDateTime,
+  /**
+   * Explicitly identifies whether this transition may adopt a pending turn-start
+   * placeholder. The decider always persists a value on new events; optionality
+   * exists only so older commands remain decodable while upgrading.
+   */
+  pendingTurnStartAdoption: Schema.optional(ThreadSessionPendingTurnStartAdoption),
+  /**
+   * Set only when this session-set is driven by a provider `turn.started`, and
+   * carries the sequence of the `thread.turn-start-requested` that turn was
+   * started for.
+   *
+   * It rides the command rather than `OrchestrationSession` on purpose: the
+   * session struct is durable state that outlives the turn, while this is a
+   * fact about ONE transition — which request the arriving turn answers. The
+   * projector consumes it to adopt the matching pending placeholder instead of
+   * the oldest one, which is what keeps two out-of-order starts from swapping
+   * each other's message, model, source plan, and interrupt flag.
+   */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
+  /**
+   * Set only when this session-set closes a specific turn — a provider
+   * `turn.completed`, or the stall watchdog failing the turn it timed out —
+   * and names that turn.
+   *
+   * This exists because "the session went quiet" is not evidence that any
+   * particular turn finished. Several writers produce a session-set with no
+   * active turn for reasons that settle nothing: a concurrent turn-start
+   * failure, a session rebind, the stop's own teardown. The escalated-stop
+   * re-drive must distinguish "this spared request's turn ran to its end"
+   * (do not re-send the prompt) from all of those (do re-send it), and the
+   * only way to do that without guessing from status strings is for the one
+   * writer that actually knows a turn ended to say which turn. Absent means
+   * "this write settles no turn", never "unknown".
+   */
+  settledTurnId: Schema.optional(TurnId),
+  /**
+   * Exact turn lifecycle transition represented by this session update. Unlike
+   * `settledTurnId`, this also covers crash/exit/orphan cleanup, which must
+   * terminalize the known turn without claiming it settled successfully.
+   */
+  terminalTurnTransition: Schema.optional(ThreadSessionTerminalTurnTransition),
+  /**
+   * Exact turn lifecycle transitions that must be applied atomically with this
+   * session update. The singular field remains for historical events and
+   * existing producers; this array is required when one session transition
+   * terminalizes more than one turn.
+   */
+  terminalTurnTransitions: Schema.optional(Schema.Array(ThreadSessionTerminalTurnTransition)),
+});
+
+/**
+ * Records that a `thread.turn-start-requested` reached the provider but was
+ * folded into an already-running turn (a "steer") instead of opening a new one.
+ *
+ * Non-Codex adapters deliberately emit no `turn.started` for a steer — the work
+ * continues as the same turn — and `turn.started` is the only thing that
+ * consumes a pending turn-start placeholder. Without this command the steer's
+ * placeholder survives indefinitely, and every consumer that reads "a surviving
+ * pending row means this message was never sent" draws the opposite of the
+ * truth: auto-resume re-issues a prompt the provider already has, the
+ * committed-side-effect gate is bypassed on that false premise, and
+ * reconciliation reports the turn as never started.
+ *
+ * It is a distinct command rather than a synthetic `turn.started` because a
+ * steer is NOT a turn boundary. A fake start would capture a pre-turn git
+ * baseline, re-transition the command-center run to `running`, and settle turns
+ * that are still legitimately running.
+ */
+const ThreadTurnStartFoldCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn-start.fold"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  /** Sequence of the `thread.turn-start-requested` this send answered. */
+  turnRequestSequence: NonNegativeInt,
+  /** The already-running turn the steered message was folded into. */
+  turnId: TurnId,
   createdAt: IsoDateTime,
 });
 
@@ -978,7 +1225,9 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadTurnResumeCommand,
   ThreadSessionSetCommand,
+  ThreadTurnStartFoldCommand,
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadProposedPlanUpsertCommand,
@@ -1009,6 +1258,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.unsnoozed",
   "thread.pinned",
   "thread.unpinned",
+  "thread.pin-reordered",
   "thread.meta-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
@@ -1021,6 +1271,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.reverted",
   "thread.session-stop-requested",
   "thread.session-set",
+  "thread.turn-start-folded",
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
@@ -1037,6 +1288,8 @@ export const ProjectCreatedPayload = Schema.Struct({
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
+  // Optional so persisted events from older servers still decode.
+  faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -1048,6 +1301,8 @@ export const ProjectMetaUpdatedPayload = Schema.Struct({
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+  defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
+  faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
   updatedAt: IsoDateTime,
 });
@@ -1062,6 +1317,8 @@ export const ThreadCreatedPayload = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -1120,11 +1377,20 @@ export const ThreadUnsnoozedPayload = Schema.Struct({
 export const ThreadPinnedPayload = Schema.Struct({
   threadId: ThreadId,
   pinnedAt: IsoDateTime,
+  // Absent on re-pins of an already-pinned thread (the existing key wins)
+  // and on pins from clients that predate reordering.
+  pinOrderKey: Schema.optional(TrimmedNonEmptyString),
   updatedAt: IsoDateTime,
 });
 
 export const ThreadUnpinnedPayload = Schema.Struct({
   threadId: ThreadId,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadPinReorderedPayload = Schema.Struct({
+  threadId: ThreadId,
+  orderKey: TrimmedNonEmptyString,
   updatedAt: IsoDateTime,
 });
 
@@ -1139,6 +1405,8 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   /** Pending state shared with clients. Null clears a matching request. */
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   modelSelection: Schema.optional(ModelSelection),
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: IsoDateTime,
@@ -1174,6 +1442,10 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
+  routingMode: Schema.optional(ThreadRoutingMode),
+  efficiencyTier: Schema.optional(EfficiencyTier),
+  efficiencyDecision: Schema.optional(EfficiencyDecision),
+  retryOfTurnId: Schema.optional(TurnId),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -1216,12 +1488,36 @@ export const ThreadRevertedPayload = Schema.Struct({
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  /** See `ThreadSessionStopCommand.canceledThroughSequence`. */
+  canceledThroughSequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
 });
 
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  /**
+   * See `ThreadSessionSetCommand.pendingTurnStartAdoption`. Absent only on
+   * historical events, whose pre-discriminator adoption behavior is preserved
+   * during rebuild.
+   */
+  pendingTurnStartAdoption: Schema.optional(ThreadSessionPendingTurnStartAdoption),
+  /** See `ThreadSessionSetCommand.turnRequestSequence`. */
+  turnRequestSequence: Schema.optional(NonNegativeInt),
+  /** See `ThreadSessionSetCommand.settledTurnId`. */
+  settledTurnId: Schema.optional(TurnId),
+  /** See `ThreadSessionSetCommand.terminalTurnTransition`. */
+  terminalTurnTransition: Schema.optional(ThreadSessionTerminalTurnTransition),
+  /** See `ThreadSessionSetCommand.terminalTurnTransitions`. */
+  terminalTurnTransitions: Schema.optional(Schema.Array(ThreadSessionTerminalTurnTransition)),
+});
+
+/** See `ThreadTurnStartFoldCommand`. */
+export const ThreadTurnStartFoldedPayload = Schema.Struct({
+  threadId: ThreadId,
+  turnRequestSequence: NonNegativeInt,
+  turnId: TurnId,
+  createdAt: IsoDateTime,
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({
@@ -1334,6 +1630,11 @@ export const OrchestrationEvent = Schema.Union([
   }),
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("thread.pin-reordered"),
+    payload: ThreadPinReorderedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("thread.meta-updated"),
     payload: ThreadMetaUpdatedPayload,
   }),
@@ -1391,6 +1692,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.session-set"),
     payload: ThreadSessionSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.turn-start-folded"),
+    payload: ThreadTurnStartFoldedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

@@ -1,7 +1,5 @@
 # Release Checklist
 
-> For maintainers. Using T3 Code? See [docs/user](../user/).
-
 This document covers the unified release workflow for stable and nightly desktop releases.
 
 ## What the workflow does
@@ -10,7 +8,7 @@ This document covers the unified release workflow for stable and nightly desktop
 - Triggers:
   - push tag matching `v*.*.*` for stable releases
   - scheduled nightly check every three hours
-  - manual `workflow_dispatch` for either channel
+  - manual `workflow_dispatch` with an explicit `validate` or `publish` mode
 - Runs quality gates first: lint, typecheck, test.
 - Reads the shared production T3 Connect relay URL and Clerk client configuration before packaging clients.
 - Builds four artifacts in parallel for both channels:
@@ -18,19 +16,24 @@ This document covers the unified release workflow for stable and nightly desktop
   - macOS `x64` DMG
   - Linux `x64` AppImage
   - Windows `x64` NSIS installer
-- Publishes one GitHub Release with all produced files.
+- In `validate` mode, retains one consolidated signed artifact bundle for 14 days without publishing
+  npm, GitHub Releases, Vercel deployments, tags, aliases, or version commits.
+- In `publish` mode, publishes one GitHub Release with all produced files.
   - Stable tags with a suffix after `X.Y.Z` (for example `1.2.3-alpha.1`) are published as GitHub prereleases.
   - Only plain stable `X.Y.Z` releases are marked as the repository's latest release.
   - Nightly runs are always GitHub prereleases and never marked latest.
   - Automatically generated release notes are pinned to the previous tag in the same channel, so stable compares to the previous stable tag and nightly compares to the previous nightly tag.
 - Includes Electron auto-update metadata (for example `latest*.yml`, `nightly*.yml`, and `*.blockmap`) in release assets.
-- Publishes the CLI package (`apps/server`, npm package `t3`) with OIDC trusted publishing from the same workflow file:
+- Generates `SHA256SUMS.txt` and validates every updater-manifest file path and byte size before publication.
+- Publishes the CLI package (`apps/server`, npm package `@awtprod/command-center`) with OIDC trusted publishing from the same workflow file:
   - stable releases publish npm dist-tag `latest`
   - nightly releases publish npm dist-tag `nightly`
-- Deploys the hosted web app to Vercel only after a release is published:
-  - stable releases are aliased to the `latest` hosted app channel
-  - nightly releases are aliased to the `nightly` hosted app channel
-- Signing is optional and auto-detected per platform from secrets.
+- Deploys the hosted web app to the dedicated `awtprod-command-center` Vercel project only after a
+  release is published. Stable releases update its production `vercel.app` domain; nightlies retain
+  the generated preview deployment URL.
+- Stable versions, including validation runs and prereleases, fail closed unless macOS and Windows signing
+  configuration is complete. Pre-release and nightly builds may be unsigned only when no partial
+  signing configuration is present.
 
 ## Required release credentials
 
@@ -102,6 +105,20 @@ Developers deploy personal stages locally rather than through pull-request autom
 vp run --filter t3code-relay deploy -- --stage "$USER" --env-file .env.local
 ```
 
+## GitHub release infrastructure
+
+Configure the `production` GitHub environment with the relay and Clerk values above. Configure
+these repository-level release credentials before running stable validation:
+
+- Release GitHub App: `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`; the installation needs
+  repository Contents read/write access so the workflow can create releases and finalize versions.
+- Apple signing/notarization: the secrets and variables in the macOS section below.
+- Azure Trusted Signing: the secrets in the Windows section below.
+- Vercel: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID` for the dedicated project.
+
+Discord secrets are optional. Both announcement steps use `continue-on-error`, so missing Discord
+configuration cannot block a release.
+
 ## Hosted web app release deployment
 
 The hosted app is intentionally not deployed by Vercel's Git integration. The
@@ -118,41 +135,28 @@ Required GitHub Actions secrets:
 Optional GitHub Actions variables:
 
 - `VERCEL_TEAM_SLUG`: overrides the Vercel CLI scope when the team slug is preferred over the `VERCEL_ORG_ID` secret.
-- `T3CODE_WEB_ROUTER_URL`: defaults to `https://app.t3.codes`.
-- `T3CODE_WEB_LATEST_DOMAIN`: defaults to `latest.app.t3.codes`.
-- `T3CODE_WEB_NIGHTLY_DOMAIN`: defaults to `nightly.app.t3.codes`.
+- `T3CODE_WEB_ROUTER_URL`: defaults to `https://awtprod-command-center.vercel.app`.
 
-Required Vercel domains:
+Required Vercel project:
 
-- `app.t3.codes`: the router domain users open, updated by stable releases.
-- `latest.app.t3.codes`: channel alias updated by stable releases.
-- `nightly.app.t3.codes`: channel alias updated by nightly releases.
+- Project name: `awtprod-command-center`
+- Production domain: `https://awtprod-command-center.vercel.app`
+- Root directory: `apps/web`
 
-The router domain uses `apps/web/vercel.ts` routes. Users opt into a channel by
-visiting `/__t3code/channel?channel=latest` or
-`/__t3code/channel?channel=nightly`; the router stores the
-`t3code_web_channel` cookie and rewrites future requests on `app.t3.codes` to
-the matching channel alias.
-
-The release deploy job rewrites release package versions before upload so the
-hosted app's About panel renders the release version. Stable deploys alias the
-same deployment to both the `latest` channel and the router domain so the router
-rules stay current. Nightly deploys only alias the `nightly` channel. The job
-also passes `VITE_HOSTED_APP_CHANNEL=latest|nightly`, which renders the hosted
-update track selector in the About panel. Changing the selector navigates
-through `/__t3code/channel` on the router domain so the user's channel cookie is
-updated before redirecting to the hosted app root.
+The release deploy job rewrites package versions before upload so the About panel renders the
+release version. Stable releases use a production deployment. Nightly releases use a preview
+deployment and print its generated URL in the workflow summary. Because there are no fixed channel
+aliases, hosted channel switching is hidden unless `VITE_HOSTED_APP_CHANNEL_SWITCHING=1` is supplied
+for a future deployment strategy that supports it.
 
 One-time Vercel dashboard setup:
 
-1. Confirm the web project root directory remains `apps/web`.
-2. Add the three domains above to the web project.
+1. Create or select `awtprod-command-center` and set its root directory to `apps/web`.
+2. Record its project and organization IDs in the repository secrets above.
 3. Disable automatic Git deployments in the dashboard if desired; the committed
    `vercel.ts` setting is the source-of-truth, but disconnecting Git in the
    dashboard is also safe.
-4. Run one stable release deployment, or manually alias the current stable
-   deployment, so `app.t3.codes` points at a deployment containing the router
-   rules in `apps/web/vercel.ts`. Future stable releases keep this alias current.
+4. Confirm the project production domain is `https://awtprod-command-center.vercel.app`.
 
 ## Nightly builds
 
@@ -162,20 +166,19 @@ One-time Vercel dashboard setup:
   - manual `workflow_dispatch` with `channel=nightly`
 - Runs the same desktop quality gates and artifact matrix as the tagged release flow.
 - Publishes a GitHub prerelease only:
-  - current tag format: `vX.Y.Z-nightly.YYYYMMDD.<run_number>`
-  - `nightly-v...` is accepted only as a legacy previous-nightly tag
+  - tag format: `nightly-vX.Y.Z-nightly.YYYYMMDD.<run_number>`
   - release name includes the short commit SHA
   - `make_latest` is always `false`
 - Uses the next stable patch version as the nightly base. For example, `0.0.17` produces nightlies on `0.0.18-nightly.*`.
 - Publishes Electron auto-update metadata to the dedicated `nightly` updater channel, so desktop users can opt into that track independently from stable.
-- Publishes the CLI package (`apps/server`, npm package `t3`) to the `nightly` npm dist-tag using the same nightly version.
+- Publishes the CLI package (`apps/server`, npm package `@awtprod/command-center`) to the `nightly` npm dist-tag using the same nightly version.
 - Does not commit version bumps back to `main`.
 
 ## Server self-update release invariant
 
 Connected servers update to the client's exact version, not to an npm dist-tag. Every released
-desktop or hosted client version must therefore have a matching `t3@<version>` package available on
-npm before users can receive that client.
+desktop or hosted client version must therefore have a matching
+`@awtprod/command-center@<version>` package available on npm before users can receive that client.
 
 The workflow enforces this ordering:
 
@@ -186,18 +189,16 @@ The workflow enforces this ordering:
 Preserve these dependencies when changing the release graph. Publishing a client first would leave
 the **Update server** action targeting a package version that does not exist yet.
 
-For a release smoke test, confirm `npm view t3@<version> version` returns the expected version, then
+For a release smoke test, confirm `npm view @awtprod/command-center@<version> version` returns the expected version, then
 connect the new client to a server on the previous version and verify that the update action
 reconnects to the matching server. Use releases with identical migration manifests for the
 automatic path. When the manifest changed, verify that the remote action stops before restart and
-shows the exact local `npx t3@<version> service update` command. Also test the manual or
+shows the exact local `npx @awtprod/command-center@<version> service update` command. Also test the manual or
 desktop-managed guidance when those environments are available.
 
 ## Desktop auto-update notes
 
-- Updater runtime: `apps/desktop/src/updates/DesktopUpdates.ts`.
-- `electron-updater` adapter: `apps/desktop/src/electron/ElectronUpdater.ts`.
-- `apps/desktop/src/main.ts` only wires the updater layers into the desktop runtime.
+- Runtime updater: `electron-updater` in `apps/desktop/src/main.ts`.
 - Update UX:
   - Background checks run on startup delay + interval.
   - No automatic download or install.
@@ -206,6 +207,9 @@ desktop-managed guidance when those environments are available.
 - Repository slug source:
   - `T3CODE_DESKTOP_UPDATE_REPOSITORY` (format `owner/repo`), if set.
   - otherwise `GITHUB_REPOSITORY` from GitHub Actions.
+- Temporary private-repo auth workaround:
+  - set `T3CODE_DESKTOP_UPDATE_GITHUB_TOKEN` (or `GH_TOKEN`) in the desktop app runtime environment.
+  - the app forwards it as an `Authorization: Bearer <token>` request header for updater HTTP calls.
 - Required release assets for updater:
   - platform installers (`.exe`, `.dmg`, `.AppImage`, plus macOS `.zip` for Squirrel.Mac update payloads)
   - channel metadata: `latest*.yml` for stable releases, `nightly*.yml` for nightly releases
@@ -216,13 +220,12 @@ desktop-managed guidance when those environments are available.
 
 ## 0) npm OIDC trusted publishing setup (CLI)
 
-The workflow invokes `node apps/server/scripts/cli.ts publish` after aligning package versions. That
-script temporarily prepares the `t3` package, then runs `vp pm publish --filter t3 ...` from the
-repository root so workspace publish configuration is applied correctly.
+The workflow publishes the CLI with `npm publish` from `apps/server` after bumping
+the package version to the release tag version.
 
 Checklist:
 
-1. Confirm npm org/user owns package `t3` (or rename package first if needed).
+1. Create the public npm package `@awtprod/command-center` under the `awtprod` scope.
 2. In npm package settings, configure Trusted Publisher:
    - Provider: GitHub Actions
    - Repository: this repo
@@ -230,27 +233,24 @@ Checklist:
    - Environment (if used): match your npm trusted publishing config
 3. Ensure npm account and org policies allow trusted publishing for the package.
 4. Create release tag `vX.Y.Z` and push; workflow will:
-   - align the release package versions to `X.Y.Z`
+   - set `apps/server/package.json` version to `X.Y.Z`
    - build web + server
-   - invoke the CLI publish script with npm dist-tag `latest`
-5. Nightly runs invoke the same publish script with npm dist-tag `nightly`.
+   - run `npm publish --access public --tag latest`
+5. Nightly runs from the same workflow file publish with `npm publish --access public --tag nightly`.
 
-## 1) Release validation and unsigned builds
+## 1) Signed validation release
 
-There is no dry-run tag path. Pushing any accepted non-nightly tag, including
-`v0.0.0-test.1`, classifies the run as the stable channel. It publishes `t3` with npm dist-tag
-`latest`, creates a real GitHub Release, aliases the hosted app to `latest.app.t3.codes` and
-`app.t3.codes`, and can commit a version bump to `main` in the finalize job. Do not push a test tag
-to validate the workflow.
+Use this before every stable publication. It performs the full signed build matrix but has no
+publication side effects.
 
-The workflow has no non-publishing `workflow_dispatch` mode. Use normal CI or local quality gates to
-validate checks and builds without shipping. To exercise the complete release graph at lower stable
-risk, manually dispatch `channel=nightly`; this still publishes a real nightly npm package, GitHub
-prerelease, desktop updater release, and hosted nightly alias, but it does not update stable aliases or
-commit a version bump to `main`. Only run it when a real nightly release is acceptable.
-
-Manual `channel=stable` with a version input is also a real stable-channel release. Omitting signing
-secrets only makes platform artifacts unsigned; it does not prevent publication.
+1. Open **Actions → Release → Run workflow**.
+2. Select `mode=validate`, `channel=stable`, and enter the exact version (for v1, `1.0.0`).
+3. Wait for every preflight, relay, signing, build, and artifact-validation job to pass.
+4. Download the `command-center-<version>-validation` artifact.
+5. Verify signatures, notarization, install/uninstall behavior, protocols, embedded backend startup,
+   clean-profile functionality, SSH launch, persistence, and mock-server updater detection on every
+   supported OS.
+6. Only after acceptance passes, run the same version with `mode=publish`.
 
 ## 2) Apple signing + notarization setup (macOS)
 
@@ -269,14 +269,14 @@ Required repository variables:
 
 Optional repository variables:
 
-- `CLERK_PASSKEY_RP_DOMAINS`: comma-separated RP-domain override. By default, the build derives the
-  domain from the production Clerk publishable key.
+- `CLERK_PASSKEY_RP_DOMAINS`: comma-separated production Clerk RP domains. It is required by the
+  stable release workflow so associated-domain intent is explicit.
 
 Checklist:
 
 1. Apple Developer account access:
    - Team has rights to create Developer ID certificates.
-2. Create an explicit App ID for `com.t3tools.t3code` and enable Associated Domains.
+2. Create an explicit App ID for `com.awtprod.commandcenter` and enable Associated Domains.
 3. Create a `Developer ID Application` certificate and a compatible provisioning profile for that
    App ID with Associated Domains enabled.
 4. Export the certificate + private key as `.p12` from Keychain.
@@ -289,8 +289,8 @@ Checklist:
    - `APPLE_API_KEY`: contents of the downloaded `.p8`
    - `APPLE_API_KEY_ID`: Key ID
    - `APPLE_API_ISSUER`: Issuer ID
-10. Complete the Clerk Native API and AASA setup in [T3 Connect Clerk Setup](../internals/t3-connect.md#desktop-passkeys).
-11. Re-run a tag release and confirm macOS artifacts are signed/notarized and contain the expected
+10. Complete the Clerk Native API and AASA setup in [T3 Connect Clerk Setup](../cloud/t3-connect-clerk.md#desktop-passkeys).
+11. Run a stable validation and confirm macOS artifacts are signed/notarized and contain the expected
     `com.apple.developer.associated-domains` entitlement.
 
 Notes:
@@ -329,24 +329,23 @@ Checklist:
 ## 4) Ongoing release checklist
 
 1. Ensure `main` is green in CI.
-2. Bump app version as needed.
-3. Create release tag: `vX.Y.Z`.
-4. Push tag.
-5. Verify workflow steps:
+2. Run `mode=validate` for the intended version and complete the clean-profile acceptance matrix.
+3. Run `mode=publish` for the same version. A pushed stable tag also invokes publish mode, but the
+   manual interface is preferred for the first release.
+4. Verify workflow steps:
    - preflight passes
    - all matrix builds pass
-   - `publish_cli` publishes the exact release version before the release job
    - release job uploads expected files
-6. Smoke test downloaded artifacts.
+5. Smoke test downloaded artifacts.
 
 ## 5) Troubleshooting
 
 - macOS build unsigned when expected signed:
   - Check all Apple secrets plus `APPLE_TEAM_ID` are populated and non-empty.
-  - Confirm the provisioning profile belongs to `APPLE_TEAM_ID.com.t3tools.t3code` and includes
+  - Confirm the provisioning profile belongs to `APPLE_TEAM_ID.com.awtprod.commandcenter` and includes
     Associated Domains.
 - Windows build unsigned when expected signed:
   - Check all Azure ATS and auth secrets are populated and non-empty.
 - Build fails with signing error:
-  - Retry with secrets removed to confirm unsigned path still works.
-  - Re-check certificate/profile names and tenant/client credentials.
+  - Re-check certificate/profile names, associated domains, and tenant/client credentials. Stable
+    validation and publication intentionally do not have an unsigned fallback.

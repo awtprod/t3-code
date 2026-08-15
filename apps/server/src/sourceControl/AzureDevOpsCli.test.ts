@@ -9,6 +9,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { VcsProcessExitError, VcsProcessSpawnError } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { hardenedGitSpawningCliEnvironment } from "../vcs/HostGitSecurity.ts";
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
 
 const processOutput = (stdout: string): VcsProcess.VcsProcessOutput => ({
@@ -327,6 +328,8 @@ describe("AzureDevOpsCli.layer", () => {
           "origin",
         ],
         cwd: "/repo",
+        env: hardenedGitSpawningCliEnvironment("azure-devops"),
+        extendEnv: false,
         timeoutMs: 30_000,
       });
     }).pipe(Effect.provide(layer)),

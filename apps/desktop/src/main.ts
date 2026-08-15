@@ -32,6 +32,7 @@ import * as ElectronTheme from "./electron/ElectronTheme.ts";
 import * as ElectronUpdater from "./electron/ElectronUpdater.ts";
 import * as ElectronWindow from "./electron/ElectronWindow.ts";
 import * as DesktopApp from "./app/DesktopApp.ts";
+import { isRemoteOnlyDesktopBuild } from "./app/remoteOnlyBuild.ts";
 import * as DesktopAppIdentity from "./app/DesktopAppIdentity.ts";
 import * as DesktopConnectionCatalogStore from "./app/DesktopConnectionCatalogStore.ts";
 import * as DesktopClerk from "./app/DesktopClerk.ts";
@@ -75,6 +76,7 @@ const desktopEnvironmentLayer = Layer.unwrap(
       homeDirectory: NodeOS.homedir(),
       platform,
       processArch,
+      remoteOnlyBuild: isRemoteOnlyDesktopBuild,
       ...metadata,
     });
   }),
@@ -213,5 +215,11 @@ const desktopRuntimeLayer = desktopClerkLayer.pipe(
   ),
   Layer.provideMerge(DesktopPreReadyPlatform.layer),
 );
+
+// Must run before Electron reaches `ready`, which building the runtime below
+// will trigger — so it goes here at module scope rather than inside a layer.
+// Without it the renderer's custom scheme gets an opaque origin and the server
+// refuses its WebSocket upgrade. See registerDesktopSchemesAsPrivileged.
+ElectronProtocol.registerDesktopSchemesAsPrivileged();
 
 DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer), NodeRuntime.runMain);

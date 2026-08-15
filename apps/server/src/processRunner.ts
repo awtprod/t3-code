@@ -13,6 +13,7 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import {
   collectUint8StreamText,
+  decodeUtf8,
   type CollectedUint8StreamText,
 } from "./stream/collectUint8StreamText.ts";
 
@@ -23,6 +24,12 @@ export interface ProcessRunInput {
   readonly spawnCwd?: string | undefined;
   readonly timeout?: Duration.Input | undefined;
   readonly env?: NodeJS.ProcessEnv | undefined;
+  /**
+   * Whether `env` is merged over the host environment. The historical default
+   * remains `true` whenever `env` is supplied; security-sensitive callers can
+   * opt into an exact, scrubbed environment with `false`.
+   */
+  readonly extendEnv?: boolean | undefined;
   readonly stdin?: string | undefined;
   readonly maxOutputBytes?: number | undefined;
   readonly outputMode?: "error" | "truncate" | undefined;
@@ -41,6 +48,8 @@ export interface ProcessRunOutput {
   readonly timedOut: boolean;
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
+  readonly stdoutInvalidUtf8: boolean;
+  readonly stderrInvalidUtf8: boolean;
 }
 
 const ProcessInvocationFields = {
@@ -142,7 +151,7 @@ export class ProcessRunner extends Context.Service<
   {
     readonly run: (input: ProcessRunInput) => Effect.Effect<ProcessRunOutput, ProcessRunError>;
   }
->()("t3/processRunner") {}
+>()("@awtprod/command-center/processRunner") {}
 
 const DEFAULT_TIMEOUT = "60 seconds";
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -238,7 +247,7 @@ const collectText = Effect.fn("processRunner.collectText")(function* (input: {
     ),
     Effect.map(
       (state): CollectedUint8StreamText => ({
-        text: Buffer.concat(state.chunks, state.bytes).toString("utf8"),
+        ...decodeUtf8(Buffer.concat(state.chunks, state.bytes)),
         bytes: state.bytes,
         truncated: false,
       }),
@@ -268,6 +277,8 @@ function finalizeRunProcess<R>(
           timedOut: true,
           stdoutTruncated: false,
           stderrTruncated: false,
+          stdoutInvalidUtf8: false,
+          stderrInvalidUtf8: false,
         } satisfies ProcessRunOutput);
       }
       return Effect.fail(
@@ -290,7 +301,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
   const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const outputMode = input.outputMode ?? "error";
   const truncatedMarker = input.truncatedMarker ?? "";
-  const extendEnv = input.env !== undefined;
+  const extendEnv = input.env !== undefined && (input.extendEnv ?? true);
   const spawnCommand = yield* resolveSpawnCommand(
     input.command,
     input.args,
@@ -344,7 +355,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
           ),
         );
 
-  const [stdout, stderr] = yield* Effect.all(
+  const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectText({
         command: input.command,
@@ -369,23 +380,22 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
         truncatedMarker,
       }),
       writeStdin,
+      child.exitCode.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProcessReadError({
+              command: input.command,
+              argumentCount: input.args.length,
+              cwd: input.cwd,
+              spawnCwd: input.spawnCwd,
+              stream: "exitCode",
+              cause,
+            }),
+        ),
+      ),
     ],
     { concurrency: "unbounded" },
-  );
-
-  const exitCode = yield* child.exitCode.pipe(
-    Effect.mapError(
-      (cause) =>
-        new ProcessReadError({
-          command: input.command,
-          argumentCount: input.args.length,
-          cwd: input.cwd,
-          spawnCwd: input.spawnCwd,
-          stream: "exitCode",
-          cause,
-        }),
-    ),
-  );
+  ).pipe(Effect.map(([stdout, stderr, _stdin, exitCode]) => [stdout, stderr, exitCode] as const));
 
   return {
     stdout: stdout.text,
@@ -394,6 +404,8 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
     timedOut: false,
     stdoutTruncated: stdout.truncated,
     stderrTruncated: stderr.truncated,
+    stdoutInvalidUtf8: stdout.invalidUtf8,
+    stderrInvalidUtf8: stderr.invalidUtf8,
   } satisfies ProcessRunOutput;
 });
 

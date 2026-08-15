@@ -1,5 +1,5 @@
 /**
- * `t3 pair` - mint a pairing token for an already-running server and print it
+ * `command-center pair` - mint a pairing token for an already-running server and print it
  * as a QR code, without restarting anything.
  *
  * Discovery reads the `server-runtime.json` a live server persists next to its
@@ -76,9 +76,9 @@ export class NoRunningServerError extends Schema.TaggedErrorClass<NoRunningServe
 ) {
   override get message(): string {
     return [
-      "No running T3 Code server found.",
+      "No running Command Center server found.",
       ...this.checkedStatePaths.map((statePath) => `  checked ${statePath}`),
-      "Start one with `npx t3 serve`, or connect this machine with T3 Connect: `npx t3 connect`.",
+      "Start one with `command-center serve`, or connect this machine with `command-center connect`.",
     ].join("\n");
   }
 }
@@ -351,6 +351,9 @@ const makePairServerConfig = Effect.fn(function* (input: {
     logWebSocketEvents: false,
     tailscaleServeEnabled: false,
     tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
+    previewGatewayEnabled: false,
+    previewGatewayPort: 0,
+    previewGatewayServePort: DEFAULT_TAILSCALE_SERVE_PORT,
   });
 });
 
@@ -442,7 +445,7 @@ const mintPairingLink = Effect.fn("pair.mintPairingLink")(function* (input: {
     return yield* environmentAuth.createPairingLink({
       scopes: AuthStandardClientScopes,
       subject: "one-time-token",
-      label: Option.getOrElse(input.label, () => "t3 pair"),
+      label: Option.getOrElse(input.label, () => "command-center pair"),
       ...(Option.isSome(input.ttl) ? { ttl: input.ttl.value } : {}),
     });
   }).pipe(
@@ -489,7 +492,7 @@ export const pairCommand = Command.make("pair", {
   tailscaleServePort: tailscaleServePortFlag,
 }).pipe(
   Command.withDescription(
-    "Mint a pairing token for a running T3 Code server and print it as a QR code.",
+    "Mint a pairing token for a running Command Center server and print it as a QR code.",
   ),
   Command.withHandler((flags) =>
     Effect.gen(function* () {

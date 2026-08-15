@@ -26,7 +26,7 @@ export interface PendingUserInput {
 }
 
 export interface PendingUserInputDraftAnswer {
-  readonly selectedOptionLabel?: string;
+  readonly selectedOptionLabels?: ReadonlyArray<string>;
   readonly customAnswer?: string;
 }
 
@@ -227,14 +227,32 @@ function normalizeDraftAnswer(value: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function normalizeSelectedOptionLabels(
+  value: ReadonlyArray<string> | undefined,
+): ReadonlyArray<string> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(value.map((entry) => entry.trim()).filter((entry) => entry.length > 0)),
+  );
+}
+
 function resolvePendingUserInputAnswer(
+  question: UserInputQuestion,
   draft: PendingUserInputDraftAnswer | undefined,
-): string | null {
+): string | ReadonlyArray<string> | null {
   const customAnswer = normalizeDraftAnswer(draft?.customAnswer);
   if (customAnswer) {
     return customAnswer;
   }
-  return normalizeDraftAnswer(draft?.selectedOptionLabel);
+
+  const selectedOptionLabels = normalizeSelectedOptionLabels(draft?.selectedOptionLabels);
+  if (question.multiSelect) {
+    return selectedOptionLabels.length > 0 ? selectedOptionLabels : null;
+  }
+  return selectedOptionLabels[0] ?? null;
 }
 
 /** Codex children settle via task.updated (idle/failed/interrupted), never
@@ -396,10 +414,35 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   if (title) {
     entry.toolTitle = title;
   }
-  if (itemType === "mcp_tool_call") {
+  if (itemType === "mcp_tool_call" || itemType === "collab_agent_tool_call") {
     const data = asRecord(payload?.data);
-    if (data?.item !== undefined) {
-      entry.toolData = data.item;
+    if (data !== null) {
+      entry.toolData = itemType === "mcp_tool_call" && data.item !== undefined ? data.item : data;
+    }
+    if (itemType === "collab_agent_tool_call" && data !== null) {
+      const provider = typeof data.provider === "string" ? data.provider : "Agent";
+      const name = typeof data.name === "string" ? data.name : "Subagent";
+      const state = typeof data.state === "string" ? data.state : "running";
+      const result =
+        typeof data.resultSummary === "string"
+          ? data.resultSummary
+          : typeof data.errorSummary === "string"
+            ? data.errorSummary
+            : null;
+      const usage = asRecord(data.usage);
+      const tokens = [
+        usage?.uncachedInputTokens,
+        usage?.cacheReadInputTokens,
+        usage?.cacheWriteInputTokens,
+        usage?.outputTokens,
+      ].reduce<number>(
+        (sum, value) => sum + (typeof value === "number" && value >= 0 ? value : 0),
+        0,
+      );
+      entry.label = `${name} · ${provider}`;
+      entry.detail = [state, result, tokens > 0 ? `${tokens.toLocaleString()} tokens` : null]
+        .filter((value): value is string => Boolean(value))
+        .join(" · ");
     }
   }
   if (itemType) {
@@ -554,6 +597,8 @@ function toolDetailTextLooksLikeFailure(text: string): boolean {
     normalized.includes("command not found") ||
     (normalized.includes("cannot find path") && normalized.includes("because it does not exist")) ||
     (normalized.includes("is not recognized") && normalized.includes("the term '")) ||
+    normalized.includes("is not recognized as the name of a cmdlet") ||
+    normalized.includes("a parameter cannot be found that matches parameter name") ||
     /<exited with exit code\s+[1-9]\d*\s*>/i.test(text) ||
     /exit(?:ed)? with exit code\s+[1-9]\d*/i.test(text) ||
     /exit code\s*[:\s]\s*[1-9]\d*\b/i.test(text)
@@ -617,7 +662,8 @@ function workEntryIcon(entry: DerivedWorkLogEntry): ThreadFeedActivity["icon"] {
   if (entry.itemType === "web_search") return "globe";
   if (entry.itemType === "image_view") return "eye";
   if (entry.itemType === "mcp_tool_call") return "wrench";
-  if (entry.itemType === "dynamic_tool_call" || entry.itemType === "collab_agent_tool_call") {
+  if (entry.itemType === "collab_agent_tool_call") return "agent";
+  if (entry.itemType === "dynamic_tool_call") {
     return "hammer";
   }
   if (entry.tone === "error") return "alert";
@@ -635,8 +681,13 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
     }
   };
 
-  if (entry.itemType === "mcp_tool_call" && entry.toolData !== undefined) {
-    appendUniqueBlock(`MCP call\n${JSON.stringify(entry.toolData, null, 2)}`);
+  if (
+    (entry.itemType === "mcp_tool_call" || entry.itemType === "collab_agent_tool_call") &&
+    entry.toolData !== undefined
+  ) {
+    appendUniqueBlock(
+      `${entry.itemType === "collab_agent_tool_call" ? "Native subagent" : "MCP call"}\n${JSON.stringify(entry.toolData, null, 2)}`,
+    );
   }
   appendUniqueBlock(entry.rawCommand ?? entry.command);
   appendUniqueBlock(entry.detail);
@@ -649,7 +700,8 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
 
 function workEntryHasExpandedBody(entry: WorkLogEntry): boolean {
   return (
-    (entry.itemType === "mcp_tool_call" && entry.toolData !== undefined) ||
+    ((entry.itemType === "mcp_tool_call" || entry.itemType === "collab_agent_tool_call") &&
+      entry.toolData !== undefined) ||
     Boolean((entry.rawCommand ?? entry.command)?.trim()) ||
     Boolean(entry.detail?.trim()) ||
     (entry.changedFiles?.some((path) => path.trim().length > 0) ?? false)
@@ -1426,22 +1478,62 @@ export function setPendingUserInputCustomAnswer(
   draft: PendingUserInputDraftAnswer | undefined,
   customAnswer: string,
 ): PendingUserInputDraftAnswer {
-  const selectedOptionLabel =
-    customAnswer.trim().length > 0 ? undefined : draft?.selectedOptionLabel;
+  const selectedOptionLabels =
+    customAnswer.trim().length > 0
+      ? undefined
+      : normalizeSelectedOptionLabels(draft?.selectedOptionLabels);
   return {
     customAnswer,
-    ...(selectedOptionLabel ? { selectedOptionLabel } : {}),
+    ...(selectedOptionLabels && selectedOptionLabels.length > 0 ? { selectedOptionLabels } : {}),
+  };
+}
+
+export function isPendingUserInputOptionSelected(
+  draft: PendingUserInputDraftAnswer | undefined,
+  optionLabel: string,
+): boolean {
+  if (normalizeDraftAnswer(draft?.customAnswer)) {
+    return false;
+  }
+
+  return normalizeSelectedOptionLabels(draft?.selectedOptionLabels).includes(optionLabel.trim());
+}
+
+export function togglePendingUserInputOptionSelection(
+  question: UserInputQuestion,
+  draft: PendingUserInputDraftAnswer | undefined,
+  optionLabel: string,
+): PendingUserInputDraftAnswer {
+  const normalizedOptionLabel = optionLabel.trim();
+
+  if (question.multiSelect) {
+    const selectedOptionLabels = normalizeSelectedOptionLabels(draft?.selectedOptionLabels);
+    const nextSelectedOptionLabels = selectedOptionLabels.includes(normalizedOptionLabel)
+      ? selectedOptionLabels.filter((label) => label !== normalizedOptionLabel)
+      : [...selectedOptionLabels, normalizedOptionLabel];
+
+    return {
+      customAnswer: "",
+      ...(nextSelectedOptionLabels.length > 0
+        ? { selectedOptionLabels: nextSelectedOptionLabels }
+        : {}),
+    };
+  }
+
+  return {
+    customAnswer: "",
+    selectedOptionLabels: [normalizedOptionLabel],
   };
 }
 
 export function buildPendingUserInputAnswers(
   questions: ReadonlyArray<UserInputQuestion>,
   draftAnswers: Record<string, PendingUserInputDraftAnswer>,
-): Record<string, string> | null {
-  const answers: Record<string, string> = {};
+): Record<string, string | ReadonlyArray<string>> | null {
+  const answers: Record<string, string | ReadonlyArray<string>> = {};
 
   for (const question of questions) {
-    const answer = resolvePendingUserInputAnswer(draftAnswers[question.id]);
+    const answer = resolvePendingUserInputAnswer(question, draftAnswers[question.id]);
     if (!answer) {
       return null;
     }

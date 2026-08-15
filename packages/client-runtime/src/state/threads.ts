@@ -616,6 +616,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           }
         }
 
+        // Re-read the cursor on every subscribe attempt. This callback is
+        // re-issued after each reconnect, so `sequence` tracks what the client
+        // has actually applied instead of replaying from the base snapshot.
         const sequence = yield* SubscriptionRef.get(lastSequence);
         const canResume = Option.isSome(current.data);
         if (!supportsCompletionMarker && canResume) {

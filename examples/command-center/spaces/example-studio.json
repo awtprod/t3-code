@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "example-studio",
+  "name": "Example Studio",
+  "kind": "business",
+  "aliases": ["studio"],
+  "instructionsFile": "prompts/example-studio.md",
+  "repositories": [
+    {
+      "id": "example-app",
+      "remote": "https://example.invalid/example-org/example-app.git",
+      "aliases": ["app"]
+    }
+  ],
+  "connectionIds": [],
+  "routing": {
+    "provider": "auto",
+    "model": "auto"
+  }
+}

@@ -42,8 +42,8 @@ describe("pair base URL selection", () => {
   });
 
   it("pairs through the bound host when there is no dev server", () => {
-    expect(resolveDirectPairingBaseUrl({ ...baseState, host: "100.64.0.7" })).toBe(
-      "http://100.64.0.7:3773",
+    expect(resolveDirectPairingBaseUrl({ ...baseState, host: "192.0.2.7" })).toBe(
+      "http://192.0.2.7:3773",
     );
     expect(resolveDirectPairingBaseUrl(baseState)).toBe("http://localhost:3773");
   });
@@ -57,12 +57,12 @@ describe("pair tailscale local target", () => {
     // A dev server on a non-loopback interface must be proxied at that
     // interface; tailscale serve defaults to 127.0.0.1 otherwise.
     expect(
-      resolveTailscaleLocalTarget({ ...baseState, devUrl: "http://192.168.1.10:5733/" }),
-    ).toEqual({ localPort: 5_733, localHost: "192.168.1.10" });
+      resolveTailscaleLocalTarget({ ...baseState, devUrl: "http://192.0.2.10:5733/" }),
+    ).toEqual({ localPort: 5_733, localHost: "192.0.2.10" });
     // URL.hostname keeps IPv6 brackets, so the serve target stays valid.
     expect(
-      resolveTailscaleLocalTarget({ ...baseState, devUrl: "http://[fd7a:115c::1]:5733/" }),
-    ).toEqual({ localPort: 5_733, localHost: "[fd7a:115c::1]" });
+      resolveTailscaleLocalTarget({ ...baseState, devUrl: "http://[2001:db8::1]:5733/" }),
+    ).toEqual({ localPort: 5_733, localHost: "[2001:db8::1]" });
   });
 
   it("rejects HTTPS dev URLs, which tailscale serve cannot proxy", () => {
@@ -168,7 +168,7 @@ describe("t3 pair", () => {
         // @effect-diagnostics-next-line preferSchemaOverJson:off - CLI JSON output is decoded as a presentation DTO.
         const credentials = JSON.parse(listed) as ReadonlyArray<{ readonly label?: string }>;
         assert.equal(credentials.length, 1);
-        assert.equal(credentials[0]?.label, "t3 pair");
+        assert.equal(credentials[0]?.label, "command-center pair");
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -205,9 +205,9 @@ describe("t3 pair", () => {
       const rendered = String(
         typeof error === "object" && error !== null && "cause" in error ? error.cause : error,
       );
-      assert.include(rendered, "No running T3 Code server found.");
-      assert.include(rendered, "npx t3 serve");
-      assert.include(rendered, "npx t3 connect");
+      assert.include(rendered, "No running Command Center server found.");
+      assert.include(rendered, "command-center serve");
+      assert.include(rendered, "command-center connect");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -236,7 +236,7 @@ describe("t3 pair", () => {
         const rendered = String(
           typeof error === "object" && error !== null && "cause" in error ? error.cause : error,
         );
-        assert.include(rendered, "No running T3 Code server found.");
+        assert.include(rendered, "No running Command Center server found.");
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -262,7 +262,7 @@ describe("t3 pair", () => {
       const rendered = String(
         typeof error === "object" && error !== null && "cause" in error ? error.cause : error,
       );
-      assert.include(rendered, "No running T3 Code server found.");
+      assert.include(rendered, "No running Command Center server found.");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

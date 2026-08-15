@@ -12,14 +12,10 @@ describe("tokenizeCliArgs", () => {
   });
 
   it("preserves literal backslashes in path values", () => {
+    const windowsHome = ["C:", "Users", "me"].join("\\");
     expect(
-      tokenizeCliArgs(String.raw`--config cacheDir=C:\Users\me --config "quoted=C:\Users\me"`),
-    ).toEqual([
-      "--config",
-      String.raw`cacheDir=C:\Users\me`,
-      "--config",
-      String.raw`quoted=C:\Users\me`,
-    ]);
+      tokenizeCliArgs(`--config cacheDir=${windowsHome} --config "quoted=${windowsHome}"`),
+    ).toEqual(["--config", `cacheDir=${windowsHome}`, "--config", `quoted=${windowsHome}`]);
   });
 });
 

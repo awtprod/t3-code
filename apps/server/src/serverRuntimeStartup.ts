@@ -12,6 +12,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -20,6 +21,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 
 import * as ServerConfig from "./config.ts";
@@ -36,6 +38,17 @@ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
+import * as StalledTurnWatchdog from "./orchestration/Services/StalledTurnWatchdog.ts";
+import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
+import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
+import {
+  type CommandCenterAuditChainVerification,
+  makeCommandCenterAuditLog,
+} from "./command-center/AuditLog.ts";
+import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator.ts";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -66,7 +79,7 @@ export class ServerRuntimeStartup extends Context.Service<
       effect: Effect.Effect<A, E>,
     ) => Effect.Effect<A, E | ServerRuntimeStartupError>;
   }
->()("t3/serverRuntimeStartup") {}
+>()("@awtprod/command-center/serverRuntimeStartup") {}
 
 interface QueuedCommand {
   readonly run: Effect.Effect<void, never>;
@@ -290,6 +303,66 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
     Effect.withSpan(`server.startup.${phase}`),
   );
 
+export class CommandCenterAuditIntegrityError extends Schema.TaggedErrorClass<CommandCenterAuditIntegrityError>()(
+  "CommandCenterAuditIntegrityError",
+  {
+    eventCount: Schema.Number,
+    headSequence: Schema.NullOr(Schema.Number),
+    invalidSequence: Schema.NullOr(Schema.Number),
+    reason: Schema.Literals(["previous-hash", "event-hash", "chain-head"]),
+  },
+) {
+  override get message(): string {
+    return "Command Center audit history failed integrity verification.";
+  }
+}
+
+/** Fail closed before starting any worker that can recover or dispatch work. */
+export const startCommandCenterWorkersAfterAuditVerification = <EV, RV, EW, RW>(
+  verification: Effect.Effect<CommandCenterAuditChainVerification, EV, RV>,
+  startWorkers: Effect.Effect<void, EW, RW>,
+) =>
+  Effect.gen(function* () {
+    const result = yield* runStartupPhase("command-center.audit.verify", verification);
+    if (!result.valid) {
+      return yield* new CommandCenterAuditIntegrityError({
+        eventCount: result.eventCount,
+        headSequence: result.headSequence,
+        invalidSequence: result.invalidSequence ?? null,
+        reason: result.reason ?? "chain-head",
+      });
+    }
+    yield* startWorkers;
+  });
+
+export const verifyConfiguredGoogleConnections = (
+  commandCenter: Pick<CommandCenterService.CommandCenterService["Service"], "queryConnections">,
+  googleReadConnector: Pick<GoogleReadConnector.GoogleReadConnector["Service"], "verify">,
+): Effect.Effect<void> =>
+  commandCenter.queryConnections({}).pipe(
+    Effect.flatMap(({ connections }) =>
+      Effect.forEach(
+        connections.filter((connection) => connection.kind === "google"),
+        (connection) =>
+          googleReadConnector
+            .verify({ spaceId: connection.spaceId, connectionId: connection.id })
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Google read connection is unavailable.", {
+                  spaceId: connection.spaceId,
+                  connectionId: connection.id,
+                  reason: cause.reason,
+                }),
+              ),
+            ),
+        { concurrency: 4, discard: true },
+      ),
+    ),
+    Effect.catch((cause) =>
+      Effect.logWarning("Could not initialize Google read connection health.", { cause }),
+    ),
+  );
+
 interface StartupOptions {
   readonly activate?: Effect.Effect<void>;
   readonly awaitAuxiliaryParked?: Effect.Effect<void>;
@@ -302,11 +375,20 @@ export const make = (options?: StartupOptions) =>
     const keybindings = yield* Keybindings.Keybindings;
     const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
     const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
+    const stalledTurnWatchdog = yield* StalledTurnWatchdog.StalledTurnWatchdog;
+    const automationScheduleRunner = yield* AutomationScheduleRunner.AutomationScheduleRunner;
+    const automationRecoveryCoordinator =
+      yield* AutomationRecoveryCoordinator.AutomationRecoveryCoordinator;
+    const runRecoveryCoordinator = yield* RunRecoveryCoordinator.RunRecoveryCoordinator;
+    const commandCenter = yield* CommandCenterService.CommandCenterService;
+    const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
+    const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
     const crypto = yield* Crypto.Crypto;
     const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
+    const commandCenterAuditLog = yield* makeCommandCenterAuditLog;
 
     const commandGate = yield* makeCommandGate;
     const httpListening = yield* Deferred.make<void>();
@@ -345,12 +427,34 @@ export const make = (options?: StartupOptions) =>
         ),
       );
 
-      yield* Effect.logDebug("startup phase: parking orchestration roots at activation");
-      yield* runStartupPhase(
-        "reactors.start",
+      yield* Effect.logDebug("startup phase: verifying audit history before workers");
+      yield* startCommandCenterWorkersAfterAuditVerification(
+        commandCenterAuditLog.verify,
         Effect.gen(function* () {
-          yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
-          yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
+          yield* runStartupPhase(
+            "reactors.start",
+            Effect.gen(function* () {
+              yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
+              yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
+              yield* forkParked(stalledTurnWatchdog.start().pipe(Scope.provide(reactorScope)));
+              yield* forkParked(automationScheduleRunner.start().pipe(Scope.provide(reactorScope)));
+              yield* forkParked(
+                automationRecoveryCoordinator.start().pipe(Scope.provide(reactorScope)),
+              );
+            }),
+          );
+          yield* forkParked(
+            verifyConfiguredGoogleConnections(commandCenter, googleReadConnector).pipe(
+              Effect.andThen(
+                commandCenter.syncConfiguration({ force: true }).pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Could not refresh Command Center configuration.", { cause }),
+                  ),
+                  Effect.repeat(Schedule.spaced(Duration.seconds(10))),
+                ),
+              ),
+            ),
+          ).pipe(Scope.provide(reactorScope));
         }),
       );
 
@@ -415,7 +519,7 @@ export const make = (options?: StartupOptions) =>
             const startupBrowserTarget = yield* resolveStartupBrowserTarget;
             if (serverConfig.mode !== "desktop") {
               yield* Effect.logInfo(
-                "Authentication required. Open T3 Code using the pairing URL.",
+                "Authentication required. Open Command Center using the pairing URL.",
               ).pipe(Effect.annotateLogs({ pairingUrl: startupBrowserTarget }));
             }
             yield* runStartupPhase("browser.open", maybeOpenBrowser(startupBrowserTarget));
@@ -443,8 +547,12 @@ export const make = (options?: StartupOptions) =>
       );
       yield* options?.activate ?? Effect.void;
 
+      yield* orchestrationReactor.reconcileOrphanedTurns;
+      yield* orchestrationReactor.drain;
+
       yield* Effect.logDebug("Accepting commands");
       yield* commandGate.signalCommandReady;
+      yield* runRecoveryCoordinator.start().pipe(Scope.provide(reactorScope));
       yield* runStartupPhase(
         "ready.publish",
         lifecycleEvents.publish({
@@ -457,6 +565,7 @@ export const make = (options?: StartupOptions) =>
           },
         }),
       );
+      yield* commandCenterReadiness.markReady;
       yield* Effect.logDebug("startup phase: complete");
     }).pipe(
       Effect.annotateSpans({
@@ -480,6 +589,7 @@ export const make = (options?: StartupOptions) =>
           return Effect.logError("server runtime startup failed", {
             cause: startupExit.cause,
           }).pipe(
+            Effect.andThen(commandCenterReadiness.markFailed),
             Effect.andThen(commandGate.failCommandReady(error)),
             Effect.andThen(options?.abort?.(error) ?? Effect.void),
           );

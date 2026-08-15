@@ -4,7 +4,10 @@ import {
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
   normalizeCompactToolLabel,
+  deriveWorkingIndicatorStatus,
   resolveAssistantMessageCopyState,
+  resolveWorkingSilenceStart,
+  WORKING_STALE_AFTER_MS,
 } from "./MessagesTimeline.logic";
 
 describe("computeMessageDurationStart", () => {
@@ -1169,5 +1172,219 @@ describe("computeStableMessagesTimelineRows", () => {
 
     expect(reordered).not.toBe(initial);
     expect(reordered.result).toEqual([initial.result[1], initial.result[0]]);
+  });
+});
+
+describe("deriveWorkingIndicatorStatus", () => {
+  const CONNECTED = "connected" as const;
+  const NOW = Date.parse("2026-01-01T00:10:00Z");
+
+  it("reports working while connected and activity is recent", () => {
+    expect(
+      deriveWorkingIndicatorStatus({
+        connectionPhase: CONNECTED,
+        lastActivityAt: "2026-01-01T00:09:30Z",
+        workStartedAt: "2026-01-01T00:00:00Z",
+        nowMs: NOW,
+      }),
+    ).toBe("working");
+  });
+
+  it.each([["connecting"], ["reconnecting"], ["offline"], ["error"], ["available"]] as const)(
+    "reports reconnecting while the connection phase is %s, even if activity is recent",
+    (phase) => {
+      expect(
+        deriveWorkingIndicatorStatus({
+          connectionPhase: phase,
+          lastActivityAt: "2026-01-01T00:09:59Z",
+          workStartedAt: "2026-01-01T00:00:00Z",
+          nowMs: NOW,
+        }),
+      ).toBe("reconnecting");
+    },
+  );
+
+  it("prefers reconnecting over stalled: silence is unknowable while disconnected", () => {
+    expect(
+      deriveWorkingIndicatorStatus({
+        connectionPhase: "offline",
+        lastActivityAt: "2026-01-01T00:00:00Z",
+        workStartedAt: "2026-01-01T00:00:00Z",
+        nowMs: NOW,
+      }),
+    ).toBe("reconnecting");
+  });
+
+  it("reports stalled once silence reaches the threshold", () => {
+    // Exactly WORKING_STALE_AFTER_MS of silence — the boundary is inclusive.
+    const lastActivityMs = NOW - WORKING_STALE_AFTER_MS;
+    expect(
+      deriveWorkingIndicatorStatus({
+        connectionPhase: CONNECTED,
+        lastActivityAt: new Date(lastActivityMs).toISOString(),
+        workStartedAt: "2026-01-01T00:00:00Z",
+        nowMs: NOW,
+      }),
+    ).toBe("stalled");
+  });
+
+  it("stays working one millisecond below the threshold", () => {
+    const lastActivityMs = NOW - WORKING_STALE_AFTER_MS + 1;
+    expect(
+      deriveWorkingIndicatorStatus({
+        connectionPhase: CONNECTED,
+        lastActivityAt: new Date(lastActivityMs).toISOString(),
+        workStartedAt: "2026-01-01T00:00:00Z",
+        nowMs: NOW,
+      }),
+    ).toBe("working");
+  });
+
+  it("measures silence from work start when the thread was idle before the turn", () => {
+    // The regression this guards: `updatedAt` still reflects yesterday's turn
+    // until the new turn's first activity is projected. Measuring from it would
+    // flash "no response for 10h" the instant the user pressed enter.
+    expect(
+      deriveWorkingIndicatorStatus({
+        connectionPhase: CONNECTED,
+        lastActivityAt: "2025-12-31T14:00:00Z",
+        workStartedAt: "2026-01-01T00:09:30Z",
+        nowMs: NOW,
+      }),
+    ).toBe("working");
+  });
+
+  it("treats a local draft (no environment connection) as working, not reconnecting", () => {
+    expect(
+      deriveWorkingIndicatorStatus({
+        connectionPhase: null,
+        lastActivityAt: "2026-01-01T00:09:30Z",
+        workStartedAt: null,
+        nowMs: NOW,
+      }),
+    ).toBe("working");
+  });
+
+  it("falls back to working when no timestamp is usable", () => {
+    expect(
+      deriveWorkingIndicatorStatus({
+        connectionPhase: CONNECTED,
+        lastActivityAt: "not-a-date",
+        workStartedAt: null,
+        nowMs: NOW,
+      }),
+    ).toBe("working");
+  });
+});
+
+describe("resolveWorkingSilenceStart", () => {
+  it("returns the later of last activity and work start", () => {
+    expect(resolveWorkingSilenceStart("2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z")).toBe(
+      "2026-01-01T00:05:00Z",
+    );
+    expect(resolveWorkingSilenceStart("2026-01-01T00:05:00Z", "2026-01-01T00:00:00Z")).toBe(
+      "2026-01-01T00:05:00Z",
+    );
+  });
+
+  it("ignores unparseable timestamps rather than treating them as the epoch", () => {
+    expect(resolveWorkingSilenceStart("not-a-date", "2026-01-01T00:05:00Z")).toBe(
+      "2026-01-01T00:05:00Z",
+    );
+    expect(resolveWorkingSilenceStart("not-a-date", null)).toBeNull();
+  });
+});
+
+describe("deriveMessagesTimelineRows working row", () => {
+  const workingRowInput = {
+    timelineEntries: [],
+    isWorking: true,
+    activeTurnStartedAt: "2026-01-01T00:00:00Z",
+    turnDiffSummaryByAssistantMessageId: new Map(),
+    revertTurnCountByUserMessageId: new Map(),
+  };
+
+  it("carries connection phase and last activity onto the working row", () => {
+    const rows = deriveMessagesTimelineRows({
+      ...workingRowInput,
+      connectionPhase: "reconnecting",
+      lastActivityAt: "2026-01-01T00:00:30Z",
+    });
+
+    expect(rows).toEqual([
+      {
+        kind: "working",
+        id: "working-indicator-row",
+        createdAt: "2026-01-01T00:00:00Z",
+        connectionPhase: "reconnecting",
+        lastActivityAt: "2026-01-01T00:00:30Z",
+      },
+    ]);
+  });
+
+  it("defaults to no connection phase and no activity when the caller omits them", () => {
+    const rows = deriveMessagesTimelineRows(workingRowInput);
+
+    expect(rows[0]).toMatchObject({ connectionPhase: null, lastActivityAt: null });
+  });
+
+  it("does not reuse a memoized working row when the connection phase changes", () => {
+    // Without connectionPhase in the comparator the row is reused and the
+    // indicator keeps claiming "Working" after the socket drops.
+    const connected = deriveMessagesTimelineRows({
+      ...workingRowInput,
+      connectionPhase: "connected",
+      lastActivityAt: "2026-01-01T00:00:30Z",
+    });
+    const initial = computeStableMessagesTimelineRows(connected, { byId: new Map(), result: [] });
+
+    const dropped = computeStableMessagesTimelineRows(
+      deriveMessagesTimelineRows({
+        ...workingRowInput,
+        connectionPhase: "reconnecting",
+        lastActivityAt: "2026-01-01T00:00:30Z",
+      }),
+      initial,
+    );
+
+    expect(dropped).not.toBe(initial);
+    expect(dropped.result[0]).toMatchObject({ connectionPhase: "reconnecting" });
+  });
+
+  it("does not reuse a memoized working row when last activity advances", () => {
+    const first = computeStableMessagesTimelineRows(
+      deriveMessagesTimelineRows({
+        ...workingRowInput,
+        connectionPhase: "connected",
+        lastActivityAt: "2026-01-01T00:00:30Z",
+      }),
+      { byId: new Map(), result: [] },
+    );
+
+    const second = computeStableMessagesTimelineRows(
+      deriveMessagesTimelineRows({
+        ...workingRowInput,
+        connectionPhase: "connected",
+        lastActivityAt: "2026-01-01T00:01:30Z",
+      }),
+      first,
+    );
+
+    expect(second).not.toBe(first);
+    expect(second.result[0]).toMatchObject({ lastActivityAt: "2026-01-01T00:01:30Z" });
+  });
+
+  it("reuses the memoized working row when nothing changed", () => {
+    const args = {
+      ...workingRowInput,
+      connectionPhase: "connected" as const,
+      lastActivityAt: "2026-01-01T00:00:30Z",
+    };
+    const first = computeStableMessagesTimelineRows(deriveMessagesTimelineRows(args), {
+      byId: new Map(),
+      result: [],
+    });
+
+    expect(computeStableMessagesTimelineRows(deriveMessagesTimelineRows(args), first)).toBe(first);
   });
 });

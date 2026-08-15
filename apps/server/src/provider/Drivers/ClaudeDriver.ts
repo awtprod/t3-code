@@ -106,6 +106,7 @@ const withInstanceIdentity =
     ...(input.displayName ? { displayName: input.displayName } : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     continuation: { groupKey: input.continuationGroupKey },
+    capabilities: { cacheTelemetry: "read-write", nativeSubagents: true, usageTelemetry: true },
   });
 
 export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {

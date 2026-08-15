@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { hardenedGitSpawningCliEnvironment } from "../vcs/HostGitSecurity.ts";
 import {
   decodeGitLabMergeRequestJson,
   decodeGitLabMergeRequestListJson,
@@ -127,6 +128,7 @@ export class GitLabCliCommandError extends Schema.TaggedErrorClass<GitLabCliComm
           case "authentication":
             return new GitLabCliAuthenticationError({ ...context, cause });
           case "not-found":
+          case "rate-limited":
           case "command-failed":
           case undefined:
             return new GitLabCliCommandError({ ...context, cause });
@@ -249,6 +251,9 @@ export class GitLabCli extends Context.Service<
       readonly cwd: string;
       readonly args: ReadonlyArray<string>;
       readonly timeoutMs?: number;
+      /** Piped to the child's stdin, for payloads that must never appear in argv. */
+      readonly stdin?: string;
+      readonly maxOutputBytes?: number;
     }) => Effect.Effect<VcsProcess.VcsProcessOutput, GitLabCliError>;
 
     readonly listMergeRequests: (input: {
@@ -295,7 +300,7 @@ export class GitLabCli extends Context.Service<
       readonly force?: boolean;
     }) => Effect.Effect<void, GitLabCliError>;
   }
->()("t3/sourceControl/GitLabCli") {}
+>()("@awtprod/command-center/sourceControl/GitLabCli") {}
 
 const RawGitLabRepositoryCloneUrlsSchema = Schema.Struct({
   path_with_namespace: TrimmedNonEmptyString,
@@ -393,16 +398,28 @@ export const make = Effect.gen(function* () {
   const run = (
     input: Parameters<GitLabCli["Service"]["execute"]>[0],
     mapError: (error: VcsError) => GitLabCliError,
-  ) =>
-    process
+  ) => {
+    const launchesGit = input.args[0] === "mr" && input.args[1] === "checkout";
+    return process
       .run({
         operation: "GitLabCli.execute",
         command: "glab",
         args: input.args,
         cwd: input.cwd,
+        ...(launchesGit
+          ? {
+              env: hardenedGitSpawningCliEnvironment("gitlab", [globalThis.process.env], {
+                writableRoots: [input.cwd],
+              }),
+              extendEnv: false,
+            }
+          : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
+        ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
       })
       .pipe(Effect.mapError(mapError));
+  };
 
   const execute: GitLabCli["Service"]["execute"] = (input) =>
     run(input, (error) =>

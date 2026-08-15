@@ -44,6 +44,7 @@ import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
+  getProviderMaintenancePresentation,
   getProviderVersionAdvisoryPresentation,
   PROVIDER_STATUS_STYLES,
   getProviderSummary,
@@ -411,7 +412,8 @@ export function ProviderInstanceCard({
   const summary = rawSummary;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
-  const updateCommand = versionAdvisory?.updateCommand ?? null;
+  const providerMaintenance = getProviderMaintenancePresentation(liveProvider?.versionAdvisory);
+  const updateCommand = providerMaintenance?.updateCommand ?? null;
   const FallbackIconComponent = driverOption?.icon;
   const displayName =
     instance.displayName?.trim() || driverOption?.label || String(instance.driver);
@@ -619,7 +621,7 @@ export function ProviderInstanceCard({
                           "size-5 rounded-sm p-0",
                           versionAdvisory.emphasis === "strong"
                             ? "text-warning hover:text-warning"
-                            : "text-update hover:text-update",
+                            : "text-update-foreground hover:text-update-foreground",
                         )}
                         aria-label="Update available — view details"
                       >
@@ -702,6 +704,32 @@ export function ProviderInstanceCard({
                   </PopoverPopup>
                 </Popover>
               ) : null}
+              {!versionAdvisory && onRunUpdate && updateCommand ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost"
+                        className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+                        disabled={isUpdating}
+                        onClick={onRunUpdate}
+                        aria-label={`Update or reinstall ${displayName}`}
+                      >
+                        {isUpdating ? (
+                          <LoaderIcon className="size-3.5 animate-spin" />
+                        ) : (
+                          <DownloadIcon className="size-3.5" />
+                        )}
+                      </Button>
+                    }
+                  />
+                  <TooltipPopup side="top">
+                    {isUpdating ? "Updating provider" : "Update or reinstall provider"}
+                  </TooltipPopup>
+                </Tooltip>
+              ) : null}
               {titleTailNode}
             </div>
             {authRowNode}
@@ -764,6 +792,31 @@ export function ProviderInstanceCard({
               />
             </div>
 
+            {onRunUpdate && updateCommand ? (
+              <div className="rounded-lg border border-border/70 bg-muted/25 p-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-foreground">Provider installation</div>
+                    <p className="mt-1 text-xs leading-snug text-muted-foreground">
+                      Update to the latest release or reinstall the current release to repair
+                      missing native files.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    className="shrink-0"
+                    disabled={isUpdating}
+                    onClick={onRunUpdate}
+                  >
+                    {isUpdating ? <LoaderIcon className="animate-spin" /> : <DownloadIcon />}
+                    {isUpdating ? "Updating" : "Update or reinstall"}
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
             {driverOption ? (
               <ProviderSettingsForm
                 definition={driverOption}
@@ -772,6 +825,40 @@ export function ProviderInstanceCard({
                 variant="card"
                 onChange={updateConfig}
               />
+            ) : null}
+
+            {driverOption !== undefined && liveProvider?.capabilities ? (
+              <div className="rounded-lg border border-border/70 bg-muted/25 p-3 text-xs">
+                <div className="font-medium text-foreground">Runtime capabilities</div>
+                <div className="mt-1.5 grid gap-1 text-muted-foreground sm:grid-cols-3">
+                  <span>
+                    Prompt cache:{" "}
+                    {liveProvider.capabilities.cacheTelemetry === "read-write"
+                      ? "reads and writes"
+                      : liveProvider.capabilities.cacheTelemetry === "read"
+                        ? "reads"
+                        : "telemetry unavailable"}
+                  </span>
+                  <span>
+                    Native subagents:{" "}
+                    {liveProvider.capabilities.nativeSubagents ? "available" : "unavailable"}
+                  </span>
+                  <span>
+                    Usage analytics:{" "}
+                    {liveProvider.capabilities.usageTelemetry
+                      ? "available when reported"
+                      : "unavailable"}
+                  </span>
+                  {liveProvider.capabilities.commandCenterAutomation !== undefined ? (
+                    <span>
+                      Command Center:{" "}
+                      {liveProvider.capabilities.commandCenterAutomation
+                        ? "qualified"
+                        : "interactive only"}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
             ) : null}
 
             {driverOption !== undefined ? (

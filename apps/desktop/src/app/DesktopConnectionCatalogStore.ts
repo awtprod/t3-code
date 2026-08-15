@@ -469,31 +469,46 @@ export const make = Effect.gen(function* () {
     return Option.some(encoded);
   });
 
-  return DesktopConnectionCatalogStore.of({
-    get: Effect.gen(function* () {
-      const document = yield* readDocument(fileSystem, catalogPath);
-      if (Option.isNone(document)) {
-        return yield* migrateLegacyCatalog;
-      }
-      if (!(yield* encryptionAvailable)) {
-        return Option.none<string>();
-      }
-      const decrypted = yield* decodeSecretBytes(catalogPath, document.value.encryptedCatalog).pipe(
-        Effect.flatMap((encryptedCatalog) =>
-          safeStorage.decryptString(encryptedCatalog).pipe(
-            Effect.mapError(
-              (cause) =>
-                new DesktopConnectionCatalogStoreProtectionError({
-                  operation: "decrypt-catalog",
-                  catalogPath,
-                  cause,
-                }),
-            ),
+  const getCatalog = Effect.gen(function* () {
+    const document = yield* readDocument(fileSystem, catalogPath);
+    if (Option.isNone(document)) {
+      return yield* migrateLegacyCatalog;
+    }
+    if (!(yield* encryptionAvailable)) {
+      return Option.none<string>();
+    }
+    const decrypted = yield* decodeSecretBytes(catalogPath, document.value.encryptedCatalog).pipe(
+      Effect.flatMap((encryptedCatalog) =>
+        safeStorage.decryptString(encryptedCatalog).pipe(
+          Effect.mapError(
+            (cause) =>
+              new DesktopConnectionCatalogStoreProtectionError({
+                operation: "decrypt-catalog",
+                catalogPath,
+                cause,
+              }),
           ),
         ),
-      );
-      return Option.some(decrypted);
-    }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get")),
+      ),
+    );
+    return Option.some(decrypted);
+  }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get"));
+
+  const get = environment.remoteOnlyBuild
+    ? getCatalog.pipe(
+        Effect.catchTag("DesktopConnectionCatalogStoreProtectionError", (error) =>
+          error.operation === "decrypt-catalog"
+            ? Effect.logWarning(
+                "Ignoring an unreadable remote-only connection catalog; reconnecting will replace it.",
+                { catalogPath },
+              ).pipe(Effect.as(Option.none<string>()))
+            : Effect.fail(error),
+        ),
+      )
+    : getCatalog;
+
+  return DesktopConnectionCatalogStore.of({
+    get,
     set: Effect.fn("desktop.connectionCatalogStore.set")(function* (catalog) {
       if (!(yield* encryptionAvailable)) {
         return false;

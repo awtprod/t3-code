@@ -44,8 +44,8 @@ function canonicalRequestTypeFromAcpKind(kind: string | "unknown"): AcpCanonical
   }
 }
 
-function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecycleItemType {
-  switch (kind) {
+function canonicalItemTypeFromAcpToolCall(toolCall: AcpToolCallState): ToolLifecycleItemType {
+  switch (toolCall.kind) {
     case "execute":
       return "command_execution";
     case "edit":
@@ -56,8 +56,24 @@ function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecyc
     case "fetch":
       return "web_search";
     default:
-      return "dynamic_tool_call";
+      break;
   }
+  const metadata = [
+    toolCall.kind,
+    toolCall.title,
+    typeof toolCall.data.name === "string" ? toolCall.data.name : undefined,
+    typeof toolCall.data.toolName === "string" ? toolCall.data.toolName : undefined,
+    typeof toolCall.data.type === "string" ? toolCall.data.type : undefined,
+    typeof toolCall.data.action === "string" ? toolCall.data.action : undefined,
+  ]
+    .filter((value): value is string => value !== undefined)
+    .join(" ")
+    .toLowerCase();
+  return /(^|[^a-z])(agent|subagent|delegate|delegation|subtask|taskoutput)([^a-z]|$)/u.test(
+    metadata,
+  )
+    ? "collab_agent_tool_call"
+    : "dynamic_tool_call";
 }
 
 function runtimeItemStatusFromAcpToolStatus(
@@ -177,7 +193,7 @@ export function makeAcpToolCallEvent(input: {
     turnId: input.turnId,
     itemId: RuntimeItemId.make(input.toolCall.toolCallId),
     payload: {
-      itemType: canonicalItemTypeFromAcpToolKind(input.toolCall.kind),
+      itemType: canonicalItemTypeFromAcpToolCall(input.toolCall),
       ...(runtimeStatus ? { status: runtimeStatus } : {}),
       ...(input.toolCall.title ? { title: input.toolCall.title } : {}),
       ...(input.toolCall.detail ? { detail: input.toolCall.detail } : {}),

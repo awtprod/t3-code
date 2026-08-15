@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { RepositoryId, SpaceId } from "@command-center/core";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/unstable/http";
 
@@ -54,6 +55,45 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
   }),
 );
 
+it.effect("binds project and working-directory scope into the issued credential", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-project-scope"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      projectId: ProjectId.make("project-a"),
+      cwd: "  /work/project-a  ",
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const resolved = yield* registry.resolve(token);
+
+    expect(resolved?.projectId).toBe("project-a");
+    expect(resolved?.cwd).toBe("/work/project-a");
+  }),
+);
+
+it.effect("derives read-only and writable database capabilities at credential issue time", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issueCapabilities = Effect.fnUntraced(function* (databaseAccess: "read" | "write") {
+      const issued = yield* registry.issue({
+        threadId: ThreadId.make(`thread-database-${databaseAccess}`),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        databaseAccess,
+      });
+      const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      return (yield* registry.resolve(token))?.capabilities ?? new Set();
+    });
+
+    expect([...(yield* issueCapabilities("read"))]).toEqual(["preview", "database.read"]);
+    expect([...(yield* issueCapabilities("write"))]).toEqual([
+      "preview",
+      "database.read",
+      "database.write",
+    ]);
+  }),
+);
+
 it.effect("builds MCP endpoints from the bound server host", () =>
   Effect.gen(function* () {
     const cases = [
@@ -85,6 +125,51 @@ it.effect("expires credentials once their session stops showing signs of life", 
     const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
     timestamp += 101;
     expect(yield* registry.resolve(token)).toBeUndefined();
+  }),
+);
+
+it.effect("binds registered Command Center capabilities to one Space and repository", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-command-center");
+    const spaceId = SpaceId.make("space-example");
+    const repositoryId = RepositoryId.make("repository-example");
+    yield* registry.registerThreadScope(threadId, {
+      spaceId,
+      repositoryId,
+      capabilities: new Set(["cc.items.read", "cc.runs.start"]),
+      memoryWriteMode: "remember",
+    });
+
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const resolved = yield* registry.resolve(token);
+
+    expect(resolved?.spaceId).toBe(spaceId);
+    expect(resolved?.repositoryId).toBe(repositoryId);
+    expect(resolved?.memoryWriteMode).toBe("remember");
+    expect([...((resolved?.capabilities ?? new Set()) as ReadonlySet<string>)]).toEqual([
+      "cc.items.read",
+      "cc.runs.start",
+    ]);
+  }),
+);
+
+it.effect("does not accept Memory promotion mode from the credential request", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const forgedRequest = {
+      threadId: ThreadId.make("thread-forged-memory-mode"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      memoryWriteMode: "remember" as const,
+    };
+    const issued = yield* registry.issue(forgedRequest);
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+
+    expect((yield* registry.resolve(token))?.memoryWriteMode).toBe("propose");
   }),
 );
 

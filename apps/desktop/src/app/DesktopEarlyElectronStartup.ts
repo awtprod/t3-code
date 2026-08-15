@@ -50,16 +50,19 @@ function resolveEarlyDesktopSettingsPath(input: {
   readonly joinPath: JoinPath;
 }): string {
   const t3Home = Option.fromUndefinedOr(input.env.T3CODE_HOME);
+  const commandCenterHome = Option.fromUndefinedOr(input.env.COMMAND_CENTER_HOME);
   const baseDir = resolveDesktopBaseDir({
     homeDirectory: input.homeDirectory,
     joinPath: input.joinPath,
     t3Home,
+    commandCenterHome,
   });
   const stateDir = resolveDesktopStateDir({
     baseDir,
     isDevelopment: isDevelopmentEnvironment(input.env),
     joinPath: input.joinPath,
     t3Home,
+    commandCenterHome,
   });
   return input.joinPath(stateDir, "desktop-settings.json");
 }
@@ -81,7 +84,7 @@ export function resolveEarlyLinuxElectronOptions(
 ): EarlyLinuxElectronOptions {
   const preference = resolveEarlyLinuxPasswordStorePreference(input);
   return {
-    linuxWmClass: isDevelopmentEnvironment(input.env) ? "t3code-dev" : "t3code",
+    linuxWmClass: isDevelopmentEnvironment(input.env) ? "commandcenter-dev" : "command-center",
     passwordStore: resolveLinuxPasswordStoreSwitch({
       preference,
       env: input.env,

@@ -6,7 +6,13 @@
  *
  * @module ProjectionProjectRepository
  */
-import { IsoDateTime, ModelSelection, ProjectId, ProjectScript } from "@t3tools/contracts";
+import {
+  IsoDateTime,
+  ModelSelection,
+  ProjectId,
+  ProjectScript,
+  ThreadEnvMode,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
@@ -19,6 +25,8 @@ export const ProjectionProject = Schema.Struct({
   title: Schema.String,
   workspaceRoot: Schema.String,
   defaultModelSelection: Schema.NullOr(ModelSelection),
+  defaultThreadEnvMode: Schema.NullOr(ThreadEnvMode),
+  faviconPath: Schema.optional(Schema.NullOr(Schema.String)),
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -78,4 +86,6 @@ export interface ProjectionProjectRepositoryShape {
 export class ProjectionProjectRepository extends Context.Service<
   ProjectionProjectRepository,
   ProjectionProjectRepositoryShape
->()("t3/persistence/Services/ProjectionProjects/ProjectionProjectRepository") {}
+>()(
+  "@awtprod/command-center/persistence/Services/ProjectionProjects/ProjectionProjectRepository",
+) {}

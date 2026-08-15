@@ -291,9 +291,18 @@ function ThreadRouteContent(
             modelSelection: composer.modelSelection ?? selectedThread.modelSelection,
             runtimeMode: composer.runtimeMode ?? selectedThread.runtimeMode,
             interactionMode: composer.interactionMode ?? selectedThread.interactionMode,
+            routingMode: composer.routingMode,
+            efficiencyTier: composer.efficiencyTier,
           }
         : null,
-    [composer.interactionMode, composer.modelSelection, composer.runtimeMode, selectedThread],
+    [
+      composer.efficiencyTier,
+      composer.interactionMode,
+      composer.modelSelection,
+      composer.routingMode,
+      composer.runtimeMode,
+      selectedThread,
+    ],
   );
 
   /* ─── Native header theming ──────────────────────────────────────── */
@@ -785,7 +794,6 @@ function ThreadRouteContent(
           connectionStateLabel={routeConnectionState}
           threadSyncStatus={selectedThreadDetailState.status}
           loadEarlier={loadEarlierTurns}
-          activeThreadBusy={composer.activeThreadBusy}
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}
@@ -804,6 +812,7 @@ function ThreadRouteContent(
           onUpdateThreadModelSelection={composer.onUpdateModelSelection}
           onUpdateThreadRuntimeMode={composer.onUpdateRuntimeMode}
           onUpdateThreadInteractionMode={composer.onUpdateInteractionMode}
+          onUpdateThreadEfficiencyRouting={composer.onUpdateEfficiencyRouting}
           onRespondToApproval={requests.onRespondToApproval}
           onSelectUserInputOption={requests.onSelectUserInputOption}
           onChangeUserInputCustomAnswer={requests.onChangeUserInputCustomAnswer}

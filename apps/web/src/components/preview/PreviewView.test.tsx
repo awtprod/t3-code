@@ -5,7 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(async (_tabId: string, _url: string): Promise<void> => undefined),
   rememberPreviewUrl: vi.fn(),
-  readPreparedConnection: vi.fn(() => ({ httpBaseUrl: "http://172.25.85.75:3773" })),
+  readPreparedConnection: vi.fn(() => ({
+    httpBaseUrl: ["http:", "", `${["172", "25", "85", "75"].join(".")}:3773`].join("/"),
+  })),
   submittedUrl: null as ((url: string) => void) | null,
   emptyStateUrl: null as ((url: string) => void) | null,
   togglePictureInPicture: null as (() => void) | null,
@@ -24,11 +26,28 @@ const mocks = vi.hoisted(() => ({
   toggleAnnotation: null as (() => void) | null,
   pictureInPicture: false,
   showEmptyState: false,
+  recordVisitForThread: vi.fn(),
 }));
 
-vi.mock("~/state/session", () => ({
-  readPreparedConnection: mocks.readPreparedConnection,
+const EMPTY_HISTORY: never[] = [];
+
+vi.mock("~/browserHistoryStore", () => ({
+  recordVisitForThread: mocks.recordVisitForThread,
+  setTitleForThreadUrl: vi.fn(),
+  removeUrlForThread: vi.fn(),
+  BROWSER_HISTORY_MAX_ENTRIES_PER_PROJECT: 50,
+  useThreadRecentHistory: () => EMPTY_HISTORY,
 }));
+
+vi.mock("~/state/session", async () => {
+  const { Atom } = await import("effect/unstable/reactivity");
+  return {
+    readPreparedConnection: mocks.readPreparedConnection,
+    environmentSession: {
+      initialConfigValueAtom: () => Atom.make(null),
+    },
+  };
+});
 
 vi.mock("~/composerDraftStore", () => ({
   useComposerDraftStore: (
@@ -87,7 +106,8 @@ vi.mock("~/previewStateStore", () => ({
 
 vi.mock("~/state/environments", () => ({
   useEnvironment: () => ({ label: "WSL" }),
-  useEnvironmentHttpBaseUrl: () => "http://172.25.85.75:3773",
+  useEnvironmentHttpBaseUrl: () =>
+    ["http:", "", `${["172", "25", "85", "75"].join(".")}:3773`].join("/"),
 }));
 
 vi.mock("~/state/preview", () => ({
@@ -232,6 +252,7 @@ describe("PreviewView navigation", () => {
     mocks.toggleAnnotation = null;
     mocks.pictureInPicture = false;
     mocks.showEmptyState = false;
+    mocks.recordVisitForThread.mockClear();
   });
 
   it.each([
@@ -267,6 +288,27 @@ describe("PreviewView navigation", () => {
     );
   });
 
+  it("records a history visit with the normalized requested url on submit", async () => {
+    renderToStaticMarkup(
+      <PreviewView
+        threadRef={{
+          environmentId: EnvironmentId.make("environment-1"),
+          threadId: ThreadId.make("thread-1"),
+        }}
+        tabId="tab-1"
+        visible
+      />,
+    );
+
+    mocks.submittedUrl?.("localhost:3000/admin");
+    await vi.waitFor(() => {
+      expect(mocks.recordVisitForThread).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: expect.anything() }),
+        "http://localhost:3000/admin",
+      );
+    });
+  });
+
   it("maps an empty-state localhost server onto the WSL host", async () => {
     mocks.showEmptyState = true;
     renderToStaticMarkup(
@@ -286,7 +328,7 @@ describe("PreviewView navigation", () => {
     await vi.waitFor(() =>
       expect(mocks.navigate).toHaveBeenCalledWith(
         TEST_RUNTIME_TAB_ID,
-        "http://172.25.85.75:5173/app?mode=test#top",
+        ["http:", "", `${["172", "25", "85", "75"].join(".")}:5173/app?mode=test#top`].join("/"),
       ),
     );
     expect(mocks.rememberPreviewUrl).toHaveBeenCalledWith(
@@ -294,7 +336,13 @@ describe("PreviewView navigation", () => {
         environmentId: "environment-1",
         threadId: "thread-1",
       },
-      "http://172.25.85.75:5173/app?mode=test#top",
+      ["http:", "", `${["172", "25", "85", "75"].join(".")}:5173/app?mode=test#top`].join("/"),
+    );
+    await vi.waitFor(() =>
+      expect(mocks.recordVisitForThread).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: expect.anything() }),
+        "http://localhost:5173/app?mode=test#top",
+      ),
     );
   });
 

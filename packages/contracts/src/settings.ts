@@ -2,7 +2,8 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { ProjectId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { ThreadEnvMode } from "./environment.ts";
 import {
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
@@ -10,6 +11,8 @@ import {
 } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
+import { UsagePricingOverride } from "./usage.ts";
+import { EfficiencySettings } from "./efficiency.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -171,9 +174,15 @@ export const ClientSettingsSchema = Schema.Struct({
   // default UI; this beta flag restores it (plus the /plan and /default slash
   // commands) for users who still rely on the old workflow.
   planModeEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Legacy sidebar (the original per-project tree). Deliberately a fresh key
+  // (was `sidebarV2Enabled` + `sidebarV2ConfiguredByUser`): decoding drops the
+  // old keys, so everyone, including prior beta opt-outs, resets to the new
+  // default sidebar.
+  legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
+  sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
   ),
@@ -190,13 +199,6 @@ export const ClientSettingsSchema = Schema.Struct({
   sidebarThreadPreviewCount: SidebarThreadPreviewCount.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT)),
   ),
-  sidebarV2Enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  // Whether `sidebarV2Enabled` reflects an explicit choice in Settings → Beta.
-  // Client settings persist as a whole blob, so every user who has ever touched
-  // any setting already has `sidebarV2Enabled: false` stored — without this bit
-  // there is no way to tell that apart from "left alone", and a channel-derived
-  // default could never reach them. Mirrors `updateChannelConfiguredByUser`.
-  sidebarV2ConfiguredByUser: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   timestampFormat: TimestampFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TIMESTAMP_FORMAT)),
   ),
@@ -208,8 +210,9 @@ export const DEFAULT_CLIENT_SETTINGS: ClientSettings = Schema.decodeSync(ClientS
 
 // ── Server Settings (server-authoritative) ────────────────────
 
-export const ThreadEnvMode = Schema.Literals(["local", "worktree"]);
-export type ThreadEnvMode = typeof ThreadEnvMode.Type;
+// Moved to environment.ts so orchestration contracts can use it without an
+// import cycle; re-exported here for compatibility with deep imports.
+export { ThreadEnvMode } from "./environment.ts";
 
 const makeBinaryPathSetting = (fallback: string) =>
   TrimmedString.pipe(
@@ -362,6 +365,36 @@ export const ClaudeSettings = makeProviderSettingsSchema(
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
 
+export const KimiSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("kimi").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to the Kimi Code binary used by this instance.",
+        providerSettingsForm: { placeholder: "kimi", clearWhenEmpty: "omit" },
+      }),
+    ),
+    homePath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "KIMI_CODE_HOME path",
+        description: "Custom Kimi Code home and configuration directory.",
+        providerSettingsForm: { placeholder: "~/.kimi-code", clearWhenEmpty: "omit" },
+      }),
+    ),
+    customModels: Schema.Array(Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  { order: ["binaryPath", "homePath"] },
+);
+export type KimiSettings = typeof KimiSettings.Type;
+
 export const CursorSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -477,6 +510,19 @@ export const ObservabilitySettings = Schema.Struct({
 });
 export type ObservabilitySettings = typeof ObservabilitySettings.Type;
 
+export const SupabaseDatabaseConnection = Schema.Struct({
+  provider: Schema.Literal("supabase"),
+  workspaceRoot: TrimmedNonEmptyString,
+  projectRef: TrimmedNonEmptyString,
+  readOnly: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  accessToken: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  accessTokenRedacted: Schema.optional(Schema.Boolean),
+});
+export type SupabaseDatabaseConnection = typeof SupabaseDatabaseConnection.Type;
+
+export const DatabaseConnection = SupabaseDatabaseConnection;
+export type DatabaseConnection = typeof DatabaseConnection.Type;
+
 export const SourceControlWritingStyleMode = Schema.Literals([
   "repo_conventions",
   "conventional_commits",
@@ -538,7 +584,13 @@ export const BackgroundActivitySettings = Schema.Struct({
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
 export const ServerSettings = Schema.Struct({
-  enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  efficiency: EfficiencySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  // Legacy token-by-token assistant output. Deliberately a fresh key (was
+  // `enableAssistantStreaming`): decoding drops the old key, so everyone,
+  // including prior opt-ins, resets to the buffered default.
+  enableLegacyTokenStreaming: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,
   // Legacy flat fields retained for old settings files and old clients. New
@@ -593,6 +645,7 @@ export const ServerSettings = Schema.Struct({
   providers: Schema.Struct({
     codex: CodexSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     claudeAgent: ClaudeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    kimi: KimiSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     cursor: CursorSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
@@ -605,7 +658,13 @@ export const ServerSettings = Schema.Struct({
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  databaseConnections: Schema.Record(ProjectId, DatabaseConnection).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  usagePricingOverrides: Schema.Array(UsagePricingOverride).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -631,6 +690,7 @@ export class ServerSettingsError extends Schema.TaggedErrorClass<ServerSettingsE
     operation: ServerSettingsOperation,
     providerInstanceId: Schema.optional(Schema.String),
     environmentVariable: Schema.optional(Schema.String),
+    databaseProjectId: Schema.optional(Schema.String),
     cause: Schema.Defect(),
   },
 ) {
@@ -641,7 +701,9 @@ export class ServerSettingsError extends Schema.TaggedErrorClass<ServerSettingsE
       this.environmentVariable === undefined
         ? ""
         : ` and environment variable ${this.environmentVariable}`;
-    return `Server settings ${this.operation} failed${provider}${variable} at ${this.settingsPath}.`;
+    const database =
+      this.databaseProjectId === undefined ? "" : ` for database project ${this.databaseProjectId}`;
+    return `Server settings ${this.operation} failed${provider}${variable}${database} at ${this.settingsPath}.`;
   }
 }
 
@@ -678,6 +740,13 @@ const ClaudeSettingsPatch = Schema.Struct({
   launchArgs: Schema.optionalKey(TrimmedString),
 });
 
+const KimiSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  homePath: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+
 const CursorSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
@@ -701,7 +770,8 @@ const OpenCodeSettingsPatch = Schema.Struct({
 
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
-  enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
+  efficiency: Schema.optionalKey(EfficiencySettings),
+  enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
@@ -736,6 +806,7 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Struct({
       codex: Schema.optionalKey(CodexSettingsPatch),
       claudeAgent: Schema.optionalKey(ClaudeSettingsPatch),
+      kimi: Schema.optionalKey(KimiSettingsPatch),
       cursor: Schema.optionalKey(CursorSettingsPatch),
       grok: Schema.optionalKey(GrokSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
@@ -746,6 +817,10 @@ export const ServerSettingsPatch = Schema.Struct({
   // patches risk leaving driver-specific config in a half-merged state.
   // The web UI sends a fully-formed map every time it edits this field.
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
+  // Database bindings are also replaced as a whole. Credentials in redacted
+  // entries are materialized and persisted by the server settings service.
+  databaseConnections: Schema.optionalKey(Schema.Record(ProjectId, DatabaseConnection)),
+  usagePricingOverrides: Schema.optionalKey(Schema.Array(UsagePricingOverride)),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
@@ -786,7 +861,9 @@ export const ClientSettingsPatch = Schema.Struct({
     ),
   ),
   planModeEnabled: Schema.optionalKey(Schema.Boolean),
+  legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
+  sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),
@@ -794,8 +871,6 @@ export const ClientSettingsPatch = Schema.Struct({
   sidebarProjectSortOrder: Schema.optionalKey(SidebarProjectSortOrder),
   sidebarThreadSortOrder: Schema.optionalKey(SidebarThreadSortOrder),
   sidebarThreadPreviewCount: Schema.optionalKey(SidebarThreadPreviewCount),
-  sidebarV2Enabled: Schema.optionalKey(Schema.Boolean),
-  sidebarV2ConfiguredByUser: Schema.optionalKey(Schema.Boolean),
   timestampFormat: Schema.optionalKey(TimestampFormat),
   wordWrap: Schema.optionalKey(Schema.Boolean),
 });

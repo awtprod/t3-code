@@ -1,4 +1,9 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
+import type {
+  OrchestrationEvent,
+  OrchestrationReadModel,
+  ThreadId,
+  ThreadSessionTerminalTurnTransition,
+} from "@t3tools/contracts";
 import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -24,6 +29,7 @@ import {
   ThreadRuntimeModeSetPayload,
   ThreadSettledPayload,
   ThreadPinnedPayload,
+  ThreadPinReorderedPayload,
   ThreadSnoozedPayload,
   ThreadUnpinnedPayload,
   ThreadUnarchivedPayload,
@@ -32,6 +38,8 @@ import {
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
+  ThreadTurnInterruptRequestedPayload,
+  ThreadTurnStartRequestedPayload,
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
@@ -45,9 +53,8 @@ function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error"
 }
 
 /**
- * Turn state to settle a still-running latest turn with when its session
- * leaves the "running" status, or null while the session is (re)starting or
- * running and the turn must stay unsettled.
+ * Turn state to apply when a session update explicitly names the still-running
+ * latest turn to settle, or null while the session is (re)starting or running.
  */
 function settledTurnStateForSessionStatus(
   status: OrchestrationSession["status"],
@@ -65,6 +72,47 @@ function settledTurnStateForSessionStatus(
     case "running":
       return null;
   }
+}
+
+function normalizeTerminalTurnTransitions(
+  payload: Extract<OrchestrationEvent, { type: "thread.session-set" }>["payload"],
+  legacyTerminalState: "completed" | "interrupted" | "error" | null,
+): Array<ThreadSessionTerminalTurnTransition> {
+  const transitions = [
+    ...(payload.terminalTurnTransitions ?? []),
+    ...(payload.terminalTurnTransition === undefined ? [] : [payload.terminalTurnTransition]),
+    ...(payload.settledTurnId === undefined || legacyTerminalState === null
+      ? []
+      : [{ turnId: payload.settledTurnId, state: legacyTerminalState }]),
+  ];
+  const seenTurnIds = new Set<string>();
+  return transitions.filter((transition) => {
+    if (seenTurnIds.has(transition.turnId)) {
+      return false;
+    }
+    seenTurnIds.add(transition.turnId);
+    return true;
+  });
+}
+
+function applyTerminalTransitionToLatestTurn(
+  latestTurn: OrchestrationThread["latestTurn"],
+  terminalTurnTransitions: ReadonlyArray<ThreadSessionTerminalTurnTransition>,
+  completedAt: string,
+): OrchestrationThread["latestTurn"] {
+  if (latestTurn?.state !== "running") {
+    return latestTurn;
+  }
+  const matchingTerminalTransition = terminalTurnTransitions.find(
+    (transition) => transition.turnId === latestTurn.turnId,
+  );
+  return matchingTerminalTransition === undefined
+    ? latestTurn
+    : {
+        ...latestTurn,
+        state: matchingTerminalTransition.state,
+        completedAt,
+      };
 }
 
 function updateThread(
@@ -213,6 +261,8 @@ export function projectEvent(
             title: payload.title,
             workspaceRoot: payload.workspaceRoot,
             defaultModelSelection: payload.defaultModelSelection,
+            defaultThreadEnvMode: null,
+            faviconPath: payload.faviconPath ?? null,
             scripts: payload.scripts,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -244,6 +294,12 @@ export function projectEvent(
                     : {}),
                   ...(payload.defaultModelSelection !== undefined
                     ? { defaultModelSelection: payload.defaultModelSelection }
+                    : {}),
+                  ...(payload.defaultThreadEnvMode !== undefined
+                    ? { defaultThreadEnvMode: payload.defaultThreadEnvMode }
+                    : {}),
+                  ...(payload.faviconPath !== undefined
+                    ? { faviconPath: payload.faviconPath }
                     : {}),
                   ...(payload.scripts !== undefined ? { scripts: payload.scripts } : {}),
                   updatedAt: payload.updatedAt,
@@ -284,6 +340,10 @@ export function projectEvent(
             projectId: payload.projectId,
             title: payload.title,
             modelSelection: payload.modelSelection,
+            routingMode: payload.routingMode,
+            ...(payload.efficiencyTier === undefined
+              ? {}
+              : { efficiencyTier: payload.efficiencyTier }),
             runtimeMode: payload.runtimeMode,
             interactionMode: payload.interactionMode,
             branch: payload.branch,
@@ -402,6 +462,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             pinnedAt: payload.pinnedAt,
+            ...(payload.pinOrderKey !== undefined ? { pinOrderKey: payload.pinOrderKey } : {}),
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -413,6 +474,20 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             pinnedAt: null,
+            // Unpin clears the slot: re-pinning is "pin again", not "restore
+            // an ancient position".
+            pinOrderKey: null,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.pin-reordered":
+      return decodeForEvent(ThreadPinReorderedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            pinOrderKey: payload.orderKey,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -429,6 +504,10 @@ export function projectEvent(
               : {}),
             ...(payload.modelSelection !== undefined
               ? { modelSelection: payload.modelSelection }
+              : {}),
+            ...(payload.routingMode !== undefined ? { routingMode: payload.routingMode } : {}),
+            ...(payload.efficiencyTier !== undefined
+              ? { efficiencyTier: payload.efficiencyTier }
               : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
@@ -448,6 +527,28 @@ export function projectEvent(
         })),
       );
 
+    case "thread.turn-start-requested":
+      return decodeForEvent(
+        ThreadTurnStartRequestedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            ...(payload.modelSelection !== undefined
+              ? { modelSelection: payload.modelSelection }
+              : {}),
+            ...(payload.routingMode !== undefined ? { routingMode: payload.routingMode } : {}),
+            ...(payload.efficiencyTier !== undefined
+              ? { efficiencyTier: payload.efficiencyTier }
+              : {}),
+            updatedAt: event.occurredAt,
+          }),
+        })),
+      );
+
     case "thread.interaction-mode-set":
       return decodeForEvent(
         ThreadInteractionModeSetPayload,
@@ -463,6 +564,36 @@ export function projectEvent(
           }),
         })),
       );
+
+    case "thread.turn-interrupt-requested":
+      return Effect.gen(function* () {
+        const payload = yield* decodeForEvent(
+          ThreadTurnInterruptRequestedPayload,
+          event.payload,
+          event.type,
+          "payload",
+        );
+        if (payload.turnId === undefined) {
+          return nextBase;
+        }
+        const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+        const latestTurn = thread?.latestTurn;
+        if (thread === undefined || latestTurn?.turnId !== payload.turnId) {
+          return nextBase;
+        }
+        return {
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            latestTurn: {
+              ...latestTurn,
+              state: "interrupted",
+              startedAt: latestTurn.startedAt ?? payload.createdAt,
+              completedAt: latestTurn.completedAt ?? payload.createdAt,
+            },
+            updatedAt: event.occurredAt,
+          }),
+        };
+      });
 
     case "thread.message-sent":
       return Effect.gen(function* () {
@@ -544,45 +675,56 @@ export function projectEvent(
           event.type,
           "session",
         );
+        const legacyTerminalState = settledTurnStateForSessionStatus(session.status);
+        const terminalTurnTransitions = normalizeTerminalTurnTransitions(
+          payload,
+          legacyTerminalState,
+        );
+        if (
+          terminalTurnTransitions.length === 0 &&
+          payload.terminalTurnTransitions === undefined &&
+          payload.pendingTurnStartAdoption === undefined &&
+          thread.latestTurn?.state === "running" &&
+          legacyTerminalState !== null
+        ) {
+          terminalTurnTransitions.push({
+            turnId: thread.latestTurn.turnId,
+            state: legacyTerminalState,
+          });
+        }
 
-        // Leaving the "running" session status is the turn-end signal: settle
-        // a still-running latest turn so its duration reflects the whole turn.
-        const settledTurnState = settledTurnStateForSessionStatus(session.status);
+        let latestTurn = applyTerminalTransitionToLatestTurn(
+          thread.latestTurn,
+          terminalTurnTransitions,
+          session.updatedAt,
+        );
+        if (session.status === "running" && session.activeTurnId !== null) {
+          const existingSameTurn = latestTurn?.turnId === session.activeTurnId ? latestTurn : null;
+          const existingTurnIsTerminal =
+            existingSameTurn !== null && existingSameTurn.state !== "running";
+          const matchingTerminalTransition = terminalTurnTransitions.find(
+            (transition) => transition.turnId === session.activeTurnId,
+          );
+          if (!existingTurnIsTerminal) {
+            latestTurn = {
+              turnId: session.activeTurnId,
+              state: matchingTerminalTransition?.state ?? "running",
+              requestedAt: existingSameTurn?.requestedAt ?? session.updatedAt,
+              startedAt: existingSameTurn?.startedAt ?? session.updatedAt,
+              completedAt:
+                matchingTerminalTransition === undefined
+                  ? null
+                  : (existingSameTurn?.completedAt ?? session.updatedAt),
+              assistantMessageId: existingSameTurn?.assistantMessageId ?? null,
+            };
+          }
+        }
+
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             session,
-            latestTurn:
-              session.status === "running" && session.activeTurnId !== null
-                ? {
-                    turnId: session.activeTurnId,
-                    state: "running",
-                    requestedAt:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? thread.latestTurn.requestedAt
-                        : session.updatedAt,
-                    startedAt:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? (thread.latestTurn.startedAt ?? session.updatedAt)
-                        : session.updatedAt,
-                    completedAt: null,
-                    assistantMessageId:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? thread.latestTurn.assistantMessageId
-                        : null,
-                  }
-                : thread.latestTurn !== null &&
-                    thread.latestTurn.state === "running" &&
-                    settledTurnState !== null
-                  ? {
-                      ...thread.latestTurn,
-                      state: settledTurnState,
-                      // A running turn's completedAt can only hold a mid-turn
-                      // placeholder checkpoint timestamp — the session leaving
-                      // "running" is the authoritative turn end.
-                      completedAt: session.updatedAt,
-                    }
-                  : thread.latestTurn,
+            latestTurn,
             updatedAt: event.occurredAt,
           }),
         };

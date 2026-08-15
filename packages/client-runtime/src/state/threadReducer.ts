@@ -10,6 +10,7 @@ import type {
   OrchestrationSession,
   OrchestrationThread,
   OrchestrationThreadActivity,
+  ThreadSessionTerminalTurnTransition,
   TurnId,
 } from "@t3tools/contracts";
 
@@ -173,6 +174,9 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           pinnedAt: event.payload.pinnedAt,
+          ...(event.payload.pinOrderKey !== undefined
+            ? { pinOrderKey: event.payload.pinOrderKey }
+            : {}),
           updatedAt: event.payload.updatedAt,
         },
       };
@@ -183,6 +187,17 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           pinnedAt: null,
+          pinOrderKey: null,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
+
+    case "thread.pin-reordered":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          pinOrderKey: event.payload.orderKey,
           updatedAt: event.payload.updatedAt,
         },
       };
@@ -366,40 +381,54 @@ export function applyThreadDetailEvent(
 
     // ── Session ─────────────────────────────────────────────────────
     case "thread.session-set": {
-      // Leaving the "running" session status is the turn-end signal: settle a
-      // still-running latest turn so its duration reflects the whole turn.
-      const settledTurnState = settledTurnStateForSessionStatus(event.payload.session.status);
-      const latestTurn: OrchestrationLatestTurn | null =
-        event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
-          ? {
-              turnId: event.payload.session.activeTurnId,
-              state: "running",
-              requestedAt:
-                thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                  ? thread.latestTurn.requestedAt
-                  : event.payload.session.updatedAt,
-              startedAt:
-                thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                  ? (thread.latestTurn.startedAt ?? event.payload.session.updatedAt)
-                  : event.payload.session.updatedAt,
-              completedAt: null,
-              assistantMessageId:
-                thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                  ? thread.latestTurn.assistantMessageId
-                  : null,
-            }
-          : thread.latestTurn !== null &&
-              thread.latestTurn.state === "running" &&
-              settledTurnState !== null
-            ? {
-                ...thread.latestTurn,
-                state: settledTurnState,
-                // A running turn's completedAt can only hold a mid-turn
-                // placeholder checkpoint timestamp — the session leaving
-                // "running" is the authoritative turn end.
-                completedAt: event.payload.session.updatedAt,
-              }
-            : thread.latestTurn;
+      const legacyTerminalState = settledTurnStateForSessionStatus(event.payload.session.status);
+      const terminalTurnTransitions = normalizeTerminalTurnTransitions(
+        event.payload,
+        legacyTerminalState,
+      );
+      if (
+        terminalTurnTransitions.length === 0 &&
+        event.payload.terminalTurnTransitions === undefined &&
+        event.payload.pendingTurnStartAdoption === undefined &&
+        thread.latestTurn?.state === "running" &&
+        legacyTerminalState !== null
+      ) {
+        terminalTurnTransitions.push({
+          turnId: thread.latestTurn.turnId,
+          state: legacyTerminalState,
+        });
+      }
+      let latestTurn = applyTerminalTransitionToLatestTurn(
+        thread.latestTurn,
+        terminalTurnTransitions,
+        event.payload.session.updatedAt,
+      );
+
+      if (
+        event.payload.session.status === "running" &&
+        event.payload.session.activeTurnId !== null
+      ) {
+        const activeTurnId = event.payload.session.activeTurnId;
+        const existingSameTurn = latestTurn?.turnId === activeTurnId ? latestTurn : null;
+        const existingTurnIsTerminal =
+          existingSameTurn !== null && existingSameTurn.state !== "running";
+        const matchingTerminalTransition = terminalTurnTransitions.find(
+          (transition) => transition.turnId === activeTurnId,
+        );
+        if (!existingTurnIsTerminal) {
+          latestTurn = {
+            turnId: activeTurnId,
+            state: matchingTerminalTransition?.state ?? "running",
+            requestedAt: existingSameTurn?.requestedAt ?? event.payload.session.updatedAt,
+            startedAt: existingSameTurn?.startedAt ?? event.payload.session.updatedAt,
+            completedAt:
+              matchingTerminalTransition === undefined
+                ? null
+                : (existingSameTurn?.completedAt ?? event.payload.session.updatedAt),
+            assistantMessageId: existingSameTurn?.assistantMessageId ?? null,
+          };
+        }
+      }
 
       return {
         kind: "updated",
@@ -590,6 +619,47 @@ export function applyThreadDetailEvent(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+function normalizeTerminalTurnTransitions(
+  payload: Extract<OrchestrationEvent, { type: "thread.session-set" }>["payload"],
+  legacyTerminalState: "completed" | "interrupted" | "error" | null,
+): Array<ThreadSessionTerminalTurnTransition> {
+  const transitions = [
+    ...(payload.terminalTurnTransitions ?? []),
+    ...(payload.terminalTurnTransition === undefined ? [] : [payload.terminalTurnTransition]),
+    ...(payload.settledTurnId === undefined || legacyTerminalState === null
+      ? []
+      : [{ turnId: payload.settledTurnId, state: legacyTerminalState }]),
+  ];
+  const seenTurnIds = new Set<string>();
+  return transitions.filter((transition) => {
+    if (seenTurnIds.has(transition.turnId)) {
+      return false;
+    }
+    seenTurnIds.add(transition.turnId);
+    return true;
+  });
+}
+
+function applyTerminalTransitionToLatestTurn(
+  latestTurn: OrchestrationLatestTurn | null,
+  terminalTurnTransitions: ReadonlyArray<ThreadSessionTerminalTurnTransition>,
+  completedAt: string,
+): OrchestrationLatestTurn | null {
+  if (latestTurn?.state !== "running") {
+    return latestTurn;
+  }
+  const matchingTerminalTransition = terminalTurnTransitions.find(
+    (transition) => transition.turnId === latestTurn.turnId,
+  );
+  return matchingTerminalTransition === undefined
+    ? latestTurn
+    : {
+        ...latestTurn,
+        state: matchingTerminalTransition.state,
+        completedAt,
+      };
+}
 
 /**
  * Turn state to settle a still-running latest turn with when its session

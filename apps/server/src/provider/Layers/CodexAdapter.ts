@@ -16,6 +16,7 @@ import {
   ProviderInstanceId,
   type ProviderRuntimeEvent,
   type ProviderRequestKind,
+  type ProviderTurnTargetIdentity,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   RuntimeItemId,
@@ -24,6 +25,7 @@ import {
   type RuntimeTaskUsage,
   ProviderApprovalDecision,
   ThreadId,
+  type TurnId,
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -31,17 +33,22 @@ import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { resolveCommandPath } from "@t3tools/shared/shell";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { expandHomePath } from "../../pathExpansion.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -58,17 +65,32 @@ import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
+  matchesCodexInterruptTarget,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  CommandCenterCodexHomeIsolationError,
+  commandCenterCodexIsolation,
+  commandCenterProviderEnvironment,
+  commandCenterProviderIsolationIssue,
+  commandCenterProviderPlatformIssue,
+  isCommandCenterThreadId,
+  prepareCommandCenterCodexHome,
+  resolveCommandCenterCodexRuntimeExecutable,
+  resolveCommandCenterManagedGitMetadata,
+} from "../security/CommandCenterProviderIsolation.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
+const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+const isCodexAppServerProtocolParseError = Schema.is(CodexErrors.CodexAppServerProtocolParseError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
+const isCommandCenterCodexHomeIsolationError = Schema.is(CommandCenterCodexHomeIsolationError);
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -85,6 +107,71 @@ export interface CodexAdapterLiveOptions {
   >;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  /** Trusted source containing the auth.json copied into isolated Command Center homes. */
+  readonly commandCenterSourceHomePath?: string;
+  /** Test/embedding override for the exact executable admitted to the isolated runtime. */
+  readonly commandCenterRuntimeExecutablePath?: string;
+  /** Trusted test override for native Command Center platform admission. */
+  readonly commandCenterPlatform?: NodeJS.Platform;
+  /** Trusted test override for native package selection. */
+  readonly commandCenterArchitecture?: NodeJS.Architecture;
+}
+
+/**
+ * Correlates a provider `turn/started` notification back to the
+ * `thread.turn-start-requested` whose send produced it.
+ *
+ * Codex is the one adapter that cannot stamp the correlation at the emit site:
+ * `turn.started` is built by `mapToRuntimeEvents` from an app-server
+ * notification on the event fiber, which never sees the send input. So the
+ * send records the association here and the event fiber reads it.
+ *
+ * Two lookups, because the notification and the `turn/start` response race:
+ * - `byTurnId` covers the ordinary case where the response landed first, so
+ *   the turn id is already known.
+ * - `inFlight` covers the notification arriving before the response was
+ *   decoded. It is only unambiguous because `sendLock` admits one `turn/start`
+ *   at a time — with two concurrent sends, "the send currently in flight" would
+ *   name two different requests. Serializing is safe here (and only here)
+ *   because Codex's `sendTurn` returns as soon as the RPC responds; the ACP
+ *   adapters await the whole turn inside `sendTurn`, where a lock would
+ *   deadlock steering.
+ * - `unresolved` covers an ambiguous post-offer/decode failure. It preserves
+ *   the original request sequence until a late notification consumes it, and
+ *   blocks another send from replacing the only safe correlation candidate.
+ *   This state is session-local: replacing a session constructs a fresh
+ *   `CodexTurnRequestCorrelation`, so stopping/restarting the same logical
+ *   thread clears an unresolved slot instead of carrying it into the new
+ *   runtime generation.
+ *
+ * `resolvedTurnIds` is what makes the `inFlight` fallback safe to reach. That
+ * fallback assumes "no id-keyed entry" means "the response has not landed yet",
+ * but a turn whose entry was consumed by an earlier notification, or evicted
+ * once `byTurnId` hit its bound, also has no entry — and would then claim the
+ * parked slot of an unrelated send that is genuinely mid-RPC, stamping that
+ * send's placeholder onto the wrong turn. Remembering which ids are already
+ * accounted for keeps the fallback to the one case it was written for.
+ *
+ * `fallbackTrustworthy` is what stops that guarantee from silently expiring.
+ * The set is bounded, so a long enough session must eventually forget its
+ * oldest ids — and a forgotten id is indistinguishable from one never
+ * recorded, which is precisely the confusion the set exists to prevent. Rather
+ * than let the defect reopen unannounced at the bound, forgetting anything
+ * retires the fallback for the rest of the session: a genuine race then loses
+ * its stamp instead of taking someone else's.
+ *
+ * That asymmetry is the whole argument. An unstamped placeholder is one the
+ * projector declines to adopt — visible, and recoverable by the paths that
+ * already handle an unadopted row. A misstamped one silently marks the wrong
+ * user message as started, which nothing downstream can detect. Losing a rare
+ * race is the cheaper failure, so it is the one to fail into.
+ */
+interface CodexTurnRequestCorrelation {
+  readonly byTurnId: Map<TurnId, number>;
+  readonly resolvedTurnIds: Set<TurnId>;
+  fallbackTrustworthy: boolean;
+  inFlight: number | undefined;
+  unresolved: number | undefined;
 }
 
 interface CodexAdapterSessionContext {
@@ -92,8 +179,41 @@ interface CodexAdapterSessionContext {
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
+  readonly turnRequestCorrelation: CodexTurnRequestCorrelation;
+  readonly sendLock: Semaphore.Semaphore;
   stopped: boolean;
 }
+
+/**
+ * Upper bound on un-consumed `turnId -> requestSequence` entries.
+ *
+ * Every entry is normally removed by the `turn/started` that consumes it, but a
+ * turn that fails before the provider ever announces it leaves its entry
+ * behind. The bound keeps that leak from growing without limit over a long
+ * session; evicting the oldest is correct because correlations are consumed
+ * within milliseconds of being recorded, so anything this old is already dead.
+ *
+ * An evicted id is still recorded in `resolvedTurnIds`, so a late notification
+ * for it reads as "already accounted for" rather than falling through to the
+ * parked slot of whatever send happens to be in flight.
+ */
+const CODEX_TURN_REQUEST_CORRELATION_LIMIT = 64;
+
+/**
+ * Upper bound on remembered resolved turn ids.
+ *
+ * These distinguish "consumed/evicted" from "the response has not landed yet"
+ * for a notification arriving shortly after its turn was recorded, which is a
+ * millisecond-scale window — so this bound is far above what the mechanism
+ * needs and exists only to cap memory on a very long session.
+ *
+ * Reaching it is therefore not routine, and is not treated as routine:
+ * evicting anything sets `fallbackTrustworthy` to false, retiring the
+ * `inFlight` fallback rather than reopening the mis-stamp it guards against.
+ * See `CodexTurnRequestCorrelation` for why losing a stamp is the failure to
+ * prefer.
+ */
+const CODEX_RESOLVED_TURN_ID_LIMIT = 512;
 
 function mapCodexRuntimeError(
   threadId: ThreadId,
@@ -122,6 +242,31 @@ function mapCodexRuntimeError(
     detail: error.message,
     cause: error,
   });
+}
+
+/**
+ * A provider JSON-RPC error is an explicit rejection. Local request validation
+ * and wire encoding also happen before the request is offered. Every other
+ * turn/start failure may have occurred after Codex accepted the request.
+ */
+function isDefiniteCodexTurnStartRejection(error: CodexSessionRuntimeError): boolean {
+  if (isCodexAppServerRequestError(error) || isCodexSessionRuntimeThreadIdMissingError(error)) {
+    return true;
+  }
+  return (
+    isCodexAppServerProtocolParseError(error) &&
+    (error.operation === "decode-request-payload" || error.operation === "encode-wire-message")
+  );
+}
+
+function isCodexTargetGoneInterruptError(error: CodexSessionRuntimeError): boolean {
+  return (
+    isCodexAppServerRequestError(error) &&
+    error.method === "turn/interrupt" &&
+    error.operation === "receive-response" &&
+    error.code === -32600 &&
+    error.errorMessage === "no active turn to interrupt"
+  );
 }
 
 type CodexLifecycleItem =
@@ -446,6 +591,7 @@ function runtimeEventBase(
     provider: event.provider,
     threadId: canonicalThreadId,
     createdAt: event.createdAt,
+    ...(event.sessionGeneration ? { sessionGeneration: event.sessionGeneration } : {}),
     ...(event.turnId ? { turnId: event.turnId } : {}),
     ...(event.itemId ? { itemId: asRuntimeItemId(event.itemId) } : {}),
     ...(event.requestId ? { requestId: asRuntimeRequestId(event.requestId) } : {}),
@@ -457,6 +603,18 @@ function runtimeEventBase(
     },
   };
 }
+
+// Await the outward event fiber draining the runtime's now-ended event queue
+// (runtime.close emits the terminal session/closed then calls Queue.end) into the
+// runtime-event queue, BEFORE any scope-driven interruption tears the fiber down.
+// The event fiber is forked into sessionScope, so closing that scope — or the
+// explicit Fiber.interrupt — would otherwise drop a still-buffered terminal event.
+// Bounded (1s) so a wedged consumer cannot hang teardown; on timeout we fall
+// through to the scope close + interrupt, which is no worse than the prior order.
+// Fiber.await (not join) so a fiber concurrently interrupted by scope teardown
+// yields its Exit as a value rather than re-raising the interruption here.
+const drainOutwardEventFiber = (eventFiber: Fiber.Fiber<void, never>) =>
+  Fiber.await(eventFiber).pipe(Effect.timeoutOption("1 seconds"), Effect.ignore);
 
 function mapItemLifecycle(
   event: ProviderEvent,
@@ -494,6 +652,134 @@ function mapItemLifecycle(
       ...(event.payload !== undefined ? { data: event.payload } : {}),
     },
   };
+}
+
+/**
+ * Records the request sequence a `turn/start` was issued for.
+ *
+ * Called twice per send: once before the RPC (turn id unknown, so it parks in
+ * `inFlight`) and once after it responds (promoting to the id-keyed map).
+ */
+function recordCodexTurnRequestSequence(
+  correlation: CodexTurnRequestCorrelation,
+  turnId: TurnId | undefined,
+  requestSequence: number | undefined,
+): void {
+  if (requestSequence === undefined) {
+    if (turnId === undefined) {
+      correlation.inFlight = undefined;
+    }
+    return;
+  }
+  if (turnId === undefined) {
+    correlation.inFlight = requestSequence;
+    return;
+  }
+  if (correlation.inFlight !== requestSequence) {
+    // The parked slot is already gone, which under `sendLock` can only mean
+    // the `turn/started` notification beat this response and consumed it.
+    // Promoting it to the id-keyed map now would leave an entry no event will
+    // ever claim.
+    return;
+  }
+  correlation.inFlight = undefined;
+  correlation.byTurnId.set(turnId, requestSequence);
+  rememberResolvedCodexTurnId(correlation, turnId);
+  while (correlation.byTurnId.size > CODEX_TURN_REQUEST_CORRELATION_LIMIT) {
+    // Map iteration is insertion-ordered, so the first key is the oldest.
+    const oldest = correlation.byTurnId.keys().next();
+    if (oldest.done === true) {
+      break;
+    }
+    correlation.byTurnId.delete(oldest.value);
+  }
+}
+
+function clearInFlightCodexTurnRequestSequence(
+  correlation: CodexTurnRequestCorrelation,
+  requestSequence: number | undefined,
+): void {
+  if (correlation.inFlight === requestSequence) {
+    correlation.inFlight = undefined;
+  }
+}
+
+function preserveUnresolvedCodexTurnRequestSequence(
+  correlation: CodexTurnRequestCorrelation,
+  requestSequence: number | undefined,
+): void {
+  if (requestSequence === undefined || correlation.inFlight !== requestSequence) {
+    return;
+  }
+  correlation.inFlight = undefined;
+  // Never replace an older ambiguous request. The send gate below should make
+  // this branch unreachable, but keeping the assignment conditional preserves
+  // the invariant locally if the call order changes.
+  if (correlation.unresolved === undefined) {
+    correlation.unresolved = requestSequence;
+  }
+}
+
+/**
+ * Marks a turn id as one the correlation has already answered for, so a later
+ * notification naming it never falls through to the in-flight slot.
+ */
+function rememberResolvedCodexTurnId(
+  correlation: CodexTurnRequestCorrelation,
+  turnId: TurnId,
+): void {
+  correlation.resolvedTurnIds.add(turnId);
+  while (correlation.resolvedTurnIds.size > CODEX_RESOLVED_TURN_ID_LIMIT) {
+    // Set iteration is insertion-ordered, so the first entry is the oldest.
+    const oldest = correlation.resolvedTurnIds.values().next();
+    if (oldest.done === true) {
+      break;
+    }
+    correlation.resolvedTurnIds.delete(oldest.value);
+    // Once an id is forgotten it is indistinguishable from one never recorded,
+    // so the fallback can no longer tell "this turn is already spoken for" from
+    // "this turn's response has not landed yet" — the exact distinction it
+    // depends on. Retire it instead of letting it guess.
+    correlation.fallbackTrustworthy = false;
+  }
+}
+
+/** Reads and removes the correlation for a turn id, if one was recorded. */
+function takeCodexTurnRequestSequence(
+  correlation: CodexTurnRequestCorrelation,
+  turnId: TurnId,
+): number | undefined {
+  const recorded = correlation.byTurnId.get(turnId);
+  if (recorded !== undefined) {
+    correlation.byTurnId.delete(turnId);
+    return recorded;
+  }
+  if (correlation.resolvedTurnIds.has(turnId)) {
+    // This turn's correlation was already consumed by an earlier notification,
+    // or evicted once the id-keyed map hit its bound. Either way it is spoken
+    // for, and the parked slot below belongs to a different send.
+    return undefined;
+  }
+  if (!correlation.fallbackTrustworthy) {
+    // The resolved-id set has forgotten at least one entry, so "not in the set"
+    // no longer means "never recorded". Declining to stamp costs this turn its
+    // correlation; guessing would cost some other turn its correctness.
+    return undefined;
+  }
+  const unresolved = correlation.unresolved;
+  if (unresolved !== undefined) {
+    correlation.unresolved = undefined;
+    rememberResolvedCodexTurnId(correlation, turnId);
+    return unresolved;
+  }
+  // The notification beat the `turn/start` response. `sendLock` guarantees at
+  // most one send is mid-RPC, so the parked value belongs to this turn.
+  const inFlight = correlation.inFlight;
+  correlation.inFlight = undefined;
+  if (inFlight !== undefined) {
+    rememberResolvedCodexTurnId(correlation, turnId);
+  }
+  return inFlight;
 }
 
 /**
@@ -762,6 +1048,7 @@ function mapCollabAgentEvent(
 function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
+  correlation?: CodexTurnRequestCorrelation,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   if (event.kind === "notification" && event.method.startsWith("collabAgent/")) {
     return mapCollabAgentEvent(event, canonicalThreadId);
@@ -1025,12 +1312,18 @@ function mapToRuntimeEvents(
     if (!turnId) {
       return [];
     }
+    // Consume the correlation rather than just reading it: one recorded
+    // request answers exactly one `turn/started`, and leaving it behind would
+    // let a later turn re-stamp a placeholder that has already been adopted.
+    const turnRequestSequence = correlation
+      ? takeCodexTurnRequestSequence(correlation, turnId)
+      : undefined;
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
         turnId,
         type: "turn.started",
-        payload: {},
+        payload: turnRequestSequence !== undefined ? { turnRequestSequence } : {},
       },
     ];
   }
@@ -1574,6 +1867,9 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "windowsSandbox/setupCompleted") {
+    if (isCommandCenterThreadId(canonicalThreadId)) {
+      return [];
+    }
     const payload = readPayload(
       EffectCodexSchema.V2WindowsSandboxSetupCompletedNotification,
       event.payload,
@@ -1627,8 +1923,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
+  const hostPlatform = options?.commandCenterPlatform ?? (yield* HostProcessPlatform);
+  const hostArchitecture = options?.commandCenterArchitecture ?? (yield* HostProcessArchitecture);
   const serverConfig = yield* Effect.service(ServerConfig);
   const nativeEventLogger =
     options?.nativeEventLogger ??
@@ -1662,15 +1961,194 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
+        const commandCenterThread = isCommandCenterThreadId(input.threadId);
+        const sourceEnvironment = options?.environment ?? process.env;
+        const commandCenterIsolationIssue = commandCenterProviderIsolationIssue({
+          threadId: input.threadId,
+          provider: PROVIDER,
+          runtimeMode: input.runtimeMode,
+        });
+        if (commandCenterIsolationIssue !== undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: commandCenterIsolationIssue,
+          });
+        }
+        const platformIssue = commandCenterThread
+          ? commandCenterProviderPlatformIssue(hostPlatform, input.threadId)
+          : undefined;
+        if (platformIssue !== undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: platformIssue,
+          });
+        }
+        const cwd = input.cwd ?? process.cwd();
+        const managedGitMetadata = commandCenterThread
+          ? yield* resolveCommandCenterManagedGitMetadata({
+              baseDir: serverConfig.baseDir,
+              worktreesDir: serverConfig.worktreesDir,
+              cwd,
+              fileSystem,
+              path,
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: cause.issue,
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
+        const commandCenterRuntimeExecutable = commandCenterThread
+          ? yield* (
+              options?.commandCenterRuntimeExecutablePath
+                ? Effect.succeed(options.commandCenterRuntimeExecutablePath)
+                : resolveCommandPath(codexConfig.binaryPath, {
+                    env: sourceEnvironment,
+                    extendEnv: false,
+                  }).pipe(
+                    Effect.provideService(FileSystem.FileSystem, fileSystem),
+                    Effect.provideService(Path.Path, path),
+                  )
+            ).pipe(
+              Effect.flatMap((executablePath) =>
+                resolveCommandCenterCodexRuntimeExecutable({
+                  commandPath: executablePath,
+                  platform: hostPlatform,
+                  architecture: hostArchitecture,
+                  fileSystem,
+                  path,
+                }),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: isCommandCenterCodexHomeIsolationError(cause)
+                      ? cause.issue
+                      : "Command Center could not resolve the Codex runtime executable for its isolated permission profile.",
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
+        if (commandCenterThread && commandCenterRuntimeExecutable === undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "Command Center could not establish its canonical Codex runtime boundary.",
+          });
+        }
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const sourceCodexHome = (() => {
+          if (options?.commandCenterSourceHomePath) {
+            return path.resolve(expandHomePath(options.commandCenterSourceHomePath));
+          }
+          const configured = codexConfig.homePath.trim();
+          if (configured.length > 0) return path.resolve(expandHomePath(configured));
+          const environmentHome = sourceEnvironment.CODEX_HOME?.trim();
+          if (environmentHome) return path.resolve(expandHomePath(environmentHome));
+          const userHome = sourceEnvironment.HOME?.trim() || sourceEnvironment.USERPROFILE?.trim();
+          return userHome
+            ? path.join(path.resolve(userHome), ".codex")
+            : path.resolve(expandHomePath("~/.codex"));
+        })();
+        const commandCenterHome = commandCenterThread
+          ? yield* prepareCommandCenterCodexHome({
+              stateDir: serverConfig.stateDir,
+              sourceHomePath: sourceCodexHome,
+              threadId: input.threadId,
+              fileSystem,
+              path,
+              crypto,
+              runtimeExecutablePath: commandCenterRuntimeExecutable ?? codexConfig.binaryPath,
+              platform: hostPlatform,
+              writableRoots: [cwd, serverConfig.worktreesDir],
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: cause.issue,
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
+        const commandCenterIsolation =
+          commandCenterThread && commandCenterRuntimeExecutable && commandCenterHome
+            ? commandCenterCodexIsolation(
+                input.runtimeMode,
+                managedGitMetadata,
+                commandCenterRuntimeExecutable,
+                commandCenterHome,
+                hostPlatform,
+              )
+            : undefined;
+        if (commandCenterThread && commandCenterIsolation === undefined) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "Command Center could not establish its isolated Codex permission profile.",
+          });
+        }
+        const runtimeEnvironment = commandCenterHome
+          ? commandCenterProviderEnvironment({
+              source: sourceEnvironment,
+              ...commandCenterHome,
+              ...(hostPlatform === "win32" && commandCenterRuntimeExecutable !== undefined
+                ? {
+                    runtimeSupportPath: path.join(
+                      path.dirname(path.dirname(commandCenterRuntimeExecutable)),
+                      "path",
+                    ),
+                  }
+                : {}),
+              writableRoots: [cwd, serverConfig.worktreesDir],
+              ...(mcpSession
+                ? {
+                    mcpBearerToken: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
+                  }
+                : {}),
+            })
+          : mcpSession
+            ? {
+                ...sourceEnvironment,
+                T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
+              }
+            : options?.environment;
+        const mcpAppServerArgs = mcpSession
+          ? [
+              "-c",
+              `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
+              "-c",
+              'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+            ]
+          : [];
+        const appServerArgs = [
+          ...(commandCenterIsolation?.appServerArgs ?? []),
+          ...mcpAppServerArgs,
+        ];
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
-          cwd: input.cwd ?? process.cwd(),
-          binaryPath: codexConfig.binaryPath,
+          cwd,
+          binaryPath: commandCenterRuntimeExecutable ?? codexConfig.binaryPath,
+          ...(runtimeEnvironment ? { environment: runtimeEnvironment } : {}),
           launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
-          ...(options?.environment ? { environment: options.environment } : {}),
-          ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
+          ...(commandCenterHome
+            ? { homePath: commandCenterHome.homePath }
+            : codexConfig.homePath
+              ? { homePath: codexConfig.homePath }
+              : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
             : {}),
@@ -1679,31 +2157,78 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { model: input.modelSelection.model }
             : {}),
           ...(serviceTier ? { serviceTier } : {}),
-          ...(mcpSession
-            ? {
-                environment: {
-                  ...(options?.environment ?? process.env),
-                  T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
-                },
-                appServerArgs: [
-                  "-c",
-                  `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
-                  "-c",
-                  'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
-                ],
-              }
+          ...(commandCenterIsolation
+            ? { permissionProfile: commandCenterIsolation.permissionProfile }
             : {}),
+          ...(commandCenterIsolation?.windowsSandboxMode
+            ? {
+                commandCenterPlatform: hostPlatform,
+                windowsSandboxMode: commandCenterIsolation.windowsSandboxMode,
+              }
+            : commandCenterThread
+              ? { commandCenterPlatform: hostPlatform }
+              : {}),
+          ...(appServerArgs.length > 0 ? { appServerArgs } : {}),
         };
-        const sessionScope = yield* Scope.make("sequential");
-        let sessionScopeTransferred = false;
-        yield* Effect.addFinalizer(() =>
-          sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
-        );
+        const turnRequestCorrelation: CodexTurnRequestCorrelation = {
+          byTurnId: new Map<TurnId, number>(),
+          resolvedTurnIds: new Set<TurnId>(),
+          fallbackTrustworthy: true,
+          inFlight: undefined,
+          unresolved: undefined,
+        };
+        const sendLock = yield* Semaphore.make(1);
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
-        const runtime = yield* createRuntime(runtimeInput).pipe(
-          Effect.provideService(Scope.Scope, sessionScope),
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
-          Effect.provideService(Crypto.Crypto, crypto),
+        const startRuntimeAttempt = Effect.fn("CodexAdapter.startRuntimeAttempt")(function* (
+          attemptInput: CodexSessionRuntimeOptions,
+        ) {
+          const sessionScope = yield* Scope.make("sequential");
+          let sessionScopeTransferred = false;
+          yield* Effect.addFinalizer(() =>
+            sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
+          );
+          const runtime = yield* createRuntime(attemptInput).pipe(
+            Effect.provideService(Scope.Scope, sessionScope),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+            Effect.provideService(Crypto.Crypto, crypto),
+          );
+          const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
+            Effect.gen(function* () {
+              yield* writeNativeEvent(event);
+              const runtimeEvents = mapToRuntimeEvents(
+                event,
+                event.threadId,
+                turnRequestCorrelation,
+              );
+              if (runtimeEvents.length === 0) {
+                yield* Effect.logDebug("ignoring unhandled Codex provider event", {
+                  method: event.method,
+                  threadId: event.threadId,
+                  turnId: event.turnId,
+                  itemId: event.itemId,
+                });
+                return;
+              }
+              yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            }),
+          ).pipe(Effect.forkChild);
+          const started = yield* runtime
+            .start()
+            .pipe(
+              Effect.onError(() =>
+                runtime.close.pipe(
+                  Effect.andThen(drainOutwardEventFiber(eventFiber)),
+                  Effect.andThen(Effect.ignore(Scope.close(sessionScope, Exit.void))),
+                  Effect.andThen(Fiber.interrupt(eventFiber)),
+                  Effect.ignore,
+                ),
+              ),
+            );
+          sessionScopeTransferred = true;
+          return { eventFiber, runtime, sessionScope, started } as const;
+        });
+
+        const attempt = yield* startRuntimeAttempt(runtimeInput).pipe(
           Effect.mapError(
             (cause) =>
               new ProviderAdapterProcessError({
@@ -1714,51 +2239,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }),
           ),
         );
-
-        const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
-          Effect.gen(function* () {
-            yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
-            if (runtimeEvents.length === 0) {
-              yield* Effect.logDebug("ignoring unhandled Codex provider event", {
-                method: event.method,
-                threadId: event.threadId,
-                turnId: event.turnId,
-                itemId: event.itemId,
-              });
-              return;
-            }
-            yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
-          }),
-        ).pipe(Effect.forkChild);
-
-        const started = yield* runtime.start().pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterProcessError({
-                provider: PROVIDER,
-                threadId: input.threadId,
-                detail: cause.message,
-                cause,
-              }),
-          ),
-          Effect.onError(() =>
-            runtime.close.pipe(
-              Effect.andThen(Effect.ignore(Scope.close(sessionScope, Exit.void))),
-              Effect.andThen(Fiber.interrupt(eventFiber)),
-              Effect.ignore,
-            ),
-          ),
-        );
+        const { eventFiber, runtime, sessionScope, started } = attempt;
 
         sessions.set(input.threadId, {
           threadId: input.threadId,
           scope: sessionScope,
           runtime,
           eventFiber,
+          turnRequestCorrelation,
+          sendLock,
           stopped: false,
         });
-        sessionScopeTransferred = true;
 
         return started;
       }),
@@ -1812,22 +2303,70 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
-    return yield* session.runtime
-      .sendTurn({
-        ...(input.input !== undefined ? { input: input.input } : {}),
-        ...(input.modelSelection?.instanceId === boundInstanceId
-          ? { model: input.modelSelection.model }
-          : {}),
-        ...(reasoningEffort
-          ? {
-              effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
-            }
-          : {}),
-        ...(serviceTier ? { serviceTier } : {}),
-        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-        ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-      })
-      .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
+    // Serialize the RPC so the pre-response correlation slot names exactly one
+    // request. See `CodexTurnRequestCorrelation` for why this is safe for Codex
+    // specifically: `sendTurn` returns when the RPC responds, not at turn end.
+    return yield* session.sendLock.withPermit(
+      Effect.gen(function* () {
+        if (session.turnRequestCorrelation.unresolved !== undefined) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/start",
+            detail:
+              "A prior Codex turn/start has an unresolved outcome; waiting for its turn/started notification.",
+          });
+        }
+        recordCodexTurnRequestSequence(
+          session.turnRequestCorrelation,
+          undefined,
+          input.turnRequestSequence,
+        );
+        const started = yield* session.runtime
+          .sendTurn({
+            ...(input.input !== undefined ? { input: input.input } : {}),
+            ...(input.modelSelection?.instanceId === boundInstanceId
+              ? { model: input.modelSelection.model }
+              : {}),
+            ...(reasoningEffort
+              ? {
+                  effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
+                }
+              : {}),
+            ...(serviceTier ? { serviceTier } : {}),
+            ...(input.interactionMode !== undefined
+              ? { interactionMode: input.interactionMode }
+              : {}),
+            ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+          })
+          .pipe(
+            // Classify while the runtime error still retains its protocol
+            // phase. Mapping first would erase whether Codex explicitly
+            // rejected the request or may already have accepted it.
+            Effect.tapError((cause) =>
+              Effect.sync(() => {
+                if (isDefiniteCodexTurnStartRejection(cause)) {
+                  clearInFlightCodexTurnRequestSequence(
+                    session.turnRequestCorrelation,
+                    input.turnRequestSequence,
+                  );
+                } else {
+                  preserveUnresolvedCodexTurnRequestSequence(
+                    session.turnRequestCorrelation,
+                    input.turnRequestSequence,
+                  );
+                }
+              }),
+            ),
+            Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)),
+          );
+        recordCodexTurnRequestSequence(
+          session.turnRequestCorrelation,
+          started.turnId,
+          input.turnRequestSequence,
+        );
+        return started;
+      }),
+    );
   });
 
   const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {
@@ -1841,15 +2380,42 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return session;
   });
 
-  const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId) =>
-    requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
+  const interruptTargetedTurn = (
+    threadId: ThreadId,
+    turnId: TurnId | undefined,
+    target: ProviderTurnTargetIdentity,
+  ): Effect.Effect<void, CodexSessionRuntimeError> => {
+    const session = sessions.get(threadId);
+    if (!session || session.stopped) {
+      return Effect.void;
+    }
+    return session.runtime.getSession.pipe(
+      Effect.flatMap((current) =>
+        matchesCodexInterruptTarget(current, target)
+          ? session.runtime
+              .interruptTurn(turnId, target)
+              .pipe(Effect.catchIf(isCodexTargetGoneInterruptError, () => Effect.void))
+          : Effect.void,
+      ),
+    );
+  };
+
+  const interruptTurn: CodexAdapterShape["interruptTurn"] = (threadId, turnId, target) => {
+    const interrupt =
+      target === undefined
+        ? requireSession(threadId).pipe(
+            Effect.flatMap((session) => session.runtime.interruptTurn(turnId)),
+          )
+        : interruptTargetedTurn(threadId, turnId, target);
+
+    return interrupt.pipe(
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
           : mapCodexRuntimeError(threadId, "turn/interrupt", cause),
       ),
     );
+  };
 
   const readThread: CodexAdapterShape["readThread"] = (threadId) =>
     requireSession(threadId).pipe(
@@ -1930,6 +2496,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     session.stopped = true;
     sessions.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
+    yield* drainOutwardEventFiber(session.eventFiber);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });
@@ -1971,6 +2538,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      inSessionOptionIds: ["reasoningEffort", "serviceTier"],
     },
     startSession,
     sendTurn,

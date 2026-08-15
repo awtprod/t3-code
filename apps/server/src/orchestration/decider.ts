@@ -250,6 +250,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           title: command.title,
           workspaceRoot: command.workspaceRoot,
           defaultModelSelection: command.defaultModelSelection ?? null,
+          faviconPath: null,
           scripts: [],
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
@@ -287,6 +288,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.defaultModelSelection !== undefined
             ? { defaultModelSelection: command.defaultModelSelection }
             : {}),
+          ...(command.defaultThreadEnvMode !== undefined
+            ? { defaultThreadEnvMode: command.defaultThreadEnvMode }
+            : {}),
+          ...(command.faviconPath !== undefined ? { faviconPath: command.faviconPath } : {}),
           ...(command.scripts !== undefined ? { scripts: command.scripts } : {}),
           updatedAt: occurredAt,
         },
@@ -368,6 +373,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: command.projectId,
           title: command.title,
           modelSelection: command.modelSelection,
+          routingMode: command.routingMode,
+          ...(command.efficiencyTier === undefined
+            ? {}
+            : { efficiencyTier: command.efficiencyTier }),
           runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
           branch: command.branch,
@@ -676,6 +685,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           pinnedAt: existingPinnedAt ?? occurredAt,
+          // A fresh pin takes the client's slot in the arranged order; on a
+          // re-pin the existing key wins so raced duplicates cannot move a
+          // thread the user already placed.
+          ...(existingPinnedAt === null && command.orderKey !== undefined
+            ? { pinOrderKey: command.orderKey }
+            : {}),
           updatedAt: existingPinnedAt !== null ? thread.updatedAt : occurredAt,
         },
       };
@@ -745,6 +760,43 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.pin.reorder": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      // Only pinned threads have a slot in the arranged order. Rejecting
+      // (rather than silently pinning) keeps a raced reorder-after-unpin
+      // from resurrecting a pin the user just cleared.
+      if (thread.pinnedAt == null) {
+        return yield* Effect.fail(
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `thread ${command.threadId} is not pinned and cannot be reordered`,
+          }),
+        );
+      }
+      // Idempotent by re-emission (see thread.settle): a duplicate drop on
+      // the same slot keeps the existing updatedAt so it projects as a no-op.
+      const keyUnchanged = thread.pinOrderKey === command.orderKey;
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.pin-reordered",
+        payload: {
+          threadId: command.threadId,
+          orderKey: command.orderKey,
+          updatedAt: keyUnchanged ? thread.updatedAt : occurredAt,
+        },
+      };
+    }
+
     case "thread.meta.update": {
       const thread = yield* requireThread({
         readModel,
@@ -784,6 +836,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
+            : {}),
+          ...(command.routingMode !== undefined
+            ? { routingMode: command.routingMode }
+            : command.modelSelection !== undefined
+              ? { routingMode: "manual" as const }
+              : {}),
+          ...(command.efficiencyTier !== undefined
+            ? { efficiencyTier: command.efficiencyTier }
             : {}),
           ...(branch !== undefined ? { branch } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
@@ -928,6 +988,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
+          ...(command.routingMode !== undefined ? { routingMode: command.routingMode } : {}),
+          ...(command.efficiencyTier !== undefined
+            ? { efficiencyTier: command.efficiencyTier }
+            : {}),
+          ...(command.efficiencyDecision !== undefined
+            ? { efficiencyDecision: command.efficiencyDecision }
+            : {}),
+          ...(command.retryOfTurnId !== undefined ? { retryOfTurnId: command.retryOfTurnId } : {}),
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
@@ -976,12 +1044,72 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       return [...lifecycleResetEvents, userMessageEvent, turnStartRequestedEvent];
     }
 
-    case "thread.turn.interrupt": {
-      yield* requireThread({
+    case "thread.turn.resume": {
+      const targetThread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      // Re-issue an interrupted turn for the existing user message (no duplicate
+      // `thread.message-sent`). No-op if the referenced message is gone or is not a
+      // user message — auto-resume should only continue a genuine user turn.
+      const userMessage = targetThread.messages.find(
+        (message) => message.id === command.messageId && message.role === "user",
+      );
+      if (!userMessage) {
+        return [];
+      }
+      const resumeTurnStartRequestedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-start-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          // Carry the interrupted turn's model selection so the restarted session
+          // resolves to the same provider instance/model and recovers its cursor.
+          ...(command.modelSelection !== undefined
+            ? { modelSelection: command.modelSelection }
+            : {}),
+          // Carry the interrupted turn's source proposed-plan reference so a
+          // resumed plan-implementation turn re-associates with its plan (the
+          // reactor's turn.started marks the plan implemented from this field).
+          ...(command.sourceProposedPlan !== undefined
+            ? { sourceProposedPlan: command.sourceProposedPlan }
+            : {}),
+          runtimeMode: targetThread.runtimeMode,
+          interactionMode: targetThread.interactionMode,
+          createdAt: command.createdAt,
+        },
+      };
+      return [resumeTurnStartRequestedEvent];
+    }
+
+    case "thread.turn.interrupt": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      // Resolve the turn to mark interrupted to the thread's active turn,
+      // preferring it over any client-supplied turnId. The provider reactor
+      // interrupts strictly by session ("orchestration turn ids are not provider
+      // turn ids, so interrupt by session"), i.e. whichever turn is currently
+      // running — never the id in the command. A web/mobile client sends the
+      // activeTurnId from its latest snapshot, which can be stale if a steer
+      // started a newer turn before this command was processed; honoring that
+      // stale id would mark the wrong (already-finished) turn interrupted while
+      // the running turn's row stays `running`, so the ensuing session exit would
+      // auto-resume a turn the user actually interrupted. Falling back to the
+      // command's turnId only when the session has no active turn keeps the
+      // contract's id-less interrupt ("interrupt whatever is running") working;
+      // left unresolved the event carries no turnId and ProjectionPipeline
+      // ignores it (its handler returns early on `turnId === undefined`).
+      const resolvedTurnId = thread.session?.activeTurnId ?? command.turnId ?? undefined;
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -992,7 +1120,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.turn-interrupt-requested",
         payload: {
           threadId: command.threadId,
-          ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
+          ...(resolvedTurnId !== undefined ? { turnId: resolvedTurnId } : {}),
           createdAt: command.createdAt,
         },
       };
@@ -1073,11 +1201,32 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.session.stop": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      // Settle-cleanup stops are conditional: between the settle landing and
+      // this command, another client may have re-engaged the thread (a turn
+      // start unsettles it and brings the session alive). Commands are
+      // decided serially against this read model, so checking here — not in
+      // the dispatcher's pre-settle snapshot — closes that race.
+      if (command.onlyIfSettled === true) {
+        const sessionComingAlive =
+          thread.session?.status === "starting" || thread.session?.status === "running";
+        if (
+          thread.settledOverride !== "settled" ||
+          sessionComingAlive ||
+          threadHasQueuedTurnStart(thread, command.createdAt)
+        ) {
+          return yield* Effect.fail(
+            new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `thread ${command.threadId} was re-engaged after settle; skipping session stop`,
+            }),
+          );
+        }
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1088,6 +1237,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.session-stop-requested",
         payload: {
           threadId: command.threadId,
+          // Carried through rather than defaulted to this event's own sequence,
+          // because the two coincide only for a stop the user pressed. An
+          // escalated stop must keep the narrower cutoff it was handed; see
+          // `ThreadSessionStopCommand.canceledThroughSequence`.
+          ...(command.canceledThroughSequence !== undefined
+            ? { canceledThroughSequence: command.canceledThroughSequence }
+            : {}),
           createdAt: command.createdAt,
         },
       };
@@ -1099,6 +1255,28 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const pendingTurnStartAdoption =
+        command.pendingTurnStartAdoption ??
+        (command.turnRequestSequence !== undefined ? "exact" : "none");
+      const terminalTurnTransition =
+        command.terminalTurnTransition ??
+        (command.settledTurnId === undefined
+          ? undefined
+          : (() => {
+              switch (command.session.status) {
+                case "idle":
+                case "ready":
+                  return { turnId: command.settledTurnId, state: "completed" } as const;
+                case "error":
+                  return { turnId: command.settledTurnId, state: "error" } as const;
+                case "interrupted":
+                case "stopped":
+                  return { turnId: command.settledTurnId, state: "interrupted" } as const;
+                case "starting":
+                case "running":
+                  return undefined;
+              }
+            })());
       const sessionSetEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1111,19 +1289,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          pendingTurnStartAdoption,
+          ...(command.turnRequestSequence !== undefined
+            ? { turnRequestSequence: command.turnRequestSequence }
+            : {}),
+          ...(command.settledTurnId !== undefined ? { settledTurnId: command.settledTurnId } : {}),
+          ...(terminalTurnTransition !== undefined ? { terminalTurnTransition } : {}),
+          ...(command.terminalTurnTransitions !== undefined
+            ? { terminalTurnTransitions: command.terminalTurnTransitions }
+            : {}),
         },
       };
-      // Only a session coming alive is activity worth waking a settled thread
-      // for — status writes like ready/stopped/error arrive after the fact and
-      // must not fight a user's explicit settle. Snooze is deliberately NOT
-      // cleared here: snooze never pauses the agent, so its session starting
-      // or erroring is not the user re-engaging. Blocked/failed work still
-      // surfaces immediately — effectiveSnoozed refuses to classify a thread
-      // with a raised hand (approval / input / failure / fresh completion)
-      // as snoozed, without spending the return ticket.
       const isSessionActivity =
         command.session.status === "starting" || command.session.status === "running";
-      // Real activity resets ANY override (settled wakes, active unpins).
       if (thread.settledOverride === null || !isSessionActivity) {
         return sessionSetEvent;
       }
@@ -1142,6 +1320,29 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       };
       return [unsettledEvent, sessionSetEvent];
+    }
+
+    case "thread.turn-start.fold": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-start-folded",
+        payload: {
+          threadId: command.threadId,
+          turnRequestSequence: command.turnRequestSequence,
+          turnId: command.turnId,
+          createdAt: command.createdAt,
+        },
+      };
     }
 
     case "thread.message.assistant.delta": {

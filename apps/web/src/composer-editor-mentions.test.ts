@@ -22,7 +22,7 @@ describe("splitPromptIntoComposerSegments", () => {
   });
 
   it("keeps newlines around mention tokens", () => {
-    expect(splitPromptIntoComposerSegments("one\n@AGENTS.md \ntwo")).toEqual([
+    expect(splitPromptIntoComposerSegments(["one", "@AGENTS.md ", "two"].join("\n"))).toEqual([
       { type: "text", text: "one\n" },
       { type: "mention", path: "AGENTS.md", source: "@AGENTS.md" },
       { type: "text", text: " \ntwo" },

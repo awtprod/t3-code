@@ -21,7 +21,14 @@ const successfulRunner = (fs: FileSystem.FileSystem, path: Path.Path) =>
         const prefixIndex = input.args.indexOf("--prefix");
         const stagingDir = input.args[prefixIndex + 1];
         if (stagingDir === undefined) return yield* Effect.die("missing npm --prefix");
-        const entry = path.join(stagingDir, "node_modules", "t3", "dist", "bin.mjs");
+        const entry = path.join(
+          stagingDir,
+          "node_modules",
+          "@awtprod",
+          "command-center",
+          "dist",
+          "bin.mjs",
+        );
         yield* fs.makeDirectory(path.dirname(entry), { recursive: true }).pipe(Effect.orDie);
         yield* fs.writeFileString(entry, "export {};\n").pipe(Effect.orDie);
         return {
@@ -31,6 +38,8 @@ const successfulRunner = (fs: FileSystem.FileSystem, path: Path.Path) =>
           timedOut: false,
           stdoutTruncated: false,
           stderrTruncated: false,
+          stdoutInvalidUtf8: false,
+          stderrInvalidUtf8: false,
         };
       }),
   });

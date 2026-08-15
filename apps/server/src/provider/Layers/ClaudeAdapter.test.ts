@@ -42,7 +42,7 @@ const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
 class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(
-  "t3/provider/Layers/ClaudeAdapter.test/ClaudeAdapter",
+  "@awtprod/command-center/provider/Layers/ClaudeAdapter.test/ClaudeAdapter",
 ) {}
 
 class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
@@ -978,6 +978,150 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("ignores an interrupt aimed at a turn that is no longer the running one", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      // The first turn is driven all the way to `turn.completed` before the
+      // second is sent, so these are genuinely two turns rather than one
+      // steer folded into another — a mid-turn send would return the SAME
+      // turn id and the test below would be vacuous.
+      const firstTurnDone = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const firstTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "first message",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-1",
+        uuid: "result-first",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(firstTurnDone);
+
+      const secondTurn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "second message",
+        attachments: [],
+      });
+      assert.notEqual(String(secondTurn.turnId), String(firstTurn.turnId));
+
+      // The late interrupt names the FIRST turn. This is the shape the
+      // reactor's post-send fence arrives in when it decides a stop covered
+      // an earlier request while a newer message is the one actually
+      // running: `query.interrupt()` is thread-wide, so honouring a stale
+      // target would kill the second turn, which nobody asked to stop.
+      yield* adapter.interruptTurn(session.threadId, firstTurn.turnId);
+      assert.lengthOf(
+        harness.query.interruptCalls,
+        0,
+        "a stale interrupt must not stop the turn that replaced its target",
+      );
+
+      // Targeting rule, not a blanket refusal: naming the turn that IS
+      // running still interrupts. Without this half the test would pass just
+      // as well against an adapter whose interrupt did nothing at all.
+      yield* adapter.interruptTurn(session.threadId, secondTurn.turnId);
+      assert.lengthOf(
+        harness.query.interruptCalls,
+        1,
+        "an interrupt naming the running turn must still be delivered",
+      );
+
+      // An unnamed interrupt still means "whatever is running" — the
+      // session-stop and watchdog path, where thread-wide is the intent.
+      yield* adapter.interruptTurn(session.threadId, undefined);
+      assert.lengthOf(harness.query.interruptCalls, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("does not emit turn.completed for a result with no active turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      // Collect through session.exited so the window after the second result
+      // is deterministically inside the collection: both results are queued
+      // after sendTurn returns and drain in order on the one stream consumer.
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "session.exited"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        num_turns: 1,
+        session_id: "sdk-session-1",
+        uuid: "result-real",
+      } as unknown as SDKMessage);
+
+      // Second result with no turn in flight — the shape the resume
+      // handshake (system/init + result(num_turns: 0)) delivers, and the
+      // same completeTurn branch every no-turnState result lands in. This
+      // used to emit an untargeted turn.completed; it must emit nothing.
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        num_turns: 0,
+        usage: { input_tokens: 0, output_tokens: 0 },
+        session_id: "sdk-session-1",
+        uuid: "result-handshake",
+      } as unknown as SDKMessage);
+
+      harness.query.finish();
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const completions = runtimeEvents.filter((event) => event.type === "turn.completed");
+      // Exactly one completion — the real turn's, targeted at its turn id.
+      // The buggy branch produced a second, untargeted one here.
+      assert.equal(completions.length, 1);
+      const completed = completions[0];
+      if (completed?.type === "turn.completed") {
+        assert.equal(String(completed.turnId), String(turn.turnId));
+        assert.equal(completed.payload.state, "completed");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("steers a running turn instead of opening a new one on mid-turn sendTurn", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -1008,6 +1152,14 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
       });
       assert.equal(String(steeredTurn.turnId), String(turn.turnId));
+      // The fold is reported back, and only for the send that was folded. The
+      // turn id alone cannot distinguish the two cases from the reactor's side —
+      // a fresh turn also returns a valid id — so without this flag the steer's
+      // pending turn-start placeholder is never consumed by anything (the steer
+      // emits no `turn.started`, as asserted below) and later reads as a message
+      // that was requested but never sent.
+      assert.equal(turn.steered ?? false, false);
+      assert.equal(steeredTurn.steered, true);
 
       harness.query.emit({
         type: "assistant",
@@ -2328,7 +2480,13 @@ describe("ClaudeAdapterLive", () => {
             usedTokens: 24542,
             lastUsedTokens: 24542,
             inputTokens: 23863,
+            cachedInputTokens: 21144,
+            cacheWriteInputTokens: 2715,
             outputTokens: 679,
+            lastInputTokens: 23863,
+            lastCachedInputTokens: 21144,
+            lastCacheWriteInputTokens: 2715,
+            lastOutputTokens: 679,
             maxTokens: 200000,
           },
         });
@@ -2392,6 +2550,8 @@ describe("ClaudeAdapterLive", () => {
             usedTokens: 200000,
             lastUsedTokens: 200000,
             totalProcessedTokens: 535000,
+            lastInputTokens: 0,
+            lastOutputTokens: 0,
             maxTokens: 200000,
           },
         });

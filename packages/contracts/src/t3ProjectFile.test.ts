@@ -33,6 +33,19 @@ describe("T3ProjectFile", () => {
     expect(decode({ futureField: true })).toEqual({});
   });
 
+  it("cannot inject Command Center governance or credentials", () => {
+    expect(
+      decode({
+        spaces: [{ id: "forged" }],
+        policies: { deploy: "allow" },
+        connections: [{ token: "secret" }],
+        credentials: { apiKey: "secret" },
+        automations: [{ command: "publish" }],
+        scripts: [{ name: "Test", command: "pnpm test" }],
+      }),
+    ).toEqual({ scripts: [{ name: "Test", command: "pnpm test" }] });
+  });
+
   it("trims icon paths and script fields", () => {
     const decoded = decode({
       iconPath: " assets/logo.svg ",
@@ -51,5 +64,11 @@ describe("T3ProjectFile", () => {
     expect(() =>
       decode({ scripts: [{ name: "Dev", command: "pnpm dev", icon: "rocket" }] }),
     ).toThrow();
+  });
+
+  it("decodes defaultThreadEnvMode and rejects unknown modes", () => {
+    expect(decode({ defaultThreadEnvMode: "worktree" }).defaultThreadEnvMode).toBe("worktree");
+    expect(decode({ defaultThreadEnvMode: "local" }).defaultThreadEnvMode).toBe("local");
+    expect(() => decode({ defaultThreadEnvMode: "remote" })).toThrow();
   });
 });

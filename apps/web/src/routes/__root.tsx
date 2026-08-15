@@ -14,6 +14,7 @@ import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { CommandPalette } from "../components/CommandPalette";
+import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
 import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDialog";
 import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstallDialog";
 import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPromptDialog";
@@ -103,6 +104,7 @@ function RootRouteView() {
     return (
       <>
         <DocumentTitleSync />
+        <WindowsLocalOverrideBanner />
         <Outlet />
       </>
     );
@@ -117,13 +119,12 @@ function RootRouteView() {
     );
   }
 
-  const appShell = (
-    <CommandPalette>
-      <AppSidebarLayout>
-        <Outlet />
-      </AppSidebarLayout>
-    </CommandPalette>
+  const routedContent = (
+    <AppSidebarLayout>
+      <Outlet />
+    </AppSidebarLayout>
   );
+  const appShell = <CommandPalette>{routedContent}</CommandPalette>;
 
   return (
     <ToastProvider>
@@ -135,6 +136,7 @@ function RootRouteView() {
         <RelayClientInstallDialog />
         <ConnectOnboardingDialog />
         <SshPasswordPromptDialog />
+        <ConfirmDialogHost />
         <SlowRpcRequestToastCoordinator />
         <HostedStaticEnvironmentBootstrap />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
@@ -145,6 +147,25 @@ function RootRouteView() {
         <ThemeEditorHost />
       </AnchoredToastProvider>
     </ToastProvider>
+  );
+}
+
+function WindowsLocalOverrideBanner() {
+  const [active, setActive] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    void window.desktopBridge?.getPrimaryBackendState().then((state) => {
+      if (mounted) setActive(state.localExecutionOverride);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+  if (!active) return null;
+  return (
+    <div className="fixed inset-x-0 top-0 z-[100] bg-amber-600 px-3 py-1 text-center text-xs font-semibold text-white shadow-md">
+      Windows local override — execution is local for this launch only
+    </div>
   );
 }
 
@@ -240,7 +261,7 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
   const details = errorDetails(error);
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
+    <div className="relative flex min-h-full items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
       <div className="pointer-events-none absolute inset-0 opacity-80">
         <div className="absolute inset-x-0 top-0 h-44 bg-[radial-gradient(44rem_16rem_at_top,color-mix(in_srgb,var(--color-red-500)_16%,transparent),transparent)]" />
         <div className="absolute inset-0 bg-[linear-gradient(145deg,color-mix(in_srgb,var(--background)_90%,var(--color-black))_0%,var(--background)_55%)]" />

@@ -17,6 +17,11 @@ export const OrchestrationProjectionPipelineLayerLive = OrchestrationProjectionP
   Layer.provide(OrchestrationEventStoreLive),
 );
 
+export const OrchestrationRuntimeStateLayerLive = Layer.mergeAll(
+  ThreadBackgroundLiveness.layer,
+  ThreadPlanProgress.layer,
+);
+
 export const OrchestrationInfrastructureLayerLive = Layer.mergeAll(
   OrchestrationProjectionSnapshotQueryLive,
   OrchestrationEventInfrastructureLayerLive,
@@ -33,4 +38,8 @@ export const OrchestrationInfrastructureLayerLive = Layer.mergeAll(
 export const OrchestrationLayerLive = Layer.mergeAll(
   OrchestrationInfrastructureLayerLive,
   OrchestrationEngineLive.pipe(Layer.provide(OrchestrationInfrastructureLayerLive)),
+).pipe(
+  // Build one shared pair at the outer boundary: projection queries consume
+  // them while runtime ingestion receives the same exported instances.
+  Layer.provideMerge(OrchestrationRuntimeStateLayerLive),
 );

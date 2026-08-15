@@ -1,0 +1,6 @@
+[user]
+    name = Command Center Primary Identity
+    email = primary@example.com
+[credential "https://github.com"]
+    helper =
+    helper = !/opt/command-center/bin/git-credential-gh primary

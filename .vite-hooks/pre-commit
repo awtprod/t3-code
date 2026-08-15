@@ -1,1 +1,3 @@
-vp staged
+node scripts/public-leak-scan.ts --staged
+node scripts/gitleaks-staged.ts
+vp staged --concurrent 2

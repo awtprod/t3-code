@@ -9,6 +9,7 @@ import {
 } from "../../session-logic";
 import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
 import { type MessageId, type OrchestrationLatestTurn, type TurnId } from "@t3tools/contracts";
+import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 
 export const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
 export const TIMELINE_MINIMAP_ITEM_SPACING = 8;
@@ -208,7 +209,135 @@ export type MessagesTimelineRow =
       createdAt: string;
       turnPlan: TurnPlanEntry;
     }
-  | { kind: "working"; id: string; createdAt: string | null };
+  | {
+      kind: "working";
+      id: string;
+      createdAt: string | null;
+      /**
+       * Transport state for the thread's environment, or `null` for a local
+       * draft that has no environment connection to report on.
+       */
+      connectionPhase: EnvironmentConnectionPhase | null;
+      /**
+       * When the thread last produced activity. Used to time the "stalled"
+       * label from the start of the *silence* rather than from the start of
+       * the turn — a turn that worked for 9 minutes and then went quiet for 2
+       * has been unresponsive for 2, and saying otherwise would overstate it.
+       */
+      lastActivityAt: string | null;
+    };
+
+/**
+ * What the spinner is actually able to claim.
+ *
+ * - `working` — the connection is live and the provider is producing activity.
+ *   The only case where "Working for Xs" is an honest statement.
+ * - `reconnecting` — the socket is down or re-establishing. The turn may well
+ *   still be running server-side (turns are scoped to the server lifetime, not
+ *   the client connection), so this is not an error — but the elapsed timer is
+ *   no longer measuring anything we can see.
+ * - `stalled` — connected, but the thread has produced no activity for longer
+ *   than `WORKING_STALE_AFTER_MS`. Something is likely wedged; the server-side
+ *   watchdog will settle it, and until then the user deserves to know we are
+ *   waiting rather than receiving.
+ */
+export type WorkingIndicatorStatus = "working" | "reconnecting" | "stalled";
+
+/**
+ * How long a running turn may go silent before the spinner stops claiming
+ * progress.
+ *
+ * Deliberately shorter than the server's 10-minute auto-fail threshold
+ * (`StalledTurnWatchdog.ts`), so the UI tells the truth well before the
+ * watchdog acts — but comfortably above normal quiet stretches. Measured
+ * across 60 healthy completed turns in local provider logs, intra-turn silence
+ * ran p50 12.4s / p90 52.4s / p95 68.0s, with one 7.2m outlier. 2 minutes sits
+ * ~1.8x above p95, so healthy long-running work does not flicker into
+ * "stalled", while a genuine wedge surfaces in ~2 minutes instead of ~11.
+ */
+export const WORKING_STALE_AFTER_MS = 2 * 60 * 1000;
+
+/**
+ * Derive what the working indicator may honestly say.
+ *
+ * `lastActivityAt` is the thread shell's `updatedAt` — the same heartbeat the
+ * server-side watchdog uses, bumped by every `thread.activity-appended`.
+ *
+ * Connection state wins over staleness: while disconnected we have no basis to
+ * call a turn stalled, because activity may be arriving on the server and
+ * simply not reaching us.
+ *
+ * `connectionPhase` is `null` when the thread is not scoped to an environment
+ * entry at all — a local draft, whose "working" state comes from local dispatch
+ * rather than from a socket. There is no transport to be honest about there, so
+ * the connection branch is skipped rather than guessed at.
+ *
+ * `workStartedAt` bounds the silence. `updatedAt` reflects the *previous* turn
+ * until the new turn's first activity is projected, so a thread that sat idle
+ * overnight and was just sent a message would otherwise read "no response for
+ * 9h" the instant the user pressed enter. Silence cannot predate the work, so
+ * it is measured from whichever is later.
+ */
+export function deriveWorkingIndicatorStatus(input: {
+  readonly connectionPhase: EnvironmentConnectionPhase | null;
+  readonly lastActivityAt: string | null;
+  readonly workStartedAt?: string | null;
+  readonly nowMs: number;
+  readonly staleAfterMs?: number;
+}): WorkingIndicatorStatus {
+  switch (input.connectionPhase) {
+    case "connecting":
+    case "reconnecting":
+    case "offline":
+    case "error":
+    // `available` means the supervisor is idle (`desired: false`) — not
+    // connected, and not trying. We are receiving nothing either way, so the
+    // spinner must not claim progress; it is grouped here rather than given a
+    // fourth state because the user-facing point is identical.
+    case "available":
+      return "reconnecting";
+    case "connected":
+    case null:
+      break;
+  }
+
+  const silenceStartedAt = resolveWorkingSilenceStart(
+    input.lastActivityAt,
+    input.workStartedAt ?? null,
+  );
+  if (silenceStartedAt === null) {
+    return "working";
+  }
+
+  const staleAfterMs = input.staleAfterMs ?? WORKING_STALE_AFTER_MS;
+  return input.nowMs - Date.parse(silenceStartedAt) >= staleAfterMs ? "stalled" : "working";
+}
+
+/**
+ * When the current stretch of silence began: the later of last activity and
+ * work start, or `null` when neither is usable.
+ *
+ * Also drives the "No response for X" timer, so the label and the threshold
+ * always measure the same interval.
+ *
+ * Unparseable timestamps are treated as absent rather than as 0 — a NaN that
+ * silently became the epoch would report every turn as stalled forever.
+ */
+export function resolveWorkingSilenceStart(
+  lastActivityAt: string | null,
+  workStartedAt: string | null,
+): string | null {
+  let best: string | null = null;
+  let bestMs = Number.NEGATIVE_INFINITY;
+  for (const iso of [lastActivityAt, workStartedAt]) {
+    if (iso === null) continue;
+    const ms = Date.parse(iso);
+    if (Number.isNaN(ms) || ms <= bestMs) continue;
+    best = iso;
+    bestMs = ms;
+  }
+  return best;
+}
 
 export interface StableMessagesTimelineRowsState {
   byId: Map<string, MessagesTimelineRow>;
@@ -450,6 +579,8 @@ export function deriveMessagesTimelineRows(input: {
   expandedWorkGroupIds?: ReadonlySet<string>;
   isWorking: boolean;
   activeTurnStartedAt: string | null;
+  connectionPhase?: EnvironmentConnectionPhase | null | undefined;
+  lastActivityAt?: string | null | undefined;
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   revertTurnCountByUserMessageId: ReadonlyMap<MessageId, number>;
 }): MessagesTimelineRow[] {
@@ -634,6 +765,8 @@ export function deriveMessagesTimelineRows(input: {
       kind: "working",
       id: "working-indicator-row",
       createdAt: input.activeTurnStartedAt,
+      connectionPhase: input.connectionPhase ?? null,
+      lastActivityAt: input.lastActivityAt ?? null,
     });
   }
 
@@ -665,8 +798,17 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
   switch (a.kind) {
-    case "working":
-      return a.createdAt === (b as typeof a).createdAt;
+    case "working": {
+      const bw = b as typeof a;
+      // `connectionPhase` must participate: without it the memoized row is
+      // reused and the indicator keeps claiming "Working" after the socket
+      // drops. Same for `lastActivityAt`, which is what makes silence visible.
+      return (
+        a.createdAt === bw.createdAt &&
+        a.connectionPhase === bw.connectionPhase &&
+        a.lastActivityAt === bw.lastActivityAt
+      );
+    }
 
     case "turn-fold": {
       const bf = b as typeof a;

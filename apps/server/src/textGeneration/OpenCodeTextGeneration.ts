@@ -20,6 +20,7 @@ import * as ServerConfig from "../config.ts";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import {
   buildBranchNamePrompt,
+  buildAutomationSchedulePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
@@ -39,6 +40,7 @@ const OpenCodeTextGenerationOperation = Schema.Literals([
   "generatePrContent",
   "generateBranchName",
   "generateThreadTitle",
+  "generateAutomationSchedule",
 ]);
 
 type OpenCodeTextGenerationOperation = typeof OpenCodeTextGenerationOperation.Type;
@@ -253,7 +255,8 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateAutomationSchedule";
   }) =>
     sharedServerMutex.withPermit(
       Effect.gen(function* () {
@@ -392,7 +395,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
         const session = yield* Effect.tryPromise({
           try: () =>
             client.session.create({
-              title: `T3 Code ${input.operation}`,
+              title: `Command Center ${input.operation}`,
               permission: [{ permission: "*", pattern: "*", action: "deny" }],
             }),
           catch: (cause) =>
@@ -615,10 +618,23 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       };
     });
 
+  const generateAutomationSchedule: TextGeneration.TextGeneration["Service"]["generateAutomationSchedule"] =
+    Effect.fn("OpenCodeTextGeneration.generateAutomationSchedule")(function* (input) {
+      const { prompt, outputSchema } = buildAutomationSchedulePrompt(input);
+      return yield* runOpenCodeJson({
+        operation: "generateAutomationSchedule",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateAutomationSchedule,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

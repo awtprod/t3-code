@@ -12,6 +12,7 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import type * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import { COMMAND_CENTER_RPC_SCOPE_ENTRIES } from "../command-center/RpcAuthorization.ts";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
@@ -21,6 +22,7 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  * runtime failure.
  */
 export const RPC_REQUIRED_SCOPES = {
+  ...Object.fromEntries(COMMAND_CENTER_RPC_SCOPE_ENTRIES),
   [ORCHESTRATION_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,
@@ -39,18 +41,41 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverRemoveKeybinding]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverGetSettings]: AuthOrchestrationReadScope,
   [WS_METHODS.serverUpdateSettings]: AuthOrchestrationOperateScope,
+  [WS_METHODS.efficiencyPreviewDecision]: AuthOrchestrationReadScope,
   [WS_METHODS.serverDiscoverSourceControl]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetTraceDiagnostics]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetProcessDiagnostics]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetProcessResourceHistory]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetResourceTelemetryHistory]: AuthOrchestrationReadScope,
   [WS_METHODS.serverRetryResourceTelemetry]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverGetUsageSummary]: AuthOrchestrationReadScope,
   [WS_METHODS.serverSignalProcess]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
   [WS_METHODS.serverReportHostPowerState]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverGetBackgroundPolicy]: AuthOrchestrationReadScope,
+  [WS_METHODS.usageQuery]: AuthOrchestrationReadScope,
   [WS_METHODS.cloudGetRelayClientStatus]: AuthRelayReadScope,
   [WS_METHODS.cloudInstallRelayClient]: AuthRelayWriteScope,
+  [WS_METHODS.pullRequestsList]: AuthOrchestrationReadScope,
+  [WS_METHODS.pullRequestsListStats]: AuthOrchestrationReadScope,
+  [WS_METHODS.pullRequestsDetail]: AuthOrchestrationReadScope,
+  [WS_METHODS.pullRequestsActivity]: AuthOrchestrationReadScope,
+  [WS_METHODS.pullRequestsDiffFileContents]: AuthOrchestrationReadScope,
+  [WS_METHODS.pullRequestsRunAction]: AuthOrchestrationOperateScope,
+  [WS_METHODS.pullRequestsUpdate]: AuthOrchestrationOperateScope,
+  [WS_METHODS.pullRequestsComment]: AuthOrchestrationOperateScope,
+  [WS_METHODS.pullRequestsUpdateComment]: AuthOrchestrationOperateScope,
+  [WS_METHODS.pullRequestsSubmitReview]: AuthOrchestrationOperateScope,
+  [WS_METHODS.pullRequestsReplyToThread]: AuthOrchestrationOperateScope,
+  [WS_METHODS.pullRequestsSetThreadResolution]: AuthOrchestrationOperateScope,
+  [WS_METHODS.pullRequestsSetReaction]: AuthOrchestrationOperateScope,
+  // Read scope like the reads it un-caches: refreshing is part of reading, and a read-only
+  // client pressing refresh must not be told it may not look again.
+  [WS_METHODS.pullRequestsInvalidate]: AuthOrchestrationReadScope,
+  // The candidate list is a read like the detail beside it; asking somebody for a review is a
+  // write like every other one.
+  [WS_METHODS.pullRequestsReviewerCandidates]: AuthOrchestrationReadScope,
+  [WS_METHODS.pullRequestsRequestReviewers]: AuthOrchestrationOperateScope,
   [WS_METHODS.sourceControlLookupRepository]: AuthOrchestrationReadScope,
   [WS_METHODS.sourceControlCloneRepository]: AuthOrchestrationOperateScope,
   [WS_METHODS.sourceControlPublishRepository]: AuthOrchestrationOperateScope,
@@ -102,13 +127,13 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
   [WS_METHODS.subscribeBackgroundPolicy]: AuthOrchestrationReadScope,
-} as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
+} as const satisfies Readonly<Partial<Record<WsRpcMethod, AuthEnvironmentScope>>>;
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {
   if (!Object.hasOwn(RPC_REQUIRED_SCOPES, method)) {
     throw new Error(`RPC method ${method} has no declared authorization scope.`);
   }
-  const requiredScope = RPC_REQUIRED_SCOPES[method as WsRpcMethod];
+  const requiredScope = RPC_REQUIRED_SCOPES[method as keyof typeof RPC_REQUIRED_SCOPES];
   if (requiredScope === undefined) {
     throw new Error(`RPC method ${method} has no declared authorization scope.`);
   }

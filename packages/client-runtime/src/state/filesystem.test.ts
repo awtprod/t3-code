@@ -22,9 +22,9 @@ describe("filesystem browse model", () => {
 
   it("filters names, hidden directories, and exact matches consistently", () => {
     const entries = [
-      { name: ".config", fullPath: "/Users/test/.config" },
-      { name: "Code", fullPath: "/Users/test/Code" },
-      { name: "codething", fullPath: "/Users/test/codething" },
+      { name: ".config", fullPath: "/opt/example/.config" },
+      { name: "Code", fullPath: "/opt/example/Code" },
+      { name: "codething", fullPath: "/opt/example/codething" },
     ];
 
     expect(filterFilesystemBrowseEntries(entries, "co")).toEqual({

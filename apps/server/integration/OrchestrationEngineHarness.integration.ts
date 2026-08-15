@@ -310,6 +310,9 @@ export const makeOrchestrationIntegrationHarness = (
       ProjectionPendingApprovalRepositoryLive,
       checkpointStoreLayer,
       providerLayer,
+      // Expose the session directory so ProviderRuntimeIngestion can read the
+      // interrupted turn's model selection off the persisted binding at resume.
+      providerSessionDirectoryLayer,
       RuntimeReceiptBusTest,
     ).pipe(
       Layer.provideMerge(ThreadBackgroundLiveness.layer),

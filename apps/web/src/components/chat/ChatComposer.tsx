@@ -1,6 +1,7 @@
 import type {
   ApprovalRequestId,
   EnvironmentId,
+  EfficiencyTier,
   ModelSelection,
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
@@ -10,6 +11,7 @@ import type {
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
+  ThreadRoutingMode,
 } from "@t3tools/contracts";
 import {
   ProviderDriverKind,
@@ -390,6 +392,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   activeThreadProviderDisplayName: string | null;
+  contextAdviceThreshold: number | null;
+  toolWarningThreshold: number | null;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -417,6 +421,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         <ContextWindowMeter
           usage={props.activeContextWindow}
           providerDisplayName={props.activeThreadProviderDisplayName}
+          adviceThresholdPercent={props.contextAdviceThreshold}
+          toolWarningThreshold={props.toolWarningThreshold}
         />
       ) : null}
       {props.isPreparingWorktree ? (
@@ -550,6 +556,8 @@ export interface ChatComposerProps {
 
   // Context window
   activeThreadActivities: Thread["activities"] | undefined;
+  efficiencyRoutingMode: ThreadRoutingMode;
+  efficiencyTier: EfficiencyTier;
 
   // Misc
   resolvedTheme: "light" | "dark";
@@ -567,6 +575,7 @@ export interface ChatComposerProps {
 
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
+  onEfficiencyRoutingChange: (mode: ThreadRoutingMode, tier: EfficiencyTier) => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -638,6 +647,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
     activeThreadActivities,
+    efficiencyRoutingMode,
+    efficiencyTier,
     resolvedTheme,
     settings,
     keybindings,
@@ -649,6 +660,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerTerminalContextsRef,
     composerElementContextsRef,
     onSend,
+    onEfficiencyRoutingChange,
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
@@ -928,6 +940,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     return formatProviderDisplayName(activeThreadModelSelection.instanceId);
   }, [providerStatuses, activeThreadModelSelection]);
+  const activeEfficiencyTier = activeThread?.efficiencyTier ?? settings.efficiency.defaultTier;
+  const contextAdviceThreshold =
+    activeThread?.routingMode === "auto"
+      ? settings.efficiency.contextThresholds[activeEfficiencyTier]
+      : null;
+  const toolWarningThreshold =
+    activeThread?.routingMode === "auto"
+      ? settings.efficiency.toolWarnings[activeEfficiencyTier]
+      : null;
 
   // ------------------------------------------------------------------
   // Composer-local state
@@ -1975,7 +1996,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         // unique image into the overflow list for nothing.
         const existingDedupKeys = new Set(
           composerImagesRef.current.map(
-            (image) => `${image.mimeType} ${image.sizeBytes} ${image.name}`,
+            (image) => `${image.mimeType}\0${image.sizeBytes}\0${image.name}`,
           ),
         );
         const capacity = Math.max(
@@ -1986,7 +2007,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           (attachment) =>
             !existingIds.has(attachment.id) &&
             !existingDedupKeys.has(
-              `${attachment.mimeType} ${attachment.sizeBytes} ${attachment.name}`,
+              `${attachment.mimeType}\0${attachment.sizeBytes}\0${attachment.name}`,
             ),
         );
         // Anything past the attachment limit cannot be restored. The entry is
@@ -2078,7 +2099,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     // the composer has been cleared the user can type something genuinely
     // new (or switch threads) while encoding continues, and that deserves its
     // own entry.
-    const snapshotKey = `${String(composerDraftTarget)} ${prompt} ${images
+    const snapshotKey = `${String(composerDraftTarget)}\0${prompt}\0${images
       .map((image) => image.id)
       .join(",")}`;
     if (stashInFlightRef.current.has(snapshotKey)) return;
@@ -2652,7 +2673,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     <form
       ref={composerFormRef}
       onSubmit={submitComposer}
-      className="mx-auto w-full min-w-0 max-w-3xl"
+      className="mx-auto w-full min-w-0 max-w-(--chat-column-max-width)"
       data-chat-composer-form="true"
     >
       <div
@@ -3106,7 +3127,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 showMobilePendingAnswerActions && "hidden sm:flex",
               )}
             >
-              <div className="-m-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <div className="-m-1 -ms-3.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 ps-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                 {noProviderAvailable ? (
                   <Button
                     type="button"
@@ -3129,7 +3150,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     instanceEntries={providerInstanceEntries}
                     keybindings={keybindings}
                     modelOptionsByInstance={modelOptionsByInstance}
-                    triggerClassName="-ms-px ps-0"
+                    triggerClassName="-ms-2.5"
                     terminalOpen={terminalOpen}
                     open={isComposerModelPickerOpen}
                     {...(composerProviderState.modelPickerIconClassName
@@ -3142,9 +3163,43 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       setIsComposerModelPickerOpen(open);
                     }}
                     getModelDisabledReason={getModelDisabledReason}
-                    onInstanceModelChange={onProviderModelSelect}
+                    onInstanceModelChange={(instanceId, model) => {
+                      onEfficiencyRoutingChange("manual", efficiencyTier);
+                      onProviderModelSelect(instanceId, model);
+                    }}
                   />
                 )}
+
+                {settings.efficiency.enabled ? (
+                  <Select
+                    value={efficiencyRoutingMode === "manual" ? "manual" : `auto:${efficiencyTier}`}
+                    onValueChange={(value) => {
+                      if (!value) return;
+                      if (value === "manual") {
+                        onEfficiencyRoutingChange("manual", efficiencyTier);
+                      } else {
+                        onEfficiencyRoutingChange(
+                          "auto",
+                          value.slice("auto:".length) as EfficiencyTier,
+                        );
+                      }
+                    }}
+                  >
+                    <ComposerSelectControl aria-label="Efficiency routing" className="font-medium">
+                      <SelectValue>
+                        {efficiencyRoutingMode === "manual"
+                          ? "Manual"
+                          : `Auto · ${efficiencyTier[0]!.toUpperCase()}${efficiencyTier.slice(1)}`}
+                      </SelectValue>
+                    </ComposerSelectControl>
+                    <SelectPopup alignItemWithTrigger={false}>
+                      <SelectItem value="manual">Manual model</SelectItem>
+                      <SelectItem value="auto:economy">Auto · Economy</SelectItem>
+                      <SelectItem value="auto:balanced">Auto · Balanced</SelectItem>
+                      <SelectItem value="auto:quality">Auto · Quality</SelectItem>
+                    </SelectPopup>
+                  </Select>
+                ) : null}
 
                 {isComposerFooterCompact ? (
                   <CompactComposerControlsMenu
@@ -3186,6 +3241,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   activeThreadProviderDisplayName={activeThreadProviderDisplayName}
+                  contextAdviceThreshold={contextAdviceThreshold}
+                  toolWarningThreshold={toolWarningThreshold}
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}

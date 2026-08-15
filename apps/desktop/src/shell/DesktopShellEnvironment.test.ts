@@ -164,12 +164,12 @@ describe("DesktopShellEnvironment", () => {
         platform: "linux",
         handler: () =>
           envOutput({
-            PATH: "/home/linuxbrew/.linuxbrew/bin:/usr/bin",
+            PATH: "/opt/linuxbrew/bin:/usr/bin",
             SSH_AUTH_SOCK: "/tmp/secretive.sock",
           }),
       });
 
-      assert.equal(env.PATH, "/home/linuxbrew/.linuxbrew/bin:/usr/bin");
+      assert.equal(env.PATH, "/opt/linuxbrew/bin:/usr/bin");
       assert.equal(env.SSH_AUTH_SOCK, "/tmp/secretive.sock");
     }),
   );
@@ -231,6 +231,7 @@ describe("DesktopShellEnvironment", () => {
           "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
           "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
           "C:\\Users\\testuser\\AppData\\Local\\pnpm",
+          "C:\\Users\\testuser\\.local\\bin",
           "C:\\Users\\testuser\\.bun\\bin",
           "C:\\Users\\testuser\\scoop\\shims",
           "C:\\Custom\\Bin",
@@ -258,7 +259,7 @@ describe("DesktopShellEnvironment", () => {
         platform: "linux",
         handler: () =>
           envOutput({
-            PATH: "/home/linuxbrew/.linuxbrew/bin:/usr/bin",
+            PATH: "/opt/linuxbrew/bin:/usr/bin",
             XDG_CURRENT_DESKTOP: "KDE",
             XDG_SESSION_DESKTOP: "KDE",
             XDG_SESSION_TYPE: "wayland",

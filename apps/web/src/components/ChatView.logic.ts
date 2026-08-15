@@ -10,7 +10,13 @@ import {
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
-import { type ChatMessage, type SessionPhase, type Thread, type ThreadShell } from "../types";
+import {
+  type ChatImageAttachment,
+  type ChatMessage,
+  type SessionPhase,
+  type Thread,
+  type ThreadShell,
+} from "../types";
 import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
 import * as Schema from "effect/Schema";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -25,12 +31,25 @@ import type { DraftThreadEnvMode } from "../composerDraftStore";
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
+export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
 
+export function scheduleEnvironmentReconnectWarning(showWarning: () => void): () => void {
+  const timeoutId = globalThis.setTimeout(showWarning, ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
+  return () => globalThis.clearTimeout(timeoutId);
+}
+
+export function hasEnvironmentReconnectWarningGraceElapsed(
+  activeEnvironmentId: EnvironmentId | null,
+  elapsedEnvironmentId: EnvironmentId | null,
+): boolean {
+  return activeEnvironmentId !== null && activeEnvironmentId === elapsedEnvironmentId;
+}
+
 export function startNewThreadForProject(
   projectRef: ScopedProjectRef | null,
-  handleNewThread: (projectRef: ScopedProjectRef) => Promise<void>,
+  handleNewThread: (projectRef: ScopedProjectRef) => Promise<unknown>,
 ): boolean {
   if (projectRef === null) return false;
   void handleNewThread(projectRef);
@@ -43,8 +62,14 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
   nextModelSelection?: ModelSelection;
   currentBranch: string | null;
   nextBranch?: string;
+  currentRoutingMode?: "manual" | "auto";
+  nextRoutingMode?: "manual" | "auto";
+  currentEfficiencyTier?: "economy" | "balanced" | "quality";
+  nextEfficiencyTier?: "economy" | "balanced" | "quality";
 }): {
   modelSelection?: ModelSelection;
+  routingMode?: "manual" | "auto";
+  efficiencyTier?: "economy" | "balanced" | "quality";
   branch?: string;
   worktreePath?: null;
 } | null {
@@ -56,11 +81,18 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
       JSON.stringify(nextModelSelection.options ?? null) !==
         JSON.stringify(input.currentModelSelection.options ?? null));
   const branchChanged = input.nextBranch !== undefined && input.nextBranch !== input.currentBranch;
-  if (!modelSelectionChanged && !branchChanged) {
+  const routingModeChanged =
+    input.nextRoutingMode !== undefined && input.nextRoutingMode !== input.currentRoutingMode;
+  const efficiencyTierChanged =
+    input.nextEfficiencyTier !== undefined &&
+    input.nextEfficiencyTier !== input.currentEfficiencyTier;
+  if (!modelSelectionChanged && !branchChanged && !routingModeChanged && !efficiencyTierChanged) {
     return null;
   }
   return {
     ...(modelSelectionChanged ? { modelSelection: nextModelSelection } : {}),
+    ...(routingModeChanged ? { routingMode: input.nextRoutingMode } : {}),
+    ...(efficiencyTierChanged ? { efficiencyTier: input.nextEfficiencyTier } : {}),
     ...(branchChanged ? { branch: input.nextBranch, worktreePath: null } : {}),
   };
 }
@@ -257,6 +289,48 @@ export function cloneComposerImageForRetry(
     };
   } catch {
     return image;
+  }
+}
+
+export async function loadComposerImagesForRetry(
+  attachments: ReadonlyArray<ChatImageAttachment>,
+  options: {
+    readonly fetchAttachment?: (url: string) => Promise<Blob>;
+    readonly createPreviewUrl?: (file: File) => string;
+  } = {},
+): Promise<ComposerImageAttachment[]> {
+  const fetchAttachment =
+    options.fetchAttachment ??
+    (async (url: string) => {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error("Attachment could not be loaded for retry.");
+      }
+      return response.blob();
+    });
+  const createPreviewUrl = options.createPreviewUrl ?? ((file: File) => URL.createObjectURL(file));
+  const images: ComposerImageAttachment[] = [];
+  try {
+    for (const attachment of attachments) {
+      if (!attachment.previewUrl) {
+        throw new Error(`Attachment '${attachment.name}' is not available for retry.`);
+      }
+      const blob = await fetchAttachment(attachment.previewUrl).catch(() => {
+        throw new Error(`Attachment '${attachment.name}' could not be loaded for retry.`);
+      });
+      const file = new File([blob], attachment.name, { type: attachment.mimeType });
+      images.push({
+        ...attachment,
+        previewUrl: createPreviewUrl(file),
+        file,
+      });
+    }
+    return images;
+  } catch (error) {
+    for (const image of images) {
+      revokeBlobPreviewUrl(image.previewUrl);
+    }
+    throw error;
   }
 }
 

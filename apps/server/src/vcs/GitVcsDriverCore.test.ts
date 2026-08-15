@@ -18,6 +18,7 @@ import { GitCommandError, type ReviewDiffFileContentsInput } from "@t3tools/cont
 import { ServerConfig } from "../config.ts";
 import { makeGitVcsDriverCore, splitNullSeparatedGitStdoutPaths } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
+import { HOST_GIT_HARDENED_CONFIG_ARGS } from "./HostGitSecurity.ts";
 
 const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-git-vcs-driver-test-",
@@ -119,7 +120,7 @@ const initRepoWithCommit = (
   Effect.gen(function* () {
     const driver = yield* GitVcsDriver.GitVcsDriver;
     yield* driver.initRepo({ cwd });
-    yield* git(cwd, ["config", "user.email", "test@test.com"]);
+    yield* git(cwd, ["config", "user.email", "test@example.com"]);
     yield* git(cwd, ["config", "user.name", "Test"]);
     yield* writeTextFile(cwd, "README.md", "# test\n");
     yield* git(cwd, ["add", "."]);
@@ -160,9 +161,18 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
     yield* driver.listRefs({ cwd });
 
     assert.deepStrictEqual(commands, [
-      { args: ["status", "--porcelain=2", "--branch"], lcAll: "C" },
-      { args: ["rev-parse", "--abbrev-ref", "HEAD"], lcAll: "C" },
-      { args: ["rev-parse", "--git-common-dir"], lcAll: "C" },
+      {
+        args: [...HOST_GIT_HARDENED_CONFIG_ARGS, "status", "--porcelain=2", "--branch"],
+        lcAll: "C",
+      },
+      {
+        args: [...HOST_GIT_HARDENED_CONFIG_ARGS, "rev-parse", "--abbrev-ref", "HEAD"],
+        lcAll: "C",
+      },
+      {
+        args: [...HOST_GIT_HARDENED_CONFIG_ARGS, "rev-parse", "--git-common-dir"],
+        lcAll: "C",
+      },
     ]);
   }).pipe(Effect.provide(layer));
 });
@@ -235,10 +245,11 @@ it.effect("coalesces concurrent ref pages into one repository snapshot", () =>
             yield* Effect.sleep("8 seconds");
           }
           const handle = yield* delegate.spawn(command);
+          const gitDirArgumentIndex = command.args.indexOf("--git-dir");
           const isRemoteNamesScan =
-            command.args.length === 3 &&
-            command.args[0] === "--git-dir" &&
-            command.args[2] === "remote";
+            gitDirArgumentIndex >= 0 &&
+            command.args[gitDirArgumentIndex + 2] === "remote" &&
+            gitDirArgumentIndex + 3 === command.args.length;
           return isRemoteNamesScan
             ? ChildProcessSpawner.makeHandle({
                 ...handle,
@@ -262,7 +273,7 @@ it.effect("coalesces concurrent ref pages into one repository snapshot", () =>
         });
 
       yield* driver.initRepo({ cwd });
-      yield* runGit(["config", "user.email", "test@test.com"]);
+      yield* runGit(["config", "user.email", "test@example.com"]);
       yield* runGit(["config", "user.name", "Test"]);
       yield* writeTextFile(cwd, "README.md", "# test\n");
       yield* runGit(["add", "."]);
@@ -392,7 +403,11 @@ it.effect("invalidates a ref snapshot when a mutation fails after changing Git",
           if (!ChildProcess.isStandardCommand(command)) {
             return yield* Effect.die("expected a standard Git command");
           }
-          if (command.args[0] === "branch" && command.args[1] === "feature/partial-failure") {
+          const branchArgumentIndex = command.args.indexOf("branch");
+          if (
+            branchArgumentIndex >= 0 &&
+            command.args[branchArgumentIndex + 1] === "feature/partial-failure"
+          ) {
             const handle = yield* delegate.spawn(command);
             yield* handle.exitCode;
             return makeNonRepositoryHandle();
@@ -585,7 +600,7 @@ it.effect("backs off failed upstream refreshes across linked worktrees", () =>
         });
 
       yield* driver.initRepo({ cwd });
-      yield* runGit(cwd, ["config", "user.email", "test@test.com"]);
+      yield* runGit(cwd, ["config", "user.email", "test@example.com"]);
       yield* runGit(cwd, ["config", "user.name", "Test"]);
       yield* writeTextFile(cwd, "README.md", "# test\n");
       yield* runGit(cwd, ["add", "."]);
@@ -1001,6 +1016,23 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("reports remote status on unborn HEAD without failing", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.initRepo({ cwd });
+        const initialBranch = yield* git(cwd, ["symbolic-ref", "--short", "HEAD"]);
+
+        const status = yield* driver.statusDetailsRemote(cwd, { refreshUpstream: false });
+
+        assert.equal(status.isRepo, true);
+        assert.equal(status.branch, initialBranch);
+        assert.equal(status.hasUpstream, false);
+        assert.equal(status.aheadCount, 0);
+        assert.equal(status.behindCount, 0);
+      }),
+    );
+
     it.effect("can read cached remote divergence without fetching upstream", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -1063,7 +1095,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("makes background upstream status fetches non-interactive", () =>
+    it.effect("ignores ambient Git callback configuration during status refresh", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
         const tempDir = yield* makeTmpDir("git-vcs-driver-ssh-env-");
@@ -1110,15 +1142,9 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           process.env.SSH_ASKPASS_REQUIRE = "force";
           process.env.T3_TEST_SSH_ASKPASS_LOG = sshLogPath;
 
-          yield* (yield* GitVcsDriver.GitVcsDriver).statusDetails(cwd);
-
-          assert.deepEqual((yield* fileSystem.readFileString(sshLogPath)).trim().split(/\r?\n/), [
-            "GCM_INTERACTIVE=never",
-            "GIT_ASKPASS=",
-            "GIT_TERMINAL_PROMPT=0",
-            "SSH_ASKPASS=",
-            "SSH_ASKPASS_REQUIRE=never",
-          ]);
+          const status = yield* (yield* GitVcsDriver.GitVcsDriver).statusDetails(cwd);
+          assert.equal(status.isRepo, true);
+          assert.equal(yield* fileSystem.exists(sshLogPath), false);
         }).pipe(
           Effect.ensuring(
             Effect.sync(() => {
@@ -1187,7 +1213,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         const cwd = yield* makeTmpDir();
         const driver = yield* GitVcsDriver.GitVcsDriver;
         yield* driver.initRepo({ cwd });
-        yield* git(cwd, ["config", "user.email", "test@test.com"]);
+        yield* git(cwd, ["config", "user.email", "test@example.com"]);
         yield* git(cwd, ["config", "user.name", "Test"]);
         yield* writeTextFile(cwd, "initial.ts", "// first file\n");
         yield* git(cwd, ["add", "initial.ts"]);
@@ -1361,6 +1387,50 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         yield* driver.removeWorktree({ cwd, path: worktreePath });
         const fileSystem = yield* FileSystem.FileSystem;
         assert.equal(yield* fileSystem.exists(worktreePath), false);
+      }),
+    );
+
+    it.effect("keeps configured fsmonitor and checkout callbacks inactive", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const outside = yield* makeTmpDir("git-host-exec-markers-");
+        const fsmonitorMarker = pathService.join(outside, "fsmonitor-executed");
+        const checkoutMarker = pathService.join(outside, "post-checkout-executed");
+        const fsmonitor = pathService.join(cwd, ".git", "configured-fsmonitor");
+        const checkoutHook = pathService.join(cwd, ".git", "hooks", "post-checkout");
+        yield* fileSystem.writeFileString(
+          fsmonitor,
+          `#!/bin/sh\nprintf called > '${fsmonitorMarker}'\nprintf '2\\n'\n`,
+        );
+        yield* fileSystem.writeFileString(
+          checkoutHook,
+          `#!/bin/sh\nprintf called > '${checkoutMarker}'\n`,
+        );
+        yield* fileSystem.chmod(fsmonitor, 0o700);
+        yield* fileSystem.chmod(checkoutHook, 0o700);
+        yield* git(cwd, ["config", "core.fsmonitor", fsmonitor]);
+        yield* git(cwd, ["config", "core.hooksPath", pathService.dirname(checkoutHook)]);
+
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const status = yield* driver.statusDetails(cwd);
+        assert.equal(status.isRepo, true);
+        assert.equal(yield* fileSystem.exists(fsmonitorMarker), false);
+
+        const worktreePath = pathService.join(
+          yield* makeTmpDir("git-safe-worktrees-"),
+          "safe-worktree",
+        );
+        yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/safe-worktree",
+        });
+        assert.equal(yield* fileSystem.exists(checkoutMarker), false);
+        assert.equal(yield* fileSystem.exists(fsmonitorMarker), false);
       }),
     );
   });

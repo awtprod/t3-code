@@ -37,6 +37,11 @@ import {
   parseRemoteRefWithRemoteNames,
 } from "../git/remoteRefs.ts";
 import { ServerConfig } from "../config.ts";
+import {
+  hardenedHostGitArguments,
+  hardenedHostGitEnvironment,
+  resolveTrustedHostExecutable,
+} from "./HostGitSecurity.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
@@ -716,6 +721,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       const appendTruncationMarker = input.appendTruncationMarker ?? false;
 
       const runGitCommand = Effect.fn("runGitCommand")(function* () {
+        const writableRoots = [commandInput.cwd, worktreesDir];
+        const gitExecutable = resolveTrustedHostExecutable("git", { writableRoots });
+        if (gitExecutable === undefined) {
+          return yield* new GitCommandError({
+            ...gitCommandContext(commandInput),
+            detail: "Refused to resolve Git outside repository-writable command roots.",
+          });
+        }
         const trace2Monitor = yield* createTrace2Monitor(commandInput, input.progress).pipe(
           Effect.provideService(Path.Path, path),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -730,13 +743,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         );
         const child = yield* commandSpawner
           .spawn(
-            ChildProcess.make("git", commandInput.args, {
+            ChildProcess.make(gitExecutable, hardenedHostGitArguments(commandInput.args), {
               cwd: commandInput.cwd,
-              env: {
-                ...process.env,
-                ...input.env,
-                ...trace2Monitor.env,
-              },
+              env: hardenedHostGitEnvironment([input.env, trace2Monitor.env], {
+                allowIndexFile: input.operation.startsWith("GitVcsDriver.checkpoints."),
+                writableRoots,
+              }),
+              extendEnv: false,
             }),
           )
           .pipe(
@@ -1477,25 +1490,35 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     if (branchResult === null) {
       return NON_REPOSITORY_REMOTE_STATUS_DETAILS;
     }
+    let branch: string | null;
     if (branchResult.exitCode !== 0) {
       if (isNonRepositoryGitStderr(branchResult.stderr)) {
         return NON_REPOSITORY_REMOTE_STATUS_DETAILS;
       }
-      return yield* new GitCommandError({
-        ...gitCommandContext({
-          operation: "GitVcsDriver.statusDetailsRemote.branch",
-          cwd,
-          args: ["rev-parse", "--abbrev-ref", "HEAD"],
-        }),
-        detail: "Git branch lookup failed.",
-        exitCode: branchResult.exitCode,
-        stdoutLength: branchResult.stdout.length,
-        stderrLength: branchResult.stderr.length,
-      });
-    }
+      if (!isUnbornHeadStderr(branchResult.stderr)) {
+        return yield* new GitCommandError({
+          ...gitCommandContext({
+            operation: "GitVcsDriver.statusDetailsRemote.branch",
+            cwd,
+            args: ["rev-parse", "--abbrev-ref", "HEAD"],
+          }),
+          detail: "Git branch lookup failed.",
+          exitCode: branchResult.exitCode,
+          stdoutLength: branchResult.stdout.length,
+          stderrLength: branchResult.stderr.length,
+        });
+      }
 
-    const branchValue = branchResult.stdout.trim();
-    const branch = branchValue.length > 0 && branchValue !== "HEAD" ? branchValue : null;
+      const branchValue = yield* runGitStdout(
+        "GitVcsDriver.statusDetailsRemote.unbornBranch",
+        cwd,
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+      );
+      branch = branchValue.trim() || null;
+    } else {
+      const branchValue = branchResult.stdout.trim();
+      branch = branchValue.length > 0 && branchValue !== "HEAD" ? branchValue : null;
+    }
     const upstream = yield* resolveCurrentUpstream(cwd);
     const upstreamRef = upstream?.upstreamRef ?? null;
     let aheadCount = 0;
@@ -2794,6 +2817,95 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       );
     });
 
+  const resolveCommit: GitVcsDriver.GitVcsDriver["Service"]["resolveCommit"] = Effect.fn(
+    "resolveCommit",
+  )(function* (input) {
+    const commitSha = yield* runGitStdout("GitVcsDriver.resolveCommit", input.cwd, [
+      "rev-parse",
+      "--verify",
+      `${input.revision}^{commit}`,
+    ]).pipe(Effect.map((stdout) => stdout.trim()));
+
+    return { commitSha };
+  });
+
+  const fetchPullRequestHeadCommit: GitVcsDriver.GitVcsDriver["Service"]["fetchPullRequestHeadCommit"] =
+    Effect.fn("fetchPullRequestHeadCommit")(function* (input) {
+      const remoteName = yield* resolvePrimaryRemoteName(input.cwd);
+      // No refspec destination: the pull head lands in FETCH_HEAD (per worktree) instead of a
+      // branch, which is the only way to read it while that branch is checked out somewhere.
+      yield* executeGit(
+        "GitVcsDriver.fetchPullRequestHeadCommit",
+        input.cwd,
+        ["fetch", "--quiet", "--no-tags", remoteName, `refs/pull/${input.prNumber}/head`],
+        {
+          fallbackErrorDetail: "git fetch pull request head failed",
+        },
+      );
+
+      return yield* resolveCommit({ cwd: input.cwd, revision: "FETCH_HEAD" });
+    });
+
+  const refreshCheckedOutBranch: GitVcsDriver.GitVcsDriver["Service"]["refreshCheckedOutBranch"] =
+    Effect.fn("refreshCheckedOutBranch")(function* (input) {
+      const { commitSha: headCommit } = yield* resolveCommit({ cwd: input.cwd, revision: "HEAD" });
+      if (headCommit === input.targetCommit) {
+        return { headCommit, moved: false, onTarget: true };
+      }
+
+      const worktreeChanges = yield* runGitStdout(
+        "GitVcsDriver.refreshCheckedOutBranch.status",
+        input.cwd,
+        ["status", "--porcelain"],
+      );
+      if (worktreeChanges.trim().length > 0) {
+        return { headCommit, moved: false, onTarget: false };
+      }
+
+      const isAncestor = yield* executeGit(
+        "GitVcsDriver.refreshCheckedOutBranch.isAncestor",
+        input.cwd,
+        ["merge-base", "--is-ancestor", headCommit, input.targetCommit],
+        { allowNonZeroExit: true },
+      ).pipe(Effect.map((result) => result.exitCode === 0));
+      // A rewritten head (rebase, squash, amend) does not descend from the checkout, so it can
+      // only be taken by resetting. That is lossless exactly when the tree is clean and HEAD
+      // never left the commit the upstream held before the fetch.
+      if (!isAncestor && headCommit !== input.resetWhenHeadCommit) {
+        return { headCommit, moved: false, onTarget: false };
+      }
+
+      if (!isAncestor) {
+        // The commit being reset away is about to be reachable from nothing. It is only ever a
+        // commit the remote already held, but "the remote held it" stops being a way back once
+        // the head it belonged to has been rewritten, so a ref keeps it findable.
+        yield* executeGit(
+          "GitVcsDriver.refreshCheckedOutBranch.keepPrevious",
+          input.cwd,
+          ["update-ref", "refs/t3code/pre-refresh", headCommit],
+          { fallbackErrorDetail: "git failed to record the previous checkout commit" },
+        );
+      }
+
+      yield* executeGit(
+        "GitVcsDriver.refreshCheckedOutBranch.move",
+        input.cwd,
+        // `--merge` rather than `--hard`: the cleanliness check above is a snapshot, and another
+        // thread may edit a tracked file between it and this move. Git itself refuses a `--merge`
+        // reset that would overwrite such an edit — the same guarantee `--ff-only` gives the
+        // other branch — so a race loses nothing; the refresh fails and is reported instead.
+        isAncestor
+          ? ["merge", "--ff-only", input.targetCommit]
+          : ["reset", "--merge", input.targetCommit],
+        {
+          timeoutMs: 30_000,
+          fallbackErrorDetail: "git failed to move the checkout onto the pull request head",
+        },
+      );
+
+      return { headCommit: input.targetCommit, moved: true, onTarget: true };
+    });
+
   const fetchRemote: GitVcsDriver.GitVcsDriver["Service"]["fetchRemote"] = Effect.fn("fetchRemote")(
     function* (input) {
       yield* executeGit(
@@ -3071,6 +3183,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     createWorktree: (input) => withListRefsInvalidation(input.cwd, createWorktree(input)),
     fetchPullRequestBranch: (input) =>
       withListRefsInvalidation(input.cwd, fetchPullRequestBranch(input)),
+    fetchPullRequestHeadCommit,
+    resolveCommit,
+    refreshCheckedOutBranch: (input) =>
+      withListRefsInvalidation(input.cwd, refreshCheckedOutBranch(input)),
     ensureRemote: (input) => withListRefsInvalidation(input.cwd, ensureRemote(input)),
     resolvePrimaryRemoteName,
     fetchRemote: (input) => withListRefsInvalidation(input.cwd, fetchRemote(input)),

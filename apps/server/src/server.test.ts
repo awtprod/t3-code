@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
+  AuthAdministrativeScopes,
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
@@ -149,6 +150,15 @@ import * as DesktopTelemetryReceiver from "./resourceTelemetry/DesktopTelemetryR
 import * as NativeTelemetryClient from "./resourceTelemetry/NativeTelemetryClient.ts";
 import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
+import * as UsageService from "./usage/UsageService.ts";
+import * as CommandCenterService from "./command-center/Service.ts";
+import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as CommandCenterReadinessGate from "./command-center/ReadinessGate.ts";
+import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
+import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
+import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
 import * as Data from "effect/Data";
 
 import { makeOrchestrationIntegrationHarness } from "../integration/OrchestrationEngineHarness.integration.ts";
@@ -453,6 +463,9 @@ const buildAppUnderTest = (options?: {
       logWebSocketEvents: false,
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
+      previewGatewayEnabled: false,
+      previewGatewayPort: 0,
+      previewGatewayServePort: 8445,
       ...options?.config,
     };
     const layerConfig = ServerConfig.layer(config);
@@ -603,6 +616,83 @@ const buildAppUnderTest = (options?: {
         ),
       ),
     );
+    const orchestrationEngineLayer = Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
+      readEvents: () => Stream.empty,
+      dispatch: () => Effect.succeed({ sequence: 0 }),
+      streamDomainEvents: Stream.empty,
+      latestSequence: Effect.succeed(0),
+      ...options?.layers?.orchestrationEngine,
+    });
+    const projectSetupScriptRunnerLayer = Layer.mock(
+      ProjectSetupScriptRunner.ProjectSetupScriptRunner,
+    )({
+      runForThread: () => Effect.succeed({ status: "no-script" as const }),
+      ...options?.layers?.projectSetupScriptRunner,
+    });
+    const orchestrationCommandDispatcherLayer = OrchestrationCommandDispatcher.layer.pipe(
+      Layer.provide(orchestrationEngineLayer),
+      Layer.provide(
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([]),
+          refresh: () => Effect.succeed([]),
+          refreshInstance: () => Effect.succeed([]),
+          getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+            Effect.succeed(
+              makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
+            ),
+          setProviderMaintenanceActionState: () => Effect.succeed([]),
+          streamChanges: Stream.empty,
+          ...options?.layers?.providerRegistry,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ServerSettings.ServerSettingsService)({
+          start: Effect.void,
+          ready: Effect.void,
+          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+          updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
+          streamChanges: Stream.empty,
+          ...options?.layers?.serverSettings,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
+          getCommandReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
+          getSnapshot: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
+          getShellSnapshot: () =>
+            Effect.succeed({
+              snapshotSequence: 0,
+              projects: [],
+              threads: [],
+              updatedAt: "1970-01-01T00:00:00.000Z",
+            }),
+          getArchivedShellSnapshot: () =>
+            Effect.succeed({
+              snapshotSequence: 0,
+              projects: [],
+              threads: [],
+              updatedAt: "1970-01-01T00:00:00.000Z",
+            }),
+          searchThreads: () => Effect.succeed({ matches: [] }),
+          getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
+          getProjectShellById: () => Effect.succeed(Option.none()),
+          getThreadShellById: () => Effect.succeed(Option.none()),
+          getThreadDetailById: () => Effect.succeed(Option.none()),
+          getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+          getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
+          getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+          getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+          getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+          getFullThreadDiffContext: () => Effect.succeed(Option.none()),
+          ...options?.layers?.projectionSnapshotQuery,
+        }),
+      ),
+      Layer.provide(gitWorkflowLayer),
+      Layer.provide(projectSetupScriptRunnerLayer),
+      Layer.provide(vcsStatusBroadcasterLayer),
+      Layer.provide(WorkspacePaths.layer),
+      Layer.provide(layerConfig),
+    );
     const serviceLauncherClientLayer = ServiceLauncherClient.layer.pipe(
       Layer.provide(Layer.succeed(HostProcessEnvironment, {})),
     );
@@ -727,12 +817,7 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
-      Layer.provide(
-        Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
-          runForThread: () => Effect.succeed({ status: "no-script" as const }),
-          ...options?.layers?.projectSetupScriptRunner,
-        }),
-      ),
+      Layer.provide(projectSetupScriptRunnerLayer),
       Layer.provide(
         Layer.mock(TerminalManager.TerminalManager)({
           ...options?.layers?.terminalManager,
@@ -762,15 +847,7 @@ const buildAppUnderTest = (options?: {
           }),
         ),
       ),
-      Layer.provide(
-        Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
-          readEvents: () => Stream.empty,
-          dispatch: () => Effect.succeed({ sequence: 0 }),
-          streamDomainEvents: Stream.empty,
-          latestSequence: Effect.succeed(0),
-          ...options?.layers?.orchestrationEngine,
-        }),
-      ),
+      Layer.provide(orchestrationEngineLayer),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
           getCommandReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
@@ -803,28 +880,39 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
-          getTurnDiff: () =>
-            Effect.succeed({
-              threadId: defaultThreadId,
-              fromTurnCount: 0,
-              toTurnCount: 0,
-              diff: "",
-            }),
-          getFullThreadDiff: () =>
-            Effect.succeed({
-              threadId: defaultThreadId,
-              fromTurnCount: 0,
-              toTurnCount: 0,
-              diff: "",
-            }),
-          ...options?.layers?.checkpointDiffQuery,
-        }),
+        Layer.mergeAll(
+          Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
+            getTurnDiff: () =>
+              Effect.succeed({
+                threadId: defaultThreadId,
+                fromTurnCount: 0,
+                toTurnCount: 0,
+                diff: "",
+              }),
+            getFullThreadDiff: () =>
+              Effect.succeed({
+                threadId: defaultThreadId,
+                fromTurnCount: 0,
+                toTurnCount: 0,
+                diff: "",
+              }),
+            ...options?.layers?.checkpointDiffQuery,
+          }),
+          Layer.mock(CommandCenterService.CommandCenterService)({}),
+          Layer.mock(CommandCenterEventStream.CommandCenterEventStream)({}),
+          Layer.mock(CommandCenterReadinessGate.CommandCenterReadinessGate)({}),
+          Layer.mock(AutomationDefinitionConfig.AutomationDefinitionConfig)({}),
+          Layer.mock(AutomationRuns.AutomationRuns)({}),
+          Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+          Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+          orchestrationCommandDispatcherLayer,
+        ),
       ),
     );
 
     const appLayer = servedRoutesLayer.pipe(
       Layer.provide(resourceTelemetryLayer),
+      Layer.provide(UsageService.layerTest),
       Layer.provide(
         Layer.mock(BrowserTraceCollector.BrowserTraceCollector)({
           record: () => Effect.void,
@@ -1065,9 +1153,7 @@ const exchangeAccessToken = (
         subject_token: credential,
         subject_token_type: AuthEnvironmentBootstrapTokenType,
         requested_token_type: AuthAccessTokenType,
-        scope:
-          options?.scope ??
-          "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
+        scope: options?.scope ?? AuthAdministrativeScopes.join(" "),
         ...(options?.clientMetadata?.label ? { client_label: options.clientMetadata.label } : {}),
         ...(options?.clientMetadata?.deviceType
           ? { client_device_type: options.clientMetadata.deviceType }
@@ -1595,10 +1681,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(tokenResponse.status, 200);
       assert.equal(tokenBody.issued_token_type, AuthAccessTokenType);
       assert.equal(tokenBody.token_type, "Bearer");
-      assert.equal(
-        tokenBody.scope,
-        "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
-      );
+      assert.equal(tokenBody.scope, AuthAdministrativeScopes.join(" "));
       assert.equal(typeof tokenBody.access_token, "string");
 
       const sessionUrl = yield* getHttpServerUrl("/api/auth/session");
@@ -1616,16 +1699,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(sessionResponse.status, 200);
       assert.equal(sessionBody.authenticated, true);
       assert.equal(sessionBody.sessionMethod, "bearer-access-token");
-      assert.deepEqual(sessionBody.scopes, [
-        "orchestration:read",
-        "orchestration:operate",
-        "terminal:operate",
-        "review:write",
-        "relay:read",
-        "access:read",
-        "access:write",
-        "relay:write",
-      ]);
+      assert.deepEqual(sessionBody.scopes, AuthAdministrativeScopes);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -3522,8 +3596,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
-
-  for (const desktopOrigin of ["t3code://app", "t3code-dev://app"]) {
+  for (const desktopOrigin of [
+    "commandcenter://app",
+    "commandcenter-dev://app",
+    "t3code://app",
+    "t3code-dev://app",
+  ]) {
     it.effect(`allows credentialed preflights from ${desktopOrigin} in development`, () =>
       Effect.gen(function* () {
         yield* buildAppUnderTest({
@@ -5231,6 +5309,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 },
                 branch: "feature/demo",
                 worktreePath: null,
+                isOnPullRequestHead: true,
               }),
           },
           gitVcsDriver: {
@@ -7016,6 +7095,126 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ["thread.archive"],
         );
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("stops the provider session after settle without closing terminals", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-settle");
+      const effects: string[] = [];
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* buildAppUnderTest({
+        layers: {
+          terminalManager: {
+            close: (input) =>
+              Effect.sync(() => {
+                effects.push(`terminal.close:${input.threadId}`);
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                effects.push(`dispatch:${command.type}`);
+                return { sequence: dispatchedCommands.length };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: () =>
+              Effect.succeed(
+                Option.some(
+                  makeDefaultOrchestrationThreadShell({
+                    id: threadId,
+                    updatedAt: now,
+                    session: {
+                      threadId,
+                      status: "ready",
+                      providerName: "claudeAgent",
+                      runtimeMode: "full-access",
+                      activeTurnId: null,
+                      lastError: null,
+                      updatedAt: now,
+                    },
+                  }),
+                ),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const dispatchResult = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+            type: "thread.settle",
+            commandId: CommandId.make("cmd-thread-settle"),
+            threadId,
+          }),
+        ),
+      );
+
+      assert.equal(dispatchResult.sequence, 1);
+      assert.deepEqual(effects, ["dispatch:thread.settle", "dispatch:thread.session.stop"]);
+      const sessionStopCommand = dispatchedCommands[1];
+      assert.equal(sessionStopCommand?.type, "thread.session.stop");
+      if (sessionStopCommand?.type === "thread.session.stop") {
+        assert.equal(sessionStopCommand.threadId, threadId);
+        assert.equal(sessionStopCommand.commandId, "session-stop-for-settle:cmd-thread-settle");
+        assert.equal(sessionStopCommand.onlyIfSettled, true);
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("settles without dispatching session stop when the thread has no session", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-settle-no-session");
+      const effects: string[] = [];
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          terminalManager: {
+            close: (input) =>
+              Effect.sync(() => {
+                effects.push(`terminal.close:${input.threadId}`);
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                effects.push(`dispatch:${command.type}`);
+                return { sequence: dispatchedCommands.length };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: () =>
+              Effect.succeed(
+                Option.some(makeDefaultOrchestrationThreadShell({ id: threadId, session: null })),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const dispatchResult = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+            type: "thread.settle",
+            commandId: CommandId.make("cmd-thread-settle-no-session"),
+            threadId,
+          }),
+        ),
+      );
+
+      assert.equal(dispatchResult.sequence, 1);
+      assert.deepEqual(effects, ["dispatch:thread.settle"]);
+      assert.deepEqual(
+        dispatchedCommands.map((command) => command.type),
+        ["thread.settle"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("archives and still closes terminals when session stop fails", () =>

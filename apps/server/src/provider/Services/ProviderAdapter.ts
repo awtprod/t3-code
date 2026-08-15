@@ -17,6 +17,7 @@ import type {
   ProviderSession,
   ProviderSessionStartInput,
   ThreadId,
+  ProviderTurnTargetIdentity,
   ProviderTurnStartResult,
   TurnId,
 } from "@t3tools/contracts";
@@ -30,6 +31,8 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /** Option ids verified to apply to an existing session without replay. */
+  readonly inSessionOptionIds?: ReadonlyArray<string>;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -66,7 +69,11 @@ export interface ProviderAdapterShape<TError> {
   /**
    * Interrupt an active turn.
    */
-  readonly interruptTurn: (threadId: ThreadId, turnId?: TurnId) => Effect.Effect<void, TError>;
+  readonly interruptTurn: (
+    threadId: ThreadId,
+    turnId?: TurnId,
+    target?: ProviderTurnTargetIdentity,
+  ) => Effect.Effect<void, TError>;
 
   /**
    * Respond to an interactive approval request.

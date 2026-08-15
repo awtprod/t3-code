@@ -104,6 +104,8 @@ export interface CommandPaletteGroup {
   readonly value: string;
   readonly label: string;
   readonly items: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
+  /** Results already ranked by a scoped server query should not be re-filtered locally. */
+  readonly preFiltered?: boolean;
 }
 
 export interface CommandPaletteView {
@@ -154,7 +156,16 @@ export function buildProjectActionItems(input: {
 
 export type BuildThreadActionItemsThread = Pick<
   SidebarThreadSummary,
-  "archivedAt" | "branch" | "createdAt" | "environmentId" | "id" | "projectId" | "title"
+  | "archivedAt"
+  | "branch"
+  | "createdAt"
+  | "environmentId"
+  | "id"
+  | "modelSelection"
+  | "projectId"
+  | "session"
+  | "title"
+  | "worktreePath"
 > & {
   updatedAt: string;
   latestUserMessageAt?: string | null;
@@ -170,6 +181,8 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   renderLeadingContent?: (thread: TThread) => ReactNode;
   /** Optional content rendered inline after the title text per-thread. */
   renderTrailingContent?: (thread: TThread) => ReactNode;
+  /** Optional rich description (e.g. favicon + workspace icons). Falls back to text. */
+  renderDescription?: (thread: TThread, meta: { projectTitle: string | undefined }) => ReactNode;
   getContentMatch?: (thread: TThread) => CommandPaletteThreadContentMatch | undefined;
   runThread: (thread: Pick<SidebarThreadSummary, "environmentId" | "id">) => Promise<void>;
   limit?: number;
@@ -198,6 +211,9 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
     const leadingContent = input.renderLeadingContent?.(thread);
     const trailingContent = input.renderTrailingContent?.(thread);
     const contentMatch = input.getContentMatch?.(thread);
+    const description = input.renderDescription
+      ? input.renderDescription(thread, { projectTitle })
+      : descriptionParts.join(` · `);
 
     return Object.assign(
       {
@@ -210,7 +226,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
           contentMatch?.snippet ?? ``,
         ],
         title: thread.title,
-        description: descriptionParts.join(` · `),
+        description,
         timestamp: formatRelativeTimeLabel(
           thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
         ),
@@ -267,6 +283,7 @@ export function filterCommandPaletteGroups(input: {
   isInSubmenu: boolean;
   projectSearchItems: ReadonlyArray<CommandPaletteActionItem>;
   threadSearchItems: ReadonlyArray<CommandPaletteActionItem>;
+  additionalSearchGroups?: ReadonlyArray<CommandPaletteGroup>;
 }): CommandPaletteGroup[] {
   const isActionsFilter = input.query.startsWith(">");
   const searchQuery = isActionsFilter ? input.query.slice(1) : input.query;
@@ -302,23 +319,26 @@ export function filterCommandPaletteGroups(input: {
         items: input.threadSearchItems,
       });
     }
+    searchableGroups.push(...(input.additionalSearchGroups ?? []));
   }
 
   return searchableGroups.flatMap((group) => {
-    const items = Arr.filterMap(group.items, (item, index) => {
-      const haystack = normalizeSearchText(item.searchTerms.join(" "));
-      if (!haystack.includes(normalizedQuery)) {
-        return Result.failVoid;
-      }
+    const items = group.preFiltered
+      ? [...group.items]
+      : Arr.filterMap(group.items, (item, index) => {
+          const haystack = normalizeSearchText(item.searchTerms.join(" "));
+          if (!haystack.includes(normalizedQuery)) {
+            return Result.failVoid;
+          }
 
-      return Result.succeed({
-        item,
-        index,
-        rank: rankCommandPaletteItemMatch(item, normalizedQuery),
-      });
-    })
-      .toSorted((left, right) => right.rank - left.rank || left.index - right.index)
-      .map((entry) => entry.item);
+          return Result.succeed({
+            item,
+            index,
+            rank: rankCommandPaletteItemMatch(item, normalizedQuery),
+          });
+        })
+          .toSorted((left, right) => right.rank - left.rank || left.index - right.index)
+          .map((entry) => entry.item);
 
     if (items.length === 0) {
       return [];

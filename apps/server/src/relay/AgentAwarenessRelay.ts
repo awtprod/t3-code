@@ -35,6 +35,7 @@ import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import {
+  isAgentActivityPublishingEnabledValue,
   PUBLISH_AGENT_ACTIVITY_SECRET,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
@@ -52,7 +53,7 @@ export class AgentAwarenessRelay extends Context.Service<
     readonly publishThread: (threadId: ThreadId) => Effect.Effect<void>;
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
   }
->()("t3/relay/AgentAwarenessRelay") {}
+>()("@awtprod/command-center/relay/AgentAwarenessRelay") {}
 
 export function eventThreadId(event: OrchestrationEvent): ThreadId | null {
   const payload = event.payload as { readonly threadId?: unknown };
@@ -79,6 +80,12 @@ export function shouldPublishAgentAwarenessEvent(event: OrchestrationEvent): boo
     case "thread.runtime-mode-set":
     case "thread.interaction-mode-set":
       return false;
+    case "thread.turn-start-folded":
+      // Bookkeeping only. A steer folds into a turn already reported as running,
+      // so the shell state this would publish is the state already published —
+      // republishing it queues a redundant awareness update for a transition the
+      // user cannot observe.
+      return false;
     case "thread.activity-appended":
       return (
         event.payload.activity.kind === "approval.requested" ||
@@ -102,7 +109,7 @@ export function agentAwarenessPublishIdentity(state: RelayAgentActivityState | n
 }
 
 export function isAgentActivityPublishingEnabled(value: string | null): boolean {
-  return value === "true";
+  return isAgentActivityPublishingEnabledValue(value);
 }
 
 export function resolveAgentActivityPublishingStartupState(input: {

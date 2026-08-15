@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { beforeEach, vi } from "vite-plus/test";
 
 const { handleMock, netFetchMock, unhandleMock } = vi.hoisted(() => ({
@@ -15,6 +17,8 @@ vi.mock("electron", () => ({
 }));
 
 import * as ElectronProtocol from "./ElectronProtocol.ts";
+
+const protocolLayer = ElectronProtocol.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("ElectronProtocol", () => {
   beforeEach(() => {
@@ -35,7 +39,7 @@ describe("ElectronProtocol", () => {
         Effect.gen(function* () {
           const protocol = yield* ElectronProtocol.ElectronProtocol;
           yield* protocol.registerDesktopProtocol({
-            scheme: "t3code-dev",
+            scheme: "commandcenter-dev",
             targetOrigin: new URL("http://127.0.0.1:3773/"),
             backendOrigin: new URL("http://127.0.0.1:3774/"),
             clerkFrontendApiHostname: "clerk.t3.codes",
@@ -44,11 +48,11 @@ describe("ElectronProtocol", () => {
 
           const response = yield* Effect.promise(() =>
             handler!(
-              new Request("t3code-dev://app/api/health?verbose=1", {
+              new Request("commandcenter-dev://app/api/health?verbose=1", {
                 headers: {
                   accept: "application/json",
-                  origin: "t3code-dev://app",
-                  referer: "t3code-dev://app/",
+                  origin: "commandcenter-dev://app",
+                  referer: "commandcenter-dev://app/",
                   "sec-fetch-site": "same-origin",
                 },
               }),
@@ -65,18 +69,18 @@ describe("ElectronProtocol", () => {
           );
           assert.include(
             response.headers.get("content-security-policy") ?? "",
-            "img-src 'self' t3code-dev: blob: data: http: https:",
+            "img-src 'self' commandcenter-dev: blob: data: http: https:",
           );
           assert.include(
             response.headers.get("content-security-policy") ?? "",
-            "font-src 'self' t3code-dev: data:",
+            "font-src 'self' commandcenter-dev: data:",
           );
         }),
       );
 
       assert.deepEqual(
         handleMock.mock.calls.map((call) => call[0]),
-        ["t3code-dev"],
+        ["commandcenter-dev"],
       );
       assert.equal(netFetchMock.mock.calls[0]?.[0], "http://127.0.0.1:3773/api/health?verbose=1");
       const forwardedHeaders = new Headers(netFetchMock.mock.calls[0]?.[1]?.headers);
@@ -84,8 +88,8 @@ describe("ElectronProtocol", () => {
       assert.isNull(forwardedHeaders.get("origin"));
       assert.isNull(forwardedHeaders.get("referer"));
       assert.isNull(forwardedHeaders.get("sec-fetch-site"));
-      assert.deepEqual(unhandleMock.mock.calls, [["t3code-dev"]]);
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+      assert.deepEqual(unhandleMock.mock.calls, [["commandcenter-dev"]]);
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it.effect("rejects custom protocol requests for another host", () =>
@@ -99,18 +103,18 @@ describe("ElectronProtocol", () => {
         Effect.gen(function* () {
           const protocol = yield* ElectronProtocol.ElectronProtocol;
           yield* protocol.registerDesktopProtocol({
-            scheme: "t3code",
+            scheme: "commandcenter",
             targetOrigin: new URL("http://127.0.0.1:3773/"),
             backendOrigin: new URL("http://127.0.0.1:3773/"),
             clerkFrontendApiHostname: undefined,
           });
-          return yield* Effect.promise(() => handler!(new Request("t3code://other/")));
+          return yield* Effect.promise(() => handler!(new Request("commandcenter://other/")));
         }),
       );
 
       assert.equal(response.status, 404);
       assert.equal(netFetchMock.mock.calls.length, 0);
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it.effect("retries transient renderer target failures", () =>
@@ -127,18 +131,18 @@ describe("ElectronProtocol", () => {
         Effect.gen(function* () {
           const protocol = yield* ElectronProtocol.ElectronProtocol;
           yield* protocol.registerDesktopProtocol({
-            scheme: "t3code-dev",
+            scheme: "commandcenter-dev",
             targetOrigin: new URL("http://127.0.0.1:5733/"),
             backendOrigin: new URL("http://127.0.0.1:3773/"),
             clerkFrontendApiHostname: undefined,
           });
-          return yield* Effect.promise(() => handler!(new Request("t3code-dev://app/")));
+          return yield* Effect.promise(() => handler!(new Request("commandcenter-dev://app/")));
         }),
       );
 
       assert.equal(yield* Effect.promise(() => response.text()), "ready");
       assert.equal(netFetchMock.mock.calls.length, 2);
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it.effect("preserves protocol registration failures", () =>
@@ -151,7 +155,7 @@ describe("ElectronProtocol", () => {
       const protocol = yield* ElectronProtocol.ElectronProtocol;
       const error = yield* Effect.scoped(
         protocol.registerDesktopProtocol({
-          scheme: "t3code-dev",
+          scheme: "commandcenter-dev",
           targetOrigin: new URL("http://127.0.0.1:3773/"),
           backendOrigin: new URL("http://127.0.0.1:3774/"),
           clerkFrontendApiHostname: undefined,
@@ -159,10 +163,13 @@ describe("ElectronProtocol", () => {
       ).pipe(Effect.flip);
 
       assert.instanceOf(error, ElectronProtocol.ElectronProtocolRegistrationError);
-      assert.equal(error.scheme, "t3code-dev");
+      assert.equal(error.scheme, "commandcenter-dev");
       assert.strictEqual(error.cause, cause);
-      assert.equal(error.message, 'Failed to register Electron protocol scheme "t3code-dev".');
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+      assert.equal(
+        error.message,
+        'Failed to register Electron protocol scheme "commandcenter-dev".',
+      );
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it.effect("preserves protocol unregistration failures", () =>
@@ -176,7 +183,7 @@ describe("ElectronProtocol", () => {
       const exit = yield* Effect.exit(
         Effect.scoped(
           protocol.registerDesktopProtocol({
-            scheme: "t3code",
+            scheme: "commandcenter",
             targetOrigin: new URL("http://127.0.0.1:3773/"),
             backendOrigin: new URL("http://127.0.0.1:3773/"),
             clerkFrontendApiHostname: undefined,
@@ -188,16 +195,19 @@ describe("ElectronProtocol", () => {
       if (exit._tag === "Failure") {
         const error = Cause.squash(exit.cause);
         assert.instanceOf(error, ElectronProtocol.ElectronProtocolUnregistrationError);
-        assert.equal(error.scheme, "t3code");
+        assert.equal(error.scheme, "commandcenter");
         assert.strictEqual(error.cause, cause);
-        assert.equal(error.message, 'Failed to unregister Electron protocol scheme "t3code".');
+        assert.equal(
+          error.message,
+          'Failed to unregister Electron protocol scheme "commandcenter".',
+        );
       }
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it("keeps executable sources host-restricted while allowing runtime network resources", () => {
     const policy = ElectronProtocol.makeDesktopContentSecurityPolicy({
-      scheme: "t3code",
+      scheme: "commandcenter",
       targetOrigin: new URL("http://127.0.0.1:3773/"),
       backendOrigin: new URL("http://127.0.0.1:3773/"),
       clerkFrontendApiHostname: "clerk.t3.codes",
@@ -219,12 +229,12 @@ describe("ElectronProtocol", () => {
     assert.deepEqual(directives["connect-src"], ["'self'", "http:", "https:", "ws:", "wss:"]);
     assert.deepEqual(directives["img-src"], [
       "'self'",
-      "t3code:",
+      "commandcenter:",
       "blob:",
       "data:",
       "http:",
       "https:",
     ]);
-    assert.deepEqual(directives["font-src"], ["'self'", "t3code:", "data:"]);
+    assert.deepEqual(directives["font-src"], ["'self'", "commandcenter:", "data:"]);
   });
 });

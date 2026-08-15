@@ -1,0 +1,4 @@
+[includeIf "gitdir:/srv/command-center/workspaces/primary/"]
+    path = /var/lib/command-center/gitconfig-primary
+[includeIf "gitdir:/srv/command-center/workspaces/secondary/"]
+    path = /var/lib/command-center/gitconfig-secondary

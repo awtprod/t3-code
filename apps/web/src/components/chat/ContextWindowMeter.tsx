@@ -15,8 +15,10 @@ function formatPercentage(value: number | null): string | null {
 export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot;
   providerDisplayName?: string | null;
+  adviceThresholdPercent?: number | null;
+  toolWarningThreshold?: number | null;
 }) {
-  const { usage, providerDisplayName } = props;
+  const { usage, providerDisplayName, adviceThresholdPercent, toolWarningThreshold } = props;
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -24,7 +26,22 @@ export function ContextWindowMeter(props: {
   const dashOffset = circumference * (1 - normalizedPercentage / 100);
   const totalProcessedTokens = usage.totalProcessedTokens ?? null;
   const showTotalProcessed = totalProcessedTokens !== null && totalProcessedTokens > 0;
-  const isOverloaded = normalizedPercentage > 90;
+  const latestInput = usage.lastInputTokens ?? usage.inputTokens ?? null;
+  const latestCacheRead = usage.lastCachedInputTokens ?? usage.cachedInputTokens ?? null;
+  const latestCacheWrite = usage.lastCacheWriteInputTokens ?? usage.cacheWriteInputTokens ?? null;
+  const latestOutput = usage.lastOutputTokens ?? usage.outputTokens ?? null;
+  const cacheInputTotal =
+    latestInput === null
+      ? null
+      : Math.max(latestInput, (latestCacheRead ?? 0) + (latestCacheWrite ?? 0));
+  const cacheUtilization =
+    cacheInputTotal && latestCacheRead !== null ? (latestCacheRead / cacheInputTotal) * 100 : null;
+  const isOverloaded =
+    normalizedPercentage >= (adviceThresholdPercent ?? 90) ||
+    (toolWarningThreshold !== null &&
+      toolWarningThreshold !== undefined &&
+      usage.toolUses != null &&
+      usage.toolUses >= toolWarningThreshold);
   const usageColor = isOverloaded
     ? "var(--color-error)"
     : "color-mix(in oklab, var(--color-muted-foreground) 72%, transparent)";
@@ -128,9 +145,62 @@ export function ContextWindowMeter(props: {
               </span>
             </div>
           ) : null}
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] leading-4">
+            <span className="text-muted-foreground/60">Uncached input</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {latestInput === null
+                ? "Unavailable"
+                : formatContextWindowTokens(
+                    Math.max(0, latestInput - (latestCacheRead ?? 0) - (latestCacheWrite ?? 0)),
+                  )}
+            </span>
+            <span className="text-muted-foreground/60">Cache read</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {latestCacheRead === null
+                ? "Unavailable"
+                : formatContextWindowTokens(latestCacheRead)}
+            </span>
+            <span className="text-muted-foreground/60">Cache write</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {latestCacheWrite === null
+                ? "Unavailable"
+                : formatContextWindowTokens(latestCacheWrite)}
+            </span>
+            <span className="text-muted-foreground/60">Output</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {latestOutput === null ? "Unavailable" : formatContextWindowTokens(latestOutput)}
+            </span>
+            <span className="text-muted-foreground/60">Cache utilization</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {formatPercentage(cacheUtilization) ?? "Unavailable"}
+            </span>
+            <span className="text-muted-foreground/60">Cost</span>
+            <span className="text-right tabular-nums text-muted-foreground/80">
+              {usage.costUsd == null
+                ? "Unavailable"
+                : `$${usage.costUsd.toFixed(4)}${usage.costKind === "reported" ? " reported" : " est."}`}
+            </span>
+          </div>
           {usage.compactsAutomatically ? (
             <div className="mt-1 text-pretty text-secondary-label text-[11px] font-medium">
               {providerDisplayName ?? "It"} automatically compacts its context when needed.
+            </div>
+          ) : null}
+          {adviceThresholdPercent !== null &&
+          adviceThresholdPercent !== undefined &&
+          normalizedPercentage >= adviceThresholdPercent ? (
+            <div className="mt-1 text-pretty text-[11px] font-medium text-amber-600 dark:text-amber-400">
+              This task has reached its {adviceThresholdPercent}% context guide. Compact it if the
+              provider supports that, or start a new task to keep token use predictable.
+            </div>
+          ) : null}
+          {toolWarningThreshold !== null &&
+          toolWarningThreshold !== undefined &&
+          usage.toolUses != null &&
+          usage.toolUses >= toolWarningThreshold ? (
+            <div className="text-pretty text-[11px] font-medium text-amber-600 dark:text-amber-400">
+              This turn has used {usage.toolUses} tools. Consider narrowing the next request or
+              starting a focused task.
             </div>
           ) : null}
         </div>

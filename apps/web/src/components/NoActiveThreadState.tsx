@@ -6,7 +6,7 @@ import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 export function NoActiveThreadState() {
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
         <header
           className={cn(
@@ -16,9 +16,7 @@ export function NoActiveThreadState() {
           )}
         >
           {isElectron ? (
-            <span className="text-xs text-muted-foreground/50 wco:pr-[var(--workspace-native-controls-inset)]">
-              No active thread
-            </span>
+            <span className="text-xs text-muted-foreground/50">No active thread</span>
           ) : (
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-foreground md:text-muted-foreground/60">

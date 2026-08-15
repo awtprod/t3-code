@@ -16,6 +16,18 @@ import * as Schema from "effect/Schema";
 
 export const DEFAULT_PORT = 3773;
 
+/**
+ * HTTPS port Tailscale Serve publishes the preview gateway on.
+ *
+ * The gateway is mounted at the root of its *own* port rather than under a path
+ * prefix on the main one, because dev servers emit absolute URLs that would 404
+ * under a prefix. That costs one extra Tailscale mapping, and this is it.
+ */
+export const DEFAULT_PREVIEW_GATEWAY_SERVE_PORT = 8445;
+
+/** Preferred loopback port for the preview gateway listener. */
+export const DEFAULT_PREVIEW_GATEWAY_PORT = 3774;
+
 export const RuntimeMode = Schema.Literals(["web", "desktop"]);
 export type RuntimeMode = typeof RuntimeMode.Type;
 
@@ -70,6 +82,7 @@ export class ServerConfig extends Context.Service<
     readonly host: string | undefined;
     readonly cwd: string;
     readonly baseDir: string;
+    readonly commandCenterConfigDir?: string;
     readonly staticDir: string | undefined;
     readonly devUrl: URL | undefined;
     readonly devAllowedOrigins: ReadonlyArray<string>;
@@ -83,8 +96,13 @@ export class ServerConfig extends Context.Service<
     readonly logWebSocketEvents: boolean;
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
+    readonly previewGatewayEnabled: boolean;
+    /** Loopback port the preview gateway listens on; 0 asks the OS for one. */
+    readonly previewGatewayPort: number;
+    /** HTTPS port Tailscale Serve publishes the gateway on, when Serve is enabled. */
+    readonly previewGatewayServePort: number;
   }
->()("t3/config/ServerConfig") {
+>()("@awtprod/command-center/config/ServerConfig") {
   /** @deprecated Import and use `layerTest` from this module. */
   static readonly layerTest = (
     cwd: string,
@@ -186,6 +204,9 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
     logWebSocketEvents: false,
     tailscaleServeEnabled: false,
     tailscaleServePort: 443,
+    previewGatewayEnabled: false,
+    previewGatewayPort: 0,
+    previewGatewayServePort: DEFAULT_PREVIEW_GATEWAY_SERVE_PORT,
     port: 0,
     host: undefined,
     desktopBootstrapToken: undefined,

@@ -1,5 +1,6 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -296,6 +297,37 @@ describe("serverSettings helpers", () => {
       enabled: true,
       config: { homePath: "~/.codex" },
     });
+  });
+
+  it("replaces database connection maps as a whole", () => {
+    const projectA = ProjectId.make("project-a");
+    const projectB = ProjectId.make("project-b");
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      databaseConnections: {
+        [projectA]: {
+          provider: "supabase" as const,
+          workspaceRoot: "/work/a",
+          projectRef: "supabase-a",
+          readOnly: true,
+          accessToken: "",
+          accessTokenRedacted: true,
+        },
+      },
+    };
+    const replacement = {
+      [projectB]: {
+        provider: "supabase" as const,
+        workspaceRoot: "/work/b",
+        projectRef: "supabase-b",
+        readOnly: false,
+        accessToken: "replacement",
+      },
+    };
+
+    expect(
+      applyServerSettingsPatch(current, { databaseConnections: replacement }).databaseConnections,
+    ).toEqual(replacement);
   });
 
   it("stores background activity profiles as a versioned object and syncs legacy aliases", () => {

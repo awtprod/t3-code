@@ -6,6 +6,51 @@ import { classifyTaskAgentKind, ProviderRuntimeEvent } from "./providerRuntime.t
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 describe("ProviderRuntimeEvent", () => {
+  it("decodes provider-neutral usage with cache writes and subagent identity", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "turn.usage.recorded",
+      eventId: "event-kimi-usage",
+      provider: "kimi",
+      providerInstanceId: "kimi",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      threadId: "thread-kimi",
+      turnId: "turn-kimi",
+      payload: {
+        usage: {
+          component: { kind: "subagent", id: "agent-1", name: "researcher" },
+          model: "kimi-code/k3",
+          workload: "interactive",
+          quality: "reported",
+          uncachedInputTokens: 100,
+          cacheReadInputTokens: 800,
+          cacheWriteInputTokens: 25,
+          outputTokens: 75,
+          reasoningOutputTokens: 20,
+          completedAt: "2026-08-01T00:00:00.000Z",
+        },
+      },
+    });
+
+    expect(parsed.type).toBe("turn.usage.recorded");
+    if (parsed.type !== "turn.usage.recorded") throw new Error("expected usage event");
+    expect(parsed.payload.usage.component.kind).toBe("subagent");
+    expect(parsed.payload.usage.cacheWriteInputTokens).toBe(25);
+  });
+
+  it("keeps cache-write snapshot fields backward compatible", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "thread.token-usage.updated",
+      eventId: "event-cache",
+      provider: "claudeAgent",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      threadId: "thread-cache",
+      payload: { usage: { usedTokens: 10 } },
+    });
+    expect(parsed.type).toBe("thread.token-usage.updated");
+    if (parsed.type !== "thread.token-usage.updated") throw new Error("expected usage snapshot");
+    expect(parsed.payload.usage.cacheWriteInputTokens).toBeUndefined();
+  });
+
   it("accepts fork-provided driver kinds as branded slugs", () => {
     const parsed = decodeRuntimeEvent({
       type: "session.started",

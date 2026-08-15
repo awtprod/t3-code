@@ -67,4 +67,4 @@ export interface ProviderSessionDirectoryShape {
 export class ProviderSessionDirectory extends Context.Service<
   ProviderSessionDirectory,
   ProviderSessionDirectoryShape
->()("t3/provider/Services/ProviderSessionDirectory") {}
+>()("@awtprod/command-center/provider/Services/ProviderSessionDirectory") {}

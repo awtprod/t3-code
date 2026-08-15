@@ -12,11 +12,11 @@ describe("DesktopEarlyElectronStartup", () => {
 
   it("reads the persisted linux password-store preference before Electron is ready", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
-      env: { T3CODE_HOME: "/home/user/.t3-test" },
-      homeDirectory: "/home/user",
+      env: { T3CODE_HOME: "/tmp/command-center-user/.t3-test" },
+      homeDirectory: "/tmp/command-center-user",
       joinPath,
       readFileString: (path) => {
-        assert.equal(path, "/home/user/.t3-test/userdata/desktop-settings.json");
+        assert.equal(path, "/tmp/command-center-user/.t3-test/userdata/desktop-settings.json");
         return JSON.stringify({ linuxPasswordStore: "kwallet6" });
       },
     });
@@ -26,8 +26,8 @@ describe("DesktopEarlyElectronStartup", () => {
 
   it("accepts JSONC in the early desktop settings file", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
-      env: { T3CODE_HOME: "/home/user/.t3-test" },
-      homeDirectory: "/home/user",
+      env: { T3CODE_HOME: "/tmp/command-center-user/.t3-test" },
+      homeDirectory: "/tmp/command-center-user",
       joinPath,
       readFileString: () => `{
         // manually edited setting
@@ -41,7 +41,7 @@ describe("DesktopEarlyElectronStartup", () => {
   it("falls back to auto when the early settings document is missing or invalid", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
       env: {},
-      homeDirectory: "/home/user",
+      homeDirectory: "/tmp/command-center-user",
       joinPath,
       readFileString: () => {
         throw new Error("missing");
@@ -54,7 +54,7 @@ describe("DesktopEarlyElectronStartup", () => {
   it("preserves absolute root paths when resolving early settings", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
       env: { T3CODE_HOME: "/" },
-      homeDirectory: "/home/user",
+      homeDirectory: "/tmp/command-center-user",
       joinPath,
       readFileString: (path) => {
         assert.equal(path, "/userdata/desktop-settings.json");
@@ -68,33 +68,33 @@ describe("DesktopEarlyElectronStartup", () => {
   it("resolves the early linux Electron switches", () => {
     const options = resolveEarlyLinuxElectronOptions({
       env: {
-        T3CODE_HOME: "/home/user/.t3-test",
+        T3CODE_HOME: "/tmp/command-center-user/.t3-test",
         XDG_CURRENT_DESKTOP: "niri",
         VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
       },
-      homeDirectory: "/home/user",
+      homeDirectory: "/tmp/command-center-user",
       joinPath,
       readFileString: (path) => {
-        assert.equal(path, "/home/user/.t3-test/userdata/desktop-settings.json");
+        assert.equal(path, "/tmp/command-center-user/.t3-test/userdata/desktop-settings.json");
         return JSON.stringify({ linuxPasswordStore: "auto" });
       },
     });
 
     assert.deepEqual(options, {
-      linuxWmClass: "t3code-dev",
+      linuxWmClass: "commandcenter-dev",
       passwordStore: "gnome-libsecret",
     });
   });
 
-  it("keeps implicit development state under ~/.t3/dev when T3CODE_HOME is unset", () => {
+  it("keeps implicit development state under ~/.command-center/dev when home overrides are unset", () => {
     const preference = resolveEarlyLinuxPasswordStorePreference({
       env: {
         VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
       },
-      homeDirectory: "/home/user",
+      homeDirectory: "/tmp/command-center-user",
       joinPath,
       readFileString: (path) => {
-        assert.equal(path, "/home/user/.t3/dev/desktop-settings.json");
+        assert.equal(path, "/tmp/command-center-user/.command-center/dev/desktop-settings.json");
         return JSON.stringify({ linuxPasswordStore: "kwallet" });
       },
     });
@@ -108,10 +108,10 @@ describe("DesktopEarlyElectronStartup", () => {
         T3CODE_HOME: "   ",
         VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
       },
-      homeDirectory: "/home/user",
+      homeDirectory: "/tmp/command-center-user",
       joinPath,
       readFileString: (path) => {
-        assert.equal(path, "/home/user/.t3/dev/desktop-settings.json");
+        assert.equal(path, "/tmp/command-center-user/.command-center/dev/desktop-settings.json");
         return JSON.stringify({ linuxPasswordStore: "gnome-libsecret" });
       },
     });
