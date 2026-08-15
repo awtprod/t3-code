@@ -91,23 +91,22 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
   handler: Effect.fn("desktop.ipc.window.getLocalEnvironmentBootstraps")(function* () {
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
     const settings = yield* appSettings.get;
+    const pool = yield* DesktopBackendPool.DesktopBackendPool;
+    const instances = yield* pool.list;
+    const bootstraps: DesktopEnvironmentBootstrap[] = [];
     if (settings.primaryBackendMode === "remote" && !isLocalExecutionOverride()) {
       const normalized = DesktopAppSettings.normalizeRemoteBackendUrl(settings.remoteBackendUrl);
-      if (normalized === null) return [];
-      const httpBaseUrl = new URL(normalized);
-      return [
-        {
+      if (normalized !== null) {
+        const httpBaseUrl = new URL(normalized);
+        bootstraps.push({
           id: PRIMARY_LOCAL_ENVIRONMENT_ID,
           label: httpBaseUrl.hostname,
           runningDistro: null,
           httpBaseUrl: httpBaseUrl.href,
           wsBaseUrl: toWebSocketBaseUrl(httpBaseUrl),
-        },
-      ];
+        });
+      }
     }
-    const pool = yield* DesktopBackendPool.DesktopBackendPool;
-    const instances = yield* pool.list;
-    const bootstraps: DesktopEnvironmentBootstrap[] = [];
     for (const instance of instances) {
       const isPrimary = instance.id === PRIMARY_LOCAL_ENVIRONMENT_ID;
       const config = yield* instance.currentConfig;
@@ -213,7 +212,11 @@ export const pickFolder = DesktopIpc.makeIpcMethod({
       targetId !== PRIMARY_LOCAL_ENVIRONMENT_ID &&
       targetId.startsWith(DesktopWslBackend.WSL_INSTANCE_ID_PREFIX);
     const settings = yield* appSettings.get;
-    if (settings.primaryBackendMode === "remote" && !isLocalExecutionOverride()) {
+    if (
+      settings.primaryBackendMode === "remote" &&
+      !isLocalExecutionOverride() &&
+      targetId !== DesktopBackendPool.WINDOWS_SECONDARY_INSTANCE_ID
+    ) {
       // A native Windows folder path is meaningless to the remote Linux
       // environment. Remote project selection stays server-side.
       return null;

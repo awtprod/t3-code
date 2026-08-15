@@ -42,6 +42,7 @@ function makeStubInstance(
 
 function makePoolLayer(
   labelRef: Ref.Ref<string>,
+  settings: DesktopAppSettings.DesktopSettings = DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
 ): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
   return DesktopBackendPool.layer.pipe(
     Layer.provideMerge(
@@ -78,7 +79,7 @@ function makePoolLayer(
           resolvePrimaryLabel: Ref.get(labelRef),
           resolveWsl: () => Effect.die("unexpected WSL config resolve"),
         } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]),
-        DesktopAppSettings.layerTest(),
+        DesktopAppSettings.layerTest(settings),
         ElectronDialog.layer,
         Layer.succeed(DesktopWindow.DesktopWindow, {
           createMain: Effect.die("unexpected window create"),
@@ -146,6 +147,29 @@ describe("DesktopBackendPool", () => {
         yield* Ref.set(labelRef, "WSL (Ubuntu)");
 
         assert.equal(yield* Option.getOrThrow(primary).label, "WSL (Ubuntu)");
+      }),
+    ),
+  );
+
+  it.effect("keeps Windows registered as a secondary for a remote primary", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const labelRef = yield* Ref.make("Windows");
+        const pool = yield* DesktopBackendPool.DesktopBackendPool.pipe(
+          Effect.provide(
+            makePoolLayer(labelRef, {
+              ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+              primaryBackendMode: "remote",
+              remoteBackendUrl: "https://remote.example.test",
+            }),
+          ),
+        );
+
+        assert.isTrue(Option.isNone(yield* pool.primary));
+        assert.deepEqual(
+          (yield* pool.list).map((instance) => instance.id),
+          [DesktopBackendPool.WINDOWS_SECONDARY_INSTANCE_ID],
+        );
       }),
     ),
   );

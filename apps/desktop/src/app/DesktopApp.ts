@@ -328,6 +328,20 @@ const bootstrap = Effect.gen(function* () {
         baseUrl: remoteHttpBaseUrl.href,
       });
       yield* desktopWindow.handleBackendReady(remoteHttpBaseUrl);
+
+      // Keep the native Windows backend available as a secondary environment
+      // while the remote server remains the renderer's primary backend.
+      const localBackend = yield* pool.get(DesktopBackendPool.WINDOWS_SECONDARY_INSTANCE_ID);
+      if (Option.isSome(localBackend)) {
+        const backendPortSelection = yield* resolveDesktopBackendPort(
+          environment.configuredBackendPort,
+        );
+        yield* serverExposure.configureFromSettings({ port: backendPortSelection.port });
+        yield* localBackend.value.start;
+        yield* logBootstrapInfo("bootstrap Windows secondary start requested", {
+          port: backendPortSelection.port,
+        });
+      }
     }
     return;
   }
