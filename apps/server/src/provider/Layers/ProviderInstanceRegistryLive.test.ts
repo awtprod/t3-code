@@ -96,6 +96,7 @@ const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
   homePath: "",
   shadowHomePath: "",
   launchArgs: "",
+  autoApproveReadOnlyPermissions: false,
   customModels: [],
   ...overrides,
 });

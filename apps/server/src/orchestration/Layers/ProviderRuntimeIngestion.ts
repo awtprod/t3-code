@@ -718,6 +718,10 @@ function requestKindFromCanonicalRequestType(
       return "file-read";
     case "file_change_approval":
     case "apply_patch_approval":
+    // A Codex sandbox escalation can grant writes, so it rides the file-change
+    // kind. Must match CODEX_PERMISSION_REQUEST_KIND, which the session runtime
+    // stamps on the request itself.
+    case "permissions_approval":
       return "file-change";
     default:
       return undefined;
@@ -793,13 +797,15 @@ export function runtimeEventToActivities(
           tone: "approval",
           kind: "approval.requested",
           summary:
-            requestKind === "command"
-              ? "Command approval requested"
-              : requestKind === "file-read"
-                ? "File-read approval requested"
-                : requestKind === "file-change"
-                  ? "File-change approval requested"
-                  : "Approval requested",
+            event.payload.requestType === "permissions_approval"
+              ? "Sandbox permission approval requested"
+              : requestKind === "command"
+                ? "Command approval requested"
+                : requestKind === "file-read"
+                  ? "File-read approval requested"
+                  : requestKind === "file-change"
+                    ? "File-change approval requested"
+                    : "Approval requested",
           payload: {
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),

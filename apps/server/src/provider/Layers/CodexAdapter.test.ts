@@ -2171,6 +2171,54 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("surfaces a sandbox permission request with the paths it asks for", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      const event: ProviderEvent = {
+        id: asEventId("evt-permissions-request"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/permissions/requestApproval",
+        requestKind: "file-change",
+        requestId: ApprovalRequestId.make("req-perm-1"),
+        payload: {
+          cwd: "/workspace",
+          itemId: "item-1",
+          permissions: {
+            fileSystem: {
+              entries: [{ access: "write", path: { type: "path", path: "/workspace/dist" } }],
+            },
+          },
+          reason: "write build output",
+          startedAtMs: 0,
+          threadId: "thread-1",
+          turnId: "turn-1",
+        },
+      };
+
+      yield* runtime.emit(event);
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.type, "request.opened");
+      if (firstEvent.value.type !== "request.opened") {
+        return;
+      }
+      // Before this method was mapped it fell through to "unknown", which the
+      // web and mobile approval folds silently drop.
+      NodeAssert.equal(firstEvent.value.payload.requestType, "permissions_approval");
+      NodeAssert.match(firstEvent.value.payload.detail ?? "", /write: \/workspace\/dist/u);
+      NodeAssert.match(firstEvent.value.payload.detail ?? "", /write build output/u);
+    }),
+  );
+
   it.effect("preserves file-read request type when mapping serverRequest/resolved", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

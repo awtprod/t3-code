@@ -49,6 +49,10 @@ import {
   COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE,
   COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE,
 } from "../security/CommandCenterProviderIsolation.ts";
+import {
+  CODEX_PERMISSION_REQUEST_KIND,
+  classifyCodexPermissionRequest,
+} from "../security/CodexPermissionEscalation.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 const decodeV2CommandExecResponse = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2CommandExecResponse,
@@ -166,6 +170,12 @@ export interface CodexSessionRuntimeOptions {
   readonly permissionProfile?: string;
   readonly commandCenterPlatform?: NodeJS.Platform;
   readonly windowsSandboxMode?: "elevated";
+  /**
+   * Grant read-only sandbox escalations without prompting. Only ever applies to
+   * requests classified read-only by `classifyCodexPermissionRequest`; writes,
+   * sandbox denials, and network enables always prompt.
+   */
+  readonly autoApproveReadOnlyPermissions?: boolean;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -2120,6 +2130,97 @@ export const makeCodexSessionRuntime = (
         return {
           decision: resolved,
         } satisfies EffectCodexSchema.FileChangeRequestApprovalResponse;
+      }),
+    );
+
+    // Sandbox escalation. Codex asks to widen filesystem access and/or re-enable
+    // network mid-turn. Without this handler the request falls through to
+    // `handleUnknownServerRequest` below and is answered with a JSON-RPC
+    // "method not found", which Codex reports as a user rejection — a silent
+    // denial the user is never shown and cannot answer.
+    yield* client.handleServerRequest("item/permissions/requestApproval", (payload) =>
+      Effect.gen(function* () {
+        const classification = classifyCodexPermissionRequest(payload.permissions);
+        const turnId = TurnId.make(payload.turnId);
+        const itemId = ProviderItemId.make(payload.itemId);
+
+        // Auto-approve is keyed on the requested permissions, never on the tool
+        // that triggered them: a read-only tool can still ask for write. The
+        // grant is echoed back scoped to this turn only, so it never silently
+        // widens the rest of the session.
+        if (classification.readOnly && options.autoApproveReadOnlyPermissions === true) {
+          yield* Effect.logDebug("Auto-approved a read-only Codex sandbox escalation.").pipe(
+            Effect.annotateLogs({ threadId: options.threadId, itemId: payload.itemId }),
+          );
+          return {
+            permissions: payload.permissions,
+            scope: "turn",
+          } satisfies EffectCodexSchema.PermissionsRequestApprovalResponse;
+        }
+
+        const requestId = ApprovalRequestId.make(
+          yield* randomUUIDv4("permissions-approval-request"),
+        );
+        const decision = yield* Deferred.make<ProviderApprovalDecision>();
+
+        yield* Ref.update(pendingApprovalsRef, (current) => {
+          const next = new Map(current);
+          next.set(requestId, {
+            requestId,
+            jsonRpcId: payload.itemId,
+            requestKind: CODEX_PERMISSION_REQUEST_KIND,
+            turnId,
+            itemId,
+            decision,
+          });
+          return next;
+        });
+        yield* Ref.update(approvalCorrelationsRef, (current) => {
+          const next = new Map(current);
+          next.set(payload.itemId, {
+            requestId,
+            requestKind: CODEX_PERMISSION_REQUEST_KIND,
+            turnId,
+            itemId,
+          });
+          return next;
+        });
+
+        yield* emitEvent({
+          kind: "request",
+          threadId: options.threadId,
+          method: "item/permissions/requestApproval",
+          requestId,
+          requestKind: CODEX_PERMISSION_REQUEST_KIND,
+          ...(turnId ? { turnId } : {}),
+          ...(itemId ? { itemId } : {}),
+          payload,
+        });
+
+        const resolved = yield* Deferred.await(decision).pipe(
+          Effect.ensuring(
+            Ref.update(pendingApprovalsRef, (current) => {
+              const next = new Map(current);
+              next.delete(requestId);
+              return next;
+            }),
+          ),
+        );
+
+        // The approval channel carries only accept/decline, so the granted
+        // profile is the requested one echoed back on accept and an empty
+        // profile on refusal. `acceptForSession` is the one path that persists
+        // the grant beyond this turn.
+        if (resolved === "accept" || resolved === "acceptForSession") {
+          return {
+            permissions: payload.permissions,
+            scope: resolved === "acceptForSession" ? "session" : "turn",
+          } satisfies EffectCodexSchema.PermissionsRequestApprovalResponse;
+        }
+        return {
+          permissions: {},
+          scope: "turn",
+        } satisfies EffectCodexSchema.PermissionsRequestApprovalResponse;
       }),
     );
 

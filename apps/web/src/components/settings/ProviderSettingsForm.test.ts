@@ -19,6 +19,7 @@ describe("ProviderSettingsForm helpers", () => {
       "homePath",
       "shadowHomePath",
       "launchArgs",
+      "autoApproveReadOnlyPermissions",
     ]);
   });
 
