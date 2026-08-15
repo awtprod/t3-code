@@ -541,6 +541,47 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
     }),
   );
 
+  it.effect("resolves the native executable behind a canonical Linux npm launcher", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cc-linux-runtime-" });
+      const packageRoot = path.join(root, "node_modules", "@openai", "codex");
+      const commandPath = path.join(packageRoot, "bin", "codex.js");
+      const platformPackageRoot = path.join(
+        packageRoot,
+        "node_modules",
+        "@openai",
+        "codex-linux-x64",
+      );
+      const nativePath = path.join(
+        platformPackageRoot,
+        "vendor",
+        "x86_64-unknown-linux-musl",
+        "bin",
+        "codex",
+      );
+      yield* writeFile(commandPath, "#!/usr/bin/env node\n");
+      yield* writeFile(
+        path.join(platformPackageRoot, "package.json"),
+        '{"name":"@openai/codex-linux-x64","version":"0.0.0"}\n',
+      );
+      yield* fileSystem.makeDirectory(path.dirname(nativePath), { recursive: true });
+      yield* fileSystem.writeFile(nativePath, Uint8Array.from([0x7f, 0x45, 0x4c, 0x46]));
+
+      NodeAssert.equal(
+        yield* resolveCommandCenterCodexRuntimeExecutable({
+          commandPath,
+          platform: "linux",
+          architecture: "x64",
+          fileSystem,
+          path,
+        }),
+        yield* fileSystem.realPath(nativePath),
+      );
+    }),
+  );
+
   it.effect(
     "grants read-only access to the exact pointer and common metadata for a valid worktree",
     () =>

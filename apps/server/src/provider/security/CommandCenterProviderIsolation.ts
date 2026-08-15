@@ -387,7 +387,7 @@ function codexHomeError(issue: string, cause?: unknown): CommandCenterCodexHomeI
   });
 }
 
-/** Resolve the native executable behind the official Windows npm launcher without executing it. */
+/** Resolve the native executable behind the official Codex npm launcher without executing it. */
 export const resolveCommandCenterCodexRuntimeExecutable = Effect.fn(
   "CommandCenterProviderIsolation.resolveCodexRuntimeExecutable",
 )(function* (input: ResolveCommandCenterCodexRuntimeInput) {
@@ -399,51 +399,57 @@ export const resolveCommandCenterCodexRuntimeExecutable = Effect.fn(
         codexHomeError("Command Center could not canonicalize the Codex runtime launcher.", cause),
       ),
     );
-  if (input.platform !== "win32" || path.extname(canonicalCommandPath).toLowerCase() === ".exe") {
+  if (
+    (input.platform === "win32" && path.extname(canonicalCommandPath).toLowerCase() === ".exe") ||
+    (input.platform !== "win32" && path.basename(canonicalCommandPath) !== "codex.js")
+  ) {
     return canonicalCommandPath;
   }
-  const target =
-    input.architecture === "arm64"
-      ? {
-          packageName: "@openai/codex-win32-arm64",
-          triple: "aarch64-pc-windows-msvc",
-        }
-      : input.architecture === "x64"
-        ? {
-            packageName: "@openai/codex-win32-x64",
-            triple: "x86_64-pc-windows-msvc",
-          }
-        : undefined;
+  const targets: Readonly<
+    Record<string, readonly [packageName: string, triple: string, executableName: string]>
+  > = {
+    "linux:arm64": ["@openai/codex-linux-arm64", "aarch64-unknown-linux-musl", "codex"],
+    "linux:x64": ["@openai/codex-linux-x64", "x86_64-unknown-linux-musl", "codex"],
+    "darwin:arm64": ["@openai/codex-darwin-arm64", "aarch64-apple-darwin", "codex"],
+    "darwin:x64": ["@openai/codex-darwin-x64", "x86_64-apple-darwin", "codex"],
+    "win32:arm64": ["@openai/codex-win32-arm64", "aarch64-pc-windows-msvc", "codex.exe"],
+    "win32:x64": ["@openai/codex-win32-x64", "x86_64-pc-windows-msvc", "codex.exe"],
+  };
+  const target = targets[`${input.platform}:${input.architecture}`];
   if (target === undefined) {
     return yield* codexHomeError(
-      `Command Center does not support the '${input.architecture}' Windows Codex runtime architecture.`,
+      `Command Center does not support the '${input.architecture}' ${input.platform} Codex runtime architecture.`,
     );
   }
-  const codexPackageRoot = path.join(
-    path.dirname(canonicalCommandPath),
-    "node_modules",
-    "@openai",
-    "codex",
-  );
-  const codexLauncherPath = path.join(codexPackageRoot, "bin", "codex.js");
+  const codexLauncherPath =
+    path.basename(canonicalCommandPath) === "codex.js"
+      ? canonicalCommandPath
+      : path.join(
+          path.dirname(canonicalCommandPath),
+          "node_modules",
+          "@openai",
+          "codex",
+          "bin",
+          "codex.js",
+        );
   if (!(yield* fileSystem.exists(codexLauncherPath))) {
     return yield* codexHomeError(
-      "Command Center requires the official native Codex package; the configured Windows launcher does not have a verifiable @openai/codex installation.",
+      "Command Center requires the official native Codex package; the configured launcher does not have a verifiable @openai/codex installation.",
     );
   }
+  const [packageName, triple, executableName] = target;
   const packageJsonPath = yield* Effect.try({
-    try: () =>
-      NodeModule.createRequire(codexLauncherPath).resolve(`${target.packageName}/package.json`),
+    try: () => NodeModule.createRequire(codexLauncherPath).resolve(`${packageName}/package.json`),
     catch: (cause) =>
       codexHomeError(
-        `Command Center could not resolve the native ${target.packageName} package. Reinstall or update @openai/codex.`,
+        `Command Center could not resolve the native ${packageName} package. Reinstall or update @openai/codex.`,
         cause,
       ),
   });
-  const platformVendorRoot = path.join(path.dirname(packageJsonPath), "vendor", target.triple);
+  const platformVendorRoot = path.join(path.dirname(packageJsonPath), "vendor", triple);
   const nativeExecutableCandidates = [
-    path.join(platformVendorRoot, "bin", "codex.exe"),
-    path.join(platformVendorRoot, "codex", "codex.exe"),
+    path.join(platformVendorRoot, "bin", executableName),
+    path.join(platformVendorRoot, "codex", executableName),
   ];
   for (const candidate of nativeExecutableCandidates) {
     if (yield* fileSystem.exists(candidate)) {
@@ -457,7 +463,7 @@ export const resolveCommandCenterCodexRuntimeExecutable = Effect.fn(
     }
   }
   return yield* codexHomeError(
-    "Command Center found the Windows Codex package but not its native codex.exe. Reinstall @openai/codex with optional dependencies enabled.",
+    `Command Center found the ${input.platform} Codex package but not its native ${executableName}. Reinstall @openai/codex with optional dependencies enabled.`,
   );
 });
 
