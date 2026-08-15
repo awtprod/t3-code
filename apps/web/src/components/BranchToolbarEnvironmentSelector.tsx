@@ -114,10 +114,7 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
                 ) : (
                   <CloudIcon className="size-3" />
                 )}
-                <span>{env.label}</span>
-                {env.projectId === null ? (
-                  <span className="text-xs text-muted-foreground">Choose folder…</span>
-                ) : null}
+                {env.label}
               </span>
             </SelectItem>
           ))}
