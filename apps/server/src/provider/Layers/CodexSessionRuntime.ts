@@ -596,6 +596,16 @@ interface CodexIsolationProbeClient {
 const COMMAND_CENTER_ISOLATION_PROBE_SUCCESS = "command-center-isolation-ok";
 const COMMAND_CENTER_ISOLATION_READ_DENIAL_READY = "command-center-isolation-read-denial-ready";
 
+export function isCommandCenterIsolationProbeAccepted(
+  writable: boolean,
+  result: { readonly exitCode: number; readonly stdout: string },
+): boolean {
+  return writable
+    ? result.exitCode === 0 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_PROBE_SUCCESS
+    : [1, 73].includes(result.exitCode) &&
+        result.stdout.trim() === COMMAND_CENTER_ISOLATION_READ_DENIAL_READY;
+}
+
 function isCommandCenterPermissionProfile(
   permissionProfile: string | undefined,
 ): permissionProfile is
@@ -622,12 +632,12 @@ export function buildCommandCenterIsolationProbeScript(
     : [
         'probe_path=".cc-provider-isolation-probe.$$"',
         "trap 'rm -f \"$probe_path\"' EXIT",
+        `printf '${COMMAND_CENTER_ISOLATION_READ_DENIAL_READY}\\n'`,
         'if : > "$probe_path" 2>/dev/null; then',
         '  rm -f "$probe_path"',
         "  trap - EXIT",
         "  exit 74",
         "fi",
-        `printf '${COMMAND_CENTER_ISOLATION_READ_DENIAL_READY}\\n'`,
         "exit 73",
       ];
   return [
@@ -854,9 +864,7 @@ export const verifyCommandCenterCodexIsolation = Effect.fn(
         );
     }),
   );
-  const accepted = writable
-    ? result.exitCode === 0 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_PROBE_SUCCESS
-    : result.exitCode === 73 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_READ_DENIAL_READY;
+  const accepted = isCommandCenterIsolationProbeAccepted(writable, result);
   if (!accepted) {
     return yield* new CodexSessionRuntimeIsolationProbeError({
       issue:
