@@ -120,7 +120,7 @@ import {
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
-import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
+import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
@@ -262,7 +262,6 @@ import { NoActiveThreadState } from "./NoActiveThreadState";
 import {
   resolveEffectiveEnvMode,
   resolveLocalCheckoutBranchMismatch,
-  resolveEnvironmentOptionLabel,
   shouldShowComposerContextStrip,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
@@ -1891,24 +1890,14 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const logicalProjectEnvironments = useMemo(() => {
     if (!activeProject) return [];
-    const logicalKeyByPhysicalKey = buildPhysicalToLogicalProjectKeyMap({
-      projects: allProjects,
-      settings: projectGroupingSettings,
-      primaryEnvironmentId,
-    });
-    const logicalKey =
-      logicalKeyByPhysicalKey.get(derivePhysicalProjectKey(activeProject)) ??
-      deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
-    const memberProjects = allProjects.filter((project) => {
-      return (
-        (logicalKeyByPhysicalKey.get(derivePhysicalProjectKey(project)) ??
-          deriveLogicalProjectKeyFromSettings(project, projectGroupingSettings)) === logicalKey
-      );
-    });
+    const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
+    const memberProjects = allProjects.filter(
+      (p) => deriveLogicalProjectKeyFromSettings(p, projectGroupingSettings) === logicalKey,
+    );
     const seen = new Set<string>();
     const envs: Array<{
       environmentId: EnvironmentId;
-      projectId: ProjectId | null;
+      projectId: ProjectId;
       label: string;
       isPrimary: boolean;
     }> = [];
@@ -1924,37 +1913,13 @@ function ChatViewContent(props: ChatViewProps) {
         isPrimary,
       });
     }
-    for (const environment of environments) {
-      if (seen.has(environment.environmentId) || environment.connection.phase !== "connected") {
-        continue;
-      }
-      seen.add(environment.environmentId);
-      const isPrimary = environment.environmentId === primaryEnvironmentId;
-      envs.push({
-        environmentId: environment.environmentId,
-        projectId: null,
-        label: resolveEnvironmentOptionLabel({
-          isPrimary,
-          environmentId: environment.environmentId,
-          runtimeLabel: environment.label,
-        }),
-        isPrimary,
-      });
-    }
     // Sort: primary first, then alphabetical
     envs.sort((a, b) => {
       if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
       return a.label.localeCompare(b.label);
     });
     return envs;
-  }, [
-    activeProject,
-    allProjects,
-    environments,
-    projectGroupingSettings,
-    primaryEnvironmentId,
-    environmentById,
-  ]);
+  }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
   const activeEnvironmentOption =
     logicalProjectEnvironments.find(
@@ -2815,10 +2780,6 @@ function ChatViewContent(props: ChatViewProps) {
         (env) => env.environmentId === nextEnvironmentId,
       );
       if (!target) return;
-      if (target.projectId === null) {
-        openCommandPalette({ open: "add-project" });
-        return;
-      }
       setDraftThreadContext(draftId, {
         projectRef: scopeProjectRef(target.environmentId, target.projectId),
       });

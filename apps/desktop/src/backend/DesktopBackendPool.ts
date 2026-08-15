@@ -108,7 +108,6 @@ const { logWarning: logBackendPoolWarning } =
 export type BackendInstanceId = DesktopBackendManager.BackendInstanceId;
 export const BackendInstanceId = DesktopBackendManager.BackendInstanceId;
 export const PRIMARY_INSTANCE_ID = DesktopBackendManager.PRIMARY_INSTANCE_ID;
-export const WINDOWS_SECONDARY_INSTANCE_ID = BackendInstanceId("windows:local");
 export type DesktopBackendInstance = DesktopBackendManager.DesktopBackendInstance;
 export type BackendInstanceSpec = DesktopBackendManager.BackendInstanceSpec;
 
@@ -307,43 +306,19 @@ export const layer = Layer.effect(
             }),
           );
 
-    // A normal desktop using a remote primary still keeps its native backend
-    // available as a secondary execution environment. The remote-only build is
-    // intentionally excluded: that distribution must never launch local work.
-    const windowsSecondary =
-      !isRemoteOnlyDesktopBuild && startupPlan.remoteOnly
-        ? Option.some(
-            yield* DesktopBackendManager.makeBackendInstance({
-              id: WINDOWS_SECONDARY_INSTANCE_ID,
-              label: Effect.succeed("Windows"),
-              configResolve: configuration.resolvePrimary,
-            }),
-          )
-        : Option.none<DesktopBackendInstance>();
-
     const instancesRef = yield* SynchronizedRef.make<
       ReadonlyMap<BackendInstanceId, RegisteredInstance>
     >(
-      new Map([
-        ...Option.match(primary, {
-          onNone: () => [],
-          onSome: (instance) => [
+      Option.match(primary, {
+        onNone: () => new Map(),
+        onSome: (instance) =>
+          new Map([
             [
               DesktopBackendManager.PRIMARY_INSTANCE_ID,
               { _tag: "Active" as const, instance, scope: Option.none() },
-            ] as const,
-          ],
-        }),
-        ...Option.match(windowsSecondary, {
-          onNone: () => [],
-          onSome: (instance) => [
-            [
-              WINDOWS_SECONDARY_INSTANCE_ID,
-              { _tag: "Active" as const, instance, scope: Option.none() },
-            ] as const,
-          ],
-        }),
-      ]),
+            ],
+          ]),
+      }),
     );
 
     const register: DesktopBackendPool["Service"]["register"] = (spec) =>

@@ -14,27 +14,24 @@ That gives you:
 
 ## Use a Remote Server as the Desktop Primary
 
-The Electron desktop can use a paired remote environment as its primary backend while keeping its
-native Windows backend available as a secondary execution environment. The dedicated remote-only
-desktop build remains remote-only and never starts local execution.
+The Electron desktop can use a paired remote environment as its primary backend. In this mode the
+remote environment owns execution; Desktop does not start a second local backend.
 
 1. Pair the remote environment from **Settings** → **Connections** → **Add environment**.
 2. In **Desktop execution**, choose **Remote server** and enter its HTTP or HTTPS base URL.
 3. Test the connection, then choose **Make remote primary and restart**.
 
 Remote-primary mode persists across ordinary launches. The desktop loads its web bundle from the
-remote server and sends primary HTTP and WebSocket traffic directly to it using the saved pairing
-session. A normal desktop build also starts Windows as a secondary environment so each new thread
-can explicitly run remotely or on this computer.
+remote server and sends HTTP and WebSocket traffic directly to it using the saved pairing session.
+Projects, files, git state, terminals, and provider sessions therefore remain on the remote machine.
 
 If the remote server is unavailable, Command Center shows a local recovery window. It never falls
 back to Windows automatically. You can retry, edit the endpoint, quit, or select **Start local for
 this launch**. The last option relaunches with a conspicuous local-override indicator and leaves the
 persisted Remote preference unchanged, so the next ordinary launch returns to remote-only mode.
 
-Switching the primary back to **Windows local** or **WSL** is always an explicit Connections setting
-change followed by a restart. When the remote server remains primary, choosing Windows for a new
-thread enables the native folder picker for that Windows project.
+To run work on the desktop machine, switch the primary back to **Windows local** or **WSL** in
+Connections and restart. Local execution is not available while the remote server remains primary.
 
 ## Enabling Network Access
 
