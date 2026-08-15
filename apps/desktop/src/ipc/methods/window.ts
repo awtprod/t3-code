@@ -198,11 +198,7 @@ export const pickFolder = DesktopIpc.makeIpcMethod({
       targetId !== PRIMARY_LOCAL_ENVIRONMENT_ID &&
       targetId.startsWith(DesktopWslBackend.WSL_INSTANCE_ID_PREFIX);
     const settings = yield* appSettings.get;
-    if (
-      settings.primaryBackendMode === "remote" &&
-      !isLocalExecutionOverride() &&
-      targetId !== DesktopBackendPool.WINDOWS_SECONDARY_INSTANCE_ID
-    ) {
+    if (settings.primaryBackendMode === "remote" && !isLocalExecutionOverride()) {
       // A native Windows folder path is meaningless to the remote Linux
       // environment. Remote project selection stays server-side.
       return null;

@@ -151,7 +151,7 @@ describe("DesktopBackendPool", () => {
     ),
   );
 
-  it.effect("keeps Windows registered as a secondary for a remote primary", () =>
+  it.effect("does not register a local backend for a remote primary", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const labelRef = yield* Ref.make("Windows");
@@ -166,10 +166,7 @@ describe("DesktopBackendPool", () => {
         );
 
         assert.isTrue(Option.isNone(yield* pool.primary));
-        assert.deepEqual(
-          (yield* pool.list).map((instance) => instance.id),
-          [DesktopBackendPool.WINDOWS_SECONDARY_INSTANCE_ID],
-        );
+        assert.deepEqual(yield* pool.list, []);
       }),
     ),
   );
