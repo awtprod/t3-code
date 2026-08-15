@@ -72,8 +72,14 @@ describe("shouldRefreshOnArrival", () => {
 });
 
 describe("shouldRefreshOnInterval", () => {
-  const tick = (now: number, lastInteractedAt: number) =>
-    shouldRefreshOnInterval({ visible: true, now, lastRefreshedAt: 0, lastInteractedAt });
+  const tick = (now: number, lastInteractedAt: number, refreshWhileVisible = false) =>
+    shouldRefreshOnInterval({
+      visible: true,
+      now,
+      lastRefreshedAt: 0,
+      lastInteractedAt,
+      refreshWhileVisible,
+    });
 
   it("reads for a reader who is here", () => {
     expect(tick(LIVE_REFRESH_INTERVAL_MS, LIVE_REFRESH_INTERVAL_MS - 1_000)).toBe(true);
@@ -81,6 +87,10 @@ describe("shouldRefreshOnInterval", () => {
 
   it("stops reading for a window left showing on a desk nobody is at", () => {
     expect(tick(LIVE_REFRESH_IDLE_AFTER_MS + 60_000, 0)).toBe(false);
+  });
+
+  it("keeps a visible dashboard current after the normal idle cutoff", () => {
+    expect(tick(LIVE_REFRESH_IDLE_AFTER_MS + 60_000, 0, true)).toBe(true);
   });
 
   it("starts reading again once the reader touches the window", () => {

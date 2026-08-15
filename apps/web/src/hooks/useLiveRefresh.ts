@@ -68,9 +68,12 @@ export function shouldRefreshOnInterval(input: {
   readonly now: number;
   readonly lastRefreshedAt: number;
   readonly lastInteractedAt: number;
+  /** Continue reading while visible, even after the normal idle cutoff. */
+  readonly refreshWhileVisible?: boolean;
 }): boolean {
   return (
-    input.now - input.lastInteractedAt < LIVE_REFRESH_IDLE_AFTER_MS && shouldLiveRefresh(input)
+    (input.refreshWhileVisible || input.now - input.lastInteractedAt < LIVE_REFRESH_IDLE_AFTER_MS) &&
+    shouldLiveRefresh(input)
   );
 }
 
@@ -116,9 +119,14 @@ function watchInteraction(): () => void {
 
 export function useLiveRefresh(
   refresh: (() => void) | null,
-  options: { readonly enabled?: boolean; readonly key?: string } = {},
+  options: {
+    readonly enabled?: boolean;
+    readonly key?: string;
+    /** Keep refreshing while the window is visible instead of stopping after idle time. */
+    readonly refreshWhileVisible?: boolean;
+  } = {},
 ): void {
-  const { enabled = true, key } = options;
+  const { enabled = true, key, refreshWhileVisible = false } = options;
   // Held in a ref so a caller can pass a fresh closure every render without re-arming the
   // listeners, which would otherwise refresh on every render that changed anything at all.
   const latest = useRef(refresh);
@@ -149,7 +157,15 @@ export function useLiveRefresh(
     const onInterval = () => {
       const now = Date.now();
       const lastRefreshedAt = lastRefreshedAtByView.get(viewId) ?? now;
-      if (shouldRefreshOnInterval({ visible: visible(), now, lastRefreshedAt, lastInteractedAt })) {
+      if (
+        shouldRefreshOnInterval({
+          visible: visible(),
+          now,
+          lastRefreshedAt,
+          lastInteractedAt,
+          refreshWhileVisible,
+        })
+      ) {
         read(now);
       }
     };
@@ -178,5 +194,5 @@ export function useLiveRefresh(
       document.removeEventListener("visibilitychange", onVisibilityChange);
       stopWatchingInteraction();
     };
-  }, [enabled, viewId]);
+  }, [enabled, refreshWhileVisible, viewId]);
 }
