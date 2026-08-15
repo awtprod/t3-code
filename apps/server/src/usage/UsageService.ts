@@ -14,7 +14,10 @@
 import * as NodeOS from "node:os";
 
 import {
+  ClaudeSettings,
+  CodexSettings,
   USAGE_CONTRACT_VERSION,
+  type ServerSettings as ServerSettingsDocument,
   type UsageProviderKind,
   type UsageSource,
   type UsageSummary,
@@ -92,6 +95,49 @@ export class UsageService extends Context.Service<
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
   }
 >()("@awtprod/command-center/usage/UsageService") {}
+
+type UsageProviderSettings =
+  | { readonly provider: "claude"; readonly config: ClaudeSettings }
+  | { readonly provider: "codex"; readonly config: CodexSettings };
+
+const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
+const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
+
+/** Resolve every enabled provider instance the transcript dashboard supports. */
+export function configuredUsageProviders(
+  settings: ServerSettingsDocument,
+): readonly UsageProviderSettings[] {
+  const configured: UsageProviderSettings[] = [];
+  let hasClaudeInstance = false;
+  let hasCodexInstance = false;
+
+  for (const instance of Object.values(settings.providerInstances)) {
+    if (instance.enabled === false) continue;
+    if (instance.driver === "claudeAgent") {
+      const config = decodeClaudeSettings(instance.config);
+      if (Option.isSome(config) && config.value.homePath.length > 0) {
+        hasClaudeInstance = true;
+        configured.push({ provider: "claude", config: config.value });
+      }
+    } else if (instance.driver === "codex") {
+      const config = decodeCodexSettings(instance.config);
+      if (Option.isSome(config) && config.value.homePath.length > 0) {
+        hasCodexInstance = true;
+        configured.push({ provider: "codex", config: config.value });
+      }
+    }
+  }
+
+  // Preserve mixed and legacy settings during the provider-instance migration.
+  if (!hasClaudeInstance && settings.providers.claudeAgent.enabled) {
+    configured.push({ provider: "claude", config: settings.providers.claudeAgent });
+  }
+  if (!hasCodexInstance && settings.providers.codex.enabled) {
+    configured.push({ provider: "codex", config: settings.providers.codex });
+  }
+
+  return configured;
+}
 
 /** Empty summary, for suites that only need the RPC surface to resolve. */
 export const layerTest = Layer.succeed(
@@ -215,14 +261,21 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-    const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
-    const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
-    const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
-
-    return [
-      { provider: "claude" as const, dir: claudeDir },
-      { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
-    ];
+    const dirs: Array<{ readonly provider: UsageProviderKind; readonly dir: string }> = [];
+    const seen = new Set<string>();
+    for (const provider of configuredUsageProviders(settings)) {
+      const dir =
+        provider.provider === "claude"
+          ? yield* resolveClaudeHomePath(provider.config).pipe(
+              Effect.flatMap(resolveClaudeTranscriptDir),
+            )
+          : path.join((yield* resolveCodexHomeLayout(provider.config)).sharedHomePath, "sessions");
+      const key = `${provider.provider}:${dir}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dirs.push({ provider: provider.provider, dir });
+    }
+    return dirs;
   });
 
   /**
