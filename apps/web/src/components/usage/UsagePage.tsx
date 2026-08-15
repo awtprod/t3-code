@@ -100,7 +100,9 @@ export function UsagePage() {
       setWindowSelection({ days: windowDays, window: nextWindow });
     }
   };
-  useLiveRefresh(refreshWindow, { key: "usage-dashboard" });
+  // Usage is a live operational dashboard, so a visible tab should keep
+  // reporting even when the reader is watching without interacting.
+  useLiveRefresh(refreshWindow, { key: "usage-dashboard", refreshWhileVisible: true });
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
