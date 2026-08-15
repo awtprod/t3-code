@@ -75,9 +75,12 @@ describe("Command Center native sandbox admission", () => {
   );
 
   it("builds native probes without Linux-only process assumptions", () => {
+    const linux = buildCommandCenterIsolationProbeScript(true);
     const darwin = buildCommandCenterDarwinIsolationProbeScript(true);
     const windows = buildCommandCenterWindowsIsolationProbeScript(false);
 
+    NodeAssert.doesNotMatch(linux, /\/proc\//u);
+    NodeAssert.match(linux, /CC_PROVIDER_ISOLATION_SENTINEL/u);
     NodeAssert.doesNotMatch(darwin, /\/proc\//u);
     NodeAssert.match(darwin, /HOME\/auth\.json/u);
     NodeAssert.match(windows, /USERPROFILE/u);
