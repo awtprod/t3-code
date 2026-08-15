@@ -2009,7 +2009,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ? yield* (
               options?.commandCenterRuntimeExecutablePath
                 ? Effect.succeed(options.commandCenterRuntimeExecutablePath)
-                : resolveCommandPath(codexConfig.binaryPath, {
+                : resolveCommandPath("codex", {
                     env: sourceEnvironment,
                     extendEnv: false,
                   }).pipe(
