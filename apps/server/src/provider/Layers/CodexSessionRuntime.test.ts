@@ -17,10 +17,12 @@ import {
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
   buildCommandCenterDarwinIsolationProbeScript,
+  buildCommandCenterIsolationProbeScript,
   buildCommandCenterWindowsIsolationProbeScript,
   buildTurnStartParams,
   ensureCommandCenterWindowsSandbox,
   hasConfiguredMcpServer,
+  isCommandCenterIsolationProbeAccepted,
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
@@ -75,14 +77,43 @@ describe("Command Center native sandbox admission", () => {
   );
 
   it("builds native probes without Linux-only process assumptions", () => {
+    const linux = buildCommandCenterIsolationProbeScript(true);
     const darwin = buildCommandCenterDarwinIsolationProbeScript(true);
     const windows = buildCommandCenterWindowsIsolationProbeScript(false);
 
+    NodeAssert.doesNotMatch(linux, /\/proc\//u);
+    NodeAssert.match(linux, /CC_PROVIDER_ISOLATION_SENTINEL/u);
     NodeAssert.doesNotMatch(darwin, /\/proc\//u);
     NodeAssert.match(darwin, /HOME\/auth\.json/u);
     NodeAssert.match(windows, /USERPROFILE/u);
     NodeAssert.match(windows, /WriteAllText/u);
     NodeAssert.match(windows, /exit 73/u);
+  });
+
+  it("admits both shell-reported and sandbox-enforced read denials after the marker", () => {
+    const linux = buildCommandCenterIsolationProbeScript(false);
+    NodeAssert.ok(
+      linux.indexOf("command-center-isolation-read-denial-ready") <
+        linux.indexOf(': > "$probe_path"'),
+    );
+    NodeAssert.equal(
+      isCommandCenterIsolationProbeAccepted(false, {
+        exitCode: 1,
+        stdout: "command-center-isolation-read-denial-ready\n",
+      }),
+      true,
+    );
+    NodeAssert.equal(
+      isCommandCenterIsolationProbeAccepted(false, {
+        exitCode: 74,
+        stdout: "command-center-isolation-read-denial-ready\n",
+      }),
+      false,
+    );
+    NodeAssert.equal(
+      isCommandCenterIsolationProbeAccepted(false, { exitCode: 1, stdout: "" }),
+      false,
+    );
   });
 });
 

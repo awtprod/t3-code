@@ -811,39 +811,45 @@ export const prepareCommandCenterCodexHome = Effect.fn(
   }
 
   const targetAuthStat = yield* optionalStat(targetAuthPath);
-  if (Option.isSome(targetAuthStat)) {
-    if (targetAuthStat.value.type !== "File") {
-      return yield* codexHomeError(
-        "Command Center's isolated Codex authentication entry is not a private file.",
-      );
-    }
-    const linkState = yield* fileSystem.readLink(targetAuthPath).pipe(
-      Effect.map(Option.some),
-      Effect.catchTags({
-        PlatformError: (cause) =>
-          isNotSymlink(cause)
-            ? Effect.succeed(Option.none())
-            : Effect.fail(
-                codexHomeError(
-                  "Command Center could not verify isolated Codex authentication.",
-                  cause,
-                ),
-              ),
-      }),
+  if (Option.isNone(targetAuthStat)) {
+    // Fail closed. Without `auth.json` the session still starts, and the first
+    // model call fails far downstream as an opaque provider 401 that says
+    // nothing about which home Command Center actually read.
+    return yield* codexHomeError(
+      `Command Center found no Codex credentials to isolate: ${sourceAuthPath} does not exist. ` +
+        "Sign in with Codex for this identity, or point the provider instance's CODEX_HOME " +
+        "setting at the home that holds its auth.json.",
     );
-    if (Option.isSome(linkState)) {
-      return yield* codexHomeError(
-        "Command Center refuses symlinked isolated Codex authentication.",
-      );
-    }
-    yield* fileSystem
-      .chmod(targetAuthPath, 0o600)
-      .pipe(
-        Effect.mapError((cause) =>
-          codexHomeError("Command Center could not protect isolated Codex authentication.", cause),
-        ),
-      );
   }
+  if (targetAuthStat.value.type !== "File") {
+    return yield* codexHomeError(
+      "Command Center's isolated Codex authentication entry is not a private file.",
+    );
+  }
+  const linkState = yield* fileSystem.readLink(targetAuthPath).pipe(
+    Effect.map(Option.some),
+    Effect.catchTags({
+      PlatformError: (cause) =>
+        isNotSymlink(cause)
+          ? Effect.succeed(Option.none())
+          : Effect.fail(
+              codexHomeError(
+                "Command Center could not verify isolated Codex authentication.",
+                cause,
+              ),
+            ),
+    }),
+  );
+  if (Option.isSome(linkState)) {
+    return yield* codexHomeError("Command Center refuses symlinked isolated Codex authentication.");
+  }
+  yield* fileSystem
+    .chmod(targetAuthPath, 0o600)
+    .pipe(
+      Effect.mapError((cause) =>
+        codexHomeError("Command Center could not protect isolated Codex authentication.", cause),
+      ),
+    );
 
   return layout;
 });

@@ -336,6 +336,37 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
     }),
   );
 
+  it.effect("names the missing source auth.json instead of starting unauthenticated", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cc-codex-home-noauth-" });
+      const stateDir = path.join(root, "state");
+      const sourceHomePath = path.join(root, "source-home");
+      yield* fileSystem.makeDirectory(stateDir, { recursive: true });
+      yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+
+      // No auth.json in the source home. Previously this copied nothing and let
+      // the session start, so the failure only surfaced as a provider 401 on the
+      // first model call.
+      const error = yield* prepareCommandCenterCodexHome({
+        stateDir,
+        sourceHomePath,
+        threadId: "cc:thread-missing-auth",
+        fileSystem,
+        path,
+        crypto,
+        runtimeExecutablePath: NodeProcess.execPath,
+        platform: NodeProcess.platform,
+        writableRoots: [root],
+      }).pipe(Effect.flip);
+
+      NodeAssert.match(error.issue, /found no Codex credentials to isolate/u);
+      NodeAssert.ok(error.issue.includes(path.join(sourceHomePath, "auth.json")));
+    }),
+  );
+
   it.effect("fails closed if an isolated Codex home gains ambient config", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -346,6 +377,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
       const sourceHomePath = path.join(root, "source-home");
       yield* fileSystem.makeDirectory(stateDir, { recursive: true });
       yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+      yield* writeFile(path.join(sourceHomePath, "auth.json"), '{"token":"test-only"}\n');
       const input = {
         stateDir,
         sourceHomePath,
@@ -375,6 +407,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
       const sourceHomePath = path.join(root, "source-home");
       yield* fileSystem.makeDirectory(stateDir, { recursive: true });
       yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+      yield* writeFile(path.join(sourceHomePath, "auth.json"), '{"token":"test-only"}\n');
       const input = {
         stateDir,
         sourceHomePath,
@@ -463,6 +496,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
       const runtimePath = path.join(root, "codex.exe");
       yield* fileSystem.makeDirectory(stateDir, { recursive: true });
       yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+      yield* writeFile(path.join(sourceHomePath, "auth.json"), '{"token":"test-only"}\n');
       yield* fileSystem.writeFile(runtimePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
 
       const makeHome = (threadId: string) =>
