@@ -7,6 +7,7 @@ import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
+import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import {
   enumerateDays,
   enumerateHourStarts,
@@ -99,6 +100,7 @@ export function UsagePage() {
       setWindowSelection({ days: windowDays, window: nextWindow });
     }
   };
+  useLiveRefresh(refreshWindow, { key: "usage-dashboard" });
 
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground isolate">
