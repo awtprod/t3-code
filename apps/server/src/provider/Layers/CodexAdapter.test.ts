@@ -286,6 +286,15 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
 });
 
 const validationRuntimeFactory = makeRuntimeFactory();
+// Isolation requires a source auth.json before any session starts, so these
+// validation cases need a real home even though none of them assert on auth.
+const validationSourceHomePath = NodeFS.mkdtempSync(
+  NodePath.join(NodeOS.tmpdir(), "cc-codex-validation-home-"),
+);
+NodeFS.writeFileSync(
+  NodePath.join(validationSourceHomePath, "auth.json"),
+  '{"token":"test-only"}\n',
+);
 const validationLayer = it.layer(
   Layer.effect(
     CodexAdapter,
@@ -293,7 +302,7 @@ const validationLayer = it.layer(
       const codexConfig = decodeCodexSettings({});
       return yield* makeCodexAdapter(codexConfig, {
         makeRuntime: validationRuntimeFactory.factory,
-        commandCenterSourceHomePath: NodePath.join(process.cwd(), ".missing-command-center-auth"),
+        commandCenterSourceHomePath: validationSourceHomePath,
         commandCenterRuntimeExecutablePath: process.execPath,
       });
     }),
@@ -444,6 +453,7 @@ it.effect("fails closed when elevated Windows Command Center isolation cannot be
   const runtimePath = NodePath.join(tempDir, "codex.exe");
   const sourceHomePath = NodePath.join(tempDir, "codex-home");
   NodeFS.mkdirSync(sourceHomePath, { recursive: true });
+  NodeFS.writeFileSync(NodePath.join(sourceHomePath, "auth.json"), '{"token":"test-only"}\n');
   NodeFS.writeFileSync(runtimePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
 
   const runtimeFactory = makeRuntimeFactory({
