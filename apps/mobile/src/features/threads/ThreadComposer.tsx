@@ -732,19 +732,6 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     [navigation, settingsSheetPresentation.onStackTransitionsFinished],
   );
 
-  function handleEfficiencyMenuAction(event: string) {
-    if (event === "efficiency:manual") {
-      props.onUpdateEfficiencyRouting("manual", currentEfficiencyTier);
-      return;
-    }
-    if (event.startsWith("efficiency:auto:")) {
-      props.onUpdateEfficiencyRouting(
-        "auto",
-        event.slice("efficiency:auto:".length) as EfficiencyTier,
-      );
-    }
-  }
-
   return (
     <Animated.View
       className="px-4"

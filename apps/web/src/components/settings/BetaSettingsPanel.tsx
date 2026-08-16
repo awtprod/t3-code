@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 
-import {
-  useClientSettings,
-  useSidebarV2Enabled,
-  useUpdateClientSettings,
-} from "../../hooks/useSettings";
+import { useClientSettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
@@ -56,7 +52,7 @@ function AutoSettleDaysInput({
 }
 
 export function BetaSettingsPanel() {
-  const sidebarV2Enabled = useSidebarV2Enabled();
+  const sidebarV2Enabled = useClientSettings((settings) => settings.sidebarV2Enabled);
   const sidebarAutoSettleAfterDays = useClientSettings(
     (settings) => settings.sidebarAutoSettleAfterDays,
   );
