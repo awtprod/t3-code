@@ -6,7 +6,12 @@ import * as Effect from "effect/Effect";
 import type { SandboxExecutionTarget } from "./ThreadSandboxRuntime.ts";
 import { redeemSandboxProviderEnvironment } from "./SandboxRuntimeManager.ts";
 
-const targets = new Map<string, SandboxExecutionTarget>();
+export type SandboxProviderBindingOwner = symbol;
+type SandboxProviderBinding = {
+  readonly target: SandboxExecutionTarget;
+  readonly owners: Set<SandboxProviderBindingOwner>;
+};
+const targets = new Map<string, SandboxProviderBinding>();
 const PROVIDER_ENV_ALLOWLIST =
   /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_TOKEN|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|LANG|LC_ALL|TERM)$/;
 const PERSISTENT_PROVIDER_CREDENTIAL =
@@ -17,20 +22,44 @@ const SANDBOX_PROVIDER_ENV = {
   USER: "sandbox",
 } as const;
 
-export function bindSandboxProviderTarget(target: SandboxExecutionTarget): void {
-  const current = targets.get(target.threadId);
-  if (current !== undefined && current.sandboxId !== target.sandboxId) {
-    throw new Error(`thread ${target.threadId} is already bound to a different sandbox generation`);
-  }
-  targets.set(target.threadId, target);
+export function makeSandboxProviderBindingOwner(): SandboxProviderBindingOwner {
+  return Symbol("sandbox-provider-binding-owner");
 }
 
-export function unbindSandboxProviderTarget(threadId: string): void {
-  targets.delete(threadId);
+export function bindSandboxProviderTarget(
+  target: SandboxExecutionTarget,
+  owner: SandboxProviderBindingOwner,
+): void {
+  const current = targets.get(target.threadId);
+  if (current !== undefined && current.target.sandboxId !== target.sandboxId) {
+    throw new Error(`thread ${target.threadId} is already bound to a different sandbox generation`);
+  }
+  if (current !== undefined) {
+    current.owners.add(owner);
+    return;
+  }
+  targets.set(target.threadId, { target, owners: new Set([owner]) });
+}
+
+export function unbindSandboxProviderTarget(
+  threadId: string,
+  owner: SandboxProviderBindingOwner,
+): void {
+  const current = targets.get(threadId);
+  if (current === undefined) return;
+  current.owners.delete(owner);
+  if (current.owners.size === 0) targets.delete(threadId);
+}
+
+export function unbindAllSandboxProviderTargets(owner: SandboxProviderBindingOwner): void {
+  for (const [threadId, binding] of targets) {
+    binding.owners.delete(owner);
+    if (binding.owners.size === 0) targets.delete(threadId);
+  }
 }
 
 export function sandboxProviderTarget(threadId: string): SandboxExecutionTarget | undefined {
-  return targets.get(threadId);
+  return targets.get(threadId)?.target;
 }
 
 function execArgs(

@@ -1459,6 +1459,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.turn-diff-completed",
   "thread.activity-appended",
   "sandbox.provisioning-started",
+  "sandbox.provision-requested",
   "sandbox.ready",
   "sandbox.failed",
   "sandbox.paused",
@@ -1752,6 +1753,10 @@ export const ThreadSandboxLifecyclePayload = Schema.Struct({
 });
 
 export const SandboxBranchExportRequestedPayload = Schema.Struct({ threadId: ThreadId });
+export const SandboxProvisionRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  config: Schema.optional(SandboxConfig),
+});
 export const SandboxWorkerSpawnRequestedPayload = Schema.Struct({
   parentThreadId: ThreadId,
   childThreadId: ThreadId,
@@ -1946,6 +1951,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.activity-appended"),
     payload: ThreadActivityAppendedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.provision-requested"),
+    payload: SandboxProvisionRequestedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

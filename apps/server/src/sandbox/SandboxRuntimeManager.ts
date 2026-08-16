@@ -5,6 +5,8 @@ import type {
   SandboxArtifactExport,
   SandboxReconcileResult,
   SandboxUsageSample,
+  SandboxExecInput,
+  SandboxCommandResult,
 } from "./types.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -50,6 +52,11 @@ export type ManagedSandboxReady = SandboxReady & {
 };
 
 export interface SandboxRuntimeManagerShape {
+  readonly exec?: (
+    runtime: "docker" | "podman",
+    threadId: string,
+    input: SandboxExecInput,
+  ) => Effect.Effect<SandboxCommandResult, SandboxManagerError>;
   readonly provision: (
     input: SandboxProvisionInput & { services?: ReadonlyArray<ThreadServiceDeclaration> },
   ) => Effect.Effect<ManagedSandboxReady, SandboxManagerError>;
@@ -121,6 +128,9 @@ const makeManager = (artifactRoot: string | undefined): SandboxRuntimeManagerSha
         }),
     });
   return {
+    exec: Effect.fn("SandboxRuntimeManager.exec")(function* (runtime, threadId, input) {
+      return yield* attempt(() => get(runtime).backend.exec(threadId, input));
+    }),
     provision: Effect.fn("SandboxRuntimeManager.provision")(function* (input) {
       const previewImage = process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE?.trim();
       if (!previewImage)

@@ -78,6 +78,31 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
     }),
   );
 
+  it.effect("durably requests provenance resolution for manual provisioning", () =>
+    Effect.gen(function* () {
+      const event = yield* decideOrchestrationCommand({
+        readModel: readModel(),
+        command: {
+          type: "sandbox.provision",
+          commandId: CommandId.make("manual-provision"),
+          threadId: ThreadId.make("thread-1"),
+          config: { runtime: "podman" },
+          createdAt: NOW,
+        },
+      });
+      expect(Array.isArray(event)).toBe(false);
+      const requested = event as Omit<
+        Extract<OrchestrationEvent, { type: "sandbox.provision-requested" }>,
+        "sequence"
+      >;
+      expect(requested.type).toBe("sandbox.provision-requested");
+      expect(requested.payload).toEqual({
+        threadId: ThreadId.make("thread-1"),
+        config: { runtime: "podman" },
+      });
+    }),
+  );
+
   it.effect("rejects simultaneous human takeover leases", () => {
     const sandbox = {
       lifecycle: "paused" as const,

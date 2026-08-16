@@ -64,6 +64,8 @@ import { resolveSupabaseConnection } from "../../database/SupabaseMcpConnector.t
 import * as ServerSettings from "../../serverSettings.ts";
 import {
   bindSandboxProviderTarget,
+  makeSandboxProviderBindingOwner,
+  unbindAllSandboxProviderTargets,
   unbindSandboxProviderTarget,
 } from "../../sandbox/SandboxProviderProcess.ts";
 import { commandCenterProviderIsolationIssue } from "../security/CommandCenterProviderIsolation.ts";
@@ -239,6 +241,7 @@ const correlateRuntimeEventWithInstance = (
 const makeProviderService = Effect.fn("makeProviderService")(function* (
   options?: ProviderServiceLiveOptions,
 ) {
+  const sandboxBindingOwner = makeSandboxProviderBindingOwner();
   const analytics = yield* Effect.service(AnalyticsService.AnalyticsService);
   const serverConfig = yield* ServerConfig.ServerConfig;
   const eventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
@@ -750,7 +753,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
-        if (executionTarget?.kind === "sandbox") bindSandboxProviderTarget(executionTarget);
+        if (executionTarget?.kind === "sandbox") {
+          bindSandboxProviderTarget(executionTarget, sandboxBindingOwner);
+        }
         yield* prepareMcpSession(threadId, resolvedInstanceId, input.projectId, effectiveCwd);
         const session = yield* adapter
           .startSession({
@@ -806,9 +811,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
         return sessionWithInstance;
       }).pipe(
-        Effect.tapError(() =>
+        Effect.onError(() =>
           Effect.sync(() => {
-            if (executionTarget?.kind === "sandbox") unbindSandboxProviderTarget(threadId);
+            if (executionTarget?.kind === "sandbox") {
+              unbindSandboxProviderTarget(threadId, sandboxBindingOwner);
+            }
           }),
         ),
         withMetrics({
@@ -1093,8 +1100,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* analytics.record("provider.session.stopped", {
           provider: routed.adapter.provider,
         });
-        unbindSandboxProviderTarget(input.threadId);
       }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => unbindSandboxProviderTarget(input.threadId, sandboxBindingOwner)),
+        ),
         withMetrics({
           counter: providerSessionsTotal,
           outcomeAttributes: () =>
@@ -1292,6 +1301,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   yield* Effect.addFinalizer(() =>
     runStopAll().pipe(
+      Effect.ensuring(Effect.sync(() => unbindAllSandboxProviderTargets(sandboxBindingOwner))),
       Effect.catchCause((cause) =>
         Effect.logWarning("failed to stop provider service", {
           errorTag: causeErrorTag(cause),

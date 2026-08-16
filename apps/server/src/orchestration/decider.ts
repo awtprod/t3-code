@@ -1673,10 +1673,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       }
       const branch = current?.branch ?? command.branch;
       if (branch === undefined) {
-        return yield* sandboxInvariant(
-          command.type,
-          `thread ${command.threadId} sandbox provision requires branch provenance`,
-        );
+        return {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "sandbox.provision-requested",
+          payload: {
+            threadId: command.threadId,
+            ...(command.config === undefined ? {} : { config: command.config }),
+          },
+        };
       }
       const config = command.config ?? thread.sandboxConfig ?? {};
       const currentWithoutFailure =

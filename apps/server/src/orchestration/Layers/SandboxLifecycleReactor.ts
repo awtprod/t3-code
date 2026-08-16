@@ -12,11 +12,13 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { SandboxManagerError, SandboxRuntimeManager } from "../../sandbox/SandboxRuntimeManager.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -36,6 +38,7 @@ type SandboxRequestEvent = Extract<
   {
     type:
       | "sandbox.branch-export-requested"
+      | "sandbox.provision-requested"
       | "sandbox.worker-spawn-requested"
       | "sandbox.worker-status-requested"
       | "sandbox.worker-message-requested"
@@ -47,16 +50,38 @@ type SandboxRequestEvent = Extract<
   }
 >;
 
-const make = Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery;
   const providers = yield* ProviderService;
   const runtimes = yield* SandboxRuntimeManager;
   const projectFiles = yield* T3ProjectFileLoader;
+  const gitWorkflow = yield* GitWorkflowService;
   const crypto = yield* Crypto.Crypto;
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((id) => CommandId.make(`server:${tag}:${id}`)));
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+  const dispatchAndAwaitProjection = Effect.fn(
+    "SandboxLifecycleReactor.dispatchAndAwaitProjection",
+  )(function* (command: Parameters<typeof engine.dispatch>[0]) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const pull = yield* Stream.toPull(
+          engine.streamDomainEvents.pipe(
+            Stream.filter((candidate) => candidate.commandId === command.commandId),
+          ),
+        );
+        const projected = yield* pull.pipe(Effect.timeout(Duration.seconds(30)), Effect.forkScoped);
+        // Let the stream fiber acquire its PubSub subscription before dispatch
+        // can publish the matching committed event.
+        yield* Effect.yieldNow;
+        const receipt = yield* engine.dispatch(command);
+        yield* Fiber.join(projected);
+        return receipt;
+      }),
+    );
+  });
 
   const getThread = (threadId: Parameters<typeof snapshots.getThreadDetailById>[0]) =>
     snapshots.getThreadDetailById(threadId).pipe(Effect.map(Option.getOrUndefined));
@@ -104,6 +129,105 @@ const make = Effect.gen(function* () {
   const processEvent = Effect.fn("SandboxLifecycleReactor.processEvent")(function* (
     event: SandboxRequestEvent,
   ) {
+    if (event.type === "sandbox.provision-requested") {
+      const thread = yield* getThread(event.payload.threadId);
+      if (!thread) return;
+      const snapshot = yield* snapshots.getSnapshot();
+      const project = snapshot.projects.find((item) => item.id === thread.projectId);
+      if (!project)
+        return yield* new SandboxManagerError({
+          message: `project '${thread.projectId}' was not found`,
+        });
+      const branch =
+        thread.sandbox?.branch ??
+        thread.sandboxBranch ??
+        (yield* Effect.gen(function* () {
+          const local = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
+          if (!local.isRepo || local.refName === null)
+            return yield* new SandboxManagerError({
+              message: "Isolated threads require a Git repository with a selected branch.",
+            });
+          const base = yield* gitWorkflow.resolveRemoteTrackingCommit({
+            cwd: project.workspaceRoot,
+            refName: local.refName,
+            fallbackRemoteName: "origin",
+          });
+          return {
+            branchName: `t3/thread/${thread.id}`,
+            baseCommit: base.commitSha,
+          };
+        }));
+      const config = event.payload.config ?? thread.sandboxConfig ?? {};
+      const createdAt = yield* nowIso;
+      const provisionCommandId = yield* commandId("sandbox-manual-provision");
+      yield* dispatchAndAwaitProjection({
+        type: "sandbox.provision",
+        commandId: provisionCommandId,
+        threadId: thread.id,
+        config,
+        branch,
+        createdAt,
+      });
+      const declaration = Option.getOrUndefined(
+        yield* projectFiles.load(project.workspaceRoot),
+      )?.sandbox;
+      const image = declaration?.image ?? process.env.T3_SANDBOX_IMAGE?.trim();
+      if (!image)
+        return yield* new SandboxManagerError({
+          message: "T3_SANDBOX_IMAGE must name a digest-pinned desktop sandbox image.",
+        });
+      const provision = yield* runtimes.provision({
+        bootstrap: {
+          threadId: thread.id,
+          projectId: thread.projectId,
+          repositoryUrl: project.repositoryIdentity?.locator.remoteUrl ?? project.workspaceRoot,
+          baseCommit: branch.baseCommit,
+          branchName: branch.branchName,
+        },
+        config,
+        image,
+        ...(process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE?.trim()
+          ? { egressProxyImage: process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE.trim() }
+          : {}),
+        ...(declaration?.caches ? { caches: declaration.caches } : {}),
+        ...(declaration?.setup ? { setup: declaration.setup } : {}),
+        ...(declaration?.teardown ? { teardown: declaration.teardown } : {}),
+        ...(declaration?.services ? { services: declaration.services } : {}),
+        ...(declaration?.previewPorts ? { previewPorts: declaration.previewPorts } : {}),
+      });
+      yield* engine.dispatch({
+        type: "sandbox.provision.ready",
+        commandId: yield* commandId("sandbox-manual-ready"),
+        threadId: thread.id,
+        sandboxId: SandboxId.make(provision.sandboxId),
+        runtime: provision.runtime,
+        runtimeRef: provision.containerName,
+        createdAt: yield* nowIso,
+      });
+      const readyThread = yield* getThread(thread.id);
+      if (readyThread?.sandbox) {
+        const checkedAt = yield* nowIso;
+        yield* engine.dispatch({
+          type: "sandbox.reconcile.result",
+          commandId: yield* commandId("sandbox-manual-service-health"),
+          threadId: thread.id,
+          disposition: "matched",
+          sandbox: {
+            ...readyThread.sandbox,
+            services: provision.services.map((service) => ({
+              name: service.name,
+              status: "healthy" as const,
+              ...(service.internalPorts[0] === undefined
+                ? {}
+                : { internalPort: service.internalPorts[0] }),
+              checkedAt,
+            })),
+          },
+          createdAt: checkedAt,
+        });
+      }
+      return;
+    }
     if (event.type === "sandbox.takeover-acquired") {
       desktopGateway.setHumanControl(event.payload.threadId, true);
       return;
@@ -489,6 +613,7 @@ const make = Effect.gen(function* () {
         event.type.startsWith("sandbox.") &&
         [
           "sandbox.branch-export-requested",
+          "sandbox.provision-requested",
           "sandbox.worker-spawn-requested",
           "sandbox.worker-status-requested",
           "sandbox.worker-message-requested",

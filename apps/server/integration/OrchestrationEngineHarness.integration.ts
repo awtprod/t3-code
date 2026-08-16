@@ -1,10 +1,12 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
+import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ApprovalRequestId,
   CodexSettings,
+  DEFAULT_SANDBOX_RESOURCE_LIMITS,
   ProviderDriverKind,
   type OrchestrationEvent,
   type OrchestrationThread,
@@ -29,6 +31,7 @@ import { OrchestrationEventStoreLive } from "../src/persistence/Layers/Orchestra
 import { ProjectionCheckpointRepositoryLive } from "../src/persistence/Layers/ProjectionCheckpoints.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../src/persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../src/persistence/Layers/ProviderSessionRuntime.ts";
+import { ProviderTurnSendClaimRepositoryLive } from "../src/persistence/Layers/ProviderTurnSendClaims.ts";
 import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
 import { ProjectionCheckpointRepository } from "../src/persistence/Services/ProjectionCheckpoints.ts";
 import { ProjectionPendingApprovalRepository } from "../src/persistence/Services/ProjectionPendingApprovals.ts";
@@ -54,7 +57,10 @@ import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackground
 import * as ThreadPlanProgress from "../src/orchestration/ThreadPlanProgress.ts";
 import { RuntimeReceiptBusTest } from "../src/orchestration/Layers/RuntimeReceiptBus.ts";
 import { OrchestrationReactorLive } from "../src/orchestration/Layers/OrchestrationReactor.ts";
-import { ProviderCommandReactorLive } from "../src/orchestration/Layers/ProviderCommandReactor.ts";
+import {
+  make as makeProviderCommandReactor,
+  ProviderCommandReactorLive,
+} from "../src/orchestration/Layers/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionLive } from "../src/orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { CheckpointReactor } from "../src/orchestration/Services/CheckpointReactor.ts";
 import { ProviderRuntimeIngestionService } from "../src/orchestration/Services/ProviderRuntimeIngestion.ts";
@@ -63,6 +69,7 @@ import {
   type OrchestrationEngineShape,
 } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../src/orchestration/Services/ThreadDeletionReactor.ts";
+import { ProviderCommandReactor } from "../src/orchestration/Services/ProviderCommandReactor.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -82,6 +89,12 @@ import { VcsStatusBroadcaster } from "../src/vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 import * as AgentAwarenessRelay from "../src/relay/AgentAwarenessRelay.ts";
+import { ThreadSandboxRuntime } from "../src/sandbox/ThreadSandboxRuntime.ts";
+import {
+  SandboxManagerError,
+  SandboxRuntimeManager,
+} from "../src/sandbox/SandboxRuntimeManager.ts";
+import { T3ProjectFileLoader } from "../src/project/T3ProjectFileLoader.ts";
 
 const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
 
@@ -178,6 +191,7 @@ const tryRuntimePromise = <A>(operation: string, run: () => Promise<A>) =>
 export interface OrchestrationIntegrationHarness {
   readonly rootDir: string;
   readonly workspaceDir: string;
+  readonly baseCommit: string;
   readonly dbPath: string;
   readonly adapterHarness: TestProviderAdapterHarness | null;
   readonly engine: OrchestrationEngineShape;
@@ -261,7 +275,7 @@ export const makeOrchestrationIntegrationHarness = (
     yield* fileSystem.makeDirectory(workspaceDir, { recursive: true });
     yield* fileSystem.makeDirectory(stateDir, { recursive: true });
     yield* initializeGitWorkspace(workspaceDir);
-
+    const baseCommit = runGit(workspaceDir, ["rev-parse", "HEAD"]).trim();
     const persistenceLayer = makeSqlitePersistenceLive(dbPath);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -301,7 +315,13 @@ export const makeOrchestrationIntegrationHarness = (
         );
     const providerRegistryLayer = makeProviderRegistryLayer();
 
-    const checkpointStoreLayer = CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer));
+    const sandboxRuntimeManagerLayer = makeSandboxRuntimeManagerLayer();
+    const checkpointStoreCommonLayer = CheckpointStore.layer.pipe(
+      Layer.provide(VcsDriverRegistry.layer),
+    );
+    const checkpointStoreLayer = useRealCodex
+      ? checkpointStoreCommonLayer
+      : checkpointStoreCommonLayer.pipe(Layer.provide(sandboxRuntimeManagerLayer));
     const projectionSnapshotQueryLayer = OrchestrationProjectionSnapshotQueryLive;
     const runtimeServicesLayer = Layer.mergeAll(
       projectionSnapshotQueryLayer,
@@ -324,6 +344,17 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(serverSettingsLayer),
     );
     const gitWorkflowLayer = Layer.mock(GitWorkflowService)({
+      localStatus: () =>
+        Effect.succeed({
+          isRepo: true,
+          hasPrimaryRemote: false,
+          isDefaultRef: true,
+          refName: "main",
+          hasWorkingTreeChanges: false,
+          workingTree: { files: [], insertions: 0, deletions: 0 },
+        }),
+      resolveRemoteTrackingCommit: () =>
+        Effect.succeed({ commitSha: baseCommit, remoteRefName: "main" }),
       renameBranch: (input: {
         readonly cwd: string;
         readonly oldBranch: string;
@@ -334,13 +365,135 @@ export const makeOrchestrationIntegrationHarness = (
       generateBranchName: () => Effect.succeed({ branch: "update" }),
       generateThreadTitle: () => Effect.succeed({ title: "New thread" }),
     } as unknown as TextGenerationShape);
-    const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
+    const threadSandboxRuntimeLayer = Layer.succeed(ThreadSandboxRuntime, {
+      ensureReady: (thread: OrchestrationThread) =>
+        Effect.succeed({
+          kind: "sandbox" as const,
+          threadId: thread.id,
+          sandboxId: thread.sandbox?.sandboxId ?? `test-${thread.id}`,
+          runtimeRef: thread.sandbox?.runtimeRef ?? `test-${thread.id}`,
+          runtime: "docker" as const,
+          workspaceCwd: "/workspace/repo",
+        }),
+    });
+    function makeSandboxRuntimeManagerLayer() {
+      return Layer.succeed(SandboxRuntimeManager, {
+        exec: (_runtime, _threadId, input) =>
+          Effect.gen(function* () {
+            if (input.cwd !== "/workspace/repo") {
+              return yield* new SandboxManagerError({
+                message: `test sandbox exec rejected cwd '${input.cwd ?? ""}'`,
+              });
+            }
+            if (input.executable !== "git" && input.executable !== "rm") {
+              return yield* new SandboxManagerError({
+                message: `test sandbox exec rejected executable '${input.executable}'`,
+              });
+            }
+            const mapSandboxPath = (value: string) =>
+              value === "/workspace/repo"
+                ? workspaceDir
+                : value.startsWith("/workspace/repo/")
+                  ? NodePath.join(workspaceDir, value.slice("/workspace/repo/".length))
+                  : value;
+            const args = [...(input.args ?? [])].map(mapSandboxPath);
+            if (
+              input.executable === "rm" &&
+              args.some((arg) => {
+                if (arg.startsWith("-")) return false;
+                const relative = NodePath.relative(
+                  workspaceDir,
+                  NodePath.resolve(workspaceDir, arg),
+                );
+                return relative === ".." || relative.startsWith(`..${NodePath.sep}`);
+              })
+            ) {
+              return yield* new SandboxManagerError({
+                message: "test sandbox exec rejected rm path outside workspace",
+              });
+            }
+            const result = NodeChildProcess.spawnSync(input.executable, args, {
+              cwd: workspaceDir,
+              env: {
+                ...process.env,
+                ...Object.fromEntries(
+                  Object.entries(input.env ?? {}).map(([key, value]) => [
+                    key,
+                    mapSandboxPath(value),
+                  ]),
+                ),
+              },
+              encoding: "utf8",
+              input: input.stdin,
+              timeout: input.timeoutMs ?? 30_000,
+              maxBuffer: 1024 * 1024,
+            });
+            if (result.error) {
+              return yield* new SandboxManagerError({
+                message: result.error.message,
+                cause: result.error,
+              });
+            }
+            return {
+              exitCode: result.status ?? 1,
+              stdout: (result.stdout ?? "").slice(0, 1024 * 1024),
+              stderr: (result.stderr ?? "").slice(0, 1024 * 1024),
+            };
+          }),
+        provision: (input) =>
+          Effect.succeed({
+            sandboxId: `test-${input.bootstrap.threadId}`,
+            runtime: input.config?.runtime ?? "docker",
+            containerName: `test-${input.bootstrap.threadId}`,
+            networkName: `test-${input.bootstrap.threadId}`,
+            workspaceVolumeName: `test-${input.bootstrap.threadId}-workspace`,
+            desktopVolumeName: `test-${input.bootstrap.threadId}-desktop`,
+            branchName: input.bootstrap.branchName,
+            limits: input.config?.limits ?? DEFAULT_SANDBOX_RESOURCE_LIMITS,
+            desktopSessionId: `test-${input.bootstrap.threadId}`,
+            desktopStreamPath: `/desktop/test-${input.bootstrap.threadId}`,
+            services: [],
+          }),
+        exportBranch: () => Effect.die("exportBranch should not be called in this test"),
+        stop: () => Effect.die("stop should not be called in this test"),
+        reconcile: () => Effect.die("reconcile should not be called in this test"),
+        sampleUsage: () => Effect.die("sampleUsage should not be called in this test"),
+        recoverPreview: () => Effect.die("recoverPreview should not be called in this test"),
+        revokeCredentials: () => Effect.succeed(0),
+      });
+    }
+    const projectFileLoaderLayer = Layer.succeed(T3ProjectFileLoader, {
+      load: () =>
+        Effect.succeed(
+          Option.some({
+            sandbox: {
+              image:
+                "registry.example/t3-desktop@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            },
+          }),
+        ),
+    });
+    const providerCommandReactorCommonLayer = (
+      useRealCodex
+        ? ProviderCommandReactorLive
+        : Layer.effect(ProviderCommandReactor, makeProviderCommandReactor).pipe(
+            Layer.provide(OrchestrationEventStoreLive),
+            Layer.provide(ProviderTurnSendClaimRepositoryLive),
+            Layer.provide(projectFileLoaderLayer),
+          )
+    ).pipe(
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(gitWorkflowLayer),
       Layer.provideMerge(textGenerationLayer),
       Layer.provideMerge(serverSettingsLayer),
     );
-    const checkpointReactorLayer = CheckpointReactorLive.pipe(
+    const providerCommandReactorLayer = useRealCodex
+      ? providerCommandReactorCommonLayer
+      : providerCommandReactorCommonLayer.pipe(
+          Layer.provideMerge(threadSandboxRuntimeLayer),
+          Layer.provideMerge(sandboxRuntimeManagerLayer),
+        );
+    const checkpointReactorCommonLayer = CheckpointReactorLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(
         Layer.succeed(VcsStatusBroadcaster, {
@@ -368,6 +521,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(WorkspacePaths.layer),
       Layer.provideMerge(VcsProcess.layer),
     );
+    const checkpointReactorLayer = checkpointReactorCommonLayer;
     const orchestrationReactorLayer = OrchestrationReactorLive.pipe(
       Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(providerCommandReactorLayer),
@@ -562,6 +716,7 @@ export const makeOrchestrationIntegrationHarness = (
     return {
       rootDir,
       workspaceDir,
+      baseCommit,
       dbPath,
       adapterHarness,
       engine,

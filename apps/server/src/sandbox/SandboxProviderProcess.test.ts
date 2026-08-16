@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { SandboxId, ThreadId } from "@t3tools/contracts";
 import {
   bindSandboxProviderTarget,
+  makeSandboxProviderBindingOwner,
   sandboxProviderInvocation,
   sandboxProviderTarget,
   unbindSandboxProviderTarget,
@@ -56,12 +57,29 @@ describe("SandboxProviderProcess", () => {
   });
 
   it("rejects replacing a live binding with another sandbox generation", () => {
-    bindSandboxProviderTarget(target);
+    const owner = makeSandboxProviderBindingOwner();
+    bindSandboxProviderTarget(target, owner);
     expect(() =>
-      bindSandboxProviderTarget({ ...target, sandboxId: SandboxId.make("sandbox-b") }),
+      bindSandboxProviderTarget(
+        { ...target, sandboxId: SandboxId.make("sandbox-b") },
+        makeSandboxProviderBindingOwner(),
+      ),
     ).toThrow("different sandbox generation");
     expect(sandboxProviderTarget(target.threadId)).toEqual(target);
-    unbindSandboxProviderTarget(target.threadId);
+    unbindSandboxProviderTarget(target.threadId, owner);
     expect(sandboxProviderTarget(target.threadId)).toBeUndefined();
+  });
+
+  it("allows a new sandbox generation after the active binding is released", () => {
+    const firstOwner = makeSandboxProviderBindingOwner();
+    const secondOwner = makeSandboxProviderBindingOwner();
+    const nextTarget = { ...target, sandboxId: SandboxId.make("sandbox-b") };
+
+    bindSandboxProviderTarget(target, firstOwner);
+    unbindSandboxProviderTarget(target.threadId, firstOwner);
+    bindSandboxProviderTarget(nextTarget, secondOwner);
+
+    expect(sandboxProviderTarget(target.threadId)).toEqual(nextTarget);
+    unbindSandboxProviderTarget(target.threadId, secondOwner);
   });
 });
