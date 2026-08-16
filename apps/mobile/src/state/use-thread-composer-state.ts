@@ -134,6 +134,10 @@ export function useThreadComposerState() {
     );
   }, [selectedThreadDetail, selectedThreadSessionActivity, selectedThreadShell]);
 
+  const activeThreadBusy =
+    !!selectedThread &&
+    (selectedThread.session?.status === "running" || selectedThread.session?.status === "starting");
+
   const onSendMessage = useCallback(async () => {
     if (!selectedThreadShell) {
       return null;
@@ -327,6 +331,7 @@ export function useThreadComposerState() {
     interactionMode,
     routingMode,
     efficiencyTier,
+    activeThreadBusy,
     onChangeDraftMessage,
     onPickDraftImages,
     onPasteIntoDraft,

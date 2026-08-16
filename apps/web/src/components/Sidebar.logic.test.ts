@@ -19,6 +19,7 @@ import {
   resolveSidebarStageBadgeLabel,
   resolveThreadRowClassName,
   resolveSidebarThreadStatus,
+  resolveSidebarV2Status,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
   searchSidebarThreadsByTitle,
@@ -27,10 +28,12 @@ import {
   shouldClearThreadSelectionOnMouseDown,
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebar,
+  sortSettledThreadsForSidebarV2,
   pinOrderKeyBetween,
   planPinnedReorder,
   sortPinnedThreadsForSidebar,
   sortThreadsForSidebar,
+  sortThreadsForSidebarV2,
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
   shouldCreateNewThreadInCurrentProject,
@@ -1043,6 +1046,46 @@ describe("formatWorkingDurationLabel", () => {
   it("clamps negative and non-finite elapsed values to zero", () => {
     expect(formatWorkingDurationLabel(-5_000)).toBe("0s");
     expect(formatWorkingDurationLabel(Number.NaN)).toBe("0s");
+  });
+});
+
+// SidebarV2 (./SidebarV2.tsx) reuses the status/sort model above under its
+// own exported names (see Sidebar.logic.ts); these checks just confirm the
+// aliases actually forward, not the underlying behavior already covered by
+// the describe blocks above.
+describe("resolveSidebarV2Status", () => {
+  it("forwards to resolveSidebarThreadStatus", () => {
+    const idle = { hasPendingApprovals: false, hasPendingUserInput: false, session: null };
+    expect(resolveSidebarV2Status(idle)).toBe(resolveSidebarThreadStatus(idle));
+    expect(resolveSidebarV2Status({ ...idle, hasPendingApprovals: true })).toBe("approval");
+  });
+});
+
+describe("sortThreadsForSidebarV2", () => {
+  it("forwards to sortThreadsForSidebar", () => {
+    const sortable = (input: { id: string; createdAt: string }) => ({ ...input });
+    const threads = [
+      sortable({ id: "oldest", createdAt: "2026-03-09T08:00:00.000Z" }),
+      sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),
+    ];
+    expect(sortThreadsForSidebarV2(threads)).toEqual(sortThreadsForSidebar(threads));
+  });
+});
+
+describe("sortSettledThreadsForSidebarV2", () => {
+  it("forwards to sortSettledThreadsForSidebar", () => {
+    const settled = (input: { id: string; settledAt?: string | null }) => ({
+      id: input.id,
+      settledAt: input.settledAt ?? null,
+      latestUserMessageAt: null,
+      latestTurn: null,
+      updatedAt: "2026-03-09T09:00:00.000Z",
+    });
+    const threads = [
+      settled({ id: "settled-first", settledAt: "2026-03-09T10:00:00.000Z" }),
+      settled({ id: "settled-last", settledAt: "2026-03-09T12:00:00.000Z" }),
+    ];
+    expect(sortSettledThreadsForSidebarV2(threads)).toEqual(sortSettledThreadsForSidebar(threads));
   });
 });
 

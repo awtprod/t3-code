@@ -114,6 +114,39 @@ describe("ClientSettings sidebar", () => {
   });
 });
 
+describe("ClientSettings sidebar v2", () => {
+  it("defaults the beta off with a three-day auto-settle threshold", () => {
+    const settings = decodeClientSettings({});
+    expect(settings.sidebarV2Enabled).toBe(false);
+    expect(settings.sidebarAutoSettleAfterDays).toBe(3);
+  });
+
+  it("treats settings written before the beta had a per-channel default as unconfigured", () => {
+    // The stored blob always carries `sidebarV2Enabled`, so only the companion
+    // flag can distinguish "user opted out" from "never touched it".
+    expect(decodeClientSettings({ sidebarV2Enabled: false }).sidebarV2ConfiguredByUser).toBe(false);
+    expect(decodeClientSettings({ sidebarV2Enabled: true }).sidebarV2ConfiguredByUser).toBe(false);
+  });
+
+  it("preserves an explicit beta choice", () => {
+    const settings = decodeClientSettings({
+      sidebarV2Enabled: false,
+      sidebarV2ConfiguredByUser: true,
+    });
+    expect(settings.sidebarV2Enabled).toBe(false);
+    expect(settings.sidebarV2ConfiguredByUser).toBe(true);
+  });
+
+  it("carries an explicit beta opt-out through the patch the beta toggle writes", () => {
+    const patch = decodeClientSettingsPatch({
+      sidebarV2Enabled: false,
+      sidebarV2ConfiguredByUser: true,
+    });
+    expect(patch.sidebarV2Enabled).toBe(false);
+    expect(patch.sidebarV2ConfiguredByUser).toBe(true);
+  });
+});
+
 describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults text generation to Luna at low reasoning effort", () => {
     expect(DEFAULT_SERVER_SETTINGS.textGenerationModelSelection).toEqual({

@@ -165,7 +165,8 @@ export function PreviewView({
   const navigateToResolvedUrl = useCallback(
     async (resolvedUrl: string) => {
       if (runtimeTabId && previewBridge) {
-        // The bridge mirrors the resolved URL back to the server.
+        // Drive the webview imperatively; `usePreviewBridge` mirrors the
+        // resolved URL back to the server so other clients stay in sync.
         await previewBridge.navigate(runtimeTabId, resolvedUrl);
         rememberPreviewUrl(threadRef, resolvedUrl);
         return true;

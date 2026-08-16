@@ -52,18 +52,6 @@ it("survives the kernel OOM-killing a greedy agent child", () => {
   expect(unit).toContain("OOMPolicy=continue");
 });
 
-it("survives the kernel OOM-killing a greedy agent child", () => {
-  const unit = BootService.renderBootServiceUnit({
-    nodePath: "/usr/bin/node",
-    launcherPath: "/workspace/example-project/.t3/runtime/service-launcher.mjs",
-    baseDir: "/workspace/example-project/.t3",
-    logPath: "/workspace/example-project/.t3/userdata/logs/boot-service.log",
-    unitPath: "/workspace/example-project/.config/systemd/user/t3code.service",
-  });
-
-  expect(unit).toContain("OOMPolicy=continue");
-});
-
 const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   platform: NodeJS.Platform = "linux",
   usePinnedLauncher = false,

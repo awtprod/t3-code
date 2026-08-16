@@ -498,6 +498,15 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   return "ready";
 }
 
+// SidebarV2 (./SidebarV2.tsx) uses the same status model under its own
+// exported names; kept as a thin alias pair rather than merged into the
+// names above so each surface can evolve its status story independently.
+export type SidebarV2Status = SidebarThreadStatus;
+type SidebarV2StatusInput = SidebarThreadStatusInput;
+export function resolveSidebarV2Status(thread: SidebarV2StatusInput): SidebarV2Status {
+  return resolveSidebarThreadStatus(thread);
+}
+
 /** NaN-safe Date.parse for sort comparators: a malformed timestamp must not
     poison the whole ordering, so it sinks to the epoch instead. */
 export function parseTimestampMs(isoDate: string): number {
@@ -544,6 +553,10 @@ export function sortThreadsForSidebar<
       left.id.localeCompare(right.id),
   );
 }
+
+// SidebarV2 (./SidebarV2.tsx) twin of sortThreadsForSidebar; see the status
+// alias pair above for why this stays separate rather than shared.
+export const sortThreadsForSidebarV2 = sortThreadsForSidebar;
 
 // Pinned-reorder key math and the keyed sort live in client-runtime
 // (state/thread-sort) so web and mobile compute identical pinned orders.
@@ -612,6 +625,9 @@ export function sortSettledThreadsForSidebar<
     (left, right) => timestampMs(right) - timestampMs(left) || left.id.localeCompare(right.id),
   );
 }
+
+// SidebarV2 (./SidebarV2.tsx) twin of sortSettledThreadsForSidebar.
+export const sortSettledThreadsForSidebarV2 = sortSettledThreadsForSidebar;
 
 /** The timestamp a working thread's elapsed label counts from: the running
     turn's start (request time until adoption), falling back to the session's

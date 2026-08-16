@@ -236,6 +236,9 @@ const SettingsSheetStack = createNativeStackNavigator({
       // Keep the old deep link working after the Connect GA launch.
       screen: SettingsAuthRouteScreen,
       linking: "waitlist",
+      options: {
+        title: "Sign in",
+      },
     }),
   },
 });

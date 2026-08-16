@@ -332,6 +332,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     props.connectionState !== "connected" || props.queueCount > 0 ? "Queue" : "Send";
   const currentModelSelection = props.selectedThread.modelSelection;
   const currentRuntimeMode = props.selectedThread.runtimeMode;
+  const currentInteractionMode = props.selectedThread.interactionMode ?? "default";
   const currentRoutingMode = props.selectedThread.routingMode ?? "manual";
   const currentEfficiencyTier = props.selectedThread.efficiencyTier ?? "economy";
   const connectionStatus = composerConnectionStatus({
@@ -730,6 +731,19 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ),
     [navigation, settingsSheetPresentation.onStackTransitionsFinished],
   );
+
+  function handleEfficiencyMenuAction(event: string) {
+    if (event === "efficiency:manual") {
+      props.onUpdateEfficiencyRouting("manual", currentEfficiencyTier);
+      return;
+    }
+    if (event.startsWith("efficiency:auto:")) {
+      props.onUpdateEfficiencyRouting(
+        "auto",
+        event.slice("efficiency:auto:".length) as EfficiencyTier,
+      );
+    }
+  }
 
   return (
     <Animated.View

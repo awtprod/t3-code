@@ -10,8 +10,10 @@
  * @module state/usage
  */
 import { useAtomValue } from "@effect/atom-react";
+import { createEnvironmentRpcQueryAtomFamily } from "@t3tools/client-runtime/state/runtime";
 import {
   USAGE_CONTRACT_VERSION,
+  WS_METHODS,
   type EnvironmentId,
   type UsageSummary,
   type UsageSummaryInput,
@@ -22,6 +24,7 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback, useMemo } from "react";
 
 import { appAtomRegistry } from "./atom-registry";
+import { connectionAtomRuntime } from "../connection/runtime";
 import { environmentPresentations } from "./presentation";
 import { serverEnvironment } from "./server";
 
@@ -137,3 +140,10 @@ export function useUsage(input: UsageSummaryInput): UsageView {
     refresh,
   };
 }
+
+export const usageEnvironment = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+  label: "mobile-environment-data:usage:query",
+  tag: WS_METHODS.usageQuery,
+  staleTimeMs: 30_000,
+  idleTtlMs: 120_000,
+});

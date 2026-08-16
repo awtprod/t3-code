@@ -1331,6 +1331,153 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("emulates prefers-color-scheme and re-applies it across webview swaps", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const makeWebContents = (id: number) => {
+          const sendCommand = vi.fn(async () => undefined);
+          return {
+            sendCommand,
+            wc: {
+              id,
+              isDestroyed: () => false,
+              isDevToolsOpened: () => false,
+              getType: () => "webview",
+              getURL: () => "https://example.com",
+              getTitle: () => "Example",
+              isLoading: () => false,
+              getZoomFactor: () => 1,
+              setZoomFactor: vi.fn(),
+              on: vi.fn(),
+              off: vi.fn(),
+              ipc: { on: vi.fn(), off: vi.fn() },
+              send: webviewSend,
+              navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+              setWindowOpenHandler: vi.fn(),
+              debugger: {
+                isAttached: () => false,
+                attach: vi.fn(),
+                sendCommand,
+                on: vi.fn(),
+                off: vi.fn(),
+              },
+            } as never,
+          };
+        };
+        const first = makeWebContents(42);
+        fromId.mockReturnValue(first.wc);
+        const states: PreviewManager.PreviewTabState[] = [];
+
+        yield* manager.subscribeStateChanges((_tabId, state) =>
+          Effect.sync(() => {
+            states.push(state);
+          }),
+        );
+        yield* manager.createTab("tab_scheme");
+        yield* manager.registerWebview("tab_scheme", 42);
+        yield* Effect.yieldNow;
+
+        yield* manager.setColorScheme("tab_scheme", "dark");
+
+        expect(first.sendCommand).toHaveBeenCalledWith("Emulation.setEmulatedMedia", {
+          features: [{ name: "prefers-color-scheme", value: "dark" }],
+        });
+        expect(states.at(-1)?.colorScheme).toBe("dark");
+
+        const replacement = makeWebContents(43);
+        fromId.mockReturnValue(replacement.wc);
+        yield* manager.registerWebview("tab_scheme", 43);
+        yield* Effect.yieldNow;
+
+        expect(replacement.sendCommand).toHaveBeenCalledWith("Emulation.setEmulatedMedia", {
+          features: [{ name: "prefers-color-scheme", value: "dark" }],
+        });
+        expect(states.at(-1)?.colorScheme).toBe("dark");
+
+        yield* manager.setColorScheme("tab_scheme", "system");
+
+        expect(replacement.sendCommand).toHaveBeenCalledWith("Emulation.setEmulatedMedia", {
+          features: [{ name: "prefers-color-scheme", value: "" }],
+        });
+        expect(states.at(-1)?.colorScheme).toBe("system");
+      }),
+    ),
+  );
+
+  effectIt.effect("blocks late webview and capture starts during tab close", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const capturePage = vi.fn(async () => ({
+          toJPEG: () => Buffer.from("close-race-frame"),
+          getSize: () => ({ width: 1280, height: 720 }),
+        }));
+        const firstWebContents = makeTestPreviewWebContents(capturePage, 42);
+        const replacementWebContents = makeTestPreviewWebContents(capturePage, 43);
+        const replacementListenerSpies = replacementWebContents as unknown as {
+          readonly on: ReturnType<typeof vi.fn>;
+          readonly off: ReturnType<typeof vi.fn>;
+          readonly ipc: { readonly off: ReturnType<typeof vi.fn> };
+        };
+        fromId.mockImplementation((id) => {
+          if (id === 42) return firstWebContents;
+          if (id === 43) return replacementWebContents;
+          return null;
+        });
+        const { pictureInPictureWindow } = makeTestPictureInPictureWindow();
+        browserWindowConstructor.mockImplementation(function () {
+          return pictureInPictureWindow;
+        });
+
+        yield* manager.createTab("tab_close_register_race");
+        yield* manager.registerWebview("tab_close_register_race", 42);
+        yield* manager.openPictureInPicture("tab_close_register_race");
+
+        const closeCleanupPaused = yield* Deferred.make<void>();
+        const continueCloseCleanup = yield* Deferred.make<void>();
+        yield* manager.subscribeStateChanges((_tabId, state) =>
+          !state.pictureInPicture && state.webContentsId === 42
+            ? Deferred.succeed(closeCleanupPaused, undefined).pipe(
+                Effect.andThen(Deferred.await(continueCloseCleanup)),
+              )
+            : Effect.void,
+        );
+
+        const closeFiber = yield* manager
+          .closeTab("tab_close_register_race")
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(closeCleanupPaused);
+        const recreateFiber = yield* manager
+          .createTab("tab_close_register_race")
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        const registrationFiber = yield* manager
+          .registerWebview("tab_close_register_race", 43)
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        expect(replacementListenerSpies.on).not.toHaveBeenCalled();
+        yield* manager.closeTab("tab_close_register_race");
+        const recordingExit = yield* Effect.exit(manager.startRecording("tab_close_register_race"));
+        yield* Deferred.succeed(continueCloseCleanup, undefined);
+        yield* Fiber.join(closeFiber);
+        const recreated = yield* Fiber.join(recreateFiber);
+        const registrationExit = yield* Fiber.await(registrationFiber);
+
+        for (const exit of [registrationExit, recordingExit]) {
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (Exit.isSuccess(exit)) continue;
+          expect(Option.getOrThrow(Cause.findErrorOption(exit.cause))).toMatchObject({
+            _tag: "PreviewTabNotFoundError",
+            tabId: "tab_close_register_race",
+          });
+        }
+        expect(replacementListenerSpies.on).not.toHaveBeenCalled();
+        expect(replacementListenerSpies.off).not.toHaveBeenCalled();
+        expect(replacementListenerSpies.ipc.off).not.toHaveBeenCalled();
+        expect(capturePage).toHaveBeenCalledOnce();
+        expect(recreated.webContentsId).toBeNull();
+      }),
+    ),
+  );
+
   effectIt.effect("keeps a main-frame load failure visible until a retry starts", () =>
     withManager((manager) =>
       Effect.gen(function* () {

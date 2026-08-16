@@ -22,6 +22,7 @@ import {
   resolveAndroidSdkRoot,
   selectLanIpv4Address,
   showcaseCaptureDirectory,
+  showcaseSceneUrl,
   validateStoreAsset,
   validateStoreAssetCount,
 } from "./mobile-showcase.ts";
@@ -243,6 +244,23 @@ it("selects a reachable LAN IPv4 address", () => {
   );
 });
 
+it("maps capture scenes to the real application routes", () => {
+  assert.equal(showcaseSceneUrl("threads", "environment-1"), "t3code://");
+  assert.equal(showcaseSceneUrl("environments", "environment-1"), "t3code://settings/environments");
+  assert.equal(
+    showcaseSceneUrl("thread", "environment-1"),
+    "t3code://threads/environment-1/remote-command-center",
+  );
+  assert.equal(
+    showcaseSceneUrl("terminal", "environment-1"),
+    "t3code://threads/environment-1/remote-command-center/terminal?terminalId=term-1",
+  );
+  assert.equal(
+    showcaseSceneUrl("review", "environment-1"),
+    "t3code://threads/environment-1/remote-command-center/review",
+  );
+});
+
 it("seeds a playful multi-environment project spectrum", () => {
   assert.deepStrictEqual(
     SHOWCASE_PROJECTS.map((project) => project.title),
@@ -252,15 +270,14 @@ it("seeds a playful multi-environment project spectrum", () => {
     SHOWCASE_ENVIRONMENTS.map((environment) => environment.label),
     ["Moonbase Terminal", "Suspense Station", "Kernel Cabin"],
   );
-  assert.equal(SHOWCASE_THREADS.length, 9);
+  assert.equal(SHOWCASE_THREADS.length, 8);
   assert.equal(new Set(SHOWCASE_THREADS.map((thread) => thread.projectId)).size, 3);
   const snoozedThreads = SHOWCASE_THREADS.filter((thread) => "snoozeMinutes" in thread);
-  assert.equal(snoozedThreads.length, 2);
+  assert.equal(snoozedThreads.length, 1);
   assert.deepStrictEqual(
     snoozedThreads.map((thread) => thread.id),
-    ["hydration-haikus", "patient-penguins"],
+    ["hydration-haikus"],
   );
-  assert.equal(new Set(snoozedThreads.map((thread) => thread.snoozeMinutes)).size, 2);
   for (const thread of snoozedThreads) {
     assert.equal(thread.response !== null, true, `${thread.title} is not completed`);
     assert.equal("state" in thread, false, `${thread.title} is blocked or working`);

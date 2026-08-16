@@ -1,4 +1,4 @@
-import { DownloadIcon, PlusIcon } from "lucide-react";
+import { PlusIcon, UploadIcon } from "lucide-react";
 import type { ChangeEvent, DragEvent, UIEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/utils";
@@ -79,13 +79,13 @@ function highlightJson(value: string): string {
     const index = match.index ?? 0;
     highlighted += escapeJsonHtml(value.slice(cursor, index));
 
-    let tokenClass = "text-[var(--app-theme-secondary-foreground,var(--color-amber-600))]";
+    let tokenClass = "theme-json-number";
     if (token.startsWith('"')) {
       tokenClass = /^\s*:/.test(value.slice(index + token.length))
-        ? "text-[var(--app-theme-accent,var(--color-blue-600))]"
-        : "text-[var(--app-theme-message-action,var(--color-emerald-600))]";
+        ? "theme-json-key"
+        : "theme-json-string";
     } else if (token === "true" || token === "false" || token === "null") {
-      tokenClass = "text-[var(--app-theme-accent-surface-foreground,var(--color-violet-600))]";
+      tokenClass = "theme-json-constant";
     }
     highlighted += `<span class="${tokenClass}">${escapeJsonHtml(token)}</span>`;
     cursor = index + token.length;
@@ -480,7 +480,7 @@ export function ThemeImportDialog({
             );
             const chooseButton = (label = "Choose files") => (
               <Button disabled={isReading} size="sm" variant="outline" onClick={openFilePicker}>
-                <DownloadIcon />
+                <UploadIcon />
                 {isReading ? "Reading…" : label}
               </Button>
             );

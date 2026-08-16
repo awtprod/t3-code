@@ -212,17 +212,6 @@ export const SHOWCASE_THREADS = [
     response:
       "The plan groups milestones without changing the underlying log stream, preserves plain-text output, and adds zero work to the hot path.",
   },
-  {
-    id: "patient-penguins",
-    projectId: "linux",
-    title: "Teach penguins to wait patiently",
-    branch: "feat/patient-penguins",
-    minutesAgo: 52,
-    request: "Make delayed work easier to follow without adding noise to the scheduler trace.",
-    response:
-      "Delayed work now carries a concise reason through the trace, so the wait is legible without changing scheduling behavior.",
-    snoozeMinutes: 8 * 60,
-  },
   // Finished work, settled by hand: the list keeps it as a receded tail so
   // the active block above reads as everything still in flight. The active
   // block stays small enough that the settled tail begins above the fold —

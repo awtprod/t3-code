@@ -312,6 +312,63 @@ function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean
   return !(isTerminalTaskRow && payload.agentKind === "agent");
 }
 
+/** Codex children settle via task.updated (idle/failed/interrupted), never
+ * task.completed — these rows are mobile's only terminal signal for them. */
+const MOBILE_TERMINAL_UPDATE_STATUSES: ReadonlySet<string> = new Set([
+  "idle",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+function isTerminalBypassUpdate(activity: OrchestrationThreadActivity): boolean {
+  if (activity.kind !== "task.updated") {
+    return false;
+  }
+  const payload =
+    activity.payload && typeof activity.payload === "object"
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  return (
+    payload?.timelineBypass === true &&
+    typeof payload.status === "string" &&
+    MOBILE_TERMINAL_UPDATE_STATUSES.has(payload.status)
+  );
+}
+
+/**
+ * Quiet-timeline guarantee (mirrors web's session-logic): agent-internal
+ * activity lives in the Agents sheet, not the work log. Terminal rows are
+ * kept — with no Agents surface on mobile they are the terminal signal
+ * (a surface that hides rows must keep its own terminal signal). That means
+ * task.completed (Claude) AND terminal bypassed task.updated (Codex, whose
+ * children never emit task.completed — review finding).
+ */
+function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload =
+    activity.payload && typeof activity.payload === "object"
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  if (!payload) {
+    return false;
+  }
+  const isTerminalTaskRow = activity.kind === "task.completed" || isTerminalBypassUpdate(activity);
+  if (payload.timelineBypass === true && !isTerminalTaskRow) {
+    return true;
+  }
+  // agentId marks ownership, not "hide me": a NESTED AGENT's terminal row is
+  // the only signal mobile gets (no Agents sheet), so it stays. Only an
+  // agent's own background work (stamped "background") is internal — same
+  // rule as web (review finding: hiding on agentId alone dropped nested
+  // completions with no replacement UI).
+  const ownedByAgent = typeof payload.agentId === "string" && payload.agentId.trim().length > 0;
+  if (!ownedByAgent) {
+    return false;
+  }
+  return !(isTerminalTaskRow && payload.agentKind === "agent");
+}
+
 function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): DerivedWorkLogEntry[] {

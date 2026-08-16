@@ -140,34 +140,42 @@ function createCanvas(width: number, height: number): Canvas2D | null {
  * and it keeps alpha, so screenshots with transparency survive intact.
  * Browsers that can't encode it silently fall back to JPEG.
  */
-async function encodeCanvas(
+async function encodeToDataUrl(
   canvas: OffscreenCanvas | HTMLCanvasElement,
   quality: number,
   mimeType: string,
   budgetChars: number,
-): Promise<{ dataUrl: string | null; mimeType: string } | null> {
+): Promise<{ dataUrl: string; dataUrlLength: number; mimeType: string } | null> {
   if (typeof HTMLCanvasElement !== "undefined" && canvas instanceof HTMLCanvasElement) {
     const dataUrl = canvas.toDataURL(mimeType, quality);
     // toDataURL silently returns a PNG when the requested type is unsupported.
     if (!dataUrl.startsWith(`data:${mimeType}`)) return null;
-    return { dataUrl: dataUrl.length <= budgetChars ? dataUrl : null, mimeType };
+    return { dataUrl, dataUrlLength: dataUrl.length, mimeType };
   }
   const blob = await (canvas as OffscreenCanvas).convertToBlob({ type: mimeType, quality });
   if (blob.type && blob.type !== mimeType) return null;
-  const dataUrlLength = `data:${mimeType};base64,`.length + 4 * Math.ceil(blob.size / 3);
-  if (dataUrlLength > budgetChars) return { dataUrl: null, mimeType };
-  return { dataUrl: await blobToDataUrl(blob, mimeType), mimeType };
+  const headerLength = `data:${mimeType};base64,`.length;
+  const dataUrlLength = headerLength + 4 * Math.ceil(blob.size / 3);
+  // Blob.size determines the exact base64 payload length. Avoid reading and
+  // allocating a large string when this encoding cannot possibly fit.
+  if (dataUrlLength > budgetChars) {
+    return { dataUrl: "", dataUrlLength, mimeType };
+  }
+  const dataUrl = await blobToDataUrl(blob, mimeType);
+  return { dataUrl, dataUrlLength: dataUrl.length, mimeType };
 }
 
 /**
  * Draws `bitmap` scaled to fit `maxDimension` and encodes it, stepping
- * quality down until the data URL fits `budgetChars`.
+ * quality down until the data URL fits `budgetChars`. Returns the smallest
+ * encoding produced, even if it still exceeds the budget, so the caller can
+ * decide whether to keep or drop it.
  */
 async function encodeWithinBudget(
   bitmap: ImageBitmap,
   maxDimension: number,
   budgetChars: number,
-): Promise<{ dataUrl: string; mimeType: string } | null> {
+): Promise<{ dataUrl: string; dataUrlLength: number; mimeType: string } | null> {
   const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
   const width = Math.max(1, Math.round(bitmap.width * scale));
   const height = Math.max(1, Math.round(bitmap.height * scale));
@@ -176,7 +184,7 @@ async function encodeWithinBudget(
 
   // Probe WebP once; JPEG (no alpha) needs a white matte, so the fill has to
   // happen before drawing and depends on which codec we end up using.
-  const probe = await encodeCanvas(target.canvas, QUALITY_STEPS[0], "image/webp", 0);
+  const probe = await encodeToDataUrl(target.canvas, QUALITY_STEPS[0], "image/webp", budgetChars);
   const mimeType = probe ? "image/webp" : "image/jpeg";
 
   if (mimeType === "image/jpeg") {
@@ -185,14 +193,18 @@ async function encodeWithinBudget(
   }
   target.context.drawImage(bitmap, 0, 0, width, height);
 
+  let smallest: { dataUrl: string; dataUrlLength: number; mimeType: string } | null = null;
   for (const quality of QUALITY_STEPS) {
-    const encoded = await encodeCanvas(target.canvas, quality, mimeType, budgetChars);
+    const encoded = await encodeToDataUrl(target.canvas, quality, mimeType, budgetChars);
     if (!encoded) break;
-    if (encoded.dataUrl !== null) {
-      return { dataUrl: encoded.dataUrl, mimeType: encoded.mimeType };
+    if (smallest === null || encoded.dataUrlLength < smallest.dataUrlLength) {
+      smallest = encoded;
+    }
+    if (encoded.dataUrlLength <= budgetChars) {
+      return encoded;
     }
   }
-  return null;
+  return smallest;
 }
 
 type ReencodeResult =
@@ -227,7 +239,7 @@ async function reencodeWithinBudget(file: File, budgetChars: number): Promise<Re
     let encodeFailed = false;
     for (const dimensionScale of [1, ...FALLBACK_SCALE_STEPS]) {
       const targetDimension = Math.max(1, Math.round(baseDimension * dimensionScale));
-      let encoded: { dataUrl: string; mimeType: string } | null;
+      let encoded: { dataUrl: string; dataUrlLength: number; mimeType: string } | null;
       try {
         encoded = await encodeWithinBudget(bitmap, targetDimension, budgetChars);
       } catch {
@@ -241,7 +253,7 @@ async function reencodeWithinBudget(file: File, budgetChars: number): Promise<Re
         continue;
       }
       encodeFailed = false;
-      if (encoded && encoded.dataUrl.length <= budgetChars) {
+      if (encoded && encoded.dataUrlLength <= budgetChars) {
         return { ok: true, dataUrl: encoded.dataUrl, mimeType: encoded.mimeType };
       }
     }

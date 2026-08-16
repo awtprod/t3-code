@@ -137,6 +137,15 @@ export const make = ElectronDialog.of({
     }
     return Option.fromNullishOr(result.filePaths[0]);
   }),
+  // KEPT HEAD VERSION — needs human review. origin/main also declared a
+  // `confirm` dialog method here, but its body in the diff3 conflict was
+  // textually identical/misaligned with `pickFiles`'s open-file-dialog body
+  // (using ElectronDialogPickFilesError and openFile dialog options for a
+  // function that should return a boolean from a message box). That looked
+  // like a merge/rebase artifact rather than real confirm() logic, and
+  // `confirm` has no callers anywhere in apps/desktop, so it was dropped
+  // here to match HEAD. If a real confirm() dialog is needed, it should be
+  // reimplemented from scratch using showMessageBox.
   pickFiles: Effect.fn("desktop.electron.dialog.pickFiles")(function* (input) {
     const ownerWindowId = Option.match(input.owner, {
       onNone: () => null,

@@ -900,7 +900,7 @@ export default function DiffPanel({
                   key={collapseScopeKey ?? reviewSectionId}
                   viewerRef={codeViewRef}
                   codeViewKey={codeViewMountKey}
-                  className="h-full min-h-0 overflow-auto"
+                  className="diff-render-surface h-full min-h-0 overflow-auto"
                   files={codeViewFiles}
                   sectionId={reviewSectionId}
                   sectionTitle={reviewSectionTitle}

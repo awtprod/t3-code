@@ -330,6 +330,7 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
         }
       }
 
+      return persisted;
       if (Object.keys(clientPatch).length > 0) {
         persistClientSettings({
           ...getClientSettingsSnapshot(),

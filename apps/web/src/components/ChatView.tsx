@@ -6326,14 +6326,12 @@ function ChatViewContent(props: ChatViewProps) {
           className={cn(
             "bg-background transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none",
             isElectron
-              ? // KEPT FORK VERSION — needs human review. Upstream reintroduces a
-                // `reserveTitleBarControlInset` / `inlineRightPanelOwnsTitleBar`
-                // pair that no longer exists anywhere in this file (a prior
-                // "reserve a clear native titlebar" commit removed both, letting
-                // the `.workspace-topbar` CSS class carry the native-controls
-                // inset instead). Also drops the inline `h-[var(--workspace-topbar-height)])`
-                // utility duplication upstream adds, since `.workspace-topbar`
-                // already sets height from that same var in index.css.
+              ? // Upstream reintroduces a `reserveTitleBarControlInset` /
+                // `inlineRightPanelOwnsTitleBar` pair that no longer exists
+                // anywhere in this file (a prior "reserve a clear native
+                // titlebar" commit removed both, letting the
+                // `.workspace-topbar` CSS class carry the native-controls
+                // inset instead).
                 "workspace-topbar drag-region relative px-3 sm:px-5"
               : "workspace-topbar pl-[calc(env(safe-area-inset-left)+0.75rem)] pr-[calc(env(safe-area-inset-right)+0.75rem)] sm:pl-[calc(env(safe-area-inset-left)+1.25rem)] sm:pr-[calc(env(safe-area-inset-right)+1.25rem)]",
             COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,

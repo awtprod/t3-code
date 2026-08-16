@@ -357,6 +357,7 @@ export function ThemeEditorPanel({
     };
     window.addEventListener("resize", clamp);
     return () => window.removeEventListener("resize", clamp);
+    // oxlint-disable-next-line exhaustive-deps -- clampPosition reads live layout only.
   }, [isMinimized, open]);
 
   // The draft only reaches the live app once this open has been seeded;
@@ -751,7 +752,7 @@ export function ThemeEditorPanel({
     [activeAppearance, editingTheme, selectedRole],
   );
 
-  const handleSubmit = () => {
+  const handleSubmit = useCallback(() => {
     if (!name.trim()) {
       setError("Name your theme first.");
       return;
@@ -906,7 +907,19 @@ export function ThemeEditorPanel({
             : "Could not create the theme.",
       );
     }
-  };
+  }, [
+    activeAppearance,
+    colorsByAppearance,
+    editingTheme,
+    isAdvanced,
+    isEditing,
+    mergeTarget,
+    name,
+    onOpenChange,
+    onSaved,
+    simpleColorsDirtyByAppearance,
+    takenAppearances,
+  ]);
 
   const renderNameField = () => (
     <label className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] items-center gap-3">

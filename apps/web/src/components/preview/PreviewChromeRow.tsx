@@ -168,7 +168,7 @@ export function PreviewChromeRow({
           </Tooltip>
         </div>
 
-        <InputGroup variant="ghost" className="group/address h-7 flex-1">
+        <InputGroup variant="ghost" className="group/address h-7 flex-1 rounded-md">
           <Tooltip>
             <TooltipTrigger
               render={

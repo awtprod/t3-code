@@ -365,7 +365,7 @@ function ThemeLibraryCard({
                               onDownload();
                             }}
                           >
-                            <UploadIcon />
+                            <DownloadIcon />
                           </Button>
                         }
                       />
@@ -874,7 +874,7 @@ export function ThemeLibrary({
             Create theme
           </Button>
           <Button size="xs" variant="outline" onClick={() => onImportOpenChange(true)}>
-            <DownloadIcon />
+            <UploadIcon />
             Import theme
           </Button>
         </div>
@@ -882,9 +882,20 @@ export function ThemeLibrary({
       {renderPairGrid()}
       <ThemeImportDialog
         onImportedMany={(importedThemes, { updated }) => {
-          // Re-apply after collection updates. The update may remove the
-          // selected variant, in which case the theme hook falls back safely.
-          if (updated) refreshTheme();
+          // Re-apply only when an updated theme is actually showing (as the
+          // base or either half). The update may remove the selected
+          // variant, in which case the theme hook falls back safely.
+          if (
+            updated &&
+            importedThemes.some(
+              (imported) =>
+                getThemeDefinition(theme)?.id === imported.id ||
+                themeHalves?.light === imported.id ||
+                themeHalves?.dark === imported.id,
+            )
+          ) {
+            refreshTheme();
+          }
           const verb = updated ? "updated" : "added";
           toastManager.add(
             stackedThreadToast({

@@ -21,6 +21,7 @@ export const APP_BUNDLE_ID = isDevelopment
   : "com.awtprod.commandcenter";
 const APP_PROTOCOL_SCHEMES = isDevelopment ? ["commandcenter-dev"] : ["commandcenter"];
 const LAUNCHER_VERSION = 15;
+const defaultIconPath = NodePath.join(desktopDir, "resources", "icon.icns");
 const developmentMacIconPngPath = NodePath.join(
   repoRoot,
   "assets",

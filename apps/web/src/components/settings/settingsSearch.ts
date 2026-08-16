@@ -10,6 +10,7 @@ export type SettingsPath =
   | "/settings/source-control"
   | "/settings/databases"
   | "/settings/connections"
+  | "/settings/beta"
   | "/settings/archived";
 
 export interface SettingsSearchItem {
@@ -36,6 +37,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/source-control": "Source Control",
   "/settings/databases": "Databases",
   "/settings/connections": "Connections",
+  "/settings/beta": "Beta",
   "/settings/archived": "Archive",
 };
 
@@ -107,16 +109,6 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "project-grouping",
     title: "Project grouping",
-    to: "/settings/general",
-  },
-  {
-    id: "auto-settle-inactive-threads",
-    title: "Auto-settle inactive threads",
-    to: "/settings/general",
-  },
-  {
-    id: "auto-settle-merged-threads",
-    title: "Auto-settle merged threads",
     to: "/settings/general",
   },
   {
@@ -210,6 +202,22 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "remote-environments",
     title: "Remote environments",
     to: "/settings/connections",
+  },
+  {
+    id: "sidebar-v2",
+    title: "Sidebar v2",
+    to: "/settings/beta",
+  },
+  {
+    id: "auto-settle-inactive-threads",
+    title: "Auto-settle inactive threads",
+    to: "/settings/beta",
+    targetId: "sidebar-v2",
+  },
+  {
+    id: "restore-plan-mode",
+    title: "Restore plan mode (legacy)",
+    to: "/settings/beta",
   },
   {
     id: "archive",

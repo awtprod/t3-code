@@ -1581,6 +1581,20 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     }
   }, [clearUserScrollSettle, props.anchorMessageId, transitionEndFollow]);
 
+  // A thread switch opens pinned to the end; a send explicitly returns to the
+  // live edge (ThreadDetailScreen scrolls the new message into place). Both
+  // re-arm follow regardless of where the user had scrolled before.
+  useEffect(() => {
+    userScrollSessionRef.current = false;
+    setEndFollow(true);
+  }, [props.threadId, setEndFollow]);
+  useEffect(() => {
+    if (props.anchorMessageId !== null) {
+      userScrollSessionRef.current = false;
+      setEndFollow(true);
+    }
+  }, [props.anchorMessageId, setEndFollow]);
+
   const expandedWorkGroupIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [groupId, expanded] of Object.entries(expandedWorkGroups)) {

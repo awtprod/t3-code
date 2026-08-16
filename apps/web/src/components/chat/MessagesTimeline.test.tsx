@@ -254,9 +254,9 @@ describe("MessagesTimeline", () => {
     );
 
     expect(compactMarkup).toContain('class="h-3 sm:h-4"');
-    expect(compactMarkup).not.toContain("topbar-scroll-fade");
+    expect(compactMarkup).not.toContain("chat-timeline-scroll-fade");
     expect(fadedMarkup).toContain('class="h-10 sm:h-12"');
-    expect(fadedMarkup).toContain("topbar-scroll-fade");
+    expect(fadedMarkup).toContain("chat-timeline-scroll-fade");
   });
 
   it("keeps assistant changed-files headers sticky below the thread header", () => {
@@ -615,8 +615,7 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("globalThis.__t3Xss");
   });
 
-  it("renders inline terminal labels with the composer chip UI", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
+  it("renders inline terminal labels with the composer chip UI", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
