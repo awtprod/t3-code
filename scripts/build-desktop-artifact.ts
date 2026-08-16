@@ -29,6 +29,7 @@ import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/unstable/cli";
@@ -269,7 +270,12 @@ export class BuildCommandFailedError extends Schema.TaggedErrorClass<BuildComman
   }
 }
 
-export function isRetryableWindowsNsisOutputLockFailure(error: BuildCommandFailedError): boolean {
+export function isRetryableWindowsNsisOutputLockFailure(
+  error: BuildCommandFailedError | PlatformError.PlatformError,
+): boolean {
+  if (error._tag !== "BuildCommandFailedError") {
+    return false;
+  }
   const output = `${error.stdoutTail ?? ""}\n${error.stderrTail ?? ""}`;
   return (
     error.command.includes("electron-builder") &&
