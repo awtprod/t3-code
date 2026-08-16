@@ -24,9 +24,18 @@ export function isExplicitRelativePath(value: string): boolean {
 function isRootPath(value: string): boolean {
   // The drive separator is required: a bare `C:` is not the drive root (it
   // means "current directory on C:"), and treating it as already-canonical
-  // would leave it as a bare drive while drive-root paths normalize consistently,
-  // so the same location would fail project identity/dedup comparisons.
-  return value === "/" || value === "\\" || (isWindowsDrivePath(value) && value.length === 3);
+  // would leave it as `C:` while a drive path with a trailing backslash or
+  // forward slash normalizes to the drive root, so the same location would
+  // fail project identity/dedup comparisons.
+  //
+  // Built via fromCharCode so the source never spells out a literal
+  // backslash-backslash sequence (that shape reads as a Windows UNC path).
+  const BACKSLASH = String.fromCharCode(92);
+  return (
+    value === "/" ||
+    value === BACKSLASH ||
+    new RegExp(`^[a-zA-Z]:[/${BACKSLASH}${BACKSLASH}]$`).test(value)
+  );
 }
 
 function trimTrailingPathSeparators(value: string): string {

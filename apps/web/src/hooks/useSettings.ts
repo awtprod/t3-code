@@ -29,7 +29,6 @@ import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
 } from "@t3tools/client-runtime/state/runtime";
-import { APP_STAGE_LABEL } from "~/branding";
 import { ensureLocalApi } from "~/localApi";
 import {
   getThemeDefinition,
@@ -331,13 +330,14 @@ function useUpdateSettingsTarget(environmentId: EnvironmentId | null) {
         }
       }
 
-      return persisted;
       if (Object.keys(clientPatch).length > 0) {
         persistClientSettings({
           ...getClientSettingsSnapshot(),
           ...clientPatch,
         });
       }
+
+      return persisted;
     },
     [environmentId, persistServerSettings],
   );

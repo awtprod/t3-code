@@ -15,6 +15,7 @@ describe("hosted static onboarding header", () => {
     const onboardingHeader = routeSource.slice(onboardingStart, onboardingEnd);
 
     expect(onboardingHeader).toContain("workspace-topbar");
+    expect(onboardingHeader).toContain("COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS");
     expect(onboardingHeader).not.toMatch(/(?:^|\s)(?:[\w-]+:)*py-/);
   });
 });

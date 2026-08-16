@@ -6,10 +6,7 @@ const { readPreparedConnection } = vi.hoisted(() => ({
   readPreparedConnection: vi.fn<() => { httpBaseUrl: string } | null>(() => null),
 }));
 
-vi.mock("~/state/session", () => ({
-  readPreparedConnection,
-  environmentSession: { initialConfigValueAtom: () => null },
-}));
+vi.mock("~/state/session", () => ({ readPreparedConnection }));
 
 import {
   BROWSER_HISTORY_MAX_ENTRIES_PER_PROJECT,

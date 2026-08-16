@@ -141,7 +141,7 @@ function searchItem(number: number, repository: string, updatedAt: string) {
     number,
     title: `Pull request ${number}`,
     url: `https://github.com/${repository}/pull/${number}`,
-    author: { login: "octocat", avatarUrl: "https://avatars.example/octocat" },
+    author: { login: "octocat", avatarUrl: "https://avatars.example.com/octocat" },
     headRefName: "feat/page",
     baseRefName: "main",
     state: "OPEN",
@@ -403,8 +403,8 @@ layer("GitHubPullRequestCli.layer", (it) => {
       assert.deepStrictEqual(
         batch.items.map((item) => [item.repository, item.number, item.author?.avatarUrl]),
         [
-          ["acme/web", 7, "https://avatars.example/octocat"],
-          ["pingdotgg/t3code", 9, "https://avatars.example/octocat"],
+          ["acme/web", 7, "https://avatars.example.com/octocat"],
+          ["pingdotgg/t3code", 9, "https://avatars.example.com/octocat"],
         ],
       );
       // The listing leaves the line counts to a read of their own.
@@ -1624,7 +1624,7 @@ layer("GitHubPullRequestCli.layer", (it) => {
         number: 7,
         verdict: "approve",
         body: "Looks right.",
-        comments: [{ path: "src/a.ts", line: 4, side: "right", body: "nit" }],
+        comments: [{ path: "src/a.ts", position: { kind: "added", newLine: 4 }, body: "nit" }],
       });
 
       expect(callAt(0).args).toEqual([

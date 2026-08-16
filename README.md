@@ -93,6 +93,8 @@ multiple worktrees are running.
 
 For a production-like local build where the server also serves the compiled web client:
 
+Stable:
+
 ```bash
 pnpm serve --home-dir /absolute/path/to/command-center-data
 ```

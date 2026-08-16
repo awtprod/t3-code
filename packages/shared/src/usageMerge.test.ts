@@ -96,7 +96,11 @@ describe("mergeUsage", () => {
 
   it("counts a shared transcript directory once", () => {
     // Two worktree servers on one machine resolve the same provider home.
-    const shared = { provider: "claude" as const, hostId: "mac", homePath: "/workspace/.claude" };
+    const shared = {
+      provider: "claude" as const,
+      hostId: "mac",
+      homePath: "/workspace/example-home/.claude",
+    };
     const merged = mergeUsage(
       [
         environment("env-a", summary([bucket()], [shared])),
@@ -116,7 +120,7 @@ describe("mergeUsage", () => {
     const sharedClaude = {
       provider: "claude" as const,
       hostId: "mac",
-      homePath: "/workspace/.claude",
+      homePath: "/workspace/example-home/.claude",
     };
     const merged = mergeUsage(
       [
@@ -125,7 +129,10 @@ describe("mergeUsage", () => {
           "env-b",
           summary(
             [bucket(), bucket({ provider: "codex", model: "gpt-5.6-sol", costUsd: 4 })],
-            [sharedClaude, { provider: "codex", hostId: "mac", homePath: "/workspace/.codex" }],
+            [
+              sharedClaude,
+              { provider: "codex", hostId: "mac", homePath: "/workspace/example-home/.codex" },
+            ],
           ),
         ),
       ],
@@ -190,9 +197,13 @@ describe("mergeUsage", () => {
   });
 
   it("keeps two machines apart when hostname and home path collide", () => {
-    // Every test host resolves the same synthetic provider home, so a hostname clash used to make
-    // one machine's usage vanish. Filesystem identity separates them.
-    const shape = { provider: "claude" as const, hostId: "mac", homePath: "/workspace/.claude" };
+    // Every Mac resolves the same per-user provider home, so a hostname clash
+    // used to make one machine's usage vanish. Filesystem identity separates them.
+    const shape = {
+      provider: "claude" as const,
+      hostId: "mac",
+      homePath: "/workspace/example-home/.claude",
+    };
     const merged = mergeUsage(
       [
         environment("env-a", summary([bucket()], [{ ...shape, volumeId: "16777220:1234" }])),
@@ -209,7 +220,7 @@ describe("mergeUsage", () => {
     const same = {
       provider: "claude" as const,
       hostId: "mac",
-      homePath: "/workspace/.claude",
+      homePath: "/workspace/example-home/.claude",
       volumeId: "16777220:1234",
     };
     const merged = mergeUsage(

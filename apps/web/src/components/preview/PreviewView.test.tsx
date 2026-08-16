@@ -344,6 +344,12 @@ describe("PreviewView navigation", () => {
         "http://localhost:5173/app?mode=test#top",
       ),
     );
+    await vi.waitFor(() =>
+      expect(mocks.recordVisitForThread).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: expect.anything() }),
+        "http://localhost:5173/app?mode=test#top",
+      ),
+    );
   });
 
   it("opens and closes a thread-scoped floating preview for the active tab", async () => {

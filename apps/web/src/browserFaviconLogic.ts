@@ -71,7 +71,7 @@ function persistedFaviconAlias(value: unknown): string | null {
   const normalized = normalizeHostname(value);
   if (!normalized || normalized !== value) return null;
   try {
-    const parsed = new URL(["http:/", formatFaviconHost(normalized)].join("/"));
+    const parsed = new URL("http://" + formatFaviconHost(normalized));
     return normalizeHostname(parsed.hostname) === normalized ? normalized : null;
   } catch {
     return null;

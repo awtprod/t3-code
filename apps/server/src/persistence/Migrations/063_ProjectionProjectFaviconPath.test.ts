@@ -8,13 +8,13 @@ import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("040_ProjectionProjectFaviconPath", (it) => {
+layer("063_ProjectionProjectFaviconPath", (it) => {
   it.effect("adds the nullable favicon path to project projections", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 58 });
-      yield* runMigrations({ toMigrationInclusive: 59 });
+      yield* runMigrations({ toMigrationInclusive: 62 });
+      yield* runMigrations({ toMigrationInclusive: 63 });
 
       const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
         PRAGMA table_info(projection_projects)

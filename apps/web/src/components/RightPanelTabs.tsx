@@ -26,6 +26,7 @@ import type { DesktopPreviewOverlay } from "~/previewStateStore";
 import type { RightPanelSurface } from "~/rightPanelStore";
 import { cn } from "~/lib/utils";
 import { readLocalApi } from "~/localApi";
+import { Button } from "~/components/ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { Kbd } from "~/components/ui/kbd";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
@@ -608,6 +609,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
           // the titlebar's height: a compact row re-centers the layout
           // controls a few pixels higher and the cluster jumps on open.
           props.mode === "inline" && !props.layoutControls ? "pr-28" : "pr-3",
+          ownsDesktopTitleBar && "wco:pr-[calc(var(--workspace-native-controls-inset)+6rem)]",
           props.mode === "inline" && props.maximized && COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
         )}
         data-right-panel-tabbar
@@ -681,8 +683,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             {props.surfaces.length > 0 ? (
               <Menu>
                 <MenuTrigger
-                  className="cursor-pointer relative inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-                  aria-label="Add panel surface"
+                  render={
+                    <Button
+                      aria-label="Add panel surface"
+                      className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
+                      size="icon-xs"
+                      variant="ghost"
+                    />
+                  }
                 >
                   <Plus className="size-3.5" />
                 </MenuTrigger>

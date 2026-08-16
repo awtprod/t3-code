@@ -379,20 +379,24 @@ describe("review thread decoding", () => {
       decodeReviewThreadsJson(
         reviewJson({
           requested: [
-            { login: "julius", name: "Julius", avatarUrl: "https://avatars.example/j.png" },
+            { login: "julius", name: "Julius", avatarUrl: "https://avatars.example.com/j.png" },
           ],
           // An app that has reviewed is no longer an outstanding request, which is why asking
           // only for requests reported nobody on a pull request a bot had reviewed.
           reviewed: [
-            { login: "macroscopeapp", avatarUrl: "https://avatars.example/in/900172.png" },
+            { login: "macroscopeapp", avatarUrl: "https://avatars.example.com/in/900172.png" },
           ],
         }),
       ),
     );
 
     expect(result.reviewers).toEqual([
-      { login: "julius", name: "Julius", avatarUrl: "https://avatars.example/j.png" },
-      { login: "macroscopeapp", name: null, avatarUrl: "https://avatars.example/in/900172.png" },
+      { login: "julius", name: "Julius", avatarUrl: "https://avatars.example.com/j.png" },
+      {
+        login: "macroscopeapp",
+        name: null,
+        avatarUrl: "https://avatars.example.com/in/900172.png",
+      },
     ]);
   });
 
@@ -479,8 +483,8 @@ describe("review thread decoding", () => {
     const result = expectSuccess(
       decodeReviewThreadsJson(
         reviewJson({
-          requested: [{ login: "julius", avatarUrl: "https://avatars.example/j.png" }],
-          reviewed: [{ login: "julius", avatarUrl: "https://avatars.example/j.png" }],
+          requested: [{ login: "julius", avatarUrl: "https://avatars.example.com/j.png" }],
+          reviewed: [{ login: "julius", avatarUrl: "https://avatars.example.com/j.png" }],
         }),
       ),
     );
@@ -500,13 +504,13 @@ describe("review thread decoding", () => {
     const result = expectSuccess(
       decodeReviewThreadsJson(
         reviewJson({
-          requested: [{}, { login: "julius", avatarUrl: "https://avatars.example/j.png" }],
+          requested: [{}, { login: "julius", avatarUrl: "https://avatars.example.com/j.png" }],
         }),
       ),
     );
 
     expect(result.reviewers).toEqual([
-      { login: "julius", name: null, avatarUrl: "https://avatars.example/j.png" },
+      { login: "julius", name: null, avatarUrl: "https://avatars.example.com/j.png" },
     ]);
   });
 
@@ -828,7 +832,7 @@ describe("review thread decoding", () => {
 
   const comment = (id: string, body: string) => ({
     id,
-    author: { login: "bilal", avatarUrl: "https://avatars.example/b.png" },
+    author: { login: "bilal", avatarUrl: "https://avatars.example.com/b.png" },
     body,
     createdAt: "2026-07-01T00:00:00Z",
     url: `https://github.com/acme/web/pull/1#discussion_r${id}`,
@@ -861,7 +865,7 @@ describe("review thread decoding", () => {
         comments: [
           {
             id: "c1",
-            author: { login: "bilal", name: null, avatarUrl: "https://avatars.example/b.png" },
+            author: { login: "bilal", name: null, avatarUrl: "https://avatars.example.com/b.png" },
             body: "first",
             createdAt: "2026-07-01T00:00:00Z",
             url: "https://github.com/acme/web/pull/1#discussion_rc1",
@@ -869,7 +873,7 @@ describe("review thread decoding", () => {
           },
           {
             id: "c2",
-            author: { login: "bilal", name: null, avatarUrl: "https://avatars.example/b.png" },
+            author: { login: "bilal", name: null, avatarUrl: "https://avatars.example.com/b.png" },
             body: "second",
             createdAt: "2026-07-01T00:00:00Z",
             url: "https://github.com/acme/web/pull/1#discussion_rc2",
@@ -1153,8 +1157,16 @@ describe("review submission payload", () => {
         verdict: "request-changes",
         body: "Two things.",
         comments: [
-          { path: "src/a.ts", line: 12, side: "right", body: "rename this" },
-          { path: "src/b.ts", line: 3, side: "left", body: "why remove?" },
+          {
+            path: "src/a.ts",
+            position: { kind: "added", newLine: 12 },
+            body: "rename this",
+          },
+          {
+            path: "src/b.ts",
+            position: { kind: "deleted", oldLine: 3 },
+            body: "why remove?",
+          },
         ],
       }),
     ) as Record<string, unknown>;
