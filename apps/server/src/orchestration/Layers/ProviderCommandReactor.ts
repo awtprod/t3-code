@@ -8,6 +8,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  SandboxId,
   type ProjectId,
   type OrchestrationSession,
   ThreadId,
@@ -21,10 +22,12 @@ import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
+import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
@@ -65,6 +68,19 @@ import {
 } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import {
+  ThreadSandboxRuntime,
+  type ProviderExecutionTarget,
+} from "../../sandbox/ThreadSandboxRuntime.ts";
+import {
+  SandboxRuntimeManager,
+  resolveSandboxImage,
+  resolveSandboxPreviewProxyImage,
+} from "../../sandbox/SandboxRuntimeManager.ts";
+import {
+  T3ProjectFileLoader,
+  layer as T3ProjectFileLoaderLive,
+} from "../../project/T3ProjectFileLoader.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
@@ -330,13 +346,21 @@ function buildGeneratedWorktreeBranchName(raw: string): string {
   return `${WORKTREE_BRANCH_PREFIX}/${safeFragment}`;
 }
 
-const make = Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const orchestrationEventStore = yield* OrchestrationEventStore;
   const providerTurnSendClaimRepository = yield* ProviderTurnSendClaimRepository;
   const providerService = yield* ProviderService;
+  const threadSandboxRuntime = yield* ThreadSandboxRuntime;
+  const sandboxRuntimeManager = yield* SandboxRuntimeManager;
+  const projectFileLoader = yield* T3ProjectFileLoader;
+  const sandboxProvisionLocks = new Map<string, Semaphore.Semaphore>();
+  const provisionedTargets = new Map<
+    string,
+    Extract<ProviderExecutionTarget, { kind: "sandbox" }>
+  >();
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -345,6 +369,199 @@ const make = Effect.gen(function* () {
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
+  const ensureExecutionTarget = Effect.fn("ProviderCommandReactor.ensureExecutionTarget")(
+    function* (
+      thread: Parameters<typeof threadSandboxRuntime.ensureReady>[0],
+      legacyCwd: string | undefined,
+    ) {
+      if (
+        thread.sandbox != null &&
+        thread.sandbox.lifecycle !== "unprovisioned" &&
+        thread.sandbox.lifecycle !== "failed"
+      ) {
+        return yield* threadSandboxRuntime.ensureReady(thread, legacyCwd);
+      }
+      let lock = sandboxProvisionLocks.get(thread.id);
+      if (lock === undefined) {
+        lock = yield* Semaphore.make(1);
+        sandboxProvisionLocks.set(thread.id, lock);
+      }
+      return yield* lock.withPermits(1)(
+        Effect.gen(function* () {
+          const cached = provisionedTargets.get(thread.id);
+          if (cached !== undefined) return cached;
+          const project = yield* resolveProject(thread.projectId);
+          if (project === undefined) {
+            return yield* new ProviderAdapterRequestError({
+              provider: "sandbox",
+              method: "sandbox.provision",
+              detail: `Project '${thread.projectId}' was not found.`,
+            });
+          }
+          const projectFile = Option.getOrUndefined(
+            yield* projectFileLoader.load(project.workspaceRoot),
+          );
+          const declaration = projectFile?.sandbox;
+          const image = resolveSandboxImage(projectFile);
+          if (image === undefined || resolveSandboxPreviewProxyImage() === undefined) {
+            if (legacyCwd === undefined) {
+              return yield* new ProviderAdapterRequestError({
+                provider: "sandbox",
+                method: "sandbox.provision",
+                detail:
+                  "Sandbox images are not configured and no host workspace directory is available.",
+              });
+            }
+            return { kind: "legacy-host", cwd: legacyCwd } as const;
+          }
+          const runtime = thread.sandboxConfig?.runtime ?? "docker";
+          if (runtime !== "docker" && runtime !== "podman") {
+            return yield* new ProviderAdapterRequestError({
+              provider: "sandbox",
+              method: "sandbox.provision",
+              detail: `Sandbox runtime '${runtime}' is not available in v1.`,
+            });
+          }
+          const occurredAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+          const branch =
+            thread.sandbox?.branch ??
+            (yield* Effect.gen(function* () {
+              const local = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
+              if (!local.isRepo || local.refName === null)
+                return yield* new ProviderAdapterRequestError({
+                  provider: "sandbox",
+                  method: "sandbox.provision",
+                  detail: "Isolated threads require a Git repository with a selected branch.",
+                });
+              const base = yield* gitWorkflow.resolveRemoteTrackingCommit({
+                cwd: project.workspaceRoot,
+                refName: local.refName,
+                fallbackRemoteName: "origin",
+              });
+              return { branchName: `t3/thread/${thread.id}`, baseCommit: base.commitSha };
+            }).pipe(
+              Effect.mapError((cause) =>
+                isProviderAdapterRequestError(cause)
+                  ? cause
+                  : new ProviderAdapterRequestError({
+                      provider: "sandbox",
+                      method: "sandbox.provision",
+                      detail: cause instanceof Error ? cause.message : String(cause),
+                      cause,
+                    }),
+              ),
+            ));
+          yield* orchestrationEngine.dispatch({
+            type: "sandbox.provision",
+            commandId: yield* serverCommandId("sandbox-provision"),
+            threadId: thread.id,
+            config: thread.sandboxConfig ?? {},
+            ...(thread.sandbox === null ? { branch } : {}),
+            createdAt: occurredAt,
+          });
+          const provision = yield* sandboxRuntimeManager
+            .provision({
+              bootstrap: {
+                threadId: thread.id,
+                projectId: thread.projectId,
+                repositoryUrl:
+                  project.repositoryIdentity?.locator.remoteUrl ?? project.workspaceRoot,
+                baseCommit: branch.baseCommit,
+                branchName: branch.branchName,
+                ...("parentThreadId" in branch && branch.parentThreadId
+                  ? { parentThreadId: branch.parentThreadId }
+                  : {}),
+              },
+              config: thread.sandboxConfig ?? {},
+              image,
+              ...(process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE?.trim()
+                ? { egressProxyImage: process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE.trim() }
+                : {}),
+              ...(declaration?.caches ? { caches: declaration.caches } : {}),
+              ...(declaration?.setup ? { setup: declaration.setup } : {}),
+              ...(declaration?.teardown ? { teardown: declaration.teardown } : {}),
+              ...(declaration?.services ? { services: declaration.services } : {}),
+              ...(declaration?.previewPorts ? { previewPorts: declaration.previewPorts } : {}),
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: "sandbox",
+                    method: "sandbox.provision",
+                    detail: cause instanceof Error ? cause.message : String(cause),
+                    cause,
+                  }),
+              ),
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  const failedAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+                  yield* orchestrationEngine
+                    .dispatch({
+                      type: "sandbox.operation.fail",
+                      commandId: yield* serverCommandId("sandbox-failed"),
+                      threadId: thread.id,
+                      failure: {
+                        stage: "provision",
+                        code: "sandbox_provision_failed",
+                        message: error.detail,
+                        retryable: true,
+                        occurredAt: failedAt,
+                      },
+                      createdAt: failedAt,
+                    })
+                    .pipe(Effect.ignore);
+                  return yield* error;
+                }),
+              ),
+            );
+          const readyAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+          yield* orchestrationEngine.dispatch({
+            type: "sandbox.provision.ready",
+            commandId: yield* serverCommandId("sandbox-ready"),
+            threadId: thread.id,
+            sandboxId: SandboxId.make(provision.sandboxId),
+            runtime: provision.runtime,
+            runtimeRef: provision.containerName,
+            createdAt: readyAt,
+          });
+          const readyThread = Option.getOrUndefined(
+            yield* projectionSnapshotQuery.getThreadDetailById(thread.id),
+          );
+          if (readyThread?.sandbox !== null && readyThread?.sandbox !== undefined) {
+            yield* orchestrationEngine.dispatch({
+              type: "sandbox.reconcile.result",
+              commandId: yield* serverCommandId("sandbox-service-health"),
+              threadId: thread.id,
+              disposition: "matched",
+              sandbox: {
+                ...readyThread.sandbox,
+                services: provision.services.map((service) => ({
+                  name: service.name,
+                  status: "healthy" as const,
+                  ...(service.internalPorts[0] === undefined
+                    ? {}
+                    : { internalPort: service.internalPorts[0] }),
+                  checkedAt: readyAt,
+                })),
+              },
+              createdAt: readyAt,
+            });
+          }
+          const target = {
+            kind: "sandbox",
+            threadId: thread.id,
+            sandboxId: provision.sandboxId,
+            runtimeRef: provision.containerName,
+            runtime,
+            workspaceCwd: "/workspace/repo",
+          } as const;
+          provisionedTargets.set(thread.id, target);
+          return target;
+        }),
+      );
+    },
+  );
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -565,6 +782,7 @@ const make = Effect.gen(function* () {
     options?: {
       readonly modelSelection?: ModelSelection;
       readonly pendingTurnStart?: boolean;
+      readonly executionTarget?: ProviderExecutionTarget;
     },
   ) {
     const thread = yield* resolveThread(threadId);
@@ -693,26 +911,34 @@ const make = Effect.gen(function* () {
       }
     }
     const project = yield* resolveProject(thread.projectId);
-    const effectiveCwd = resolveThreadWorkspaceCwd({
+    const legacyCwd = resolveThreadWorkspaceCwd({
       thread,
       projects: project ? [project] : [],
     });
+    const executionTarget =
+      options?.executionTarget ?? (yield* ensureExecutionTarget(thread, legacyCwd));
+    const effectiveCwd =
+      executionTarget.kind === "sandbox" ? executionTarget.workspaceCwd : executionTarget.cwd;
 
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
     }) =>
-      providerService.startSession(threadId, {
+      providerService.startSession(
         threadId,
-        projectId: thread.projectId,
-        ...(preferredProvider ? { provider: preferredProvider } : {}),
-        providerInstanceId: desiredInstanceId,
-        ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-        ...(thread.title ? { title: thread.title } : {}),
-        modelSelection: desiredModelSelection,
-        ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-        runtimeMode: desiredRuntimeMode,
-      });
+        {
+          threadId,
+          projectId: thread.projectId,
+          ...(preferredProvider ? { provider: preferredProvider } : {}),
+          providerInstanceId: desiredInstanceId,
+          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+          ...(thread.title ? { title: thread.title } : {}),
+          modelSelection: desiredModelSelection,
+          ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+          runtimeMode: desiredRuntimeMode,
+        },
+        executionTarget,
+      );
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -849,6 +1075,7 @@ const make = Effect.gen(function* () {
      * legitimately fall back to oldest-first adoption.
      */
     readonly turnRequestSequence?: number;
+    readonly executionTarget?: ProviderExecutionTarget;
   }) {
     const thread = yield* resolveThread(input.threadId);
     if (!thread) {
@@ -859,6 +1086,7 @@ const make = Effect.gen(function* () {
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       pendingTurnStart: true,
+      ...(input.executionTarget !== undefined ? { executionTarget: input.executionTarget } : {}),
     });
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
@@ -2021,15 +2249,25 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const project = yield* resolveProject(thread.projectId);
+    const legacyCwd = resolveThreadWorkspaceCwd({
+      thread,
+      projects: project ? [project] : [],
+    });
+    const executionTarget = yield* ensureExecutionTarget(thread, legacyCwd);
+    // Provisioning can take long enough for a stop or a replacement request to
+    // land. Re-check before any cwd-dependent or provider side effect.
+    const postReadyClaim = yield* readTurnStartClaim;
+    if (postReadyClaim.supersededBySameMessage || postReadyClaim.interruptedAfter) {
+      return;
+    }
+    const executionCwd =
+      executionTarget.kind === "sandbox" ? executionTarget.workspaceCwd : executionTarget.cwd;
+
     const isFirstUserMessageTurn =
       thread.messages.filter((entry) => entry.role === "user").length === 1;
     if (isFirstUserMessageTurn) {
-      const project = yield* resolveProject(thread.projectId);
-      const generationCwd =
-        resolveThreadWorkspaceCwd({
-          thread,
-          projects: project ? [project] : [],
-        }) ?? process.cwd();
+      const generationCwd = executionCwd;
       const generationInput = {
         messageText: message.text,
         ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
@@ -2100,6 +2338,7 @@ const make = Effect.gen(function* () {
         : {}),
       interactionMode: event.payload.interactionMode,
       createdAt: event.payload.createdAt,
+      executionTarget,
       turnRequestSequence: event.sequence,
     }).pipe(
       Effect.map(Option.some),
@@ -2841,4 +3080,5 @@ const make = Effect.gen(function* () {
 export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
   Layer.provide(OrchestrationEventStoreLive),
   Layer.provide(ProviderTurnSendClaimRepositoryLive),
+  Layer.provide(T3ProjectFileLoaderLive),
 );

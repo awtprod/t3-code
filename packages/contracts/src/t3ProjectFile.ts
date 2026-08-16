@@ -12,6 +12,7 @@ export const T3_PROJECT_FILE_SCHEMA_URL = "https://t3.codes/schema/t3.json";
 
 const T3_PROJECT_FILE_PATH_MAX_LENGTH = 512;
 const T3_PROJECT_FILE_MAX_SCRIPTS = 50;
+const T3_PROJECT_FILE_MAX_SANDBOX_ITEMS = 32;
 
 // Annotations go on the encoded (string) side so they survive into the
 // published JSON Schema; decoding still trims and re-validates non-emptiness.
@@ -59,6 +60,94 @@ export const T3ProjectFileScript = Schema.Struct({
 });
 export type T3ProjectFileScript = typeof T3ProjectFileScript.Type;
 
+const digestPinnedImage = trimmedNonEmpty(
+  { description: "OCI image pinned by an immutable sha256 digest." },
+  256,
+).check(Schema.isPattern(/^[a-z0-9][a-z0-9._/-]{0,200}@sha256:[a-f0-9]{64}$/i));
+const sandboxPath = trimmedNonEmpty(
+  { description: "Absolute path inside the sandbox." },
+  512,
+).check(Schema.isPattern(/^\/(?!.*(?:^|\/)\.\.(?:\/|$))[^\0]*$/));
+const sandboxCommand = Schema.Struct({
+  executable: trimmedNonEmpty({ description: "Executable name or absolute sandbox path." }, 256),
+  args: Schema.optionalKey(
+    Schema.Array(Schema.String.check(Schema.isMaxLength(16_384))).check(Schema.isMaxLength(256)),
+  ),
+});
+const sandboxService = Schema.Struct({
+  name: trimmedNonEmpty({ description: "Thread-local service hostname." }, 63).check(
+    Schema.isPattern(/^[a-z][a-z0-9-]*$/),
+  ),
+  image: digestPinnedImage,
+  internalPorts: Schema.optionalKey(
+    Schema.Array(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65_535 }))).check(
+      Schema.isMaxLength(32),
+    ),
+  ),
+  volumes: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        name: trimmedNonEmpty({ description: "Thread-local volume name." }, 63).check(
+          Schema.isPattern(/^[a-z][a-z0-9-]*$/),
+        ),
+        target: sandboxPath,
+      }),
+    ).check(Schema.isMaxLength(32)),
+  ),
+  healthCheck: Schema.optionalKey(
+    Schema.Struct({
+      executable: trimmedNonEmpty(
+        { description: "Health-check executable inside the service container." },
+        256,
+      ),
+      args: Schema.optionalKey(
+        Schema.Array(Schema.String.check(Schema.isMaxLength(4096))).check(Schema.isMaxLength(64)),
+      ),
+      intervalSeconds: Schema.optionalKey(
+        Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 300 })),
+      ),
+      timeoutSeconds: Schema.optionalKey(
+        Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 60 })),
+      ),
+      retries: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 30 }))),
+    }),
+  ),
+  generatedEnvironment: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        key: Schema.String.check(Schema.isPattern(/^[A-Z_][A-Z0-9_]{0,127}$/)),
+        kind: Schema.Literals(["database-name", "username", "password"]),
+      }),
+    ).check(Schema.isMaxLength(32)),
+  ),
+});
+export const T3ProjectFileSandbox = Schema.Struct({
+  image: digestPinnedImage,
+  services: Schema.optionalKey(
+    Schema.Array(sandboxService).check(Schema.isMaxLength(T3_PROJECT_FILE_MAX_SANDBOX_ITEMS)),
+  ),
+  setup: Schema.optionalKey(
+    Schema.Array(sandboxCommand).check(Schema.isMaxLength(T3_PROJECT_FILE_MAX_SANDBOX_ITEMS)),
+  ),
+  teardown: Schema.optionalKey(
+    Schema.Array(sandboxCommand).check(Schema.isMaxLength(T3_PROJECT_FILE_MAX_SANDBOX_ITEMS)),
+  ),
+  caches: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        digest: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/i)),
+        target: sandboxPath,
+      }),
+    ).check(Schema.isMaxLength(T3_PROJECT_FILE_MAX_SANDBOX_ITEMS)),
+  ),
+  previewPorts: Schema.optionalKey(
+    Schema.Array(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65_535 }))).check(
+      Schema.isMaxLength(32),
+    ),
+  ),
+});
+export type T3ProjectFileSandbox = typeof T3ProjectFileSandbox.Type;
+
 export const T3ProjectFile = Schema.Struct({
   $schema: Schema.optionalKey(
     Schema.String.annotate({
@@ -87,6 +176,7 @@ export const T3ProjectFile = Schema.Struct({
       })
       .check(Schema.isMaxLength(T3_PROJECT_FILE_MAX_SCRIPTS)),
   ),
+  sandbox: Schema.optionalKey(T3ProjectFileSandbox),
 }).annotate({
   title: "T3 project file",
   description:

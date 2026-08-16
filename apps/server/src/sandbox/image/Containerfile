@@ -1,0 +1,26 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates chromium curl tmux wget x11-utils xfce4 xfce4-terminal xvfb \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY install-verified-desktop-assets.sh /usr/local/sbin/install-verified-desktop-assets
+ARG CODE_OSS_URL
+ARG CODE_OSS_SHA256
+ARG WEBRTC_BRIDGE_URL
+ARG WEBRTC_BRIDGE_SHA256
+ARG PREVIEW_BRIDGE_URL
+ARG PREVIEW_BRIDGE_SHA256
+RUN /usr/local/sbin/install-verified-desktop-assets \
+      "$CODE_OSS_URL" "$CODE_OSS_SHA256" /usr/local/bin/code \
+ && /usr/local/sbin/install-verified-desktop-assets \
+      "$WEBRTC_BRIDGE_URL" "$WEBRTC_BRIDGE_SHA256" /usr/local/bin/t3-desktop-webrtc
+RUN /usr/local/sbin/install-verified-desktop-assets \
+      "$PREVIEW_BRIDGE_URL" "$PREVIEW_BRIDGE_SHA256" /usr/local/bin/t3-preview-bridge
+
+RUN mkdir -p /workspace /thread-data \
+ && chown -R 1000:1000 /workspace /thread-data
+USER 1000:1000

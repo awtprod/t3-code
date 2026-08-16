@@ -71,6 +71,14 @@ function commandToAggregateRef(command: OrchestrationCommand): {
         aggregateKind: "project",
         aggregateId: command.projectId,
       };
+    case "sandbox.worker.spawn":
+    case "sandbox.worker.status":
+    case "sandbox.worker.message":
+    case "sandbox.worker.stop":
+      return {
+        aggregateKind: "thread",
+        aggregateId: command.parentThreadId,
+      };
     default:
       return {
         aggregateKind: "thread",

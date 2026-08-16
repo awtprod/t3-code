@@ -66,6 +66,11 @@ import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import {
+  SandboxRuntimeManager,
+  type SandboxRuntimeManagerShape,
+} from "../../sandbox/SandboxRuntimeManager.ts";
+import { DEFAULT_SANDBOX_RESOURCE_LIMITS } from "@t3tools/contracts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -104,6 +109,7 @@ describe("ProviderCommandReactor", () => {
   const createdBaseDirs = new Set<string>();
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (scope) {
       await Effect.runPromise(Scope.close(scope, Exit.void));
     }
@@ -159,7 +165,17 @@ describe("ProviderCommandReactor", () => {
       ProviderSession,
       ProviderAdapterRequestError | ProviderAdapterValidationError
     >;
+    readonly sandboxImages?: "both" | "image-only" | "none";
   }) {
+    const sandboxImages = input?.sandboxImages ?? "both";
+    vi.stubEnv(
+      "T3_SANDBOX_IMAGE",
+      sandboxImages === "none" ? "" : `desktop@sha256:${"d".repeat(64)}`,
+    );
+    vi.stubEnv(
+      "T3_SANDBOX_PREVIEW_PROXY_IMAGE",
+      sandboxImages === "both" ? `preview@sha256:${"e".repeat(64)}` : "",
+    );
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
       input?.baseDir ?? NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-"));
@@ -174,6 +190,22 @@ describe("ProviderCommandReactor", () => {
       model: "gpt-5-codex",
     };
     const startSessionEffect = input?.startSessionEffect;
+    const provisionSandbox = vi.fn(
+      (request: Parameters<SandboxRuntimeManagerShape["provision"]>[0]) =>
+        Effect.succeed({
+          sandboxId: request.bootstrap.threadId,
+          runtime: "docker" as const,
+          containerName: `sandbox-${request.bootstrap.threadId}`,
+          networkName: `network-${request.bootstrap.threadId}`,
+          workspaceVolumeName: `workspace-${request.bootstrap.threadId}`,
+          desktopVolumeName: `desktop-${request.bootstrap.threadId}`,
+          branchName: request.bootstrap.branchName,
+          limits: DEFAULT_SANDBOX_RESOURCE_LIMITS,
+          desktopSessionId: `desktop-${request.bootstrap.threadId}`,
+          desktopStreamPath: `/desktop/${request.bootstrap.threadId}`,
+          services: [],
+        }),
+    );
     const startSession = vi.fn((_: unknown, input: unknown) => {
       const sessionIndex = nextSessionIndex++;
       const resumeCursor =
@@ -401,6 +433,17 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(
         Layer.mock(GitWorkflowService.GitWorkflowService)({
           renameBranch,
+          localStatus: () =>
+            Effect.succeed({
+              isRepo: true,
+              hasPrimaryRemote: true,
+              isDefaultRef: true,
+              refName: "main",
+              hasWorkingTreeChanges: false,
+              workingTree: { files: [], insertions: 0, deletions: 0 },
+            }),
+          resolveRemoteTrackingCommit: () =>
+            Effect.succeed({ commitSha: "a".repeat(40), remoteRefName: "origin/main" }),
         } satisfies Partial<GitWorkflowService.GitWorkflowService["Service"]>),
       ),
       Layer.provideMerge(
@@ -419,6 +462,30 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(
+        Layer.succeed(SandboxRuntimeManager, {
+          provision: provisionSandbox,
+          exportBranch: () =>
+            Effect.succeed({
+              commit: "a".repeat(40),
+              patch: "",
+              artifactId: "b".repeat(64),
+              bundleSha256: "c".repeat(64),
+            }),
+          stop: () => Effect.void,
+          reconcile: () =>
+            Effect.succeed({
+              activeThreadIds: [],
+              missingThreadIds: [],
+              orphanThreadIds: [],
+              removedRuntimeRefs: [],
+            }),
+          sampleUsage: () =>
+            Effect.succeed({ cpuPercent: 0, memoryBytes: 0, diskBytes: 0, processCount: 0 }),
+          recoverPreview: () => Effect.succeed(false),
+          revokeCredentials: () => Effect.succeed(0),
+        } satisfies SandboxRuntimeManagerShape),
+      ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(NodeServices.layer),
@@ -453,6 +520,8 @@ describe("ProviderCommandReactor", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        sandboxConfig: {},
+        sandboxBranch: { branchName: "t3/thread/thread-1", baseCommit: "a".repeat(40) },
         createdAt: now,
       }),
     );
@@ -469,6 +538,8 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
+          sandboxConfig: {},
+          sandboxBranch: { branchName: "t3/thread/thread-2", baseCommit: "a".repeat(40) },
           createdAt: now,
         }),
       );
@@ -510,6 +581,7 @@ describe("ProviderCommandReactor", () => {
       generateBranchName,
       generateThreadTitle,
       runtimeSessions,
+      provisionSandbox,
       stateDir,
       drain,
       runEffect,
@@ -519,7 +591,7 @@ describe("ProviderCommandReactor", () => {
     };
   }
 
-  it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
+  it("lazily provisions before starting and sending a provider turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -544,19 +616,144 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.startSession.mock.calls[0]?.[0]).toEqual(ThreadId.make("thread-1"));
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      cwd: "/tmp/provider-project",
+      cwd: "/workspace/repo",
       modelSelection: {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5-codex",
       },
       runtimeMode: "approval-required",
     });
+    expect(harness.provisionSandbox).toHaveBeenCalledTimes(1);
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("falls back to host execution when no sandbox image is configured", async () => {
+    const harness = await createHarness({ sandboxImages: "none" });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-host-fallback"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-host-fallback"),
+          role: "user",
+          text: "hello host",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      cwd: "/tmp/provider-project",
+    });
+    expect(harness.provisionSandbox).not.toHaveBeenCalled();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.sandbox?.lifecycle).toBe("unprovisioned");
+    expect(thread?.session?.status).toBe("starting");
+  });
+
+  it("falls back to host execution when the preview proxy image is missing", async () => {
+    const harness = await createHarness({ sandboxImages: "image-only" });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-proxy-fallback"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-proxy-fallback"),
+          role: "user",
+          text: "hello host",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      cwd: "/tmp/provider-project",
+    });
+    expect(harness.provisionSandbox).not.toHaveBeenCalled();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.sandbox?.lifecycle).toBe("unprovisioned");
+  });
+
+  it("recovers a failed sandbox thread on the host when images are not configured", async () => {
+    const harness = await createHarness({ sandboxImages: "none" });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "sandbox.provision",
+        commandId: CommandId.make("cmd-sandbox-provision-wedge"),
+        threadId: ThreadId.make("thread-1"),
+        config: {},
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "sandbox.operation.fail",
+        commandId: CommandId.make("cmd-sandbox-fail-wedge"),
+        threadId: ThreadId.make("thread-1"),
+        failure: {
+          stage: "provision",
+          code: "sandbox_provision_failed",
+          message: "T3_SANDBOX_IMAGE must name a digest-pinned desktop sandbox image.",
+          retryable: true,
+          occurredAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    const wedged = await harness.readModel();
+    expect(
+      wedged.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.sandbox?.lifecycle,
+    ).toBe("failed");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-after-failure"),
+          role: "user",
+          text: "hello again",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      cwd: "/tmp/provider-project",
+    });
+    expect(harness.provisionSandbox).not.toHaveBeenCalled();
   });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
@@ -2033,7 +2230,7 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
   });
 
-  it("restarts the provider session when the thread workspace changes", async () => {
+  it("keeps provider execution in the sandbox when host workspace metadata changes", async () => {
     const harness = await createHarness({
       threadModelSelection: {
         instanceId: ProviderInstanceId.make("claudeAgent"),
@@ -2062,7 +2259,7 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      cwd: "/tmp/provider-project",
+      cwd: "/workspace/repo",
     });
 
     await Effect.runPromise(
@@ -2091,13 +2288,12 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await waitFor(() => harness.startSession.mock.calls.length === 2);
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
     expect(harness.stopSession.mock.calls.length).toBe(0);
-    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
-      cwd: "/tmp/provider-project-worktree",
-      resumeCursor: { opaque: "resume-1" },
+      cwd: "/workspace/repo",
       modelSelection: {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-sonnet-4-6",

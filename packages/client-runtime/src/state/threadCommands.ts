@@ -23,6 +23,11 @@ import {
   type UnsettleThreadInput,
   type UnsnoozeThreadInput,
   type UpdateThreadMetadataInput,
+  type ProvisionSandboxInput,
+  type TakeOverSandboxInput,
+  type ResumeSandboxInput,
+  type StopSandboxInput,
+  type ExportSandboxBranchInput,
   archiveThread,
   createThread,
   deleteThread,
@@ -43,8 +48,16 @@ import {
   unsettleThread,
   unsnoozeThread,
   updateThreadMetadata,
+  provisionSandbox,
+  takeOverSandbox,
+  resumeSandbox,
+  stopSandbox,
+  exportSandboxBranch,
 } from "../operations/commands.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import { requestSandboxViewerTicket } from "../operations/sandboxViewerTicket.ts";
+export { SandboxViewerTicketError } from "../operations/sandboxViewerTicket.ts";
+export type { SandboxViewerTicket } from "../operations/sandboxViewerTicket.ts";
 
 export type {
   ArchiveThreadInput,
@@ -67,6 +80,11 @@ export type {
   UnsettleThreadInput,
   UnsnoozeThreadInput,
   UpdateThreadMetadataInput,
+  ProvisionSandboxInput,
+  TakeOverSandboxInput,
+  ResumeSandboxInput,
+  StopSandboxInput,
+  ExportSandboxBranchInput,
 } from "../operations/commands.ts";
 
 export function createThreadEnvironmentAtoms<R, E>(
@@ -196,6 +214,43 @@ export function createThreadEnvironmentAtoms<R, E>(
     stopSession: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:stop-session",
       execute: (input: StopThreadSessionInput) => stopThreadSession(input),
+      scheduler,
+      concurrency,
+    }),
+    provisionSandbox: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:sandbox:provision",
+      execute: (input: ProvisionSandboxInput) => provisionSandbox(input),
+      scheduler,
+      concurrency,
+    }),
+    takeOverSandbox: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:sandbox:takeover",
+      execute: (input: TakeOverSandboxInput) => takeOverSandbox(input),
+      scheduler,
+      concurrency,
+    }),
+    resumeSandbox: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:sandbox:resume",
+      execute: (input: ResumeSandboxInput) => resumeSandbox(input),
+      scheduler,
+      concurrency,
+    }),
+    stopSandbox: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:sandbox:stop",
+      execute: (input: StopSandboxInput) => stopSandbox(input),
+      scheduler,
+      concurrency,
+    }),
+    exportSandboxBranch: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:sandbox:branch-export",
+      execute: (input: ExportSandboxBranchInput) => exportSandboxBranch(input),
+      scheduler,
+      concurrency,
+    }),
+    requestSandboxViewerTicket: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:sandbox:viewer-ticket",
+      execute: ({ threadId }: { readonly threadId: import("@t3tools/contracts").ThreadId }) =>
+        requestSandboxViewerTicket({ threadId }),
       scheduler,
       concurrency,
     }),

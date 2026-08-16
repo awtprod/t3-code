@@ -635,6 +635,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             interactionMode: event.payload.interactionMode,
             branch: event.payload.branch,
             worktreePath: event.payload.worktreePath,
+            sandbox: event.payload.sandbox ?? null,
             latestTurnId: null,
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
@@ -654,6 +655,32 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             deletedAt: null,
           });
           return;
+
+        case "sandbox.provisioning-started":
+        case "sandbox.ready":
+        case "sandbox.failed":
+        case "sandbox.paused":
+        case "sandbox.takeover-requested":
+        case "sandbox.takeover-acquired":
+        case "sandbox.resumed":
+        case "sandbox.stopping":
+        case "sandbox.expired":
+        case "sandbox.stopped":
+        case "sandbox.reconciled":
+        case "sandbox.branch-exported": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            sandbox: event.payload.sandbox,
+            updatedAt: event.occurredAt,
+          });
+          return;
+        }
 
         case "thread.archived": {
           const existingRow = yield* projectionThreadRepository.getById({

@@ -27,6 +27,7 @@ import {
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import { checkpointExecutionTargetForThread } from "../../checkpointing/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { forkParked } from "../../serverActivation.ts";
@@ -185,7 +186,11 @@ const make = Effect.gen(function* () {
   // a git repository.
   const resolveCheckpointCwd = Effect.fn("resolveCheckpointCwd")(function* (input: {
     readonly threadId: ThreadId;
-    readonly thread: { readonly projectId: ProjectId; readonly worktreePath: string | null };
+    readonly thread: {
+      readonly projectId: ProjectId;
+      readonly worktreePath: string | null;
+      readonly sandbox?: unknown | null;
+    };
     readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
     readonly preferSessionRuntime: boolean;
   }): Effect.fn.Return<string | undefined> {
@@ -209,7 +214,7 @@ const make = Effect.gen(function* () {
     if (!cwd) {
       return undefined;
     }
-    if (!isGitWorkspace(cwd)) {
+    if (input.thread.sandbox == null && !isGitWorkspace(cwd)) {
       return undefined;
     }
     return cwd;
@@ -229,6 +234,7 @@ const make = Effect.gen(function* () {
       }>;
     };
     readonly cwd: string;
+    readonly target: CheckpointStore.CheckpointExecutionTarget;
     readonly turnCount: number;
     readonly status: "ready" | "missing" | "error";
     readonly assistantMessageId: MessageId | undefined;
@@ -241,6 +247,7 @@ const make = Effect.gen(function* () {
     const fromCheckpointExists = yield* checkpointStore.hasCheckpointRef({
       cwd: input.cwd,
       checkpointRef: fromCheckpointRef,
+      target: input.target,
     });
     if (!fromCheckpointExists) {
       yield* Effect.logWarning("checkpoint capture missing pre-turn baseline", {
@@ -253,11 +260,14 @@ const make = Effect.gen(function* () {
     yield* checkpointStore.captureCheckpoint({
       cwd: input.cwd,
       checkpointRef: targetCheckpointRef,
+      target: input.target,
     });
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects files created or deleted during this turn.
-    yield* workspaceEntries.refresh(input.cwd);
+    if (input.target.kind === "legacy-host") {
+      yield* workspaceEntries.refresh(input.cwd);
+    }
 
     const files = yield* checkpointStore
       .diffCheckpoints({
@@ -266,6 +276,7 @@ const make = Effect.gen(function* () {
         toCheckpointRef: targetCheckpointRef,
         fallbackFromToHead: false,
         ignoreWhitespace: false,
+        target: input.target,
       })
       .pipe(
         Effect.map((diff) =>
@@ -409,6 +420,7 @@ const make = Effect.gen(function* () {
         turnId,
         thread,
         cwd: checkpointCwd,
+        target: checkpointExecutionTargetForThread(thread),
         turnCount: nextTurnCount,
         status: checkpointStatusFromRuntime(event.payload.state),
         assistantMessageId: undefined,
@@ -472,6 +484,7 @@ const make = Effect.gen(function* () {
       turnId,
       thread,
       cwd: checkpointCwd,
+      target: checkpointExecutionTargetForThread(thread),
       turnCount: checkpointTurnCount,
       status: "ready",
       assistantMessageId: event.payload.assistantMessageId ?? undefined,
@@ -510,6 +523,7 @@ const make = Effect.gen(function* () {
       const baselineExists = yield* checkpointStore.hasCheckpointRef({
         cwd: checkpointCwd,
         checkpointRef: baselineCheckpointRef,
+        target: checkpointExecutionTargetForThread(thread),
       });
       if (baselineExists) {
         return;
@@ -518,6 +532,7 @@ const make = Effect.gen(function* () {
       yield* checkpointStore.captureCheckpoint({
         cwd: checkpointCwd,
         checkpointRef: baselineCheckpointRef,
+        target: checkpointExecutionTargetForThread(thread),
       });
       yield* receiptBus.publish({
         type: "checkpoint.baseline.captured",
@@ -669,6 +684,7 @@ const make = Effect.gen(function* () {
     const baselineExists = yield* checkpointStore.hasCheckpointRef({
       cwd: checkpointCwd,
       checkpointRef: baselineCheckpointRef,
+      target: checkpointExecutionTargetForThread(thread),
     });
     if (baselineExists) {
       return;
@@ -677,6 +693,7 @@ const make = Effect.gen(function* () {
     yield* checkpointStore.captureCheckpoint({
       cwd: checkpointCwd,
       checkpointRef: baselineCheckpointRef,
+      target: checkpointExecutionTargetForThread(thread),
     });
     yield* receiptBus.publish({
       type: "checkpoint.baseline.captured",
@@ -713,7 +730,8 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.catch(() => Effect.void));
       return;
     }
-    if (!isGitWorkspace(sessionRuntime.value.cwd)) {
+    const checkpointTarget = checkpointExecutionTargetForThread(thread);
+    if (checkpointTarget.kind === "legacy-host" && !isGitWorkspace(sessionRuntime.value.cwd)) {
       yield* appendRevertFailureActivity({
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
@@ -759,6 +777,7 @@ const make = Effect.gen(function* () {
       cwd: sessionRuntime.value.cwd,
       checkpointRef: targetCheckpointRef,
       fallbackToHead: event.payload.turnCount === 0,
+      target: checkpointTarget,
     });
     if (!restored) {
       yield* appendRevertFailureActivity({
@@ -772,7 +791,9 @@ const make = Effect.gen(function* () {
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects the reverted filesystem state.
-    yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
+    if (checkpointTarget.kind === "legacy-host") {
+      yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
+    }
 
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
@@ -793,6 +814,7 @@ const make = Effect.gen(function* () {
       yield* checkpointStore.deleteCheckpointRefs({
         cwd: sessionRuntime.value.cwd,
         checkpointRefs: staleCheckpointRefs,
+        target: checkpointTarget,
       });
     }
 
