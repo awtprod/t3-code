@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Effect's Path service has no `delimiter`.
+import * as NodePath from "node:path";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -298,6 +300,34 @@ function resolveBaseDir(baseDir: string | undefined): Effect.Effect<string, neve
   });
 }
 
+/**
+ * Repo-local binaries, ahead of whatever PATH we inherited.
+ *
+ * We spawn `vp` by bare name, so resolution is at the mercy of the caller's
+ * PATH. That is not hypothetical: `atfs` ships an unrelated `/usr/bin/vp`
+ * (ShapeTools), and when it wins the lookup it does not fail loudly — it prints
+ * `basename: unrecognized option '--filter=...'`, starts no dev server, and
+ * exits 0. The launcher then reports success while the stack is already gone.
+ * Pinning node_modules/.bin first makes `vp` mean this repo's toolchain
+ * regardless of the environment we were launched from.
+ */
+function devToolchainPath(
+  baseEnv: NodeJS.ProcessEnv,
+): Effect.Effect<string | undefined, never, Path.Path> {
+  return Effect.gen(function* () {
+    const path = yield* Path.Path;
+    // import.meta.dirname is scripts/; its parent is the repo root.
+    const binDir = path.join(path.dirname(import.meta.dirname), "node_modules", ".bin");
+    const inherited = baseEnv.PATH;
+    if (inherited === undefined || inherited.length === 0) {
+      return binDir;
+    }
+    // Effect's Path service has no `delimiter`; the separator is platform state.
+    const alreadyFirst = inherited.split(NodePath.delimiter).at(0) === binDir;
+    return alreadyFirst ? inherited : `${binDir}${NodePath.delimiter}${inherited}`;
+  });
+}
+
 interface CreateDevRunnerEnvInput {
   readonly mode: DevMode;
   readonly baseEnv: NodeJS.ProcessEnv;
@@ -339,6 +369,7 @@ export function createDevRunnerEnv({
 
     const output: NodeJS.ProcessEnv = {
       ...baseEnv,
+      PATH: yield* devToolchainPath(baseEnv),
       PORT: String(webPort),
       VITE_DEV_SERVER_URL:
         devUrl?.toString() ??
@@ -362,6 +393,11 @@ export function createDevRunnerEnv({
 
     if (configuredBaseDir !== undefined) {
       output.T3CODE_HOME = resolvedBaseDir;
+      // The server gives COMMAND_CENTER_HOME precedence over T3CODE_HOME.
+      // Once the runner has selected an explicit or worktree-local home, an
+      // inherited launcher home must not redirect the child back to shared
+      // state.
+      delete output.COMMAND_CENTER_HOME;
     } else {
       delete output.T3CODE_HOME;
     }
