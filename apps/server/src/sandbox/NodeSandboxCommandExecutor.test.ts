@@ -1,9 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as Effect from "effect/Effect";
 import { NodeSandboxCommandExecutor } from "./NodeSandboxCommandExecutor.ts";
+
+const hostPlatform = Effect.runSync(HostProcessPlatform);
 
 describe("NodeSandboxCommandExecutor", () => {
   it("executes argv directly and captures bounded output", async () => {
-    const result = await new NodeSandboxCommandExecutor(process.platform).run({
+    const result = await new NodeSandboxCommandExecutor(hostPlatform).run({
       executable: process.execPath,
       args: [
         "-e",
@@ -17,7 +21,7 @@ describe("NodeSandboxCommandExecutor", () => {
 
   it("kills commands that exceed their deadline", async () => {
     await expect(
-      new NodeSandboxCommandExecutor(process.platform).run({
+      new NodeSandboxCommandExecutor(hostPlatform).run({
         executable: process.execPath,
         args: ["-e", "setInterval(() => {}, 1000)"],
         timeoutMs: 25,
