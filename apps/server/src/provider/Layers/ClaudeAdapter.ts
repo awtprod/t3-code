@@ -76,6 +76,10 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
+import {
+  sandboxProviderTarget,
+  spawnClaudeInSandbox,
+} from "../../sandbox/SandboxProviderProcess.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import {
   getClaudeModelCapabilities,
@@ -4144,6 +4148,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         canUseTool,
         env: claudeEnvironment,
         additionalDirectories,
+        ...(sandboxProviderTarget(input.threadId)
+          ? {
+              spawnClaudeCodeProcess: (options) =>
+                spawnClaudeInSandbox(sandboxProviderTarget(input.threadId)!, options),
+            }
+          : {}),
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
           ? {

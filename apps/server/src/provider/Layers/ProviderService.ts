@@ -62,6 +62,12 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import { resolveSupabaseConnection } from "../../database/SupabaseMcpConnector.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import {
+  bindSandboxProviderTarget,
+  makeSandboxProviderBindingOwner,
+  unbindAllSandboxProviderTargets,
+  unbindSandboxProviderTarget,
+} from "../../sandbox/SandboxProviderProcess.ts";
 import { commandCenterProviderIsolationIssue } from "../security/CommandCenterProviderIsolation.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
@@ -235,6 +241,7 @@ const correlateRuntimeEventWithInstance = (
 const makeProviderService = Effect.fn("makeProviderService")(function* (
   options?: ProviderServiceLiveOptions,
 ) {
+  const sandboxBindingOwner = makeSandboxProviderBindingOwner();
   const analytics = yield* Effect.service(AnalyticsService.AnalyticsService);
   const serverConfig = yield* ServerConfig.ServerConfig;
   const eventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
@@ -637,7 +644,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   });
 
   const startSession: ProviderServiceMethod<"startSession"> = Effect.fn("startSession")(
-    function* (threadId, rawInput) {
+    function* (threadId, rawInput, executionTarget) {
       const parsed = yield* decodeInputOrValidationError({
         operation: "ProviderService.startSession",
         schema: ProviderSessionStartInput,
@@ -658,6 +665,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       return yield* Effect.gen(function* () {
         const instanceInfo = yield* registry.getInstanceInfo(resolvedInstanceId);
         const resolvedProvider = instanceInfo.driverKind;
+        if (executionTarget?.kind === "sandbox") {
+          if (resolvedProvider !== "codex" && resolvedProvider !== "claudeAgent") {
+            return yield* toValidationError(
+              "ProviderService.startSession",
+              `Sandbox provider startup is not supported for '${resolvedProvider}'.`,
+            );
+          }
+        }
         metricProvider = resolvedProvider;
         if (parsed.provider !== undefined && parsed.provider !== resolvedProvider) {
           return yield* toValidationError(
@@ -738,6 +753,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
+        if (executionTarget?.kind === "sandbox") {
+          bindSandboxProviderTarget(executionTarget, sandboxBindingOwner);
+        }
         yield* prepareMcpSession(threadId, resolvedInstanceId, input.projectId, effectiveCwd);
         const session = yield* adapter
           .startSession({
@@ -793,6 +811,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
         return sessionWithInstance;
       }).pipe(
+        Effect.onError(() =>
+          Effect.sync(() => {
+            if (executionTarget?.kind === "sandbox") {
+              unbindSandboxProviderTarget(threadId, sandboxBindingOwner);
+            }
+          }),
+        ),
         withMetrics({
           counter: providerSessionsTotal,
           attributes: () =>
@@ -1076,6 +1101,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           provider: routed.adapter.provider,
         });
       }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => unbindSandboxProviderTarget(input.threadId, sandboxBindingOwner)),
+        ),
         withMetrics({
           counter: providerSessionsTotal,
           outcomeAttributes: () =>
@@ -1273,6 +1301,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   yield* Effect.addFinalizer(() =>
     runStopAll().pipe(
+      Effect.ensuring(Effect.sync(() => unbindAllSandboxProviderTargets(sandboxBindingOwner))),
       Effect.catchCause((cause) =>
         Effect.logWarning("failed to stop provider service", {
           errorTag: causeErrorTag(cause),

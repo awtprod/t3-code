@@ -1,4 +1,9 @@
-import { ProjectId, ThreadId, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  DEFAULT_SANDBOX_RESOURCE_LIMITS,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -132,6 +137,85 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-opus-4-6",
       });
+    }),
+  );
+
+  it.effect("round-trips validated sandbox state and preserves historical nulls", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const sandbox = {
+        lifecycle: "ready" as const,
+        sandboxId: "sandbox-thread-1" as never,
+        runtime: "podman" as const,
+        runtimeRef: "container-thread-1",
+        branch: {
+          branchName: "threads/thread-sandbox",
+          baseCommit: "a".repeat(40),
+        },
+        limits: DEFAULT_SANDBOX_RESOURCE_LIMITS,
+        desktop: { status: "ready" as const, sessionId: "desktop-thread-1" },
+        services: [],
+        controller: { kind: "none" as const },
+        createdAt: "2026-08-15T00:00:00.000Z",
+        lastActiveAt: "2026-08-15T00:00:01.000Z",
+      };
+
+      yield* threads.upsert({
+        threadId: ThreadId.make("thread-sandbox"),
+        projectId: ProjectId.make("project-sandbox"),
+        title: "Sandbox thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5.6",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: "threads/thread-sandbox",
+        worktreePath: null,
+        sandbox,
+        latestTurnId: null,
+        createdAt: "2026-08-15T00:00:00.000Z",
+        updatedAt: "2026-08-15T00:00:01.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        snoozedUntil: null,
+        snoozedAt: null,
+        pinnedAt: null,
+        latestUserMessageAt: null,
+        pendingApprovalCount: 0,
+        pendingUserInputCount: 0,
+        hasActionableProposedPlan: 0,
+        deletedAt: null,
+      });
+
+      const persisted = yield* threads.getById({ threadId: ThreadId.make("thread-sandbox") });
+      assert.deepStrictEqual(Option.getOrNull(persisted)?.sandbox, sandbox);
+
+      yield* sql`
+        UPDATE projection_threads SET sandbox_json = NULL WHERE thread_id = 'thread-sandbox'
+      `;
+      const historical = yield* threads.getById({ threadId: ThreadId.make("thread-sandbox") });
+      assert.strictEqual(Option.getOrNull(historical)?.sandbox, null);
+    }),
+  );
+
+  it.effect("fails closed when persisted sandbox JSON is malformed", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`
+        UPDATE projection_threads
+        SET sandbox_json = '{"lifecycle":"ready"}'
+        WHERE thread_id = 'thread-null-options'
+      `;
+
+      const result = yield* Effect.result(
+        threads.getById({ threadId: ThreadId.make("thread-null-options") }),
+      );
+      assert.isTrue(result._tag === "Failure");
     }),
   );
 

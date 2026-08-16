@@ -152,6 +152,7 @@ import { PullRequestDetailGhost } from "./pullRequest/PullRequestGhosts";
 import { PullRequestsUnavailableState } from "./pullRequest/PullRequestsUnavailableState";
 import { RightPanelTabs, type PullRequestTabStatus } from "./RightPanelTabs";
 import { AgentsPanel } from "./AgentsPanel";
+import { SandboxDesktopPanel } from "./SandboxDesktopPanel";
 import {
   deriveAgentPanelModel,
   foldSubagentActivities,
@@ -1234,6 +1235,17 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
+    reportFailure: false,
+  });
+  const provisionSandbox = useAtomCommand(threadEnvironment.provisionSandbox, "sandbox provision");
+  const takeOverSandbox = useAtomCommand(threadEnvironment.takeOverSandbox, "sandbox takeover");
+  const resumeSandbox = useAtomCommand(threadEnvironment.resumeSandbox, "sandbox resume");
+  const stopSandbox = useAtomCommand(threadEnvironment.stopSandbox, "sandbox stop");
+  const exportSandboxBranch = useAtomCommand(
+    threadEnvironment.exportSandboxBranch,
+    "sandbox branch export",
+  );
+  const requestSandboxViewerTicket = useAtomCommand(threadEnvironment.requestSandboxViewerTicket, {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
@@ -3356,6 +3368,10 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().open(activeThreadRef, "agents");
   }, [activeThreadRef]);
+  const addDesktopSurface = useCallback(() => {
+    if (!activeThreadRef || routeKind !== "server") return;
+    useRightPanelStore.getState().open(activeThreadRef, "desktop");
+  }, [activeThreadRef, routeKind]);
   const openFileSurface = useCallback(
     (relativePath: string) => {
       if (!activeThreadRef || !activeProject) return;
@@ -6227,6 +6243,40 @@ function ChatViewContent(props: ChatViewProps) {
         composerDraftTarget={composerDraftTarget}
         onStateChange={handlePullRequestTabStatusChange}
       />
+    ) : activeRightPanelSurface?.kind === "desktop" ? (
+      <SandboxDesktopPanel
+        sandbox={activeServerThread?.sandbox ?? null}
+        onProvision={() => provisionSandbox({ environmentId, input: { threadId } })}
+        onTakeover={() =>
+          takeOverSandbox({
+            environmentId,
+            input: { threadId, sessionId: `desktop-${randomHex(16)}` },
+          })
+        }
+        onResume={(leaseId) =>
+          resumeSandbox({
+            environmentId,
+            input: {
+              threadId,
+              ...(leaseId === undefined ? {} : { leaseId }),
+              takeoverSummary:
+                "Manual desktop control ended; repository and browser state may have changed.",
+            },
+          })
+        }
+        onStop={() => stopSandbox({ environmentId, input: { threadId } })}
+        onExport={() => exportSandboxBranch({ environmentId, input: { threadId } })}
+        onReconnect={() => undefined}
+        onRequestViewerUrl={async () => {
+          const result = await requestSandboxViewerTicket({
+            environmentId,
+            input: { threadId },
+          });
+          if (result._tag === "Failure")
+            throw new Error("Could not obtain a desktop viewer ticket.");
+          return result.value.viewerUrl;
+        }}
+      />
     ) : activeRightPanelSurface?.kind === "agents" ? (
       <AgentsPanel
         model={agentPanelModel}
@@ -6685,12 +6735,14 @@ function ChatViewContent(props: ChatViewProps) {
           onAddFiles={addFilesSurface}
           onAddPullRequest={addPullRequestSurface}
           onAddAgents={addAgentsSurface}
+          onAddDesktop={addDesktopSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           terminalAvailable={activeProject !== null}
           diffAvailable={isServerThread && isGitRepo}
           filesAvailable={activeProject !== null}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           agentsAvailable
+          desktopAvailable={isServerThread}
           pullRequestStatuses={pullRequestTabStatuses}
           liveAgentCount={agentPanelModel.liveCount}
         >
@@ -6724,12 +6776,14 @@ function ChatViewContent(props: ChatViewProps) {
             onAddFiles={addFilesSurface}
             onAddPullRequest={addPullRequestSurface}
             onAddAgents={addAgentsSurface}
+            onAddDesktop={addDesktopSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             terminalAvailable={activeProject !== null}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}
             pullRequestAvailable={pullRequestSurfaceAvailable}
             agentsAvailable
+            desktopAvailable={isServerThread}
             pullRequestStatuses={pullRequestTabStatuses}
             liveAgentCount={agentPanelModel.liveCount}
           >

@@ -85,6 +85,7 @@ describe("orchestration projector", () => {
         interactionMode: "default",
         branch: null,
         worktreePath: null,
+        sandbox: null,
         latestTurn: null,
         createdAt: now,
         updatedAt: now,

@@ -31,6 +31,7 @@ import type * as Stream from "effect/Stream";
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
+import type { ProviderExecutionTarget } from "../../sandbox/ThreadSandboxRuntime.ts";
 
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
@@ -42,6 +43,7 @@ export interface ProviderServiceShape {
   readonly startSession: (
     threadId: ThreadId,
     input: ProviderSessionStartInput,
+    executionTarget?: ProviderExecutionTarget,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
 
   /**

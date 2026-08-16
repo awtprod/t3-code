@@ -1,8 +1,12 @@
 import {
+  DEFAULT_SANDBOX_DESKTOP_CONFIG,
+  DEFAULT_SANDBOX_RESOURCE_LIMITS,
   EventId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
+  type SandboxEvent,
+  type SandboxState,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -23,6 +27,9 @@ import {
 import { projectEvent } from "./projector.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+const sandboxInvariant = (commandType: string, detail: string) =>
+  new OrchestrationCommandInvariantError({ commandType, detail });
 
 // Session adoption takes seconds; a user message still unadopted after this
 // window is a failed/stale start, not pending work. Mirrors the client's
@@ -223,6 +230,24 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   OrchestrationCommandInvariantError | PlatformError.PlatformError,
   Crypto.Crypto
 > {
+  const sandboxTransition = Effect.fn("sandboxTransition")(function* (
+    threadId: SandboxEvent["threadId"],
+    commandId: OrchestrationCommand["commandId"],
+    type: SandboxEvent["type"],
+    event: SandboxEvent,
+    sandbox: SandboxState,
+  ) {
+    return {
+      ...(yield* withEventBase({
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: event.occurredAt,
+        commandId,
+      })),
+      type,
+      payload: { threadId, event, sandbox },
+    } as PlannedOrchestrationEvent;
+  });
   switch (command.type) {
     case "project.create": {
       yield* requireProjectAbsent({
@@ -360,6 +385,23 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const sandbox =
+        command.sandbox ??
+        (command.sandboxBranch
+          ? {
+              lifecycle: "unprovisioned" as const,
+              branch: command.sandboxBranch,
+              limits: command.sandboxConfig?.limits ?? DEFAULT_SANDBOX_RESOURCE_LIMITS,
+              desktop: {
+                status: "unavailable" as const,
+                resolution: command.sandboxConfig?.desktop ?? DEFAULT_SANDBOX_DESKTOP_CONFIG,
+              },
+              services: [],
+              controller: { kind: "none" as const },
+              createdAt: command.createdAt,
+              lastActiveAt: command.createdAt,
+            }
+          : null);
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -381,6 +423,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          sandboxConfig: command.sandboxConfig,
+          sandboxBranch: command.sandboxBranch,
+          sandbox,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -929,6 +974,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (targetThread.sandbox?.controller.kind === "human") {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} is controlled by an active human takeover lease`,
+        );
+      }
+      if (
+        targetThread.sandbox != null &&
+        !["unprovisioned", "ready"].includes(targetThread.sandbox.lifecycle)
+      ) {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox is ${targetThread.sandbox.lifecycle}`,
+        );
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1520,6 +1580,466 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       };
       return [unsettledEvent, activityAppendedEvent];
+    }
+
+    case "sandbox.branch-export": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (thread.sandbox === null || thread.sandbox === undefined) {
+        return yield* sandboxInvariant(command.type, `thread ${command.threadId} has no sandbox`);
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "sandbox.branch-export-requested",
+        payload: { threadId: command.threadId },
+      };
+    }
+
+    case "sandbox.worker.spawn": {
+      yield* requireThread({ readModel, command, threadId: command.parentThreadId });
+      yield* requireThreadAbsent({ readModel, command, threadId: command.childThreadId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.parentThreadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "sandbox.worker-spawn-requested",
+        payload: {
+          parentThreadId: command.parentThreadId,
+          childThreadId: command.childThreadId,
+          task: command.task,
+          inheritedCommit: command.inheritedCommit,
+          ...(command.inheritedPatch === undefined
+            ? {}
+            : { inheritedPatch: command.inheritedPatch }),
+          ...(command.config === undefined ? {} : { config: command.config }),
+          branchName: command.branchName,
+        },
+      };
+    }
+
+    case "sandbox.worker.status":
+    case "sandbox.worker.message":
+    case "sandbox.worker.stop": {
+      yield* requireThread({ readModel, command, threadId: command.parentThreadId });
+      const child = yield* requireThread({ readModel, command, threadId: command.childThreadId });
+      if (child.sandboxBranch?.parentThreadId !== command.parentThreadId) {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.childThreadId} is not a worker of ${command.parentThreadId}`,
+        );
+      }
+      const suffix = command.type.slice("sandbox.worker.".length);
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.parentThreadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: `sandbox.worker-${suffix}-requested` as
+          | "sandbox.worker-status-requested"
+          | "sandbox.worker-message-requested"
+          | "sandbox.worker-stop-requested",
+        payload: {
+          parentThreadId: command.parentThreadId,
+          childThreadId: command.childThreadId,
+          ...(command.type === "sandbox.worker.message" ? { message: command.message } : {}),
+          ...(command.type === "sandbox.worker.stop" && command.reason !== undefined
+            ? { reason: command.reason }
+            : {}),
+        },
+      };
+    }
+
+    case "sandbox.provision": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const current = thread.sandbox ?? null;
+      if (current !== null && current.lifecycle !== "unprovisioned") {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox is not unprovisioned`,
+        );
+      }
+      const branch = current?.branch ?? command.branch;
+      if (branch === undefined) {
+        return {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "sandbox.provision-requested",
+          payload: {
+            threadId: command.threadId,
+            ...(command.config === undefined ? {} : { config: command.config }),
+          },
+        };
+      }
+      const config = command.config ?? thread.sandboxConfig ?? {};
+      const currentWithoutFailure =
+        current === null
+          ? {
+              branch,
+              limits: config.limits ?? DEFAULT_SANDBOX_RESOURCE_LIMITS,
+              desktop: {
+                status: "unavailable" as const,
+                resolution: config.desktop ?? DEFAULT_SANDBOX_DESKTOP_CONFIG,
+              },
+              services: [],
+              controller: { kind: "none" as const },
+              createdAt: command.createdAt,
+              lastActiveAt: command.createdAt,
+            }
+          : (({ failure: _failure, ...rest }) => rest)(current);
+      const sandbox: SandboxState = {
+        ...currentWithoutFailure,
+        lifecycle: "provisioning",
+        runtime: config.runtime ?? "docker",
+        limits: config.limits ?? currentWithoutFailure.limits,
+        desktop: {
+          status: "starting",
+          resolution:
+            config.desktop ??
+            currentWithoutFailure.desktop.resolution ??
+            DEFAULT_SANDBOX_DESKTOP_CONFIG,
+        },
+        lastActiveAt: command.createdAt,
+      };
+      const event: SandboxEvent = {
+        type: "sandbox.provisioning-started",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        sandbox,
+      );
+    }
+
+    case "sandbox.provision.ready": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.sandbox ?? null;
+      if (current?.lifecycle !== "provisioning") {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox is not provisioning`,
+        );
+      }
+      const { failure: _failure, ...currentWithoutFailure } = current;
+      const sandbox: SandboxState = {
+        ...currentWithoutFailure,
+        lifecycle: "ready",
+        sandboxId: command.sandboxId,
+        runtime: command.runtime,
+        runtimeRef: command.runtimeRef,
+        desktop: { ...current.desktop, status: "ready", readyAt: command.createdAt },
+        lastActiveAt: command.createdAt,
+      };
+      const event: SandboxEvent = {
+        type: "sandbox.ready",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+        sandboxId: command.sandboxId,
+        runtime: command.runtime,
+        runtimeRef: command.runtimeRef,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        sandbox,
+      );
+    }
+
+    case "sandbox.operation.fail": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.sandbox ?? null;
+      if (current === null || ["stopped", "expired", "deleted"].includes(current.lifecycle)) {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox cannot fail from its current lifecycle`,
+        );
+      }
+      const sandbox: SandboxState = {
+        ...current,
+        lifecycle: "failed",
+        failure: command.failure,
+        lastActiveAt: command.createdAt,
+      };
+      const event: SandboxEvent = {
+        type: "sandbox.failed",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+        failure: command.failure,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        sandbox,
+      );
+    }
+
+    case "sandbox.pause": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.sandbox ?? null;
+      if (current?.lifecycle !== "ready" || current.controller.kind === "human") {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox cannot be paused`,
+        );
+      }
+      const sandbox: SandboxState = {
+        ...current,
+        lifecycle: "paused",
+        pauseReason: command.reason,
+        controller: { kind: "none" },
+        lastActiveAt: command.createdAt,
+      };
+      const event: SandboxEvent = {
+        type: "sandbox.paused",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+        reason: command.reason,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        sandbox,
+      );
+    }
+
+    case "sandbox.takeover": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.sandbox ?? null;
+      if (current === null || !["ready", "paused"].includes(current.lifecycle)) {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox is not available for takeover`,
+        );
+      }
+      if (current.controller.kind === "human") {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} already has an active human takeover lease`,
+        );
+      }
+      const sandbox: SandboxState = {
+        ...current,
+        lifecycle: "pausing",
+        pauseReason: "human-takeover",
+        controller: { kind: "none" },
+        lastActiveAt: command.createdAt,
+      };
+      const event: SandboxEvent = {
+        type: "sandbox.takeover-requested",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+        sessionId: command.sessionId,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        sandbox,
+      );
+    }
+
+    case "sandbox.takeover.complete": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.sandbox ?? null;
+      if (current?.lifecycle !== "pausing" || current.pauseReason !== "human-takeover") {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox is not awaiting takeover`,
+        );
+      }
+      const controller = {
+        kind: "human" as const,
+        leaseId: String(command.commandId),
+        sessionId: command.sessionId,
+        acquiredAt: command.createdAt,
+      };
+      const sandbox: SandboxState = {
+        ...current,
+        lifecycle: "paused",
+        controller,
+        lastActiveAt: command.createdAt,
+      };
+      const event: SandboxEvent = {
+        type: "sandbox.takeover-acquired",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+        controller,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        sandbox,
+      );
+    }
+
+    case "sandbox.resume": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.sandbox ?? null;
+      if (current?.lifecycle !== "paused") {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox is not paused`,
+        );
+      }
+      if (current.controller.kind === "human" && command.leaseId !== current.controller.leaseId) {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} resume does not hold the active takeover lease`,
+        );
+      }
+      const summary = command.takeoverSummary ?? "Sandbox resumed without manual changes.";
+      const { pauseReason: _pauseReason, ...currentWithoutPauseReason } = current;
+      const sandbox: SandboxState = {
+        ...currentWithoutPauseReason,
+        lifecycle: "ready",
+        controller: { kind: "none" },
+        lastActiveAt: command.createdAt,
+      };
+      const event: SandboxEvent = {
+        type: "sandbox.resumed",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+        summary,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        sandbox,
+      );
+    }
+
+    case "sandbox.expire":
+    case "sandbox.stop": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.sandbox ?? null;
+      if (current === null || ["stopped", "expired", "deleted"].includes(current.lifecycle)) {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox is already terminal`,
+        );
+      }
+      if (current.controller.kind === "human" && command.type !== "sandbox.expire") {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox has an active takeover lease`,
+        );
+      }
+      const expired = command.type === "sandbox.expire";
+      const sandbox: SandboxState = {
+        ...current,
+        lifecycle: "stopping",
+        controller: { kind: "none" },
+        lastActiveAt: command.createdAt,
+      };
+      const event: SandboxEvent = {
+        type: "sandbox.stopping",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+        expired,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        sandbox,
+      );
+    }
+
+    case "sandbox.stop.complete": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.sandbox ?? null;
+      if (current?.lifecycle !== "stopping") {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} sandbox is not stopping`,
+        );
+      }
+      const sandbox: SandboxState = {
+        ...current,
+        lifecycle: command.expired ? "expired" : "stopped",
+        lastActiveAt: command.createdAt,
+      };
+      const event: SandboxEvent = {
+        type: command.expired ? "sandbox.expired" : "sandbox.stopped",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        sandbox,
+      );
+    }
+
+    case "sandbox.reconcile.result": {
+      yield* requireThread({ readModel, command, threadId: command.threadId });
+      const event: SandboxEvent = {
+        type: "sandbox.reconciled",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+        disposition: command.disposition,
+      };
+      return yield* sandboxTransition(
+        command.threadId,
+        command.commandId,
+        event.type,
+        event,
+        command.sandbox,
+      );
+    }
+
+    case "sandbox.branch-export.result": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const current = thread.sandbox ?? null;
+      if (current === null)
+        return yield* sandboxInvariant(command.type, `thread ${command.threadId} has no sandbox`);
+      const event: SandboxEvent = {
+        type: "sandbox.branch-exported",
+        threadId: command.threadId,
+        occurredAt: command.createdAt,
+        branchName: command.branchName,
+        headCommit: command.headCommit,
+        artifactId: command.artifactId,
+        bundleSha256: command.bundleSha256,
+      };
+      return yield* sandboxTransition(command.threadId, command.commandId, event.type, event, {
+        ...current,
+        lastActiveAt: command.createdAt,
+      });
     }
 
     default: {

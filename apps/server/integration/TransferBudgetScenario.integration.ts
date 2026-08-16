@@ -7,6 +7,7 @@ import {
   MessageId,
   ProjectId,
   ProviderDriverKind,
+  SandboxId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -80,8 +81,43 @@ export const seedTransferBudgetHistory = Effect.fn("TransferBudget.seedHistory")
     interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
     branch: "main",
     worktreePath: harness.workspaceDir,
+    sandboxBranch: {
+      branchName: `t3/thread/${TRANSFER_THREAD_ID}`,
+      baseCommit: harness.baseCommit,
+    },
     createdAt: turnTimestamp(0),
   });
+  yield* harness.waitForThread(
+    TRANSFER_THREAD_ID,
+    (thread) => thread.sandbox?.lifecycle === "unprovisioned",
+  );
+  yield* harness.engine.dispatch({
+    type: "sandbox.provision",
+    commandId: CommandId.make(`transfer:${provider}:sandbox-provision`),
+    threadId: TRANSFER_THREAD_ID,
+    branch: {
+      branchName: `t3/thread/${TRANSFER_THREAD_ID}`,
+      baseCommit: harness.baseCommit,
+    },
+    createdAt: turnTimestamp(0),
+  });
+  yield* harness.waitForThread(
+    TRANSFER_THREAD_ID,
+    (thread) => thread.sandbox?.lifecycle === "provisioning",
+  );
+  yield* harness.engine.dispatch({
+    type: "sandbox.provision.ready",
+    commandId: CommandId.make(`transfer:${provider}:sandbox-ready`),
+    threadId: TRANSFER_THREAD_ID,
+    sandboxId: SandboxId.make(`transfer-${provider}`),
+    runtime: "docker",
+    runtimeRef: `transfer-${provider}`,
+    createdAt: turnTimestamp(0),
+  });
+  yield* harness.waitForThread(
+    TRANSFER_THREAD_ID,
+    (thread) => thread.sandbox?.lifecycle === "ready",
+  );
 
   for (let turnIndex = 0; turnIndex < TRANSFER_HISTORY_TURN_COUNT; turnIndex += 1) {
     const response = makeRecordedTransferTurn(provider, turnIndex);

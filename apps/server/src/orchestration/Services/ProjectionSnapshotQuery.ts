@@ -20,6 +20,7 @@ import type {
   OrchestrationThreadDetailWindow,
   OrchestrationThreadShell,
   ProjectId,
+  SandboxState,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -42,6 +43,7 @@ export interface ProjectionThreadCheckpointContext {
   readonly projectId: ProjectId;
   readonly workspaceRoot: string;
   readonly worktreePath: string | null;
+  readonly sandbox?: SandboxState | null;
   readonly checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>;
 }
 
@@ -50,6 +52,7 @@ export interface ProjectionFullThreadDiffContext {
   readonly projectId: ProjectId;
   readonly workspaceRoot: string;
   readonly worktreePath: string | null;
+  readonly sandbox?: SandboxState | null;
   readonly latestCheckpointTurnCount: number;
   readonly toCheckpointRef: CheckpointRef | null;
 }

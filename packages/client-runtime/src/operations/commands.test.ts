@@ -25,6 +25,8 @@ import {
   archiveThread,
   createProject,
   settleThread,
+  sandboxSpawnWorker,
+  takeOverSandbox,
   stopThreadSession,
   unsettleThread,
 } from "./commands.ts";
@@ -118,6 +120,41 @@ describe("environment commands", () => {
           createdAt: "2026-06-06T00:01:00.000Z",
         },
       ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches takeover and isolated child-worker commands", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+      const provide = Effect.provideService(
+        EnvironmentSupervisor.EnvironmentSupervisor,
+        supervisor,
+      );
+
+      yield* takeOverSandbox({
+        threadId: ThreadId.make("parent"),
+        sessionId: "desktop-session",
+        createdAt: "2026-06-06T00:00:00.000Z",
+      }).pipe(provide);
+      yield* sandboxSpawnWorker({
+        parentThreadId: ThreadId.make("parent"),
+        childThreadId: ThreadId.make("child"),
+        branchName: "thread/child",
+        inheritedCommit: "0123456789abcdef0123456789abcdef01234567",
+        task: "Implement the isolated task",
+        createdAt: "2026-06-06T00:00:01.000Z",
+      }).pipe(provide);
+
+      expect(dispatched.map((command) => command.type)).toEqual([
+        "sandbox.takeover",
+        "sandbox.worker.spawn",
+      ]);
+      expect(dispatched[1]).toMatchObject({
+        parentThreadId: "parent",
+        childThreadId: "child",
+        branchName: "thread/child",
+      });
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 

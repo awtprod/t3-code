@@ -298,6 +298,8 @@ export const make = Effect.gen(function* () {
             interactionMode: bootstrap.createThread.interactionMode,
             branch: bootstrap.createThread.branch,
             worktreePath: bootstrap.createThread.worktreePath,
+            sandboxConfig: bootstrap.createThread.sandboxConfig,
+            sandboxBranch: bootstrap.createThread.sandboxBranch,
             createdAt: bootstrap.createThread.createdAt,
           });
           createdThread = true;
@@ -380,8 +382,79 @@ export const make = Effect.gen(function* () {
     );
   };
 
+  const ensureThreadSandbox = Effect.fn("OrchestrationCommandDispatcher.ensureThreadSandbox")(
+    function* (
+      resolvedCommand: OrchestrationCommand,
+    ): Effect.fn.Return<OrchestrationCommand, OrchestrationDispatchCommandError> {
+      const create =
+        resolvedCommand.type === "thread.create"
+          ? resolvedCommand
+          : resolvedCommand.type === "thread.turn.start"
+            ? resolvedCommand.bootstrap?.createThread
+            : undefined;
+      if (create === undefined || create.sandboxBranch !== undefined) return resolvedCommand;
+      const targetThreadId =
+        resolvedCommand.type === "thread.create" || resolvedCommand.type === "thread.turn.start"
+          ? resolvedCommand.threadId
+          : undefined;
+      if (targetThreadId === undefined) return resolvedCommand;
+      const snapshot = yield* projectionSnapshotQuery
+        .getSnapshot()
+        .pipe(
+          Effect.mapError((cause) =>
+            toDispatchCommandError(cause, "Failed to load project for sandbox creation"),
+          ),
+        );
+      const project = snapshot.projects.find((item) => item.id === create.projectId);
+      if (!project)
+        return yield* new OrchestrationDispatchCommandError({
+          message: `Project '${create.projectId}' was not found.`,
+        });
+      const local = yield* gitWorkflow
+        .localStatus({ cwd: project.workspaceRoot })
+        .pipe(
+          Effect.mapError((cause) =>
+            toDispatchCommandError(cause, "Failed to inspect sandbox Git base"),
+          ),
+        );
+      if (!local.isRepo || local.refName === null)
+        return yield* new OrchestrationDispatchCommandError({
+          message: "Isolated threads require a Git repository with a selected branch.",
+        });
+      const base = yield* gitWorkflow
+        .resolveRemoteTrackingCommit({
+          cwd: project.workspaceRoot,
+          refName: local.refName,
+          fallbackRemoteName: "origin",
+        })
+        .pipe(
+          Effect.mapError((cause) =>
+            toDispatchCommandError(cause, "Failed to resolve immutable sandbox Git base"),
+          ),
+        );
+      const sandboxFields = {
+        sandboxConfig: create.sandboxConfig ?? {},
+        sandboxBranch: {
+          branchName: `t3/thread/${targetThreadId}`,
+          baseCommit: base.commitSha,
+        },
+      };
+      if (resolvedCommand.type === "thread.create") return { ...resolvedCommand, ...sandboxFields };
+      if (resolvedCommand.type === "thread.turn.start")
+        return {
+          ...resolvedCommand,
+          bootstrap: {
+            ...resolvedCommand.bootstrap!,
+            createThread: { ...resolvedCommand.bootstrap!.createThread!, ...sandboxFields },
+          },
+        };
+      return resolvedCommand;
+    },
+  );
+
   const dispatchNormalized: OrchestrationCommandDispatcherShape["dispatchNormalized"] = (command) =>
     resolveEfficiency(command).pipe(
+      Effect.flatMap(ensureThreadSandbox),
       Effect.flatMap((resolvedCommand) =>
         resolvedCommand.type === "thread.turn.start" && resolvedCommand.bootstrap
           ? dispatchBootstrapTurnStart(resolvedCommand)
