@@ -19,7 +19,11 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
-import { SandboxManagerError, SandboxRuntimeManager } from "../../sandbox/SandboxRuntimeManager.ts";
+import {
+  SandboxManagerError,
+  SandboxRuntimeManager,
+  resolveSandboxImage,
+} from "../../sandbox/SandboxRuntimeManager.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -168,10 +172,9 @@ export const make = Effect.gen(function* () {
         branch,
         createdAt,
       });
-      const declaration = Option.getOrUndefined(
-        yield* projectFiles.load(project.workspaceRoot),
-      )?.sandbox;
-      const image = declaration?.image ?? process.env.T3_SANDBOX_IMAGE?.trim();
+      const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
+      const declaration = projectFile?.sandbox;
+      const image = resolveSandboxImage(projectFile);
       if (!image)
         return yield* new SandboxManagerError({
           message: "T3_SANDBOX_IMAGE must name a digest-pinned desktop sandbox image.",
@@ -291,11 +294,9 @@ export const make = Effect.gen(function* () {
         return yield* new SandboxManagerError({
           message: `project '${parent.projectId}' was not found`,
         });
-      const declaration = Option.getOrUndefined(
-        yield* projectFiles.load(project.workspaceRoot),
-      )?.sandbox;
-      const fallbackImage = process.env.T3_SANDBOX_IMAGE?.trim();
-      const image = declaration?.image ?? fallbackImage;
+      const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
+      const declaration = projectFile?.sandbox;
+      const image = resolveSandboxImage(projectFile);
       if (!image)
         return yield* new SandboxManagerError({
           message: "A digest-pinned sandbox image is required to spawn an isolated worker",

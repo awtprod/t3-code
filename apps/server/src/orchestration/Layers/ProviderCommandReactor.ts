@@ -72,7 +72,11 @@ import {
   ThreadSandboxRuntime,
   type ProviderExecutionTarget,
 } from "../../sandbox/ThreadSandboxRuntime.ts";
-import { SandboxRuntimeManager } from "../../sandbox/SandboxRuntimeManager.ts";
+import {
+  SandboxRuntimeManager,
+  resolveSandboxImage,
+  resolveSandboxPreviewProxyImage,
+} from "../../sandbox/SandboxRuntimeManager.ts";
 import {
   T3ProjectFileLoader,
   layer as T3ProjectFileLoaderLive,
@@ -370,7 +374,11 @@ export const make = Effect.gen(function* () {
       thread: Parameters<typeof threadSandboxRuntime.ensureReady>[0],
       legacyCwd: string | undefined,
     ) {
-      if (thread.sandbox != null && thread.sandbox.lifecycle !== "unprovisioned") {
+      if (
+        thread.sandbox != null &&
+        thread.sandbox.lifecycle !== "unprovisioned" &&
+        thread.sandbox.lifecycle !== "failed"
+      ) {
         return yield* threadSandboxRuntime.ensureReady(thread, legacyCwd);
       }
       let lock = sandboxProvisionLocks.get(thread.id);
@@ -390,24 +398,28 @@ export const make = Effect.gen(function* () {
               detail: `Project '${thread.projectId}' was not found.`,
             });
           }
+          const projectFile = Option.getOrUndefined(
+            yield* projectFileLoader.load(project.workspaceRoot),
+          );
+          const declaration = projectFile?.sandbox;
+          const image = resolveSandboxImage(projectFile);
+          if (image === undefined || resolveSandboxPreviewProxyImage() === undefined) {
+            if (legacyCwd === undefined) {
+              return yield* new ProviderAdapterRequestError({
+                provider: "sandbox",
+                method: "sandbox.provision",
+                detail:
+                  "Sandbox images are not configured and no host workspace directory is available.",
+              });
+            }
+            return { kind: "legacy-host", cwd: legacyCwd } as const;
+          }
           const runtime = thread.sandboxConfig?.runtime ?? "docker";
           if (runtime !== "docker" && runtime !== "podman") {
             return yield* new ProviderAdapterRequestError({
               provider: "sandbox",
               method: "sandbox.provision",
               detail: `Sandbox runtime '${runtime}' is not available in v1.`,
-            });
-          }
-          const projectFile = Option.getOrUndefined(
-            yield* projectFileLoader.load(project.workspaceRoot),
-          );
-          const declaration = projectFile?.sandbox;
-          const image = declaration?.image ?? process.env.T3_SANDBOX_IMAGE?.trim();
-          if (!image) {
-            return yield* new ProviderAdapterRequestError({
-              provider: "sandbox",
-              method: "sandbox.provision",
-              detail: "T3_SANDBOX_IMAGE must name a digest-pinned desktop sandbox image.",
             });
           }
           const occurredAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));

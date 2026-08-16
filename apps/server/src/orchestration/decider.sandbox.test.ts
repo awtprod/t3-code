@@ -245,6 +245,55 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
     });
   });
 
+  it.effect("accepts new turns on a failed sandbox so execution can fall back", () => {
+    const sandbox = {
+      lifecycle: "failed" as const,
+      branch: BRANCH,
+      limits: {
+        cpuCount: 2,
+        memoryBytes: 4_294_967_296,
+        diskBytes: 21_474_836_480,
+        processCount: 512,
+        idleTimeoutSeconds: 3600,
+        maximumLifetimeSeconds: 28800,
+      },
+      desktop: { status: "unavailable" as const },
+      services: [],
+      controller: { kind: "none" as const },
+      failure: {
+        stage: "provision" as const,
+        code: "sandbox_provision_failed",
+        message: "T3_SANDBOX_IMAGE must name a digest-pinned desktop sandbox image.",
+        retryable: true,
+        occurredAt: NOW,
+      },
+      createdAt: NOW,
+      lastActiveAt: NOW,
+    };
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(
+        decideOrchestrationCommand({
+          readModel: readModel(sandbox),
+          command: {
+            type: "thread.turn.start",
+            commandId: CommandId.make("turn-after-failure"),
+            threadId: ThreadId.make("thread-1"),
+            message: {
+              messageId: "message-1" as never,
+              role: "user",
+              text: "try again",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: NOW,
+          },
+        }),
+      );
+      expect(exit._tag).toBe("Success");
+    });
+  });
+
   it.effect("requires the active human lease to resume", () => {
     const sandbox = {
       lifecycle: "paused" as const,

@@ -994,7 +994,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       }
       if (
         targetThread.sandbox != null &&
-        !["unprovisioned", "ready"].includes(targetThread.sandbox.lifecycle)
+        !["unprovisioned", "ready", "failed"].includes(targetThread.sandbox.lifecycle)
       ) {
         return yield* sandboxInvariant(
           command.type,

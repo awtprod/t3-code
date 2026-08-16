@@ -165,8 +165,17 @@ describe("ProviderCommandReactor", () => {
       ProviderSession,
       ProviderAdapterRequestError | ProviderAdapterValidationError
     >;
+    readonly sandboxImages?: "both" | "image-only" | "none";
   }) {
-    vi.stubEnv("T3_SANDBOX_IMAGE", `desktop@sha256:${"d".repeat(64)}`);
+    const sandboxImages = input?.sandboxImages ?? "both";
+    vi.stubEnv(
+      "T3_SANDBOX_IMAGE",
+      sandboxImages === "none" ? "" : `desktop@sha256:${"d".repeat(64)}`,
+    );
+    vi.stubEnv(
+      "T3_SANDBOX_PREVIEW_PROXY_IMAGE",
+      sandboxImages === "both" ? `preview@sha256:${"e".repeat(64)}` : "",
+    );
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
       input?.baseDir ?? NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-"));
@@ -621,6 +630,130 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("falls back to host execution when no sandbox image is configured", async () => {
+    const harness = await createHarness({ sandboxImages: "none" });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-host-fallback"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-host-fallback"),
+          role: "user",
+          text: "hello host",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      cwd: "/tmp/provider-project",
+    });
+    expect(harness.provisionSandbox).not.toHaveBeenCalled();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.sandbox?.lifecycle).toBe("unprovisioned");
+    expect(thread?.session?.status).toBe("starting");
+  });
+
+  it("falls back to host execution when the preview proxy image is missing", async () => {
+    const harness = await createHarness({ sandboxImages: "image-only" });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-proxy-fallback"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-proxy-fallback"),
+          role: "user",
+          text: "hello host",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      cwd: "/tmp/provider-project",
+    });
+    expect(harness.provisionSandbox).not.toHaveBeenCalled();
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.sandbox?.lifecycle).toBe("unprovisioned");
+  });
+
+  it("recovers a failed sandbox thread on the host when images are not configured", async () => {
+    const harness = await createHarness({ sandboxImages: "none" });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "sandbox.provision",
+        commandId: CommandId.make("cmd-sandbox-provision-wedge"),
+        threadId: ThreadId.make("thread-1"),
+        config: {},
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "sandbox.operation.fail",
+        commandId: CommandId.make("cmd-sandbox-fail-wedge"),
+        threadId: ThreadId.make("thread-1"),
+        failure: {
+          stage: "provision",
+          code: "sandbox_provision_failed",
+          message: "T3_SANDBOX_IMAGE must name a digest-pinned desktop sandbox image.",
+          retryable: true,
+          occurredAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    const wedged = await harness.readModel();
+    expect(
+      wedged.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.sandbox?.lifecycle,
+    ).toBe("failed");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-after-failure"),
+          role: "user",
+          text: "hello again",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      cwd: "/tmp/provider-project",
+    });
+    expect(harness.provisionSandbox).not.toHaveBeenCalled();
   });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>

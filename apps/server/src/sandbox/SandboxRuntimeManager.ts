@@ -27,6 +27,24 @@ import { ServerConfig } from "../config.ts";
 
 const credentialBroker = new ThreadCredentialBroker();
 
+/**
+ * Resolves the sandbox container image for a project: the `.t3` project file's
+ * `sandbox.image` wins over the `T3_SANDBOX_IMAGE` environment default.
+ * Returns undefined when sandboxing is not configured for this deployment.
+ */
+export function resolveSandboxImage(
+  projectFile: { readonly sandbox?: { readonly image?: string } } | undefined,
+): string | undefined {
+  const image = projectFile?.sandbox?.image ?? process.env.T3_SANDBOX_IMAGE?.trim();
+  return image ? image : undefined;
+}
+
+/** Resolves the preview-proxy sidecar image required by sandbox provisioning. */
+export function resolveSandboxPreviewProxyImage(): string | undefined {
+  const image = process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE?.trim();
+  return image ? image : undefined;
+}
+
 /** One-shot credential boundary used immediately before provider process spawn. */
 export function redeemSandboxProviderEnvironment(
   threadId: string,
@@ -136,7 +154,7 @@ const makeManager = (
       return yield* attempt(() => get(runtime).backend.exec(threadId, input));
     }),
     provision: Effect.fn("SandboxRuntimeManager.provision")(function* (input) {
-      const previewImage = process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE?.trim();
+      const previewImage = resolveSandboxPreviewProxyImage();
       if (!previewImage)
         return yield* new SandboxManagerError({
           message:
