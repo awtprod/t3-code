@@ -1,3 +1,13 @@
+/*
+ * The desktop-stream iframe below intentionally combines allow-scripts and
+ * allow-same-origin: it renders an interactive remote-desktop viewer served
+ * by our own AuthenticatedPreviewRouter behind a short-lived, thread-scoped
+ * signed ticket, and needs both flags to run its viewer client and keep its
+ * own storage/session state. A sandbox restrictive enough to remove either
+ * flag would break the viewer outright. This file contains exactly one
+ * iframe.
+ */
+/* oxlint-disable react/iframe-missing-sandbox */
 import type { SandboxState } from "@t3tools/contracts";
 import { Download, Expand, MonitorUp, Pause, Play, RefreshCw, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
