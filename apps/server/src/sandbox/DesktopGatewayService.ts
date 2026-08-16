@@ -2,7 +2,7 @@ import { AuthenticatedPreviewRouter } from "./AuthenticatedPreviewRouter.ts";
 import { ThreadCredentialBroker } from "./CredentialBroker.ts";
 import { ThreadDesktopSignaling } from "./DesktopSession.ts";
 import type { ThreadPreviewProxy } from "./ThreadPreviewProxy.ts";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
@@ -43,10 +43,14 @@ export const desktopGateway = {
     return signaling.issue(threadId, "bridge");
   },
   issueViewerTicket(threadId: string) {
-    const id = randomBytes(16).toString("hex");
-    const secret = randomBytes(32).toString("base64url");
+    const id = NodeCrypto.randomBytes(16).toString("hex");
+    const secret = NodeCrypto.randomBytes(32).toString("base64url");
     const expiresAt = performance.timeOrigin + performance.now() + 60_000;
-    tickets.set(id, { threadId, hash: createHash("sha256").update(secret).digest(), expiresAt });
+    tickets.set(id, {
+      threadId,
+      hash: NodeCrypto.createHash("sha256").update(secret).digest(),
+      expiresAt,
+    });
     return {
       ticket: `${id}.${secret}`,
       expiresAt: DateTime.formatIso(Option.getOrThrow(DateTime.make(expiresAt))),
@@ -65,10 +69,10 @@ export const desktopGateway = {
       record.expiresAt <= performance.timeOrigin + performance.now()
     )
       return false;
-    const supplied = createHash("sha256")
+    const supplied = NodeCrypto.createHash("sha256")
       .update(ticket.slice(separator + 1))
       .digest();
-    return timingSafeEqual(record.hash, supplied);
+    return NodeCrypto.timingSafeEqual(record.hash, supplied);
   },
   purgeExpired() {
     const now = performance.timeOrigin + performance.now();
@@ -85,8 +89,11 @@ export const desktopGateway = {
     return purged;
   },
   setAutomationTarget(threadId: string, hostname: string, profilePath: string) {
-    const routeId = createHash("sha256").update(`${threadId}\0cdp`).digest("hex").slice(0, 24);
-    const token = randomBytes(32).toString("base64url");
+    const routeId = NodeCrypto.createHash("sha256")
+      .update(`${threadId}\0cdp`)
+      .digest("hex")
+      .slice(0, 24);
+    const token = NodeCrypto.randomBytes(32).toString("base64url");
     previews.register({ routeId, threadId, hostname, internalPort: 9222, token });
     targets.set(threadId, {
       endpoint: `/api/thread-preview/${routeId}/`,
@@ -102,7 +109,10 @@ export const desktopGateway = {
     const target = targets.get(threadId);
     if (target === undefined || previewProxy === null) return null;
     return previewProxy.automate({
-      routeId: createHash("sha256").update(`${threadId}\0cdp`).digest("hex").slice(0, 24),
+      routeId: NodeCrypto.createHash("sha256")
+        .update(`${threadId}\0cdp`)
+        .digest("hex")
+        .slice(0, 24),
       threadId,
       token: target.token,
       operation,

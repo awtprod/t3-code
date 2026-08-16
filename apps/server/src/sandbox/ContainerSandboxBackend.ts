@@ -22,7 +22,7 @@ import {
   validateExec,
   validateHook,
 } from "./validation.ts";
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 const MANAGED_LABEL = "com.t3tools.sandbox.managed=true";
 const THREAD_LABEL = "com.t3tools.sandbox.thread";
@@ -87,7 +87,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
 
     const threadId = sanitizeId(input.bootstrap.threadId, "threadId");
     const projectId = sanitizeId(input.bootstrap.projectId, "projectId");
-    const suffix = createHash("sha256")
+    const suffix = NodeCrypto.createHash("sha256")
       .update(`${projectId}\0${threadId}`)
       .digest("hex")
       .slice(0, 32);
@@ -876,8 +876,8 @@ function makeReady(
     ...(input.egressProxyImage === undefined
       ? {}
       : {
-          egressProxyContainerName: `t3-egress-${createHash("sha256").update(`${input.bootstrap.projectId}\0${input.bootstrap.threadId}`).digest("hex").slice(0, 32)}`,
-          egressNetworkName: `t3-egress-net-${createHash("sha256").update(`${input.bootstrap.projectId}\0${input.bootstrap.threadId}`).digest("hex").slice(0, 32)}`,
+          egressProxyContainerName: `t3-egress-${NodeCrypto.createHash("sha256").update(`${input.bootstrap.projectId}\0${input.bootstrap.threadId}`).digest("hex").slice(0, 32)}`,
+          egressNetworkName: `t3-egress-net-${NodeCrypto.createHash("sha256").update(`${input.bootstrap.projectId}\0${input.bootstrap.threadId}`).digest("hex").slice(0, 32)}`,
         }),
     branchName: input.bootstrap.branchName,
     limits,

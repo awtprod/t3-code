@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - provider subprocesses cross the Node/container boundary.
-import { spawn, type ChildProcess } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import type { SpawnOptions, SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 import { ChildProcess as EffectChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as Effect from "effect/Effect";
@@ -160,12 +160,16 @@ export function spawnClaudeInSandbox(
     options.cwd,
     options.env,
   );
-  const child: ChildProcess = spawn(invocation.executable, invocation.args, {
-    shell: false,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: invocation.env,
-    signal: options.signal,
-    windowsHide: true,
-  });
+  const child: NodeChildProcess.ChildProcess = NodeChildProcess.spawn(
+    invocation.executable,
+    invocation.args,
+    {
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: invocation.env,
+      signal: options.signal,
+      windowsHide: true,
+    },
+  );
   return child as SpawnedProcess;
 }

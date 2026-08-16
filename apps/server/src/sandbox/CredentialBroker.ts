@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 type CredentialRecord = {
   readonly threadId: string;
@@ -21,8 +21,8 @@ export class ThreadCredentialBroker {
     if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs < 1 || input.ttlMs > 15 * 60_000)
       throw new Error("credential ttl must be between 1ms and 15 minutes");
     if (input.value.length === 0) throw new Error("credential value is required");
-    const token = randomBytes(32).toString("base64url");
-    const id = randomBytes(16).toString("hex");
+    const token = NodeCrypto.randomBytes(32).toString("base64url");
+    const id = NodeCrypto.randomBytes(16).toString("hex");
     this.#records.set(id, {
       threadId: input.threadId,
       scope: input.scope,
@@ -45,7 +45,7 @@ export class ThreadCredentialBroker {
     const authorized =
       record.threadId === input.threadId &&
       record.scope === input.scope &&
-      timingSafeEqual(record.tokenHash, candidate);
+      NodeCrypto.timingSafeEqual(record.tokenHash, candidate);
     if (!authorized) return null;
     record.redeemed = true;
     this.#records.delete(input.id);
@@ -75,4 +75,4 @@ export class ThreadCredentialBroker {
   }
 }
 
-const digest = (value: string) => createHash("sha256").update(value).digest();
+const digest = (value: string) => NodeCrypto.createHash("sha256").update(value).digest();

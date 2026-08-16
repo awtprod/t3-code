@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 type Route = {
   readonly threadId: string;
@@ -39,7 +39,10 @@ export class AuthenticatedPreviewRouter {
     const route = this.#routes.get(input.routeId);
     if (route === undefined) return null;
     const tokenHash = hash(input.token);
-    if (route.threadId !== input.threadId || !timingSafeEqual(route.tokenHash, tokenHash))
+    if (
+      route.threadId !== input.threadId ||
+      !NodeCrypto.timingSafeEqual(route.tokenHash, tokenHash)
+    )
       return null;
     return { hostname: route.hostname, port: route.internalPort };
   }
@@ -50,4 +53,4 @@ export class AuthenticatedPreviewRouter {
   }
 }
 
-const hash = (value: string) => createHash("sha256").update(value).digest();
+const hash = (value: string) => NodeCrypto.createHash("sha256").update(value).digest();

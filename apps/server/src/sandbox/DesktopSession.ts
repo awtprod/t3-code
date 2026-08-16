@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import type { SandboxCommandExecutor } from "./types.ts";
 
 export const REQUIRED_DESKTOP_BINARIES = [
@@ -36,7 +36,7 @@ const safeId = (value: string) => {
 
 export const desktopSessionForThread = (threadIdValue: string): ThreadDesktopSession => {
   const threadId = safeId(threadIdValue);
-  const digest = createHash("sha256").update(threadId).digest("hex").slice(0, 24);
+  const digest = NodeCrypto.createHash("sha256").update(threadId).digest("hex").slice(0, 24);
   return {
     threadId,
     sessionId: `desktop-${digest}`,
@@ -134,14 +134,14 @@ export class ThreadDesktopSignaling {
 
   issue(threadId: string, role: "viewer" | "bridge" = "viewer") {
     const session = desktopSessionForThread(threadId);
-    const token = randomBytes(32).toString("base64url");
+    const token = NodeCrypto.randomBytes(32).toString("base64url");
     const existing = this.#records.get(threadId);
     this.#records.set(
       threadId,
       existing === undefined
         ? {
             session,
-            tokenHashes: { [role]: createHash("sha256").update(token).digest() },
+            tokenHashes: { [role]: NodeCrypto.createHash("sha256").update(token).digest() },
             connected: false,
             expiresAt: this.#now() + 8 * 60 * 60_000,
             sequence: 0,
@@ -151,7 +151,7 @@ export class ThreadDesktopSignaling {
             ...existing,
             tokenHashes: {
               ...existing.tokenHashes,
-              [role]: createHash("sha256").update(token).digest(),
+              [role]: NodeCrypto.createHash("sha256").update(token).digest(),
             },
           },
     );
@@ -170,9 +170,9 @@ export class ThreadDesktopSignaling {
       this.#records.delete(input.threadId);
       return null;
     }
-    const candidate = createHash("sha256").update(input.token).digest();
+    const candidate = NodeCrypto.createHash("sha256").update(input.token).digest();
     const expected = record.tokenHashes[input.role ?? "viewer"];
-    if (expected === undefined || !timingSafeEqual(expected, candidate)) return null;
+    if (expected === undefined || !NodeCrypto.timingSafeEqual(expected, candidate)) return null;
     record.connected = true;
     return { ...record.session, connected: true as const };
   }

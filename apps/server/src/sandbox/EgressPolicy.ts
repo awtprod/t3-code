@@ -1,4 +1,4 @@
-import { isIP } from "node:net";
+import * as NodeNet from "node:net";
 
 export type EgressDecision =
   | { readonly allowed: true }
@@ -33,7 +33,7 @@ export const evaluateEgressDestination = (
     return { allowed: false, reason: "metadata destination" };
   if (crossSandboxHosts.has(hostname))
     return { allowed: false, reason: "cross-sandbox destination" };
-  if (isIP(hostname) !== 0 && isForbiddenIp(hostname))
+  if (NodeNet.isIP(hostname) !== 0 && isForbiddenIp(hostname))
     return { allowed: false, reason: "private, loopback, or link-local destination" };
   return { allowed: true };
 };

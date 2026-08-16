@@ -9,7 +9,7 @@ import * as Data from "effect/Data";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
-import { spawn } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import {
   HttpRouter,
   HttpServerRequest,
@@ -20,7 +20,8 @@ import * as HttpIncomingMessage from "effect/unstable/http/HttpIncomingMessage";
 import { authenticateRawRouteWithScope } from "../http.ts";
 import { desktopGateway } from "./DesktopGatewayService.ts";
 import { ServerConfig } from "../config.ts";
-import { resolve } from "node:path";
+import * as NodePath from "node:path";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 const prefix = "/api/thread-desktop/";
 
@@ -178,7 +179,7 @@ export const sandboxArtifactHttpRouteLayer = HttpRouter.add(
       return HttpServerResponse.text("Not Found", { status: 404 });
     const config = yield* ServerConfig;
     const fs = yield* FileSystem.FileSystem;
-    const path = resolve(
+    const path = NodePath.resolve(
       config.stateDir,
       "sandbox-artifacts",
       `${artifactId}.${kind === "bundle" ? "bundle" : "json"}`,
@@ -325,18 +326,19 @@ const relayPreviewWebSocket = Effect.fnUntraced(function* (
   request: HttpServerRequest.HttpServerRequest,
   command: { executable: string; args: ReadonlyArray<string>; handshake: string },
 ) {
+  const hostPlatform = yield* HostProcessPlatform;
   const downstream = yield* Effect.orDie(request.upgrade);
   const writeDownstream = yield* downstream.writer;
-  const child = spawn(command.executable, [...command.args], {
+  const child = NodeChildProcess.spawn(command.executable, [...command.args], {
     stdio: ["pipe", "pipe", "ignore"],
     shell: false,
-    detached: process.platform !== "win32",
+    detached: hostPlatform !== "win32",
     env: { PATH: process.env.PATH },
   });
   const terminate = () => {
     if (child.pid === undefined || child.killed) return;
     try {
-      process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
+      process.kill(hostPlatform === "win32" ? child.pid : -child.pid, "SIGKILL");
     } catch {
       /* already exited */
     }

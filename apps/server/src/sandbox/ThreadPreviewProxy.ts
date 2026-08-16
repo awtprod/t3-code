@@ -1,5 +1,5 @@
 import type { SandboxCommand, SandboxCommandExecutor } from "./types.ts";
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import { AuthenticatedPreviewRouter } from "./AuthenticatedPreviewRouter.ts";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -247,4 +247,4 @@ const isBridgeResponse = (
 };
 
 const previewContainerName = (threadId: string) =>
-  `t3-preview-${createHash("sha256").update(threadId).digest("hex").slice(0, 24)}`;
+  `t3-preview-${NodeCrypto.createHash("sha256").update(threadId).digest("hex").slice(0, 24)}`;

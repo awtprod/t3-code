@@ -1,5 +1,5 @@
 // @effect-diagnostics globalTimers:off - bounded container health polling at the runtime boundary.
-import { createHash, randomBytes } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import type { SandboxCommandExecutor } from "./types.ts";
 
 export type ThreadServiceDeclaration = {
@@ -37,7 +37,7 @@ export const planThreadServiceStack = (
   declarations: ReadonlyArray<ThreadServiceDeclaration>,
 ): ReadonlyArray<ThreadServiceInstance> => {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(threadId)) throw new Error("invalid thread id");
-  const suffix = createHash("sha256").update(threadId).digest("hex").slice(0, 16);
+  const suffix = NodeCrypto.createHash("sha256").update(threadId).digest("hex").slice(0, 16);
   const networkName = `t3-net-${suffix}`;
   const names = new Set<string>();
   return declarations.map((service) => {
@@ -284,10 +284,10 @@ const generatedServiceValue = (
   entry: { readonly key: string; readonly kind: "database-name" | "username" | "password" },
 ) =>
   entry.kind === "database-name"
-    ? `db_${createHash("sha256").update(`${threadId}\0${service}`).digest("hex").slice(0, 16)}`
+    ? `db_${NodeCrypto.createHash("sha256").update(`${threadId}\0${service}`).digest("hex").slice(0, 16)}`
     : entry.kind === "username"
-      ? `u_${randomBytes(12).toString("hex")}`
-      : randomBytes(32).toString("base64url");
+      ? `u_${NodeCrypto.randomBytes(12).toString("hex")}`
+      : NodeCrypto.randomBytes(32).toString("base64url");
 
 const healthCheckArgs = (health: NonNullable<ThreadServiceDeclaration["healthCheck"]>) => {
   if (

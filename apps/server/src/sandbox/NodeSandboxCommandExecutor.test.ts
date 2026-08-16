@@ -3,7 +3,7 @@ import { NodeSandboxCommandExecutor } from "./NodeSandboxCommandExecutor.ts";
 
 describe("NodeSandboxCommandExecutor", () => {
   it("executes argv directly and captures bounded output", async () => {
-    const result = await new NodeSandboxCommandExecutor().run({
+    const result = await new NodeSandboxCommandExecutor(process.platform).run({
       executable: process.execPath,
       args: [
         "-e",
@@ -17,7 +17,7 @@ describe("NodeSandboxCommandExecutor", () => {
 
   it("kills commands that exceed their deadline", async () => {
     await expect(
-      new NodeSandboxCommandExecutor().run({
+      new NodeSandboxCommandExecutor(process.platform).run({
         executable: process.execPath,
         args: ["-e", "setInterval(() => {}, 1000)"],
         timeoutMs: 25,

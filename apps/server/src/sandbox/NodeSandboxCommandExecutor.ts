@@ -1,17 +1,23 @@
 // @effect-diagnostics nodeBuiltinImport:off - This is the production adapter at the Node process boundary.
 // @effect-diagnostics globalTimers:off - The executor owns a native process timeout and process-group kill.
-import { spawn } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 import type { SandboxCommand, SandboxCommandExecutor, SandboxCommandResult } from "./types.ts";
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 export class NodeSandboxCommandExecutor implements SandboxCommandExecutor {
+  private readonly platform: NodeJS.Platform;
+
+  constructor(platform: NodeJS.Platform) {
+    this.platform = platform;
+  }
+
   run(command: SandboxCommand): Promise<SandboxCommandResult> {
     return new Promise((resolve, reject) => {
-      const child = spawn(command.executable, [...command.args], {
+      const child = NodeChildProcess.spawn(command.executable, [...command.args], {
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
-        detached: process.platform !== "win32",
+        detached: this.platform !== "win32",
         env: { PATH: process.env.PATH },
       });
       const stdout: Buffer[] = [];
@@ -31,7 +37,7 @@ export class NodeSandboxCommandExecutor implements SandboxCommandExecutor {
       const terminate = () => {
         if (child.pid === undefined) return;
         try {
-          process.kill(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
+          process.kill(this.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
         } catch {
           /* Process already exited. */
         }

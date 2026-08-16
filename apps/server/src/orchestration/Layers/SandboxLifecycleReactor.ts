@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - validates inherited Git patch content before container handoff.
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 import {
   CommandId,
   EventId,
@@ -278,7 +278,7 @@ export const make = Effect.gen(function* () {
       }
       if (inheritedPatch?.content !== undefined) {
         const bytes = Buffer.byteLength(inheritedPatch.content);
-        const digest = createHash("sha256").update(inheritedPatch.content).digest("hex");
+        const digest = NodeCrypto.createHash("sha256").update(inheritedPatch.content).digest("hex");
         if (bytes !== inheritedPatch.sizeBytes || digest !== inheritedPatch.sha256) {
           return yield* new SandboxManagerError({
             message: "inherited worker patch content failed size or digest validation",

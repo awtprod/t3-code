@@ -12,9 +12,10 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { ContainerSandboxBackend } from "./ContainerSandboxBackend.ts";
 import { NodeSandboxCommandExecutor } from "./NodeSandboxCommandExecutor.ts";
 import { ThreadDesktopRuntime } from "./ThreadDesktopRuntime.ts";
@@ -93,8 +94,11 @@ export class SandboxManagerError extends Schema.TaggedErrorClass<SandboxManagerE
   },
 ) {}
 
-const makeManager = (artifactRoot: string | undefined): SandboxRuntimeManagerShape => {
-  const executor = new NodeSandboxCommandExecutor();
+const makeManager = (
+  artifactRoot: string | undefined,
+  platform: NodeJS.Platform,
+): SandboxRuntimeManagerShape => {
+  const executor = new NodeSandboxCommandExecutor(platform);
   const runtimes = new Map<
     "docker" | "podman",
     {
@@ -164,11 +168,11 @@ const makeManager = (artifactRoot: string | undefined): SandboxRuntimeManagerSha
           return yield* new SandboxManagerError({
             message: "local repository seeding requires configured server artifact storage",
           });
-        const seedRoot = resolve(artifactRoot, "seeds");
-        yield* attempt(() => mkdir(seedRoot, { recursive: true, mode: 0o700 }));
-        seedBundle = resolve(
+        const seedRoot = NodePath.resolve(artifactRoot, "seeds");
+        yield* attempt(() => NodeFSP.mkdir(seedRoot, { recursive: true, mode: 0o700 }));
+        seedBundle = NodePath.resolve(
           seedRoot,
-          `.${createHash("sha256").update(input.bootstrap.threadId).digest("hex")}.${process.pid}.bundle`,
+          `.${NodeCrypto.createHash("sha256").update(input.bootstrap.threadId).digest("hex")}.${process.pid}.bundle`,
         );
         yield* attempt(async () => {
           const created = await executor.run({
@@ -202,7 +206,7 @@ const makeManager = (artifactRoot: string | undefined): SandboxRuntimeManagerSha
         Effect.ensuring(
           seedBundle === undefined
             ? Effect.void
-            : Effect.promise(() => rm(seedBundle!, { force: true })),
+            : Effect.promise(() => NodeFSP.rm(seedBundle!, { force: true })),
         ),
       );
       teardownHooks.set(input.bootstrap.threadId, input.teardown ?? []);
@@ -259,11 +263,11 @@ const makeManager = (artifactRoot: string | undefined): SandboxRuntimeManagerSha
       desktopGateway.setPreviewProxy(managed.previews);
       for (const port of input.previewPorts ?? []) {
         desktopGateway.registerPreviewRoute({
-          routeId: `${createHash("sha256").update(`${input.bootstrap.threadId}\0${port}`).digest("hex").slice(0, 24)}`,
+          routeId: `${NodeCrypto.createHash("sha256").update(`${input.bootstrap.threadId}\0${port}`).digest("hex").slice(0, 24)}`,
           threadId: input.bootstrap.threadId,
           hostname: ready.containerName,
           internalPort: port,
-          token: randomBytes(32).toString("base64url"),
+          token: NodeCrypto.randomBytes(32).toString("base64url"),
         });
       }
       const desktop = yield* attempt(() =>
@@ -302,30 +306,36 @@ const makeManager = (artifactRoot: string | undefined): SandboxRuntimeManagerSha
       attempt(async () => {
         if (artifactRoot === undefined)
           throw new Error("sandbox artifact storage requires the configured server runtime layer");
-        await mkdir(artifactRoot, { recursive: true, mode: 0o700 });
-        const name = createHash("sha256").update(threadId).digest("hex");
-        const bundleTemporary = resolve(artifactRoot, `.${name}.${process.pid}.bundle.tmp`);
-        const bundleDestination = resolve(artifactRoot, `${name}.bundle`);
-        const manifestTemporary = resolve(artifactRoot, `.${name}.${process.pid}.json.tmp`);
-        const manifestDestination = resolve(artifactRoot, `${name}.json`);
+        await NodeFSP.mkdir(artifactRoot, { recursive: true, mode: 0o700 });
+        const name = NodeCrypto.createHash("sha256").update(threadId).digest("hex");
+        const bundleTemporary = NodePath.resolve(
+          artifactRoot,
+          `.${name}.${process.pid}.bundle.tmp`,
+        );
+        const bundleDestination = NodePath.resolve(artifactRoot, `${name}.bundle`);
+        const manifestTemporary = NodePath.resolve(
+          artifactRoot,
+          `.${name}.${process.pid}.json.tmp`,
+        );
+        const manifestDestination = NodePath.resolve(artifactRoot, `${name}.json`);
         try {
           const result = await get(runtime).backend.exportBranch(threadId);
           await get(runtime).backend.exportBundle(threadId, bundleTemporary);
-          const bundleSha256 = createHash("sha256")
-            .update(await readFile(bundleTemporary))
+          const bundleSha256 = NodeCrypto.createHash("sha256")
+            .update(await NodeFSP.readFile(bundleTemporary))
             .digest("hex");
-          await writeFile(
+          await NodeFSP.writeFile(
             manifestTemporary,
             JSON.stringify({ threadId, bundle: `${name}.bundle`, bundleSha256, ...result }),
             { mode: 0o600, flag: "wx" },
           );
-          await rename(bundleTemporary, bundleDestination);
-          await rename(manifestTemporary, manifestDestination);
+          await NodeFSP.rename(bundleTemporary, bundleDestination);
+          await NodeFSP.rename(manifestTemporary, manifestDestination);
           return { ...result, artifactId: name, bundleSha256 };
         } finally {
           await Promise.all([
-            rm(bundleTemporary, { force: true }),
-            rm(manifestTemporary, { force: true }),
+            NodeFSP.rm(bundleTemporary, { force: true }),
+            NodeFSP.rm(manifestTemporary, { force: true }),
           ]);
         }
       }),
@@ -368,11 +378,14 @@ const makeManager = (artifactRoot: string | undefined): SandboxRuntimeManagerSha
         desktopGateway.setPreviewProxy(previews);
         for (const port of ports)
           desktopGateway.registerPreviewRoute({
-            routeId: createHash("sha256").update(`${threadId}\0${port}`).digest("hex").slice(0, 24),
+            routeId: NodeCrypto.createHash("sha256")
+              .update(`${threadId}\0${port}`)
+              .digest("hex")
+              .slice(0, 24),
             threadId,
             hostname,
             internalPort: port,
-            token: randomBytes(32).toString("base64url"),
+            token: NodeCrypto.randomBytes(32).toString("base64url"),
           });
         return true;
       }),
@@ -382,7 +395,8 @@ const makeManager = (artifactRoot: string | undefined): SandboxRuntimeManagerSha
 
 const configuredArtifactRoot = process.env.T3_SANDBOX_ARTIFACT_DIR;
 const defaultManager = makeManager(
-  configuredArtifactRoot === undefined ? undefined : resolve(configuredArtifactRoot),
+  configuredArtifactRoot === undefined ? undefined : NodePath.resolve(configuredArtifactRoot),
+  Effect.runSync(HostProcessPlatform),
 );
 export class SandboxRuntimeManager extends Context.Reference<SandboxRuntimeManagerShape>(
   "@awtprod/command-center/sandbox/SandboxRuntimeManager",
@@ -391,5 +405,9 @@ export class SandboxRuntimeManager extends Context.Reference<SandboxRuntimeManag
 
 export const SandboxRuntimeManagerLive = Layer.effect(
   SandboxRuntimeManager,
-  Effect.map(ServerConfig, (config) => makeManager(resolve(config.stateDir, "sandbox-artifacts"))),
+  Effect.gen(function* () {
+    const config = yield* ServerConfig;
+    const platform = yield* HostProcessPlatform;
+    return makeManager(NodePath.resolve(config.stateDir, "sandbox-artifacts"), platform);
+  }),
 );
