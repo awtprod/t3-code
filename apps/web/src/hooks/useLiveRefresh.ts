@@ -72,7 +72,8 @@ export function shouldRefreshOnInterval(input: {
   readonly refreshWhileVisible?: boolean;
 }): boolean {
   return (
-    (input.refreshWhileVisible || input.now - input.lastInteractedAt < LIVE_REFRESH_IDLE_AFTER_MS) &&
+    (input.refreshWhileVisible ||
+      input.now - input.lastInteractedAt < LIVE_REFRESH_IDLE_AFTER_MS) &&
     shouldLiveRefresh(input)
   );
 }
