@@ -43,10 +43,10 @@ it("keeps systemd pinned to the stable launcher rather than a versioned server",
 it("survives the kernel OOM-killing a greedy agent child", () => {
   const unit = BootService.renderBootServiceUnit({
     nodePath: "/usr/bin/node",
-    launcherPath: "/home/theo/.t3/runtime/service-launcher.mjs",
-    baseDir: "/home/theo/.t3",
-    logPath: "/home/theo/.t3/userdata/logs/boot-service.log",
-    unitPath: "/home/theo/.config/systemd/user/t3code.service",
+    launcherPath: "/tmp/command-center-theo/.t3/runtime/service-launcher.mjs",
+    baseDir: "/tmp/command-center-theo/.t3",
+    logPath: "/tmp/command-center-theo/.t3/userdata/logs/boot-service.log",
+    unitPath: "/tmp/command-center-theo/.config/systemd/user/t3code.service",
   });
 
   expect(unit).toContain("OOMPolicy=continue");

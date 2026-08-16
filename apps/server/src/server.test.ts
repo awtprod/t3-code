@@ -1063,7 +1063,7 @@ const parseSessionCookieFromWsUrl = (
   };
 };
 
-const wsRpcProtocolLayer = (wsUrl: string) => {
+const wsRpcProtocolLayer = (wsUrl: string, options?: { readonly origin?: string }) => {
   const { cookie, url } = parseSessionCookieFromWsUrl(wsUrl);
   const webSocketConstructorLayer = Layer.succeed(
     Socket.WebSocketConstructor,
@@ -1071,7 +1071,12 @@ const wsRpcProtocolLayer = (wsUrl: string) => {
       new NodeSocket.NodeWS.WebSocket(
         socketUrl,
         protocols,
-        cookie ? { headers: { cookie } } : undefined,
+        cookie || options?.origin
+          ? {
+              ...(cookie ? { headers: { cookie } } : {}),
+              ...(options?.origin ? { origin: options.origin } : {}),
+            }
+          : undefined,
       ) as unknown as globalThis.WebSocket,
   );
 
@@ -1088,7 +1093,8 @@ type WsRpcClient =
 const withWsRpcClient = <A, E, R>(
   wsUrl: string,
   f: (client: WsRpcClient) => Effect.Effect<A, E, R>,
-) => makeWsRpcClient.pipe(Effect.flatMap(f), Effect.provide(wsRpcProtocolLayer(wsUrl)));
+  options?: { readonly origin?: string },
+) => makeWsRpcClient.pipe(Effect.flatMap(f), Effect.provide(wsRpcProtocolLayer(wsUrl, options)));
 
 const appendSessionCookieToWsUrl = (url: string, sessionCookieHeader: string) => {
   const isAbsoluteUrl = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(url);
@@ -4090,6 +4096,24 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.auth.policy, "desktop-managed-local");
       assert.equal(response.shellResumeCompletionMarker, true);
       assert.equal(response.threadResumeCompletionMarker, true);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("accepts websocket rpc handshake from a configured development origin", () =>
+    Effect.gen(function* () {
+      const configuredOrigin = "https://host.example.ts.net";
+      yield* buildAppUnderTest({
+        config: { devAllowedOrigins: [configuredOrigin] },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const response = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => client[WS_METHODS.serverGetConfig]({}), {
+          origin: configuredOrigin,
+        }),
+      );
+
+      assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

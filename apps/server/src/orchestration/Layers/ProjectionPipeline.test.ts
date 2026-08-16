@@ -2,9 +2,11 @@ import {
   CheckpointRef,
   CommandId,
   CorrelationId,
+  DEFAULT_SANDBOX_RESOURCE_LIMITS,
   EventId,
   MessageId,
   ProjectId,
+  SandboxId,
   ThreadId,
   TurnId,
   ProviderInstanceId,
@@ -14,6 +16,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -24,6 +27,7 @@ import {
   SqlitePersistenceMemory,
 } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
+import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import {
@@ -53,6 +57,146 @@ const exists = (filePath: string) =>
   });
 
 const BaseTestLayer = makeProjectionPipelinePrefixedTestLayer("t3-projection-pipeline-test-");
+
+it.layer(makeProjectionPipelinePrefixedTestLayer("t3-sandbox-projection-test-"))(
+  "sandbox projection lifecycle",
+  (it) => {
+    it.effect("persists sandbox state from a thread.created payload", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const threads = yield* ProjectionThreadRepository;
+        const now = "2026-08-15T12:00:00.000Z";
+        const branch = {
+          branchName: "t3/thread-sandbox-projection",
+          baseCommit: "0123456789abcdef0123456789abcdef01234567",
+        };
+        const sandbox = {
+          lifecycle: "unprovisioned" as const,
+          branch,
+          limits: DEFAULT_SANDBOX_RESOURCE_LIMITS,
+          desktop: {
+            status: "unavailable" as const,
+            resolution: { width: 1440, height: 900, webRtcEnabled: true },
+          },
+          services: [],
+          controller: { kind: "none" as const },
+          createdAt: now,
+          lastActiveAt: now,
+        };
+
+        yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-thread-sandbox-projection"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-sandbox-projection"),
+          occurredAt: now,
+          commandId: CommandId.make("cmd-thread-sandbox-projection"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-thread-sandbox-projection"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-sandbox-projection"),
+            projectId: ProjectId.make("project-sandbox-projection"),
+            title: "Sandbox projection",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            sandboxBranch: branch,
+            sandbox,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+
+        yield* projectionPipeline.bootstrap;
+
+        const projected = yield* threads.getById({
+          threadId: ThreadId.make("thread-sandbox-projection"),
+        });
+        assert.deepEqual(Option.getOrNull(projected)?.sandbox, sandbox);
+
+        const provisioningAt = "2026-08-15T12:00:01.000Z";
+        const provisioning = {
+          ...sandbox,
+          lifecycle: "provisioning" as const,
+          desktop: { ...sandbox.desktop, status: "starting" as const },
+          lastActiveAt: provisioningAt,
+        };
+        yield* eventStore.append({
+          type: "sandbox.provisioning-started",
+          eventId: EventId.make("evt-sandbox-provisioning"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-sandbox-projection"),
+          occurredAt: provisioningAt,
+          commandId: CommandId.make("cmd-sandbox-provisioning"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-sandbox-provisioning"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-sandbox-projection"),
+            event: {
+              type: "sandbox.provisioning-started",
+              threadId: ThreadId.make("thread-sandbox-projection"),
+              occurredAt: provisioningAt,
+            },
+            sandbox: provisioning,
+          },
+        });
+        yield* projectionPipeline.bootstrap;
+        const projectedProvisioning = yield* threads.getById({
+          threadId: ThreadId.make("thread-sandbox-projection"),
+        });
+        assert.deepEqual(Option.getOrNull(projectedProvisioning)?.sandbox, provisioning);
+
+        const readyAt = "2026-08-15T12:00:02.000Z";
+        const sandboxId = SandboxId.make("sandbox-projection");
+        const ready = {
+          ...provisioning,
+          lifecycle: "ready" as const,
+          sandboxId,
+          runtime: "docker" as const,
+          runtimeRef: "container-projection",
+          desktop: { ...provisioning.desktop, status: "ready" as const, readyAt },
+          lastActiveAt: readyAt,
+        };
+        yield* eventStore.append({
+          type: "sandbox.ready",
+          eventId: EventId.make("evt-sandbox-ready"),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-sandbox-projection"),
+          occurredAt: readyAt,
+          commandId: CommandId.make("cmd-sandbox-ready"),
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-sandbox-ready"),
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-sandbox-projection"),
+            event: {
+              type: "sandbox.ready",
+              threadId: ThreadId.make("thread-sandbox-projection"),
+              occurredAt: readyAt,
+              sandboxId,
+              runtime: "docker",
+              runtimeRef: "container-projection",
+            },
+            sandbox: ready,
+          },
+        });
+        yield* projectionPipeline.bootstrap;
+        const projectedReady = yield* threads.getById({
+          threadId: ThreadId.make("thread-sandbox-projection"),
+        });
+        assert.deepEqual(Option.getOrNull(projectedReady)?.sandbox, ready);
+      }),
+    );
+  },
+);
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   it.effect("bootstraps all projection states and writes projection rows", () =>

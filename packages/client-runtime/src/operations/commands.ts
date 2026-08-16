@@ -51,6 +51,16 @@ export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond
 export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
 export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert">;
 export type StopThreadSessionInput = CommandInput<"thread.session.stop">;
+export type ProvisionSandboxInput = CommandInput<"sandbox.provision">;
+export type PauseSandboxInput = CommandInput<"sandbox.pause">;
+export type TakeOverSandboxInput = CommandInput<"sandbox.takeover">;
+export type ResumeSandboxInput = CommandInput<"sandbox.resume">;
+export type StopSandboxInput = CommandInput<"sandbox.stop">;
+export type ExportSandboxBranchInput = CommandInput<"sandbox.branch-export">;
+export type SpawnSandboxWorkerInput = CommandInput<"sandbox.worker.spawn">;
+export type GetSandboxWorkerStatusInput = CommandInput<"sandbox.worker.status">;
+export type MessageSandboxWorkerInput = CommandInput<"sandbox.worker.message">;
+export type StopSandboxWorkerInput = CommandInput<"sandbox.worker.stop">;
 
 type DispatchTag = typeof ORCHESTRATION_WS_METHODS.dispatchCommand;
 type CommandEffect = Effect.Effect<
@@ -330,4 +340,74 @@ export const stopThreadSession: (input: StopThreadSessionInput) => CommandEffect
     commandId: metadata.commandId,
     createdAt: metadata.createdAt,
   });
+});
+
+export const provisionSandbox: (input: ProvisionSandboxInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.provisionSandbox",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.provision", ...metadata });
+});
+
+export const pauseSandbox: (input: PauseSandboxInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.pauseSandbox",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.pause", ...metadata });
+});
+
+export const takeOverSandbox: (input: TakeOverSandboxInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.takeOverSandbox",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.takeover", ...metadata });
+});
+
+export const resumeSandbox: (input: ResumeSandboxInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.resumeSandbox",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.resume", ...metadata });
+});
+
+export const stopSandbox: (input: StopSandboxInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.stopSandbox",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.stop", ...metadata });
+});
+
+export const exportSandboxBranch: (input: ExportSandboxBranchInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.exportSandboxBranch",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.branch-export", ...metadata });
+});
+
+export const sandboxSpawnWorker: (input: SpawnSandboxWorkerInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.sandboxSpawnWorker",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.worker.spawn", ...metadata });
+});
+
+export const sandboxWorkerStatus: (input: GetSandboxWorkerStatusInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.sandboxWorkerStatus",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.worker.status", ...metadata });
+});
+
+export const sandboxWorkerMessage: (input: MessageSandboxWorkerInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.sandboxWorkerMessage",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.worker.message", ...metadata });
+});
+
+export const sandboxWorkerStop: (input: StopSandboxWorkerInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.sandboxWorkerStop",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({ ...input, type: "sandbox.worker.stop", ...metadata });
 });

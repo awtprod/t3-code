@@ -71,4 +71,29 @@ describe("T3ProjectFile", () => {
     expect(decode({ defaultThreadEnvMode: "local" }).defaultThreadEnvMode).toBe("local");
     expect(() => decode({ defaultThreadEnvMode: "remote" })).toThrow();
   });
+
+  it("decodes bounded digest-pinned sandbox declarations", () => {
+    const sandbox = decode({
+      sandbox: {
+        image: `desktop@sha256:${"a".repeat(64)}`,
+        services: [
+          {
+            name: "db",
+            image: `postgres@sha256:${"b".repeat(64)}`,
+            internalPorts: [5432],
+            generatedEnvironment: [{ key: "POSTGRES_PASSWORD", kind: "password" }],
+          },
+        ],
+        setup: [{ executable: "pnpm", args: ["install", "--frozen-lockfile"] }],
+        caches: [{ digest: "c".repeat(64), target: "/cache/pnpm" }],
+        previewPorts: [3000],
+      },
+    }).sandbox;
+    expect(sandbox?.services?.[0]?.name).toBe("db");
+    expect(sandbox?.services?.[0]?.generatedEnvironment?.[0]?.key).toBe("POSTGRES_PASSWORD");
+    expect(() => decode({ sandbox: { image: "desktop:latest" } })).toThrow();
+    expect(() =>
+      decode({ sandbox: { image: `desktop@sha256:${"a".repeat(64)}`, previewPorts: [0] } }),
+    ).toThrow();
+  });
 });

@@ -32,6 +32,7 @@ import {
 import type { CheckpointServiceError } from "./Errors.ts";
 import { checkpointRefForThreadTurn } from "./Utils.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
+import { checkpointExecutionTargetForThread } from "./CheckpointStore.ts";
 
 /** Service tag for checkpoint diff queries. */
 export class CheckpointDiffQuery extends Context.Service<
@@ -171,6 +172,10 @@ export const make = Effect.gen(function* () {
           toCheckpointRef,
           fallbackFromToHead: false,
           ignoreWhitespace,
+          target: checkpointExecutionTargetForThread({
+            id: input.threadId,
+            sandbox: threadContext.value.sandbox,
+          }),
         })
         .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
 
@@ -261,6 +266,10 @@ export const make = Effect.gen(function* () {
         toCheckpointRef: threadContext.value.toCheckpointRef as CheckpointRef,
         fallbackFromToHead: false,
         ignoreWhitespace,
+        target: checkpointExecutionTargetForThread({
+          id: input.threadId,
+          sandbox: threadContext.value.sandbox,
+        }),
       })
       .pipe(Effect.withSpan("checkpoint.fullThread.diffCheckpoints"));
 

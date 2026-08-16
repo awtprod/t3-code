@@ -3002,6 +3002,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
     const allowedWebSocketOrigins = [
       ...(config.devUrl ? [config.devUrl.origin] : []),
       ...DESKTOP_RENDERER_ORIGINS,
+      ...config.devAllowedOrigins,
     ];
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;

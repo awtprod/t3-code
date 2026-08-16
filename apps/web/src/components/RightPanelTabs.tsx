@@ -6,6 +6,7 @@ import {
   Files,
   GitPullRequest,
   Globe2,
+  MonitorUp,
   Plus,
   TerminalSquare,
   X,
@@ -65,12 +66,14 @@ interface RightPanelTabsProps {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddAgents: () => void;
+  onAddDesktop?: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
   pullRequestAvailable: boolean;
   agentsAvailable: boolean;
+  desktopAvailable?: boolean;
   pullRequestStatuses?: Readonly<Record<string, PullRequestTabStatus>>;
   /** Running + waiting subagents; badges the Agents card in the empty state. */
   liveAgentCount: number;
@@ -92,6 +95,7 @@ const SURFACE_DISABLED_REASONS = {
   diff: "Diff is only available for server threads in Git repositories.",
   pullRequest: "This thread's branch has no pull request yet.",
   agents: "Agents are only available from a thread.",
+  desktop: "The isolated desktop is only available from a sandboxed thread.",
 } as const;
 
 /** Overlays that must win over the launcher's letter shortcuts. */
@@ -114,6 +118,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   diff: "Available for Git repositories.",
   pullRequest: "No pull request on this branch yet.",
   agents: "Available from a thread.",
+  desktop: "Available from an isolated thread.",
 } as const;
 
 type TabContextMenuAction = "copy-path" | "close" | "close-others" | "close-to-right" | "close-all";
@@ -160,12 +165,14 @@ function RightPanelEmptyState(props: {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddAgents: () => void;
+  onAddDesktop?: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
   pullRequestAvailable: boolean;
   agentsAvailable: boolean;
+  desktopAvailable?: boolean;
   liveAgentCount: number;
 }) {
   // -1 means no highlight: it only appears on hover or arrow use.
@@ -220,6 +227,16 @@ function RightPanelEmptyState(props: {
       available: props.pullRequestAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.pullRequest,
       onClick: props.onAddPullRequest,
+      badgeCount: 0,
+    },
+    {
+      label: "Desktop",
+      description: "Watch or take control of the thread desktop.",
+      icon: MonitorUp,
+      shortcut: "I",
+      available: props.desktopAvailable === true,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.desktop,
+      onClick: props.onAddDesktop ?? (() => undefined),
       badgeCount: 0,
     },
     {
@@ -426,6 +443,8 @@ function surfaceTitle(
       return `#${surface.number}`;
     case "agents":
       return "Agents";
+    case "desktop":
+      return "Desktop";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -484,6 +503,8 @@ function SurfaceIcon({
       return <FileDiff className="size-3 shrink-0" />;
     case "files":
       return <Files className="size-3 shrink-0" />;
+    case "desktop":
+      return <MonitorUp className="size-3 shrink-0" />;
     case "file":
       return (
         <PierreEntryIcon
@@ -737,6 +758,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     Pull request
                   </SurfaceMenuItem>
                   <SurfaceMenuItem
+                    available={props.desktopAvailable === true}
+                    disabledReason={SURFACE_DISABLED_REASONS.desktop}
+                    onClick={props.onAddDesktop ?? (() => undefined)}
+                  >
+                    <MonitorUp />
+                    Desktop
+                  </SurfaceMenuItem>
+                  <SurfaceMenuItem
                     available={props.agentsAvailable}
                     disabledReason={SURFACE_DISABLED_REASONS.agents}
                     onClick={props.onAddAgents}
@@ -760,12 +789,16 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddFiles={props.onAddFiles}
             onAddPullRequest={props.onAddPullRequest}
             onAddAgents={props.onAddAgents}
+            {...(props.onAddDesktop === undefined ? {} : { onAddDesktop: props.onAddDesktop })}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}
             filesAvailable={props.filesAvailable}
             pullRequestAvailable={props.pullRequestAvailable}
             agentsAvailable={props.agentsAvailable}
+            {...(props.desktopAvailable === undefined
+              ? {}
+              : { desktopAvailable: props.desktopAvailable })}
             liveAgentCount={props.liveAgentCount}
           />
         ) : (
