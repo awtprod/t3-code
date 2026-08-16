@@ -244,6 +244,8 @@ describe("CommandCenterHome projection", () => {
       id: "run-1",
       status: "running",
       threadId: "thread-1",
+      title: "Assistant",
+      agentKind: "assistant",
     });
     expect(projection.context.needsYou[0]).toMatchObject({ reason: "review" });
     expect(projection.context.needsYou[0]?.action).toMatchObject({
@@ -256,6 +258,40 @@ describe("CommandCenterHome projection", () => {
       detail: "Read-only",
     });
     expect(projection.context.today).toHaveLength(1);
+  });
+
+  it("derives agent kind from run kind and repository binding", () => {
+    const bootstrap = {
+      ...BOOTSTRAP,
+      runs: [
+        BOOTSTRAP.runs[0],
+        {
+          ...BOOTSTRAP.runs[0],
+          id: "run-coding",
+          repositoryId: "repository-1",
+          createdAt: "2026-01-15T09:56:00.000Z",
+        },
+        {
+          ...BOOTSTRAP.runs[0],
+          id: "run-automation",
+          kind: "automation",
+          createdAt: "2026-01-15T09:57:00.000Z",
+        },
+      ],
+    } as unknown as CommandCenterBootstrap;
+
+    const projection = projectBootstrap(bootstrap, new Date("2026-01-15T10:00:00.000Z"));
+
+    expect(projection.conversations.map((c) => [c.id, c.agentKind, c.title])).toEqual([
+      ["run-automation", "automation", "Automation run"],
+      ["run-coding", "coding", "Coding run"],
+      ["run-1", "assistant", "Assistant"],
+    ]);
+    expect(projection.context.activeRuns.map((run) => run.agentKind)).toEqual([
+      "assistant",
+      "coding",
+      "automation",
+    ]);
   });
 
   it("does not count failed runs as active work", () => {

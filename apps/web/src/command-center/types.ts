@@ -10,12 +10,15 @@ export interface CommandCenterSpace {
 
 export type CommandCenterConversationStatus = "idle" | "running" | "waiting" | "failed";
 
+export type CommandCenterAgentKind = "assistant" | "coding" | "automation";
+
 export interface CommandCenterConversation {
   readonly id: string;
   readonly spaceId: string;
   readonly projectId?: string | undefined;
   readonly threadId?: string | undefined;
   readonly title: string;
+  readonly agentKind: CommandCenterAgentKind;
   readonly preview?: string | undefined;
   readonly updatedAtLabel: string;
   readonly status?: CommandCenterConversationStatus | undefined;
@@ -115,6 +118,7 @@ export interface CommandCenterActiveRun {
   readonly projectId?: string | undefined;
   readonly threadId?: string | undefined;
   readonly title: string;
+  readonly agentKind: CommandCenterAgentKind;
   readonly spaceName: string;
   readonly status: "queued" | "running" | "waiting" | "failed";
   readonly detail?: string | undefined;

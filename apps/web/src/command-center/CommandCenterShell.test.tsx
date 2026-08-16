@@ -20,6 +20,7 @@ const FIXTURE: CommandCenterShellProps = {
   context: {
     activeRuns: [
       {
+        agentKind: "coding",
         detail: "Reviewing changes",
         id: "run-1",
         spaceName: "Studio",
@@ -64,6 +65,7 @@ const FIXTURE: CommandCenterShellProps = {
   conversationTitle: "Command",
   conversations: [
     {
+      agentKind: "assistant",
       id: "conversation-1",
       preview: "Draft is ready for review",
       spaceId: "studio",

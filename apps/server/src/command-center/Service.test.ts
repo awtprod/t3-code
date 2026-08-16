@@ -879,6 +879,30 @@ it.effect("uses least-privilege capabilities for Needs You and automation drafti
   }).pipe(Effect.provide(makeTestLayer())),
 );
 
+it.effect("routes assistant phrasing away from repository work", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const submit = (commandId: string, text: string) =>
+      service.submitCommand(decodeCommand({ commandId, text, spaceId: systemSpace.id }), providers);
+
+    const fixCalendar = yield* submit("command-fix-calendar", "Fix my calendar for next week");
+    const buildPlan = yield* submit("command-build-plan", "Build a plan for the week");
+    const testIdea = yield* submit("command-test-idea", "Test this idea");
+    const recurringSummary = yield* submit(
+      "command-recurring-summary",
+      "Schedule a recurring email summary",
+    );
+    const checkSchedule = yield* submit("command-check-schedule", "Check my schedule");
+
+    expect(fixCalendar.route.intent).toBe("google");
+    expect(buildPlan.route.intent).toBe("conversation");
+    expect(testIdea.route.intent).toBe("item");
+    expect(recurringSummary.route.intent).toBe("automation");
+    expect(recurringSummary.route.actionKind).toBe("automation.draft");
+    expect(checkSchedule.route.intent).toBe("google");
+  }).pipe(Effect.provide(makeTestLayer())),
+);
+
 it.effect("replays duplicate command ids with the current Run state and immutable route", () =>
   Effect.gen(function* () {
     const service = yield* CommandCenterService;

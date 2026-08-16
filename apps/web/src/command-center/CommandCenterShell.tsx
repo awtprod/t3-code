@@ -40,7 +40,11 @@ import type {
   CommandCenterShellProps,
   CommandCenterTodayItem,
 } from "./types";
-import { CommandCenterHistoryMenu } from "./CommandCenterHistoryMenu";
+import {
+  AGENT_KIND_CHIP_CLASS,
+  AGENT_KIND_CHIP_LABEL,
+  CommandCenterHistoryMenu,
+} from "./CommandCenterHistoryMenu";
 
 const STATUS_DOT_CLASS = {
   failed: "bg-destructive",
@@ -1073,7 +1077,17 @@ function ActiveRunRows({
         <span className={cn("size-2 rounded-full", STATUS_DOT_CLASS[run.status])} />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="line-clamp-2 block text-xs font-medium leading-relaxed">{run.title}</span>
+        <span className="flex items-center gap-1.5">
+          <span className="line-clamp-2 text-xs font-medium leading-relaxed">{run.title}</span>
+          <span
+            className={cn(
+              "shrink-0 rounded-sm px-1 py-px text-[0.5625rem] font-medium uppercase tracking-wide",
+              AGENT_KIND_CHIP_CLASS[run.agentKind],
+            )}
+          >
+            {AGENT_KIND_CHIP_LABEL[run.agentKind]}
+          </span>
+        </span>
         <span className="mt-0.5 block truncate text-[0.6875rem] text-muted-foreground">
           {run.spaceName} · {run.detail ?? run.status}
         </span>

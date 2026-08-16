@@ -672,6 +672,19 @@ function inferClassifier(text: string, spaceId: SpaceType["id"] | undefined) {
       spaceId,
     };
   }
+  if (/\b(automation|automate|recurring|weekly|daily)\b/u.test(normalized)) {
+    const execute =
+      /\b(run|start|execute|trigger)\b.{0,32}\b(automation|workflow)\b/u.test(normalized) ||
+      /\b(automation|workflow)\b.{0,32}\b(run|start|execute|trigger)\b/u.test(normalized);
+    return {
+      intent: "automation" as const,
+      actionKind: execute ? ("automation.run" as const) : ("automation.draft" as const),
+      capabilities: execute
+        ? (["cc.automations.read", "cc.automations.run"] as const)
+        : (["cc.automations.read", "cc.automations.write"] as const),
+      spaceId,
+    };
+  }
   if (/\b(email|gmail)\b/u.test(normalized)) {
     return {
       intent: "google" as const,
@@ -704,19 +717,6 @@ function inferClassifier(text: string, spaceId: SpaceType["id"] | undefined) {
       spaceId,
     };
   }
-  if (/\b(automation|automate|recurring|weekly|daily)\b/u.test(normalized)) {
-    const execute =
-      /\b(run|start|execute|trigger)\b.{0,32}\b(automation|workflow)\b/u.test(normalized) ||
-      /\b(automation|workflow)\b.{0,32}\b(run|start|execute|trigger)\b/u.test(normalized);
-    return {
-      intent: "automation" as const,
-      actionKind: execute ? ("automation.run" as const) : ("automation.draft" as const),
-      capabilities: execute
-        ? (["cc.automations.read", "cc.automations.run"] as const)
-        : (["cc.automations.read", "cc.automations.write"] as const),
-      spaceId,
-    };
-  }
   if (/\b(remember|note that|keep this)\b/u.test(normalized)) {
     return {
       intent: "conversation" as const,
@@ -726,7 +726,7 @@ function inferClassifier(text: string, spaceId: SpaceType["id"] | undefined) {
     };
   }
   if (
-    /\b(start work|work on|app|application|repo|repository|code|fix|build|test|branch|pull request|pr)\b/u.test(
+    /\b(repo|repository|repositories|codebase|branch|pull request|pr)\b|\bstart work\b|\b(fix|build|debug|refactor|implement|test)\b.{0,48}\b(app|application|code|service|project)\b/u.test(
       normalized,
     )
   ) {

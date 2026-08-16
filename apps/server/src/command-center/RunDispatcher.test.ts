@@ -72,7 +72,7 @@ it("gives only top-level interactive runs the router policy", () => {
   });
 
   expect(topLevel).toContain("Command Center router role");
-  expect(topLevel).toContain("isolated worktree or the shared workspace");
+  expect(topLevel).toContain("personal assistant and router");
   expect(child).not.toContain("Command Center router role");
 });
 

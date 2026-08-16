@@ -3,6 +3,7 @@ import {
   archiveSelectedThreadEntries,
   buildBulkTitleRegenerationContextMenuItem,
   buildMultiSelectThreadContextMenuItems,
+  commandCenterThreadBadge,
   createThreadJumpHintVisibilityController,
   getSidebarThreadIdsToPrewarm,
   getVisibleSidebarThreadIds,
@@ -52,6 +53,20 @@ import {
 } from "../types";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
+
+describe("commandCenterThreadBadge", () => {
+  it("labels interactive Command Center threads as Assistant", () => {
+    expect(commandCenterThreadBadge("cc:interactive:abc-123")).toBe("Assistant");
+  });
+
+  it("labels other Command Center threads as Agent task", () => {
+    expect(commandCenterThreadBadge("cc:automation:abc-123")).toBe("Agent task");
+  });
+
+  it("returns no badge for ordinary threads", () => {
+    expect(commandCenterThreadBadge("thread-1")).toBeNull();
+  });
+});
 
 describe("shouldNavigateAfterProjectRemoval", () => {
   const projectThreads = [{ environmentId: "environment-local", id: "thread-1" }];

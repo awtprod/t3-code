@@ -18,6 +18,7 @@ import type {
 } from "@t3tools/contracts";
 
 import type {
+  CommandCenterAgentKind,
   CommandCenterContext,
   CommandCenterConversation,
   CommandCenterMessage,
@@ -98,6 +99,17 @@ function formatTime(value: string, now: Date): string {
   if (elapsedMs < 86_400_000) return `${Math.floor(elapsedMs / 3_600_000)}h ago`;
   return timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
+
+function runAgentKind(run: Run): CommandCenterAgentKind {
+  if (run.kind === "automation") return "automation";
+  return run.repositoryId === undefined ? "assistant" : "coding";
+}
+
+const AGENT_KIND_TITLES: Record<CommandCenterAgentKind, string> = {
+  assistant: "Assistant",
+  coding: "Coding run",
+  automation: "Automation run",
+};
 
 function conversationStatus(status: Run["status"]): CommandCenterConversation["status"] {
   if (status === "queued" || status === "running") return "running";
@@ -350,7 +362,8 @@ export function projectBootstrap(
         spaceId: run.spaceId,
         projectId: run.projectId,
         threadId: run.threadId,
-        title: `${titleCase(run.kind)} run`,
+        title: AGENT_KIND_TITLES[runAgentKind(run)],
+        agentKind: runAgentKind(run),
         preview:
           run.modelId === undefined
             ? titleCase(run.status)
@@ -387,7 +400,8 @@ export function projectBootstrap(
       id: run.id,
       projectId: run.projectId,
       threadId: run.threadId,
-      title: `${titleCase(run.kind)} run`,
+      title: AGENT_KIND_TITLES[runAgentKind(run)],
+      agentKind: runAgentKind(run),
       spaceName: spaceName(bootstrap, run.spaceId),
       status:
         run.status === "waiting" || run.status === "waiting_approval"

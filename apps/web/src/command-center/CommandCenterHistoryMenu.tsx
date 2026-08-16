@@ -5,7 +5,19 @@ import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { cn } from "~/lib/utils";
 
-import type { CommandCenterConversation } from "./types";
+import type { CommandCenterAgentKind, CommandCenterConversation } from "./types";
+
+export const AGENT_KIND_CHIP_LABEL: Record<CommandCenterAgentKind, string> = {
+  assistant: "Assistant",
+  automation: "Automation",
+  coding: "Coding",
+};
+
+export const AGENT_KIND_CHIP_CLASS: Record<CommandCenterAgentKind, string> = {
+  assistant: "bg-info/10 text-info",
+  automation: "bg-warning/10 text-warning",
+  coding: "bg-muted text-muted-foreground",
+};
 
 const STATUS_DOT_CLASS = {
   failed: "bg-destructive",
@@ -68,7 +80,17 @@ export function CommandCenterHistoryMenu({
                     )}
                   />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs font-medium">{conversation.title}</span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="truncate text-xs font-medium">{conversation.title}</span>
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-sm px-1 py-px text-[0.5625rem] font-medium uppercase tracking-wide",
+                          AGENT_KIND_CHIP_CLASS[conversation.agentKind],
+                        )}
+                      >
+                        {AGENT_KIND_CHIP_LABEL[conversation.agentKind]}
+                      </span>
+                    </span>
                     {conversation.preview ? (
                       <span className="mt-0.5 block truncate text-[0.6875rem] text-muted-foreground">
                         {conversation.preview}

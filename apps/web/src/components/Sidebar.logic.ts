@@ -23,6 +23,15 @@ export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
 // it small; cold opens still render instantly from the cached snapshot.
 export const SIDEBAR_THREAD_PREWARM_LIMIT = 3;
 
+// Command Center threads carry their origin in the thread id: interactive
+// main-page threads are "cc:interactive:*", child/automation runs use other
+// "cc:" prefixes. Non-CC threads get no badge.
+export function commandCenterThreadBadge(threadId: string): "Assistant" | "Agent task" | null {
+  if (threadId.startsWith("cc:interactive:")) return "Assistant";
+  if (threadId.startsWith("cc:")) return "Agent task";
+  return null;
+}
+
 type SidebarProject = {
   id: string;
   title: string;
