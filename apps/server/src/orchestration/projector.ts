@@ -9,6 +9,7 @@ import {
   OrchestrationMessage,
   OrchestrationSession,
   OrchestrationThread,
+  ThreadSandboxLifecyclePayload,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -348,6 +349,7 @@ export function projectEvent(
             interactionMode: payload.interactionMode,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
+            sandbox: payload.sandbox ?? null,
             latestTurn: null,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -916,6 +918,33 @@ export function projectEvent(
             }),
           };
         }),
+      );
+
+    case "sandbox.provisioning-started":
+    case "sandbox.ready":
+    case "sandbox.failed":
+    case "sandbox.paused":
+    case "sandbox.takeover-requested":
+    case "sandbox.takeover-acquired":
+    case "sandbox.resumed":
+    case "sandbox.stopping":
+    case "sandbox.expired":
+    case "sandbox.stopped":
+    case "sandbox.reconciled":
+    case "sandbox.branch-exported":
+      return decodeForEvent(
+        ThreadSandboxLifecyclePayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            sandbox: payload.sandbox,
+            updatedAt: payload.event.occurredAt,
+          }),
+        })),
       );
 
     default:

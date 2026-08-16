@@ -82,6 +82,10 @@ import {
   resolveCommandCenterCodexRuntimeExecutable,
   resolveCommandCenterManagedGitMetadata,
 } from "../security/CommandCenterProviderIsolation.ts";
+import {
+  makeSandboxChildProcessSpawner,
+  sandboxProviderTarget,
+} from "../../sandbox/SandboxProviderProcess.ts";
 import { describeCodexPermissionRequest } from "../security/CodexPermissionEscalation.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
@@ -1973,7 +1977,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
-        const commandCenterThread = isCommandCenterThreadId(input.threadId);
+        const sandboxTarget = sandboxProviderTarget(input.threadId);
+        const commandCenterThread =
+          isCommandCenterThreadId(input.threadId) && sandboxTarget === undefined;
         const sourceEnvironment = options?.environment ?? process.env;
         const commandCenterIsolationIssue = commandCenterProviderIsolationIssue({
           threadId: input.threadId,
@@ -2204,7 +2210,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           );
           const runtime = yield* createRuntime(attemptInput).pipe(
             Effect.provideService(Scope.Scope, sessionScope),
-            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+            Effect.provideService(
+              ChildProcessSpawner.ChildProcessSpawner,
+              sandboxTarget
+                ? makeSandboxChildProcessSpawner(sandboxTarget, childProcessSpawner)
+                : childProcessSpawner,
+            ),
             Effect.provideService(Crypto.Crypto, crypto),
           );
           const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>

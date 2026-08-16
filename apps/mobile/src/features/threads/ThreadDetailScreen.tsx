@@ -81,6 +81,7 @@ import {
 } from "./ThreadComposer";
 import { ThreadFeed } from "./ThreadFeed";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
+import { SandboxDesktopPanel } from "./SandboxDesktopPanel";
 
 export interface ThreadDetailScreenProps {
   readonly selectedThread: OrchestrationThreadShell;
@@ -716,6 +717,10 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             {/* Hidden (not unmounted) while a user-input request owns the
                 composer slot, so composer drafts and editor state survive. */}
             <View style={activeUserInputRequestId !== null ? { display: "none" } : undefined}>
+              <SandboxDesktopPanel
+                environmentId={props.environmentId}
+                thread={props.selectedThread}
+              />
               <ThreadComposer
                 editorRef={composerEditorRef}
                 draftMessage={props.draftMessage}

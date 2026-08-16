@@ -66,6 +66,11 @@ import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import {
+  SandboxRuntimeManager,
+  type SandboxRuntimeManagerShape,
+} from "../../sandbox/SandboxRuntimeManager.ts";
+import { DEFAULT_SANDBOX_RESOURCE_LIMITS } from "@t3tools/contracts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -104,6 +109,7 @@ describe("ProviderCommandReactor", () => {
   const createdBaseDirs = new Set<string>();
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (scope) {
       await Effect.runPromise(Scope.close(scope, Exit.void));
     }
@@ -160,6 +166,7 @@ describe("ProviderCommandReactor", () => {
       ProviderAdapterRequestError | ProviderAdapterValidationError
     >;
   }) {
+    vi.stubEnv("T3_SANDBOX_IMAGE", `desktop@sha256:${"d".repeat(64)}`);
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
       input?.baseDir ?? NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-reactor-"));
@@ -174,6 +181,22 @@ describe("ProviderCommandReactor", () => {
       model: "gpt-5-codex",
     };
     const startSessionEffect = input?.startSessionEffect;
+    const provisionSandbox = vi.fn(
+      (request: Parameters<SandboxRuntimeManagerShape["provision"]>[0]) =>
+        Effect.succeed({
+          sandboxId: request.bootstrap.threadId,
+          runtime: "docker" as const,
+          containerName: `sandbox-${request.bootstrap.threadId}`,
+          networkName: `network-${request.bootstrap.threadId}`,
+          workspaceVolumeName: `workspace-${request.bootstrap.threadId}`,
+          desktopVolumeName: `desktop-${request.bootstrap.threadId}`,
+          branchName: request.bootstrap.branchName,
+          limits: DEFAULT_SANDBOX_RESOURCE_LIMITS,
+          desktopSessionId: `desktop-${request.bootstrap.threadId}`,
+          desktopStreamPath: `/desktop/${request.bootstrap.threadId}`,
+          services: [],
+        }),
+    );
     const startSession = vi.fn((_: unknown, input: unknown) => {
       const sessionIndex = nextSessionIndex++;
       const resumeCursor =
@@ -401,6 +424,17 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(
         Layer.mock(GitWorkflowService.GitWorkflowService)({
           renameBranch,
+          localStatus: () =>
+            Effect.succeed({
+              isRepo: true,
+              hasPrimaryRemote: true,
+              isDefaultRef: true,
+              refName: "main",
+              hasWorkingTreeChanges: false,
+              workingTree: { files: [], insertions: 0, deletions: 0 },
+            }),
+          resolveRemoteTrackingCommit: () =>
+            Effect.succeed({ commitSha: "a".repeat(40), remoteRefName: "origin/main" }),
         } satisfies Partial<GitWorkflowService.GitWorkflowService["Service"]>),
       ),
       Layer.provideMerge(
@@ -419,6 +453,30 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(
+        Layer.succeed(SandboxRuntimeManager, {
+          provision: provisionSandbox,
+          exportBranch: () =>
+            Effect.succeed({
+              commit: "a".repeat(40),
+              patch: "",
+              artifactId: "b".repeat(64),
+              bundleSha256: "c".repeat(64),
+            }),
+          stop: () => Effect.void,
+          reconcile: () =>
+            Effect.succeed({
+              activeThreadIds: [],
+              missingThreadIds: [],
+              orphanThreadIds: [],
+              removedRuntimeRefs: [],
+            }),
+          sampleUsage: () =>
+            Effect.succeed({ cpuPercent: 0, memoryBytes: 0, diskBytes: 0, processCount: 0 }),
+          recoverPreview: () => Effect.succeed(false),
+          revokeCredentials: () => Effect.succeed(0),
+        } satisfies SandboxRuntimeManagerShape),
+      ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(NodeServices.layer),
@@ -453,6 +511,8 @@ describe("ProviderCommandReactor", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
+        sandboxConfig: {},
+        sandboxBranch: { branchName: "t3/thread/thread-1", baseCommit: "a".repeat(40) },
         createdAt: now,
       }),
     );
@@ -469,6 +529,8 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
+          sandboxConfig: {},
+          sandboxBranch: { branchName: "t3/thread/thread-2", baseCommit: "a".repeat(40) },
           createdAt: now,
         }),
       );
@@ -510,6 +572,7 @@ describe("ProviderCommandReactor", () => {
       generateBranchName,
       generateThreadTitle,
       runtimeSessions,
+      provisionSandbox,
       stateDir,
       drain,
       runEffect,
@@ -519,7 +582,7 @@ describe("ProviderCommandReactor", () => {
     };
   }
 
-  it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
+  it("lazily provisions before starting and sending a provider turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -544,13 +607,14 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.startSession.mock.calls[0]?.[0]).toEqual(ThreadId.make("thread-1"));
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      cwd: "/tmp/provider-project",
+      cwd: "/workspace/repo",
       modelSelection: {
         instanceId: ProviderInstanceId.make("codex"),
         model: "gpt-5-codex",
       },
       runtimeMode: "approval-required",
     });
+    expect(harness.provisionSandbox).toHaveBeenCalledTimes(1);
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
@@ -2033,7 +2097,7 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
   });
 
-  it("restarts the provider session when the thread workspace changes", async () => {
+  it("keeps provider execution in the sandbox when host workspace metadata changes", async () => {
     const harness = await createHarness({
       threadModelSelection: {
         instanceId: ProviderInstanceId.make("claudeAgent"),
@@ -2062,7 +2126,7 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
-      cwd: "/tmp/provider-project",
+      cwd: "/workspace/repo",
     });
 
     await Effect.runPromise(
@@ -2091,13 +2155,12 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await waitFor(() => harness.startSession.mock.calls.length === 2);
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
     expect(harness.stopSession.mock.calls.length).toBe(0);
-    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
-      cwd: "/tmp/provider-project-worktree",
-      resumeCursor: { opaque: "resume-1" },
+      cwd: "/workspace/repo",
       modelSelection: {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-sonnet-4-6",

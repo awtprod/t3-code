@@ -62,6 +62,10 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import { resolveSupabaseConnection } from "../../database/SupabaseMcpConnector.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import {
+  bindSandboxProviderTarget,
+  unbindSandboxProviderTarget,
+} from "../../sandbox/SandboxProviderProcess.ts";
 import { commandCenterProviderIsolationIssue } from "../security/CommandCenterProviderIsolation.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
@@ -637,7 +641,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   });
 
   const startSession: ProviderServiceMethod<"startSession"> = Effect.fn("startSession")(
-    function* (threadId, rawInput) {
+    function* (threadId, rawInput, executionTarget) {
       const parsed = yield* decodeInputOrValidationError({
         operation: "ProviderService.startSession",
         schema: ProviderSessionStartInput,
@@ -658,6 +662,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       return yield* Effect.gen(function* () {
         const instanceInfo = yield* registry.getInstanceInfo(resolvedInstanceId);
         const resolvedProvider = instanceInfo.driverKind;
+        if (executionTarget?.kind === "sandbox") {
+          if (resolvedProvider !== "codex" && resolvedProvider !== "claudeAgent") {
+            return yield* toValidationError(
+              "ProviderService.startSession",
+              `Sandbox provider startup is not supported for '${resolvedProvider}'.`,
+            );
+          }
+        }
         metricProvider = resolvedProvider;
         if (parsed.provider !== undefined && parsed.provider !== resolvedProvider) {
           return yield* toValidationError(
@@ -738,6 +750,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
+        if (executionTarget?.kind === "sandbox") bindSandboxProviderTarget(executionTarget);
         yield* prepareMcpSession(threadId, resolvedInstanceId, input.projectId, effectiveCwd);
         const session = yield* adapter
           .startSession({
@@ -793,6 +806,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
         return sessionWithInstance;
       }).pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            if (executionTarget?.kind === "sandbox") unbindSandboxProviderTarget(threadId);
+          }),
+        ),
         withMetrics({
           counter: providerSessionsTotal,
           attributes: () =>
@@ -1075,6 +1093,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* analytics.record("provider.session.stopped", {
           provider: routed.adapter.provider,
         });
+        unbindSandboxProviderTarget(input.threadId);
       }).pipe(
         withMetrics({
           counter: providerSessionsTotal,

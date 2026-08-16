@@ -23,6 +23,17 @@ import {
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { EfficiencyDecision, EfficiencyTier, ThreadRoutingMode } from "./efficiency.ts";
+import {
+  SandboxConfig,
+  SandboxBranchProvenance,
+  SandboxEvent,
+  SandboxState,
+  SandboxFailure,
+  SandboxId,
+  SandboxPauseReason,
+  SandboxRuntime,
+  SandboxSpawnWorkerInput,
+} from "./sandbox.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -380,6 +391,11 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  sandboxConfig: Schema.optional(SandboxConfig),
+  sandboxBranch: Schema.optional(SandboxState.fields.branch),
+  sandbox: Schema.optional(Schema.NullOr(SandboxState)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -452,6 +468,11 @@ export const OrchestrationThreadShell = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  sandboxConfig: Schema.optional(SandboxConfig),
+  sandboxBranch: Schema.optional(SandboxState.fields.branch),
+  sandbox: Schema.optional(Schema.NullOr(SandboxState)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -675,6 +696,9 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  sandboxConfig: Schema.optional(SandboxConfig),
+  sandboxBranch: Schema.optional(SandboxState.fields.branch),
+  sandbox: Schema.optional(Schema.NullOr(SandboxState)),
   createdAt: IsoDateTime,
 });
 
@@ -806,6 +830,9 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  sandboxConfig: Schema.optional(SandboxConfig),
+  sandboxBranch: Schema.optional(SandboxState.fields.branch),
+  sandbox: Schema.optional(Schema.NullOr(SandboxState)),
   createdAt: IsoDateTime,
 });
 
@@ -1005,6 +1032,80 @@ const ClientThreadSessionStopCommand = Schema.Struct({
   onlyIfSettled: Schema.optional(Schema.Boolean),
 });
 
+const SandboxProvisionCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.provision"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  config: Schema.optional(SandboxConfig),
+  branch: Schema.optional(SandboxBranchProvenance),
+  createdAt: IsoDateTime,
+});
+const SandboxPauseCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.pause"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  reason: SandboxPauseReason,
+  createdAt: IsoDateTime,
+});
+const SandboxTakeoverCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.takeover"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  sessionId: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+const SandboxResumeCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.resume"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  leaseId: Schema.optional(TrimmedNonEmptyString),
+  takeoverSummary: Schema.optional(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+});
+const SandboxStopCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+const SandboxBranchExportCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.branch-export"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+const SandboxWorkerSpawnCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.worker.spawn"),
+  commandId: CommandId,
+  ...SandboxSpawnWorkerInput.fields,
+  childThreadId: ThreadId,
+  branchName: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+const SandboxWorkerStatusCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.worker.status"),
+  commandId: CommandId,
+  parentThreadId: ThreadId,
+  childThreadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+const SandboxWorkerMessageCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.worker.message"),
+  commandId: CommandId,
+  parentThreadId: ThreadId,
+  childThreadId: ThreadId,
+  message: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+const SandboxWorkerStopCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.worker.stop"),
+  commandId: CommandId,
+  parentThreadId: ThreadId,
+  childThreadId: ThreadId,
+  reason: Schema.optional(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+});
+
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
@@ -1029,6 +1130,16 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ThreadSessionStopCommand,
+  SandboxProvisionCommand,
+  SandboxPauseCommand,
+  SandboxTakeoverCommand,
+  SandboxResumeCommand,
+  SandboxStopCommand,
+  SandboxBranchExportCommand,
+  SandboxWorkerSpawnCommand,
+  SandboxWorkerStatusCommand,
+  SandboxWorkerMessageCommand,
+  SandboxWorkerStopCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -1057,6 +1168,16 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ClientThreadSessionStopCommand,
+  SandboxProvisionCommand,
+  SandboxPauseCommand,
+  SandboxTakeoverCommand,
+  SandboxResumeCommand,
+  SandboxStopCommand,
+  SandboxBranchExportCommand,
+  SandboxWorkerSpawnCommand,
+  SandboxWorkerStatusCommand,
+  SandboxWorkerMessageCommand,
+  SandboxWorkerStopCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -1224,6 +1345,61 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
+const SandboxProvisionReadyCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.provision.ready"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  sandboxId: SandboxId,
+  runtime: SandboxRuntime,
+  runtimeRef: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+const SandboxOperationFailCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.operation.fail"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  failure: SandboxFailure,
+  createdAt: IsoDateTime,
+});
+const SandboxExpireCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.expire"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+const SandboxStopCompleteCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.stop.complete"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  expired: Schema.Boolean,
+  createdAt: IsoDateTime,
+});
+const SandboxTakeoverCompleteCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.takeover.complete"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  sessionId: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+const SandboxReconcileResultCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.reconcile.result"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  disposition: Schema.Literals(["matched", "missing", "adopted", "orphan-removed"]),
+  sandbox: SandboxState,
+  createdAt: IsoDateTime,
+});
+const SandboxBranchExportResultCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.branch-export.result"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  branchName: TrimmedNonEmptyString,
+  headCommit: TrimmedNonEmptyString,
+  artifactId: TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  bundleSha256: TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadTurnResumeCommand,
   ThreadSessionSetCommand,
@@ -1235,6 +1411,13 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
+  SandboxProvisionReadyCommand,
+  SandboxOperationFailCommand,
+  SandboxExpireCommand,
+  SandboxStopCompleteCommand,
+  SandboxTakeoverCompleteCommand,
+  SandboxReconcileResultCommand,
+  SandboxBranchExportResultCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1275,6 +1458,23 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
+  "sandbox.provisioning-started",
+  "sandbox.ready",
+  "sandbox.failed",
+  "sandbox.paused",
+  "sandbox.takeover-requested",
+  "sandbox.takeover-acquired",
+  "sandbox.resumed",
+  "sandbox.stopping",
+  "sandbox.expired",
+  "sandbox.stopped",
+  "sandbox.reconciled",
+  "sandbox.branch-exported",
+  "sandbox.branch-export-requested",
+  "sandbox.worker-spawn-requested",
+  "sandbox.worker-status-requested",
+  "sandbox.worker-message-requested",
+  "sandbox.worker-stop-requested",
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
@@ -1325,6 +1525,9 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  sandboxConfig: Schema.optional(SandboxConfig),
+  sandboxBranch: Schema.optional(SandboxState.fields.branch),
+  sandbox: Schema.optional(Schema.NullOr(SandboxState)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1541,6 +1744,37 @@ export const ThreadActivityAppendedPayload = Schema.Struct({
   activity: OrchestrationThreadActivity,
 });
 
+/** A durable sandbox transition plus its fully materialized resulting state. */
+export const ThreadSandboxLifecyclePayload = Schema.Struct({
+  threadId: ThreadId,
+  event: SandboxEvent,
+  sandbox: SandboxState,
+});
+
+export const SandboxBranchExportRequestedPayload = Schema.Struct({ threadId: ThreadId });
+export const SandboxWorkerSpawnRequestedPayload = Schema.Struct({
+  parentThreadId: ThreadId,
+  childThreadId: ThreadId,
+  task: TrimmedNonEmptyString,
+  inheritedCommit: TrimmedNonEmptyString,
+  inheritedPatch: SandboxSpawnWorkerInput.fields.inheritedPatch,
+  config: SandboxSpawnWorkerInput.fields.config,
+  branchName: TrimmedNonEmptyString,
+});
+export const SandboxWorkerOperationRequestedPayload = Schema.Struct({
+  parentThreadId: ThreadId,
+  childThreadId: ThreadId,
+  message: Schema.optional(TrimmedNonEmptyString),
+  reason: Schema.optional(TrimmedNonEmptyString),
+});
+
+const sandboxLifecyclePayload = <Type extends (typeof SandboxEvent.Type)["type"]>(type: Type) =>
+  ThreadSandboxLifecyclePayload.check(
+    Schema.makeFilter(
+      (payload) => payload.event.type === type || `sandbox event must be '${type}'`,
+    ),
+  );
+
 export const OrchestrationEventMetadata = Schema.Struct({
   providerTurnId: Schema.optional(TrimmedNonEmptyString),
   providerItemId: Schema.optional(ProviderItemId),
@@ -1712,6 +1946,91 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.activity-appended"),
     payload: ThreadActivityAppendedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.provisioning-started"),
+    payload: sandboxLifecyclePayload("sandbox.provisioning-started"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.ready"),
+    payload: sandboxLifecyclePayload("sandbox.ready"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.failed"),
+    payload: sandboxLifecyclePayload("sandbox.failed"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.paused"),
+    payload: sandboxLifecyclePayload("sandbox.paused"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.takeover-requested"),
+    payload: sandboxLifecyclePayload("sandbox.takeover-requested"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.takeover-acquired"),
+    payload: sandboxLifecyclePayload("sandbox.takeover-acquired"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.resumed"),
+    payload: sandboxLifecyclePayload("sandbox.resumed"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.stopping"),
+    payload: sandboxLifecyclePayload("sandbox.stopping"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.expired"),
+    payload: sandboxLifecyclePayload("sandbox.expired"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.stopped"),
+    payload: sandboxLifecyclePayload("sandbox.stopped"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.reconciled"),
+    payload: sandboxLifecyclePayload("sandbox.reconciled"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.branch-exported"),
+    payload: sandboxLifecyclePayload("sandbox.branch-exported"),
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.branch-export-requested"),
+    payload: SandboxBranchExportRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.worker-spawn-requested"),
+    payload: SandboxWorkerSpawnRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.worker-status-requested"),
+    payload: SandboxWorkerOperationRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.worker-message-requested"),
+    payload: SandboxWorkerOperationRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("sandbox.worker-stop-requested"),
+    payload: SandboxWorkerOperationRequestedPayload,
   }),
 ]);
 export type OrchestrationEvent = typeof OrchestrationEvent.Type;

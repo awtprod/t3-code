@@ -1,0 +1,512 @@
+// @effect-diagnostics nodeBuiltinImport:off - validates inherited Git patch content before container handoff.
+import { createHash } from "node:crypto";
+import {
+  CommandId,
+  EventId,
+  MessageId,
+  SandboxId,
+  type OrchestrationEvent,
+} from "@t3tools/contracts";
+import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
+import * as Stream from "effect/Stream";
+import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { SandboxManagerError, SandboxRuntimeManager } from "../../sandbox/SandboxRuntimeManager.ts";
+import { forkParked } from "../../serverActivation.ts";
+import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import {
+  SandboxLifecycleReactor,
+  type SandboxLifecycleReactorShape,
+} from "../Services/SandboxLifecycleReactor.ts";
+import {
+  T3ProjectFileLoader,
+  layer as T3ProjectFileLoaderLive,
+} from "../../project/T3ProjectFileLoader.ts";
+import { desktopGateway } from "../../sandbox/DesktopGatewayService.ts";
+
+type SandboxRequestEvent = Extract<
+  OrchestrationEvent,
+  {
+    type:
+      | "sandbox.branch-export-requested"
+      | "sandbox.worker-spawn-requested"
+      | "sandbox.worker-status-requested"
+      | "sandbox.worker-message-requested"
+      | "sandbox.worker-stop-requested"
+      | "sandbox.stopping"
+      | "sandbox.takeover-requested"
+      | "sandbox.takeover-acquired"
+      | "sandbox.resumed";
+  }
+>;
+
+const make = Effect.gen(function* () {
+  const engine = yield* OrchestrationEngineService;
+  const snapshots = yield* ProjectionSnapshotQuery;
+  const providers = yield* ProviderService;
+  const runtimes = yield* SandboxRuntimeManager;
+  const projectFiles = yield* T3ProjectFileLoader;
+  const crypto = yield* Crypto.Crypto;
+  const commandId = (tag: string) =>
+    crypto.randomUUIDv4.pipe(Effect.map((id) => CommandId.make(`server:${tag}:${id}`)));
+  const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+  const getThread = (threadId: Parameters<typeof snapshots.getThreadDetailById>[0]) =>
+    snapshots.getThreadDetailById(threadId).pipe(Effect.map(Option.getOrUndefined));
+
+  const exportBranch = Effect.fn("SandboxLifecycleReactor.exportBranch")(function* (
+    threadId: Parameters<typeof getThread>[0],
+  ) {
+    const thread = yield* getThread(threadId);
+    const runtime = thread?.sandbox?.runtime;
+    if (thread?.sandbox == null || (runtime !== "docker" && runtime !== "podman")) return;
+    const result = yield* runtimes.exportBranch(runtime, threadId);
+    yield* engine.dispatch({
+      type: "sandbox.branch-export.result",
+      commandId: yield* commandId("sandbox-export"),
+      threadId,
+      branchName: thread.sandbox.branch.branchName,
+      headCommit: result.commit,
+      createdAt: yield* nowIso,
+      artifactId: result.artifactId,
+      bundleSha256: result.bundleSha256,
+    });
+  });
+
+  const stop = Effect.fn("SandboxLifecycleReactor.stop")(function* (
+    threadId: Parameters<typeof getThread>[0],
+    expired: boolean,
+  ) {
+    const thread = yield* getThread(threadId);
+    const runtime = thread?.sandbox?.runtime;
+    if (thread?.sandbox == null || (runtime !== "docker" && runtime !== "podman")) return;
+    const sessions = yield* providers.listSessions();
+    if (sessions.some((session) => session.threadId === threadId))
+      yield* providers.stopSession({ threadId });
+    yield* exportBranch(threadId);
+    yield* runtimes.stop(runtime, threadId);
+    yield* engine.dispatch({
+      type: "sandbox.stop.complete",
+      commandId: yield* commandId("sandbox-stop-complete"),
+      threadId,
+      expired,
+      createdAt: yield* nowIso,
+    });
+  });
+
+  const processEvent = Effect.fn("SandboxLifecycleReactor.processEvent")(function* (
+    event: SandboxRequestEvent,
+  ) {
+    if (event.type === "sandbox.takeover-acquired") {
+      desktopGateway.setHumanControl(event.payload.threadId, true);
+      return;
+    }
+    if (event.type === "sandbox.resumed") {
+      desktopGateway.setHumanControl(event.payload.threadId, false);
+      return;
+    }
+    if (event.type === "sandbox.branch-export-requested")
+      return yield* exportBranch(event.payload.threadId);
+    if (event.type === "sandbox.takeover-requested") {
+      const sessions = yield* providers.listSessions();
+      if (sessions.some((session) => session.threadId === event.payload.threadId)) {
+        yield* providers
+          .stopSession({ threadId: event.payload.threadId })
+          .pipe(Effect.timeout(Duration.seconds(30)));
+      }
+      const request = event.payload.event as Extract<
+        typeof event.payload.event,
+        { type: "sandbox.takeover-requested" }
+      >;
+      yield* engine.dispatch({
+        type: "sandbox.takeover.complete",
+        commandId: yield* commandId("sandbox-takeover-complete"),
+        threadId: event.payload.threadId,
+        sessionId: request.sessionId,
+        createdAt: yield* nowIso,
+      });
+      return;
+    }
+    if (event.type === "sandbox.stopping") {
+      desktopGateway.setHumanControl(event.payload.threadId, false);
+      const stopping = event.payload.event as Extract<
+        typeof event.payload.event,
+        { type: "sandbox.stopping" }
+      >;
+      return yield* stop(event.payload.threadId, stopping.expired);
+    }
+    if (event.type === "sandbox.worker-spawn-requested") {
+      const parent = yield* getThread(event.payload.parentThreadId);
+      if (!parent) return;
+      const createdAt = yield* nowIso;
+      const inheritedPatch = event.payload.inheritedPatch;
+      if (inheritedPatch && inheritedPatch.content === undefined) {
+        return yield* new SandboxManagerError({
+          message: "inherited worker patch metadata did not include patch content",
+        });
+      }
+      if (inheritedPatch?.content !== undefined) {
+        const bytes = Buffer.byteLength(inheritedPatch.content);
+        const digest = createHash("sha256").update(inheritedPatch.content).digest("hex");
+        if (bytes !== inheritedPatch.sizeBytes || digest !== inheritedPatch.sha256) {
+          return yield* new SandboxManagerError({
+            message: "inherited worker patch content failed size or digest validation",
+          });
+        }
+      }
+      const snapshot = yield* snapshots.getSnapshot();
+      const project = snapshot.projects.find((item) => item.id === parent.projectId);
+      if (!project)
+        return yield* new SandboxManagerError({
+          message: `project '${parent.projectId}' was not found`,
+        });
+      const declaration = Option.getOrUndefined(
+        yield* projectFiles.load(project.workspaceRoot),
+      )?.sandbox;
+      const fallbackImage = process.env.T3_SANDBOX_IMAGE?.trim();
+      const image = declaration?.image ?? fallbackImage;
+      if (!image)
+        return yield* new SandboxManagerError({
+          message: "A digest-pinned sandbox image is required to spawn an isolated worker",
+        });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: yield* commandId("sandbox-worker-create"),
+        threadId: event.payload.childThreadId,
+        projectId: parent.projectId,
+        title: event.payload.task.slice(0, 120),
+        modelSelection: parent.modelSelection,
+        routingMode: parent.routingMode,
+        efficiencyTier: parent.efficiencyTier,
+        runtimeMode: parent.runtimeMode,
+        interactionMode: parent.interactionMode,
+        branch: null,
+        worktreePath: null,
+        sandboxConfig: event.payload.config,
+        sandboxBranch: {
+          branchName: event.payload.branchName,
+          baseCommit: event.payload.inheritedCommit,
+          parentThreadId: event.payload.parentThreadId,
+          inheritedCommit: event.payload.inheritedCommit,
+          ...(event.payload.inheritedPatch
+            ? { inheritedPatchSha256: event.payload.inheritedPatch.sha256 }
+            : {}),
+        },
+        createdAt,
+      });
+      yield* engine.dispatch({
+        type: "sandbox.provision",
+        commandId: yield* commandId("sandbox-worker-provision"),
+        threadId: event.payload.childThreadId,
+        config: event.payload.config ?? {},
+        createdAt,
+      });
+      const provision = yield* runtimes.provision({
+        bootstrap: {
+          threadId: event.payload.childThreadId,
+          projectId: parent.projectId,
+          repositoryUrl: project.repositoryIdentity?.locator.remoteUrl ?? project.workspaceRoot,
+          baseCommit: event.payload.inheritedCommit,
+          branchName: event.payload.branchName,
+          parentThreadId: event.payload.parentThreadId,
+          ...(inheritedPatch?.content !== undefined
+            ? { inheritedPatch: inheritedPatch.content }
+            : {}),
+        },
+        config: event.payload.config ?? {},
+        image,
+        ...(process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE?.trim()
+          ? { egressProxyImage: process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE.trim() }
+          : {}),
+        ...(declaration?.caches ? { caches: declaration.caches } : {}),
+        ...(declaration?.setup ? { setup: declaration.setup } : {}),
+        ...(declaration?.teardown ? { teardown: declaration.teardown } : {}),
+        ...(declaration?.services ? { services: declaration.services } : {}),
+        ...(declaration?.previewPorts ? { previewPorts: declaration.previewPorts } : {}),
+      });
+      yield* engine.dispatch({
+        type: "sandbox.provision.ready",
+        commandId: yield* commandId("sandbox-worker-ready"),
+        threadId: event.payload.childThreadId,
+        sandboxId: SandboxId.make(provision.sandboxId),
+        runtime: provision.runtime,
+        runtimeRef: provision.containerName,
+        createdAt: yield* nowIso,
+      });
+      const readyChild = yield* getThread(event.payload.childThreadId);
+      if (readyChild?.sandbox) {
+        const checkedAt = yield* nowIso;
+        yield* engine.dispatch({
+          type: "sandbox.reconcile.result",
+          commandId: yield* commandId("worker-service-health"),
+          threadId: event.payload.childThreadId,
+          disposition: "matched",
+          sandbox: {
+            ...readyChild.sandbox,
+            services: provision.services.map((service) => ({
+              name: service.name,
+              status: "healthy" as const,
+              ...(service.internalPorts[0] === undefined
+                ? {}
+                : { internalPort: service.internalPorts[0] }),
+              checkedAt,
+            })),
+          },
+          createdAt: checkedAt,
+        });
+      }
+      yield* engine.dispatch({
+        type: "thread.turn.start",
+        commandId: yield* commandId("sandbox-worker-run"),
+        threadId: event.payload.childThreadId,
+        message: {
+          messageId: MessageId.make(`worker:${yield* crypto.randomUUIDv4}`),
+          role: "user",
+          text: event.payload.task,
+          attachments: [],
+        },
+        runtimeMode: parent.runtimeMode,
+        interactionMode: parent.interactionMode,
+        createdAt,
+      });
+      return;
+    }
+    if (event.type === "sandbox.worker-message-requested" && event.payload.message) {
+      const child = yield* getThread(event.payload.childThreadId);
+      if (!child || child.sandbox?.branch.parentThreadId !== event.payload.parentThreadId) return;
+      const id = yield* crypto.randomUUIDv4;
+      yield* engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`server:worker-message:${id}`),
+        threadId: child.id,
+        message: {
+          messageId: MessageId.make(`worker:${id}`),
+          role: "user",
+          text: event.payload.message,
+          attachments: [],
+        },
+        runtimeMode: child.runtimeMode,
+        interactionMode: child.interactionMode,
+        createdAt: yield* nowIso,
+      });
+      return;
+    }
+    if (event.type === "sandbox.worker-stop-requested") {
+      const child = yield* getThread(event.payload.childThreadId);
+      if (!child || child.sandbox?.branch.parentThreadId !== event.payload.parentThreadId) return;
+      yield* engine.dispatch({
+        type: "sandbox.stop",
+        commandId: yield* commandId("worker-stop"),
+        threadId: child.id,
+        createdAt: yield* nowIso,
+      });
+      return;
+    }
+    if (event.type === "sandbox.worker-status-requested") {
+      const child = yield* getThread(event.payload.childThreadId);
+      if (!child || child.sandbox?.branch.parentThreadId !== event.payload.parentThreadId) return;
+      const createdAt = yield* nowIso;
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: yield* commandId("worker-status"),
+        threadId: event.payload.parentThreadId,
+        createdAt,
+        activity: {
+          id: EventId.make(yield* crypto.randomUUIDv4),
+          tone: "info",
+          kind: "sandbox.worker.status",
+          summary: `Worker ${child.id} is ${child.sandbox.lifecycle}`,
+          payload: {
+            childThreadId: child.id,
+            lifecycle: child.sandbox.lifecycle,
+            latestTurn: child.latestTurn,
+          },
+          turnId: null,
+          createdAt,
+        },
+      });
+    }
+  });
+  const worker = yield* makeDrainableWorker((event: SandboxRequestEvent) =>
+    processEvent(event).pipe(
+      Effect.catchCause((cause) =>
+        Effect.gen(function* () {
+          const threadId =
+            "threadId" in event.payload ? event.payload.threadId : event.payload.childThreadId;
+          const occurredAt = yield* nowIso;
+          yield* engine
+            .dispatch({
+              type: "sandbox.operation.fail",
+              commandId: yield* commandId("sandbox-lifecycle-failed"),
+              threadId,
+              failure: {
+                stage:
+                  event.type === "sandbox.branch-export-requested"
+                    ? "export"
+                    : event.type === "sandbox.stopping"
+                      ? "teardown"
+                      : "runtime",
+                code: "sandbox_lifecycle_failed",
+                message: String(cause),
+                retryable: true,
+                occurredAt,
+              },
+              createdAt: occurredAt,
+            })
+            .pipe(Effect.ignore);
+          yield* Effect.logWarning("sandbox lifecycle event failed", { type: event.type, cause });
+        }),
+      ),
+    ),
+  );
+
+  const reconcile = Effect.fn("SandboxLifecycleReactor.reconcile")(function* () {
+    const snapshot = yield* snapshots.getSnapshot();
+    for (const runtime of ["docker", "podman"] as const) {
+      const expected = new Set(
+        snapshot.threads
+          .filter(
+            (thread) =>
+              thread.sandbox?.runtime === runtime &&
+              !["stopped", "expired", "deleted"].includes(thread.sandbox.lifecycle),
+          )
+          .map((thread) => thread.id),
+      );
+      const result = yield* runtimes.reconcile(runtime, expected).pipe(Effect.option);
+      if (Option.isNone(result)) continue;
+      for (const threadId of result.value.activeThreadIds) {
+        const thread = snapshot.threads.find((item) => item.id === threadId);
+        desktopGateway.setServiceStatus(
+          threadId,
+          (thread?.sandbox?.services ?? []).map((service) => ({
+            name: service.name,
+            healthy: service.status === "healthy",
+          })),
+        );
+        const project = snapshot.projects.find((item) => item.id === thread?.projectId);
+        const declaration =
+          project === undefined
+            ? undefined
+            : Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot))?.sandbox;
+        if (thread?.sandbox?.runtimeRef && (declaration?.previewPorts?.length ?? 0) > 0) {
+          yield* runtimes
+            .recoverPreview(
+              runtime,
+              threadId,
+              thread.sandbox.runtimeRef,
+              declaration!.previewPorts!,
+            )
+            .pipe(Effect.ignore);
+        }
+      }
+      for (const threadId of result.value.missingThreadIds) {
+        const thread = snapshot.threads.find((item) => item.id === threadId);
+        if (!thread?.sandbox) continue;
+        const createdAt = yield* nowIso;
+        yield* engine
+          .dispatch({
+            type: "sandbox.reconcile.result",
+            commandId: yield* commandId("sandbox-missing"),
+            threadId: thread.id,
+            disposition: "missing",
+            sandbox: {
+              ...thread.sandbox,
+              lifecycle: "failed",
+              failure: {
+                stage: "reconcile",
+                code: "sandbox_container_missing",
+                message: "Recorded sandbox container was not found during startup reconciliation.",
+                retryable: true,
+                occurredAt: createdAt,
+              },
+              lastActiveAt: createdAt,
+            },
+            createdAt,
+          })
+          .pipe(Effect.ignore);
+      }
+    }
+  });
+
+  const expire = Effect.fn("SandboxLifecycleReactor.expire")(function* () {
+    const snapshot = yield* snapshots.getSnapshot();
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    const activeSessions = new Set(
+      (yield* providers.listSessions()).map((session) => session.threadId),
+    );
+    for (const thread of snapshot.threads) {
+      const sandbox = thread.sandbox;
+      if (!sandbox || !["ready", "paused"].includes(sandbox.lifecycle)) continue;
+      const activeAt = activeSessions.has(thread.id) ? yield* nowIso : sandbox.lastActiveAt;
+      if (sandbox.runtime === "docker" || sandbox.runtime === "podman") {
+        const sampledAt = yield* nowIso;
+        const usage = yield* runtimes.sampleUsage(sandbox.runtime, thread.id).pipe(Effect.option);
+        if (Option.isSome(usage)) {
+          yield* engine
+            .dispatch({
+              type: "sandbox.reconcile.result",
+              commandId: yield* commandId("sandbox-usage"),
+              threadId: thread.id,
+              disposition: "matched",
+              sandbox: { ...sandbox, usage: { ...usage.value, sampledAt }, lastActiveAt: activeAt },
+              createdAt: sampledAt,
+            })
+            .pipe(Effect.ignore);
+        }
+      }
+      const idleAt =
+        DateTime.toEpochMillis(DateTime.makeUnsafe(activeAt)) +
+        sandbox.limits.idleTimeoutSeconds * 1000;
+      const maxAt =
+        DateTime.toEpochMillis(DateTime.makeUnsafe(sandbox.createdAt)) +
+        sandbox.limits.maximumLifetimeSeconds * 1000;
+      const deadline = sandbox.controller.kind === "human" ? maxAt : Math.min(idleAt, maxAt);
+      if (now < deadline) continue;
+      yield* engine
+        .dispatch({
+          type: "sandbox.expire",
+          commandId: yield* commandId("sandbox-expire"),
+          threadId: thread.id,
+          createdAt: yield* nowIso,
+        })
+        .pipe(Effect.ignore);
+    }
+  });
+
+  const start: SandboxLifecycleReactorShape["start"] = Effect.fn("start")(function* () {
+    yield* reconcile().pipe(
+      Effect.catchCause((cause) => Effect.logWarning("sandbox reconciliation failed", { cause })),
+    );
+    yield* forkParked(
+      Stream.runForEach(engine.streamDomainEvents, (event) =>
+        event.type.startsWith("sandbox.") &&
+        [
+          "sandbox.branch-export-requested",
+          "sandbox.worker-spawn-requested",
+          "sandbox.worker-status-requested",
+          "sandbox.worker-message-requested",
+          "sandbox.worker-stop-requested",
+          "sandbox.stopping",
+          "sandbox.takeover-requested",
+          "sandbox.takeover-acquired",
+          "sandbox.resumed",
+        ].includes(event.type)
+          ? worker.enqueue(event as SandboxRequestEvent)
+          : Effect.void,
+      ),
+    );
+    yield* forkParked(expire().pipe(Effect.repeat(Schedule.spaced(Duration.minutes(1)))));
+  });
+  return { start, drain: worker.drain } satisfies SandboxLifecycleReactorShape;
+});
+
+export const SandboxLifecycleReactorLive = Layer.effect(SandboxLifecycleReactor, make).pipe(
+  Layer.provide(T3ProjectFileLoaderLive),
+);
