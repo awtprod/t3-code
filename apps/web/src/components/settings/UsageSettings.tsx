@@ -5,8 +5,8 @@ import {
   type InternalGenerationUsageBreakdown,
   type UsageBreakdown,
   type UsagePricingOverride,
-  type UsageSummary,
-  type UsageTokenTotals,
+  type UsageQuerySummary,
+  type UsageQueryTokenTotals,
 } from "@t3tools/contracts";
 import { BarChart3Icon, RefreshCwIcon } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -14,14 +14,15 @@ import { useMemo, useState } from "react";
 import { usePrimaryEnvironment } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { usageEnvironment } from "../../state/usage";
+import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 
-const RANGES = [7, 30, 90] as const;
+const RANGES = [1, 7, 30, 90] as const;
 
-function tokenTotal(tokens: UsageTokenTotals): number | null {
+function tokenTotal(tokens: UsageQueryTokenTotals): number | null {
   const values = [
     tokens.uncachedInputTokens,
     tokens.cacheReadInputTokens,
@@ -35,7 +36,7 @@ function number(value: number | null): string {
   return value === null ? "Unavailable" : new Intl.NumberFormat().format(value);
 }
 
-function cost(summary: UsageSummary): string {
+function cost(summary: UsageQuerySummary): string {
   return summary.cost.microUsd === null
     ? "Unavailable"
     : `$${(summary.cost.microUsd / 1_000_000).toFixed(2)}`;
@@ -113,7 +114,7 @@ export function UsageSettingsPanel() {
   const environment = usePrimaryEnvironment();
   const pricingOverrides = usePrimarySettings((settings) => settings.usagePricingOverrides);
   const updateSettings = useUpdatePrimarySettings();
-  const [days, setDays] = useState<(typeof RANGES)[number] | "custom">(30);
+  const [days, setDays] = useState<(typeof RANGES)[number] | "custom">(1);
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [priceDraft, setPriceDraft] = useState({
@@ -131,11 +132,17 @@ export function UsageSettingsPanel() {
     const from = custom
       ? new Date(`${customFrom}T00:00:00.000Z`)
       : new Date(to.getTime() - (days === "custom" ? 30 : days) * 86_400_000);
-    return { from: from.toISOString(), to: to.toISOString(), bucket: "day" as const, limit: 50 };
+    return {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      bucket: days === 1 ? ("hour" as const) : ("day" as const),
+      limit: 50,
+    };
   }, [customFrom, customTo, days]);
   const query = useEnvironmentQuery(
     environment ? usageEnvironment({ environmentId: environment.environmentId, input }) : null,
   );
+  useLiveRefresh(query.refresh, { key: "settings-usage", enabled: environment !== null });
   const result = query.data;
   const summary = result?.summary;
   const coverage = summary
@@ -175,7 +182,7 @@ export function UsageSettingsPanel() {
                   variant={days === range ? "secondary" : "ghost"}
                   onClick={() => setDays(range)}
                 >
-                  {range}d
+                  {range === 1 ? "24h" : `${range}d`}
                 </Button>
               ))}
               <Button

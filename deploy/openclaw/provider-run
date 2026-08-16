@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+instance=${1:-}
+if [ "$#" -lt 2 ]; then
+  echo "usage: provider-run <codex-primary|codex-secondary|claude-primary|claude-secondary|kimi-primary|kimi-secondary> <command> [args...]" >&2
+  exit 64
+fi
+shift
+
+case "$instance" in
+  codex-primary|claude-primary|kimi-primary) identity=primary ;;
+  codex-secondary|claude-secondary|kimi-secondary) identity=secondary ;;
+  *) echo "provider-run: unknown provider instance '$instance'" >&2; exit 64 ;;
+esac
+
+provider_home=/var/lib/command-center/providers/${instance%-*}/$identity
+export HOME=$provider_home
+export XDG_CONFIG_HOME=$provider_home/.config
+export XDG_DATA_HOME=$provider_home/.local/share
+export XDG_STATE_HOME=$provider_home/.local/state
+export CODEX_HOME=$provider_home/.codex
+export CLAUDE_CONFIG_DIR=$provider_home/.claude
+export KIMI_CODE_HOME=$provider_home/.kimi-code
+export COMMAND_CENTER_GITHUB_IDENTITY=$identity
+export GH_CONFIG_DIR=/var/lib/command-center/gh/$identity
+export GIT_CONFIG_GLOBAL=/var/lib/command-center/.gitconfig
+export PATH=/opt/command-center/bin:/opt/command-center/provider-cli/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+
+cd /srv/command-center/workspaces/$identity
+exec "$@"

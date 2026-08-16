@@ -68,6 +68,42 @@ describe("ClientSettings environment identification", () => {
   });
 });
 
+describe("ClientSettings sidebar", () => {
+  it("defaults to the current sidebar with automatic merge and inactivity settling", () => {
+    const settings = decodeClientSettings({});
+    expect(settings.legacySidebarEnabled).toBe(false);
+    expect(settings.sidebarAutoSettleAfterDays).toBe(3);
+    expect(settings.sidebarAutoSettleOnMerge).toBe(true);
+  });
+
+  it("preserves an explicit legacy sidebar opt-in", () => {
+    expect(decodeClientSettings({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(true);
+    expect(decodeClientSettingsPatch({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(
+      true,
+    );
+  });
+
+  it("allows auto-settle by inactivity to be disabled", () => {
+    expect(
+      decodeClientSettings({ sidebarAutoSettleAfterDays: null }).sidebarAutoSettleAfterDays,
+    ).toBeNull();
+  });
+
+  it("allows auto-settle on merge to be disabled", () => {
+    expect(decodeClientSettings({ sidebarAutoSettleOnMerge: false }).sidebarAutoSettleOnMerge).toBe(
+      false,
+    );
+    expect(
+      decodeClientSettingsPatch({ sidebarAutoSettleOnMerge: false }).sidebarAutoSettleOnMerge,
+    ).toBe(false);
+  });
+
+  it.each([-1, 0, 91])("rejects an auto-settle threshold outside 1..90: %s", (value) => {
+    expect(() => decodeClientSettings({ sidebarAutoSettleAfterDays: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ sidebarAutoSettleAfterDays: value })).toThrow();
+  });
+});
+
 describe("ClientSettings sidebar v2", () => {
   it("defaults the beta off with a three-day auto-settle threshold", () => {
     const settings = decodeClientSettings({});
@@ -98,17 +134,6 @@ describe("ClientSettings sidebar v2", () => {
     });
     expect(patch.sidebarV2Enabled).toBe(false);
     expect(patch.sidebarV2ConfiguredByUser).toBe(true);
-  });
-
-  it("allows auto-settle by inactivity to be disabled", () => {
-    expect(
-      decodeClientSettings({ sidebarAutoSettleAfterDays: null }).sidebarAutoSettleAfterDays,
-    ).toBeNull();
-  });
-
-  it.each([-1, 0, 91])("rejects an auto-settle threshold outside 1..90: %s", (value) => {
-    expect(() => decodeClientSettings({ sidebarAutoSettleAfterDays: value })).toThrow();
-    expect(() => decodeClientSettingsPatch({ sidebarAutoSettleAfterDays: value })).toThrow();
   });
 });
 

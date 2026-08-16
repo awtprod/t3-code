@@ -63,6 +63,8 @@ function output(stdout: string, code = 0): ProcessRunOutput {
     timedOut: false,
     stdoutTruncated: false,
     stderrTruncated: false,
+    stdoutInvalidUtf8: false,
+    stderrInvalidUtf8: false,
   };
 }
 

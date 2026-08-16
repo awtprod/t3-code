@@ -82,6 +82,7 @@ import {
   resolveCommandCenterCodexRuntimeExecutable,
   resolveCommandCenterManagedGitMetadata,
 } from "../security/CommandCenterProviderIsolation.ts";
+import { describeCodexPermissionRequest } from "../security/CodexPermissionEscalation.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
@@ -453,6 +454,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "exec_command_approval";
     case "item/tool/requestUserInput":
       return "tool_user_input";
+    case "item/permissions/requestApproval":
+      return "permissions_approval";
     case "item/tool/call":
       return "dynamic_tool_call";
     case "account/chatgptAuthTokens/refresh":
@@ -1119,6 +1122,15 @@ function mapToRuntimeEvents(
             event.payload,
           );
           return payload?.reason ?? payload?.command.join(" ");
+        }
+        case "item/permissions/requestApproval": {
+          const payload = readPayload(
+            EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
+            event.payload,
+          );
+          // The persisted approval activity keeps only `detail`, so the
+          // requested paths are folded in here or the prompt is unreviewable.
+          return payload ? describeCodexPermissionRequest(payload) : undefined;
         }
         case "item/tool/call": {
           const payload = readPayload(
@@ -2009,7 +2021,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ? yield* (
               options?.commandCenterRuntimeExecutablePath
                 ? Effect.succeed(options.commandCenterRuntimeExecutablePath)
-                : resolveCommandPath(codexConfig.binaryPath, {
+                : resolveCommandPath("codex", {
                     env: sourceEnvironment,
                     extendEnv: false,
                   }).pipe(
@@ -2160,6 +2172,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(commandCenterIsolation
             ? { permissionProfile: commandCenterIsolation.permissionProfile }
             : {}),
+          ...(codexConfig.autoApproveReadOnlyPermissions
+            ? { autoApproveReadOnlyPermissions: true }
+            : {}),
           ...(commandCenterIsolation?.windowsSandboxMode
             ? {
                 commandCenterPlatform: hostPlatform,
@@ -2192,6 +2207,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
             Effect.provideService(Crypto.Crypto, crypto),
           );
+          // Fork into the session scope, not the calling fiber. `forkChild` makes
+          // this a child of `startSession`, and Effect interrupts a fiber's
+          // children when it completes, so the consumer died on return and every
+          // runtime event the session emitted afterwards was dropped.
           const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
             Effect.gen(function* () {
               yield* writeNativeEvent(event);
@@ -2211,7 +2230,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }
               yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
             }),
-          ).pipe(Effect.forkChild);
+          ).pipe(Effect.forkIn(sessionScope));
           const started = yield* runtime
             .start()
             .pipe(

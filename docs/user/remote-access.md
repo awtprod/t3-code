@@ -12,6 +12,27 @@ That gives you:
 - transport security at the network layer
 - less exposure than opening the server to the public internet
 
+## Use a Remote Server as the Desktop Primary
+
+The Electron desktop can use a paired remote environment as its primary backend. In this mode the
+remote environment owns execution; Desktop does not start a second local backend.
+
+1. Pair the remote environment from **Settings** → **Connections** → **Add environment**.
+2. In **Desktop execution**, choose **Remote server** and enter its HTTP or HTTPS base URL.
+3. Test the connection, then choose **Make remote primary and restart**.
+
+Remote-primary mode persists across ordinary launches. The desktop loads its web bundle from the
+remote server and sends HTTP and WebSocket traffic directly to it using the saved pairing session.
+Projects, files, git state, terminals, and provider sessions therefore remain on the remote machine.
+
+If the remote server is unavailable, Command Center shows a local recovery window. It never falls
+back to Windows automatically. You can retry, edit the endpoint, quit, or select **Start local for
+this launch**. The last option relaunches with a conspicuous local-override indicator and leaves the
+persisted Remote preference unchanged, so the next ordinary launch returns to remote-only mode.
+
+To run work on the desktop machine, switch the primary back to **Windows local** or **WSL** in
+Connections and restart. Local execution is not available while the remote server remains primary.
+
 ## Enabling Network Access
 
 There are two ways to expose your server for remote connections: from the desktop app or from the CLI.
@@ -192,6 +213,17 @@ Typical uses:
 - revoke old pairing links or sessions
 
 Use `command-center auth --help` and the nested subcommand help pages for the full reference.
+
+### Deregister a T3 Connect Environment
+
+Open your account menu and choose **T3 Connect** to see every environment registered to your
+account. On mobile, open **Settings** → **T3 Connect**. Choose **Deregister** to revoke an
+environment's T3 Connect access, remove any managed tunnel, and free its host space.
+
+Deregistration is an account action and does not need a connection to the environment, so it also
+works for a server that was wiped or is no longer reachable. Device-local connect and disconnect
+controls remain in **Settings** → **Connections** on web and desktop or **Settings** →
+**Environments** on mobile.
 
 ## Security Notes
 

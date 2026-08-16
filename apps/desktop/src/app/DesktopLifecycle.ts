@@ -43,6 +43,7 @@ export class DesktopLifecycle extends Context.Service<
   {
     readonly relaunch: (
       reason: string,
+      additionalArgs?: ReadonlyArray<string>,
     ) => Effect.Effect<void, never, DesktopLifecycleRuntimeServices>;
     readonly register: Effect.Effect<void, never, Scope.Scope | DesktopLifecycleRuntimeServices>;
   }
@@ -141,7 +142,7 @@ function quitFromSignal(
 }
 
 export const make = DesktopLifecycle.of({
-  relaunch: Effect.fn("desktop.lifecycle.relaunch")(function* (reason) {
+  relaunch: Effect.fn("desktop.lifecycle.relaunch")(function* (reason, additionalArgs = []) {
     const electronApp = yield* ElectronApp.ElectronApp;
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const state = yield* DesktopState.DesktopState;
@@ -156,7 +157,7 @@ export const make = DesktopLifecycle.of({
       }
       yield* electronApp.relaunch({
         execPath: process.execPath,
-        args: process.argv.slice(1),
+        args: [...process.argv.slice(1), ...additionalArgs],
       });
       yield* electronApp.exit(0);
     }).pipe(

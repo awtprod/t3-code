@@ -3,12 +3,16 @@ import {
   DesktopAppBrandingSchema,
   DesktopEnvironmentBootstrapSchema,
   DesktopThemeSchema,
+  EDITORS,
+  EditorId,
   PickedThemeFileSchema,
   PickFolderOptionsSchema,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
+  REMOTE_CAPABLE_EDITOR_IDS,
   type DesktopEnvironmentBootstrap,
   type PickedThemeFile,
 } from "@t3tools/contracts";
+import { isCommandAvailable } from "@t3tools/shared/shell";
 import * as NodeOS from "node:os";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -20,8 +24,10 @@ import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as DesktopLocalEnvironmentAuth from "../../backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
+import { isLocalExecutionOverride } from "./primaryBackend.ts";
 import * as DesktopWslBackend from "../../wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "../../wsl/DesktopWslEnvironment.ts";
+import * as ElectronApp from "../../electron/ElectronApp.ts";
 import * as ElectronDialog from "../../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../../electron/ElectronMenu.ts";
 import * as ElectronShell from "../../electron/ElectronShell.ts";
@@ -60,6 +66,15 @@ export const getAppBranding = DesktopIpc.makeSyncIpcMethod({
   }),
 });
 
+export const getSystemLocale = DesktopIpc.makeSyncIpcMethod({
+  channel: IpcChannels.GET_SYSTEM_LOCALE_CHANNEL,
+  result: Schema.String,
+  handler: Effect.fn("desktop.ipc.window.getSystemLocale")(function* () {
+    const electronApp = yield* ElectronApp.ElectronApp;
+    return yield* electronApp.systemLocale;
+  }),
+});
+
 export const getWindowFullscreenState = DesktopIpc.makeSyncIpcMethod({
   channel: IpcChannels.GET_WINDOW_FULLSCREEN_STATE_CHANNEL,
   result: Schema.Boolean,
@@ -74,9 +89,24 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
   channel: IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL,
   result: Schema.Array(DesktopEnvironmentBootstrapSchema),
   handler: Effect.fn("desktop.ipc.window.getLocalEnvironmentBootstraps")(function* () {
+    const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
+    const settings = yield* appSettings.get;
     const pool = yield* DesktopBackendPool.DesktopBackendPool;
     const instances = yield* pool.list;
     const bootstraps: DesktopEnvironmentBootstrap[] = [];
+    if (settings.primaryBackendMode === "remote" && !isLocalExecutionOverride()) {
+      const normalized = DesktopAppSettings.normalizeRemoteBackendUrl(settings.remoteBackendUrl);
+      if (normalized !== null) {
+        const httpBaseUrl = new URL(normalized);
+        bootstraps.push({
+          id: PRIMARY_LOCAL_ENVIRONMENT_ID,
+          label: httpBaseUrl.hostname,
+          runningDistro: null,
+          httpBaseUrl: httpBaseUrl.href,
+          wsBaseUrl: toWebSocketBaseUrl(httpBaseUrl),
+        });
+      }
+    }
     for (const instance of instances) {
       const isPrimary = instance.id === PRIMARY_LOCAL_ENVIRONMENT_ID;
       const config = yield* instance.currentConfig;
@@ -146,7 +176,7 @@ function extractWslDistroFromEnvironmentId(envId: string): string | null {
 export const getLocalEnvironmentBearerToken = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL,
   payload: Schema.Void,
-  result: Schema.String,
+  result: Schema.NullOr(Schema.String),
   handler: Effect.fn("desktop.ipc.window.getLocalEnvironmentBearerToken")(function* () {
     const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
     return yield* localAuth.getBearerToken;
@@ -182,6 +212,11 @@ export const pickFolder = DesktopIpc.makeIpcMethod({
       targetId !== PRIMARY_LOCAL_ENVIRONMENT_ID &&
       targetId.startsWith(DesktopWslBackend.WSL_INSTANCE_ID_PREFIX);
     const settings = yield* appSettings.get;
+    if (settings.primaryBackendMode === "remote" && !isLocalExecutionOverride()) {
+      // A native Windows folder path is meaningless to the remote Linux
+      // environment. Remote project selection stays server-side.
+      return null;
+    }
     // Fall back to the persisted wslDistro when the id is the
     // "wsl:default" sentinel; the orchestrator uses the same fallback
     // for the actual backend.
@@ -217,19 +252,6 @@ export const pickFolder = DesktopIpc.makeIpcMethod({
       selectedPath.value,
     );
     return Option.getOrElse(converted, () => selectedPath.value);
-  }),
-});
-
-export const confirm = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.CONFIRM_CHANNEL,
-  payload: Schema.String,
-  result: Schema.Boolean,
-  handler: Effect.fn("desktop.ipc.window.confirm")(function* (message) {
-    const dialog = yield* ElectronDialog.ElectronDialog;
-    const electronWindow = yield* ElectronWindow.ElectronWindow;
-    return yield* electronWindow.focusedMainOrFirst.pipe(
-      Effect.flatMap((owner) => dialog.confirm({ owner, message })),
-    );
   }),
 });
 
@@ -271,6 +293,30 @@ export const openExternal = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.window.openExternal")(function* (url) {
     const shell = yield* ElectronShell.ElectronShell;
     return yield* shell.openExternal(url);
+  }),
+});
+
+export const probeRemoteEditors = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PROBE_REMOTE_EDITORS_CHANNEL,
+  payload: Schema.Undefined,
+  result: Schema.Array(EditorId),
+  // Probes THIS machine (where the renderer runs) for remote-capable editor
+  // CLIs, unlike the server's probe which walks the environment host's PATH.
+  // A Finder-launched app can miss PATH entries; an empty result makes the
+  // renderer fall back to VS Code only, so that fails soft.
+  handler: Effect.fn("desktop.ipc.window.probeRemoteEditors")(function* () {
+    const available: Array<EditorId> = [];
+    for (const editorId of REMOTE_CAPABLE_EDITOR_IDS) {
+      const commands = EDITORS.find((editor) => editor.id === editorId)?.commands;
+      if (!commands) continue;
+      for (const command of commands) {
+        if (yield* isCommandAvailable(command, { env: process.env })) {
+          available.push(editorId);
+          break;
+        }
+      }
+    }
+    return available;
   }),
 });
 

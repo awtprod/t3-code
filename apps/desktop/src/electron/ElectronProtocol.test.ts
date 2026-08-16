@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { beforeEach, vi } from "vite-plus/test";
 
 const { handleMock, netFetchMock, unhandleMock } = vi.hoisted(() => ({
@@ -15,6 +17,8 @@ vi.mock("electron", () => ({
 }));
 
 import * as ElectronProtocol from "./ElectronProtocol.ts";
+
+const protocolLayer = ElectronProtocol.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
 describe("ElectronProtocol", () => {
   beforeEach(() => {
@@ -85,7 +89,7 @@ describe("ElectronProtocol", () => {
       assert.isNull(forwardedHeaders.get("referer"));
       assert.isNull(forwardedHeaders.get("sec-fetch-site"));
       assert.deepEqual(unhandleMock.mock.calls, [["commandcenter-dev"]]);
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it.effect("rejects custom protocol requests for another host", () =>
@@ -110,7 +114,7 @@ describe("ElectronProtocol", () => {
 
       assert.equal(response.status, 404);
       assert.equal(netFetchMock.mock.calls.length, 0);
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it.effect("retries transient renderer target failures", () =>
@@ -138,7 +142,7 @@ describe("ElectronProtocol", () => {
 
       assert.equal(yield* Effect.promise(() => response.text()), "ready");
       assert.equal(netFetchMock.mock.calls.length, 2);
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it.effect("preserves protocol registration failures", () =>
@@ -165,7 +169,7 @@ describe("ElectronProtocol", () => {
         error.message,
         'Failed to register Electron protocol scheme "commandcenter-dev".',
       );
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it.effect("preserves protocol unregistration failures", () =>
@@ -198,7 +202,7 @@ describe("ElectronProtocol", () => {
           'Failed to unregister Electron protocol scheme "commandcenter".',
         );
       }
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it("keeps executable sources host-restricted while allowing runtime network resources", () => {

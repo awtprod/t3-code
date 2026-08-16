@@ -34,8 +34,8 @@ it("records the committed static-context baseline", () => {
     },
   };
   expect(baseline).toEqual({
-    collaborationInstructions: { defaultBytes: 2_101, planBytes: 8_212 },
-    mcp: { toolCount: 36, schemaBytes: 23_607, toolkitCounts: [14, 13, 9] },
+    collaborationInstructions: { defaultBytes: 2_071, planBytes: 10_302 },
+    mcp: { toolCount: 36, schemaBytes: 23_519, toolkitCounts: [14, 13, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

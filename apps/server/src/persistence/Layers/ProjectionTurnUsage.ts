@@ -10,9 +10,9 @@ import {
   type InternalGenerationUsageBreakdown,
   type InternalGenerationUsageSummary,
   type UsageQueryResult,
-  type UsageSummary,
+  type UsageQuerySummary,
   type UsageTimeSeriesBucket,
-  type UsageTokenTotals,
+  type UsageQueryTokenTotals,
   type UsageTurnRow,
   EfficiencyTier,
 } from "@t3tools/contracts";
@@ -80,7 +80,7 @@ type InternalGenerationDbRow = typeof InternalGenerationDbRow.Type;
 
 const optionalSum = (
   rows: ReadonlyArray<UsageDbRow>,
-  key: keyof UsageTokenTotals,
+  key: keyof UsageQueryTokenTotals,
 ): number | null => {
   const values = rows.flatMap((row) => {
     const value = row[key as keyof UsageDbRow];
@@ -99,8 +99,8 @@ function costKind(rows: ReadonlyArray<UsageDbRow>): UsageCostKind {
   return "estimated";
 }
 
-function summarize(rows: ReadonlyArray<UsageDbRow>): UsageSummary {
-  const tokens: UsageTokenTotals = {
+function summarize(rows: ReadonlyArray<UsageDbRow>): UsageQuerySummary {
+  const tokens: UsageQueryTokenTotals = {
     uncachedInputTokens: optionalSum(rows, "uncachedInputTokens"),
     cacheReadInputTokens: optionalSum(rows, "cacheReadInputTokens"),
     cacheWriteInputTokens: optionalSum(rows, "cacheWriteInputTokens"),

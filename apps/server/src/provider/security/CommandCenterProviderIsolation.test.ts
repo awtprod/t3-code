@@ -336,6 +336,37 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
     }),
   );
 
+  it.effect("names the missing source auth.json instead of starting unauthenticated", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cc-codex-home-noauth-" });
+      const stateDir = path.join(root, "state");
+      const sourceHomePath = path.join(root, "source-home");
+      yield* fileSystem.makeDirectory(stateDir, { recursive: true });
+      yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+
+      // No auth.json in the source home. Previously this copied nothing and let
+      // the session start, so the failure only surfaced as a provider 401 on the
+      // first model call.
+      const error = yield* prepareCommandCenterCodexHome({
+        stateDir,
+        sourceHomePath,
+        threadId: "cc:thread-missing-auth",
+        fileSystem,
+        path,
+        crypto,
+        runtimeExecutablePath: NodeProcess.execPath,
+        platform: NodeProcess.platform,
+        writableRoots: [root],
+      }).pipe(Effect.flip);
+
+      NodeAssert.match(error.issue, /found no Codex credentials to isolate/u);
+      NodeAssert.ok(error.issue.includes(path.join(sourceHomePath, "auth.json")));
+    }),
+  );
+
   it.effect("fails closed if an isolated Codex home gains ambient config", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -346,6 +377,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
       const sourceHomePath = path.join(root, "source-home");
       yield* fileSystem.makeDirectory(stateDir, { recursive: true });
       yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+      yield* writeFile(path.join(sourceHomePath, "auth.json"), '{"token":"test-only"}\n');
       const input = {
         stateDir,
         sourceHomePath,
@@ -375,6 +407,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
       const sourceHomePath = path.join(root, "source-home");
       yield* fileSystem.makeDirectory(stateDir, { recursive: true });
       yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+      yield* writeFile(path.join(sourceHomePath, "auth.json"), '{"token":"test-only"}\n');
       const input = {
         stateDir,
         sourceHomePath,
@@ -463,6 +496,7 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
       const runtimePath = path.join(root, "codex.exe");
       yield* fileSystem.makeDirectory(stateDir, { recursive: true });
       yield* fileSystem.makeDirectory(sourceHomePath, { recursive: true });
+      yield* writeFile(path.join(sourceHomePath, "auth.json"), '{"token":"test-only"}\n');
       yield* fileSystem.writeFile(runtimePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
 
       const makeHome = (threadId: string) =>
@@ -537,6 +571,47 @@ it.layer(NodeServices.layer)("CommandCenter provider runtime isolation", (it) =>
           path,
         }),
         yield* fileSystem.realPath(legacyNativePath),
+      );
+    }),
+  );
+
+  it.effect("resolves the native executable behind a canonical Linux npm launcher", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cc-linux-runtime-" });
+      const packageRoot = path.join(root, "node_modules", "@openai", "codex");
+      const commandPath = path.join(packageRoot, "bin", "codex.js");
+      const platformPackageRoot = path.join(
+        packageRoot,
+        "node_modules",
+        "@openai",
+        "codex-linux-x64",
+      );
+      const nativePath = path.join(
+        platformPackageRoot,
+        "vendor",
+        "x86_64-unknown-linux-musl",
+        "bin",
+        "codex",
+      );
+      yield* writeFile(commandPath, "#!/usr/bin/env node\n");
+      yield* writeFile(
+        path.join(platformPackageRoot, "package.json"),
+        '{"name":"@openai/codex-linux-x64","version":"0.0.0"}\n',
+      );
+      yield* fileSystem.makeDirectory(path.dirname(nativePath), { recursive: true });
+      yield* fileSystem.writeFile(nativePath, Uint8Array.from([0x7f, 0x45, 0x4c, 0x46]));
+
+      NodeAssert.equal(
+        yield* resolveCommandCenterCodexRuntimeExecutable({
+          commandPath,
+          platform: "linux",
+          architecture: "x64",
+          fileSystem,
+          path,
+        }),
+        yield* fileSystem.realPath(nativePath),
       );
     }),
   );

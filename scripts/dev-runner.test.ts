@@ -38,6 +38,7 @@ const emptyConfigLayer = ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }
 const netServiceLayer = Layer.succeed(NetService.NetService, {
   canListenOnHost: () => Effect.succeed(true),
   isPortAvailableOnLoopback: () => Effect.succeed(true),
+  hasListenerOnHost: () => Effect.succeed(false),
   reserveLoopbackPort: () => Effect.succeed(49_152),
   findAvailablePort: (port) => Effect.succeed(port),
 });
@@ -202,6 +203,53 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
+    it.effect("pins the repo toolchain ahead of an inherited PATH", () =>
+      Effect.gen(function* () {
+        // A stray /usr/bin/vp (atfs/ShapeTools) otherwise wins the bare-name
+        // lookup, starts no dev server, and still exits 0.
+        const env = yield* createDevRunnerEnv({
+          mode: "dev",
+          baseEnv: { PATH: "/usr/local/bin:/usr/bin:/bin" },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+          tailscaleServe: undefined,
+        });
+
+        const entries = (env.PATH ?? "").split(NodePath.delimiter);
+        assert.ok(entries[0]?.endsWith(NodePath.join("node_modules", ".bin")));
+        assert.deepEqual(entries.slice(1), ["/usr/local/bin", "/usr/bin", "/bin"]);
+      }),
+    );
+
+    it.effect("keeps PATH usable when none was inherited", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev",
+          baseEnv: {},
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+          tailscaleServe: undefined,
+        });
+
+        assert.ok(env.PATH?.endsWith(NodePath.join("node_modules", ".bin")));
+        assert.ok(!env.PATH?.includes(NodePath.delimiter));
+      }),
+    );
+
     it.effect("allows browser auto-open to be explicitly enabled", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
@@ -271,6 +319,29 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         assert.equal(env.T3CODE_LOG_WS_EVENTS, "1");
         assert.equal(env.T3CODE_HOST, "0.0.0.0");
         assert.equal(env.VITE_DEV_SERVER_URL, "http://localhost:7331/");
+      }),
+    );
+
+    it.effect("prevents an ambient Command Center home from overriding the selected home", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const env = yield* createDevRunnerEnv({
+          mode: "dev",
+          baseEnv: { COMMAND_CENTER_HOME: "/opt/shared-command-center" },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: "/tmp/isolated-t3",
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+          tailscaleServe: undefined,
+        });
+
+        assert.equal(env.T3CODE_HOME, path.resolve("/tmp/isolated-t3"));
+        assert.equal(env.COMMAND_CENTER_HOME, undefined);
       }),
     );
 

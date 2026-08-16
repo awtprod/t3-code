@@ -3,6 +3,7 @@ import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { ProjectId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { ThreadEnvMode } from "./environment.ts";
 import {
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
@@ -113,6 +114,9 @@ export const FontFamilyPreference = Schema.String.check(Schema.isMaxLength(200))
 export type FontFamilyPreference = typeof FontFamilyPreference.Type;
 
 export const ClientSettingsSchema = Schema.Struct({
+  // Desktop-only: require holding the quit shortcut (Cmd/Ctrl+Q) before the
+  // app quits; a quick tap only shows a hint. Browser clients ignore it.
+  confirmQuit: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
@@ -173,9 +177,15 @@ export const ClientSettingsSchema = Schema.Struct({
   // default UI; this beta flag restores it (plus the /plan and /default slash
   // commands) for users who still rely on the old workflow.
   planModeEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Legacy sidebar (the original per-project tree), opted into from
+  // Settings → General → Legacy features. A separate key from the
+  // `sidebarV2Enabled`/`sidebarV2ConfiguredByUser` beta pair below, which
+  // opts into the newer experimental sidebar from Settings → Beta.
+  legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
+  sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
   ),
@@ -210,8 +220,9 @@ export const DEFAULT_CLIENT_SETTINGS: ClientSettings = Schema.decodeSync(ClientS
 
 // ── Server Settings (server-authoritative) ────────────────────
 
-export const ThreadEnvMode = Schema.Literals(["local", "worktree"]);
-export type ThreadEnvMode = typeof ThreadEnvMode.Type;
+// Moved to environment.ts so orchestration contracts can use it without an
+// import cycle; re-exported here for compatibility with deep imports.
+export { ThreadEnvMode } from "./environment.ts";
 
 const makeBinaryPathSetting = (fallback: string) =>
   TrimmedString.pipe(
@@ -309,13 +320,28 @@ export const CodexSettings = makeProviderSettingsSchema(
         description: "Additional CLI arguments passed to codex app-server on session start.",
       }),
     ),
+    autoApproveReadOnlyPermissions: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "Auto-approve read-only sandbox requests",
+        description:
+          "Grant Codex sandbox escalations that only request read access, without prompting. Requests for write access, sandbox denials, or network access always prompt.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
+    order: [
+      "binaryPath",
+      "homePath",
+      "shadowHomePath",
+      "launchArgs",
+      "autoApproveReadOnlyPermissions",
+    ],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -584,7 +610,12 @@ export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
 export const ServerSettings = Schema.Struct({
   efficiency: EfficiencySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
-  enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Legacy token-by-token assistant output. Deliberately a fresh key (was
+  // `enableAssistantStreaming`): decoding drops the old key, so everyone,
+  // including prior opt-ins, resets to the buffered default.
+  enableLegacyTokenStreaming: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,
   // Legacy flat fields retained for old settings files and old clients. New
@@ -723,6 +754,7 @@ const CodexSettingsPatch = Schema.Struct({
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
   launchArgs: Schema.optionalKey(TrimmedString),
+  autoApproveReadOnlyPermissions: Schema.optionalKey(Schema.Boolean),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
@@ -765,7 +797,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   efficiency: Schema.optionalKey(EfficiencySettings),
-  enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
+  enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
@@ -819,6 +851,7 @@ export const ServerSettingsPatch = Schema.Struct({
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
+  confirmQuit: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
@@ -855,7 +888,9 @@ export const ClientSettingsPatch = Schema.Struct({
     ),
   ),
   planModeEnabled: Schema.optionalKey(Schema.Boolean),
+  legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
+  sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),

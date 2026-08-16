@@ -1,9 +1,19 @@
 #!/usr/bin/env node
+// @effect-diagnostics nodeBuiltinImport:off - Node's typed junction API avoids Windows symlink privileges while keeping the probe isolated.
 
+import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
 
+import {
+  createPackageWithOptions,
+  extractAll,
+  getRawHeader,
+  statFile,
+  type DirectoryRecord,
+} from "@electron/asar";
+
 import { fromYaml } from "@t3tools/shared/schemaYaml";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -17,17 +27,23 @@ import {
   type WebAssetBrand,
 } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
+import {
+  findInlinedExternalPackages,
+  selectCliRuntimeExternalDependencies,
+} from "./lib/cli-external-packages.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Config from "effect/Config";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import type { PlatformError } from "effect/PlatformError";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -36,6 +52,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "com.awtprod.commandcenter";
+const REMOTE_ONLY_DESKTOP_APP_ID = "com.awtprod.commandcenter.remote";
+const REMOTE_ONLY_DESKTOP_PRODUCT_NAME = "Command Center Remote";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -61,6 +79,7 @@ const StageWorkspaceConfig = Schema.Struct({
   allowBuilds: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
   patchedDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   overrides: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  nodeLinker: Schema.optional(Schema.Literals(["hoisted"])),
 });
 type StageWorkspaceConfig = typeof StageWorkspaceConfig.Type;
 
@@ -145,6 +164,7 @@ interface BuildCliInput {
   readonly mockUpdates: Option.Option<boolean>;
   readonly mockUpdateServerPort: Option.Option<number>;
   readonly wslPrebuild: Option.Option<string>;
+  readonly remoteOnly: Option.Option<boolean>;
 }
 
 function detectHostBuildPlatform(hostPlatform: string): typeof BuildPlatform.Type | undefined {
@@ -269,7 +289,10 @@ export class BuildCommandFailedError extends Schema.TaggedErrorClass<BuildComman
   }
 }
 
-export function isRetryableWindowsNsisOutputLockFailure(error: BuildCommandFailedError): boolean {
+const isBuildCommandFailedError = Schema.is(BuildCommandFailedError);
+
+export function isRetryableWindowsNsisOutputLockFailure(error: unknown): boolean {
+  if (!isBuildCommandFailedError(error)) return false;
   const output = `${error.stdoutTail ?? ""}\n${error.stderrTail ?? ""}`;
   return (
     error.command.includes("electron-builder") &&
@@ -307,6 +330,18 @@ export class DesktopIconSourceMissingError extends Schema.TaggedErrorClass<Deskt
 ) {
   override get message(): string {
     return `Desktop ${desktopIconPlatformNames[this.platform]} icon source is missing at ${this.sourcePath}`;
+  }
+}
+
+export class DesktopDmgBackgroundSourceMissingError extends Schema.TaggedErrorClass<DesktopDmgBackgroundSourceMissingError>()(
+  "DesktopDmgBackgroundSourceMissingError",
+  {
+    channel: Schema.Literals(["latest", "nightly"]),
+    sourcePath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Desktop ${this.channel} DMG background source is missing at ${this.sourcePath}`;
   }
 }
 
@@ -375,6 +410,7 @@ const DesktopBuildInputArtifact = Schema.Literals([
   "desktop-resources",
   "server-dist",
   "bundled-server-client",
+  "web-dist",
 ]);
 type DesktopBuildInputArtifact = typeof DesktopBuildInputArtifact.Type;
 const desktopBuildInputArtifactNames = {
@@ -382,7 +418,72 @@ const desktopBuildInputArtifactNames = {
   "desktop-resources": "desktopResources",
   "server-dist": "serverDist",
   "bundled-server-client": "bundled server client",
+  "web-dist": "web client",
 } satisfies Record<DesktopBuildInputArtifact, string>;
+
+/**
+ * Imported by every server module, so it is inlined in any correctly bundled
+ * build. Its absence means the bundle went back to externalizing its
+ * dependencies, which the sidecar's selected runtime closure does not cover.
+ */
+const BUNDLE_SELF_CONTAINED_SENTINEL = "effect";
+
+const BUNDLE_SELF_CHECK_TIMEOUT = Duration.seconds(120);
+const WINDOWS_PRIMARY_NATIVE_PROBE_TIMEOUT = Duration.seconds(30);
+
+const WINDOWS_PRIMARY_FFF_PROBE_SOURCE = `
+const { join } = await import("node:path");
+const { pathToFileURL } = await import("node:url");
+const { FileFinder } = await import(pathToFileURL(process.argv[1]).href);
+const probeRoot = process.argv[2];
+const result = FileFinder.create({
+  basePath: probeRoot,
+  frecencyDbPath: join(probeRoot, "frecency.mdb"),
+  historyDbPath: join(probeRoot, "history.mdb"),
+  disableWatch: true,
+  disableMmapCache: true,
+  disableContentIndexing: true,
+});
+if (!result.ok) throw new Error(result.error);
+result.value.destroy();
+`;
+
+export class ExternalizedBundleError extends Schema.TaggedErrorClass<ExternalizedBundleError>()(
+  "ExternalizedBundleError",
+  { sentinel: Schema.String, inlinedPackageCount: Schema.Number },
+) {
+  override get message(): string {
+    return `The server bundle did not inline "${this.sentinel}" (${this.inlinedPackageCount} packages inlined). The bundle is meant to be self-contained apart from the runtime externals; if its dependencies are external again they will be absent from the sidecar, and the backend will fail with ERR_MODULE_NOT_FOUND. Check the deps.alwaysBundle wiring in apps/server/vite.config.ts.`;
+  }
+}
+
+export class BundleNotSelfContainedError extends Schema.TaggedErrorClass<BundleNotSelfContainedError>()(
+  "BundleNotSelfContainedError",
+  { exitCode: Schema.Number, output: Schema.String },
+) {
+  override get message(): string {
+    return `The packaged server bundle could not load from the isolated, extracted sidecar (exit ${this.exitCode}). Anything it imports that is neither a Node built-in nor in the selected runtime-external closure is unavailable to both backends. Output:
+${this.output}`;
+  }
+}
+
+export class InlinedNativePackageError extends Schema.TaggedErrorClass<InlinedNativePackageError>()(
+  "InlinedNativePackageError",
+  { packages: Schema.Array(Schema.String) },
+) {
+  override get message(): string {
+    return `The server bundle inlined packages that load native binaries: ${this.packages.join(", ")}. A node-gyp-build style loader resolves prebuilds relative to its own file, so inlined into a chunk it finds none and the importer quietly falls back to a slower JS path. Add them to CLI_RUNTIME_EXTERNAL_PREFIXES in scripts/lib/cli-external-packages.ts so they stay external and are staged in the sidecar.`;
+  }
+}
+
+export class InlinedExternalPackageError extends Schema.TaggedErrorClass<InlinedExternalPackageError>()(
+  "InlinedExternalPackageError",
+  { packages: Schema.Array(Schema.String) },
+) {
+  override get message(): string {
+    return `The server bundle inlined packages that must stay external: ${this.packages.join(", ")}. These are native addons or their loaders; inlined, they resolve prebuilds relative to the bundle and silently lose native acceleration. Check the deps.neverBundle wiring in apps/server/vite.config.ts.`;
+  }
+}
 
 export class MissingDesktopBuildInputError extends Schema.TaggedErrorClass<MissingDesktopBuildInputError>()(
   "MissingDesktopBuildInputError",
@@ -442,6 +543,71 @@ export class WslNodePtyPrebuildMissingError extends Schema.TaggedErrorClass<WslN
 ) {
   override get message(): string {
     return `WSL node-pty prebuild not found at ${this.prebuildPath}.`;
+  }
+}
+
+export class WindowsServerSidecarPackError extends Schema.TaggedErrorClass<WindowsServerSidecarPackError>()(
+  "WindowsServerSidecarPackError",
+  {
+    asarPath: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Failed to pack the Windows server sidecar at ${this.asarPath}.`;
+  }
+}
+
+export class WindowsPrimaryNativeProbeError extends Schema.TaggedErrorClass<WindowsPrimaryNativeProbeError>()(
+  "WindowsPrimaryNativeProbeError",
+  {
+    executablePath: Schema.String,
+    exitCode: Schema.Number,
+    output: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `The packaged Windows primary could not load fff from server.asar (exit ${this.exitCode}). Output:\n${this.output}`;
+  }
+}
+
+const WindowsPackagedPayloadValidationReason = Schema.Literals([
+  "packaged-app-missing",
+  "sidecar-missing",
+  "sidecar-invalid",
+  "unpacked-native-missing",
+  "resource-monitor-missing",
+  "file-limit-exceeded",
+]);
+
+export class WindowsPackagedPayloadValidationError extends Schema.TaggedErrorClass<WindowsPackagedPayloadValidationError>()(
+  "WindowsPackagedPayloadValidationError",
+  {
+    reason: WindowsPackagedPayloadValidationReason,
+    packagedAppDir: Schema.String,
+    missingFiles: Schema.optionalKey(Schema.Array(Schema.String)),
+    fileCount: Schema.optionalKey(Schema.Int),
+    fileLimit: Schema.optionalKey(Schema.Int),
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    if (this.reason === "file-limit-exceeded") {
+      return `Windows packaged payload contains ${String(this.fileCount)} files; expected at most ${String(this.fileLimit)}.`;
+    }
+    if (this.reason === "unpacked-native-missing") {
+      return `Windows server sidecar is missing ${String(this.missingFiles?.length ?? 0)} unpacked native files.`;
+    }
+    if (this.reason === "resource-monitor-missing") {
+      return "Windows packaged payload is missing the resource monitor executable.";
+    }
+    if (this.reason === "sidecar-invalid") {
+      return "Windows packaged payload contains an invalid server.asar sidecar.";
+    }
+    if (this.reason === "sidecar-missing") {
+      return "Windows packaged payload is missing resources/server.asar.";
+    }
+    return `Windows packaged application directory was not found at ${this.packagedAppDir}.`;
   }
 }
 
@@ -615,6 +781,7 @@ interface ResolvedBuildOptions {
   readonly mockUpdates: boolean;
   readonly mockUpdateServerPort: number | undefined;
   readonly wslPrebuild: string | undefined;
+  readonly remoteOnly: boolean;
 }
 
 interface StagePackageJson {
@@ -641,14 +808,48 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   // so the SDK's optional platform packages (each a ~200MB bundled executable)
   // are dead weight. The trailing dash keeps the SDK's own JS package.
   "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
+  // Windows stages the server sidecar below prod-resources so electron-builder
+  // can copy it using project-relative extraResources matchers. Keep those
+  // staging inputs out of app.asar; they are emitted once at resources/.
+  "!apps/desktop/prod-resources/windows-server",
+  "!apps/desktop/prod-resources/windows-server/**/*",
 ] as const;
-// The WSL backend launches the server with plain `wsl.exe -- node`, which
-// cannot read inside an asar archive — and the server bundle externalizes its
-// runtime deps, so the whole node_modules tree must be unpacked, not just the
-// bundle (otherwise ERR_MODULE_NOT_FOUND: "Cannot find package 'effect'").
-// The Windows primary backend reads the same files through the asar redirect,
-// so nothing is duplicated.
-export const WINDOWS_ASAR_UNPACK = ["apps/server/dist/**", "**/node_modules/**"] as const;
+// Windows ships the server tree (bundle + node_modules) as a separate
+// resources/server.asar sidecar instead of loose files: the NSIS installer
+// then extracts a handful of large archives instead of thousands of small
+// files, which dominates install (and update) time. The Windows primary runs
+// the server from inside server.asar via the asar-aware ELECTRON_RUN_AS_NODE
+// runtime; the WSL backend cannot read asar archives, so enabling WSL lazily
+// extracts the sidecar to a version-keyed directory (see DesktopWslServerTree).
+export const WINDOWS_SERVER_ASAR_RESOURCE = "server.asar";
+// dlopen/spawn need real files, so native modules, shared libraries, and
+// helper executables live in the server.asar.unpacked sibling (the standard
+// asar redirect convention). Everything else stays packed.
+export const WINDOWS_SERVER_ASAR_UNPACK_GLOB =
+  "{**/*.node,**/*.dll,**/*.exe,**/*.so,**/*.so.*,**/*.dylib}";
+// Mirrors DESKTOP_FILE_EXCLUSIONS for the hand-packed sidecar: the Claude SDK
+// platform packages are dead weight (see above), and node_modules/.bin shims
+// are never spawned at runtime (and are symlinks on POSIX build hosts, which
+// the asar extraction path deliberately does not support).
+export const WINDOWS_SERVER_ASAR_IGNORE_GLOBS = [
+  "**/node_modules/@anthropic-ai/claude-agent-sdk-*",
+  "**/node_modules/@anthropic-ai/claude-agent-sdk-*/**",
+  "**/node_modules/.bin",
+  "**/node_modules/.bin/**",
+] as const;
+export const WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT = 80;
+export const WINDOWS_SERVER_RESOURCE_SOURCE_DIR = "apps/desktop/prod-resources/windows-server";
+export const WINDOWS_SERVER_EXTRA_RESOURCES = [
+  {
+    // Copy the archive and its .unpacked sibling from one parent directory.
+    // Mapping the .unpacked directory as an independent FileSet silently
+    // omitted it from Windows packages even though electron-builder copied
+    // the adjacent archive.
+    from: WINDOWS_SERVER_RESOURCE_SOURCE_DIR,
+    to: ".",
+    filter: [WINDOWS_SERVER_ASAR_RESOURCE, `${WINDOWS_SERVER_ASAR_RESOURCE}.unpacked/**/*`],
+  },
+] as const;
 export const DESKTOP_EXTRA_RESOURCES = [
   {
     from: "apps/desktop/prod-resources/resource-monitor",
@@ -966,14 +1167,20 @@ export function createStageWorkspaceConfig(input: {
   readonly allowBuilds?: Record<string, boolean>;
   readonly patchedDependencies?: Record<string, string>;
   readonly overrides?: Record<string, string>;
+  // The Windows server sidecar stage runs both the Windows primary and the
+  // WSL Linux backend from one dependency tree, so it needs win32 + linux
+  // natives (e.g. @yuuang/ffi-rs-linux-x64-gnu) — and a hoisted (physical,
+  // symlink-free) node_modules: the tree gets packed into server.asar and
+  // later extracted for WSL, and neither step can rely on pnpm's
+  // symlink/junction layout surviving the trip.
+  readonly linuxServerBackend?: boolean;
 }): StageWorkspaceConfig {
-  const { platform, arch, allowBuilds, patchedDependencies, overrides } = input;
+  const { platform, arch, allowBuilds, patchedDependencies, overrides, linuxServerBackend } = input;
   const hostOs = platform === "mac" ? "darwin" : platform === "win" ? "win32" : "linux";
   const hostCpu = arch === "universal" ? ["arm64", "x64"] : [arch];
-  // Linux AppImages and Windows WSL backends both execute a Linux/glibc Node
-  // process that loads Linux-native optional deps at runtime (e.g.
-  // @yuuang/ffi-rs-linux-x64-gnu). Keep libc explicit so pnpm includes those
-  // optional packages in the staged production install.
+  // Linux AppImages execute a Linux/glibc Node process that loads
+  // Linux-native optional deps at runtime. Keep libc explicit so pnpm
+  // includes those optional packages in the staged production install.
   const supportedArchitectures =
     platform === "linux"
       ? {
@@ -981,7 +1188,7 @@ export function createStageWorkspaceConfig(input: {
           cpu: hostCpu,
           libc: ["glibc"],
         }
-      : platform === "win"
+      : linuxServerBackend
         ? {
             os: Array.from(new Set([hostOs, "linux"])),
             cpu: hostCpu,
@@ -999,6 +1206,7 @@ export function createStageWorkspaceConfig(input: {
       ? { patchedDependencies }
       : {}),
     ...(overrides && Object.keys(overrides).length > 0 ? { overrides } : {}),
+    ...(linuxServerBackend ? { nodeLinker: "hoisted" as const } : {}),
   };
 }
 
@@ -1049,6 +1257,11 @@ const BuildEnvConfig = Config.all({
   // into the staged node-pty so the WSL backend ships a ready binary and never
   // compiles on the user's machine.
   wslPrebuild: Config.string("T3CODE_DESKTOP_WSL_PREBUILD").pipe(Config.option),
+  // A remote-only build ships no local/WSL backend and connects to a remote
+  // server. `VITE_REMOTE_ONLY` is still honoured (below) for backward
+  // compatibility, but that env var does not survive every `vp run` env
+  // forwarding path, so this dedicated flag/env is the reliable switch.
+  remoteOnly: Config.boolean("T3CODE_DESKTOP_REMOTE_ONLY").pipe(Config.withDefault(false)),
 });
 
 const MockUpdateServerPortSchema = Schema.NumberFromString.check(
@@ -1143,6 +1356,10 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const wslPrebuild =
     Option.getOrUndefined(input.wslPrebuild) ?? Option.getOrUndefined(env.wslPrebuild);
 
+  const remoteOnly =
+    resolveBooleanFlag(input.remoteOnly, env.remoteOnly) ||
+    process.env.VITE_REMOTE_ONLY?.trim() === "1";
+
   return {
     platform,
     target,
@@ -1156,6 +1373,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     mockUpdates,
     mockUpdateServerPort,
     wslPrebuild,
+    remoteOnly,
   } satisfies ResolvedBuildOptions;
 });
 
@@ -1186,6 +1404,273 @@ const runCommand = Effect.fn("runCommand")(function* (
     });
   }
 });
+
+/**
+ * Every `node_modules` directory that would be visible from `startDir`.
+ *
+ * The self-containment check is only meaningful in a directory with none of
+ * these: Node walks parents when resolving a bare import, so a stray
+ * node_modules above the probe would satisfy imports that are missing from the
+ * packaged tree and turn the check into a silent pass.
+ */
+function trimTrailingSeparators(value: string): string {
+  let end = value.length;
+  while (end > 1 && (value[end - 1] === "/" || value[end - 1] === "\\")) end -= 1;
+  return value.slice(0, end);
+}
+
+/**
+ * Length of the UNC share-root prefix (double backslash, host, backslash, share),
+ * or 0 when the path is not UNC.
+ *
+ * The share is the highest real directory on a UNC path: the double-backslash host
+ * prefix on its own is not one, so the ancestor walk must stop there.
+ */
+function uncShareRootLength(value: string): number {
+  const isUnc = value.startsWith("\\\\") || value.startsWith("//");
+  if (!isUnc) return 0;
+  const separator = /[\\/]/;
+  const serverEnd = value.slice(2).search(separator);
+  if (serverEnd < 0) return value.length;
+  const shareStart = 2 + serverEnd + 1;
+  const shareEnd = value.slice(shareStart).search(separator);
+  return shareEnd < 0 ? value.length : shareStart + shareEnd;
+}
+
+export function ancestorNodeModulesPaths(
+  startDir: string,
+  separator: string,
+): ReadonlyArray<string> {
+  // Walks with lastIndexOf rather than splitting into segments so UNC roots
+  // (double-backslash host, backslash, share) and drive roots keep their prefix instead of
+  // being rebuilt into a relative path that silently resolves against the build cwd.
+  const paths: string[] = [];
+  let current = trimTrailingSeparators(startDir);
+  // On a UNC path the share itself is the root: the double-backslash host prefix is not a
+  // directory, so walking past the host+share prefix would emit paths that cannot exist.
+  const uncRootLength = uncShareRootLength(current);
+  for (;;) {
+    const cut = Math.max(current.lastIndexOf("/"), current.lastIndexOf("\\"));
+    if (cut < 0 || (uncRootLength > 0 && cut < uncRootLength)) break;
+    const parent = cut === 0 ? current.slice(0, 1) : current.slice(0, cut);
+    if (parent === current) break;
+    paths.push(
+      parent.endsWith(separator) ? `${parent}node_modules` : `${parent}${separator}node_modules`,
+    );
+    if (cut === 0) break;
+    current = parent;
+  }
+  return paths;
+}
+
+const NativeMarkerManifest = Schema.Struct({
+  dependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  optionalDependencies: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+});
+const decodeNativeMarkerManifest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(NativeMarkerManifest),
+);
+
+/** Locate a package inside the pnpm store, which is where the real files live. */
+const findStorePackageDirectory = Effect.fn("findStorePackageDirectory")(function* (
+  repoRoot: string,
+  packageName: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const storeDir = path.join(repoRoot, "node_modules/.pnpm");
+  const exists = (candidate: string) =>
+    fs.exists(candidate).pipe(Effect.orElseSucceed(() => false));
+  if (!(yield* exists(storeDir))) return null;
+
+  const flattened = `${packageName.replace("/", "+")}@`;
+  const entries = yield* fs
+    .readDirectory(storeDir)
+    .pipe(Effect.orElseSucceed(() => [] as string[]));
+  for (const entry of entries) {
+    if (!entry.startsWith(flattened)) continue;
+    const candidate = path.join(storeDir, entry, "node_modules", packageName);
+    if (yield* exists(candidate)) return candidate;
+  }
+  return null;
+});
+
+/** Whether a package builds or ships a native addon it loads at runtime. */
+const hasNativeLoaderMarkers = Effect.fn("hasNativeLoaderMarkers")(function* (packageDir: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const exists = (candidate: string) =>
+    fs.exists(candidate).pipe(Effect.orElseSucceed(() => false));
+
+  if (yield* exists(path.join(packageDir, "binding.gyp"))) return true;
+  if (yield* exists(path.join(packageDir, "prebuilds"))) return true;
+
+  const manifestPath = path.join(packageDir, "package.json");
+  if (!(yield* exists(manifestPath))) return false;
+  const source = yield* fs.readFileString(manifestPath).pipe(Effect.orElseSucceed(() => ""));
+  if (source === "") return false;
+  const manifest = yield* Effect.try(() => decodeNativeMarkerManifest(source)).pipe(
+    Effect.orElseSucceed(() => null),
+  );
+  if (manifest === null) return false;
+  return Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies }).some(
+    (dependency) => dependency.startsWith("node-gyp-build"),
+  );
+});
+
+export const copyDirectoryPreservingSymlinks = Effect.fn("copyDirectoryPreservingSymlinks")(
+  function* (source: string, destination: string) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+
+    // Effect's Node implementation delegates directory copies to fs.cp, whose
+    // default rewrites links into absolute source-tree references. Recreate every
+    // in-tree directory link as a junction rooted in the isolated copy so the
+    // probe cannot resolve through staging and Windows needs no symlink privilege.
+    yield* fs.copy(source, destination);
+
+    const restoreRelativeSymlinks = (
+      sourceDirectory: string,
+      destinationDirectory: string,
+    ): Effect.Effect<void, PlatformError | BundleNotSelfContainedError> =>
+      Effect.gen(function* () {
+        for (const entry of yield* fs.readDirectory(sourceDirectory)) {
+          const sourceEntry = path.join(sourceDirectory, entry);
+          const destinationEntry = path.join(destinationDirectory, entry);
+          const linkTarget = yield* fs.readLink(sourceEntry).pipe(Effect.option);
+          if (Option.isSome(linkTarget)) {
+            const absoluteSourceTarget = path.isAbsolute(linkTarget.value)
+              ? linkTarget.value
+              : path.resolve(path.dirname(sourceEntry), linkTarget.value);
+            const sourceRelativeTarget = path.relative(source, absoluteSourceTarget);
+            if (
+              sourceRelativeTarget === ".." ||
+              sourceRelativeTarget.startsWith(`..${path.sep}`) ||
+              path.isAbsolute(sourceRelativeTarget)
+            ) {
+              return yield* new BundleNotSelfContainedError({
+                exitCode: -1,
+                output: `Refusing to copy symlink ${sourceEntry}: its target ${absoluteSourceTarget} escapes the packaged tree.`,
+              });
+            }
+            const target = path.join(destination, sourceRelativeTarget);
+            yield* fs.remove(destinationEntry, { recursive: true, force: true });
+            yield* Effect.tryPromise({
+              try: () => NodeFSP.symlink(target, destinationEntry, "junction"),
+              catch: (cause) =>
+                new BundleNotSelfContainedError({
+                  exitCode: -1,
+                  output: `Could not isolate ${sourceEntry}: ${String(cause)}`,
+                }),
+            });
+          } else {
+            const info = yield* fs.stat(sourceEntry);
+            if (info.type === "Directory") {
+              yield* restoreRelativeSymlinks(sourceEntry, destinationEntry);
+            }
+          }
+        }
+      });
+
+    yield* restoreRelativeSymlinks(source, destination);
+  },
+);
+
+const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBundleIsSelfContained")(
+  function* (input: { readonly asarPath: string; readonly verbose: boolean }) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+
+    const probeRoot = yield* fs.makeTempDirectoryScoped({
+      prefix: "t3code-bundle-selfcheck-",
+    });
+    const extractedApp = path.join(probeRoot, "extracted");
+    const probeApp = path.join(probeRoot, "app");
+    yield* Effect.try({
+      try: () => extractAll(input.asarPath, extractedApp),
+      catch: (cause) =>
+        new BundleNotSelfContainedError({
+          exitCode: -1,
+          output: `Could not extract ${input.asarPath} for the bundle self-containment check: ${String(cause)}`,
+        }),
+    });
+    // Keep the existing symlink isolation guard even though the sidecar stage
+    // is hoisted and should be physical. A future package-manager layout change
+    // must not let the probe resolve through the build tree.
+    yield* copyDirectoryPreservingSymlinks(extractedApp, probeApp);
+
+    // Guard the guard: if anything above the probe provides a node_modules, a
+    // missing dependency would resolve there and the check would pass while the
+    // packaged tree is broken.
+    for (const candidate of ancestorNodeModulesPaths(probeApp, path.sep)) {
+      if (yield* fs.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
+        return yield* new BundleNotSelfContainedError({
+          exitCode: -1,
+          output: `Refusing to report success: ${candidate} is visible from the probe directory, so bare imports could resolve outside the packaged tree. Remove or rename it, or point TMPDIR somewhere without one.`,
+        });
+      }
+    }
+
+    const entryPoint = path.join(probeApp, "apps/server/dist/bin.mjs");
+    if (!(yield* fs.exists(entryPoint).pipe(Effect.orElseSucceed(() => false)))) {
+      return yield* new BundleNotSelfContainedError({
+        exitCode: -1,
+        output: `Expected the server entry at ${entryPoint}.`,
+      });
+    }
+
+    // --version exercises the eagerly loaded module graph, which is where a
+    // missing dependency shows up, without starting a server or touching disk
+    // state. It does not cover lazily imported externals: node-pty is checked
+    // by the WSL preflight probe at runtime, while ffi-rs, @ff-labs/fff-node
+    // and the bun adapters are covered by the shared runtime-external closure
+    // and emitted-bundle checks.
+    yield* runCommand(
+      ChildProcess.make(
+        process.execPath,
+        // --no-global-search-paths because clearing NODE_PATH is not enough:
+        // CommonJS resolution still falls back to $HOME/.node_modules,
+        // $HOME/.node_libraries and the install prefix, so a globally installed
+        // copy of a missing dependency would quietly satisfy this check.
+        ["--no-global-search-paths", entryPoint, "--version"],
+        {
+          cwd: probeApp,
+          stdout: "pipe",
+          stderr: "pipe",
+          // NODE_PATH would let a createRequire call inside the bundle resolve
+          // a missing external from outside the packaged tree, which is the
+          // whole thing this is trying to rule out.
+          env: { ...process.env, NODE_PATH: "" },
+        },
+      ),
+      {
+        label: "server sidecar self-containment check (node bin.mjs --version)",
+        verbose: input.verbose,
+      },
+    ).pipe(
+      // Printing a version should be immediate. A regression that blocks (on
+      // stdin, a port, a lock) would otherwise hang release CI until the job
+      // times out with nothing useful in the log.
+      Effect.timeout(BUNDLE_SELF_CHECK_TIMEOUT),
+      Effect.catchTag("TimeoutError", () =>
+        Effect.fail(
+          new BundleNotSelfContainedError({
+            exitCode: -1,
+            output: `The packaged bundle did not print its version within ${Duration.toSeconds(BUNDLE_SELF_CHECK_TIMEOUT)}s; it is hanging rather than failing to resolve.`,
+          }),
+        ),
+      ),
+      Effect.catchTag("BuildCommandFailedError", (error) =>
+        Effect.fail(
+          new BundleNotSelfContainedError({
+            exitCode: error.exitCode,
+            output: `${error.stderrTail ?? ""}${error.stdoutTail ?? ""}`.trim(),
+          }),
+        ),
+      ),
+    );
+  },
+);
 
 const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* (input: {
   readonly repoRoot: string;
@@ -1325,6 +1810,39 @@ function stageMacIcons(stageResourcesDir: string, sourcePng: string, verbose: bo
     yield* generateMacIconSet(sourcePng, iconIcnsPath, tmpRoot, path, verbose);
   });
 }
+
+export const stageDesktopDmgBackground = Effect.fn("stageDesktopDmgBackground")(function* (
+  stageResourcesDir: string,
+  channel: "latest" | "nightly",
+  verbose: boolean,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const sourcePath = path.join(stageResourcesDir, "dmg", `dmg-background-${channel}.svg`);
+  if (!(yield* fs.exists(sourcePath))) {
+    return yield* new DesktopDmgBackgroundSourceMissingError({ channel, sourcePath });
+  }
+
+  for (const output of [
+    { suffix: "", width: 540, height: 380 },
+    { suffix: "@2x", width: 1080, height: 760 },
+  ] as const) {
+    const targetPath = path.join(
+      stageResourcesDir,
+      "dmg",
+      `dmg-background-${channel}${output.suffix}.png`,
+    );
+    yield* runCommand(
+      ChildProcess.make(
+        {},
+      )`sips -s format png -z ${output.height} ${output.width} ${sourcePath} --out ${targetPath}`,
+      {
+        label: `sips ${channel} DMG background${output.suffix || "@1x"}`,
+        verbose,
+      },
+    );
+  }
+});
 
 function stageLinuxIcons(stageResourcesDir: string, sourcePng: string, verbose: boolean) {
   return Effect.gen(function* () {
@@ -1530,6 +2048,10 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "Command Center");
 }
 
+export function resolveDesktopArtifactName(version: string, remoteOnlyBuild: boolean): string {
+  return `${remoteOnlyBuild ? "Command-Center-Remote" : "Command-Center"}-${version}-\${arch}.\${ext}`;
+}
+
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
@@ -1543,21 +2065,28 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         readonly provisioningProfilePath: string;
       }
     | undefined,
+  remoteOnlyBuild = false,
 ) {
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
-    artifactName: "Command-Center-${version}-${arch}.${ext}",
+    appId: remoteOnlyBuild ? REMOTE_ONLY_DESKTOP_APP_ID : DESKTOP_APP_ID,
+    productName: remoteOnlyBuild
+      ? REMOTE_ONLY_DESKTOP_PRODUCT_NAME
+      : resolveDesktopProductName(version),
+    artifactName: resolveDesktopArtifactName(version, remoteOnlyBuild),
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [...DESKTOP_FILE_EXCLUSIONS],
     directories: {
       buildResources: "apps/desktop/resources",
     },
-    // Only the Windows WSL backend needs files outside the asar (see
-    // WINDOWS_ASAR_UNPACK); macOS and Linux stay packed — smart unpack
-    // extracts native libraries, which fff-node finds in app.asar.unpacked.
-    ...(platform === "win" ? { asarUnpack: [...WINDOWS_ASAR_UNPACK] } : {}),
-    extraResources: DESKTOP_EXTRA_RESOURCES,
+    // All platforms keep app.asar fully packed; electron-builder's default
+    // smart unpack extracts native libraries, which loaders find in
+    // app.asar.unpacked. Windows additionally ships the server tree as the
+    // hand-packed server.asar sidecar (see WINDOWS_SERVER_ASAR_RESOURCE) when
+    // the build includes a local/WSL backend.
+    extraResources: [
+      ...DESKTOP_EXTRA_RESOURCES,
+      ...(platform === "win" && !remoteOnlyBuild ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
+    ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
   const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
@@ -1592,6 +2121,29 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     };
   }
 
+  if (platform === "mac" && target === "dmg") {
+    buildConfig.dmg = {
+      // Give the themed installer its own Finder volume name. Finder caches
+      // DMG window backgrounds by volume name, so reusing a generic name can
+      // make a newly built background look unchanged during testing.
+      title: `${resolveDesktopProductName(version)} ${version} Installer`,
+      background: `dmg/dmg-background-${updateChannel}.png`,
+      window: {
+        width: 540,
+        // Finder counts its 32px title bar in the window bounds. The themed
+        // background itself is 380px tall, so add the chrome height here to
+        // keep the full canvas visible.
+        height: 412,
+      },
+      contents: [
+        { x: 130, y: 220, type: "file" },
+        { x: 410, y: 220, type: "link", path: "/Applications" },
+      ],
+      iconSize: 80,
+      iconTextSize: 12,
+    };
+  }
+
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
@@ -1617,6 +2169,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
 
   if (platform === "win") {
     buildConfig.npmRebuild = false;
+    // Keep blockmap-based differential downloads enabled while changing the
+    // installed file topology. The optimization is in the payload shape, not
+    // in trading update bandwidth for install speed.
+    buildConfig.nsis = { differentialPackage: true };
     const winConfig: Record<string, unknown> = {
       target: [target],
       icon: "icon.ico",
@@ -1725,6 +2281,381 @@ const stageWslNodePtyPrebuild = Effect.fn("stageWslNodePtyPrebuild")(function* (
   );
 });
 
+// Stage and pack the Windows server sidecar: the bundled server plus a hoisted
+// install of only its runtime-external/native dependency closure for win32 and
+// WSL Linux. The Windows primary runs from the archive through the asar-aware
+// ELECTRON_RUN_AS_NODE runtime; enabling WSL extracts it to a real directory.
+// Shipping one packed archive instead of thousands of loose files is what
+// makes the NSIS install/update fast.
+export const packWindowsServerAsar = Effect.fn("packWindowsServerAsar")(function* (input: {
+  readonly sourceDir: string;
+  readonly asarPath: string;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  yield* Effect.tryPromise({
+    try: () =>
+      createPackageWithOptions(input.sourceDir, input.asarPath, {
+        dot: true,
+        unpack: WINDOWS_SERVER_ASAR_UNPACK_GLOB,
+        globOptions: { ignore: [...WINDOWS_SERVER_ASAR_IGNORE_GLOBS] },
+      }),
+    catch: (cause) => new WindowsServerSidecarPackError({ asarPath: input.asarPath, cause }),
+  });
+  const unpackedDirPath = `${input.asarPath}.unpacked`;
+  if (!(yield* fs.exists(unpackedDirPath))) {
+    return yield* new WindowsServerSidecarPackError({
+      asarPath: input.asarPath,
+      cause: new Error(`expected native binaries at ${unpackedDirPath}, but none were unpacked`),
+    });
+  }
+});
+
+export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(function* (input: {
+  readonly stageRoot: string;
+  readonly repoRoot: string;
+  readonly serverDistDir: string;
+  readonly arch: typeof BuildArch.Type;
+  readonly appVersion: string;
+  readonly runtimeExternalDependencies: Record<string, string>;
+  readonly fffNodeVersion: string;
+  readonly allowBuilds: Record<string, boolean>;
+  readonly patchedDependencies: Record<string, string>;
+  readonly overrides: Record<string, string>;
+  readonly wslPrebuildPath: string | undefined;
+  readonly asarPath: string;
+  readonly verbose: boolean;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+
+  const serverStageDir = path.join(input.stageRoot, "server");
+  yield* fs.makeDirectory(path.join(serverStageDir, "apps/server"), { recursive: true });
+  yield* fs.copy(input.serverDistDir, path.join(serverStageDir, "apps/server/dist"));
+
+  const sidecarDependencies = {
+    ...input.runtimeExternalDependencies,
+    // The sidecar serves two processes: the Windows primary loads win32
+    // natives, and the WSL backend loads the matching Linux natives (fff via
+    // ffi-rs) from the extracted copy of this same tree.
+    ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
+    ...resolveFffNativeDependencies("linux", input.arch, input.fffNodeVersion),
+  };
+  const sidecarPatchedDependencies = createStagePatchedDependencies(
+    input.patchedDependencies,
+    sidecarDependencies,
+  );
+  const sidecarPackageJson = {
+    name: "t3code-server",
+    version: input.appVersion,
+    private: true,
+    packageManager: rootPackageJson.packageManager,
+    dependencies: sidecarDependencies,
+  };
+  const sidecarPackageJsonString = yield* encodeJsonString(sidecarPackageJson);
+  yield* fs.writeFileString(
+    path.join(serverStageDir, "package.json"),
+    `${sidecarPackageJsonString}\n`,
+  );
+  const sidecarWorkspaceConfig = createStageWorkspaceConfig({
+    platform: "win",
+    arch: input.arch,
+    allowBuilds: input.allowBuilds,
+    patchedDependencies: sidecarPatchedDependencies,
+    overrides: input.overrides,
+    linuxServerBackend: true,
+  });
+  const sidecarWorkspaceConfigString = yield* encodeStageWorkspaceConfig(sidecarWorkspaceConfig);
+  yield* fs.writeFileString(
+    path.join(serverStageDir, "pnpm-workspace.yaml"),
+    sidecarWorkspaceConfigString,
+  );
+  if (Object.keys(sidecarPatchedDependencies).length > 0) {
+    yield* fs.copy(path.join(input.repoRoot, "patches"), path.join(serverStageDir, "patches"));
+  }
+
+  yield* Effect.log("[desktop-artifact] Installing server sidecar runtime externals...");
+  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  yield* runCommand(
+    ChildProcess.make(installCommand.command, installCommand.args, {
+      cwd: serverStageDir,
+      shell: installCommand.shell,
+    }),
+    { label: "vp install --prod (server sidecar)", verbose: input.verbose },
+  );
+
+  yield* stageWslNodePtyPrebuild({
+    stageAppDir: serverStageDir,
+    arch: input.arch,
+    prebuildPath: input.wslPrebuildPath,
+  });
+
+  yield* Effect.log("[desktop-artifact] Packing server.asar...");
+  yield* fs.makeDirectory(path.dirname(input.asarPath), { recursive: true });
+  yield* packWindowsServerAsar({ sourceDir: serverStageDir, asarPath: input.asarPath });
+  const packedStat = yield* fs.stat(input.asarPath);
+  yield* Effect.log(
+    `[desktop-artifact] Packed server.asar (${String(packedStat.size)} bytes) + unpacked natives.`,
+  );
+});
+
+function collectUnpackedAsarFiles(
+  directory: DirectoryRecord,
+  parentPath = "",
+  output: string[] = [],
+): readonly string[] {
+  for (const [name, entry] of Object.entries(directory.files)) {
+    const entryPath = parentPath.length === 0 ? name : `${parentPath}/${name}`;
+    if ("files" in entry) {
+      collectUnpackedAsarFiles(entry, entryPath, output);
+    } else if (entry.unpacked) {
+      output.push(entryPath);
+    }
+  }
+  return output;
+}
+
+const countPayloadFiles = Effect.fn("desktopArtifact.countPayloadFiles")(function* (root: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const pendingDirectories = [root];
+  let count = 0;
+
+  while (pendingDirectories.length > 0) {
+    const directory = pendingDirectories.pop();
+    if (directory === undefined) break;
+    const entries = yield* fs.readDirectory(directory);
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry);
+      const stat = yield* fs.stat(entryPath);
+      if (stat.type === "Directory") {
+        pendingDirectories.push(entryPath);
+      } else if (stat.type === "File") {
+        count += 1;
+      }
+    }
+  }
+
+  return count;
+});
+
+export const verifyWindowsPrimaryFffNativeLoad = Effect.fn(
+  "desktopArtifact.verifyWindowsPrimaryFffNativeLoad",
+)(function* (input: {
+  readonly packagedAppDir: string;
+  readonly asarPath: string;
+  readonly appExecutableName: string;
+  readonly targetArch: typeof BuildArch.Type;
+  readonly verbose: boolean;
+}) {
+  const hostPlatform = yield* HostProcessPlatform;
+  const hostArchitecture = yield* HostProcessArchitecture;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const executablePath = path.join(input.packagedAppDir, input.appExecutableName);
+  const executableStat = yield* fs.stat(executablePath).pipe(Effect.orElseSucceed(() => null));
+  if (executableStat?.type !== "File") {
+    return yield* new WindowsPrimaryNativeProbeError({
+      executablePath,
+      exitCode: -1,
+      output: "The unpacked application does not contain its expected primary executable.",
+    });
+  }
+  if (hostPlatform !== "win32" || hostArchitecture !== input.targetArch) return;
+
+  const probeRoot = yield* fs.makeTempDirectoryScoped({
+    prefix: "t3code-windows-primary-native-probe-",
+  });
+  const fffEntryPath = path.join(
+    input.asarPath,
+    "node_modules/@ff-labs/fff-node/dist/src/index.js",
+  );
+  const probeEnv = { ...process.env };
+  delete probeEnv.ELECTRON_NO_ASAR;
+  delete probeEnv.NODE_OPTIONS;
+
+  yield* runCommand(
+    ChildProcess.make(
+      executablePath,
+      [
+        "--no-global-search-paths",
+        "--input-type=module",
+        "--eval",
+        WINDOWS_PRIMARY_FFF_PROBE_SOURCE,
+        fffEntryPath,
+        probeRoot,
+      ],
+      {
+        cwd: input.packagedAppDir,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...probeEnv,
+          ELECTRON_RUN_AS_NODE: "1",
+          NODE_PATH: "",
+        },
+      },
+    ),
+    {
+      label: "Windows primary fff native-load probe",
+      verbose: input.verbose,
+    },
+  ).pipe(
+    Effect.timeout(WINDOWS_PRIMARY_NATIVE_PROBE_TIMEOUT),
+    Effect.catchTags({
+      TimeoutError: () =>
+        Effect.fail(
+          new WindowsPrimaryNativeProbeError({
+            executablePath,
+            exitCode: -1,
+            output: `The native-load probe did not finish within ${Duration.toSeconds(WINDOWS_PRIMARY_NATIVE_PROBE_TIMEOUT)}s.`,
+          }),
+        ),
+      BuildCommandFailedError: (error) =>
+        Effect.fail(
+          new WindowsPrimaryNativeProbeError({
+            executablePath,
+            exitCode: error.exitCode,
+            output: `${error.stderrTail ?? ""}${error.stdoutTail ?? ""}`.trim(),
+          }),
+        ),
+    }),
+  );
+});
+
+export const validateWindowsPackagedPayload = Effect.fn(
+  "desktopArtifact.validateWindowsPackagedPayload",
+)(function* (input: {
+  readonly stageDistDir: string;
+  readonly appExecutableName: string;
+  readonly targetArch: typeof BuildArch.Type;
+  readonly fileLimit?: number;
+  readonly verbose?: boolean;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const fileLimit = input.fileLimit ?? WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT;
+  const isFile = (filePath: string) =>
+    fs.stat(filePath).pipe(
+      Effect.map((stat) => stat.type === "File"),
+      Effect.orElseSucceed(() => false),
+    );
+  const stageEntries = yield* fs.readDirectory(input.stageDistDir);
+  let packagedAppDir: string | undefined;
+
+  for (const entry of stageEntries) {
+    if (!entry.endsWith("-unpacked")) continue;
+    const candidate = path.join(input.stageDistDir, entry);
+    const stat = yield* fs.stat(candidate).pipe(Effect.orElseSucceed(() => null));
+    if (stat?.type === "Directory") {
+      packagedAppDir = candidate;
+      break;
+    }
+  }
+
+  if (packagedAppDir === undefined) {
+    return yield* new WindowsPackagedPayloadValidationError({
+      reason: "packaged-app-missing",
+      packagedAppDir: path.join(input.stageDistDir, "win-unpacked"),
+    });
+  }
+
+  const resourcesDir = path.join(packagedAppDir, "resources");
+  const asarPath = path.join(resourcesDir, WINDOWS_SERVER_ASAR_RESOURCE);
+  if (!(yield* fs.exists(asarPath).pipe(Effect.orElseSucceed(() => false)))) {
+    return yield* new WindowsPackagedPayloadValidationError({
+      reason: "sidecar-missing",
+      packagedAppDir,
+      missingFiles: [WINDOWS_SERVER_ASAR_RESOURCE],
+    });
+  }
+
+  const unpackedFiles = yield* Effect.try({
+    try: () => {
+      // The entry lookup proves the archive contains the server executable,
+      // while the single header walk identifies every file ASAR redirects to
+      // the unpacked sibling at runtime.
+      // @electron/asar resolves entry names using the host path separator.
+      // POSIX separators work on Linux/macOS but fail on Windows even when the
+      // entry is present in the archive.
+      statFile(asarPath, path.join("apps", "server", "dist", "bin.mjs"));
+      return [...collectUnpackedAsarFiles(getRawHeader(asarPath).header)].sort();
+    },
+    catch: (cause) =>
+      new WindowsPackagedPayloadValidationError({
+        reason: "sidecar-invalid",
+        packagedAppDir,
+        cause,
+      }),
+  });
+  if (unpackedFiles.length === 0) {
+    return yield* new WindowsPackagedPayloadValidationError({
+      reason: "sidecar-invalid",
+      packagedAppDir,
+      cause: new Error("server.asar does not declare any unpacked native files"),
+    });
+  }
+
+  const missingFiles: string[] = [];
+  for (const unpackedFile of unpackedFiles) {
+    const unpackedPath = path.join(
+      resourcesDir,
+      `${WINDOWS_SERVER_ASAR_RESOURCE}.unpacked`,
+      ...unpackedFile.split("/"),
+    );
+    if (!(yield* isFile(unpackedPath))) {
+      missingFiles.push(`${WINDOWS_SERVER_ASAR_RESOURCE}.unpacked/${unpackedFile}`);
+    }
+  }
+  if (missingFiles.length > 0) {
+    return yield* new WindowsPackagedPayloadValidationError({
+      reason: "unpacked-native-missing",
+      packagedAppDir,
+      missingFiles,
+    });
+  }
+
+  const resourceMonitorPath = path.join(
+    resourcesDir,
+    "resource-monitor",
+    resourceMonitorExecutableName("win"),
+  );
+  if (!(yield* isFile(resourceMonitorPath))) {
+    return yield* new WindowsPackagedPayloadValidationError({
+      reason: "resource-monitor-missing",
+      packagedAppDir,
+      missingFiles: ["resource-monitor/t3-resource-monitor.exe"],
+    });
+  }
+
+  const fileCount = yield* countPayloadFiles(packagedAppDir);
+  if (fileCount > fileLimit) {
+    return yield* new WindowsPackagedPayloadValidationError({
+      reason: "file-limit-exceeded",
+      packagedAppDir,
+      fileCount,
+      fileLimit,
+    });
+  }
+
+  yield* verifyWindowsPrimaryFffNativeLoad({
+    packagedAppDir,
+    asarPath,
+    appExecutableName: input.appExecutableName,
+    targetArch: input.targetArch,
+    verbose: input.verbose ?? false,
+  });
+
+  yield* verifyPackagedBundleIsSelfContained({
+    asarPath,
+    verbose: input.verbose ?? false,
+  });
+
+  yield* Effect.log(
+    `[desktop-artifact] Validated Windows payload (${String(fileCount)} files, ${String(unpackedFiles.length)} sidecar natives).`,
+  );
+  return { packagedAppDir, fileCount, unpackedFiles } as const;
+});
+
 const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   options: ResolvedBuildOptions,
 ) {
@@ -1746,9 +2677,19 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   const electronVersion = desktopPackageJson.dependencies.electron;
+  const remoteOnlyBuild = options.remoteOnly;
+  // The web and desktop vite sub-builds each key their remote-only behaviour off
+  // `process.env.VITE_REMOTE_ONLY` (apps/web/vite.config.ts,
+  // apps/desktop/vite.config.ts, which bakes __T3CODE_REMOTE_ONLY__ from it).
+  // `--remote-only` / T3CODE_DESKTOP_REMOTE_ONLY resolve into `options.remoteOnly`
+  // but do not set that env var, so normalise it here — otherwise the packer
+  // would skip the server while the client bundles were still built full.
+  if (remoteOnlyBuild) {
+    process.env.VITE_REMOTE_ONLY = "1";
+  }
 
   const serverDependencies = serverPackageJson.dependencies;
-  if (!serverDependencies || Object.keys(serverDependencies).length === 0) {
+  if (!remoteOnlyBuild && (!serverDependencies || Object.keys(serverDependencies).length === 0)) {
     return yield* new MissingServerProductionDependenciesError({
       manifestPath: "apps/server/package.json",
     });
@@ -1764,15 +2705,20 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       }),
   });
 
-  const resolvedServerDependencies = yield* Effect.try({
-    try: () => resolveCatalogDependencies(serverDependencies, workspaceCatalog, "apps/server"),
-    catch: (cause) =>
-      new DesktopBuildDependencyResolutionError({
-        kind: "server-production",
-        manifestPath: "apps/server/package.json",
-        cause,
-      }),
-  });
+  const resolvedServerDependencies = remoteOnlyBuild
+    ? {}
+    : yield* Effect.try({
+        try: () => resolveCatalogDependencies(serverDependencies!, workspaceCatalog, "apps/server"),
+        catch: (cause) =>
+          new DesktopBuildDependencyResolutionError({
+            kind: "server-production",
+            manifestPath: "apps/server/package.json",
+            cause,
+          }),
+      });
+  const resolvedServerRuntimeExternalDependencies = selectCliRuntimeExternalDependencies(
+    resolvedServerDependencies,
+  );
   const resolvedDesktopRuntimeDependencies = yield* Effect.try({
     try: () => resolveDesktopRuntimeDependencies(desktopPackageJson.dependencies, workspaceCatalog),
     catch: (cause) =>
@@ -1797,25 +2743,45 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     desktopDist: path.join(repoRoot, "apps/desktop/dist-electron"),
     desktopResources: path.join(repoRoot, "apps/desktop/resources"),
     serverDist: path.join(repoRoot, "apps/server/dist"),
+    webDist: path.join(repoRoot, "apps/web/dist"),
   };
   const bundledClientEntry = path.join(distDirs.serverDist, "client/index.html");
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    const spawnCommand = yield* resolveSpawnCommand("vp", ["run", "build:desktop"]);
-    yield* runCommand(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        cwd: repoRoot,
-        shell: spawnCommand.shell,
-      }),
-      { label: "vp run build:desktop", verbose: options.verbose },
-    );
+    const runBuild = Effect.fn("buildDesktopArtifact.build")(function* (
+      args: ReadonlyArray<string>,
+      label: string,
+    ) {
+      const command = yield* resolveSpawnCommand("vp", args);
+      yield* runCommand(
+        ChildProcess.make(command.command, command.args, {
+          cwd: repoRoot,
+          shell: command.shell,
+        }),
+        { label, verbose: options.verbose },
+      );
+    });
+    if (remoteOnlyBuild) {
+      yield* runBuild(
+        ["run", "--filter", "@t3tools/web", "build"],
+        "vp run --filter @t3tools/web build",
+      );
+      yield* runBuild(
+        ["run", "--filter", "@t3tools/desktop", "build"],
+        "vp run --filter @t3tools/desktop build",
+      );
+    } else {
+      yield* runBuild(["run", "build:desktop"], "vp run build:desktop");
+    }
   }
 
   const requiredBuildInputs = [
     { artifact: "desktop-dist", artifactPath: distDirs.desktopDist },
     { artifact: "desktop-resources", artifactPath: distDirs.desktopResources },
-    { artifact: "server-dist", artifactPath: distDirs.serverDist },
+    ...(remoteOnlyBuild
+      ? ([{ artifact: "web-dist", artifactPath: distDirs.webDist }] as const)
+      : ([{ artifact: "server-dist", artifactPath: distDirs.serverDist }] as const)),
   ] as const;
   for (const input of requiredBuildInputs) {
     if (!(yield* fs.exists(input.artifactPath))) {
@@ -1826,7 +2792,73 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     }
   }
 
-  if (!(yield* fs.exists(bundledClientEntry))) {
+  // Assert against the emitted bundle, not the bundler config. `alwaysBundle`
+  // only forces packages IN, so a transitive dependency of an external package
+  // is bundled by default however the predicate is written — that silently
+  // inlined msgpackr-extract and its native loader while every list-based test
+  // still passed. An inlined native loader resolves its prebuilds relative to
+  // the bundle and quietly falls back to a slower pure-JS path, so this fails
+  // the build rather than shipping a silent regression.
+  //
+  // A remote-only build never produces distDirs.serverDist (see
+  // requiredBuildInputs above), so this scan has nothing to read and is
+  // skipped entirely for that build shape.
+  if (!remoteOnlyBuild) {
+    const chunkNames = (yield* fs.readDirectory(distDirs.serverDist)).filter((entry) =>
+      entry.endsWith(".mjs"),
+    );
+    let totalRegions = 0;
+    const inlined = new Set<string>();
+    const inlinedPackages = new Set<string>();
+    for (const chunkName of chunkNames) {
+      const source = yield* fs.readFileString(path.join(distDirs.serverDist, chunkName));
+      const scan = findInlinedExternalPackages(source);
+      totalRegions += scan.regionCount;
+      for (const name of scan.inlined) inlined.add(name);
+      for (const name of scan.inlinedPackages) inlinedPackages.add(name);
+    }
+    if (inlined.size > 0) {
+      return yield* new InlinedExternalPackageError({
+        packages: [...inlined].sort(),
+      });
+    }
+    // No regions at all means the scan went blind (marker format changed), not
+    // that the bundle is clean.
+    if (totalRegions === 0) {
+      return yield* new InlinedExternalPackageError({
+        packages: ["<no module regions found; the bundle scan needs updating>"],
+      });
+    }
+    // The check above is one-directional: it only proves nothing external got
+    // inlined. A regression to externalizing everything would also pass it,
+    // since source-file regions still exist -- and that is the failure this
+    // whole change exists to prevent, because those packages are not in the
+    // selected sidecar closure and both backends would die on ERR_MODULE_NOT_FOUND.
+    // `effect` is imported by every server module, so it is inlined in any
+    // correctly bundled build.
+    // The list-based check above only sees packages someone already thought to
+    // list. bufferutil and utf-8-validate were inlined for exactly that reason:
+    // native, but absent from the list, so nothing flagged them. Ask the store
+    // what each inlined package actually is instead.
+    const nativeInlined: string[] = [];
+    for (const name of [...inlinedPackages].sort()) {
+      const packageDir = yield* findStorePackageDirectory(repoRoot, name);
+      if (packageDir === null) continue;
+      if (yield* hasNativeLoaderMarkers(packageDir)) nativeInlined.push(name);
+    }
+    if (nativeInlined.length > 0) {
+      return yield* new InlinedNativePackageError({ packages: nativeInlined });
+    }
+
+    if (!inlinedPackages.has(BUNDLE_SELF_CONTAINED_SENTINEL)) {
+      return yield* new ExternalizedBundleError({
+        sentinel: BUNDLE_SELF_CONTAINED_SENTINEL,
+        inlinedPackageCount: inlinedPackages.size,
+      });
+    }
+  }
+
+  if (!remoteOnlyBuild && !(yield* fs.exists(bundledClientEntry))) {
     return yield* new MissingDesktopBuildInputError({
       artifact: "bundled-server-client",
       artifactPath: bundledClientEntry,
@@ -1835,17 +2867,41 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   const webAssetBrand = resolveDesktopWebAssetBrand(appVersion);
-  yield* applyWebBrandAssets(webAssetBrand, "apps/server/dist/client");
+  yield* applyWebBrandAssets(
+    webAssetBrand,
+    remoteOnlyBuild ? "apps/web/dist" : "apps/server/dist/client",
+  );
   yield* Effect.log(`[desktop-artifact] Applied ${webAssetBrand} web client branding.`);
-  yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
+  yield* validateBundledClientAssets(
+    remoteOnlyBuild ? distDirs.webDist : path.dirname(bundledClientEntry),
+  );
 
   yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop"), { recursive: true });
-  yield* fs.makeDirectory(path.join(stageAppDir, "apps/server"), { recursive: true });
+  if (remoteOnlyBuild) {
+    yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop/client"), { recursive: true });
+  } else if (options.platform !== "win") {
+    // On Windows the server tree ships in the server.asar sidecar instead of
+    // app.asar (see stageWindowsServerSidecar), so the app stage omits it.
+    yield* fs.makeDirectory(path.join(stageAppDir, "apps/server"), { recursive: true });
+  }
 
   yield* Effect.log("[desktop-artifact] Staging release app...");
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
-  yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  if (options.platform === "mac" && options.target === "dmg") {
+    yield* stageDesktopDmgBackground(
+      stageResourcesDir,
+      resolveDesktopUpdateChannel(appVersion),
+      options.verbose,
+    );
+  }
+  if (remoteOnlyBuild) {
+    yield* fs.copy(distDirs.webDist, path.join(stageAppDir, "apps/desktop/client"));
+  } else if (options.platform !== "win") {
+    // On Windows the server tree ships in the server.asar sidecar instead of
+    // app.asar (see stageWindowsServerSidecar), so the app stage omits it.
+    yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  }
   yield* stageResourceMonitor({
     repoRoot,
     stageResourcesDir,
@@ -1866,7 +2922,8 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   );
 
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
-  yield* fs.copy(stageResourcesDir, path.join(stageAppDir, "apps/desktop/prod-resources"));
+  const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
+  yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
 
   const configuredMacPasskeySigning =
     options.platform === "mac" && options.signed
@@ -1896,30 +2953,33 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     yield* fs.writeFileString(macEntitlementsPath, renderMacPasskeyEntitlements(macPasskeySigning));
   }
 
-  const stageDependencies = {
-    ...resolvedServerDependencies,
-    ...resolvedDesktopRuntimeDependencies,
-    ...resolveFffNativeDependencies(
-      options.platform,
-      options.arch,
-      serverPackageJson.dependencies["@ff-labs/fff-node"],
-    ),
-    // Windows artifacts also bundle the same-architecture WSL Linux backend, which loads the
-    // fff native binary through ffi-rs. The platform fff binary above is the
-    // host's (win32), so promote the matching Linux fff binaries too; without
-    // them file-finding in WSL fails to load its Linux native package.
-    ...(options.platform === "win"
-      ? resolveFffNativeDependencies(
-          "linux",
-          options.arch,
-          serverPackageJson.dependencies["@ff-labs/fff-node"],
-        )
-      : {}),
-  };
+  // Windows splits dependencies per process: app.asar carries only the
+  // desktop main-process runtime deps, while the server bundle's deps live in
+  // the server.asar sidecar (see stageWindowsServerSidecar). A remote-only
+  // build ships no server on any platform, so it needs only the desktop
+  // runtime deps too. macOS and Linux (non-remote-only) keep the single
+  // merged tree — their primary resolves everything from app.asar and there
+  // is no second consumer.
+  const stageDependencies =
+    options.platform === "win" || remoteOnlyBuild
+      ? { ...resolvedDesktopRuntimeDependencies }
+      : {
+          ...resolvedServerDependencies,
+          ...resolvedDesktopRuntimeDependencies,
+          ...resolveFffNativeDependencies(
+            options.platform,
+            options.arch,
+            serverPackageJson.dependencies["@ff-labs/fff-node"],
+          ),
+        };
   const stagePatchedDependencies = createStagePatchedDependencies(
     workspacePatchedDependencies,
     stageDependencies,
   );
+  const windowsServerAsarPath =
+    options.platform === "win" && !remoteOnlyBuild
+      ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
+      : undefined;
   const stagePackageJson: StagePackageJson = {
     name: "t3code",
     version: appVersion,
@@ -1943,6 +3003,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
             provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
           }
         : undefined,
+      remoteOnlyBuild,
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -1980,13 +3041,25 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   );
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
 
-  // WSL is Windows-only, so only the Windows artifact carries the Linux backend
-  // binary; other platforms ignore the prebuild input.
-  if (options.platform === "win") {
-    yield* stageWslNodePtyPrebuild({
-      stageAppDir,
+  // WSL is Windows-only, so only the Windows artifact carries the server
+  // sidecar (which embeds the Linux node-pty prebuild); other platforms, and
+  // remote-only builds (which stage no server at all), ignore the prebuild
+  // input. windowsServerAsarPath is already undefined for a remote-only build.
+  if (options.platform === "win" && windowsServerAsarPath) {
+    yield* stageWindowsServerSidecar({
+      stageRoot,
+      repoRoot,
+      serverDistDir: distDirs.serverDist,
       arch: options.arch,
-      prebuildPath: options.wslPrebuild,
+      appVersion,
+      runtimeExternalDependencies: resolvedServerRuntimeExternalDependencies,
+      fffNodeVersion: serverPackageJson.dependencies["@ff-labs/fff-node"],
+      allowBuilds: workspaceAllowBuilds,
+      patchedDependencies: workspacePatchedDependencies,
+      overrides: resolvedOverrides,
+      wslPrebuildPath: options.wslPrebuild,
+      asarPath: windowsServerAsarPath,
+      verbose: options.verbose,
     });
   }
 
@@ -2077,6 +3150,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       (error) =>
         options.platform === "win" &&
         options.target === "nsis" &&
+        error._tag === "BuildCommandFailedError" &&
         isRetryableWindowsNsisOutputLockFailure(error),
       () => retryBuilderAfterWindowsOutputLock(),
     ),
@@ -2088,6 +3162,30 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       distPath: stageDistDir,
       platform: options.platform,
       arch: options.arch,
+    });
+  }
+
+  // Prove the packaged bundle is self-contained by loading it the way the
+  // packaged backends do, rather than by reasoning about the emitted source.
+  //
+  // Static analysis kept getting this wrong here. Scanning for bare imports
+  // matched specifiers inside effect's JSDoc examples and inside ajv's runtime
+  // codegen template, and asserting that one sentinel package was inlined
+  // missed a build that inlined `effect` while leaving `yaml` external. Node's
+  // resolver has no such ambiguity: it either finds every import or it does not.
+  //
+  // Only Windows ships anything outside app.asar; macOS and Linux keep the
+  // whole tree inside the asar, where this check has nothing to look at.
+  // Windows validates and executes the separately packed server sidecar after
+  // electron-builder copies it into the final payload. A remote-only build has
+  // no WSL backend and stages no server bundle, so there is nothing to prove
+  // self-contained — skip it there as with the server-bundle checks above.
+  if (options.platform === "win" && !remoteOnlyBuild) {
+    yield* validateWindowsPackagedPayload({
+      stageDistDir,
+      appExecutableName: `${resolveDesktopProductName(appVersion)}.exe`,
+      targetArch: options.arch,
+      verbose: options.verbose,
     });
   }
 
@@ -2173,6 +3271,12 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   wslPrebuild: Flag.string("wsl-prebuild").pipe(
     Flag.withDescription(
       "Path to a prebuilt Linux node-pty (pty.node) for the target arch, staged for the WSL backend (env: T3CODE_DESKTOP_WSL_PREBUILD).",
+    ),
+    Flag.optional,
+  ),
+  remoteOnly: Flag.boolean("remote-only").pipe(
+    Flag.withDescription(
+      "Build the remote-only variant: no local/WSL backend, connects to a remote server (env: T3CODE_DESKTOP_REMOTE_ONLY or VITE_REMOTE_ONLY=1).",
     ),
     Flag.optional,
   ),

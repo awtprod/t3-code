@@ -14,6 +14,7 @@ import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { CommandPalette } from "../components/CommandPalette";
+import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
 import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDialog";
 import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstallDialog";
 import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPromptDialog";
@@ -103,6 +104,7 @@ function RootRouteView() {
     return (
       <>
         <DocumentTitleSync />
+        <WindowsLocalOverrideBanner />
         <Outlet />
       </>
     );
@@ -134,6 +136,7 @@ function RootRouteView() {
         <RelayClientInstallDialog />
         <ConnectOnboardingDialog />
         <SshPasswordPromptDialog />
+        <ConfirmDialogHost />
         <SlowRpcRequestToastCoordinator />
         <HostedStaticEnvironmentBootstrap />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
@@ -144,6 +147,25 @@ function RootRouteView() {
         <ThemeEditorHost />
       </AnchoredToastProvider>
     </ToastProvider>
+  );
+}
+
+function WindowsLocalOverrideBanner() {
+  const [active, setActive] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    void window.desktopBridge?.getPrimaryBackendState().then((state) => {
+      if (mounted) setActive(state.localExecutionOverride);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+  if (!active) return null;
+  return (
+    <div className="fixed inset-x-0 top-0 z-[100] bg-amber-600 px-3 py-1 text-center text-xs font-semibold text-white shadow-md">
+      Windows local override — execution is local for this launch only
+    </div>
   );
 }
 

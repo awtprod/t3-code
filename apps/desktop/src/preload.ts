@@ -35,6 +35,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     }
     return result as ReturnType<DesktopBridge["getAppBranding"]>;
   },
+  getSystemLocale: () => {
+    const result = ipcRenderer.sendSync(IpcChannels.GET_SYSTEM_LOCALE_CHANNEL);
+    return typeof result === "string" ? result : null;
+  },
   getLocalEnvironmentBootstraps: () => {
     const result = ipcRenderer.sendSync(IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAPS_CHANNEL);
     if (!Array.isArray(result)) {
@@ -96,9 +100,13 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(IpcChannels.SET_WSL_BACKEND_ENABLED_CHANNEL, enabled),
   setWslDistro: (distro) => ipcRenderer.invoke(IpcChannels.SET_WSL_DISTRO_CHANNEL, distro),
   setWslOnly: (enabled) => ipcRenderer.invoke(IpcChannels.SET_WSL_ONLY_CHANNEL, enabled),
+  getPrimaryBackendState: () => ipcRenderer.invoke(IpcChannels.GET_PRIMARY_BACKEND_STATE_CHANNEL),
+  setPrimaryBackend: (input) => ipcRenderer.invoke(IpcChannels.SET_PRIMARY_BACKEND_CHANNEL, input),
+  retryRemotePrimary: (remoteHttpBaseUrl) =>
+    ipcRenderer.invoke(IpcChannels.RETRY_REMOTE_PRIMARY_CHANNEL, remoteHttpBaseUrl),
+  startLocalExecutionOnce: () => ipcRenderer.invoke(IpcChannels.START_LOCAL_EXECUTION_ONCE_CHANNEL),
   pickFolder: (options) => ipcRenderer.invoke(IpcChannels.PICK_FOLDER_CHANNEL, options),
   pickThemeFiles: () => ipcRenderer.invoke(IpcChannels.PICK_THEME_FILES_CHANNEL, undefined),
-  confirm: (message) => ipcRenderer.invoke(IpcChannels.CONFIRM_CHANNEL, message),
   setTheme: (theme) => ipcRenderer.invoke(IpcChannels.SET_THEME_CHANNEL, theme),
   showContextMenu: (items, position) =>
     ipcRenderer.invoke(IpcChannels.CONTEXT_MENU_CHANNEL, {
@@ -106,6 +114,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ...(position === undefined ? {} : { position }),
     }),
   openExternal: (url: string) => ipcRenderer.invoke(IpcChannels.OPEN_EXTERNAL_CHANNEL, url),
+  probeRemoteEditors: () => ipcRenderer.invoke(IpcChannels.PROBE_REMOTE_EDITORS_CHANNEL, undefined),
   onMenuAction: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, action: unknown) => {
       if (typeof action !== "string") return;
@@ -115,6 +124,17 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.on(IpcChannels.MENU_ACTION_CHANNEL, wrappedListener);
     return () => {
       ipcRenderer.removeListener(IpcChannels.MENU_ACTION_CHANNEL, wrappedListener);
+    };
+  },
+  onQuitShortcut: (listener) => {
+    const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
+      if (state !== "down" && state !== "up") return;
+      listener(state);
+    };
+
+    ipcRenderer.on(IpcChannels.QUIT_SHORTCUT_CHANNEL, wrappedListener);
+    return () => {
+      ipcRenderer.removeListener(IpcChannels.QUIT_SHORTCUT_CHANNEL, wrappedListener);
     };
   },
   getWindowFullscreenState: () =>

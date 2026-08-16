@@ -302,6 +302,8 @@ const fakeRunnerLayer = Layer.effect(
               timedOut: false,
               stdoutTruncated: false,
               stderrTruncated: false,
+              stdoutInvalidUtf8: false,
+              stderrInvalidUtf8: false,
             })
           : Effect.gen(function* () {
               recordedArgs.push(input.args);
@@ -313,6 +315,8 @@ const fakeRunnerLayer = Layer.effect(
                   timedOut: false,
                   stdoutTruncated: false,
                   stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
                 };
               }
               const outputIndex = input.args.indexOf("--out");
@@ -325,6 +329,8 @@ const fakeRunnerLayer = Layer.effect(
                   timedOut: false,
                   stdoutTruncated: false,
                   stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
                 };
               }
               yield* fs.writeFileString(outputPath, "safe export contents").pipe(Effect.orDie);
@@ -335,6 +341,8 @@ const fakeRunnerLayer = Layer.effect(
                 timedOut: false,
                 stdoutTruncated: false,
                 stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
               };
             });
       },

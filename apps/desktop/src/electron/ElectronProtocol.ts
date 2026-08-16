@@ -1,7 +1,9 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as NodeTimersPromises from "node:timers/promises";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -102,6 +104,10 @@ export interface DesktopProtocolRegistrationInput {
   readonly targetOrigin: URL;
   readonly backendOrigin: URL;
   readonly clerkFrontendApiHostname: string | undefined;
+  // Remote-only installers package the renderer but deliberately omit
+  // apps/server. Serve that static client from the desktop protocol while its
+  // Connections records make direct bearer-authenticated requests to servers.
+  readonly staticClientRoot?: string;
 }
 
 export class ElectronProtocol extends Context.Service<
@@ -231,6 +237,64 @@ async function proxyRequest(
   return withContentSecurityPolicy(response, contentSecurityPolicy);
 }
 
+const staticClientContentTypes: Readonly<Record<string, string>> = {
+  ".css": "text/css; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".wasm": "application/wasm",
+  ".woff2": "font/woff2",
+};
+
+export function resolveStaticClientPath(
+  path: Path.Path,
+  clientRoot: string,
+  requestPathname: string,
+): string | null {
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(requestPathname);
+  } catch {
+    return null;
+  }
+  const root = path.resolve(clientRoot);
+  const requested = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  const candidate = path.resolve(root, requested);
+  const relative = path.relative(root, candidate);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return null;
+  }
+  return candidate;
+}
+
+async function staticClientResponse(
+  request: Request,
+  clientRoot: string,
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+): Promise<Response> {
+  const requestUrl = new URL(request.url);
+  const candidate = resolveStaticClientPath(path, clientRoot, requestUrl.pathname);
+  if (candidate === null) return new Response(null, { status: 404 });
+
+  const extension = path.extname(candidate).toLowerCase();
+  const fallbackToIndex = extension.length === 0;
+  const filePath = fallbackToIndex ? path.join(clientRoot, "index.html") : candidate;
+  try {
+    const body = Uint8Array.from(await Effect.runPromise(fileSystem.readFile(filePath)));
+    return new Response(body.buffer, {
+      headers: {
+        "content-type":
+          staticClientContentTypes[path.extname(filePath).toLowerCase()] ??
+          "application/octet-stream",
+      },
+    });
+  } catch {
+    return new Response(null, { status: 404 });
+  }
+}
+
 const TRANSIENT_FETCH_RETRY_DELAYS_MS = [0, 50, 150] as const;
 
 async function fetchWithTransientRetry(url: string, init: RequestInit): Promise<Response> {
@@ -253,6 +317,8 @@ async function fetchWithTransientRetry(url: string, init: RequestInit): Promise<
 
 export const make = Effect.gen(function* () {
   const registered = yield* Ref.make(false);
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
 
   const registerDesktopProtocol = Effect.fn("desktop.electron.protocol.registerDesktopProtocol")(
     function* (input: DesktopProtocolRegistrationInput) {
@@ -264,7 +330,11 @@ export const make = Effect.gen(function* () {
         Effect.try({
           try: () => {
             Electron.protocol.handle(input.scheme, (request) =>
-              proxyRequest(request, input.targetOrigin, contentSecurityPolicy),
+              input.staticClientRoot
+                ? staticClientResponse(request, input.staticClientRoot, fileSystem, path).then(
+                    (response) => withContentSecurityPolicy(response, contentSecurityPolicy),
+                  )
+                : proxyRequest(request, input.targetOrigin, contentSecurityPolicy),
             );
           },
           catch: (cause) => new ElectronProtocolRegistrationError({ scheme: input.scheme, cause }),

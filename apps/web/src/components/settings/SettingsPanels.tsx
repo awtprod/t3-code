@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArchiveX, LoaderIcon, SettingsIcon } from "lucide-react";
+import { ArchiveIcon, ArchiveX, ChevronRightIcon, LoaderIcon, SettingsIcon } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -84,6 +84,7 @@ import { useProjects } from "../../state/entities";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import {
   Dialog,
   DialogDescription,
@@ -102,6 +103,7 @@ import {
   isMonospaceFamily,
   resolveDefaultFamilyLabel,
   resolveTerminalFontPreference,
+  resolveTerminalFontSizePreference,
   TYPOGRAPHY_ADVANCED_STORAGE_KEY,
 } from "../../appearanceFonts";
 import { CodeFontPreview, PromptFontPreview, TerminalFontPreview } from "./SettingsFontPreviews";
@@ -123,6 +125,7 @@ import {
   backgroundActivitySharedPolicySettings,
   durationToSeconds,
   formatDiagnosticsDescription,
+  getChangedTypographySettingLabels,
   normalizeIntervalSeconds,
   PROVIDER_HEALTH_INTERVAL_STEP_SECONDS,
   hasChangedBackgroundActivitySettings,
@@ -221,6 +224,7 @@ function AboutVersionTitle() {
 function AboutVersionSection() {
   const updateState = useDesktopUpdateState();
   const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
+  const [isUpdateActionPending, setIsUpdateActionPending] = useState(false);
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
@@ -257,7 +261,7 @@ function AboutVersionSection() {
     [selectedUpdateChannel],
   );
 
-  const handleButtonClick = useCallback(() => {
+  const handleButtonClick = useCallback(async () => {
     const bridge = window.desktopBridge;
     if (!bridge) return;
 
@@ -277,22 +281,43 @@ function AboutVersionSection() {
     }
 
     if (action === "install") {
-      const confirmed = window.confirm(
-        getDesktopUpdateInstallConfirmationMessage(
-          updateState ?? { availableVersion: null, downloadedVersion: null },
-          navigator.platform,
-        ),
-      );
-      if (!confirmed) return;
-      void bridge.installUpdate().catch((error: unknown) => {
+      if (isUpdateActionPending) return;
+      setIsUpdateActionPending(true);
+      let confirmed = false;
+      try {
+        confirmed = await ensureLocalApi().dialogs.confirm(
+          getDesktopUpdateInstallConfirmationMessage(
+            updateState ?? { availableVersion: null, downloadedVersion: null },
+            navigator.platform,
+          ),
+        );
+      } catch (error) {
+        setIsUpdateActionPending(false);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not install update",
-            description: error instanceof Error ? error.message : "Install failed.",
+            title: "Could not confirm update",
+            description: error instanceof Error ? error.message : "Update confirmation failed.",
           }),
         );
-      });
+        return;
+      }
+      if (!confirmed) {
+        setIsUpdateActionPending(false);
+        return;
+      }
+      void bridge
+        .installUpdate()
+        .catch((error: unknown) => {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not install update",
+              description: error instanceof Error ? error.message : "Install failed.",
+            }),
+          );
+        })
+        .finally(() => setIsUpdateActionPending(false));
       return;
     }
 
@@ -320,7 +345,7 @@ function AboutVersionSection() {
           }),
         );
       });
-  }, [updateState]);
+  }, [isUpdateActionPending, updateState]);
 
   const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
   const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState) : null;
@@ -354,7 +379,7 @@ function AboutVersionSection() {
                 <Button
                   size="xs"
                   variant={action === "install" ? "default" : "outline"}
-                  disabled={buttonDisabled}
+                  disabled={buttonDisabled || isUpdateActionPending}
                   onClick={handleButtonClick}
                 >
                   {buttonLabel}
@@ -468,22 +493,21 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
         ? ["Project Grouping"]
         : []),
+      ...(settings.sidebarAutoSettleAfterDays !==
+      DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
+        ? ["Auto-settle inactive threads"]
+        : []),
+      ...(settings.sidebarAutoSettleOnMerge !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge
+        ? ["Auto-settle merged threads"]
+        : []),
       ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
-      ...(settings.fontFamilySans !== DEFAULT_UNIFIED_SETTINGS.fontFamilySans
-        ? ["Interface font"]
-        : []),
-      ...(settings.fontFamilyComposer !== DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer
-        ? ["Prompt font"]
-        : []),
-      ...(settings.fontFamilyCode !== DEFAULT_UNIFIED_SETTINGS.fontFamilyCode ? ["Code font"] : []),
-      ...(settings.fontFamilyTerminal !== DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal
-        ? ["Terminal font"]
-        : []),
+      ...getChangedTypographySettingLabels(settings),
       ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
         ? ["Diff whitespace changes"]
         : []),
-      ...(settings.enableAssistantStreaming !== DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
-        ? ["Assistant output"]
+      ...(settings.enableLegacyTokenStreaming !==
+      DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming
+        ? ["Stream token by token"]
         : []),
       ...(settings.enableProviderUpdateChecks !==
       DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
@@ -506,11 +530,15 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
         ? ["Delete confirmation"]
         : []),
+      ...(settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit
+        ? ["Quit confirmation"]
+        : []),
       ...(isTextGenerationModelDirty ? ["Text generation model"] : []),
     ],
     [
       isTextGenerationModelDirty,
       isBackgroundActivityDirty,
+      settings.confirmQuit,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
       settings.addProjectBaseDirectory,
@@ -527,14 +555,17 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.fontSizePrompt,
       settings.fontSizeTerminal,
       settings.glassOpacity,
-      settings.enableAssistantStreaming,
+      settings.enableLegacyTokenStreaming,
       settings.enableProviderUpdateChecks,
+      settings.sidebarAutoSettleAfterDays,
+      settings.sidebarAutoSettleOnMerge,
       settings.sidebarProjectGroupingMode,
       settings.sidebarThreadPreviewCount,
       settings.timestampFormat,
       settings.wordWrap,
       followSystem,
       theme,
+      themeHalves,
     ],
   );
 
@@ -545,6 +576,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       ["Restore default settings?", `This will reset: ${changedSettingLabels.join(", ")}.`].join(
         "\n",
       ),
+      { variant: "destructive" },
     );
     if (!confirmed) return;
 
@@ -607,7 +639,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
-      enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
+      sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
+      sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
+      enableLegacyTokenStreaming: DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
       backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
       backgroundActivityProfile: DEFAULT_UNIFIED_SETTINGS.backgroundActivityProfile,
@@ -618,11 +652,16 @@ export function useSettingsRestore(onRestored?: () => void) {
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
+      confirmQuit: DEFAULT_UNIFIED_SETTINGS.confirmQuit,
       textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
       fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
       fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
       fontFamilyTerminal: DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal,
+      fontSizeInterface: DEFAULT_UNIFIED_SETTINGS.fontSizeInterface,
+      fontSizePrompt: DEFAULT_UNIFIED_SETTINGS.fontSizePrompt,
+      fontSizeCode: DEFAULT_UNIFIED_SETTINGS.fontSizeCode,
+      fontSizeTerminal: DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal,
     });
     onRestored?.();
   }, [
@@ -1076,13 +1115,21 @@ function InterfaceFontRow({ preview }: { preview?: ReactNode }) {
       {...searchableSetting("interface-font")}
       description="Everything outside code blocks and the terminal."
       defaultFamily={defaults.sans}
+      defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilySans}
       value={settings.fontFamilySans}
       onValueChange={(fontFamilySans) => updateSettings({ fontFamilySans })}
+      onReset={() =>
+        updateSettings({
+          fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
+          fontSizeInterface: DEFAULT_UNIFIED_SETTINGS.fontSizeInterface,
+        })
+      }
       size={{
         label: "Interface font size",
         min: MIN_INTERFACE_FONT_SIZE,
         max: MAX_INTERFACE_FONT_SIZE,
         value: settings.fontSizeInterface,
+        defaultValue: DEFAULT_UNIFIED_SETTINGS.fontSizeInterface,
         onChange: (fontSizeInterface) => updateSettings({ fontSizeInterface }),
       }}
       {...(preview !== undefined ? { preview } : {})}
@@ -1099,13 +1146,21 @@ function PromptFontRow() {
       {...searchableSetting("prompt-font")}
       description="Only the box you write prompts in. Mono works well here."
       defaultFamily={defaults.interfaceFamily}
+      defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer}
       value={settings.fontFamilyComposer}
       onValueChange={(fontFamilyComposer) => updateSettings({ fontFamilyComposer })}
+      onReset={() =>
+        updateSettings({
+          fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
+          fontSizePrompt: DEFAULT_UNIFIED_SETTINGS.fontSizePrompt,
+        })
+      }
       size={{
         label: "Prompt font size",
         min: MIN_PROMPT_FONT_SIZE,
         max: MAX_PROMPT_FONT_SIZE,
         value: settings.fontSizePrompt,
+        defaultValue: DEFAULT_UNIFIED_SETTINGS.fontSizePrompt,
         onChange: (fontSizePrompt) => updateSettings({ fontSizePrompt }),
       }}
       preview={<PromptFontPreview />}
@@ -1131,14 +1186,22 @@ function CodeFontRow({
       {...(title !== undefined ? { title } : {})}
       description={description}
       defaultFamily={defaults.code}
+      defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyCode}
       value={settings.fontFamilyCode}
       onValueChange={(fontFamilyCode) => updateSettings({ fontFamilyCode })}
+      onReset={() =>
+        updateSettings({
+          fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
+          fontSizeCode: DEFAULT_UNIFIED_SETTINGS.fontSizeCode,
+        })
+      }
       requireMonospace
       size={{
         label: "Code font size",
         min: MIN_CODE_FONT_SIZE,
         max: MAX_CODE_FONT_SIZE,
         value: settings.fontSizeCode,
+        defaultValue: DEFAULT_UNIFIED_SETTINGS.fontSizeCode,
         onChange: (fontSizeCode) => updateSettings({ fontSizeCode }),
       }}
       preview={preview ?? <CodeFontPreview />}
@@ -1155,14 +1218,22 @@ function TerminalFontRow() {
       {...searchableSetting("terminal-font")}
       description="Terminal output, independent from code blocks and diffs."
       defaultFamily={defaults.code}
+      defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal}
       value={settings.fontFamilyTerminal}
       onValueChange={(fontFamilyTerminal) => updateSettings({ fontFamilyTerminal })}
+      onReset={() =>
+        updateSettings({
+          fontFamilyTerminal: DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal,
+          fontSizeTerminal: DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal,
+        })
+      }
       requireMonospace
       size={{
         label: "Terminal font size",
         min: MIN_TERMINAL_FONT_SIZE,
         max: MAX_TERMINAL_FONT_SIZE,
         value: settings.fontSizeTerminal,
+        defaultValue: DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal,
         onChange: (fontSizeTerminal) => updateSettings({ fontSizeTerminal }),
       }}
       preview={
@@ -1268,7 +1339,11 @@ function SimpleFontRows() {
                 code: settings.fontFamilyCode,
                 terminal: settings.fontFamilyTerminal,
               })}
-              size={settings.fontSizeTerminal}
+              size={resolveTerminalFontSizePreference({
+                advanced: false,
+                code: settings.fontSizeCode,
+                terminal: settings.fontSizeTerminal,
+              })}
             />
           </>
         }
@@ -1336,9 +1411,11 @@ function FontFamilySettingsRow({
   title,
   description,
   defaultFamily,
+  defaultValue,
   preview,
   value,
   onValueChange,
+  onReset,
   requireMonospace = false,
   size,
 }: {
@@ -1347,11 +1424,21 @@ function FontFamilySettingsRow({
   description: string;
   /** What an unset preference renders as, e.g. "Menlo". */
   defaultFamily: string;
+  /** The persisted family value supplied by the unified settings defaults. */
+  defaultValue: string;
   preview?: ReactNode;
   value: string;
   onValueChange: (value: string) => void;
+  onReset: () => void;
   requireMonospace?: boolean;
-  size: { label: string; min: number; max: number; value: number; onChange: (v: number) => void };
+  size: {
+    label: string;
+    min: number;
+    max: number;
+    value: number;
+    defaultValue: number;
+    onChange: (v: number) => void;
+  };
 }) {
   const trimmed = value.trim();
   // The fallback input edits a draft; the preference only commits once typing
@@ -1398,12 +1485,18 @@ function FontFamilySettingsRow({
   // Flag an unknown name only once typing pauses, and never for an empty
   // field - that is the starting state, not a rejected entry.
   const draftPending = draftSettled && draftTrimmed.length > 0 && draftTrimmed !== trimmed;
+  const resetToDefault = () => {
+    if (commitTimerRef.current !== null) {
+      window.clearTimeout(commitTimerRef.current);
+      commitTimerRef.current = null;
+    }
+    setDraft(defaultValue);
+    setDraftSettled(true);
+    onReset();
+  };
   const resetAction =
-    trimmed.length > 0 ? (
-      <SettingResetButton
-        label={`${title.toLowerCase()} family`}
-        onClick={() => onValueChange("")}
-      />
+    value !== defaultValue || size.value !== size.defaultValue ? (
+      <SettingResetButton label={title.toLowerCase()} onClick={resetToDefault} />
     ) : null;
   const fontEnumeration = useFontEnumeration();
   // Everyone starts on the plain input; focusing it is the user gesture that
@@ -1507,6 +1600,110 @@ function FontFamilySettingsRow({
     >
       {preview}
     </SettingsRow>
+  );
+}
+
+// The legacy rows sit behind the fold, so a settings-search jump has to
+// expand the section before its target can mount and scroll.
+const LEGACY_FEATURE_TARGET_IDS: ReadonlySet<string> = new Set([
+  "legacy-plan-mode",
+  "legacy-token-streaming",
+  "legacy-sidebar",
+]);
+
+/**
+ * Retired features kept only for users who still depend on them. Collapsed by
+ * default so they stay out of the everyday settings path; a settings-search
+ * jump to one of the rows unfolds the section.
+ */
+function LegacyFeaturesSection() {
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+  const [open, setOpen] = useState(false);
+  const searchTargetId = useSettingsSearchTargetId();
+  // Unfold once per search jump; tracking the handled id lets the user fold
+  // the section back up without the still-set target immediately reopening it.
+  const lastExpandedTargetRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (searchTargetId === null) {
+      // A handled jump clears the target; forgetting it here lets a later
+      // jump to the same row expand the section again.
+      lastExpandedTargetRef.current = null;
+      return;
+    }
+    if (!LEGACY_FEATURE_TARGET_IDS.has(searchTargetId)) return;
+    if (lastExpandedTargetRef.current === searchTargetId) return;
+    lastExpandedTargetRef.current = searchTargetId;
+    setOpen(true);
+  }, [searchTargetId]);
+
+  return (
+    <section className="space-y-3">
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger className="group flex min-h-8 w-full items-center gap-2 px-3 sm:px-4">
+          <h2 className="text-lg font-semibold tracking-[-0.025em] text-muted-foreground transition-colors group-hover:text-foreground">
+            Legacy features
+          </h2>
+          <ChevronRightIcon className="size-4 text-muted-foreground transition-transform duration-200 group-data-panel-open:rotate-90" />
+        </CollapsibleTrigger>
+        <CollapsiblePanel>
+          <div className="relative space-y-1 overflow-visible pt-3 text-foreground">
+            <SettingsRow
+              {...searchableSetting("legacy-plan-mode")}
+              description="Brings back the Build/Plan toggle in the composer along with the /plan and /default commands and the Shift+Tab shortcut. While off, every thread runs in build mode."
+              control={
+                <Switch
+                  checked={settings.planModeEnabled}
+                  onCheckedChange={(checked) =>
+                    updateSettings({ planModeEnabled: Boolean(checked) })
+                  }
+                  aria-label="Plan mode (legacy)"
+                />
+              }
+            />
+            <SettingsRow
+              {...searchableSetting("legacy-token-streaming")}
+              description="Paints assistant output token by token instead of in complete chunks. Not recommended: it is significantly slower, and long responses become harder to follow. Kept only for compatibility with the old behavior."
+              control={
+                <Switch
+                  checked={settings.enableLegacyTokenStreaming}
+                  onCheckedChange={(checked) => {
+                    if (!checked) {
+                      updateSettings({ enableLegacyTokenStreaming: false });
+                      return;
+                    }
+                    void (async () => {
+                      const api = readLocalApi();
+                      const confirmed = await (api ?? ensureLocalApi()).dialogs.confirm(
+                        [
+                          "Turn on token-by-token output?",
+                          "It is significantly slower than the default buffered output and hurts the reading experience. This switch exists only for backwards compatibility.",
+                        ].join("\n"),
+                      );
+                      if (confirmed) updateSettings({ enableLegacyTokenStreaming: true });
+                    })();
+                  }}
+                  aria-label="Stream token by token (legacy)"
+                />
+              }
+            />
+            <SettingsRow
+              {...searchableSetting("legacy-sidebar")}
+              description="Brings back the original sidebar with per-project thread trees. The default sidebar shows one flat list: active work as rich cards, settled threads as compact rows."
+              control={
+                <Switch
+                  checked={settings.legacySidebarEnabled}
+                  onCheckedChange={(checked) =>
+                    updateSettings({ legacySidebarEnabled: Boolean(checked) })
+                  }
+                  aria-label="Sidebar (legacy)"
+                />
+              }
+            />
+          </div>
+        </CollapsiblePanel>
+      </Collapsible>
+    </section>
   );
 }
 
@@ -1666,33 +1863,6 @@ export function GeneralSettingsPanel() {
                 updateSettings({ diffIgnoreWhitespace: Boolean(checked) })
               }
               aria-label="Hide whitespace changes by default"
-            />
-          }
-        />
-
-        <SettingsRow
-          {...searchableSetting("assistant-output")}
-          description="Show token-by-token output while a response is in progress."
-          resetAction={
-            settings.enableAssistantStreaming !==
-            DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming ? (
-              <SettingResetButton
-                label="assistant output"
-                onClick={() =>
-                  updateSettings({
-                    enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.enableAssistantStreaming}
-              onCheckedChange={(checked) =>
-                updateSettings({ enableAssistantStreaming: Boolean(checked) })
-              }
-              aria-label="Stream assistant messages"
             />
           }
         />
@@ -1962,6 +2132,30 @@ export function GeneralSettingsPanel() {
           }
         />
 
+        {isElectron ? (
+          <SettingsRow
+            {...searchableSetting("quit-confirmation")}
+            description="Require holding the quit shortcut before the desktop app quits. A quick tap shows a hint instead."
+            resetAction={
+              settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit ? (
+                <SettingResetButton
+                  label="quit confirmation"
+                  onClick={() =>
+                    updateSettings({ confirmQuit: DEFAULT_UNIFIED_SETTINGS.confirmQuit })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.confirmQuit}
+                onCheckedChange={(checked) => updateSettings({ confirmQuit: Boolean(checked) })}
+                aria-label="Hold to quit"
+              />
+            }
+          />
+        ) : null}
+
         <SettingsRow
           {...searchableSetting("text-generation-model")}
           description="Default model for generated text like thread titles and source control content. Source control settings can override it with a dedicated source control writer model."
@@ -2056,6 +2250,8 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
+
+      <LegacyFeaturesSection />
     </SettingsPageContainer>
   );
 }
@@ -2086,6 +2282,7 @@ export function ArchivedThreadsPanel() {
                 environmentId,
                 name: project.title,
                 cwd: project.workspaceRoot,
+                faviconPath: project.faviconPath,
               },
             ] as const,
         ),
@@ -2207,7 +2404,13 @@ export function ArchivedThreadsPanel() {
             key={project.id}
             id={index === 0 ? searchableSetting("archive").id : undefined}
             title={project.name}
-            icon={<ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />}
+            icon={
+              <ProjectFavicon
+                environmentId={project.environmentId}
+                cwd={project.cwd}
+                faviconPath={project.faviconPath}
+              />
+            }
           >
             {projectThreads.map((thread) => (
               <SettingsRow

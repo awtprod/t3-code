@@ -6,7 +6,7 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { Thread, ThreadShell } from "../types";
 import {
@@ -19,7 +19,9 @@ import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
+  ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
   getStartedThreadModelChangeBlockReason,
+  hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
   loadComposerImagesForRetry,
@@ -27,6 +29,7 @@ import {
   reconcileRetainedMountedThreadIds,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
+  scheduleEnvironmentReconnectWarning,
   startNewThreadForProject,
   shouldShowBranchMismatchBanner,
   shouldWriteThreadErrorToCurrentServerThread,
@@ -84,6 +87,42 @@ describe("loadComposerImagesForRetry", () => {
         },
       ]),
     ).rejects.toThrow("missing.png");
+  });
+});
+
+describe("environment reconnect warning grace", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("shows a persistent reconnect after the grace period", () => {
+    vi.useFakeTimers();
+    const showWarning = vi.fn();
+
+    scheduleEnvironmentReconnectWarning(showWarning);
+    vi.advanceTimersByTime(ENVIRONMENT_RECONNECT_WARNING_GRACE_MS - 1);
+    expect(showWarning).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(showWarning).toHaveBeenCalledOnce();
+  });
+
+  it("cancels the warning when the connection recovers during the grace period", () => {
+    vi.useFakeTimers();
+    const showWarning = vi.fn();
+
+    const cancel = scheduleEnvironmentReconnectWarning(showWarning);
+    cancel();
+    vi.advanceTimersByTime(ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
+
+    expect(showWarning).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse elapsed grace from another environment", () => {
+    const anotherEnvironmentId = EnvironmentId.make("environment-remote");
+
+    expect(hasEnvironmentReconnectWarningGraceElapsed(environmentId, environmentId)).toBe(true);
+    expect(hasEnvironmentReconnectWarningGraceElapsed(anotherEnvironmentId, environmentId)).toBe(
+      false,
+    );
   });
 });
 

@@ -87,6 +87,7 @@ import {
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
   resolveWorkingSilenceStart,
+  shouldPreserveAssistantLineBreaks,
   type StableMessagesTimelineRowsState,
   type MessagesTimelineRow,
   TIMELINE_MINIMAP_MIN_ITEMS,
@@ -110,7 +111,7 @@ import {
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
-import { formatChatTimestampTooltip, formatShortTimestamp } from "../../timestampFormat";
+import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
 
 import {
   buildInlineTerminalContextText,
@@ -184,7 +185,7 @@ function TimelineLoadEarlierHeader({
 }) {
   return (
     <div className={fade ? "pt-10 sm:pt-12" : "pt-3 sm:pt-4"}>
-      <div className="mx-auto w-full max-w-3xl pb-2">
+      <div className="mx-auto w-full max-w-(--chat-column-max-width) pb-2">
         <button
           type="button"
           onClick={onLoadEarlier}
@@ -592,7 +593,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip" data-timeline-root="true">
+      <div
+        className="mx-auto w-full min-w-0 max-w-(--chat-column-max-width) overflow-x-clip"
+        data-timeline-root="true"
+      >
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -652,7 +656,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           />
           <TimelineMinimap
             items={minimapItems}
-            bottomInset={contentInsetEndAdjustment}
             hasPersistentGutter={minimapHasPersistentGutter}
             hitStripWidth={minimapHitStripWidth}
             stripMap={minimapStripMap}
@@ -754,14 +757,12 @@ function timelineMinimapEventTargetsPreview(target: EventTarget): boolean {
 }
 
 function TimelineMinimap({
-  bottomInset,
   hasPersistentGutter,
   hitStripWidth,
   items,
   stripMap,
   onSelect,
 }: {
-  bottomInset: number;
   hasPersistentGutter: boolean;
   hitStripWidth: number;
   items: ReadonlyArray<TimelineMinimapItem>;
@@ -821,19 +822,16 @@ function TimelineMinimap({
     return null;
   }
 
-  const safeBottomInset = Math.max(0, Math.ceil(bottomInset));
-
   return (
     <div
       className={cn(
-        "group/minimap pointer-events-none absolute top-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
+        "group/minimap pointer-events-none absolute inset-y-0 left-0 z-40 hidden w-18 [@media(pointer:fine)]:block",
         hasPersistentGutter
           ? "opacity-100"
           : "opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100",
       )}
       data-testid="timeline-minimap"
       data-persistent-gutter={hasPersistentGutter ? "true" : "false"}
-      style={{ bottom: safeBottomInset }}
     >
       <div className="relative h-full w-full select-none">
         <button
@@ -1025,7 +1023,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
 
   return (
     <div className="group flex flex-col items-end gap-1">
-      <div className="relative max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
+      <div className="relative max-w-[min(80%,40rem)] rounded-2xl bg-message p-3 text-message-foreground">
         {regularImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
             {regularImages.map((image: NonNullable<TimelineMessage["attachments"]>[number]) => (
@@ -1083,11 +1081,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           markdownCwd={ctx.markdownCwd}
         />
       </div>
-      <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
+      <div className="flex w-full max-w-[min(80%,40rem)] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
         <div className="flex shrink-0 items-center gap-2">
           <Tooltip>
             <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
-              {formatShortTimestamp(row.message.createdAt, ctx.timestampFormat)}
+              {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
             </TooltipTrigger>
             <TooltipPopup>
               {formatChatTimestampTooltip(row.message.createdAt, ctx.timestampFormat)}
@@ -1187,6 +1185,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           cwd={ctx.markdownCwd}
           threadRef={ctx.threadRef ?? undefined}
           isStreaming={Boolean(row.message.streaming)}
+          lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
           skills={ctx.skills}
         />
         <AssistantChangedFilesSection
@@ -1203,7 +1202,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
                 <TooltipTrigger
                   render={<p className="text-muted-foreground text-xs tabular-nums" />}
                 >
-                  {formatShortTimestamp(row.message.updatedAt, ctx.timestampFormat)}
+                  {formatDayAwareTimestamp(row.message.updatedAt, ctx.timestampFormat)}
                 </TooltipTrigger>
                 <TooltipPopup>
                   {formatChatTimestampTooltip(row.message.updatedAt, ctx.timestampFormat)}
@@ -1867,6 +1866,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
             skills={props.skills}
             className="text-message-foreground"
             lineBreaks
+            parseRawHtml={false}
           />
         ) : null}
         {trailingWhitespace ? <span aria-hidden="true">{trailingWhitespace}</span> : null}
@@ -1889,6 +1889,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
                   skills={props.skills}
                   className="text-message-foreground"
                   lineBreaks
+                  parseRawHtml={false}
                 />
               </div>
             ) : null
@@ -1977,6 +1978,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
           skills={props.skills}
           className="text-message-foreground"
           lineBreaks
+          parseRawHtml={false}
         />,
       );
     } else if (inlinePrefix.length === 0) {
@@ -2002,6 +2004,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
       skills={props.skills}
       className="text-message-foreground"
       lineBreaks
+      parseRawHtml={false}
     />
   );
 });
@@ -2233,6 +2236,9 @@ function buildToolCallExpandedBody(
   }
   return blocks.length > 0 ? blocks.join("\n\n") : null;
 }
+
+export const toolCallExpandedBodyClassName =
+  "max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[length:var(--font-size-code,0.6875rem)] leading-relaxed select-text";
 
 function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   if (
@@ -2594,9 +2600,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           onClick={stopRowToggle}
           onPointerDown={stopRowToggle}
         >
-          <pre className="max-h-64 cursor-text overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[11px] leading-relaxed select-text">
-            {expandedBody}
-          </pre>
+          <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
         </div>
       ) : null}
     </div>

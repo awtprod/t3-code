@@ -1,3 +1,5 @@
+import { isElectron } from "~/env";
+
 export type SettingsPath =
   | "/settings/general"
   | "/settings/appearance"
@@ -16,6 +18,9 @@ export interface SettingsSearchItem {
   readonly title: string;
   readonly to: SettingsPath;
   readonly targetId?: string;
+  // Its row only renders in the desktop app, so a browser result would land on
+  // an anchor that isn't there.
+  readonly desktopOnly?: boolean;
 }
 
 /**
@@ -117,11 +122,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
   },
   {
-    id: "assistant-output",
-    title: "Assistant output",
-    to: "/settings/general",
-  },
-  {
     id: "provider-update-checks",
     title: "Provider update checks",
     to: "/settings/general",
@@ -153,6 +153,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
   },
   {
+    id: "quit-confirmation",
+    title: "Hold to quit",
+    to: "/settings/general",
+    desktopOnly: true,
+  },
+  {
     id: "text-generation-model",
     title: "Text generation model",
     to: "/settings/general",
@@ -160,6 +166,21 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "diagnostics",
     title: "Diagnostics",
+    to: "/settings/general",
+  },
+  {
+    id: "legacy-plan-mode",
+    title: "Plan mode (legacy)",
+    to: "/settings/general",
+  },
+  {
+    id: "legacy-token-streaming",
+    title: "Stream token by token (legacy)",
+    to: "/settings/general",
+  },
+  {
+    id: "legacy-sidebar",
+    title: "Sidebar (legacy)",
     to: "/settings/general",
   },
   {
@@ -240,5 +261,9 @@ export function searchSettings(
   const normalizedQuery = normalizeSearchText(query);
   if (normalizedQuery.length === 0) return [];
 
-  return items.filter((item) => normalizeSearchText(item.title).includes(normalizedQuery));
+  return items.filter(
+    (item) =>
+      (isElectron || item.desktopOnly !== true) &&
+      normalizeSearchText(item.title).includes(normalizedQuery),
+  );
 }

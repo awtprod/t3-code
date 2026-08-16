@@ -85,6 +85,26 @@ export function resolveSelectableModelSelection(
     : null;
 }
 
+/**
+ * Like resolveSelectableModelSelection, but additionally rejects legacy
+ * models. Used for implicit defaults (stored draft, project last-used): a
+ * new thread should never quietly start on a legacy model, so those fall
+ * through to the provider's default instead. Explicit picks in the settings
+ * sheet are unaffected.
+ */
+export function resolveDefaultableModelSelection(
+  config: T3ServerConfig | null | undefined,
+  selection: ModelSelection | null,
+): ModelSelection | null {
+  const usable = resolveSelectableModelSelection(config, selection);
+  if (!usable || !config) {
+    return usable;
+  }
+  const provider = config.providers.find((candidate) => candidate.instanceId === usable.instanceId);
+  const model = provider?.models.find((candidate) => candidate.slug === usable.model);
+  return model?.isLegacy === true ? null : usable;
+}
+
 export function buildModelOptions(
   config: T3ServerConfig | null | undefined,
   fallbackModelSelection: ModelSelection | null,

@@ -57,6 +57,16 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.itemId]),
       },
     }),
+    createItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:create-item",
+      tag: COMMAND_CENTER_WS_METHODS.itemCreate,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.requestId]),
+      },
+    }),
     refreshConnection: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:refresh-connection",
       tag: COMMAND_CENTER_WS_METHODS.connectionsRefresh,

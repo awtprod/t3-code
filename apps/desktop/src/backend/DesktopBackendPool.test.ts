@@ -42,6 +42,7 @@ function makeStubInstance(
 
 function makePoolLayer(
   labelRef: Ref.Ref<string>,
+  settings: DesktopAppSettings.DesktopSettings = DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
 ): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
   return DesktopBackendPool.layer.pipe(
     Layer.provideMerge(
@@ -78,7 +79,7 @@ function makePoolLayer(
           resolvePrimaryLabel: Ref.get(labelRef),
           resolveWsl: () => Effect.die("unexpected WSL config resolve"),
         } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]),
-        DesktopAppSettings.layerTest(),
+        DesktopAppSettings.layerTest(settings),
         ElectronDialog.layer,
         Layer.succeed(DesktopWindow.DesktopWindow, {
           createMain: Effect.die("unexpected window create"),
@@ -91,6 +92,7 @@ function makePoolLayer(
           handleBackendNotReady: Effect.void,
           flushMainWindowBounds: Effect.void,
           dispatchMenuAction: () => Effect.die("unexpected menu action"),
+          zoomMain: () => Effect.die("unexpected zoom"),
           syncAppearance: Effect.void,
         } satisfies DesktopWindow.DesktopWindow["Service"]),
       ),
@@ -114,7 +116,7 @@ describe("DesktopBackendPool", () => {
       assert.lengthOf(all, 2);
       // First instance becomes primary in layerTest so single-instance
       // stubs don't have to wire an explicit primary.
-      assert.equal(resolvedPrimary.id, DesktopBackendPool.PRIMARY_INSTANCE_ID);
+      assert.equal(Option.getOrThrow(resolvedPrimary).id, DesktopBackendPool.PRIMARY_INSTANCE_ID);
     }).pipe(
       Effect.provide(
         DesktopBackendPool.layerTest([
@@ -125,12 +127,12 @@ describe("DesktopBackendPool", () => {
     ),
   );
 
-  it.effect("layerTest dies when no instances are supplied", () =>
-    Effect.exit(
-      Effect.gen(function* () {
-        yield* DesktopBackendPool.DesktopBackendPool;
-      }).pipe(Effect.provide(DesktopBackendPool.layerTest([]))),
-    ).pipe(Effect.map((exit) => assert.equal(exit._tag, "Failure"))),
+  it.effect("layerTest supports an empty remote-only pool", () =>
+    Effect.gen(function* () {
+      const pool = yield* DesktopBackendPool.DesktopBackendPool;
+      assert.deepEqual(yield* pool.list, []);
+      assert.isTrue(Option.isNone(yield* pool.primary));
+    }).pipe(Effect.provide(DesktopBackendPool.layerTest([]))),
   );
 
   it.effect("resolves the primary label lazily after pool layer construction", () =>
@@ -144,7 +146,27 @@ describe("DesktopBackendPool", () => {
 
         yield* Ref.set(labelRef, "WSL (Ubuntu)");
 
-        assert.equal(yield* primary.label, "WSL (Ubuntu)");
+        assert.equal(yield* Option.getOrThrow(primary).label, "WSL (Ubuntu)");
+      }),
+    ),
+  );
+
+  it.effect("does not register a local backend for a remote primary", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const labelRef = yield* Ref.make("Windows");
+        const pool = yield* DesktopBackendPool.DesktopBackendPool.pipe(
+          Effect.provide(
+            makePoolLayer(labelRef, {
+              ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+              primaryBackendMode: "remote",
+              remoteBackendUrl: "https://remote.example.test",
+            }),
+          ),
+        );
+
+        assert.isTrue(Option.isNone(yield* pool.primary));
+        assert.deepEqual(yield* pool.list, []);
       }),
     ),
   );

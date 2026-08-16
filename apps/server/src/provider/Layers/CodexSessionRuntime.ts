@@ -49,6 +49,10 @@ import {
   COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE,
   COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE,
 } from "../security/CommandCenterProviderIsolation.ts";
+import {
+  CODEX_PERMISSION_REQUEST_KIND,
+  classifyCodexPermissionRequest,
+} from "../security/CodexPermissionEscalation.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 const decodeV2CommandExecResponse = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2CommandExecResponse,
@@ -106,6 +110,7 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "no such thread",
   "unknown thread",
   "does not exist",
+  "no rollout found",
 ];
 
 export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
@@ -166,6 +171,12 @@ export interface CodexSessionRuntimeOptions {
   readonly permissionProfile?: string;
   readonly commandCenterPlatform?: NodeJS.Platform;
   readonly windowsSandboxMode?: "elevated";
+  /**
+   * Grant read-only sandbox escalations without prompting. Only ever applies to
+   * requests classified read-only by `classifyCodexPermissionRequest`; writes,
+   * sandbox denials, and network enables always prompt.
+   */
+  readonly autoApproveReadOnlyPermissions?: boolean;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -596,6 +607,16 @@ interface CodexIsolationProbeClient {
 const COMMAND_CENTER_ISOLATION_PROBE_SUCCESS = "command-center-isolation-ok";
 const COMMAND_CENTER_ISOLATION_READ_DENIAL_READY = "command-center-isolation-read-denial-ready";
 
+export function isCommandCenterIsolationProbeAccepted(
+  writable: boolean,
+  result: { readonly exitCode: number; readonly stdout: string },
+): boolean {
+  return writable
+    ? result.exitCode === 0 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_PROBE_SUCCESS
+    : [1, 73].includes(result.exitCode) &&
+        result.stdout.trim() === COMMAND_CENTER_ISOLATION_READ_DENIAL_READY;
+}
+
 function isCommandCenterPermissionProfile(
   permissionProfile: string | undefined,
 ): permissionProfile is
@@ -622,23 +643,20 @@ export function buildCommandCenterIsolationProbeScript(
     : [
         'probe_path=".cc-provider-isolation-probe.$$"',
         "trap 'rm -f \"$probe_path\"' EXIT",
+        `printf '${COMMAND_CENTER_ISOLATION_READ_DENIAL_READY}\\n'`,
         'if : > "$probe_path" 2>/dev/null; then',
         '  rm -f "$probe_path"',
         "  trap - EXIT",
         "  exit 74",
         "fi",
-        `printf '${COMMAND_CENTER_ISOLATION_READ_DENIAL_READY}\\n'`,
         "exit 73",
       ];
   return [
     "set -eu",
-    "for environment_file in /proc/[0-9]*/environ; do",
-    '  if /usr/bin/tr "\\0" "\\n" < "$environment_file" 2>/dev/null | /usr/bin/grep -Eq "^(CC_PROVIDER_ISOLATION_SENTINEL|T3_MCP_BEARER_TOKEN|OPENAI_API_KEY)="; then',
-    "    exit 70",
-    "  fi",
-    "done",
+    'test -z "${CC_PROVIDER_ISOLATION_SENTINEL:-}" || exit 70',
+    'test -z "${T3_MCP_BEARER_TOKEN:-}" || exit 70',
+    'test -z "${OPENAI_API_KEY:-}" || exit 70',
     'test ! -r "$HOME/auth.json" || exit 71',
-    'test ! -r "/proc/1/root$HOME/auth.json" || exit 72',
     'test ! -r "$HOME/.cc-provider-isolation-canary" || exit 80',
     ...(blockedNetworkPort === undefined
       ? []
@@ -854,9 +872,7 @@ export const verifyCommandCenterCodexIsolation = Effect.fn(
         );
     }),
   );
-  const accepted = writable
-    ? result.exitCode === 0 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_PROBE_SUCCESS
-    : result.exitCode === 73 && result.stdout.trim() === COMMAND_CENTER_ISOLATION_READ_DENIAL_READY;
+  const accepted = isCommandCenterIsolationProbeAccepted(writable, result);
   if (!accepted) {
     return yield* new CodexSessionRuntimeIsolationProbeError({
       issue:
@@ -1062,6 +1078,49 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     default:
       return undefined;
   }
+}
+
+export function makeMemoryConsolidationNotificationFilter(): (
+  notification: CodexServerNotification,
+) => boolean {
+  const threadIds = new Set<string>();
+
+  return (notification) => {
+    if (notification.method === "thread/started") {
+      const thread = notification.params.thread;
+      const source = thread.source;
+      if (
+        thread.threadSource === "memory_consolidation" ||
+        (typeof source === "object" &&
+          source !== null &&
+          "subAgent" in source &&
+          source.subAgent === "memory_consolidation")
+      ) {
+        threadIds.add(thread.id);
+        return true;
+      }
+    }
+
+    const params = notification.params;
+    const threadId =
+      notification.method === "thread/started"
+        ? notification.params.thread.id
+        : "threadId" in params && typeof params.threadId === "string"
+          ? params.threadId
+          : undefined;
+    if (!threadId || !threadIds.has(threadId)) {
+      return false;
+    }
+
+    if (notification.method === "serverRequest/resolved") {
+      return false;
+    }
+
+    if (notification.method === "thread/closed") {
+      threadIds.delete(threadId);
+    }
+    return true;
+  };
 }
 
 function readRouteFields(notification: CodexServerNotification): {
@@ -1337,13 +1396,13 @@ function currentProviderThreadId(session: ProviderSession): string | undefined {
 
 function updateSession(
   sessionRef: Ref.Ref<ProviderSession>,
-  updates: Partial<ProviderSession>,
+  updates: Partial<ProviderSession> | ((session: ProviderSession) => Partial<ProviderSession>),
 ): Effect.Effect<void> {
   return Effect.gen(function* () {
     const updatedAt = DateTime.formatIso(yield* DateTime.now);
     yield* Ref.update(sessionRef, (session) => ({
       ...session,
-      ...updates,
+      ...(typeof updates === "function" ? updates(session) : updates),
       updatedAt,
     }));
   });
@@ -1380,6 +1439,7 @@ export const makeCodexSessionRuntime = (
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     /** Child provider-thread id → its currently running provider turn id. */
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
+    const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
     const mcpCatalogReloadedRef = yield* Ref.make(false);
     // Records the single terminal lifecycle emit (`session/exited` from a process
@@ -1810,6 +1870,9 @@ export const makeCodexSessionRuntime = (
         if (notification.method === "windowsSandbox/setupCompleted") {
           yield* Deferred.succeed(windowsSandboxSetupCompleted, notification.params);
         }
+        const isMemoryConsolidationNotification =
+          suppressMemoryConsolidationNotification(notification);
+
         const payload = notification.params;
         const route = readRouteFields(notification);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
@@ -1884,6 +1947,10 @@ export const makeCodexSessionRuntime = (
             }
           }
           yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
+          return;
+        }
+
+        if (isMemoryConsolidationNotification) {
           return;
         }
 
@@ -2115,6 +2182,97 @@ export const makeCodexSessionRuntime = (
         return {
           decision: resolved,
         } satisfies EffectCodexSchema.FileChangeRequestApprovalResponse;
+      }),
+    );
+
+    // Sandbox escalation. Codex asks to widen filesystem access and/or re-enable
+    // network mid-turn. Without this handler the request falls through to
+    // `handleUnknownServerRequest` below and is answered with a JSON-RPC
+    // "method not found", which Codex reports as a user rejection — a silent
+    // denial the user is never shown and cannot answer.
+    yield* client.handleServerRequest("item/permissions/requestApproval", (payload) =>
+      Effect.gen(function* () {
+        const classification = classifyCodexPermissionRequest(payload.permissions);
+        const turnId = TurnId.make(payload.turnId);
+        const itemId = ProviderItemId.make(payload.itemId);
+
+        // Auto-approve is keyed on the requested permissions, never on the tool
+        // that triggered them: a read-only tool can still ask for write. The
+        // grant is echoed back scoped to this turn only, so it never silently
+        // widens the rest of the session.
+        if (classification.readOnly && options.autoApproveReadOnlyPermissions === true) {
+          yield* Effect.logDebug("Auto-approved a read-only Codex sandbox escalation.").pipe(
+            Effect.annotateLogs({ threadId: options.threadId, itemId: payload.itemId }),
+          );
+          return {
+            permissions: payload.permissions,
+            scope: "turn",
+          } satisfies EffectCodexSchema.PermissionsRequestApprovalResponse;
+        }
+
+        const requestId = ApprovalRequestId.make(
+          yield* randomUUIDv4("permissions-approval-request"),
+        );
+        const decision = yield* Deferred.make<ProviderApprovalDecision>();
+
+        yield* Ref.update(pendingApprovalsRef, (current) => {
+          const next = new Map(current);
+          next.set(requestId, {
+            requestId,
+            jsonRpcId: payload.itemId,
+            requestKind: CODEX_PERMISSION_REQUEST_KIND,
+            turnId,
+            itemId,
+            decision,
+          });
+          return next;
+        });
+        yield* Ref.update(approvalCorrelationsRef, (current) => {
+          const next = new Map(current);
+          next.set(payload.itemId, {
+            requestId,
+            requestKind: CODEX_PERMISSION_REQUEST_KIND,
+            turnId,
+            itemId,
+          });
+          return next;
+        });
+
+        yield* emitEvent({
+          kind: "request",
+          threadId: options.threadId,
+          method: "item/permissions/requestApproval",
+          requestId,
+          requestKind: CODEX_PERMISSION_REQUEST_KIND,
+          ...(turnId ? { turnId } : {}),
+          ...(itemId ? { itemId } : {}),
+          payload,
+        });
+
+        const resolved = yield* Deferred.await(decision).pipe(
+          Effect.ensuring(
+            Ref.update(pendingApprovalsRef, (current) => {
+              const next = new Map(current);
+              next.delete(requestId);
+              return next;
+            }),
+          ),
+        );
+
+        // The approval channel carries only accept/decline, so the granted
+        // profile is the requested one echoed back on accept and an empty
+        // profile on refusal. `acceptForSession` is the one path that persists
+        // the grant beyond this turn.
+        if (resolved === "accept" || resolved === "acceptForSession") {
+          return {
+            permissions: payload.permissions,
+            scope: resolved === "acceptForSession" ? "session" : "turn",
+          } satisfies EffectCodexSchema.PermissionsRequestApprovalResponse;
+        }
+        return {
+          permissions: {},
+          scope: "turn",
+        } satisfies EffectCodexSchema.PermissionsRequestApprovalResponse;
       }),
     );
 
@@ -2433,11 +2591,14 @@ export const makeCodexSessionRuntime = (
             ),
           );
           const turnId = TurnId.make(response.turn.id);
-          yield* updateSession(sessionRef, {
+          yield* updateSession(sessionRef, (session) => ({
             status: "running",
-            activeTurnId: turnId,
+            // Codex accepts follow-ups while the current turn is still
+            // running. The response contains the queued turn id, but
+            // turn/interrupt only accepts the id that is active now.
+            activeTurnId: session.activeTurnId ?? turnId,
             ...(normalizedModel ? { model: normalizedModel } : {}),
-          });
+          }));
           return {
             threadId: options.threadId,
             turnId,

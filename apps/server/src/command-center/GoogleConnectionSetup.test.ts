@@ -49,6 +49,8 @@ const output = (stdout: string) => ({
   timedOut: false,
   stdoutTruncated: false,
   stderrTruncated: false,
+  stdoutInvalidUtf8: false,
+  stderrInvalidUtf8: false,
 });
 
 it("targets the entered Google account and validates the matching callback", () => {

@@ -65,6 +65,7 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.browserArtifactsDir, "/tmp/t3/userdata/browser-artifacts");
       assert.equal(environment.rootDir, "/repo");
       assert.equal(environment.appRoot, "/repo");
+      assert.equal(environment.serverRoot, "/repo");
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
       assert.equal(environment.appUserModelId, "com.awtprod.commandcenter.dev");
@@ -98,6 +99,24 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
+  it.effect("uses the packaged Windows server sidecar as the backend root", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment({
+        platform: "win32",
+        isPackaged: true,
+        appPath: "/install/resources/app.asar",
+        resourcesPath: "/install/resources",
+      });
+
+      assert.equal(environment.appRoot, "/install/resources/app.asar");
+      assert.equal(environment.serverRoot, "/install/resources/server.asar");
+      assert.equal(
+        environment.backendEntryPath,
+        "/install/resources/server.asar/apps/server/dist/bin.mjs",
+      );
+    }),
+  );
+
   it.effect("keeps implicit development state separate from production state", () =>
     Effect.gen(function* () {
       const development = yield* makeEnvironment(
@@ -113,6 +132,20 @@ describe("DesktopEnvironment", () => {
       assert.equal(production.appUserModelId, "com.awtprod.commandcenter");
       assert.equal(production.linuxDesktopEntryName, "command-center.desktop");
       assert.equal(production.linuxWmClass, "command-center");
+    }),
+  );
+
+  it.effect("keeps remote-only builds out of ordinary desktop state", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment({ remoteOnlyBuild: true });
+      const expectedBaseDir = environment.path.join("/user-home", ".command-center-remote-only");
+
+      assert.equal(environment.remoteOnlyBuild, true);
+      assert.equal(environment.baseDir, expectedBaseDir);
+      assert.equal(environment.stateDir, environment.path.join(expectedBaseDir, "userdata"));
+      assert.equal(environment.userDataDirName, "command-center-remote-only");
+      assert.deepEqual(environment.legacyUserDataDirNames, []);
+      assert.equal(environment.appUserModelId, "com.awtprod.commandcenter.remote-only");
     }),
   );
 

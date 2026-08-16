@@ -48,6 +48,7 @@ function makeLayer(
   encryptionAvailable = true,
   failDecrypt: Ref.Ref<boolean> | null = null,
   fileSystemLayer: Layer.Layer<FileSystem.FileSystem> = NodeServices.layer,
+  remoteOnlyBuild = false,
 ) {
   const environmentLayer = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
@@ -59,6 +60,7 @@ function makeLayer(
     isPackaged: true,
     resourcesPath: "/missing/resources",
     runningUnderArm64Translation: false,
+    remoteOnlyBuild,
   }).pipe(
     Layer.provide(
       Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({ T3CODE_HOME: baseDir })),
@@ -412,5 +414,32 @@ describe("DesktopConnectionCatalogStore", () => {
       yield* Ref.set(failDecrypt, false);
       assert.deepStrictEqual(yield* store.get, Option.some('{"schemaVersion":1,"targets":[]}'));
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect(
+    "returns a remote-only build to Connections when its catalog is no longer decryptable",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-desktop-connection-catalog-test-",
+        });
+        const failDecrypt = yield* Ref.make(false);
+        const layer = makeLayer(baseDir, true, failDecrypt, NodeServices.layer, true);
+        const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore.pipe(
+          Effect.provide(layer),
+        );
+        const environment = yield* DesktopEnvironment.DesktopEnvironment.pipe(
+          Effect.provide(layer),
+        );
+        const catalogPath = `${environment.stateDir}/connection-catalog.json`;
+
+        assert.isTrue(yield* store.set('{"schemaVersion":1,"targets":[]}'));
+        const preservedCatalog = yield* fileSystem.readFileString(catalogPath);
+        yield* Ref.set(failDecrypt, true);
+
+        assert.deepStrictEqual(yield* store.get, Option.none());
+        assert.equal(yield* fileSystem.readFileString(catalogPath), preservedCatalog);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 });

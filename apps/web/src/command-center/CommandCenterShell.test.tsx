@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   CommandCenterShell,
+  ContextRail,
   Messages,
+  NeedsYouRows,
+  buildCommandCenterSuggestions,
   shouldSubmitCommandComposerOnKeyDown,
 } from "./CommandCenterShell";
 import type {
@@ -93,7 +96,11 @@ const FIXTURE: CommandCenterShellProps = {
     },
   ],
   onDraftChange: vi.fn(),
+  onCapture: vi.fn(async () => true),
+  onClearTranscript: vi.fn(),
   onDecideApproval: vi.fn(),
+  onDismissNeedsYouItems: vi.fn(),
+  onModelSelectionChange: vi.fn(),
   onOpenLinkedThread: vi.fn(),
   onSubmit: vi.fn(),
   projects: [
@@ -124,13 +131,22 @@ const FIXTURE: CommandCenterShellProps = {
     summary: "Review the project and prepare a reversible local draft.",
   },
   routeOptions: {
-    models: [{ id: "balanced", label: "Balanced" }],
+    models: [
+      {
+        id: "balanced",
+        label: "Balanced",
+        detail: "Example Provider",
+        providerId: "provider-example",
+      },
+    ],
     projects: [{ id: "project-studio", label: "Studio Project", detail: "Studio App" }],
     providers: [{ id: "provider-example", label: "Example Provider", detail: "Ready" }],
     repositories: [{ id: "studio-repository", label: "Studio App", detail: "Studio" }],
   },
   routeSelection: {
+    modelId: "balanced",
     projectId: "project-studio",
+    providerId: "provider-example",
     repositoryId: "studio-repository",
     spaceId: "studio",
   },
@@ -280,20 +296,75 @@ describe("CommandCenterShell", () => {
     expect(html).toContain("justify-end");
   });
 
-  it("renders lightweight conversation controls and route summaries", () => {
+  it("renders persistent shortcuts and a model-only composer", () => {
     const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} />);
 
     expect(html).toContain('aria-label="Open recent Command Center conversations"');
     expect(html).toContain('aria-label="Open live context"');
-    expect(html).toContain('aria-label="Space route selection"');
-    expect(html).toContain('aria-label="Repo route selection"');
-    expect(html).toContain('aria-label="Project route selection"');
-    expect(html).toContain('aria-label="Provider route selection"');
-    expect(html).toContain('aria-label="Model route selection"');
-    expect(html).toContain("Route this command");
+    expect(html).toContain('aria-label="Command Center shortcuts"');
+    expect(html).toContain('aria-label="Space shortcuts"');
+    expect(html).toContain("All Spaces");
+    expect(html).toContain("Command");
+    expect(html).toContain("Capture");
+    expect(html).toContain('aria-label="Clear command transcript"');
+    expect(html).toContain('aria-label="Model selection"');
+    expect(html).not.toContain('aria-label="Space route selection"');
+    expect(html).not.toContain('aria-label="Provider route selection"');
+    expect(html).not.toContain("Route this command");
     expect(html).toContain("chat-composer-glass");
     expect(html).toContain("Explicit route");
     expect(html).toContain("Ask anything, @tag files/folders, $use skills, or / for commands");
+  });
+
+  it("offers dismissal for generic attention items", () => {
+    const genericItems = ["one", "two"].map((id) => ({
+      id,
+      reason: "blocked" as const,
+      spaceId: "studio",
+      spaceName: "Studio",
+      title: `Blocked item ${id}`,
+    }));
+    const html = renderToStaticMarkup(
+      <NeedsYouRows items={genericItems} onDismissNeedsYouItems={FIXTURE.onDismissNeedsYouItems} />,
+    );
+
+    expect(html.match(/>Dismiss<\/button>/g)).toHaveLength(2);
+
+    const railHtml = renderToStaticMarkup(
+      <ContextRail
+        context={{ ...FIXTURE.context, needsYou: genericItems }}
+        onDismissNeedsYouItems={FIXTURE.onDismissNeedsYouItems}
+      />,
+    );
+    expect(railHtml).toContain("Dismiss all");
+  });
+
+  it("renders a useful, Space-scoped briefing when the transcript is empty", () => {
+    const html = renderToStaticMarkup(<CommandCenterShell {...FIXTURE} messages={[]} />);
+
+    expect(html).toContain("A useful place to start");
+    expect(html).toContain("Suggested by Command");
+    expect(html).toContain("Studio");
+    expect(html).toContain("Needs you · 1");
+    expect(html).toContain("In progress · 1");
+    expect(html).toContain("Today · 1");
+  });
+
+  it("fills proactive suggestions from live context and evergreen opportunities", () => {
+    const suggestions = buildCommandCenterSuggestions({
+      needsYouCount: 2,
+      activeRunCount: 0,
+      todayCount: 0,
+      failedRunCount: 1,
+      unhealthyConnectionCount: 0,
+    });
+
+    expect(suggestions).toHaveLength(3);
+    expect(suggestions.map((suggestion) => suggestion.label)).toEqual([
+      "Prioritize 2 attention items",
+      "Recover 1 failed run",
+      "Recommend my next move",
+    ]);
   });
 
   it("disables submission while the composer is empty", () => {

@@ -7,6 +7,7 @@ import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
+import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import {
   buildCodexDeveloperInstructions,
@@ -16,11 +17,14 @@ import {
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
   buildCommandCenterDarwinIsolationProbeScript,
+  buildCommandCenterIsolationProbeScript,
   buildCommandCenterWindowsIsolationProbeScript,
   buildTurnStartParams,
   ensureCommandCenterWindowsSandbox,
   hasConfiguredMcpServer,
+  isCommandCenterIsolationProbeAccepted,
   isRecoverableThreadResumeError,
+  makeMemoryConsolidationNotificationFilter,
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
@@ -73,14 +77,43 @@ describe("Command Center native sandbox admission", () => {
   );
 
   it("builds native probes without Linux-only process assumptions", () => {
+    const linux = buildCommandCenterIsolationProbeScript(true);
     const darwin = buildCommandCenterDarwinIsolationProbeScript(true);
     const windows = buildCommandCenterWindowsIsolationProbeScript(false);
 
+    NodeAssert.doesNotMatch(linux, /\/proc\//u);
+    NodeAssert.match(linux, /CC_PROVIDER_ISOLATION_SENTINEL/u);
     NodeAssert.doesNotMatch(darwin, /\/proc\//u);
     NodeAssert.match(darwin, /HOME\/auth\.json/u);
     NodeAssert.match(windows, /USERPROFILE/u);
     NodeAssert.match(windows, /WriteAllText/u);
     NodeAssert.match(windows, /exit 73/u);
+  });
+
+  it("admits both shell-reported and sandbox-enforced read denials after the marker", () => {
+    const linux = buildCommandCenterIsolationProbeScript(false);
+    NodeAssert.ok(
+      linux.indexOf("command-center-isolation-read-denial-ready") <
+        linux.indexOf(': > "$probe_path"'),
+    );
+    NodeAssert.equal(
+      isCommandCenterIsolationProbeAccepted(false, {
+        exitCode: 1,
+        stdout: "command-center-isolation-read-denial-ready\n",
+      }),
+      true,
+    );
+    NodeAssert.equal(
+      isCommandCenterIsolationProbeAccepted(false, {
+        exitCode: 74,
+        stdout: "command-center-isolation-read-denial-ready\n",
+      }),
+      false,
+    );
+    NodeAssert.equal(
+      isCommandCenterIsolationProbeAccepted(false, { exitCode: 1, stdout: "" }),
+      false,
+    );
   });
 });
 
@@ -384,6 +417,144 @@ describe("hasConfiguredMcpServer", () => {
   });
 });
 
+function makeThreadStartedNotification(
+  threadId: string,
+  source: EffectCodexSchema.V2ThreadStartedNotification["thread"]["source"],
+  threadSource?: string,
+) {
+  return {
+    method: "thread/started" as const,
+    params: {
+      thread: {
+        cliVersion: "0.0.0",
+        createdAt: 0,
+        cwd: "/tmp/project",
+        ephemeral: true,
+        id: threadId,
+        modelProvider: "openai",
+        preview: "",
+        sessionId: threadId,
+        source,
+        status: { type: "idle" as const },
+        ...(threadSource ? { threadSource } : {}),
+        turns: [],
+        updatedAt: 0,
+      },
+    },
+  };
+}
+
+describe("makeMemoryConsolidationNotificationFilter", () => {
+  it("suppresses memory consolidation without hiding other Codex subagents", () => {
+    const shouldSuppress = makeMemoryConsolidationNotificationFilter();
+
+    NodeAssert.equal(
+      shouldSuppress(
+        makeThreadStartedNotification("memory-thread", "unknown", "memory_consolidation"),
+      ),
+      true,
+    );
+    NodeAssert.equal(
+      shouldSuppress({
+        method: "item/agentMessage/delta",
+        params: {
+          delta: "internal memory update",
+          itemId: "memory-message",
+          threadId: "memory-thread",
+          turnId: "memory-turn",
+        },
+      }),
+      true,
+    );
+    NodeAssert.equal(
+      shouldSuppress({
+        method: "serverRequest/resolved",
+        params: {
+          requestId: "memory-approval",
+          threadId: "memory-thread",
+        },
+      }),
+      false,
+    );
+    NodeAssert.equal(
+      shouldSuppress({
+        method: "warning",
+        params: {
+          message: "internal warning",
+          threadId: "memory-thread",
+        },
+      }),
+      true,
+    );
+    NodeAssert.equal(
+      shouldSuppress({
+        method: "item/agentMessage/delta",
+        params: {
+          delta: "normal reply",
+          itemId: "root-message",
+          threadId: "root-thread",
+          turnId: "root-turn",
+        },
+      }),
+      false,
+    );
+
+    NodeAssert.equal(
+      shouldSuppress(
+        makeThreadStartedNotification("legacy-memory-thread", {
+          subAgent: "memory_consolidation",
+        }),
+      ),
+      true,
+    );
+
+    for (const source of [
+      { subAgent: "review" as const },
+      { subAgent: "compact" as const },
+      {
+        subAgent: {
+          thread_spawn: {
+            depth: 1,
+            parent_thread_id: "root-thread",
+          },
+        },
+      },
+    ]) {
+      NodeAssert.equal(
+        shouldSuppress(makeThreadStartedNotification("visible-subagent", source)),
+        false,
+      );
+    }
+  });
+
+  it("forgets memory consolidation threads after they close", () => {
+    const shouldSuppress = makeMemoryConsolidationNotificationFilter();
+    shouldSuppress(
+      makeThreadStartedNotification("memory-thread", "unknown", "memory_consolidation"),
+    );
+
+    NodeAssert.equal(
+      shouldSuppress({
+        method: "thread/closed",
+        params: { threadId: "memory-thread" },
+      }),
+      true,
+    );
+    NodeAssert.equal(
+      shouldSuppress({
+        method: "item/agentMessage/delta",
+        params: {
+          delta: "later message",
+          itemId: "later-message",
+          threadId: "memory-thread",
+          turnId: "later-turn",
+        },
+      }),
+      false,
+    );
+  });
+});
+
 describe("codexSessionAppServerArgs", () => {
   it("keeps the app-server subcommand when explicit args are provided", () => {
     NodeAssert.deepStrictEqual(codexSessionAppServerArgs(["-c", "model=gpt-5"], undefined), [
@@ -418,6 +589,18 @@ describe("isRecoverableThreadResumeError", () => {
         new CodexErrors.CodexAppServerRequestError({
           code: -32603,
           errorMessage: "Thread does not exist",
+        }),
+      ),
+      true,
+    );
+  });
+
+  it("matches a missing rollout for a known thread id", () => {
+    NodeAssert.equal(
+      isRecoverableThreadResumeError(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32603,
+          errorMessage: "no rollout found for thread id 019fdf74-aaa9-7950-b252-7cc7a8650470",
         }),
       ),
       true,

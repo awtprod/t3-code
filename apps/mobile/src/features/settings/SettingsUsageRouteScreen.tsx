@@ -1,4 +1,4 @@
-import type { UsageBreakdown, UsageSummary, UsageTokenTotals } from "@t3tools/contracts";
+import type { UsageBreakdown, UsageQuerySummary, UsageQueryTokenTotals } from "@t3tools/contracts";
 import { CommonActions, useNavigation } from "@react-navigation/native";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, TextInput, View } from "react-native";
@@ -11,7 +11,7 @@ import { usageEnvironment } from "../../state/usage";
 
 const RANGES = [7, 30, 90] as const;
 
-function total(tokens: UsageTokenTotals): number | null {
+function total(tokens: UsageQueryTokenTotals): number | null {
   const values = [
     tokens.uncachedInputTokens,
     tokens.cacheReadInputTokens,
@@ -35,7 +35,7 @@ function Metric({ label, value, note }: { label: string; value: string; note?: s
   );
 }
 
-function cost(summary: UsageSummary | undefined): string {
+function cost(summary: UsageQuerySummary | undefined): string {
   return summary?.cost.microUsd === null || summary?.cost.microUsd === undefined
     ? "Unavailable"
     : `$${(summary.cost.microUsd / 1_000_000).toFixed(2)}`;

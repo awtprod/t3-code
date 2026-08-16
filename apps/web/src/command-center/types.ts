@@ -39,6 +39,7 @@ export interface CommandCenterMessage {
   readonly authorLabel?: string | undefined;
   readonly linkedRunId?: string | undefined;
   readonly linkedThreadId?: string | undefined;
+  readonly linkedEnvironmentId?: string | undefined;
   readonly receipt?: CommandCenterRouteReceipt | undefined;
 }
 
@@ -75,6 +76,7 @@ export interface CommandCenterRouteReceipt {
   readonly projectName?: string | undefined;
   readonly providerName: string;
   readonly modelName: string;
+  readonly executionTargetName?: string | undefined;
   readonly capabilities: readonly string[];
   readonly sources: CommandCenterRouteSources;
   readonly risk: CommandCenterRisk;
@@ -154,6 +156,8 @@ export interface CommandCenterRouteOption {
   readonly id: string;
   readonly label: string;
   readonly detail?: string | undefined;
+  readonly providerId?: string | undefined;
+  readonly disabled?: boolean | undefined;
 }
 
 export interface CommandCenterRouteOptions {
@@ -197,13 +201,24 @@ export interface CommandCenterShellProps {
   readonly onDraftChange: (draft: string) => void;
   readonly onSubmit: (draft: string) => void;
   readonly onNewConversation?: (() => void) | undefined;
+  readonly onClearTranscript?: (() => void) | undefined;
   readonly onSelectSpace?: ((spaceId: string) => void) | undefined;
   readonly onSelectProject?: ((projectId: string) => void) | undefined;
   readonly onSelectConversation?: ((conversationId: string) => void) | undefined;
   readonly onRouteSelectionChange?:
     | ((control: CommandCenterRouteControl, value: string | undefined) => void)
     | undefined;
+  readonly onModelSelectionChange?: ((providerId: string, modelId: string) => void) | undefined;
+  readonly onOpenProviderSettings?: (() => void) | undefined;
+  readonly onCapture?:
+    | ((input: {
+        readonly spaceId: string;
+        readonly kind: "idea" | "task";
+        readonly title: string;
+      }) => Promise<boolean>)
+    | undefined;
   readonly onOpenNeedsYouItem?: ((itemId: string) => void) | undefined;
+  readonly onDismissNeedsYouItems?: ((itemIds: readonly string[]) => void) | undefined;
   readonly onDecideApproval?:
     | ((approvalId: string, payloadDigest: string, decision: "approved" | "declined") => void)
     | undefined;
@@ -219,5 +234,5 @@ export interface CommandCenterShellProps {
   readonly onOpenRun?: ((runId: string) => void) | undefined;
   readonly onOpenTodayItem?: ((itemId: string) => void) | undefined;
   readonly onOpenConnection?: ((connectionId: string) => void) | undefined;
-  readonly onOpenLinkedThread?: ((threadId: string) => void) | undefined;
+  readonly onOpenLinkedThread?: ((threadId: string, environmentId?: string) => void) | undefined;
 }

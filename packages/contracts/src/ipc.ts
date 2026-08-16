@@ -92,6 +92,7 @@ import { AuthAccessTokenResult, AuthSessionState, AuthWebSocketTicketResult } fr
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import type { ClientSettings } from "./settings.ts";
+import type { EditorId } from "./editor.ts";
 import type {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
@@ -499,6 +500,30 @@ export const DesktopWslStateSchema = Schema.Struct({
   preflightError: Schema.NullOr(Schema.String),
 });
 
+export const DesktopPrimaryBackendMode = Schema.Literals(["windows", "wsl", "remote"]);
+export type DesktopPrimaryBackendMode = typeof DesktopPrimaryBackendMode.Type;
+
+export const DesktopRemotePrimaryConfig = Schema.Struct({
+  httpBaseUrl: Schema.String,
+});
+export type DesktopRemotePrimaryConfig = typeof DesktopRemotePrimaryConfig.Type;
+
+export const DesktopPrimaryBackendState = Schema.Struct({
+  mode: DesktopPrimaryBackendMode,
+  remoteHttpBaseUrl: Schema.NullOr(Schema.String),
+  connectivity: Schema.Literals(["unknown", "checking", "connected", "unavailable"]),
+  localExecutionOverride: Schema.Boolean,
+  restartRequired: Schema.Boolean,
+});
+export type DesktopPrimaryBackendState = typeof DesktopPrimaryBackendState.Type;
+
+export const DesktopPrimaryBackendUpdate = Schema.Struct({
+  mode: DesktopPrimaryBackendMode,
+  remoteHttpBaseUrl: Schema.optionalKey(Schema.String),
+  restart: Schema.optionalKey(Schema.Boolean),
+});
+export type DesktopPrimaryBackendUpdate = typeof DesktopPrimaryBackendUpdate.Type;
+
 /**
  * Renderer-facing snapshot of a desktop preview tab. Mirrors the main-process
  * PreviewTabState shape but uses serialisable primitives only.
@@ -524,6 +549,28 @@ export type DesktopPreviewColorScheme = "system" | "light" | "dark";
 export const DesktopPreviewColorSchemeSchema: Schema.Codec<DesktopPreviewColorScheme> =
   Schema.Literals(["system", "light", "dark"]);
 
+export const FAVICON_DATA_URL_MAX_LENGTH = 8192;
+export const FAVICON_CAPTURED_AT_MAX = 8_640_000_000_000_000;
+
+export interface DesktopPreviewFavicon {
+  dataUrl: string;
+  pageUrl: string;
+  capturedAt: number;
+}
+
+export const DesktopPreviewFaviconSchema: Schema.Codec<DesktopPreviewFavicon> = Schema.Struct({
+  dataUrl: Schema.String.check(
+    Schema.isMaxLength(FAVICON_DATA_URL_MAX_LENGTH),
+    Schema.isPattern(/^data:image\/png;base64,[a-z0-9+/]+={0,2}$/i),
+  ),
+  pageUrl: Schema.String.check(Schema.isMaxLength(2_048)),
+  capturedAt: Schema.Number.check(
+    Schema.isFinite(),
+    Schema.isGreaterThanOrEqualTo(0),
+    Schema.isLessThanOrEqualTo(FAVICON_CAPTURED_AT_MAX),
+  ),
+});
+
 export interface DesktopPreviewTabState {
   tabId: string;
   webContentsId: number | null;
@@ -536,6 +583,7 @@ export interface DesktopPreviewTabState {
   pictureInPicture: boolean;
   colorScheme: DesktopPreviewColorScheme;
   controller: "human" | "agent" | "none";
+  favicon?: DesktopPreviewFavicon;
   updatedAt: string;
 }
 
@@ -574,6 +622,7 @@ export const DesktopPreviewTabStateSchema: Schema.Codec<DesktopPreviewTabState> 
   pictureInPicture: Schema.Boolean,
   colorScheme: DesktopPreviewColorSchemeSchema,
   controller: Schema.Literals(["human", "agent", "none"]),
+  favicon: Schema.optionalKey(DesktopPreviewFaviconSchema),
   updatedAt: Schema.String,
 });
 
@@ -996,11 +1045,18 @@ export const DesktopPreviewAutomationWaitForInputSchema = Schema.Struct({
 
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
+  /**
+   * The OS locale as a BCP-47 tag, which the renderer cannot read for itself:
+   * the packaged app ships only the `en-US` Chromium locale pak, so
+   * `navigator.language` and the default `Intl` locale are pinned to `en-US`
+   * regardless of OS settings.
+   */
+  getSystemLocale?: () => string | null;
   // One bootstrap per pool instance currently registered with bootstrap
   // info (omits instances whose backend hasn't produced a config yet).
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
-  getLocalEnvironmentBearerToken: () => Promise<string>;
+  getLocalEnvironmentBearerToken: () => Promise<string | null>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   getConnectionCatalog?: () => Promise<string | null>;
@@ -1035,6 +1091,10 @@ export interface DesktopBridge {
   setWslBackendEnabled: (enabled: boolean) => Promise<DesktopWslState>;
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
+  getPrimaryBackendState: () => Promise<DesktopPrimaryBackendState>;
+  setPrimaryBackend: (input: DesktopPrimaryBackendUpdate) => Promise<DesktopPrimaryBackendState>;
+  retryRemotePrimary: (remoteHttpBaseUrl?: string) => Promise<DesktopPrimaryBackendState>;
+  startLocalExecutionOnce: () => Promise<void>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   /**
    * Multi-select JSON file picker that opens in the VS Code extensions
@@ -1042,14 +1102,25 @@ export interface DesktopBridge {
    * web callers fall back to a plain file input.
    */
   pickThemeFiles?: () => Promise<readonly PickedThemeFile[] | null>;
-  confirm: (message: string) => Promise<boolean>;
   setTheme: (theme: DesktopTheme) => Promise<void>;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],
     position?: { x: number; y: number },
   ) => Promise<T | null>;
   openExternal: (url: string) => Promise<boolean>;
+  /**
+   * Probe this desktop machine for installed remote-capable editor CLIs
+   * (used for remote open-in-editor deep links). Optional: older desktop
+   * builds lack it; callers fall back to VS Code only.
+   */
+  probeRemoteEditors?: () => Promise<readonly EditorId[]>;
   onMenuAction: (listener: (action: string) => void) => () => void;
+  /**
+   * Hold-to-quit hint pushes: "down" when the quit shortcut is first pressed,
+   * "up" when it is released before the hold completes. Optional: older
+   * desktop builds never emit it.
+   */
+  onQuitShortcut?: (listener: (state: "down" | "up") => void) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
@@ -1137,6 +1208,12 @@ export interface DesktopPreviewBridge {
   onPointerEvent: (listener: (event: DesktopPreviewPointerEvent) => void) => () => void;
 }
 
+export type ConfirmDialogVariant = "default" | "destructive";
+
+export interface ConfirmDialogOptions {
+  readonly variant?: ConfirmDialogVariant;
+}
+
 /**
  * APIs bound to the local app shell, not to any particular backend environment.
  *
@@ -1150,7 +1227,7 @@ export interface DesktopPreviewBridge {
 export interface LocalApi {
   dialogs: {
     pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
-    confirm: (message: string) => Promise<boolean>;
+    confirm: (message: string, options?: ConfirmDialogOptions) => Promise<boolean>;
   };
   shell: {
     openExternal: (url: string) => Promise<void>;
@@ -1160,6 +1237,7 @@ export interface LocalApi {
       items: readonly ContextMenuItem<T>[],
       position?: { x: number; y: number },
     ) => Promise<T | null>;
+    close: () => Promise<void>;
   };
   persistence: {
     getClientSettings: () => Promise<ClientSettings | null>;

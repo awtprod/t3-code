@@ -21,6 +21,10 @@ b7559c467803f923e59a287c112b4c92b96e15c7:apps/server/src/auth/Layers/BootstrapCr
 08993a5ec8fbe5c55a2a4fa8f5fb37f870e87cf6:packages/effect-codex-app-server/src/protocol.test.ts:generic-api-key:117
 08993a5ec8fbe5c55a2a4fa8f5fb37f870e87cf6:packages/effect-codex-app-server/src/protocol.test.ts:generic-api-key:121
 
+# Exact false-positive fingerprint pulled in by the upstream sync merge. The base64 value is
+# RFC 6455's canonical example Sec-WebSocket-Key ("the sample nonce"), not a credential.
+apps/server/src/httpResponseErrorGuard.test.ts:generic-api-key:61
+
 # Exact staged false-positive fingerprints from the pinned public Alchemy reference corpus.
 # These paths are immutable integration fixtures under `.repos/`; never add application findings.
 .repos/alchemy-effect/packages/alchemy/src/AWS/ACMPCA/CertificateAuthority.ts:generic-api-key:238

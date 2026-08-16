@@ -77,6 +77,7 @@ const backendConfigurationLayer = Layer.succeed(
 const netLayer = Layer.succeed(NetService.NetService, {
   canListenOnHost: () => Effect.succeed(true),
   isPortAvailableOnLoopback: () => Effect.succeed(true),
+  hasListenerOnHost: () => Effect.succeed(false),
   reserveLoopbackPort: () => Effect.succeed(41773),
   findAvailablePort: (preferred) => Effect.succeed(preferred),
 } satisfies NetService.NetService["Service"]);
@@ -102,7 +103,7 @@ describe("DesktopWslBackend", () => {
             : Option.none<DesktopBackendPool.DesktopBackendInstance>(),
         ),
       list: Effect.succeed([primary]),
-      primary: Effect.succeed(primary),
+      primary: Effect.succeed(Option.some(primary)),
       register: (spec) =>
         Effect.sync(() => {
           registeredSpec = spec;
