@@ -23,6 +23,11 @@ const config = RelayConfiguration.RelayConfiguration.of({
     privateKey: Redacted.make("private-key"),
     bundleId: "com.t3tools.t3code.dev",
   },
+  webPush: {
+    privateKey: Redacted.make("web-push-private-key"),
+    publicKey: "web-push-public-key",
+    subject: "https://relay.example.test",
+  },
   apnsDeliveryJobSigningSecret: Redacted.make("job-secret"),
   clerkSecretKey: Redacted.make("clerk-secret"),
   clerkPublishableKey: "pk_test_test",
@@ -163,7 +168,9 @@ describe("RelayTokens", () => {
     }).pipe(Effect.provide(layer)),
   );
 
-  it.effect("rejects mobile registration scope on a web public client token", () =>
+  // Web Push subscriptions register through the same endpoint and scope as
+  // mobile devices, so the web client carries mobile:registration too.
+  it.effect("accepts mobile registration scope on a web public client token", () =>
     Effect.gen(function* () {
       const relayTokens = yield* RelayTokens.RelayTokens;
       const token = yield* signRelayJwt({
@@ -173,7 +180,7 @@ describe("RelayTokens", () => {
           iss: "https://relay.example.test",
           aud: "https://relay.example.test",
           sub: "user_123",
-          jti: "web-token-invalid-mobile-scope",
+          jti: "web-token-mobile-scope",
           iat: 100,
           exp: 200,
           client_id: "t3-web",
@@ -182,7 +189,8 @@ describe("RelayTokens", () => {
         },
       });
 
-      expect(yield* relayTokens.verifyDpopAccessToken({ token, nowEpochSeconds: 150 })).toBeNull();
+      const verified = yield* relayTokens.verifyDpopAccessToken({ token, nowEpochSeconds: 150 });
+      expect(verified?.scope).toContain("mobile:registration");
     }).pipe(Effect.provide(layer)),
   );
 });

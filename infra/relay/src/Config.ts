@@ -14,11 +14,22 @@ export interface ApnsCredentials {
   readonly environment: ApnsEnvironment;
 }
 
+export interface WebPushCredentials {
+  // PEM pkcs8 P-256 private key (VAPID application server key).
+  readonly privateKey: Redacted.Redacted<string>;
+  // base64url-encoded uncompressed P-256 point, as browsers expect it in
+  // PushManager.subscribe and push services expect it in the vapid k= param.
+  readonly publicKey: string;
+  // Contact for push service operators: mailto: or https: URL.
+  readonly subject: string;
+}
+
 export class RelayConfiguration extends Context.Service<
   RelayConfiguration,
   {
     readonly relayIssuer: string;
     readonly apns: ApnsCredentials;
+    readonly webPush: WebPushCredentials;
     readonly clerkSecretKey: Redacted.Redacted<string>;
     readonly clerkPublishableKey: string;
     readonly clerkJwtAudience: string;

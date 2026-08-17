@@ -76,6 +76,16 @@ export const make = Effect.gen(function* () {
             nowMs: input.nowMs,
           })
         : null;
+    // Browsers have no Live Activity; web push follows the published state
+    // change directly (the per-subscription preferences gate the phases).
+    const webPushAggregate =
+      input.deliveryUser.notificationsEnabled && input.state !== null
+        ? makeAggregateState({
+            activeStates: isTerminalPhase(input.state) ? [] : [input.state],
+            terminalState: isTerminalPhase(input.state) ? input.state : null,
+            nowMs: input.nowMs,
+          })
+        : null;
     const targets = yield* liveActivities.listTargets({ userId: input.deliveryUser.userId });
     const deliveriesByTarget = yield* Effect.forEach(
       targets,
@@ -98,7 +108,15 @@ export const make = Effect.gen(function* () {
         ),
       { concurrency: 4 },
     );
-    return deliveriesByTarget.flat();
+    const webPushDeliveries =
+      webPushAggregate === null
+        ? []
+        : yield* apnsDeliveries.sendWebPushForUser({
+            userId: input.deliveryUser.userId,
+            aggregate: webPushAggregate,
+            nowMs: input.nowMs,
+          });
+    return [...deliveriesByTarget.flat(), ...webPushDeliveries];
   });
 
   return AgentActivityPublisher.of({

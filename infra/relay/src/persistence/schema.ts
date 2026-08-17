@@ -39,6 +39,29 @@ export const relayMobileDevices = pgTable(
   ],
 );
 
+// Web Push subscriptions live apart from relay_mobile_devices: they carry an
+// endpoint + key pair instead of APNs tokens, have no Live Activity join, and
+// keeping them separate spares the iOS table its notNull/ios-typed columns.
+export const relayWebPushSubscriptions = pgTable(
+  "relay_web_push_subscriptions",
+  {
+    userId: varchar("user_id", { length: 255 }).notNull(),
+    deviceId: varchar("device_id", { length: 255 }).notNull(),
+    label: text("label").notNull().default("Web browser"),
+    endpoint: text("endpoint").notNull(),
+    p256dh: text("p256dh").notNull(),
+    auth: text("auth").notNull(),
+    appVersion: varchar("app_version", { length: 64 }),
+    preferencesJson: jsonb("preferences_json").notNull().$type<RelayAgentAwarenessPreferences>(),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+    updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.deviceId] }),
+    uniqueIndex("idx_relay_web_push_subscriptions_endpoint").on(table.endpoint),
+  ],
+);
+
 export const relayLiveActivities = pgTable(
   "relay_live_activities",
   {

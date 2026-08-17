@@ -27,6 +27,19 @@ export class DeviceRegistrationPersistenceError extends Schema.TaggedErrorClass<
   }
 }
 
+export class DeviceRegistrationInvalidError extends Schema.TaggedErrorClass<DeviceRegistrationInvalidError>()(
+  "DeviceRegistrationInvalidError",
+  {
+    userId: Schema.String,
+    deviceId: Schema.String,
+    reason: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Invalid device registration for ${this.userId}/${this.deviceId}: ${this.reason}.`;
+  }
+}
+
 export class DeviceUnregistrationPersistenceError extends Schema.TaggedErrorClass<DeviceUnregistrationPersistenceError>()(
   "DeviceUnregistrationPersistenceError",
   {
@@ -59,7 +72,7 @@ export class Devices extends Context.Service<
     readonly register: (input: {
       readonly userId: string;
       readonly registration: RelayDeviceRegistrationRequest;
-    }) => Effect.Effect<void, DeviceRegistrationPersistenceError>;
+    }) => Effect.Effect<void, DeviceRegistrationPersistenceError | DeviceRegistrationInvalidError>;
     readonly unregister: (input: {
       readonly userId: string;
       readonly deviceId: string;
@@ -80,6 +93,21 @@ export const make = Effect.gen(function* () {
       });
       const updatedAt = DateTime.formatIso(yield* DateTime.now);
       const registration = input.registration;
+      // The contract widened for platform "web" (routed to WebPushSubscriptions
+      // before reaching this store); ios rows still require iosMajorVersion
+      // (the column is notNull and the app always sends it).
+      const iosMajorVersion = registration.iosMajorVersion;
+      if (registration.platform !== "ios" || iosMajorVersion === undefined) {
+        return yield* new DeviceRegistrationInvalidError({
+          userId: input.userId,
+          deviceId: registration.deviceId,
+          reason:
+            registration.platform !== "ios"
+              ? `platform ${registration.platform} is not accepted by the mobile device store`
+              : "iosMajorVersion is required for ios registrations",
+        });
+      }
+      const platform = registration.platform;
 
       // The drizzle handle is alchemy's lazy proxy chain: it only becomes a
       // real Effect when consumed via `yield*`. Handing it to Effect.all sends
@@ -127,8 +155,8 @@ export const make = Effect.gen(function* () {
           userId: input.userId,
           deviceId: registration.deviceId,
           label: registration.label,
-          platform: registration.platform,
-          iosMajorVersion: registration.iosMajorVersion,
+          platform,
+          iosMajorVersion,
           appVersion: registration.appVersion ?? null,
           bundleId: registration.bundleId ?? null,
           apsEnvironment: registration.apsEnvironment ?? null,
@@ -141,9 +169,9 @@ export const make = Effect.gen(function* () {
         .onConflictDoUpdate({
           target: [relayMobileDevices.userId, relayMobileDevices.deviceId],
           set: {
-            platform: registration.platform,
+            platform,
             label: registration.label,
-            iosMajorVersion: registration.iosMajorVersion,
+            iosMajorVersion,
             appVersion: registration.appVersion ?? null,
             // Preserve routing from newer app builds when an older build
             // re-registers without these fields.
