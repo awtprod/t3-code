@@ -27,6 +27,7 @@ import {
   type ProviderTurnTargetIdentity,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -68,6 +69,10 @@ import {
   unbindAllSandboxProviderTargets,
   unbindSandboxProviderTarget,
 } from "../../sandbox/SandboxProviderProcess.ts";
+import {
+  provisionThreadCredentialProxy,
+  refreshThreadCredentialProxy,
+} from "../../sandbox/SandboxCredentialProxy.ts";
 import { commandCenterProviderIsolationIssue } from "../security/CommandCenterProviderIsolation.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
@@ -755,6 +760,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
         if (executionTarget?.kind === "sandbox") {
           bindSandboxProviderTarget(executionTarget, sandboxBindingOwner);
+          // Push the thread's credential document into its sidecar before the
+          // CLI starts. The secret goes over `podman exec` stdin and is bound
+          // to the thread here; the workspace container only ever learns the
+          // proxy URL and an opaque per-thread token.
+          const credentialFailure = yield* Effect.promise(() =>
+            provisionThreadCredentialProxy(threadId).then(
+              () => undefined,
+              (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
+            ),
+          );
+          if (credentialFailure !== undefined) {
+            return yield* toValidationError(
+              "ProviderService.startSession",
+              `Thread-scoped credential proxy is unavailable: ${credentialFailure}`,
+            );
+          }
         }
         yield* prepareMcpSession(threadId, resolvedInstanceId, input.projectId, effectiveCwd);
         const session = yield* adapter
@@ -811,11 +832,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
         return sessionWithInstance;
       }).pipe(
-        Effect.onError(() =>
-          Effect.sync(() => {
-            if (executionTarget?.kind === "sandbox") {
-              unbindSandboxProviderTarget(threadId, sandboxBindingOwner);
+        Effect.onError((cause) =>
+          Effect.gen(function* () {
+            if (executionTarget?.kind !== "sandbox") return;
+            // An upstream 401 means the injected secret was rotated or expired.
+            // Re-push the document so the next start picks up the current one;
+            // the thread token is preserved, so bound env stays valid.
+            if (/\b401\b|unauthorized/i.test(Cause.pretty(cause))) {
+              yield* Effect.promise(() =>
+                refreshThreadCredentialProxy(threadId).catch(() => false),
+              );
             }
+            unbindSandboxProviderTarget(threadId, sandboxBindingOwner);
           }),
         ),
         withMetrics({

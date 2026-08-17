@@ -9,6 +9,7 @@ export * from "./NodeSandboxCommandExecutor.ts";
 export * from "./ThreadDesktopRuntime.ts";
 export * from "./ThreadPreviewProxy.ts";
 export * from "./ThreadServiceStack.ts";
+export * from "./SandboxCredentialProxy.ts";
 export * from "./SandboxProviderProcess.ts";
 export * from "./SandboxRuntimeManager.ts";
 export * from "./ThreadSandboxRuntime.ts";

@@ -9,9 +9,19 @@ export const REQUIRED_DESKTOP_BINARIES = [
   "t3-desktop-webrtc",
 ] as const;
 
+/**
+ * Headless images ship no desktop stack; only a shell and git are load-bearing
+ * for provisioning. Provider CLIs are probed separately and only warned about,
+ * because a thread may legitimately use whichever provider the image carries.
+ */
+export const REQUIRED_HEADLESS_BINARIES = ["sh", "git"] as const;
+export const OPTIONAL_HEADLESS_BINARIES = ["claude", "codex"] as const;
+
 export type DesktopCapability = {
   readonly ready: boolean;
   readonly missing: ReadonlyArray<string>;
+  /** Soft-probe misses. Present in headless mode; never blocks provisioning. */
+  readonly degraded?: ReadonlyArray<string>;
 };
 
 export type ThreadDesktopSession = {
@@ -55,16 +65,26 @@ export const desktopSessionForThread = (threadIdValue: string): ThreadDesktopSes
 
 export const detectDesktopCapability = async (
   executor: SandboxCommandExecutor,
+  mode: "enabled" | "disabled" = "enabled",
 ): Promise<DesktopCapability> => {
-  const missing: Array<string> = [];
-  for (const binary of REQUIRED_DESKTOP_BINARIES) {
+  const probe = async (binary: string) => {
     const result = await executor.run({
       executable: "sh",
       args: ["-lc", 'command -v -- "$1" >/dev/null 2>&1', "sh", binary],
       timeoutMs: 5_000,
     });
-    if (result.exitCode !== 0) missing.push(binary);
+    return result.exitCode === 0;
+  };
+  const missing: Array<string> = [];
+  if (mode === "disabled") {
+    for (const binary of REQUIRED_HEADLESS_BINARIES)
+      if (!(await probe(binary))) missing.push(binary);
+    const degraded: Array<string> = [];
+    for (const binary of OPTIONAL_HEADLESS_BINARIES)
+      if (!(await probe(binary))) degraded.push(binary);
+    return { ready: missing.length === 0, missing, degraded };
   }
+  for (const binary of REQUIRED_DESKTOP_BINARIES) if (!(await probe(binary))) missing.push(binary);
   return { ready: missing.length === 0, missing };
 };
 

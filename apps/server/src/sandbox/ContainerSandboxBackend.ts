@@ -296,8 +296,11 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         String(limits.memoryBytes),
         "--pids-limit",
         String(limits.processCount),
-        "--storage-opt",
-        `size=${limits.diskBytes}`,
+        // `podman --remote` rejects `--storage-opt size=`, so deployments that
+        // talk to a user socket opt out. Dropping it is safe: the container
+        // rootfs is `--read-only`, and every writable path is either a
+        // quota'd volume (/workspace, /thread-data) or a size-bounded tmpfs.
+        ...(storageQuotaDisabled() ? [] : ["--storage-opt", `size=${limits.diskBytes}`]),
         "--read-only",
         "--init",
         "--tmpfs",
@@ -381,6 +384,19 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         },
         setupTimeoutMs,
       );
+      const gitIdentity = sandboxGitIdentity();
+      if (gitIdentity !== undefined) {
+        for (const [key, value] of [
+          ["user.name", gitIdentity.name],
+          ["user.email", gitIdentity.email],
+        ] as const) {
+          await this.#mustExec(
+            containerName,
+            { executable: "git", args: ["-C", "/workspace/repo", "config", key, value] },
+            setupTimeoutMs,
+          );
+        }
+      }
       if (input.bootstrap.inheritedPatch !== undefined) {
         await this.#mustExec(
           containerName,
@@ -882,6 +898,22 @@ function makeReady(
     branchName: input.bootstrap.branchName,
     limits,
   };
+}
+
+/** `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled` omits the `--storage-opt` pair. */
+function storageQuotaDisabled(): boolean {
+  return process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA?.trim().toLowerCase() === "disabled";
+}
+
+/**
+ * Git identity for in-sandbox commits, applied locally to the cloned repo.
+ * A fresh clone inherits no identity and the container has no global config,
+ * so without this every `git commit` inside the sandbox fails.
+ */
+function sandboxGitIdentity(): { readonly name: string; readonly email: string } | undefined {
+  const name = process.env.T3_SANDBOX_GIT_USER_NAME?.trim();
+  const email = process.env.T3_SANDBOX_GIT_USER_EMAIL?.trim();
+  return name && email ? { name, email } : undefined;
 }
 
 function boundedTimeout(seconds: number | undefined, fallback: number): number {
