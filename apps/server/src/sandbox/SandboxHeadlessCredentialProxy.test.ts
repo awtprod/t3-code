@@ -226,8 +226,12 @@ describe("thread-scoped credential proxy", () => {
     expect(document.threadToken).not.toContain(SECRET);
 
     // 3. The workspace exec receives the proxy URL and the opaque thread token only.
+    // Both credential shapes are offered here, including the bearer key the
+    // proxy itself injects, to prove the host copies are dropped rather than
+    // passed through under a name the injection happens to share.
     const invocation = sandboxProviderInvocation(target, "claude", [], undefined, {
       ANTHROPIC_API_KEY: SECRET,
+      ANTHROPIC_AUTH_TOKEN: SECRET,
     });
     expect(JSON.stringify(invocation)).not.toContain(SECRET);
     expect(invocation.env.ANTHROPIC_BASE_URL).toBe(`${CREDENTIAL_PROXY_BASE_URL}/anthropic`);
@@ -238,6 +242,45 @@ describe("thread-scoped credential proxy", () => {
       expect.arrayContaining(["--env", "ANTHROPIC_BASE_URL", "--env", "ANTHROPIC_AUTH_TOKEN"]),
     );
     expect(invocation.args.join(" ")).not.toContain(document.threadToken);
+  });
+
+  it("keeps the secret out of the workspace exec when no proxy is bound", () => {
+    // The unbound path has no deletion step, so containment rests entirely on
+    // the fail-closed throw. Nothing is returned to leak.
+    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]) {
+      let leaked: string | undefined;
+      try {
+        leaked = JSON.stringify(
+          sandboxProviderInvocation(target, "claude", [], undefined, { [key]: SECRET }),
+        );
+      } catch (error) {
+        expect(String(error)).not.toContain(SECRET);
+      }
+      expect(leaked).toBeUndefined();
+    }
+  });
+
+  it("drops a host Anthropic token even when only an openai upstream is bound", async () => {
+    // An openai-only binding injects nothing for Anthropic, so a host token
+    // would survive unless persistent keys are dropped unconditionally.
+    delete process.env.T3_SANDBOX_ANTHROPIC_AUTH_TOKEN;
+    delete process.env.T3_SANDBOX_ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.T3_SANDBOX_OPENAI_API_KEY = SECRET;
+    const sidecar = new ThreadCredentialProxySidecar("podman", new FakeExecutor());
+    await sidecar.start(target.threadId, "t3-net-abc", CREDENTIAL_IMAGE, true);
+    await provisionThreadCredentialProxy(target.threadId);
+    expect(threadCredentialProxyBinding(target.threadId)!.upstreamNames).toEqual(["openai"]);
+
+    const invocation = sandboxProviderInvocation(target, "claude", [], undefined, {
+      ANTHROPIC_AUTH_TOKEN: SECRET,
+      ANTHROPIC_API_KEY: SECRET,
+    });
+    expect(JSON.stringify(invocation)).not.toContain(SECRET);
+    expect(invocation.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(invocation.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(invocation.env.OPENAI_BASE_URL).toBe(`${CREDENTIAL_PROXY_BASE_URL}/openai`);
   });
 
   it("refuses to start without the egress sidecar it must chain through", async () => {
@@ -278,21 +321,48 @@ describe("thread-scoped credential proxy", () => {
 });
 
 describe("provider spawn boundary", () => {
-  it("allows proxy env keys and still fails closed on persistent credentials", () => {
-    // No proxy binding exists for this thread, so the fail-closed throw stands.
-    expect(() =>
-      sandboxProviderInvocation(target, "claude", [], undefined, { ANTHROPIC_API_KEY: SECRET }),
-    ).toThrow("thread-scoped credential proxy");
+  it("fails closed on every persistent credential when no proxy is bound", () => {
+    // `ANTHROPIC_AUTH_TOKEN` is what `claude setup-token` mints, so a host copy
+    // of it is a real long-lived credential and must not reach the sandbox
+    // merely because the proxy path happens to set the same key name.
+    for (const key of [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "OPENAI_API_KEY",
+      "CODEX_API_KEY",
+      "CODEX_TOKEN",
+    ]) {
+      expect(() =>
+        sandboxProviderInvocation(target, "claude", [], undefined, { [key]: SECRET }),
+      ).toThrow("thread-scoped credential proxy");
+    }
+  });
+
+  it("forwards non-credential proxy env keys without a binding", () => {
+    // Base URLs carry no secret, so they are not part of the fail-closed set.
     const anthropicUrl = `${CREDENTIAL_PROXY_BASE_URL}/anthropic`;
     const openaiUrl = `${CREDENTIAL_PROXY_BASE_URL}/openai`;
     const invocation = sandboxProviderInvocation(target, "claude", [], undefined, {
       ANTHROPIC_BASE_URL: anthropicUrl,
-      ANTHROPIC_AUTH_TOKEN: "thread-token",
       OPENAI_BASE_URL: openaiUrl,
     });
     expect(invocation.env.ANTHROPIC_BASE_URL).toBe(anthropicUrl);
-    expect(invocation.env.ANTHROPIC_AUTH_TOKEN).toBe("thread-token");
     expect(invocation.env.OPENAI_BASE_URL).toBe(openaiUrl);
+  });
+
+  it("injects the thread token only on a real binding, not from host env", async () => {
+    process.env.T3_SANDBOX_ANTHROPIC_AUTH_TOKEN = SECRET;
+    const sidecar = new ThreadCredentialProxySidecar("podman", new FakeExecutor());
+    await sidecar.start(target.threadId, "t3-net-abc", CREDENTIAL_IMAGE, true);
+    await provisionThreadCredentialProxy(target.threadId);
+    const binding = threadCredentialProxyBinding(target.threadId)!;
+
+    const invocation = sandboxProviderInvocation(target, "claude", [], undefined, {});
+    expect(invocation.env.ANTHROPIC_BASE_URL).toBe(`${CREDENTIAL_PROXY_BASE_URL}/anthropic`);
+    // The injected value is the opaque per-thread token, never the real secret.
+    expect(invocation.env.ANTHROPIC_AUTH_TOKEN).toBe(binding.threadToken);
+    expect(invocation.env.ANTHROPIC_AUTH_TOKEN).not.toBe(SECRET);
   });
 
   it("substitutes the in-image command name for a host binary path", () => {

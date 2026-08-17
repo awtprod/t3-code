@@ -15,8 +15,18 @@ type SandboxProviderBinding = {
 const targets = new Map<string, SandboxProviderBinding>();
 const PROVIDER_ENV_ALLOWLIST =
   /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_TOKEN|ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|OPENAI_BASE_URL|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|LANG|LC_ALL|TERM)$/;
+/**
+ * Credentials that must never cross into a sandbox from the host environment.
+ *
+ * `ANTHROPIC_AUTH_TOKEN` belongs here even though the proxy path also sets it:
+ * it is the bearer credential Claude Code reads and exactly what
+ * `claude setup-token` mints, so a host that is configured for this feature is
+ * the most likely place for a real long-lived one to sit. The guard below runs
+ * on host-derived env only, so the proxy's opaque per-thread token is exempt by
+ * construction rather than by being absent from this list.
+ */
 const PERSISTENT_PROVIDER_CREDENTIAL =
-  /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_TOKEN)$/;
+  /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_TOKEN)$/;
 const SANDBOX_PROVIDER_ENV = {
   HOME: "/thread-data/provider-home",
   TMPDIR: "/tmp",
@@ -117,16 +127,29 @@ export function sandboxProviderInvocation(
         entry[1] !== undefined && PROVIDER_ENV_ALLOWLIST.test(entry[0]),
     ),
   );
-  // A bound proxy makes the persistent credentials redundant: they are dropped
-  // here and the CLI is redirected at the thread's credential sidecar, which
-  // holds the real secret. Without a binding the throw below still fires, so
-  // the sandbox never sees a persistent credential either way.
+  // A bound proxy makes every persistent credential redundant: the sidecar holds
+  // the real secret, so they are all dropped here regardless of which upstreams
+  // are configured. An openai-only binding must still not leak a host Anthropic
+  // token just because nothing would overwrite it.
   const proxy = threadCredentialProxyBinding(target.threadId);
-  const proxyEnvironment: Record<string, string> = {};
   if (proxy !== undefined) {
     for (const key of Object.keys(allowedEnvironment)) {
       if (PERSISTENT_PROVIDER_CREDENTIAL.test(key)) delete allowedEnvironment[key];
     }
+  }
+  // Guard the host-derived environment before proxy values are merged in. Doing
+  // it in this order is what lets the proxy inject an `ANTHROPIC_AUTH_TOKEN`
+  // without tripping a check aimed at the host's own copy of that variable.
+  const persistentCredential = Object.keys(allowedEnvironment).find((key) =>
+    PERSISTENT_PROVIDER_CREDENTIAL.test(key),
+  );
+  if (persistentCredential !== undefined) {
+    throw new Error(
+      `direct forwarding of persistent provider credential ${persistentCredential} is denied; use a thread-scoped credential proxy`,
+    );
+  }
+  const proxyEnvironment: Record<string, string> = {};
+  if (proxy !== undefined) {
     if (proxy.upstreamNames.includes("anthropic")) {
       proxyEnvironment.ANTHROPIC_BASE_URL = `${proxy.baseUrl}/anthropic`;
       proxyEnvironment.ANTHROPIC_AUTH_TOKEN = proxy.threadToken;
@@ -140,14 +163,6 @@ export function sandboxProviderInvocation(
     ...allowedEnvironment,
     ...proxyEnvironment,
   };
-  const persistentCredential = Object.keys(requestedEnvironment).find((key) =>
-    PERSISTENT_PROVIDER_CREDENTIAL.test(key),
-  );
-  if (persistentCredential !== undefined) {
-    throw new Error(
-      `direct forwarding of persistent provider credential ${persistentCredential} is denied; use a thread-scoped credential proxy`,
-    );
-  }
   const forwardedEnvironment = redeemSandboxProviderEnvironment(
     target.threadId,
     requestedEnvironment,
