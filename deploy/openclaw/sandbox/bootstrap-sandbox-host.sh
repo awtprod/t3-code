@@ -162,8 +162,9 @@ fi
 # --------------------------------------------------------------------------
 if wants_step 3; then
   say "Step 3: allocate subordinate uid/gid ranges for $SERVICE_USER"
-  # 231072 = 165536 + 65536, i.e. the next free range after the existing ccn
-  # allocation. Append only; never rewrite lines belonging to other users.
+  # 231072 = 165536 + 65536, i.e. the next free range after the last
+  # existing allocation on this host. Append only; never rewrite lines
+  # belonging to other users.
   for file in /etc/subuid /etc/subgid; do
     [ -f "$file" ] || : >"$file"
     if grep -q "^${SERVICE_USER}:" "$file"; then
