@@ -23,6 +23,10 @@ readonly SANDBOX_IMAGE_FILE=/var/lib/command-center/sandbox-storage.img
 readonly WRAPPER_DIR=/opt/command-center/bin
 readonly HELPER_DIR=/usr/local/libexec/podman
 readonly DROPIN_DIR=/etc/systemd/system/command-center.service.d
+# Referenced by the drop-in as `EnvironmentFile=-`, holds the provider token.
+# This script never creates or reads it: it is a secret, and a bootstrap script
+# that writes secrets is one that leaks them into logs and backups.
+readonly CREDENTIALS_FILE=/etc/command-center/sandbox-credentials.env
 readonly RUNTIME_SOCKET_DIR=/run/user/986/podman
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SOURCE_DIR
@@ -734,7 +738,11 @@ if wants_step 9; then
     # Never clobber a drop-in the operator may have already activated. Silently
     # re-commenting a live production config would be an outage delivered by a
     # script that reported success.
-    if grep -Eq '^[[:space:]]*(Environment=)?T3_SANDBOX_[A-Z_]+=' "${DROPIN_DIR}/50-sandbox.conf"; then
+    # EnvironmentFile= counts as active too: an operator who has wired up the
+    # credential file but not yet uncommented the images is mid-rollout, and
+    # overwriting that is the same outage as overwriting a finished one.
+    if grep -Eq '^[[:space:]]*((Environment=)?T3_SANDBOX_[A-Z_]+=|EnvironmentFile=|ReadWritePaths=)' \
+      "${DROPIN_DIR}/50-sandbox.conf"; then
       warn "${DROPIN_DIR}/50-sandbox.conf exists and has ACTIVE sandbox settings."
       warn "Leaving it untouched. Reconcile it by hand against"
       warn "${SOURCE_DIR}/50-sandbox.conf if this release changed the template."
@@ -774,6 +782,14 @@ and uncomment the settings there.
   >>> 'docker', never invokes ${WRAPPER_DIR}/podman,   <<<
   >>> and lands on the rootful daemon it cannot use. Set the runtime <<<
   >>> and the two images together, never the images alone.           <<<
+
+  >>> AND: set T3_SANDBOX_CREDENTIAL_PROXY_IMAGE plus                <<<
+  >>> T3_SANDBOX_EGRESS_PROXY_IMAGE and write the credential file    <<<
+  >>> ${CREDENTIALS_FILE}.       <<<
+  >>> Without them every thread provisions a container and then      <<<
+  >>> fails at provider spawn: the server refuses to hand its own    <<<
+  >>> credentials to a sandbox. This script does NOT create that     <<<
+  >>> file -- it holds a secret and is yours to write (mode 0600).   <<<
 
 Read docs/operations/sandbox-host.md before flipping it. Rollback is
 re-commenting the two image lines and restarting the service.

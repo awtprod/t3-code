@@ -138,19 +138,87 @@ against `/usr/bin/podman` directly, proves nothing.
 Any failure aborts with a diagnostic naming the likely cause. Do not proceed to
 section 6 with a failing verification.
 
-## 5. Building the images
+## 5. Building the images, and the credential the sandbox runs on
 
-Sandboxing needs two images at minimum, both pinned by sha256 digest — the
-backend rejects tags. Build them with:
+### 5a. Images
+
+The build produces exactly **two** images, both pinned by sha256 digest (the
+backend rejects tags):
 
 ```sh
 deploy/openclaw/sandbox-image/build-sandbox-images.sh
 ```
 
-Record the resulting digests; they go into the drop-in in the next section. The
-egress proxy image is optional but recommended: without it the workspace
-container has whatever egress the internal network provides, rather than a
-policy-enforcing proxy.
+- `localhost/t3/sandbox-workspace-headless@sha256:…` → `T3_SANDBOX_IMAGE`
+- `localhost/t3/sandbox-sidecar@sha256:…` → **all three** of
+  `T3_SANDBOX_PREVIEW_PROXY_IMAGE`, `T3_SANDBOX_EGRESS_PROXY_IMAGE`, and
+  `T3_SANDBOX_CREDENTIAL_PROXY_IMAGE`
+
+One sidecar image serves all three roles; the server selects the binary through
+the container argv. **There is no separate credential-proxy build output** — do
+not go hunting for a third digest. Note the script prints only the workspace,
+preview and egress lines, so the credential line has to be copied across by hand.
+
+### 5b. The provider credential
+
+A sandboxed thread has no provider credentials of its own, and the server will
+not lend it the host's. `SandboxProviderProcess` strips any persistent provider
+credential from the child environment and throws:
+
+```
+direct forwarding of persistent provider credential <NAME> is denied;
+use a thread-scoped credential proxy
+```
+
+**This is deliberate fail-closed behaviour, not a bug to work around.** Setting a
+host-level `ANTHROPIC_API_KEY` on the service does not help — it is exactly what
+that check rejects. The supported path is the credential proxy sidecar, which
+holds the secret and injects it per request so the token never enters the
+container.
+
+Two consequences to plan for:
+
+- **The credential proxy makes egress mandatory.** `ThreadCredentialProxySidecar.start()`
+  refuses to start without it. Egress is optional _only_ while the credential
+  proxy is unset — which is to say, only while no thread can do any work.
+- **If `T3_SANDBOX_CREDENTIAL_PROXY_IMAGE` is unset, no sidecar starts**, no proxy
+  binding is created, and every provider spawn fails with the error above. On a
+  host that has already flipped the one-way switch, that is total loss of service.
+
+Mint a long-lived token as the identity the server should act as:
+
+```sh
+claude setup-token
+```
+
+Write it to a **root-owned 0600 file** — never into `50-sandbox.conf`, which is
+installed world-readable (0644) and tracked in git:
+
+```sh
+sudo install -d -o root -g root -m 0755 /etc/command-center
+sudo install -o root -g root -m 0600 /dev/null /etc/command-center/sandbox-credentials.env
+sudo "${EDITOR:-vi}" /etc/command-center/sandbox-credentials.env
+```
+
+One line, no `Environment=` prefix and no quotes (systemd would take the quotes
+as part of the value):
+
+```
+T3_SANDBOX_ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-…
+```
+
+`T3_SANDBOX_ANTHROPIC_API_KEY` works as an alternative if you have a plain API
+key rather than a subscription token; the proxy sends it as `x-api-key` instead
+of a bearer. The bootstrap script never creates, reads, or rewrites this file.
+
+**Rotation** is editing the file and restarting the service. Slice 2 re-resolves
+the secret per session, so no thread state is involved and nothing needs
+migrating:
+
+```sh
+sudo "${EDITOR:-vi}" /etc/command-center/sandbox-credentials.env
+sudo systemctl restart command-center.service
+```
 
 ## 6. The production flip
 
@@ -160,7 +228,8 @@ policy-enforcing proxy.
 > fallback is gone and **every new thread on this host** must successfully
 > provision a container or it cannot start at all. A bad digest, an unreachable
 > registry, or a podman socket that failed to come back after a reboot then means
-> no thread can start work.
+> no thread can start work. A missing credential proxy has the same effect one
+> step later: the container starts and the provider refuses to spawn.
 
 Canary on a scratch instance first — never flip production blind.
 
@@ -173,12 +242,21 @@ shares the host and the container runtime but none of the production state:
 sudo -u commandcenter env HOME=/var/lib/command-center \
   PATH=/opt/command-center/bin:/usr/local/bin:/usr/bin:/bin \
   T3_SANDBOX_RUNTIME=podman \
-  T3_SANDBOX_IMAGE=localhost/t3-sandbox@sha256:… \
-  T3_SANDBOX_PREVIEW_PROXY_IMAGE=localhost/t3-preview-proxy@sha256:… \
+  T3_SANDBOX_IMAGE=localhost/t3/sandbox-workspace-headless@sha256:… \
+  T3_SANDBOX_PREVIEW_PROXY_IMAGE=localhost/t3/sandbox-sidecar@sha256:… \
+  T3_SANDBOX_CREDENTIAL_PROXY_IMAGE=localhost/t3/sandbox-sidecar@sha256:… \
+  T3_SANDBOX_EGRESS_PROXY_IMAGE=localhost/t3/sandbox-sidecar@sha256:… \
+  T3_SANDBOX_ANTHROPIC_AUTH_TOKEN="$(sudo sed -n 's/^T3_SANDBOX_ANTHROPIC_AUTH_TOKEN=//p' \
+    /etc/command-center/sandbox-credentials.env)" \
   T3_SANDBOX_DESKTOP=disabled \
   /usr/local/bin/node /opt/command-center/current/apps/server/dist/bin.mjs serve \
     --base-dir /var/lib/command-center/canary --port 3899 --host 127.0.0.1 --no-browser
 ```
+
+The last three sidecar digests are the same value — see section 5a. The canary is
+where you find out whether the credential path works, so do not skip the token:
+without it the containers come up and the first turn dies at provider spawn,
+which is precisely the failure the canary exists to catch.
 
 Create a thread, run a turn end to end, and confirm from the host that the
 containers exist:
@@ -203,10 +281,21 @@ Edit `/etc/systemd/system/command-center.service.d/50-sandbox.conf` and uncommen
   The server defaults to `docker`, never invokes the wrapper, and lands on the
   rootful daemon it cannot use. Set it together with the images, never after.
 - `Environment=T3_SANDBOX_IMAGE=…` and
-  `Environment=T3_SANDBOX_PREVIEW_PROXY_IMAGE=…` with the digests from section 5.
-- Optionally `T3_SANDBOX_EGRESS_PROXY_IMAGE`, `T3_SANDBOX_ARTIFACT_DIR`,
-  `T3_SANDBOX_DESKTOP=disabled`, `T3_SANDBOX_GIT_USER_NAME`,
-  `T3_SANDBOX_GIT_USER_EMAIL`.
+  `Environment=T3_SANDBOX_PREVIEW_PROXY_IMAGE=…` with the digests from section 5a.
+- `Environment=T3_SANDBOX_CREDENTIAL_PROXY_IMAGE=…` and
+  `Environment=T3_SANDBOX_EGRESS_PROXY_IMAGE=…` — **not optional.** Both carry the
+  same sidecar digest as the preview proxy. Without the credential proxy every
+  thread fails at provider spawn; the credential proxy in turn refuses to start
+  without egress.
+- `EnvironmentFile=-/etc/command-center/sandbox-credentials.env` — the token from
+  section 5b. Safe to uncomment before the file exists (the `-` prefix keeps the
+  unit starting).
+- Optionally `T3_SANDBOX_ARTIFACT_DIR`, `T3_SANDBOX_DESKTOP=disabled`,
+  `T3_SANDBOX_GIT_USER_NAME`, `T3_SANDBOX_GIT_USER_EMAIL`.
+
+The minimum working set is **five `Environment=` lines plus the credential
+file**, not two. Uncommenting only the two images produces a host where every
+thread provisions a container and then cannot run its provider.
 
 Disabling the desktop stack for the first flip is recommended; it removes a large
 moving part from the critical path of starting a thread.
@@ -238,6 +327,14 @@ Rollback does not need the runtime uninstalled. Leave podman, the mount, and the
 socket alone; they cost nothing while unused and make the next attempt cheap.
 
 ## 8. Known caveats
+
+**"direct forwarding of persistent provider credential … is denied" means the
+credential proxy is off, not that the credential is wrong.** Containers start,
+the thread looks healthy, and the turn dies at provider spawn. Check
+`T3_SANDBOX_CREDENTIAL_PROXY_IMAGE` is set, `T3_SANDBOX_EGRESS_PROXY_IMAGE` is
+set alongside it, and the credential file is present and non-empty. Do not
+"fix" it by exporting a provider key into the service environment — that is the
+condition the error is reporting.
 
 **A server restart fail-closes running sandboxes.** The backend deliberately
 refuses to adopt containers discovered after a restart: a running workspace label
