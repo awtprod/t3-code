@@ -7,6 +7,7 @@ import type {
   SandboxUsageSample,
   SandboxExecInput,
   SandboxCommandResult,
+  SandboxCommandExecutor,
 } from "./types.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -23,6 +24,10 @@ import { ThreadServiceStackRuntime, type ThreadServiceDeclaration } from "./Thre
 import { ThreadCredentialBroker } from "./CredentialBroker.ts";
 import { desktopGateway } from "./DesktopGatewayService.ts";
 import { ThreadPreviewProxy } from "./ThreadPreviewProxy.ts";
+import {
+  resolveSandboxCredentialProxyImage,
+  ThreadCredentialProxySidecar,
+} from "./SandboxCredentialProxy.ts";
 import { ServerConfig } from "../config.ts";
 
 const credentialBroker = new ThreadCredentialBroker();
@@ -45,6 +50,36 @@ export function resolveSandboxPreviewProxyImage(): string | undefined {
   return image ? image : undefined;
 }
 
+/**
+ * Deployment default for the container runtime binary.
+ *
+ * `sandboxConfig.runtime` is a valid contract field but no client populates it,
+ * so without this the reactor's `?? "docker"` fallback is the only reachable
+ * value and a podman-only host can never be selected. Returns the raw value
+ * rather than narrowing it: the caller's existing docker/podman check then
+ * rejects a typo loudly instead of silently routing threads at the wrong
+ * runtime. Unset yields "docker", so nothing changes by default.
+ */
+export function resolveSandboxRuntime(): string {
+  const configured = process.env.T3_SANDBOX_RUNTIME?.trim().toLowerCase();
+  return configured ? configured : "docker";
+}
+
+/**
+ * Deployment-level desktop gate. `T3_SANDBOX_DESKTOP=disabled` runs sandboxes
+ * headless: no X server, no WebRTC streaming, no automation target. Defaults to
+ * "enabled" so nothing changes for deployments that never set the variable.
+ *
+ * This is intentionally an env var rather than `sandboxConfig.desktop`, which
+ * is declared in contracts but read by nothing — the choice is a property of
+ * the host image, not of a project.
+ */
+export function resolveSandboxDesktopMode(): "enabled" | "disabled" {
+  return process.env.T3_SANDBOX_DESKTOP?.trim().toLowerCase() === "disabled"
+    ? "disabled"
+    : "enabled";
+}
+
 /** One-shot credential boundary used immediately before provider process spawn. */
 export function redeemSandboxProviderEnvironment(
   threadId: string,
@@ -62,8 +97,9 @@ export function redeemSandboxProviderEnvironment(
 }
 
 export type ManagedSandboxReady = SandboxReady & {
-  readonly desktopSessionId: string;
-  readonly desktopStreamPath: string;
+  /** Absent when the deployment runs headless (`T3_SANDBOX_DESKTOP=disabled`). */
+  readonly desktopSessionId?: string;
+  readonly desktopStreamPath?: string;
   readonly services: ReadonlyArray<{
     readonly name: string;
     readonly internalPorts: ReadonlyArray<number>;
@@ -112,11 +148,16 @@ export class SandboxManagerError extends Schema.TaggedErrorClass<SandboxManagerE
   },
 ) {}
 
-const makeManager = (
+/**
+ * Builds a manager over a command executor. Tests supply their own executor to
+ * observe the exact runtime invocations without launching containers.
+ */
+export const makeSandboxRuntimeManager = (
   artifactRoot: string | undefined,
   platform: NodeJS.Platform,
+  commandExecutor?: SandboxCommandExecutor,
 ): SandboxRuntimeManagerShape => {
-  const executor = new NodeSandboxCommandExecutor(platform);
+  const executor = commandExecutor ?? new NodeSandboxCommandExecutor(platform);
   const runtimes = new Map<
     "docker" | "podman",
     {
@@ -124,6 +165,7 @@ const makeManager = (
       desktop: ThreadDesktopRuntime;
       services: ThreadServiceStackRuntime;
       previews: ThreadPreviewProxy;
+      credentials: ThreadCredentialProxySidecar;
     }
   >();
   const teardownHooks = new Map<string, NonNullable<SandboxProvisionInput["teardown"]>>();
@@ -136,6 +178,7 @@ const makeManager = (
       desktop: new ThreadDesktopRuntime(backend),
       services: new ThreadServiceStackRuntime(runtime, executor),
       previews: new ThreadPreviewProxy(runtime, executor, desktopGateway.previews),
+      credentials: new ThreadCredentialProxySidecar(runtime, executor),
     };
     runtimes.set(runtime, value);
     return value;
@@ -279,6 +322,27 @@ const makeManager = (
         ),
       );
       desktopGateway.setPreviewProxy(managed.previews);
+      const credentialImage = resolveSandboxCredentialProxyImage();
+      if (credentialImage !== undefined) {
+        yield* attempt(() =>
+          managed.credentials.start(
+            input.bootstrap.threadId,
+            ready.networkName,
+            credentialImage,
+            input.egressProxyImage !== undefined || input.egressProxyUrl !== undefined,
+          ),
+        ).pipe(
+          Effect.tapError(() =>
+            Effect.promise(async () => {
+              await managed.credentials.stop(input.bootstrap.threadId);
+              await managed.previews.stop(input.bootstrap.threadId);
+              await managed.services.stop(input.bootstrap.threadId);
+              teardownHooks.delete(input.bootstrap.threadId);
+              await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
+            }),
+          ),
+        );
+      }
       for (const port of input.previewPorts ?? []) {
         desktopGateway.registerPreviewRoute({
           routeId: `${NodeCrypto.createHash("sha256").update(`${input.bootstrap.threadId}\0${port}`).digest("hex").slice(0, 24)}`,
@@ -288,32 +352,42 @@ const makeManager = (
           token: NodeCrypto.randomBytes(32).toString("base64url"),
         });
       }
-      const desktop = yield* attempt(() =>
-        managed.desktop.start(
+      // Headless deployments stop here: no desktop runtime, no automation
+      // target. The preview sidecar above still runs, since preview routing is
+      // independent of the streamed desktop.
+      const desktop =
+        resolveSandboxDesktopMode() === "disabled"
+          ? undefined
+          : yield* attempt(() =>
+              managed.desktop.start(
+                input.bootstrap.threadId,
+                desktopGateway.bridge(input.bootstrap.threadId),
+                managed.previews.internalSignalingOrigin(input.bootstrap.threadId),
+              ),
+            ).pipe(
+              Effect.tapError(() =>
+                Effect.promise(async () => {
+                  await managed.credentials.stop(input.bootstrap.threadId);
+                  await managed.services.stop(input.bootstrap.threadId);
+                  await managed.previews.stop(input.bootstrap.threadId);
+                  teardownHooks.delete(input.bootstrap.threadId);
+                  await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
+                }),
+              ),
+            );
+      if (desktop !== undefined) {
+        const automation = managed.desktop.automationTarget(input.bootstrap.threadId);
+        desktopGateway.setAutomationTarget(
           input.bootstrap.threadId,
-          desktopGateway.bridge(input.bootstrap.threadId),
-          managed.previews.internalSignalingOrigin(input.bootstrap.threadId),
-        ),
-      ).pipe(
-        Effect.tapError(() =>
-          Effect.promise(async () => {
-            await managed.services.stop(input.bootstrap.threadId);
-            await managed.previews.stop(input.bootstrap.threadId);
-            teardownHooks.delete(input.bootstrap.threadId);
-            await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
-          }),
-        ),
-      );
-      const automation = managed.desktop.automationTarget(input.bootstrap.threadId);
-      desktopGateway.setAutomationTarget(
-        input.bootstrap.threadId,
-        ready.containerName,
-        automation.profilePath,
-      );
+          ready.containerName,
+          automation.profilePath,
+        );
+      }
       return {
         ...ready,
-        desktopSessionId: desktop.sessionId,
-        desktopStreamPath: desktop.signalingPath,
+        ...(desktop === undefined
+          ? {}
+          : { desktopSessionId: desktop.sessionId, desktopStreamPath: desktop.signalingPath }),
         services: services.map((service) => ({
           name: service.hostname,
           internalPorts: service.internalPorts,
@@ -359,7 +433,9 @@ const makeManager = (
       }),
     stop: Effect.fn("SandboxRuntimeManager.stop")(function* (runtime, threadId) {
       const managed = get(runtime);
-      yield* Effect.promise(() => managed.desktop.stop(threadId));
+      if (resolveSandboxDesktopMode() !== "disabled")
+        yield* Effect.promise(() => managed.desktop.stop(threadId));
+      yield* Effect.promise(() => managed.credentials.stop(threadId));
       yield* Effect.promise(() => managed.previews.stop(threadId));
       yield* Effect.promise(() => managed.services.stop(threadId));
       credentialBroker.revokeThread(threadId);
@@ -371,7 +447,15 @@ const makeManager = (
       attempt(async () => {
         const managed = get(runtime);
         const result = await managed.backend.reconcile({ expectedThreadIds, removeOrphans: true });
+        const headless = resolveSandboxDesktopMode() === "disabled";
         for (const threadId of result.activeThreadIds) {
+          await managed.credentials.recover(threadId);
+          // Headless threads have no desktop to recover, and marking them as
+          // capability failures would report a desktop that was never started.
+          if (headless) {
+            await managed.previews.recover(threadId);
+            continue;
+          }
           const desktop = await managed.desktop.recover(threadId);
           if (desktop === null) {
             desktopGateway.setCapabilityFailure(threadId, ["desktop-session"]);
@@ -412,7 +496,7 @@ const makeManager = (
 };
 
 const configuredArtifactRoot = process.env.T3_SANDBOX_ARTIFACT_DIR;
-const defaultManager = makeManager(
+const defaultManager = makeSandboxRuntimeManager(
   configuredArtifactRoot === undefined ? undefined : NodePath.resolve(configuredArtifactRoot),
   Effect.runSync(HostProcessPlatform),
 );
@@ -426,6 +510,9 @@ export const SandboxRuntimeManagerLive = Layer.effect(
   Effect.gen(function* () {
     const config = yield* ServerConfig;
     const platform = yield* HostProcessPlatform;
-    return makeManager(NodePath.resolve(config.stateDir, "sandbox-artifacts"), platform);
+    return makeSandboxRuntimeManager(
+      NodePath.resolve(config.stateDir, "sandbox-artifacts"),
+      platform,
+    );
   }),
 );

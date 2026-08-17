@@ -19,6 +19,7 @@ import {
 import * as HttpIncomingMessage from "effect/unstable/http/HttpIncomingMessage";
 import { authenticateRawRouteWithScope } from "../http.ts";
 import { desktopGateway } from "./DesktopGatewayService.ts";
+import { resolveSandboxDesktopMode } from "./SandboxRuntimeManager.ts";
 import { ServerConfig } from "../config.ts";
 import * as NodePath from "node:path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -38,8 +39,16 @@ export const desktopHttpRouteLayer = HttpRouter.add(
     const gateway = desktopGateway;
     if (action === "status") {
       yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
-      return HttpServerResponse.jsonUnsafe(gateway.status(threadId));
+      // Headless deployments have no desktop to report on; say so plainly
+      // rather than leaving clients polling a readiness that never arrives.
+      return HttpServerResponse.jsonUnsafe(
+        resolveSandboxDesktopMode() === "disabled"
+          ? { ...gateway.status(threadId), ready: false, readiness: "unavailable" as const }
+          : gateway.status(threadId),
+      );
     }
+    if (resolveSandboxDesktopMode() === "disabled" && action === "view")
+      return HttpServerResponse.text("Desktop is disabled on this deployment", { status: 409 });
     if (action === "automation-target") {
       yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
       const target = gateway.automationTarget(threadId);
@@ -82,6 +91,8 @@ export const desktopSignalHttpRouteLayer = HttpRouter.add(
     if (!threadId) return HttpServerResponse.text("Not Found", { status: 404 });
     if (action === "viewer-ticket") {
       yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+      if (resolveSandboxDesktopMode() === "disabled")
+        return HttpServerResponse.text("Desktop is disabled on this deployment", { status: 409 });
       const issued = desktopGateway.issueViewerTicket(threadId);
       const viewerUrl = `${prefix}${threadId}/view?ticket=${encodeURIComponent(issued.ticket)}`;
       return HttpServerResponse.jsonUnsafe(

@@ -5,6 +5,7 @@ import { ChildProcess as EffectChildProcess, ChildProcessSpawner } from "effect/
 import * as Effect from "effect/Effect";
 import type { SandboxExecutionTarget } from "./ThreadSandboxRuntime.ts";
 import { redeemSandboxProviderEnvironment } from "./SandboxRuntimeManager.ts";
+import { threadCredentialProxyBinding } from "./SandboxCredentialProxy.ts";
 
 export type SandboxProviderBindingOwner = symbol;
 type SandboxProviderBinding = {
@@ -13,7 +14,7 @@ type SandboxProviderBinding = {
 };
 const targets = new Map<string, SandboxProviderBinding>();
 const PROVIDER_ENV_ALLOWLIST =
-  /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_TOKEN|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|LANG|LC_ALL|TERM)$/;
+  /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_TOKEN|ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|OPENAI_BASE_URL|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|LANG|LC_ALL|TERM)$/;
 const PERSISTENT_PROVIDER_CREDENTIAL =
   /^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|CODEX_API_KEY|CODEX_TOKEN)$/;
 const SANDBOX_PROVIDER_ENV = {
@@ -21,6 +22,24 @@ const SANDBOX_PROVIDER_ENV = {
   TMPDIR: "/tmp",
   USER: "sandbox",
 } as const;
+const IN_IMAGE_PROVIDER_COMMANDS = ["claude", "codex"] as const;
+
+/**
+ * Maps a host-resolved provider binary onto its in-image command name.
+ *
+ * Provider spawn inside a sandbox goes through `podman exec`, so a host path
+ * like `/usr/local/bin/claude` or an nvm shim does not exist in the image.
+ * Only the basename is inspected, and only for the providers the image ships;
+ * anything else is passed through untouched so the exec fails loudly rather
+ * than silently running the wrong program.
+ */
+export function inImageProviderCommand(command: string): string {
+  const basename = command.split("/").pop() ?? command;
+  const match = IN_IMAGE_PROVIDER_COMMANDS.find(
+    (candidate) => basename === candidate || basename === `${candidate}.js`,
+  );
+  return match ?? command;
+}
 
 export function makeSandboxProviderBindingOwner(): SandboxProviderBindingOwner {
   return Symbol("sandbox-provider-binding-owner");
@@ -92,14 +111,34 @@ export function sandboxProviderInvocation(
   env: Readonly<Record<string, string | undefined>>,
 ) {
   void cwd;
+  const allowedEnvironment = Object.fromEntries(
+    Object.entries(env).filter(
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined && PROVIDER_ENV_ALLOWLIST.test(entry[0]),
+    ),
+  );
+  // A bound proxy makes the persistent credentials redundant: they are dropped
+  // here and the CLI is redirected at the thread's credential sidecar, which
+  // holds the real secret. Without a binding the throw below still fires, so
+  // the sandbox never sees a persistent credential either way.
+  const proxy = threadCredentialProxyBinding(target.threadId);
+  const proxyEnvironment: Record<string, string> = {};
+  if (proxy !== undefined) {
+    for (const key of Object.keys(allowedEnvironment)) {
+      if (PERSISTENT_PROVIDER_CREDENTIAL.test(key)) delete allowedEnvironment[key];
+    }
+    if (proxy.upstreamNames.includes("anthropic")) {
+      proxyEnvironment.ANTHROPIC_BASE_URL = `${proxy.baseUrl}/anthropic`;
+      proxyEnvironment.ANTHROPIC_AUTH_TOKEN = proxy.threadToken;
+    }
+    if (proxy.upstreamNames.includes("openai")) {
+      proxyEnvironment.OPENAI_BASE_URL = `${proxy.baseUrl}/openai`;
+    }
+  }
   const requestedEnvironment = {
     ...SANDBOX_PROVIDER_ENV,
-    ...Object.fromEntries(
-      Object.entries(env).filter(
-        (entry): entry is [string, string] =>
-          entry[1] !== undefined && PROVIDER_ENV_ALLOWLIST.test(entry[0]),
-      ),
-    ),
+    ...allowedEnvironment,
+    ...proxyEnvironment,
   };
   const persistentCredential = Object.keys(requestedEnvironment).find((key) =>
     PERSISTENT_PROVIDER_CREDENTIAL.test(key),
@@ -115,7 +154,7 @@ export function sandboxProviderInvocation(
   );
   return {
     executable: target.runtime,
-    args: execArgs(target, command, args, cwd, forwardedEnvironment),
+    args: execArgs(target, inImageProviderCommand(command), args, cwd, forwardedEnvironment),
     env: { PATH: process.env.PATH, ...forwardedEnvironment } as Record<string, string | undefined>,
   } as const;
 }

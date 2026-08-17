@@ -1,10 +1,14 @@
+import * as Effect from "effect/Effect";
 import type { ThreadSandboxBackend } from "./types.ts";
 import {
+  OPTIONAL_HEADLESS_BINARIES,
   REQUIRED_DESKTOP_BINARIES,
+  REQUIRED_HEADLESS_BINARIES,
   desktopSessionForThread,
   type DesktopCapability,
   type ThreadDesktopSession,
 } from "./DesktopSession.ts";
+import { resolveSandboxDesktopMode } from "./SandboxRuntimeManager.ts";
 
 export class ThreadDesktopRuntime {
   readonly #backend: ThreadSandboxBackend;
@@ -15,9 +19,8 @@ export class ThreadDesktopRuntime {
   }
 
   async detect(threadId: string): Promise<DesktopCapability> {
-    const missing: Array<string> = [];
-    for (const binary of REQUIRED_DESKTOP_BINARIES) {
-      const available = await this.#backend
+    const probe = (binary: string) =>
+      this.#backend
         .exec(threadId, {
           executable: "sh",
           args: ["-lc", 'command -v -- "$1" >/dev/null 2>&1', "sh", binary],
@@ -27,8 +30,23 @@ export class ThreadDesktopRuntime {
           () => true,
           () => false,
         );
-      if (!available) missing.push(binary);
+    const missing: Array<string> = [];
+    if (resolveSandboxDesktopMode() === "disabled") {
+      for (const binary of REQUIRED_HEADLESS_BINARIES)
+        if (!(await probe(binary))) missing.push(binary);
+      const degraded: Array<string> = [];
+      for (const binary of OPTIONAL_HEADLESS_BINARIES)
+        if (!(await probe(binary))) degraded.push(binary);
+      // Provider CLIs are soft requirements: a missing one degrades the thread
+      // rather than failing provisioning, so it is reported, not thrown.
+      if (degraded.length > 0)
+        Effect.runFork(
+          Effect.logWarning("Sandbox image is missing provider CLIs", { threadId, degraded }),
+        );
+      return { ready: missing.length === 0, missing, degraded };
     }
+    for (const binary of REQUIRED_DESKTOP_BINARIES)
+      if (!(await probe(binary))) missing.push(binary);
     return { ready: missing.length === 0, missing };
   }
 

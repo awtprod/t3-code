@@ -76,6 +76,7 @@ import {
   SandboxRuntimeManager,
   resolveSandboxImage,
   resolveSandboxPreviewProxyImage,
+  resolveSandboxRuntime,
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import {
   T3ProjectFileLoader,
@@ -414,7 +415,8 @@ export const make = Effect.gen(function* () {
             }
             return { kind: "legacy-host", cwd: legacyCwd } as const;
           }
-          const runtime = thread.sandboxConfig?.runtime ?? "docker";
+          // Per-thread config wins, then the deployment default, then docker.
+          const runtime = thread.sandboxConfig?.runtime ?? resolveSandboxRuntime();
           if (runtime !== "docker" && runtime !== "podman") {
             return yield* new ProviderAdapterRequestError({
               provider: "sandbox",
