@@ -2081,6 +2081,37 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          {...searchableSetting("worktree-cleanup")}
+          description="Prune build artifacts and remove worktrees for threads idle 7+ days, once local changes are pushed."
+          resetAction={
+            settings.worktreeCleanupAfterDays !==
+            DEFAULT_UNIFIED_SETTINGS.worktreeCleanupAfterDays ? (
+              <SettingResetButton
+                label="inactive worktree cleanup"
+                onClick={() =>
+                  updateSettings({
+                    worktreeCleanupAfterDays: DEFAULT_UNIFIED_SETTINGS.worktreeCleanupAfterDays,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.worktreeCleanupAfterDays !== null}
+              onCheckedChange={(checked) =>
+                updateSettings({
+                  worktreeCleanupAfterDays: checked
+                    ? (DEFAULT_UNIFIED_SETTINGS.worktreeCleanupAfterDays ?? 7)
+                    : null,
+                })
+              }
+              aria-label="Clean up inactive worktrees"
+            />
+          }
+        />
+
+        <SettingsRow
           {...searchableSetting("archive-confirmation")}
           description="Require a second click on the inline archive action before a thread is archived."
           resetAction={

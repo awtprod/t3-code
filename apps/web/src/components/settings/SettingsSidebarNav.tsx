@@ -10,6 +10,7 @@ import {
 import {
   ArchiveIcon,
   ArrowLeftIcon,
+  BellIcon,
   BotIcon,
   DatabaseIcon,
   ChartNoAxesCombinedIcon,
@@ -62,6 +63,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/source-control": GitBranchIcon,
   "/settings/databases": DatabaseIcon,
   "/settings/connections": Link2Icon,
+  "/settings/notifications": BellIcon,
   "/settings/beta": FlaskConicalIcon,
   "/settings/archived": ArchiveIcon,
 };

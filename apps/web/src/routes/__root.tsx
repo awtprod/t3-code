@@ -20,6 +20,8 @@ import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstall
 import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPromptDialog";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
 import { SlowRpcRequestToastCoordinator } from "../components/SlowRpcRequestToastCoordinator";
+import { WorktreeCleanupToastCoordinator } from "../components/WorktreeCleanupToastCoordinator";
+import { AgentActivityNotifications } from "../notifications/AgentActivityNotifications";
 import { ThemeEditorHost } from "../components/settings/ThemeEditorHost";
 import { Button } from "../components/ui/button";
 import {
@@ -138,6 +140,8 @@ function RootRouteView() {
         <SshPasswordPromptDialog />
         <ConfirmDialogHost />
         <SlowRpcRequestToastCoordinator />
+        <WorktreeCleanupToastCoordinator />
+        <AgentActivityNotifications />
         <HostedStaticEnvironmentBootstrap />
         {primaryEnvironmentAuthenticated ? <EventRouter /> : null}
         {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}

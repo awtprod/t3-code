@@ -450,6 +450,29 @@ export const ServerSignalProcessResult = Schema.Struct({
 });
 export type ServerSignalProcessResult = typeof ServerSignalProcessResult.Type;
 
+export const WorktreeCleanupNoticeReason = Schema.Literals([
+  "local-changes",
+  "local-files",
+  "no-upstream",
+  "unpushed-commits",
+  "inspection-failed",
+  "removal-failed",
+]);
+export type WorktreeCleanupNoticeReason = typeof WorktreeCleanupNoticeReason.Type;
+
+// Surfaced instead of removing the worktree: something about it needs a
+// human's attention (uncommitted work, nothing to push to, or the inspection
+// itself failed) before it's safe to retire.
+export const WorktreeCleanupNotice = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  worktreePath: TrimmedNonEmptyString,
+  projectTitle: TrimmedNonEmptyString,
+  branch: Schema.NullOr(TrimmedNonEmptyString),
+  reason: WorktreeCleanupNoticeReason,
+  createdAt: IsoDateTime,
+});
+export type WorktreeCleanupNotice = typeof WorktreeCleanupNotice.Type;
+
 export const ServerConfig = Schema.Struct({
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
@@ -472,6 +495,9 @@ export const ServerConfig = Schema.Struct({
   // dialling the dev server's port directly and fail if that is unreachable.
   previewGateway: Schema.optionalKey(ServerPreviewGateway),
   settings: ServerSettings,
+  // Absent on servers whose worktree cleanup sweep hasn't run yet, or that
+  // predate the feature.
+  worktreeCleanupNotices: Schema.optionalKey(Schema.Array(WorktreeCleanupNotice)),
   /** Whether shell subscriptions can emit an opt-in catch-up completion marker. */
   shellResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),
   /** Whether thread subscriptions can emit an opt-in catch-up completion marker. */
@@ -566,11 +592,26 @@ export const ServerConfigStreamSettingsUpdatedEvent = Schema.Struct({
 export type ServerConfigStreamSettingsUpdatedEvent =
   typeof ServerConfigStreamSettingsUpdatedEvent.Type;
 
+export const ServerConfigWorktreeCleanupUpdatedPayload = Schema.Struct({
+  notices: Schema.Array(WorktreeCleanupNotice),
+});
+export type ServerConfigWorktreeCleanupUpdatedPayload =
+  typeof ServerConfigWorktreeCleanupUpdatedPayload.Type;
+
+export const ServerConfigStreamWorktreeCleanupUpdatedEvent = Schema.Struct({
+  version: Schema.Literal(1),
+  type: Schema.Literal("worktreeCleanupUpdated"),
+  payload: ServerConfigWorktreeCleanupUpdatedPayload,
+});
+export type ServerConfigStreamWorktreeCleanupUpdatedEvent =
+  typeof ServerConfigStreamWorktreeCleanupUpdatedEvent.Type;
+
 export const ServerConfigStreamEvent = Schema.Union([
   ServerConfigStreamSnapshotEvent,
   ServerConfigStreamKeybindingsUpdatedEvent,
   ServerConfigStreamProviderStatusesEvent,
   ServerConfigStreamSettingsUpdatedEvent,
+  ServerConfigStreamWorktreeCleanupUpdatedEvent,
 ]);
 export type ServerConfigStreamEvent = typeof ServerConfigStreamEvent.Type;
 

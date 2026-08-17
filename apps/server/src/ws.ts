@@ -103,6 +103,7 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as WorktreeCleanup from "./worktreeCleanup.ts";
 import { resolveInteractiveEfficiency } from "./efficiency/EfficiencyRouting.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -417,6 +418,7 @@ const makeWsRpcLayer = (
       const config = yield* ServerConfig.ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const worktreeCleanup = yield* Effect.serviceOption(WorktreeCleanup.WorktreeCleanup);
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -1221,6 +1223,10 @@ const makeWsRpcLayer = (
           shellResumeCompletionMarker: true,
           threadResumeCompletionMarker: true,
           threadSnapshotPagination: true,
+          worktreeCleanupNotices: yield* Option.match(worktreeCleanup, {
+            onNone: () => Effect.succeed([]),
+            onSome: (cleanup) => cleanup.notices,
+          }),
         };
       });
 
@@ -2900,6 +2906,17 @@ const makeWsRpcLayer = (
                   payload: { settings },
                 })),
               );
+              const worktreeCleanupUpdates = Option.match(worktreeCleanup, {
+                onNone: () => Stream.empty,
+                onSome: (cleanup) =>
+                  cleanup.noticeChanges.pipe(
+                    Stream.map((notices) => ({
+                      version: 1 as const,
+                      type: "worktreeCleanupUpdated" as const,
+                      payload: { notices },
+                    })),
+                  ),
+              });
 
               yield* providerRegistry
                 .refresh()
@@ -2907,7 +2924,10 @@ const makeWsRpcLayer = (
 
               const liveUpdates = Stream.merge(
                 keybindingsUpdates,
-                Stream.merge(providerStatuses, settingsUpdates),
+                Stream.merge(
+                  providerStatuses,
+                  Stream.merge(settingsUpdates, worktreeCleanupUpdates),
+                ),
               );
 
               return Stream.concat(

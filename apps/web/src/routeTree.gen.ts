@@ -18,6 +18,7 @@ import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as SettingsUsageRouteImport } from './routes/settings.usage'
 import { Route as SettingsSourceControlRouteImport } from './routes/settings.source-control'
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
+import { Route as SettingsNotificationsRouteImport } from './routes/settings.notifications'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsGeneralRouteImport } from './routes/settings.general'
 import { Route as SettingsEfficiencyRouteImport } from './routes/settings.efficiency'
@@ -77,6 +78,11 @@ const SettingsSourceControlRoute = SettingsSourceControlRouteImport.update({
 const SettingsProvidersRoute = SettingsProvidersRouteImport.update({
   id: '/providers',
   path: '/providers',
+  getParentRoute: () => SettingsRoute,
+} as any)
+const SettingsNotificationsRoute = SettingsNotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
   getParentRoute: () => SettingsRoute,
 } as any)
 const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
@@ -181,6 +187,7 @@ export interface FileRoutesByFullPath {
   '/settings/efficiency': typeof SettingsEfficiencyRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/notifications': typeof SettingsNotificationsRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/settings/usage': typeof SettingsUsageRoute
@@ -206,6 +213,7 @@ export interface FileRoutesByTo {
   '/settings/efficiency': typeof SettingsEfficiencyRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/notifications': typeof SettingsNotificationsRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/settings/usage': typeof SettingsUsageRoute
@@ -234,6 +242,7 @@ export interface FileRoutesById {
   '/settings/efficiency': typeof SettingsEfficiencyRoute
   '/settings/general': typeof SettingsGeneralRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/notifications': typeof SettingsNotificationsRoute
   '/settings/providers': typeof SettingsProvidersRoute
   '/settings/source-control': typeof SettingsSourceControlRoute
   '/settings/usage': typeof SettingsUsageRoute
@@ -263,6 +272,7 @@ export interface FileRouteTypes {
     | '/settings/efficiency'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/notifications'
     | '/settings/providers'
     | '/settings/source-control'
     | '/settings/usage'
@@ -288,6 +298,7 @@ export interface FileRouteTypes {
     | '/settings/efficiency'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/notifications'
     | '/settings/providers'
     | '/settings/source-control'
     | '/settings/usage'
@@ -315,6 +326,7 @@ export interface FileRouteTypes {
     | '/settings/efficiency'
     | '/settings/general'
     | '/settings/keybindings'
+    | '/settings/notifications'
     | '/settings/providers'
     | '/settings/source-control'
     | '/settings/usage'
@@ -396,6 +408,13 @@ declare module '@tanstack/react-router' {
       path: '/providers'
       fullPath: '/settings/providers'
       preLoaderRoute: typeof SettingsProvidersRouteImport
+      parentRoute: typeof SettingsRoute
+    }
+    '/settings/notifications': {
+      id: '/settings/notifications'
+      path: '/notifications'
+      fullPath: '/settings/notifications'
+      preLoaderRoute: typeof SettingsNotificationsRouteImport
       parentRoute: typeof SettingsRoute
     }
     '/settings/keybindings': {
@@ -543,6 +562,7 @@ interface SettingsRouteChildren {
   SettingsEfficiencyRoute: typeof SettingsEfficiencyRoute
   SettingsGeneralRoute: typeof SettingsGeneralRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
+  SettingsNotificationsRoute: typeof SettingsNotificationsRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
   SettingsSourceControlRoute: typeof SettingsSourceControlRoute
   SettingsUsageRoute: typeof SettingsUsageRoute
@@ -558,6 +578,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsEfficiencyRoute: SettingsEfficiencyRoute,
   SettingsGeneralRoute: SettingsGeneralRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
+  SettingsNotificationsRoute: SettingsNotificationsRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,
   SettingsSourceControlRoute: SettingsSourceControlRoute,
   SettingsUsageRoute: SettingsUsageRoute,
