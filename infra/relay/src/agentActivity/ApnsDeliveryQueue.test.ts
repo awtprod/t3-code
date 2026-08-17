@@ -18,6 +18,11 @@ const config: RelayConfiguration.RelayConfiguration["Service"] = {
     bundleId: "com.t3tools.test",
     environment: "sandbox",
   },
+  webPush: {
+    privateKey: Redacted.make("web-push-private-key"),
+    publicKey: "web-push-public-key",
+    subject: "https://relay.example.com",
+  },
   clerkSecretKey: Redacted.make("clerk-secret"),
   clerkPublishableKey: "pk_test_test",
   clerkJwtAudience: "t3-code-relay",

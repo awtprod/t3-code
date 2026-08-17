@@ -30,6 +30,8 @@ import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as ApnsDeliveries from "./ApnsDeliveries.ts";
 import * as ApnsClient from "./ApnsClient.ts";
 import * as ApnsProviderTokens from "./ApnsProviderTokens.ts";
+import * as WebPushClient from "./WebPushClient.ts";
+import * as WebPushSubscriptions from "./WebPushSubscriptions.ts";
 
 const config = RelayConfiguration.RelayConfiguration.of({
   relayIssuer: "https://relay.example.test",
@@ -39,6 +41,11 @@ const config = RelayConfiguration.RelayConfiguration.of({
     keyId: "key-id",
     privateKey: Redacted.make("not-a-private-key"),
     bundleId: "com.t3tools.t3code.dev",
+  },
+  webPush: {
+    privateKey: Redacted.make("not-a-private-key"),
+    publicKey: "not-a-public-key",
+    subject: "https://relay.example.test",
   },
   apnsDeliveryJobSigningSecret: Redacted.make("job-signing-secret"),
   clerkSecretKey: Redacted.make("clerk-secret"),
@@ -170,6 +177,13 @@ function makeLayer(input: {
   readonly execute?: (
     request: HttpClientRequest.HttpClientRequest,
   ) => Effect.Effect<HttpClientResponse.HttpClientResponse>;
+  readonly webPushTargets?: ReadonlyArray<WebPushSubscriptions.WebPushTarget>;
+  readonly webPushSends?: Array<{
+    readonly endpoint: string;
+    readonly payload: WebPushClient.WebPushNotificationPayload;
+  }>;
+  readonly webPushSendResult?: WebPushClient.WebPushDeliveryResult;
+  readonly invalidatedEndpoints?: Array<string>;
 }) {
   return ApnsDeliveries.layer.pipe(
     Layer.provide(ApnsClient.layer),
@@ -177,6 +191,23 @@ function makeLayer(input: {
     Layer.provide(ApnsDeliveryQueue.layer.pipe(Layer.provide(NodeCryptoLayer.layer))),
     Layer.provide(
       Layer.mergeAll(
+        Layer.succeed(WebPushClient.WebPushClient, {
+          send: (send) =>
+            Effect.sync(() => {
+              input.webPushSends?.push({ endpoint: send.endpoint, payload: send.payload });
+              return input.webPushSendResult ?? { ok: true, status: 201, permanentFailure: false };
+            }),
+        }),
+        Layer.succeed(WebPushSubscriptions.WebPushSubscriptions, {
+          register: () => Effect.void,
+          unregister: () => Effect.void,
+          listTargets: () => Effect.succeed(input.webPushTargets ?? []),
+          listForUser: () => Effect.succeed([]),
+          invalidateEndpoint: (invalidated) =>
+            Effect.sync(() => {
+              input.invalidatedEndpoints?.push(invalidated.endpoint);
+            }),
+        }),
         Layer.succeed(AgentActivityRows.AgentActivityRows, {
           upsert: () => Effect.void,
           remove: () => Effect.void,
@@ -1614,6 +1645,169 @@ describe("ApnsDeliveries", () => {
       ]);
     }).pipe(
       Effect.provide(makeLayer({ attempts, invalidatedTokens, config: signingConfig, execute })),
+    );
+  });
+
+  it.effect("enqueues web_push jobs for subscriptions whose preferences allow the phase", () => {
+    const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
+    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const waitingAggregate: RelayAgentActivityAggregateState = {
+      ...aggregate,
+      activities: [
+        {
+          ...aggregate.activities[0]!,
+          phase: "waiting_for_input",
+          status: "Input",
+        },
+      ],
+    };
+    const webPushTarget: WebPushSubscriptions.WebPushTarget = {
+      userId: "dev:julius",
+      deviceId: "web-device-1",
+      endpoint: "https://push.example.test/subscription/abc",
+      p256dh: "p256dh-key",
+      auth: "auth-secret",
+      preferences: {
+        liveActivitiesEnabled: false,
+        notificationsEnabled: true,
+        notifyOnApproval: true,
+        notifyOnInput: true,
+        notifyOnCompletion: true,
+        notifyOnFailure: true,
+      },
+    };
+    const mutedTarget: WebPushSubscriptions.WebPushTarget = {
+      ...webPushTarget,
+      deviceId: "web-device-muted",
+      endpoint: "https://push.example.test/subscription/muted",
+      preferences: { ...webPushTarget.preferences, notifyOnInput: false },
+    };
+
+    return Effect.gen(function* () {
+      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const results = yield* deliveries.sendWebPushForUser({
+        userId: "dev:julius",
+        aggregate: waitingAggregate,
+        nowMs: 5_000,
+      });
+
+      expect(results).toMatchObject([{ deviceId: "web-device-1", kind: "web_push", queued: true }]);
+      expect(queuedJobs).toHaveLength(1);
+      expect(queuedJobs[0]?.payload).toMatchObject({
+        kind: "web_push",
+        target: {
+          deviceId: "web-device-1",
+          token: "https://push.example.test/subscription/abc",
+          webPushP256dh: "p256dh-key",
+          webPushAuth: "auth-secret",
+        },
+        notification: {
+          deepLink: "/",
+        },
+      });
+    }).pipe(
+      Effect.provide(
+        makeLayer({ attempts, queuedJobs, webPushTargets: [webPushTarget, mutedTarget] }),
+      ),
+    );
+  });
+
+  it.effect("processes signed web_push jobs through the web push client", () => {
+    const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
+    const webPushSends: Array<{
+      readonly endpoint: string;
+      readonly payload: WebPushClient.WebPushNotificationPayload;
+    }> = [];
+    const payload = makeApnsDeliveryJobPayload({
+      kind: "web_push",
+      userId: target.user_id,
+      deviceId: "web-device-1",
+      token: "https://push.example.test/subscription/abc",
+      webPushP256dh: "p256dh-key",
+      webPushAuth: "auth-secret",
+      aggregate: null,
+      notification: {
+        title: "Thread",
+        body: "Working: Project",
+        environmentId: state.environmentId,
+        threadId: state.threadId,
+        deepLink: "/",
+        phase: state.phase,
+        updatedAt: state.updatedAt,
+      },
+      createdAt: "1970-01-01T00:00:00.000Z",
+      expiresAt: "1970-01-01T00:10:00.000Z",
+      jobId: "job-web-push-1",
+    });
+    const signed = signApnsDeliveryJob({
+      secret: config.apnsDeliveryJobSigningSecret,
+      payload,
+    });
+
+    return Effect.gen(function* () {
+      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const result = yield* deliveries.processSignedJob(signed);
+
+      expect(result).toMatchObject({ deviceId: "web-device-1", kind: "web_push", ok: true });
+      expect(webPushSends).toMatchObject([
+        {
+          endpoint: "https://push.example.test/subscription/abc",
+          payload: { title: "Thread", body: "Working: Project" },
+        },
+      ]);
+      expect(attempts).toMatchObject([
+        {
+          kind: "web_push",
+          sourceJobId: "job-web-push-1",
+          apnsStatus: 201,
+        },
+      ]);
+    }).pipe(Effect.provide(makeLayer({ attempts, webPushSends })));
+  });
+
+  it.effect("drops the stored subscription after a permanent web push rejection", () => {
+    const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
+    const invalidatedEndpoints: Array<string> = [];
+    const payload = makeApnsDeliveryJobPayload({
+      kind: "web_push",
+      userId: target.user_id,
+      deviceId: "web-device-1",
+      token: "https://push.example.test/subscription/gone",
+      webPushP256dh: "p256dh-key",
+      webPushAuth: "auth-secret",
+      aggregate: null,
+      notification: {
+        title: "Thread",
+        body: "Working: Project",
+        environmentId: state.environmentId,
+        threadId: state.threadId,
+        deepLink: "/",
+        phase: state.phase,
+        updatedAt: state.updatedAt,
+      },
+      createdAt: "1970-01-01T00:00:00.000Z",
+      expiresAt: "1970-01-01T00:10:00.000Z",
+      jobId: "job-web-push-gone",
+    });
+    const signed = signApnsDeliveryJob({
+      secret: config.apnsDeliveryJobSigningSecret,
+      payload,
+    });
+
+    return Effect.gen(function* () {
+      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const result = yield* deliveries.processSignedJob(signed);
+
+      expect(result).toMatchObject({ kind: "web_push", ok: false, apnsStatus: 410 });
+      expect(invalidatedEndpoints).toEqual(["https://push.example.test/subscription/gone"]);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          attempts,
+          invalidatedEndpoints,
+          webPushSendResult: { ok: false, status: 410, permanentFailure: true },
+        }),
+      ),
     );
   });
 });

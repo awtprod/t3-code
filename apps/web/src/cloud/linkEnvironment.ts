@@ -167,6 +167,8 @@ function relayProtectedErrorMessage(error: RelayProtectedErrorType): string {
       return "Relay rejected an expired agent activity publish proof.";
     case "RelayAgentActivityPublishProofInvalidError":
       return `Relay rejected the agent activity publish proof (${error.reason}).`;
+    case "RelayDeviceRegistrationInvalidError":
+      return `Relay rejected the device registration (${error.reason}).`;
     case "RelayInternalError":
       return `Relay encountered an internal error (${error.reason}).`;
   }

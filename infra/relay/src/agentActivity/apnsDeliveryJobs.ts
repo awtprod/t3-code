@@ -19,6 +19,7 @@ const ApnsDeliveryKindSchema = Schema.Literals([
   "live_activity_update",
   "live_activity_end",
   "push_notification",
+  "web_push",
 ]);
 const LiveActivityStartOrUpdateKindSchema = Schema.Literals([
   "live_activity_start",
@@ -71,6 +72,11 @@ export const ApnsDeliveryJobPayload = Schema.Struct({
     // which fall back to the configured defaults.
     bundleId: Schema.optional(Schema.NullOr(Schema.String)),
     apsEnvironment: Schema.optional(Schema.NullOr(Schema.Literals(["sandbox", "production"]))),
+    // Web Push subscription keys (kind "web_push", where token carries the
+    // endpoint URL). Optional so APNs jobs keep their exact key set — the HMAC
+    // signature covers stableStringify of the payload.
+    webPushP256dh: Schema.optional(Schema.String),
+    webPushAuth: Schema.optional(Schema.String),
   }),
   aggregate: Schema.NullOr(RelayAgentActivityAggregateState),
   notification: Schema.NullOr(ApnsNotificationPayload),
@@ -250,6 +256,8 @@ export function makeApnsDeliveryJobPayload(input: {
   readonly token: string;
   readonly bundleId?: string | null | undefined;
   readonly apsEnvironment?: "sandbox" | "production" | null | undefined;
+  readonly webPushP256dh?: string | undefined;
+  readonly webPushAuth?: string | undefined;
   readonly aggregate: ApnsDeliveryJobPayload["aggregate"];
   readonly notification?: ApnsNotificationPayload | null;
   readonly alert?: ApnsLiveActivityAlert | null | undefined;
@@ -267,6 +275,9 @@ export function makeApnsDeliveryJobPayload(input: {
       token: input.token,
       ...(input.bundleId ? { bundleId: input.bundleId } : {}),
       ...(input.apsEnvironment ? { apsEnvironment: input.apsEnvironment } : {}),
+      // Omitted (not null) when absent — see the alert comment below.
+      ...(input.webPushP256dh ? { webPushP256dh: input.webPushP256dh } : {}),
+      ...(input.webPushAuth ? { webPushAuth: input.webPushAuth } : {}),
     },
     aggregate: input.aggregate,
     notification: input.notification ?? null,
@@ -314,6 +325,7 @@ function validatePayloadShape(payload: ApnsDeliveryJobPayload): ApnsDeliveryJobI
       }
       return null;
     case "push_notification":
+    case "web_push":
       if (payload.notification === null) {
         return new ApnsDeliveryJobPushNotificationMissing({
           jobId: payload.jobId,

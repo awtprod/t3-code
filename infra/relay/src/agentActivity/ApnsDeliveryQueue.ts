@@ -73,6 +73,15 @@ export class ApnsDeliveryQueue extends Context.Service<
       readonly apsEnvironment?: "sandbox" | "production" | null;
       readonly notification: NonNullable<ApnsDeliveryJobPayload["notification"]>;
     }) => Effect.Effect<RelayDeliveryResult, ApnsDeliveryQueueError>;
+    readonly enqueueWebPush: (input: {
+      readonly userId: string;
+      readonly deviceId: string;
+      // The subscription endpoint URL rides in the job's token slot.
+      readonly endpoint: string;
+      readonly p256dh: string;
+      readonly auth: string;
+      readonly notification: NonNullable<ApnsDeliveryJobPayload["notification"]>;
+    }) => Effect.Effect<RelayDeliveryResult, ApnsDeliveryQueueError>;
   }
 >()("t3code-relay/agentActivity/ApnsDeliveryQueue") {}
 
@@ -203,6 +212,68 @@ export const make = Effect.gen(function* () {
         };
       },
     ),
+    enqueueWebPush: Effect.fn("relay.apns_delivery_queue.enqueue_web_push")(function* (input) {
+      yield* Effect.annotateCurrentSpan({
+        "relay.web_push.device_id": input.deviceId,
+        "relay.delivery.kind": "web_push",
+        "relay.environment_id": input.notification.environmentId,
+        "relay.thread_id": input.notification.threadId,
+      });
+      const now = yield* DateTime.now;
+      const jobId = yield* crypto.randomUUIDv4.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ApnsDeliveryQueueSendError({
+              operation: "generate-job-id",
+              jobId: null,
+              kind: "web_push",
+              userId: input.userId,
+              deviceId: input.deviceId,
+              cause,
+            }),
+        ),
+      );
+      yield* Effect.annotateCurrentSpan({ "relay.delivery.job_id": jobId });
+      const payload = makeApnsDeliveryJobPayload({
+        kind: "web_push",
+        userId: input.userId,
+        deviceId: input.deviceId,
+        token: input.endpoint,
+        webPushP256dh: input.p256dh,
+        webPushAuth: input.auth,
+        aggregate: null,
+        notification: sanitizeApnsNotificationPayload(input.notification),
+        jobId,
+        createdAt: DateTime.formatIso(now),
+        expiresAt: expiresAtForJob(now.epochMilliseconds),
+      });
+      const signed = signApnsDeliveryJob({
+        secret: config.apnsDeliveryJobSigningSecret,
+        payload,
+      });
+      yield* sender.send(signed).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ApnsDeliveryQueueSendError({
+              operation: "send",
+              jobId,
+              kind: "web_push",
+              userId: input.userId,
+              deviceId: input.deviceId,
+              cause,
+            }),
+        ),
+      );
+      return {
+        deviceId: input.deviceId,
+        kind: "web_push" as const,
+        ok: true,
+        queued: true,
+        apnsStatus: null,
+        apnsReason: null,
+        apnsId: null,
+      };
+    }),
   });
 });
 

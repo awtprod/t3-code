@@ -88,3 +88,94 @@ self.addEventListener("fetch", (event) => {
     }),
   );
 });
+
+// Deep links from push payloads open in-app but originate from the relay;
+// accept exactly /threads/{environmentId}/{threadId} (the contract shared with
+// the mobile app's normalizeThreadDeepLink) and fall back to the app root.
+// The web router serves threads at /{environmentId}/{threadId} (no /threads
+// prefix), so the validated link is rewritten to the web route.
+function threadDeepLinkFromPayload(data) {
+  const deepLink = typeof data?.deepLink === "string" ? data.deepLink : "";
+  if (
+    deepLink.trim() !== deepLink ||
+    deepLink.startsWith("//") ||
+    deepLink.includes("?") ||
+    deepLink.includes("#")
+  ) {
+    return "/";
+  }
+  const parts = deepLink.split("/");
+  if (parts.length !== 4 || parts[0] !== "" || parts[1] !== "threads" || !parts[2] || !parts[3]) {
+    return "/";
+  }
+  return `/${parts[2]}/${parts[3]}`;
+}
+
+// Payloads are encrypted in transit (RFC 8291) and produced solely by the
+// relay's WebPushClient; see WebPushNotificationPayload for the shape.
+self.addEventListener("push", (event) => {
+  if (!event.data) return;
+
+  let payload;
+  try {
+    payload = event.data.json();
+  } catch {
+    return;
+  }
+  if (typeof payload?.title !== "string" || typeof payload?.body !== "string") {
+    return;
+  }
+
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body: payload.body,
+      icon: "/pwa-icon-192.png",
+      // One notification per thread: a newer phase replaces the stale one
+      // instead of stacking.
+      tag:
+        typeof payload.environmentId === "string" && typeof payload.threadId === "string"
+          ? `thread:${payload.environmentId}:${payload.threadId}`
+          : undefined,
+      data: {
+        deepLink: typeof payload.deepLink === "string" ? payload.deepLink : undefined,
+      },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = new URL(
+    threadDeepLinkFromPayload(event.notification.data),
+    self.location.origin,
+  ).toString();
+
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
+      const existing = windows.find(
+        (client) => new URL(client.url).origin === self.location.origin,
+      );
+      if (existing) {
+        return Promise.resolve(existing.focus()).then((focused) =>
+          "navigate" in focused ? focused.navigate(target) : undefined,
+        );
+      }
+      return self.clients.openWindow(target);
+    }),
+  );
+});
+
+// The push service can rotate a subscription at any time; hand the new one to
+// the app on next launch by nudging every open client (registration with the
+// relay needs the DPoP key, which only the app holds).
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((windows) =>
+        Promise.all(
+          windows.map((client) => client.postMessage({ type: "push-subscription-change" })),
+        ),
+      ),
+  );
+});

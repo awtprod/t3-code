@@ -37,6 +37,11 @@ const config = RelayConfiguration.RelayConfiguration.of({
     privateKey: Redacted.make("private-key"),
     bundleId: "com.t3tools.t3code.dev",
   },
+  webPush: {
+    privateKey: Redacted.make("web-push-private-key"),
+    publicKey: "web-push-public-key",
+    subject: "https://relay.example.test",
+  },
   apnsDeliveryJobSigningSecret: Redacted.make("job-secret"),
   clerkSecretKey: Redacted.make("clerk-secret"),
   clerkPublishableKey: "pk_test_test",

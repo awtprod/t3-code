@@ -97,6 +97,7 @@ function makeApnsDeliveries(
   return {
     sendForTarget: () => Effect.succeed(null),
     sendPushNotificationForTarget: () => Effect.succeed(null),
+    sendWebPushForUser: () => Effect.succeed([]),
     sendLiveActivity: () =>
       Effect.succeed({
         deviceId: "device",
