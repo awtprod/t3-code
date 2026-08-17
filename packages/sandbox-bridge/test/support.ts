@@ -9,6 +9,12 @@ import type * as NodeHttp from "node:http";
  * Test helpers that drive the *bundled* binaries. Everything here waits on a
  * real event — a listening callback, a stdout frame, a process exit — because
  * a sandbox-bridge test that needs a sleep is testing nothing.
+ *
+ * These spawn `dist/*.mjs`, which `vp test run` does not rebuild. An edit under
+ * `src/` is invisible to this suite until `node build.ts` runs, so a source
+ * change can appear to pass when the tests never saw it. The package `test`
+ * script builds first for that reason; when invoking `vp test run` directly,
+ * build first.
  */
 const packageRoot = NodePath.resolve(
   NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),

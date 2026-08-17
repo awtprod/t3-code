@@ -4,12 +4,15 @@
 # The server refuses any image reference that is not pinned by digest
 # (apps/server/src/sandbox/ContainerSandboxBackend.ts and ThreadPreviewProxy.ts
 # both test /^[a-z0-9][a-z0-9._/-]{0,200}@sha256:[a-f0-9]{64}$/i), so a tag is
-# never a usable answer here. The output of this script is three environment
+# never a usable answer here. The output of this script is four environment
 # assignments meant to be pasted into the server's unit file or sourced:
 #
 #   T3_SANDBOX_IMAGE=...@sha256:...
 #   T3_SANDBOX_PREVIEW_PROXY_IMAGE=...@sha256:...
 #   T3_SANDBOX_EGRESS_PROXY_IMAGE=...@sha256:...
+#   T3_SANDBOX_CREDENTIAL_PROXY_IMAGE=...@sha256:...
+#
+# The last three name the same sidecar image and therefore the same digest.
 #
 # Idempotent: re-running with unchanged sources rebuilds from layer cache and
 # prints the same digests. Safe to run repeatedly.
@@ -144,14 +147,18 @@ sidecar_pinned=$(pinned_ref "${sidecar_ref}")
 verify_ref "${workspace_pinned}"
 verify_ref "${sidecar_pinned}"
 
-# The sidecar image serves both the preview-proxy and egress-proxy roles; the
-# server chooses the binary through the container argv, not through the image.
+# The sidecar image serves the preview-proxy, egress-proxy and credential-proxy
+# roles; the server chooses the binary through the container argv, not through
+# the image, so those three share one digest. All four are emitted because an
+# operator pasting three of four required variables is a silent misconfiguration.
 if [ "${output}" = "env" ]; then
   printf 'T3_SANDBOX_IMAGE=%s\n' "${workspace_pinned}"
   printf 'T3_SANDBOX_PREVIEW_PROXY_IMAGE=%s\n' "${sidecar_pinned}"
   printf 'T3_SANDBOX_EGRESS_PROXY_IMAGE=%s\n' "${sidecar_pinned}"
+  printf 'T3_SANDBOX_CREDENTIAL_PROXY_IMAGE=%s\n' "${sidecar_pinned}"
 else
   printf 'export T3_SANDBOX_IMAGE=%s\n' "${workspace_pinned}"
   printf 'export T3_SANDBOX_PREVIEW_PROXY_IMAGE=%s\n' "${sidecar_pinned}"
   printf 'export T3_SANDBOX_EGRESS_PROXY_IMAGE=%s\n' "${sidecar_pinned}"
+  printf 'export T3_SANDBOX_CREDENTIAL_PROXY_IMAGE=%s\n' "${sidecar_pinned}"
 fi

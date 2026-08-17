@@ -15,7 +15,7 @@
   "scripts": {
     "build": "node build.ts",
     "typecheck": "tsgo --noEmit",
-    "test": "vp test run"
+    "test": "node build.ts && vp test run"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
