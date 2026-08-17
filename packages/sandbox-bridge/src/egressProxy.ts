@@ -139,6 +139,9 @@ export const createEgressServer = (options: EgressOptions) => {
         clientSocket.end("HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\n\r\n");
         return;
       }
+      process.stderr.write(
+        `CONNECT ${hostname}:${port} -> ${vetted.addresses[0]!.address}:${port}\n`,
+      );
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) upstream.write(head);
       upstream.on("error", () => clientSocket.destroy());
@@ -178,6 +181,9 @@ export const createEgressServer = (options: EgressOptions) => {
         headers[name] = Array.isArray(value) ? value.join(", ") : value;
       }
       headers.host = url.host;
+      process.stderr.write(
+        `${request.method} ${url.host} -> ${vetted.addresses[0]!.address}:${port}\n`,
+      );
       const upstream = NodeHttp.request(
         {
           host: vetted.addresses[0]!.address,

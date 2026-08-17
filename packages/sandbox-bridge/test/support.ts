@@ -17,9 +17,14 @@ const packageRoot = NodePath.resolve(
 
 export const binaryPath = (name: string) => NodePath.join(packageRoot, "dist", `${name}.mjs`);
 
-export const spawnBinary = (name: string, args: ReadonlyArray<string>) =>
+export const spawnBinary = (
+  name: string,
+  args: ReadonlyArray<string>,
+  environment?: Readonly<Record<string, string>>,
+) =>
   NodeChildProcess.spawn(process.execPath, [binaryPath(name), ...args], {
     stdio: ["pipe", "pipe", "pipe"],
+    ...(environment === undefined ? {} : { env: { ...process.env, ...environment } }),
   });
 
 /** Runs a one-shot binary with a single stdin document and collects stdout. */
@@ -39,10 +44,14 @@ export const runBinary = (name: string, args: ReadonlyArray<string>, stdin: stri
  * Resolves once the binary announces its listening address on stderr, yielding
  * the port it actually bound. `--listen host:0` therefore needs no port probing.
  */
-export const spawnListening = (name: string, args: ReadonlyArray<string>) =>
+export const spawnListening = (
+  name: string,
+  args: ReadonlyArray<string>,
+  environment?: Readonly<Record<string, string>>,
+) =>
   new Promise<{ child: NodeChildProcess.ChildProcessWithoutNullStreams; port: number }>(
     (resolve, reject) => {
-      const child = spawnBinary(name, args);
+      const child = spawnBinary(name, args, environment);
       let stderr = "";
       const onData = (chunk: Buffer) => {
         stderr += chunk.toString("utf8");

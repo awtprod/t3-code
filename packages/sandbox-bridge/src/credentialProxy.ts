@@ -1,11 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off - Standalone container binary; it is bundled without Effect and has no runtime.
 import * as NodeHttp from "node:http";
-import * as NodeHttps from "node:https";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import { parseArgs, parseListenAddress, printedHelp } from "./cli.ts";
+import { requestUpstream, type ProxyEnvironment } from "./proxyClient.ts";
 
 /**
  * Injects provider secrets into requests from a workspace container without
@@ -31,6 +31,9 @@ export type CredentialConfig = {
   readonly threadToken: string;
   readonly upstreams: ReadonlyArray<UpstreamConfig>;
 };
+
+/** Generous: provider turns stream for minutes before the response completes. */
+const UPSTREAM_TIMEOUT_MS = 600_000;
 
 const HOP_BY_HOP = new Set([
   "connection",
@@ -168,7 +171,10 @@ const sendText = (response: NodeHttp.ServerResponse, status: number, message: st
   response.end(`${message}\n`);
 };
 
-export const createCredentialServer = (store: ConfigStore) =>
+export const createCredentialServer = (
+  store: ConfigStore,
+  environment: ProxyEnvironment = process.env,
+) =>
   NodeHttp.createServer((request, response) => {
     const config = store.current;
     if (config === null) {
@@ -203,34 +209,42 @@ export const createCredentialServer = (store: ConfigStore) =>
     for (const injected of upstream.inject) headers[injected.header] = injected.value;
     headers.host = base.host;
 
-    const transport = base.protocol === "https:" ? NodeHttps : NodeHttp;
-    const proxied = transport.request(
-      {
-        protocol: base.protocol,
-        host: base.hostname,
-        port: base.port === "" ? undefined : Number(base.port),
-        method: request.method,
-        path,
-        headers,
-        setHost: false,
-      },
-      (incoming) => {
-        const outHeaders: Record<string, string | Array<string>> = {};
-        for (const [header, value] of Object.entries(incoming.headers)) {
-          if (value === undefined || HOP_BY_HOP.has(header.toLowerCase())) continue;
-          outHeaders[header] = value;
-        }
-        response.writeHead(incoming.statusCode ?? 502, outHeaders);
-        // Piped, not buffered: provider APIs stream SSE and buffering stalls turns.
-        incoming.pipe(response);
-      },
-    );
-    proxied.on("error", () => {
+    const onUpstreamResponse = (incoming: NodeHttp.IncomingMessage) => {
+      const outHeaders: Record<string, string | Array<string>> = {};
+      for (const [header, value] of Object.entries(incoming.headers)) {
+        if (value === undefined || HOP_BY_HOP.has(header.toLowerCase())) continue;
+        outHeaders[header] = value;
+      }
+      response.writeHead(incoming.statusCode ?? 502, outHeaders);
+      // Piped, not buffered: provider APIs stream SSE and buffering stalls turns.
+      incoming.pipe(response);
+    };
+    const failUpstream = () => {
       process.stderr.write(`upstream ${upstream.name} request failed\n`);
       if (!response.headersSent) sendText(response, 502, "upstream request failed");
       else response.destroy();
-    });
-    request.pipe(proxied);
+    };
+
+    // Chained through HTTPS_PROXY/HTTP_PROXY when set: the thread network is
+    // created `--internal`, so the egress sidecar is the only route out.
+    // Awaiting the CONNECT handshake does not buffer the body — the request
+    // stream stays paused until it is piped below.
+    void requestUpstream(
+      new URL(`${base.origin}${path}`),
+      { method: request.method, path, headers, timeoutMs: UPSTREAM_TIMEOUT_MS },
+      environment,
+      onUpstreamResponse,
+    ).then(
+      (proxied) => {
+        proxied.on("timeout", () => proxied.destroy());
+        proxied.on("error", failUpstream);
+        request.pipe(proxied);
+      },
+      () => {
+        request.resume();
+        failUpstream();
+      },
+    );
   });
 
 export const main = async (argv: ReadonlyArray<string>) => {
