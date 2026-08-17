@@ -1,0 +1,28 @@
+[Unit]
+Description=Command Center sandbox container storage (XFS with project quotas)
+Documentation=https://github.com/awtprod/t3-code
+# The loopback image lives on the root filesystem, so local filesystems must be
+# up before this mount is attempted.
+After=local-fs.target
+Before=multi-user.target
+# The rootless podman user instance keeps its graphroot here. Rather than order
+# this mount against the uid 986 user manager -- which races, because lingering
+# user managers start early -- the podman socket carries a fail-closed
+# ConditionPathIsMountPoint on this directory (see podman-socket-dropin.conf).
+# If the mount is missing, the socket refuses to start instead of silently
+# initialising a graphroot on the ext4 directory underneath, where the volume
+# quotas this whole design depends on would not be enforced.
+
+[Mount]
+What=/var/lib/command-center/sandbox-storage.img
+Where=/var/lib/command-center/sandbox
+Type=xfs
+# `pquota` is the entire point of this mount. Podman implements `volume create
+# --opt o=size=N` as an XFS project quota; without pquota the option is accepted
+# and echoed back verbatim but never enforced, which the backend's readback
+# check in ContainerSandboxBackend cannot distinguish from success.
+# `loop` lets systemd attach the image without a manual losetup.
+Options=loop,pquota,noatime
+
+[Install]
+WantedBy=multi-user.target
