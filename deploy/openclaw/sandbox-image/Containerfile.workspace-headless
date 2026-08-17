@@ -1,0 +1,75 @@
+# Headless workspace image: the container a thread's provider CLI runs in.
+#
+# Deliberately headless. apps/server/src/sandbox/image/Containerfile builds a
+# desktop variant with xfce4/Xvfb/chromium and a t3-desktop-webrtc binary; none
+# of that is installed here. Preview traffic reaches the thread through the
+# preview-proxy sidecar over the sandbox network, not through a streamed desktop.
+#
+# The server runs this image with --read-only --cap-drop ALL
+# --security-opt no-new-privileges --user 1000:1000 --workdir /workspace, with
+# /workspace and /thread-data as volumes and /tmp as a tmpfs
+# (ContainerSandboxBackend.ts, run argv). Everything the container writes must
+# land in one of those; the image layers themselves are immutable at runtime.
+#
+# Egress is forced through the egress-proxy sidecar via ALL_PROXY/HTTPS_PROXY/
+# HTTP_PROXY injected at run time, so no proxy configuration is baked in here.
+
+ARG BASE_IMAGE=docker.io/library/node:22-bookworm-slim
+FROM ${BASE_IMAGE}
+
+# git is required by the bootstrap sequence (bundle verify, clone, checkout,
+# switch, apply). ripgrep and jq are what the provider CLIs shell out to
+# constantly; ca-certificates backs every TLS dial through the proxy.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      git \
+      jq \
+      less \
+      openssh-client \
+      procps \
+      ripgrep \
+      tini \
+ && rm -rf /var/lib/apt/lists/*
+
+# Provider CLIs are pinned to the same versions the host installs
+# (deploy/openclaw/install-provider-clis.sh) so a thread behaves identically
+# inside and outside the sandbox. Bump both files together.
+ARG CLAUDE_CODE_VERSION=2.1.228
+ARG CODEX_VERSION=0.147.0
+ARG KIMI_CODE_VERSION=0.34.0
+RUN npm install --global --omit=dev --no-audit --no-fund \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@openai/codex@${CODEX_VERSION}" \
+      "@moonshot-ai/kimi-code@${KIMI_CODE_VERSION}" \
+ && npm cache clean --force \
+ && claude --version \
+ && codex --version \
+ && kimi --version
+
+# The preview bridge also lives in the workspace container: ThreadPreviewProxy
+# reaches `serve` in the sidecar, but `request`, `websocket-framed`,
+# `cdp-automation` and `signal` are run with `podman exec` against whichever
+# container holds the route. Shipping it here keeps both paths on one build.
+COPY bin/t3-preview-bridge.mjs /usr/local/bin/t3-preview-bridge
+RUN chmod 0555 /usr/local/bin/t3-preview-bridge \
+ && /usr/local/bin/t3-preview-bridge --help >/dev/null
+
+# uid/gid 1000 matches the --user the server passes. Both mount points must
+# exist and be owned by it before the read-only rootfs is sealed.
+RUN mkdir -p /workspace /thread-data /home/t3 \
+ && chown -R 1000:1000 /workspace /thread-data /home/t3
+
+ENV HOME=/home/t3 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NODE_OPTIONS=--max-old-space-size=2048
+
+USER 1000:1000
+WORKDIR /workspace
+
+# tini reaps the provider CLI's orphans; the server additionally passes --init,
+# and a doubled init is harmless while a missing one leaks zombies under
+# --pids-limit.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]

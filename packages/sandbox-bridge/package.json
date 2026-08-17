@@ -1,0 +1,26 @@
+{
+  "name": "@t3tools/sandbox-bridge",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./ipPolicy": {
+      "types": "./src/ipPolicy.ts",
+      "import": "./src/ipPolicy.ts"
+    },
+    "./cli": {
+      "types": "./src/cli.ts",
+      "import": "./src/cli.ts"
+    }
+  },
+  "scripts": {
+    "build": "node build.ts",
+    "typecheck": "tsgo --noEmit",
+    "test": "node build.ts && vp test run"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "esbuild": "0.28.1",
+    "vite-plus": "catalog:"
+  }
+}
