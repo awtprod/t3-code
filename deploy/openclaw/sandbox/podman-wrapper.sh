@@ -13,4 +13,4 @@ set -eu
 CONTAINER_HOST=unix:///run/user/986/podman/podman.sock
 export CONTAINER_HOST
 
-exec /usr/bin/podman --remote "$@"
+exec /usr/local/bin/podman --remote "$@"
