@@ -10,6 +10,7 @@ export type SettingsPath =
   | "/settings/source-control"
   | "/settings/databases"
   | "/settings/connections"
+  | "/settings/notifications"
   | "/settings/beta"
   | "/settings/archived";
 
@@ -37,6 +38,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/source-control": "Source Control",
   "/settings/databases": "Databases",
   "/settings/connections": "Connections",
+  "/settings/notifications": "Notifications",
   "/settings/beta": "Beta",
   "/settings/archived": "Archive",
 };
@@ -143,6 +145,11 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
   },
   {
+    id: "worktree-cleanup",
+    title: "Inactive worktree cleanup",
+    to: "/settings/general",
+  },
+  {
     id: "archive-confirmation",
     title: "Archive confirmation",
     to: "/settings/general",
@@ -202,6 +209,45 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "remote-environments",
     title: "Remote environments",
     to: "/settings/connections",
+  },
+  {
+    id: "notifications-desktop",
+    title: "Notifications",
+    to: "/settings/notifications",
+    desktopOnly: true,
+  },
+  {
+    id: "notification-approval",
+    title: "Notify when approval is needed",
+    to: "/settings/notifications",
+    targetId: "notifications-desktop",
+    desktopOnly: true,
+  },
+  {
+    id: "notification-input",
+    title: "Notify when input is needed",
+    to: "/settings/notifications",
+    targetId: "notifications-desktop",
+    desktopOnly: true,
+  },
+  {
+    id: "notification-completed",
+    title: "Notify when a task completes",
+    to: "/settings/notifications",
+    targetId: "notifications-desktop",
+    desktopOnly: true,
+  },
+  {
+    id: "notification-failed",
+    title: "Notify when a task fails",
+    to: "/settings/notifications",
+    targetId: "notifications-desktop",
+    desktopOnly: true,
+  },
+  {
+    id: "notification-sound",
+    title: "Notification sound",
+    to: "/settings/notifications",
   },
   {
     id: "sidebar-v2",

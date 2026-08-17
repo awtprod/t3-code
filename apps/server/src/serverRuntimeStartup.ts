@@ -39,6 +39,7 @@ import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReape
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as StalledTurnWatchdog from "./orchestration/Services/StalledTurnWatchdog.ts";
+import * as WorktreeCleanup from "./worktreeCleanup.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import {
@@ -376,6 +377,7 @@ export const make = (options?: StartupOptions) =>
     const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
     const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
     const stalledTurnWatchdog = yield* StalledTurnWatchdog.StalledTurnWatchdog;
+    const worktreeCleanup = yield* WorktreeCleanup.WorktreeCleanup;
     const automationScheduleRunner = yield* AutomationScheduleRunner.AutomationScheduleRunner;
     const automationRecoveryCoordinator =
       yield* AutomationRecoveryCoordinator.AutomationRecoveryCoordinator;
@@ -437,6 +439,7 @@ export const make = (options?: StartupOptions) =>
               yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
               yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
               yield* forkParked(stalledTurnWatchdog.start().pipe(Scope.provide(reactorScope)));
+              yield* forkParked(worktreeCleanup.start().pipe(Scope.provide(reactorScope)));
               yield* forkParked(automationScheduleRunner.start().pipe(Scope.provide(reactorScope)));
               yield* forkParked(
                 automationRecoveryCoordinator.start().pipe(Scope.provide(reactorScope)),

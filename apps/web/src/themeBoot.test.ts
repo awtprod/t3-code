@@ -9,6 +9,7 @@ import {
   isKnownThemePreference,
   resolveThemeAppearance,
   T3_CHAT_THEME,
+  VERCEL_DARK_THEME,
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
@@ -38,10 +39,17 @@ type BootResult = {
   metaContent: string | null;
 };
 
+const INSTALL_SEEN_STORAGE_KEY = "t3code:install-seen";
+
 function runBootScript(options: {
   storage?: Record<string, string>;
   storageThrows?: boolean;
   prefersDark: boolean;
+  // Every existing scenario in this file simulates a browser that has
+  // already booted the app before (the marker is set), so the new-install
+  // default never fires and none of these tests need to know about it.
+  // Only the dedicated fresh-install tests below opt out.
+  freshInstall?: boolean;
 }): BootResult {
   const classes = new Set<string>();
   const bootVariables: Record<string, string> = {};
@@ -74,11 +82,21 @@ function runBootScript(options: {
     documentElement,
     querySelectorAll: (selector: string) => (selector === 'meta[name="theme-color"]' ? [meta] : []),
   };
+  const store = new Map<string, string>(
+    Object.entries({
+      ...(options.freshInstall ? {} : { [INSTALL_SEEN_STORAGE_KEY]: "true" }),
+      ...options.storage,
+    }),
+  );
   const fakeWindow = {
     localStorage: {
       getItem: (key: string): string | null => {
         if (options.storageThrows) throw new Error("storage blocked");
-        return options.storage?.[key] ?? null;
+        return store.get(key) ?? null;
+      },
+      setItem: (key: string, value: string): void => {
+        if (options.storageThrows) throw new Error("storage blocked");
+        store.set(key, value);
       },
     },
     matchMedia: () => ({ matches: options.prefersDark }),
@@ -364,6 +382,48 @@ describe("index.html boot script", () => {
         expect(boot.metaContent).toBe(colors!.chrome);
       }
     }
+  });
+
+  it("keeps the Vercel Dark boot splash in sync with the real palette (dark-only)", () => {
+    expect(VERCEL_DARK_THEME.appearance).toBe("dark");
+    expect(getThemeColorsForMode(VERCEL_DARK_THEME, "light")).toBeNull();
+
+    const colors = getThemeColorsForMode(VERCEL_DARK_THEME, "dark")!;
+    const boot = runBootScript({
+      storage: {
+        [THEME_STORAGE_KEY]: VERCEL_DARK_THEME.id,
+        [THEME_APPEARANCE_MODE_STORAGE_KEY]: "dark",
+      },
+      prefersDark: true,
+    });
+    expect(boot.themeId).toBe(VERCEL_DARK_THEME.id);
+    expect(boot.isDark).toBe(true);
+    expect(boot.bootVariables["--boot-background"]).toBe(colors.canvas);
+    expect(boot.bootVariables["--boot-foreground"]).toBe(colors.text);
+    expect(boot.bootVariables["--boot-accent"]).toBe(colors.accent);
+    expect(boot.backgroundColor).toBe(colors.chrome);
+  });
+
+  it("gives a genuinely fresh install Vercel Dark instead of following System", () => {
+    const boot = runBootScript({ storage: {}, prefersDark: false, freshInstall: true });
+    expect(boot.themeId).toBe(VERCEL_DARK_THEME.id);
+    expect(boot.themeSelected).toBe("true");
+    expect(boot.isDark).toBe(true);
+  });
+
+  it("never overrides an existing user's System preference (marker already seen)", () => {
+    // No stored theme, but the install marker is present — this profile has
+    // booted before and was always on implicit System.
+    const boot = runBootScript({ storage: {}, prefersDark: false });
+    expect(boot.themeId).toBeUndefined();
+    expect(boot.themeSelected).not.toBe("true");
+    expect(boot.isDark).toBe(false);
+  });
+
+  it("never crashes the boot sequence when localStorage writes are blocked", () => {
+    expect(() =>
+      runBootScript({ storage: {}, prefersDark: false, freshInstall: true, storageThrows: true }),
+    ).not.toThrow();
   });
 
   it("applies the matching half of an automatic mix to the splash", () => {

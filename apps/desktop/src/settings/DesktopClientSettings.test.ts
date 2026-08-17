@@ -14,6 +14,12 @@ import * as DesktopClientSettings from "./DesktopClientSettings.ts";
 
 const clientSettings: ClientSettings = {
   confirmQuit: true,
+  desktopNotificationsEnabled: true,
+  desktopNotifyOnApproval: true,
+  desktopNotifyOnInput: true,
+  desktopNotifyOnCompletion: true,
+  desktopNotifyOnFailure: true,
+  notificationSoundEnabled: true,
   confirmThreadArchive: true,
   confirmThreadDelete: false,
   dismissedProviderUpdateNotificationKeys: [],
