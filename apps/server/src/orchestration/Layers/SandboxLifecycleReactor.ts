@@ -23,6 +23,7 @@ import {
   SandboxManagerError,
   SandboxRuntimeManager,
   resolveSandboxImage,
+  resolveSandboxPreviewProxyImage,
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -142,6 +143,32 @@ export const make = Effect.gen(function* () {
         return yield* new SandboxManagerError({
           message: `project '${thread.projectId}' was not found`,
         });
+      const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
+      const declaration = projectFile?.sandbox;
+      const image = resolveSandboxImage(projectFile);
+      const previewProxyImage = resolveSandboxPreviewProxyImage();
+      if (!image || !previewProxyImage) {
+        const disabledAt = yield* nowIso;
+        yield* engine
+          .dispatch({
+            type: "thread.activity.append",
+            commandId: yield* commandId("sandbox-disabled-notice"),
+            threadId: thread.id,
+            createdAt: disabledAt,
+            activity: {
+              id: EventId.make(yield* crypto.randomUUIDv4),
+              tone: "info",
+              kind: "sandbox.disabled",
+              summary:
+                "Sandbox isolation is disabled — this server has no sandbox image configured. This thread will keep running normally.",
+              payload: {},
+              turnId: null,
+              createdAt: disabledAt,
+            },
+          })
+          .pipe(Effect.ignore);
+        return;
+      }
       const branch =
         thread.sandbox?.branch ??
         thread.sandboxBranch ??
@@ -172,13 +199,6 @@ export const make = Effect.gen(function* () {
         branch,
         createdAt,
       });
-      const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
-      const declaration = projectFile?.sandbox;
-      const image = resolveSandboxImage(projectFile);
-      if (!image)
-        return yield* new SandboxManagerError({
-          message: "T3_SANDBOX_IMAGE must name a digest-pinned desktop sandbox image.",
-        });
       const provision = yield* runtimes.provision({
         bootstrap: {
           threadId: thread.id,
@@ -297,10 +317,29 @@ export const make = Effect.gen(function* () {
       const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
       const declaration = projectFile?.sandbox;
       const image = resolveSandboxImage(projectFile);
-      if (!image)
-        return yield* new SandboxManagerError({
-          message: "A digest-pinned sandbox image is required to spawn an isolated worker",
-        });
+      const previewProxyImage = resolveSandboxPreviewProxyImage();
+      if (!image || !previewProxyImage) {
+        const disabledAt = yield* nowIso;
+        yield* engine
+          .dispatch({
+            type: "thread.activity.append",
+            commandId: yield* commandId("sandbox-disabled-notice"),
+            threadId: parent.id,
+            createdAt: disabledAt,
+            activity: {
+              id: EventId.make(yield* crypto.randomUUIDv4),
+              tone: "info",
+              kind: "sandbox.disabled",
+              summary:
+                "Skipped spawning an isolated worker thread — sandbox isolation isn't configured on this server.",
+              payload: {},
+              turnId: null,
+              createdAt: disabledAt,
+            },
+          })
+          .pipe(Effect.ignore);
+        return;
+      }
       yield* engine.dispatch({
         type: "thread.create",
         commandId: yield* commandId("sandbox-worker-create"),
