@@ -69,7 +69,14 @@ const allowedScopesByClientId: Record<
     RelayEnvironmentStatusScope,
     RelayMobileRegistrationScope,
   ]),
-  [RelayWebClientId]: new Set([RelayEnvironmentConnectScope, RelayEnvironmentStatusScope]),
+  // mobile:registration also covers web push subscriptions: the browser
+  // registers through the same /v1/mobile/devices endpoint with platform
+  // "web", so the web client needs the same grant.
+  [RelayWebClientId]: new Set([
+    RelayEnvironmentConnectScope,
+    RelayEnvironmentStatusScope,
+    RelayMobileRegistrationScope,
+  ]),
 };
 
 function resolveDpopAccessTokenScopes(input: {

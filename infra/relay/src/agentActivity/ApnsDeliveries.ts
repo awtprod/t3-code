@@ -40,6 +40,8 @@ import * as DeliveryAttempts from "./DeliveryAttempts.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
 import * as ApnsDeliveryQueue from "./ApnsDeliveryQueue.ts";
+import * as WebPush from "./WebPushClient.ts";
+import * as WebPushSubscriptions from "./WebPushSubscriptions.ts";
 import { withSpanAttributes } from "../observability.ts";
 
 const MIN_LIVE_ACTIVITY_UPDATE_INTERVAL_MS = 15_000;
@@ -86,7 +88,8 @@ export type ApnsDeliveryError =
   | ApnsDeliveryJobClaimInFlight
   | DeliveryAttempts.DeliveryAttemptRecordPersistenceError
   | LiveActivities.LiveActivityTargetListPersistenceError
-  | LiveActivities.LiveActivityDeliveryMarkPersistenceError;
+  | LiveActivities.LiveActivityDeliveryMarkPersistenceError
+  | WebPushSubscriptions.WebPushSubscriptionPersistenceError;
 
 export class ApnsDeliveryJobClaimInFlight extends Schema.TaggedErrorClass<ApnsDeliveryJobClaimInFlight>()(
   "ApnsDeliveryJobClaimInFlight",
@@ -335,10 +338,28 @@ function notificationForAggregate(input: {
   readonly aggregate: RelayAgentActivityAggregateState | null;
   readonly nowMs: number;
 }): ApnsNotificationPayload | null {
-  if (!input.target.push_token || input.aggregate === null) {
+  if (!input.target.push_token) {
     return null;
   }
-  const preferences = parsePreferences(input.target.preferences_json);
+  return notificationForPreferences({
+    preferences: parsePreferences(input.target.preferences_json),
+    aggregate: input.aggregate,
+    nowMs: input.nowMs,
+  });
+}
+
+// Preference/phase/freshness gating shared by the APNs and Web Push channels;
+// targets differ (device token vs subscription endpoint) but the decision of
+// whether an aggregate warrants ringing anything is identical.
+function notificationForPreferences(input: {
+  readonly preferences: ReturnType<typeof parsePreferences>;
+  readonly aggregate: RelayAgentActivityAggregateState | null;
+  readonly nowMs: number;
+}): ApnsNotificationPayload | null {
+  if (input.aggregate === null) {
+    return null;
+  }
+  const preferences = input.preferences;
   if (!preferences?.notificationsEnabled) {
     return null;
   }
@@ -606,6 +627,10 @@ function expectedCurrentToken(input: {
       return input.target.activity_push_token;
     case "push_notification":
       return input.target.push_token;
+    // Web push targets live in WebPushSubscriptions, not the mobile-device
+    // join; their currency check happens in sendWebPush directly.
+    case "web_push":
+      return null;
   }
 }
 
@@ -689,6 +714,13 @@ export class ApnsDeliveries extends Context.Service<
       readonly sourceJobId?: string | null;
       readonly notification: ApnsNotificationPayload;
     }) => Effect.Effect<RelayDeliveryResult, ApnsDeliveryError>;
+    // Enqueue web_push jobs for every browser subscription of the user whose
+    // preferences allow this aggregate's leading activity to ring.
+    readonly sendWebPushForUser: (input: {
+      readonly userId: string;
+      readonly aggregate: RelayAgentActivityAggregateState | null;
+      readonly nowMs: number;
+    }) => Effect.Effect<ReadonlyArray<RelayDeliveryResult>, ApnsDeliveryError>;
   }
 >()("t3code-relay/agentActivity/ApnsDeliveries") {}
 
@@ -698,6 +730,8 @@ export const make = Effect.gen(function* () {
   const deliveryQueue = yield* ApnsDeliveryQueue.ApnsDeliveryQueue;
   const config = yield* RelayConfiguration.RelayConfiguration;
   const apns = yield* Apns.ApnsClient;
+  const webPushClient = yield* WebPush.WebPushClient;
+  const webPushSubscriptions = yield* WebPushSubscriptions.WebPushSubscriptions;
   const activityRows = yield* AgentActivityRows.AgentActivityRows;
 
   // Start jobs are decided at publish time, but consecutive publishes land in
@@ -1090,6 +1124,135 @@ export const make = Effect.gen(function* () {
     };
   });
 
+  // Queue-consumer side of a web_push job: encrypt, POST to the push service,
+  // and drop the subscription on a permanent (404/410) rejection. Transport
+  // errors resolve to a failed result (never an Effect failure) so one dead
+  // push service cannot poison the batch's retries.
+  const sendWebPush = Effect.fn("relay.apns_deliveries.send_web_push")(function* (input: {
+    readonly target: { readonly user_id: string; readonly device_id: string };
+    readonly endpoint: string;
+    readonly p256dh: string;
+    readonly auth: string;
+    readonly sourceJobId: string;
+    readonly notification: ApnsNotificationPayload;
+  }) {
+    yield* Effect.annotateCurrentSpan({
+      "relay.web_push.device_id": input.target.device_id,
+      "relay.delivery.kind": "web_push",
+      "relay.delivery.job_id": input.sourceJobId,
+    });
+    const notification = sanitizeApnsNotificationPayload(input.notification);
+    const claim = yield* attempts.claimSourceJob({
+      userId: input.target.user_id,
+      environmentId: notification.environmentId,
+      threadId: notification.threadId,
+      deviceId: input.target.device_id,
+      kind: "web_push",
+      sourceJobId: input.sourceJobId,
+      token: input.endpoint,
+    });
+    if (claim === "completed") {
+      return duplicateJobResult({ deviceId: input.target.device_id, kind: "web_push" });
+    }
+    if (claim === "in_flight") {
+      return yield* new ApnsDeliveryJobClaimInFlight({ sourceJobId: input.sourceJobId });
+    }
+    if (
+      !(yield* notificationStateIsCurrent({
+        userId: input.target.user_id,
+        notification,
+      }))
+    ) {
+      yield* attempts.completeSourceJob({
+        sourceJobId: input.sourceJobId,
+        apnsReason: "Stale agent activity state skipped.",
+      });
+      return staleJobResult({ deviceId: input.target.device_id, kind: "web_push" });
+    }
+    const result = yield* webPushClient
+      .send({
+        endpoint: input.endpoint,
+        p256dh: input.p256dh,
+        auth: input.auth,
+        payload: {
+          title: notification.title,
+          body: notification.body,
+          environmentId: notification.environmentId,
+          threadId: notification.threadId,
+          deepLink: notification.deepLink,
+        },
+      })
+      .pipe(
+        Effect.catch((cause) =>
+          Effect.logError("web push delivery transport failed", {
+            errorTag: cause._tag,
+            deviceId: input.target.device_id,
+            sourceJobId: input.sourceJobId,
+          }).pipe(
+            Effect.as({
+              ok: false,
+              status: 0,
+              reason: cause.message,
+              permanentFailure: false,
+            } satisfies WebPush.WebPushDeliveryResult),
+          ),
+        ),
+      );
+    if (result.permanentFailure) {
+      yield* webPushSubscriptions.invalidateEndpoint({ endpoint: input.endpoint });
+    }
+    yield* attempts.completeSourceJob({
+      sourceJobId: input.sourceJobId,
+      ...(result.status === 0 ? {} : { apnsStatus: result.status }),
+      ...(result.reason === undefined ? {} : { apnsReason: result.reason }),
+      ...(result.status === 0
+        ? { transportError: result.reason ?? "Web push request failed." }
+        : {}),
+    });
+    return {
+      deviceId: input.target.device_id,
+      kind: "web_push" as const,
+      ok: result.ok,
+      apnsStatus: result.status === 0 ? null : result.status,
+      apnsReason: result.reason ?? null,
+      apnsId: null,
+    };
+  });
+
+  const sendWebPushForUser: ApnsDeliveries["Service"]["sendWebPushForUser"] = Effect.fnUntraced(
+    function* (input) {
+      const targets = yield* webPushSubscriptions.listTargets({ userId: input.userId });
+      if (targets.length === 0) {
+        return [];
+      }
+      return yield* Effect.forEach(
+        targets,
+        (target) => {
+          const notification = notificationForPreferences({
+            preferences: target.preferences,
+            aggregate: input.aggregate,
+            nowMs: input.nowMs,
+          });
+          return notification === null
+            ? Effect.succeed(null)
+            : deliveryQueue.enqueueWebPush({
+                userId: target.userId,
+                deviceId: target.deviceId,
+                endpoint: target.endpoint,
+                p256dh: target.p256dh,
+                auth: target.auth,
+                notification,
+              });
+        },
+        { concurrency: 4 },
+      ).pipe(
+        Effect.map((results) =>
+          results.filter((result): result is RelayDeliveryResult => result !== null),
+        ),
+      );
+    },
+  );
+
   const processSignedJob: ApnsDeliveries["Service"]["processSignedJob"] = Effect.fn(
     "relay.apns_deliveries.process_signed_job",
   )(function* (body) {
@@ -1178,6 +1341,30 @@ export const make = Effect.gen(function* () {
             sourceJobId: payload.jobId,
             notification: payload.notification,
           });
+        case "web_push": {
+          const p256dh = payload.target.webPushP256dh;
+          const auth = payload.target.webPushAuth;
+          if (payload.notification === null || p256dh === undefined || auth === undefined) {
+            return Effect.fail(
+              new ApnsDeliveryJobPushNotificationMissing({
+                jobId: payload.jobId,
+                userId: payload.target.userId,
+                deviceId: payload.target.deviceId,
+              }),
+            );
+          }
+          return sendWebPush({
+            target: {
+              user_id: payload.target.userId,
+              device_id: payload.target.deviceId,
+            },
+            endpoint: payload.target.token,
+            p256dh,
+            auth,
+            sourceJobId: payload.jobId,
+            notification: payload.notification,
+          });
+        }
       }
     }).pipe(withSpanAttributes({ "user.id": payload.target.userId }));
   });
@@ -1185,6 +1372,7 @@ export const make = Effect.gen(function* () {
   return ApnsDeliveries.of({
     sendLiveActivity,
     sendPushNotification,
+    sendWebPushForUser,
     processSignedJob,
     sendPushNotificationForTarget: Effect.fnUntraced(function* (input) {
       const now = yield* DateTime.now;

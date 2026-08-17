@@ -11,7 +11,7 @@ import * as OpenApi from "effect/unstable/httpapi/OpenApi";
 import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 
-export const RelayAgentAwarenessPlatform = Schema.Literal("ios");
+export const RelayAgentAwarenessPlatform = Schema.Literals(["ios", "web"]);
 export type RelayAgentAwarenessPlatform = typeof RelayAgentAwarenessPlatform.Type;
 
 export const RelayAgentAwarenessPhase = Schema.Literals([
@@ -38,11 +38,16 @@ export type RelayAgentAwarenessPreferences = typeof RelayAgentAwarenessPreferenc
 export const RelayApnsEnvironment = Schema.Literals(["sandbox", "production"]);
 export type RelayApnsEnvironment = typeof RelayApnsEnvironment.Type;
 
+// One registration shape for both platforms. Per-platform requirements the
+// schema cannot express (ios needs iosMajorVersion + pushToken, web needs the
+// webPush* triple) are enforced by the relay's registration handler.
 export const RelayDeviceRegistrationRequest = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   platform: RelayAgentAwarenessPlatform,
-  iosMajorVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(18)),
+  // Required for ios registrations; absent for web. Optional (not NullOr) so
+  // every payload an older app build produces still decodes unchanged.
+  iosMajorVersion: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(18))),
   appVersion: Schema.optional(TrimmedNonEmptyString),
   // APNs routing for this install: the topic must match the app's bundle id
   // (dev/preview/prod variants differ) and development-signed builds receive
@@ -52,6 +57,11 @@ export const RelayDeviceRegistrationRequest = Schema.Struct({
   apsEnvironment: Schema.optional(RelayApnsEnvironment),
   pushToken: Schema.optional(TrimmedNonEmptyString),
   pushToStartToken: Schema.optional(TrimmedNonEmptyString),
+  // Web Push subscription (platform "web"): the push-service endpoint URL and
+  // the client keys from PushSubscription.getKey, base64url-encoded.
+  webPushEndpoint: Schema.optional(TrimmedNonEmptyString),
+  webPushP256dh: Schema.optional(TrimmedNonEmptyString),
+  webPushAuth: Schema.optional(TrimmedNonEmptyString),
   preferences: RelayAgentAwarenessPreferences,
 });
 export type RelayDeviceRegistrationRequest = typeof RelayDeviceRegistrationRequest.Type;
@@ -60,7 +70,7 @@ export const RelayClientDeviceRecord = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   platform: RelayAgentAwarenessPlatform,
-  iosMajorVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(18)),
+  iosMajorVersion: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(18))),
   appVersion: Schema.NullOr(TrimmedNonEmptyString),
   notifications: Schema.Struct({
     enabled: Schema.Boolean,
@@ -371,6 +381,20 @@ export class RelayEnvironmentLinkProofInvalidError extends Schema.TaggedErrorCla
   }
 }
 
+export class RelayDeviceRegistrationInvalidError extends Schema.TaggedErrorClass<RelayDeviceRegistrationInvalidError>()(
+  "RelayDeviceRegistrationInvalidError",
+  {
+    code: Schema.Literal("device_registration_invalid"),
+    reason: TrimmedNonEmptyString,
+    traceId: TrimmedNonEmptyString,
+  },
+  { httpApiStatus: 400 },
+) {
+  override get message(): string {
+    return `Relay device registration is invalid: ${this.reason}`;
+  }
+}
+
 export const RelayEnvironmentConnectNotAuthorizedReason = Schema.Literals([
   "client_proof_key_thumbprint_missing",
   "environment_link_not_found",
@@ -524,6 +548,7 @@ export const RelayProtectedError = Schema.Union([
   RelayEnvironmentLinkLimitExceededError,
   RelayAgentActivityPublishProofExpiredError,
   RelayAgentActivityPublishProofInvalidError,
+  RelayDeviceRegistrationInvalidError,
   RelayInternalError,
 ]);
 export type RelayProtectedError = typeof RelayProtectedError.Type;
@@ -834,6 +859,7 @@ export const RelayDeliveryKind = Schema.Literals([
   "live_activity_update",
   "live_activity_end",
   "push_notification",
+  "web_push",
 ]);
 export type RelayDeliveryKind = typeof RelayDeliveryKind.Type;
 
@@ -874,6 +900,13 @@ export const RelayHealthGroup = HttpApiGroup.make("health")
   )
   .annotate(OpenApi.Description, "Service health and readiness.");
 
+export const RelayWebPushConfigResponse = Schema.Struct({
+  // VAPID application server public key: uncompressed P-256 point,
+  // base64url-encoded, ready for PushManager.subscribe({applicationServerKey}).
+  vapidPublicKey: TrimmedNonEmptyString,
+});
+export type RelayWebPushConfigResponse = typeof RelayWebPushConfigResponse.Type;
+
 export const RelayMetadataGroup = HttpApiGroup.make("metadata")
   .add(
     HttpApiEndpoint.get("authorizationServer", "/.well-known/oauth-authorization-server", {
@@ -882,6 +915,10 @@ export const RelayMetadataGroup = HttpApiGroup.make("metadata")
     HttpApiEndpoint.get("protectedResource", "/.well-known/oauth-protected-resource", {
       success: RelayProtectedResourceMetadata,
     }).annotate(OpenApi.Summary, "Read OAuth protected-resource metadata"),
+    HttpApiEndpoint.get("webPushConfig", "/v1/web-push/config", {
+      success: RelayWebPushConfigResponse,
+      error: RelayInternalError,
+    }).annotate(OpenApi.Summary, "Read the Web Push application server key"),
   )
   .annotate(OpenApi.Description, "OAuth and DPoP discovery metadata.");
 
@@ -892,9 +929,9 @@ export const RelayRegisterDeviceEndpoint = HttpApiEndpoint.post(
     headers: RelayDpopRequestHeaders,
     payload: RelayDeviceRegistrationRequest,
     success: RelayOkResponse,
-    error: RelayAuthAndInternalErrors,
+    error: [...RelayAuthAndInternalErrors, RelayDeviceRegistrationInvalidError],
   },
-).annotate(OpenApi.Summary, "Register or update a mobile device");
+).annotate(OpenApi.Summary, "Register or update a mobile or web device");
 
 export const RelayRegisterLiveActivityEndpoint = HttpApiEndpoint.post(
   "registerLiveActivity",

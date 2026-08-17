@@ -12,6 +12,8 @@ import * as Redacted from "effect/Redacted";
 import { FetchHttpClient } from "effect/unstable/http";
 
 import * as Devices from "./Devices.ts";
+import * as WebPushClient from "./WebPushClient.ts";
+import * as WebPushSubscriptions from "./WebPushSubscriptions.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as DeliveryAttempts from "./DeliveryAttempts.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
@@ -113,6 +115,14 @@ function makeEnvironmentLinks(
   };
 }
 
+const webPushStubLayer = Layer.succeed(WebPushSubscriptions.WebPushSubscriptions, {
+  register: () => Effect.void,
+  unregister: () => Effect.void,
+  listTargets: () => Effect.succeed([]),
+  listForUser: () => Effect.succeed([]),
+  invalidateEndpoint: () => Effect.void,
+});
+
 function makeDeliveryAttempts(
   overrides: Partial<DeliveryAttempts.DeliveryAttempts["Service"]> = {},
 ): DeliveryAttempts.DeliveryAttempts["Service"] {
@@ -132,6 +142,11 @@ const config = RelayConfiguration.RelayConfiguration.of({
     keyId: "key-id",
     bundleId: "codes.t3.mobile",
     privateKey: Redacted.make("apns-private-key"),
+  },
+  webPush: {
+    privateKey: Redacted.make("web-push-private-key"),
+    publicKey: "web-push-public-key",
+    subject: "https://relay.example.test",
   },
   clerkSecretKey: Redacted.make("clerk-secret"),
   clerkPublishableKey: "pk_test_test",
@@ -153,8 +168,14 @@ function makeRegistrationReplayLayer(input: {
     Layer.provide(
       ApnsDeliveries.layer.pipe(
         Layer.provide(ApnsClient.layer.pipe(Layer.provide(ApnsProviderTokens.layer))),
+        Layer.provide(
+          Layer.succeed(WebPushClient.WebPushClient, {
+            send: () => Effect.succeed({ ok: true, status: 201, permanentFailure: false }),
+          }),
+        ),
       ),
     ),
+    Layer.provide(webPushStubLayer),
     Layer.provide(ApnsDeliveryQueue.layer.pipe(Layer.provide(NodeCryptoLayer.layer))),
     Layer.provide(
       Layer.mergeAll(
@@ -187,6 +208,68 @@ function makeAgentActivityPublisher(
 }
 
 describe("MobileRegistrations", () => {
+  it.effect("routes platform web registrations to the web push subscription store", () => {
+    let webRegistered: { userId: string; registration: RelayDeviceRegistrationRequest } | null =
+      null;
+    let mobileRegistered = false;
+    const webDevice: RelayDeviceRegistrationRequest = {
+      deviceId: "web-device-1" as RelayDeviceRegistrationRequest["deviceId"],
+      label: "Chrome on macOS",
+      platform: "web",
+      webPushEndpoint: "https://push.example.test/subscription/abc",
+      webPushP256dh: "p256dh-key",
+      webPushAuth: "auth-secret",
+      preferences: device.preferences,
+    };
+
+    return Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
+        const registrations = yield* MobileRegistrations.MobileRegistrations;
+        return yield* registrations.registerDevice({ userId: "dev:julius", payload: webDevice });
+      }).pipe(
+        Effect.provide(
+          MobileRegistrations.layer.pipe(
+            Layer.provide(
+              Layer.succeed(WebPushSubscriptions.WebPushSubscriptions, {
+                register: (input) =>
+                  Effect.sync(() => {
+                    webRegistered = input;
+                  }),
+                unregister: () => Effect.void,
+                listTargets: () => Effect.succeed([]),
+                listForUser: () => Effect.succeed([]),
+                invalidateEndpoint: () => Effect.void,
+              }),
+            ),
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.succeed(
+                  Devices.Devices,
+                  makeDevices({
+                    register: () =>
+                      Effect.sync(() => {
+                        mobileRegistered = true;
+                      }),
+                  }),
+                ),
+                Layer.succeed(LiveActivities.LiveActivities, makeLiveActivities()),
+                Layer.succeed(AgentActivityRows.AgentActivityRows, makeAgentActivityRows()),
+                Layer.succeed(
+                  AgentActivityPublisher.AgentActivityPublisher,
+                  makeAgentActivityPublisher(),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(result).toEqual({ ok: true });
+      expect(webRegistered).toEqual({ userId: "dev:julius", registration: webDevice });
+      expect(mobileRegistered).toBe(false);
+    });
+  });
+
   it.effect("registers devices through the device persistence service", () => {
     let registered: Parameters<Devices.Devices["Service"]["register"]>[0] | null = null;
     let replayed:
@@ -202,6 +285,7 @@ describe("MobileRegistrations", () => {
       }).pipe(
         Effect.provide(
           MobileRegistrations.layer.pipe(
+            Layer.provide(webPushStubLayer),
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(
@@ -253,6 +337,7 @@ describe("MobileRegistrations", () => {
       }).pipe(
         Effect.provide(
           MobileRegistrations.layer.pipe(
+            Layer.provide(webPushStubLayer),
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(Devices.Devices, makeDevices()),
@@ -297,6 +382,7 @@ describe("MobileRegistrations", () => {
       }).pipe(
         Effect.provide(
           MobileRegistrations.layer.pipe(
+            Layer.provide(webPushStubLayer),
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(
@@ -351,6 +437,7 @@ describe("MobileRegistrations", () => {
       }).pipe(
         Effect.provide(
           MobileRegistrations.layer.pipe(
+            Layer.provide(webPushStubLayer),
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(Devices.Devices, makeDevices()),
@@ -404,6 +491,7 @@ describe("MobileRegistrations", () => {
     }).pipe(
       Effect.provide(
         MobileRegistrations.layer.pipe(
+          Layer.provide(webPushStubLayer),
           Layer.provide(
             Layer.mergeAll(
               Layer.succeed(Devices.Devices, makeDevices()),

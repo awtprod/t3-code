@@ -85,6 +85,7 @@ function relayClient(
     unregisterDevice: () => unsupported("unregisterDevice"),
     registerLiveActivity: () => unsupported("registerLiveActivity"),
     getAgentActivitySnapshot: () => unsupported("getAgentActivitySnapshot"),
+    getWebPushConfig: Effect.die("getWebPushConfig unused in this test"),
     resetTokenCache: Effect.void,
   });
 }

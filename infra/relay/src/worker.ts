@@ -51,6 +51,9 @@ import * as ApnsClient from "./agentActivity/ApnsClient.ts";
 import * as ApnsProviderTokens from "./agentActivity/ApnsProviderTokens.ts";
 import * as ApnsDeliveryQueue from "./agentActivity/ApnsDeliveryQueue.ts";
 import * as ApnsDeliveries from "./agentActivity/ApnsDeliveries.ts";
+import * as WebPushClient from "./agentActivity/WebPushClient.ts";
+import * as WebPushSubscriptions from "./agentActivity/WebPushSubscriptions.ts";
+import { vapidPublicKeyFromPem } from "./agentActivity/webPushCrypto.ts";
 import * as EnvironmentConnector from "./environments/EnvironmentConnector.ts";
 import * as EnvironmentLinker from "./environments/EnvironmentLinker.ts";
 import * as EnvironmentPublishSignatures from "./environments/EnvironmentPublishSignatures.ts";
@@ -92,6 +95,12 @@ const relayApiLayer = Layer.mergeAll(
 );
 
 const CloudMintKeyPair = Alchemy.KeyPair("CloudMintKeyPair");
+// VAPID application server keypair (RFC 8292). Web Push requires P-256; the
+// public key is served to browsers for PushManager.subscribe.
+const WebPushVapidKeyPair = Alchemy.KeyPair("WebPushVapidKeyPair", {
+  algorithm: "ec",
+  namedCurve: "P-256",
+});
 const ApnsDeliveryJobSigningSecret = Alchemy.makeRandom("ApnsDeliveryJobSigningSecret", {
   bytes: 32,
 });
@@ -118,6 +127,7 @@ export const ApiLive = Api.make(
     const apnsDeliveryQueue = yield* RelayApnsDeliveryQueue;
     const apnsDeliveryDeadLetterQueue = yield* RelayApnsDeliveryDeadLetterQueue;
     const cloudMintKeyPair = yield* CloudMintKeyPair;
+    const webPushVapidKeyPair = yield* WebPushVapidKeyPair;
     const relayApiZone = yield* RelayApiZone;
     const managedEndpointZone = yield* ManagedEndpointZone;
     const randomApnsDeliveryJobSigningSecret = yield* ApnsDeliveryJobSigningSecret;
@@ -147,6 +157,8 @@ export const ApiLive = Api.make(
 
     const cloudMintPrivateKey = yield* cloudMintKeyPair.privateKey;
     const cloudMintPublicKey = yield* cloudMintKeyPair.publicKey;
+    const webPushPrivateKey = yield* webPushVapidKeyPair.privateKey;
+    const webPushPublicKeyPem = yield* webPushVapidKeyPair.publicKey;
     const hyperdrive = yield* Cloudflare.Hyperdrive.Connect(yield* RelayDb.RelayHyperdrive);
     const db = yield* Drizzle.Postgres(hyperdrive.connectionString);
 
@@ -170,6 +182,11 @@ export const ApiLive = Api.make(
           keyId: apnsKeyId,
           bundleId: apnsBundleId,
           privateKey: apnsPrivateKey,
+        },
+        webPush: {
+          privateKey: yield* webPushPrivateKey,
+          publicKey: vapidPublicKeyFromPem(yield* webPushPublicKeyPem),
+          subject: relayPublicOrigin,
         },
         apnsDeliveryJobSigningSecret: yield* apnsDeliveryJobSigningSecret,
         clerkSecretKey,
@@ -205,7 +222,13 @@ export const ApiLive = Api.make(
       ),
       Layer.provideMerge(DpopProofs.layer),
       Layer.provideMerge(ApnsDeliveries.layer),
-      Layer.provideMerge(ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer))),
+      Layer.provideMerge(
+        Layer.mergeAll(
+          ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer)),
+          WebPushClient.layer,
+          WebPushSubscriptions.layer,
+        ),
+      ),
       Layer.provideMerge(
         ApnsDeliveryQueue.layerCloudflareQueues(apnsDeliveryQueueSender, alchemyRuntimeContext),
       ),

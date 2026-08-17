@@ -12,12 +12,19 @@ import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as Devices from "./Devices.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as AgentActivityPublisher from "./AgentActivityPublisher.ts";
+import * as WebPushSubscriptions from "./WebPushSubscriptions.ts";
 
 export type MobileRegistrationError =
   | Devices.DeviceRegistrationPersistenceError
   | Devices.DeviceUnregistrationPersistenceError
   | LiveActivities.LiveActivityRegistrationPersistenceError
-  | AgentActivityRows.AgentActivityRowListPersistenceError;
+  | AgentActivityRows.AgentActivityRowListPersistenceError
+  | WebPushSubscriptions.WebPushSubscriptionPersistenceError;
+
+export type DeviceRegistrationError =
+  | MobileRegistrationError
+  | Devices.DeviceRegistrationInvalidError
+  | WebPushSubscriptions.WebPushRegistrationInvalidError;
 
 export class MobileRegistrations extends Context.Service<
   MobileRegistrations,
@@ -25,7 +32,7 @@ export class MobileRegistrations extends Context.Service<
     readonly registerDevice: (input: {
       readonly userId: string;
       readonly payload: RelayDeviceRegistrationRequest;
-    }) => Effect.Effect<{ readonly ok: true }, MobileRegistrationError>;
+    }) => Effect.Effect<{ readonly ok: true }, DeviceRegistrationError>;
     readonly registerLiveActivity: (input: {
       readonly userId: string;
       readonly payload: RelayLiveActivityRegistrationRequest;
@@ -45,6 +52,7 @@ export const make = Effect.gen(function* () {
   const devices = yield* Devices.Devices;
   const liveActivities = yield* LiveActivities.LiveActivities;
   const publisher = yield* AgentActivityPublisher.AgentActivityPublisher;
+  const webPush = yield* WebPushSubscriptions.WebPushSubscriptions;
 
   return MobileRegistrations.of({
     registerDevice: Effect.fn("relay.mobile_registrations.register_device")(function* (input) {
@@ -52,6 +60,10 @@ export const make = Effect.gen(function* () {
         "relay.mobile.device_id": input.payload.deviceId,
         "relay.mobile.platform": input.payload.platform,
       });
+      if (input.payload.platform === "web") {
+        yield* webPush.register({ userId: input.userId, registration: input.payload });
+        return { ok: true as const };
+      }
       yield* devices.register({ userId: input.userId, registration: input.payload });
       yield* publisher
         .replayForLiveActivityRegistration({
@@ -107,7 +119,10 @@ export const make = Effect.gen(function* () {
       yield* Effect.annotateCurrentSpan({
         "relay.mobile.device_id": input.deviceId,
       });
+      // A deviceId lives in at most one of the two stores; deleting from both
+      // is idempotent and spares the caller a platform parameter.
       yield* devices.unregister(input);
+      yield* webPush.unregister(input);
       return { ok: true as const };
     }),
   });

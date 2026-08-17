@@ -214,6 +214,18 @@ Typical uses:
 
 Use `command-center auth --help` and the nested subcommand help pages for the full reference.
 
+### Browser Notifications
+
+When your account is signed in to T3 Connect, the web app can notify your browser when an agent
+needs approval or input, or when work finishes — the same agent activity that powers mobile push
+notifications. Enable it per browser in **Settings** → **Connections** → **Browser notifications**.
+
+Notifications flow through T3 Connect: the environment publishes agent activity to your account,
+and the relay delivers it to every browser you enabled. Environments connected only over the local
+network without T3 Connect do not send notifications. On iPhone and iPad, first add the web app to
+your home screen (**Share** → **Add to Home Screen**); iOS only delivers web notifications to
+installed apps.
+
 ### Deregister a T3 Connect Environment
 
 Open your account menu and choose **T3 Connect** to see every environment registered to your

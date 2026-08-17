@@ -271,3 +271,31 @@ Do not enable an empty allowlist: it blocks all new sign-ups.
 Clerk allowlists control who can sign up. They do not revoke an existing user's active cloud
 access. To remove an already-created user's access, ban that user in Clerk so their active
 sessions are ended and future sign-ins are rejected.
+
+## Web Push
+
+Browsers receive agent-awareness notifications over Web Push (RFC 8030), riding the same pipeline
+as APNs: the environment publishes activity to the relay, `AgentActivityPublisher` fans out per
+user, and delivery jobs go through the signed Cloudflare Queue. The web-specific pieces:
+
+- **Registration.** The web app registers through the existing `POST /v1/mobile/devices` endpoint
+  with `platform: "web"` and the subscription triple (`webPushEndpoint`, `webPushP256dh`,
+  `webPushAuth`). `MobileRegistrations` routes web registrations to
+  `infra/relay/src/agentActivity/WebPushSubscriptions.ts` (table
+  `relay_web_push_subscriptions`); iOS registrations are unchanged. The `t3-web` client id carries
+  the `mobile:registration` scope for this.
+- **VAPID keys.** An Alchemy `KeyPair` (`WebPushVapidKeyPair`, P-256) provisioned in
+  `infra/relay/src/worker.ts`. The public key is served unauthenticated at
+  `GET /v1/web-push/config` for `PushManager.subscribe`.
+- **Delivery.** `web_push` is a `RelayDeliveryKind`; jobs carry the endpoint in the token slot
+  plus the subscription keys. `infra/relay/src/agentActivity/WebPushClient.ts` signs a VAPID JWT
+  (deterministic ES256, cached per push-service origin like the APNs provider token) and encrypts
+  the payload per RFC 8291 (`webPushCrypto.ts`, hand-rolled — the `web-push` npm package does not
+  run on Workers). A 404/410 from the push service deletes the stored subscription.
+- **Client.** `apps/web/public/service-worker.js` handles `push`/`notificationclick` (deep links
+  validated against the `/threads/{env}/{thread}` contract, rewritten to the web router's
+  `/{env}/{thread}`), and `apps/web/src/cloud/webPush.ts` owns subscribe/register/reconcile with
+  per-browser identity in `localStorage` (`t3code:web-push:v1`).
+
+There is no Live Activity analogue for browsers; web subscriptions receive plain notifications
+gated by the same per-phase preferences as mobile.

@@ -17,6 +17,7 @@ import {
 } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
 import { registerPwaServiceWorker } from "./pwa";
+import { listenForWebPushSubscriptionChange, reconcileWebPushRegistration } from "./cloud/webPush";
 import { clerkAppearance } from "./components/clerk/clerkAppearance";
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
@@ -56,3 +57,8 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
 );
 
 registerPwaServiceWorker();
+// Push subscriptions rotate at the push service's whim; re-register with the
+// relay when the stored registration no longer matches the live subscription.
+// No-ops unless the user enabled browser notifications.
+listenForWebPushSubscriptionChange();
+void reconcileWebPushRegistration();

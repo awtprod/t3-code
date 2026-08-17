@@ -18,6 +18,7 @@ import {
   RelayGetEnvironmentStatusEndpoint,
   RelayJwtSubjectTokenType,
   type RelayAgentActivitySnapshotResponse,
+  type RelayWebPushConfigResponse,
   type RelayLiveActivityRegistrationRequest,
   RelayMobileRegistrationScope,
   type RelayOkResponse,
@@ -95,6 +96,7 @@ export const ManagedRelayRequestAction = Schema.Literals([
   "unregister relay mobile device",
   "register relay live activity",
   "read relay agent activity snapshot",
+  "read relay web push config",
 ]);
 export type ManagedRelayRequestAction = typeof ManagedRelayRequestAction.Type;
 
@@ -111,6 +113,7 @@ export const ManagedRelayRequestActivity = Schema.Literals([
   "Relay mobile device unregistration",
   "Relay Live Activity registration",
   "Relay agent activity snapshot",
+  "Relay web push config",
 ]);
 export type ManagedRelayRequestActivity = typeof ManagedRelayRequestActivity.Type;
 
@@ -297,6 +300,9 @@ export class ManagedRelayClient extends Context.Service<
     readonly getAgentActivitySnapshot: (input: {
       readonly clerkToken: string;
     }) => Effect.Effect<RelayAgentActivitySnapshotResponse, ManagedRelayClientError>;
+    // Unauthenticated discovery: the VAPID application server key browsers
+    // pass to PushManager.subscribe.
+    readonly getWebPushConfig: Effect.Effect<RelayWebPushConfigResponse, ManagedRelayClientError>;
     readonly resetTokenCache: Effect.Effect<void>;
   }
 >()("@t3tools/client-runtime/relay/managedRelay/ManagedRelayClient") {}
@@ -418,6 +424,7 @@ function disabledManagedRelayClient(relayUrl: string): ManagedRelayClient["Servi
     unregisterDevice: unavailable("clientRuntime.managedRelay.unregisterDevice"),
     registerLiveActivity: unavailable("clientRuntime.managedRelay.registerLiveActivity"),
     getAgentActivitySnapshot: unavailable("clientRuntime.managedRelay.getAgentActivitySnapshot"),
+    getWebPushConfig: unavailable("clientRuntime.managedRelay.getWebPushConfig")(),
     resetTokenCache: Effect.void.pipe(
       Effect.withSpan("clientRuntime.managedRelay.resetTokenCache"),
     ),
@@ -911,6 +918,14 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
       Effect.withSpan("clientRuntime.managedRelay.registerLiveActivity"),
       withRelayClientTracing,
     ),
+    getWebPushConfig: client.metadata
+      .webPushConfig()
+      .pipe(
+        Effect.mapError(relayRequestError("read relay web push config")),
+        timeoutRelayRequest("Relay web push config"),
+        Effect.withSpan("clientRuntime.managedRelay.getWebPushConfig"),
+        withRelayClientTracing,
+      ),
     resetTokenCache: SynchronizedRef.set(cachedTokens, []).pipe(
       Effect.andThen(options.accessTokenStore ? options.accessTokenStore.clear : Effect.void),
       Effect.withSpan("clientRuntime.managedRelay.resetTokenCache"),
