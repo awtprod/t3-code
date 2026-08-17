@@ -1,0 +1,40 @@
+# Sidecar image for the sandbox network: preview proxy, egress proxy and
+# credential proxy. All three are self-contained esbuild bundles, so the image
+# carries a Node runtime and nothing else — no npm, no node_modules, no shell
+# tooling a compromised sidecar could pivot with.
+#
+# The same image serves all three roles; which binary runs is decided by the
+# argv the server passes to `podman run`:
+#   preview     ContainerSandboxBackend/ThreadPreviewProxy -> t3-preview-bridge serve
+#   egress      ContainerSandboxBackend                    -> t3-egress-proxy serve
+#   credential  (thread credential broker)                 -> t3-credential-proxy serve
+#
+# Build context is deploy/openclaw/sandbox-image/context, populated by
+# build-sandbox-images.sh from packages/sandbox-bridge/dist.
+
+ARG BASE_IMAGE=docker.io/library/node:22-bookworm-slim
+FROM ${BASE_IMAGE}
+
+# ca-certificates is the only runtime dependency: the egress and credential
+# proxies dial TLS upstreams and need a trust store.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY bin/t3-preview-bridge.mjs /usr/local/bin/t3-preview-bridge
+COPY bin/t3-egress-proxy.mjs /usr/local/bin/t3-egress-proxy
+COPY bin/t3-credential-proxy.mjs /usr/local/bin/t3-credential-proxy
+RUN chmod 0555 /usr/local/bin/t3-preview-bridge \
+      /usr/local/bin/t3-egress-proxy \
+      /usr/local/bin/t3-credential-proxy \
+ && /usr/local/bin/t3-preview-bridge --help >/dev/null \
+ && /usr/local/bin/t3-egress-proxy --help >/dev/null \
+ && /usr/local/bin/t3-credential-proxy --help >/dev/null
+
+# The sidecars are run with --read-only --cap-drop ALL --user is not set by the
+# server for sidecars, so the image must not default to root.
+USER 65532:65532
+
+# No ENTRYPOINT: the server always passes the binary name plus its subcommand as
+# the container command, and an entrypoint would prepend to that argv.
+CMD ["t3-preview-bridge", "serve", "--listen", "0.0.0.0:8080"]
