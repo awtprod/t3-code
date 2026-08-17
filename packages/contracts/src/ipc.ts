@@ -92,6 +92,7 @@ import { AuthAccessTokenResult, AuthSessionState, AuthWebSocketTicketResult } fr
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import type { ClientSettings } from "./settings.ts";
+import { ScopedThreadRef } from "./environment.ts";
 import type { EditorId } from "./editor.ts";
 import type {
   SourceControlCloneRepositoryInput,
@@ -1043,6 +1044,35 @@ export const DesktopPreviewAutomationWaitForInputSchema = Schema.Struct({
   input: PreviewAutomationWaitForInput,
 });
 
+// Only the transitions a user needs to act on or come back for: these are the
+// moments a thread stops making progress without the user, so app-lifecycle
+// noise (updates, connection changes) never lands here.
+export const DesktopNotificationKindSchema = Schema.Literals([
+  "approval-needed",
+  "input-needed",
+  "completed",
+  "failed",
+]);
+export type DesktopNotificationKind = typeof DesktopNotificationKindSchema.Type;
+
+// Title and body are composed in the renderer and shipped as data: only it
+// has the project title, thread title, and awareness headline. The main
+// process never sees a phase and never formats copy.
+export const DesktopNotificationInputSchema = Schema.Struct({
+  kind: DesktopNotificationKindSchema,
+  title: Schema.String,
+  body: Schema.String,
+  silent: Schema.Boolean,
+  threadRef: ScopedThreadRef,
+});
+export type DesktopNotificationInput = typeof DesktopNotificationInputSchema.Type;
+
+// Echoed back to the renderer when the user clicks a notification.
+export const DesktopNotificationActivationSchema = Schema.Struct({
+  threadRef: ScopedThreadRef,
+});
+export type DesktopNotificationActivation = typeof DesktopNotificationActivationSchema.Type;
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /**
@@ -1114,6 +1144,15 @@ export interface DesktopBridge {
    * builds lack it; callers fall back to VS Code only.
    */
   probeRemoteEditors?: () => Promise<readonly EditorId[]>;
+  /**
+   * Raises a native OS notification. Optional: older desktop builds lack it,
+   * and web builds have no bridge at all, so callers feature-check first.
+   */
+  showNotification?: (input: DesktopNotificationInput) => Promise<void>;
+  /** Fires when the user clicks a notification raised by `showNotification`. */
+  onNotificationActivated?: (
+    listener: (activation: DesktopNotificationActivation) => void,
+  ) => () => void;
   onMenuAction: (listener: (action: string) => void) => () => void;
   /**
    * Hold-to-quit hint pushes: "down" when the quit shortcut is first pressed,

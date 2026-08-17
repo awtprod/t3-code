@@ -2,7 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { ProjectId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { PositiveInt, ProjectId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { ThreadEnvMode } from "./environment.ts";
 import {
   DEFAULT_TEXT_GENERATION_MODEL,
@@ -117,6 +117,21 @@ export const ClientSettingsSchema = Schema.Struct({
   // Desktop-only: require holding the quit shortcut (Cmd/Ctrl+Q) before the
   // app quits; a quick tap only shows a hint. Browser clients ignore it.
   confirmQuit: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Desktop-only native OS notifications for agent activity. Defaults on: the
+  // OS owns the permission prompt, unlike web push which needs an explicit
+  // opt-in gesture and so defaults off (see webPushNotificationsEnabled
+  // handling in apps/web/src/cloud/webPush.ts, which is not itself a
+  // ClientSettings field).
+  desktopNotificationsEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
+  desktopNotifyOnApproval: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  desktopNotifyOnInput: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  desktopNotifyOnCompletion: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  desktopNotifyOnFailure: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // The in-app chime and sidebar alert both work on web and desktop; this one
+  // preference gates the sound for both.
+  notificationSoundEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
@@ -690,6 +705,13 @@ export const ServerSettings = Schema.Struct({
   usagePricingOverrides: Schema.Array(UsagePricingOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  // Days a managed worktree may sit idle (no thread activity, no running
+  // terminal) before its build artifacts are pruned and, after a further
+  // fixed minimum, the worktree itself is removed — only when it has no
+  // local changes and no unpushed commits. `null` disables the sweep.
+  worktreeCleanupAfterDays: Schema.NullOr(PositiveInt).pipe(
+    Schema.withDecodingDefault(Effect.succeed(7)),
+  ),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -847,11 +869,18 @@ export const ServerSettingsPatch = Schema.Struct({
   // entries are materialized and persisted by the server settings service.
   databaseConnections: Schema.optionalKey(Schema.Record(ProjectId, DatabaseConnection)),
   usagePricingOverrides: Schema.optionalKey(Schema.Array(UsagePricingOverride)),
+  worktreeCleanupAfterDays: Schema.optionalKey(Schema.NullOr(PositiveInt)),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
   confirmQuit: Schema.optionalKey(Schema.Boolean),
+  desktopNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
+  desktopNotifyOnApproval: Schema.optionalKey(Schema.Boolean),
+  desktopNotifyOnInput: Schema.optionalKey(Schema.Boolean),
+  desktopNotifyOnCompletion: Schema.optionalKey(Schema.Boolean),
+  desktopNotifyOnFailure: Schema.optionalKey(Schema.Boolean),
+  notificationSoundEnabled: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),

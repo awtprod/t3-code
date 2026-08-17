@@ -76,6 +76,14 @@
               chrome: "oklch(0.22813 0.020366 307.469)",
             },
           },
+          "vercel-dark": {
+            dark: {
+              background: "oklch(0 0 0)",
+              foreground: "oklch(0.946105 0 0)",
+              accent: "oklch(0.730784 0.142312 147.99)",
+              chrome: "oklch(0 0 0)",
+            },
+          },
           grove: {
             light: {
               background: "oklch(0.972369 0.005497 157.15)",
@@ -146,6 +154,7 @@
           "light",
           "dark",
           "t3-chat",
+          "vercel-dark",
           "grove",
           "ocean",
           "ember",
@@ -228,6 +237,29 @@
         };
 
         try {
+          // First-run default: a genuinely fresh install (no stored theme
+          // preference AND no install marker) gets Vercel Dark instead of
+          // following System. The marker is what makes this safe to run on
+          // every boot — an existing user who has always been on implicit
+          // System (never touched theme settings) already has the marker
+          // from an earlier boot, so this never re-fires and never changes
+          // what "System" resolves to for anyone already running the app.
+          const INSTALL_SEEN_STORAGE_KEY = "t3code:install-seen";
+          // Writes are best-effort: private browsing or a full quota can
+          // throw on setItem, and losing the default paint is far better
+          // than losing the whole boot script over a cosmetic write.
+          try {
+            if (
+              window.localStorage.getItem("t3code:theme") === null &&
+              window.localStorage.getItem(INSTALL_SEEN_STORAGE_KEY) === null
+            ) {
+              window.localStorage.setItem("t3code:theme", "vercel-dark");
+            }
+            window.localStorage.setItem(INSTALL_SEEN_STORAGE_KEY, "true");
+          } catch {
+            // Fall through with whatever localStorage already had.
+          }
+
           const storedTheme = window.localStorage.getItem("t3code:theme");
           const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
           // Older builds stored the dark T3 Chat palette as its own theme id
@@ -261,7 +293,15 @@
             themeModes !== null;
           const theme = isKnownTheme && storedTheme ? storedTheme : "system";
           const isThemed = isKnownTheme && themeModes !== null;
-          const baseAppearance = customTheme ? customTheme.appearance : "light";
+          // Mirrors the runtime's getThemePreferenceMode: a built-in's base
+          // appearance is "light" unless it is dark-only (no light variant
+          // to fall back to, e.g. Vercel Dark).
+          const baseAppearance =
+            customTheme != null
+              ? customTheme.appearance
+              : builtInModes && !builtInModes.includes("light")
+                ? "dark"
+                : "light";
           const systemMode = prefersDark ? "dark" : "light";
           const storedAppearanceMode = window.localStorage.getItem(
             THEME_APPEARANCE_MODE_STORAGE_KEY,

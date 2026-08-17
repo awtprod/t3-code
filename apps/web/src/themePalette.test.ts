@@ -26,6 +26,7 @@ import {
   subscribeToCustomThemes,
   themeAllowsSidebarArtwork,
   T3_CHAT_THEME,
+  VERCEL_DARK_THEME,
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
@@ -1014,7 +1015,14 @@ describe("stored theme preferences", () => {
   });
 
   it("recognizes only preferences the runtime can render", () => {
-    for (const preference of ["light", "dark", "system", T3_CHAT_THEME.id, GROVE_THEME.id]) {
+    for (const preference of [
+      "light",
+      "dark",
+      "system",
+      T3_CHAT_THEME.id,
+      VERCEL_DARK_THEME.id,
+      GROVE_THEME.id,
+    ]) {
       expect(isKnownThemePreference(preference)).toBe(true);
     }
     expect(isKnownThemePreference(`${GROVE_THEME.id}:dark`)).toBe(false);

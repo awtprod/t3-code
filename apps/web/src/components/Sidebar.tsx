@@ -107,6 +107,7 @@ import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useProjects, useThreadShells } from "../state/entities";
+import { useThreadAlert } from "../notifications/threadAlertStore";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
@@ -817,6 +818,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
+  // Set when a task finished or failed while this thread was not on screen,
+  // and cleared when the user opens it.
+  const threadAlert = useThreadAlert(threadRef);
   // Archiving mid-turn hides work the user hasn't seen land; the quick
   // action steps aside while a turn is actively running.
   const isThreadRunning =
@@ -1142,6 +1146,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       !props.isActive &&
       !isSelected &&
       "opacity-70 transition-opacity hover:opacity-100",
+    // A thread that finished or failed while the user was away keeps a tint
+    // until they open it. This is the signal that survives Do Not Disturb,
+    // when the banner and the chime may both have been swallowed.
+    threadAlert === "completed" && "bg-success/10",
+    threadAlert === "failed" && "bg-error/10",
   );
 
   const title = isRenaming ? (
@@ -1401,6 +1410,15 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             />
           }
         >
+          {threadAlert === null ? null : (
+            <span
+              aria-hidden
+              className={cn(
+                "pointer-events-none absolute inset-y-0 left-0 z-0 w-1 rounded-r-sm motion-safe:animate-thread-alert-splash",
+                threadAlert === "failed" ? "bg-error" : "bg-success",
+              )}
+            />
+          )}
           <div className="relative z-10 h-[4.875rem] px-[var(--sidebar-row-content-inset)] py-[var(--sidebar-content-inset)]">
             <div className="flex h-5 min-w-0 items-center gap-1.5">
               <ProjectFavicon

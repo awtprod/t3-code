@@ -7,6 +7,7 @@ import {
   type ServerLifecycleWelcomePayload,
   type ServerProvider,
   type ServerSettings,
+  type WorktreeCleanupNotice,
 } from "@t3tools/contracts";
 import { createServerEnvironmentAtoms } from "@t3tools/client-runtime/state/server";
 import { createEnvironmentServerConfigsAtom } from "@t3tools/client-runtime/state/shell";
@@ -109,3 +110,9 @@ export const primaryServerObservabilityAtom = Atom.make(
   (get): ServerConfig["observability"] | null =>
     get(primaryServerConfigAtom)?.observability ?? null,
 ).pipe(Atom.withLabel("web-primary-server-observability"));
+
+const EMPTY_WORKTREE_CLEANUP_NOTICES: ReadonlyArray<WorktreeCleanupNotice> = [];
+export const primaryServerWorktreeCleanupNoticesAtom = Atom.make(
+  (get): ReadonlyArray<WorktreeCleanupNotice> =>
+    get(primaryServerConfigAtom)?.worktreeCleanupNotices ?? EMPTY_WORKTREE_CLEANUP_NOTICES,
+).pipe(Atom.withLabel("web-primary-server-worktree-cleanup-notices"));
