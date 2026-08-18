@@ -203,7 +203,11 @@ export const makeSandboxRuntimeManager = (
           message:
             "T3_SANDBOX_PREVIEW_PROXY_IMAGE is required for the internal desktop signaling sidecar",
         });
-      const runtime = input.config?.runtime ?? "docker";
+      // Per-thread config wins, then the deployment default. Callers validate the
+      // runtime before dispatching but pass `config` through verbatim, so the
+      // deployment default has to be applied here or a podman-only host runs
+      // docker.
+      const runtime = input.config?.runtime ?? resolveSandboxRuntime();
       if (runtime !== "docker" && runtime !== "podman")
         return yield* new SandboxManagerError({
           message: `unsupported sandbox runtime: ${runtime}`,

@@ -138,6 +138,27 @@ describe("headless sandbox provisioning", () => {
   );
 });
 
+describe("runtime selection", () => {
+  it.effect("runs the deployment-default runtime when no thread config names one", () =>
+    Effect.gen(function* () {
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      process.env.T3_SANDBOX_RUNTIME = "podman";
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
+
+      // Callers validate the runtime but pass `config` through verbatim, and no
+      // client populates `sandboxConfig.runtime` -- so the deployment default has
+      // to survive all the way to the executed binary, not just the validation.
+      yield* manager.provision(provisionInput());
+
+      expect(executor.commands.length).toBeGreaterThan(0);
+      expect([...new Set(executor.commands.map((command) => command.executable))]).toEqual([
+        "podman",
+      ]);
+    }),
+  );
+});
+
 describe("local repository seeding", () => {
   it.effect("bundles the base commit by a pinned ref instead of a bare SHA", () =>
     Effect.gen(function* () {
