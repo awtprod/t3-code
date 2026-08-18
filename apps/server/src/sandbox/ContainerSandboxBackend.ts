@@ -342,11 +342,11 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           ["cp", input.bootstrap.repositoryBundlePath, `${containerName}:${containerBundle}`],
           setupTimeoutMs,
         );
-        await this.#mustExec(
-          containerName,
-          { executable: "git", args: ["bundle", "verify", containerBundle] },
-          setupTimeoutMs,
-        );
+        // No `git bundle verify` here: it needs a repository to resolve
+        // prerequisites against and there is none until the clone below runs.
+        // Nothing is lost -- verify passes on a bundle truncated mid-pack, while
+        // the clone rejects it ("remote transport reported error"), so the clone
+        // is the stronger check as well as the only runnable one.
         await this.#mustExec(
           containerName,
           {
@@ -512,17 +512,23 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         },
         120_000,
       );
+      // Verify in the container, against the repository the bundle came from:
+      // `bundle verify` resolves prerequisites against a repository and fails
+      // with "need a repository to verify a bundle" if run from wherever the
+      // server happens to live. Verifying before `cp` also keeps a bundle that
+      // failed its own check from reaching the host artifact directory at all.
+      await this.#mustExec(
+        record.ready.containerName,
+        {
+          executable: "git",
+          args: ["-C", "/workspace/repo", "bundle", "verify", containerBundle],
+        },
+        60_000,
+      );
       await this.#mustRun(
         ["cp", `${record.ready.containerName}:${containerBundle}`, destination],
         120_000,
       );
-      const verified = await this.#executor.run({
-        executable: "git",
-        args: ["bundle", "verify", destination],
-        timeoutMs: 60_000,
-      });
-      if (verified.exitCode !== 0)
-        throw new SandboxRuntimeError("exported Git bundle failed verification", verified.stderr);
     } finally {
       await this.#mustExec(
         record.ready.containerName,

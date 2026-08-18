@@ -292,12 +292,51 @@ describe("ContainerSandboxBackend", () => {
             "/tmp/thread-1.bundle",
           ],
         }),
-        expect.objectContaining({
-          executable: "git",
-          args: ["bundle", "verify", "/tmp/thread-1.bundle"],
-        }),
       ]),
     );
+
+    // Verification runs in the container against the repository the bundle came
+    // from -- `git bundle verify` needs a repository to resolve prerequisites
+    // against, so a host-side check with no `-C` fails outright. It also has to
+    // precede the `cp`, so a bad bundle never reaches the host.
+    const verifyIndex = executor.commands.findIndex(
+      (command) => command.args.includes("bundle") && command.args.includes("verify"),
+    );
+    const copyIndex = executor.commands.findIndex((command) => command.args[0] === "cp");
+    expect(verifyIndex).toBeGreaterThanOrEqual(0);
+    expect(executor.commands[verifyIndex]).toMatchObject({
+      executable: "docker",
+      args: expect.arrayContaining(["-C", "/workspace/repo", "bundle", "verify"]),
+    });
+    expect(verifyIndex).toBeLessThan(copyIndex);
+  });
+
+  it("clones the seed bundle without a pre-clone verify", async () => {
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const base = input();
+    await backend.ensureReady({
+      ...base,
+      bootstrap: { ...base.bootstrap, repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle" },
+    });
+
+    // The container has no repository until the clone runs, so a pre-clone
+    // `bundle verify` could only ever fail. The clone is also the stronger
+    // check: verify passes on a bundle truncated mid-pack, the clone does not.
+    const containerBundle = "/tmp/t3-repository.bundle";
+    expect(
+      executor.commands.some(
+        (command) =>
+          command.args.includes("bundle") &&
+          command.args.includes("verify") &&
+          command.args.includes(containerBundle),
+      ),
+    ).toBe(false);
+    expect(
+      executor.commands.some(
+        (command) => command.args.includes("clone") && command.args.includes(containerBundle),
+      ),
+    ).toBe(true);
   });
 
   it("samples bounded runtime and writable-volume usage", async () => {
