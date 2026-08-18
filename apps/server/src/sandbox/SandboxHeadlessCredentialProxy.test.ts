@@ -168,7 +168,7 @@ describe("local repository seeding", () => {
           (command) => command.args[2] === "bundle" && command.args[3] === "create",
         );
         const verified = gitCommands.find(
-          (command) => command.args[0] === "bundle" && command.args[1] === "verify",
+          (command) => command.args[2] === "bundle" && command.args[3] === "verify",
         );
         const unpin = gitCommands.find(
           (command) => command.args.includes("update-ref") && command.args.includes("-d"),
@@ -185,6 +185,12 @@ describe("local repository seeding", () => {
         expect(pin!.args.at(-1)).toBe(baseCommit);
         expect(created!.args).toContain(seedRef);
         expect(created!.args).not.toContain(baseCommit);
+
+        // Both bundle subcommands run against the source repository: `create` reads
+        // the ref from it, and `verify` resolves the bundle's prerequisites against
+        // it. Without `-C`, verify fails wherever the server's cwd happens to be.
+        for (const command of [created!, verified!])
+          expect(command.args.slice(0, 2)).toEqual(["-C", localRepoPath]);
 
         // The throwaway ref is deleted once the bundle exists, regardless of outcome.
         expect(unpin!.args.at(-1)).toBe(seedRef);

@@ -262,9 +262,13 @@ export const makeSandboxRuntimeManager = (
             });
             if (created.exitCode !== 0)
               throw new Error(created.stderr || "failed to create local repository seed bundle");
+            // `bundle verify` resolves the bundle's prerequisites against a
+            // repository, so it needs `-C` even though the bundle names a full
+            // history; without it git exits with "need a repository to verify a
+            // bundle" wherever the server happens to be running.
             const verified = await executor.run({
               executable: "git",
-              args: ["bundle", "verify", seedBundle!],
+              args: ["-C", input.bootstrap.repositoryUrl, "bundle", "verify", seedBundle!],
               timeoutMs: 60_000,
             });
             if (verified.exitCode !== 0)
