@@ -1,5 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off - test creates a real scratch directory for the seed bundle.
 import { describe, expect, it } from "@effect/vitest";
 import { afterEach } from "vite-plus/test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as Effect from "effect/Effect";
 import { SandboxId, ThreadId } from "@t3tools/contracts";
 import { ContainerSandboxBackend } from "./ContainerSandboxBackend.ts";
@@ -130,6 +134,63 @@ describe("headless sandbox provisioning", () => {
           (command) => command.args[0] === "run" && command.args.includes("t3-preview-bridge"),
         ),
       ).toBe(true);
+    }),
+  );
+});
+
+describe("local repository seeding", () => {
+  it.effect("bundles the base commit by a pinned ref instead of a bare SHA", () =>
+    Effect.gen(function* () {
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      const artifactRoot = mkdtempSync(join(tmpdir(), "t3-sandbox-artifacts-"));
+      const localRepoPath = "/var/lib/command-center/runtime/sandbox-canary-scratch/repo";
+      const baseCommit = "d".repeat(40);
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(artifactRoot, "linux", executor);
+      try {
+        yield* manager.provision(
+          provisionInput({
+            bootstrap: {
+              threadId: "thread-local-seed",
+              projectId: "project-1",
+              repositoryUrl: localRepoPath,
+              baseCommit,
+              branchName: "thread/thread-local-seed",
+            },
+          }),
+        );
+
+        const gitCommands = executor.commands.filter((command) => command.executable === "git");
+        const pin = gitCommands.find(
+          (command) => command.args.includes("update-ref") && !command.args.includes("-d"),
+        );
+        const created = gitCommands.find(
+          (command) => command.args[2] === "bundle" && command.args[3] === "create",
+        );
+        const verified = gitCommands.find(
+          (command) => command.args[0] === "bundle" && command.args[1] === "verify",
+        );
+        const unpin = gitCommands.find(
+          (command) => command.args.includes("update-ref") && command.args.includes("-d"),
+        );
+        expect(pin).toBeDefined();
+        expect(created).toBeDefined();
+        expect(verified).toBeDefined();
+        expect(unpin).toBeDefined();
+
+        // `git bundle create` refuses a bare commit SHA ("Refusing to create empty
+        // bundle") -- it must be given the pinned ref name, never the raw commit.
+        const seedRef = pin!.args.at(-2)!;
+        expect(seedRef).toMatch(/^refs\/t3-sandbox-seed\//);
+        expect(pin!.args.at(-1)).toBe(baseCommit);
+        expect(created!.args).toContain(seedRef);
+        expect(created!.args).not.toContain(baseCommit);
+
+        // The throwaway ref is deleted once the bundle exists, regardless of outcome.
+        expect(unpin!.args.at(-1)).toBe(seedRef);
+      } finally {
+        rmSync(artifactRoot, { recursive: true, force: true });
+      }
     }),
   );
 });

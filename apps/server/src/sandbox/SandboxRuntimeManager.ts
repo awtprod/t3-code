@@ -231,32 +231,53 @@ export const makeSandboxRuntimeManager = (
           });
         const seedRoot = NodePath.resolve(artifactRoot, "seeds");
         yield* attempt(() => NodeFSP.mkdir(seedRoot, { recursive: true, mode: 0o700 }));
-        seedBundle = NodePath.resolve(
-          seedRoot,
-          `.${NodeCrypto.createHash("sha256").update(input.bootstrap.threadId).digest("hex")}.${process.pid}.bundle`,
-        );
+        const seedHash = NodeCrypto.createHash("sha256")
+          .update(input.bootstrap.threadId)
+          .digest("hex");
+        seedBundle = NodePath.resolve(seedRoot, `.${seedHash}.${process.pid}.bundle`);
+        // `git bundle create` refuses a bare commit SHA ("Refusing to create empty
+        // bundle") because a bundle records named refs, not anonymous commits. Pin a
+        // throwaway ref at the base commit so the bundle has something to name, then
+        // remove it once the bundle is written.
+        const seedRef = `refs/t3-sandbox-seed/${seedHash}.${process.pid}`;
         yield* attempt(async () => {
-          const created = await executor.run({
+          const refUpdated = await executor.run({
             executable: "git",
             args: [
               "-C",
               input.bootstrap.repositoryUrl,
-              "bundle",
-              "create",
-              seedBundle!,
+              "update-ref",
+              seedRef,
               input.bootstrap.baseCommit,
             ],
-            timeoutMs: 120_000,
+            timeoutMs: 30_000,
           });
-          if (created.exitCode !== 0)
-            throw new Error(created.stderr || "failed to create local repository seed bundle");
-          const verified = await executor.run({
-            executable: "git",
-            args: ["bundle", "verify", seedBundle!],
-            timeoutMs: 60_000,
-          });
-          if (verified.exitCode !== 0)
-            throw new Error(verified.stderr || "local repository seed bundle failed verification");
+          if (refUpdated.exitCode !== 0)
+            throw new Error(refUpdated.stderr || "failed to pin local repository seed ref");
+          try {
+            const created = await executor.run({
+              executable: "git",
+              args: ["-C", input.bootstrap.repositoryUrl, "bundle", "create", seedBundle!, seedRef],
+              timeoutMs: 120_000,
+            });
+            if (created.exitCode !== 0)
+              throw new Error(created.stderr || "failed to create local repository seed bundle");
+            const verified = await executor.run({
+              executable: "git",
+              args: ["bundle", "verify", seedBundle!],
+              timeoutMs: 60_000,
+            });
+            if (verified.exitCode !== 0)
+              throw new Error(
+                verified.stderr || "local repository seed bundle failed verification",
+              );
+          } finally {
+            await executor.run({
+              executable: "git",
+              args: ["-C", input.bootstrap.repositoryUrl, "update-ref", "-d", seedRef],
+              timeoutMs: 30_000,
+            });
+          }
         });
         provisionInput = {
           ...input,
