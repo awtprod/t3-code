@@ -592,10 +592,14 @@ if wants_step 8; then
   as_service_user podman network create --internal \
     --label com.t3tools.sandbox.managed=true "$V_NET" >/dev/null ||
     die "podman network create --internal failed"
-  as_service_user podman run --detach --name "$V_PEER" --network "$V_NET" \
+  # The extended --network syntax registers both the container-name alias and
+  # 'egress-proxy' in the same attachment. A separate `network connect --alias`
+  # call to a network the container is already on fails (podman refuses a
+  # second connect to the same network) -- that failure was previously
+  # swallowed by `|| true`, which is why the alias never actually landed.
+  as_service_user podman run --detach --name "$V_PEER" \
+    --network "${V_NET}:alias=egress-proxy" \
     "$VERIFY_IMAGE" sleep 300 >/dev/null || die "could not start the DNS peer container"
-  # --alias mirrors how the backend attaches the egress proxy.
-  as_service_user podman network connect --alias egress-proxy "$V_NET" "$V_PEER" >/dev/null 2>&1 || true
 
   # -- 8e. hardened run, mirroring the backend's workspace container flags ----
   info "8e. hardened container run"
