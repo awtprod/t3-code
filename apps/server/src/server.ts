@@ -519,6 +519,7 @@ const OrchestrationCommandDispatcherLayerLive = OrchestrationCommandDispatcher.l
   Layer.provide(ProviderRegistryLive),
   Layer.provide(ProjectSetupScriptRunnerLayerLive),
   Layer.provide(ServerSettingsLayerLive),
+  Layer.provide(T3ProjectFileLoader.layer),
   Layer.provide(VcsStatusBroadcaster.layer.pipe(Layer.provide(GitWorkflowLayerLive))),
   Layer.provide(WorkspacePaths.layer),
 );

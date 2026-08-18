@@ -21,6 +21,11 @@ import * as ServerConfig from "../config.ts";
 import { resolveInteractiveEfficiency } from "../efficiency/EfficiencyRouting.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
+import {
+  resolveSandboxImage,
+  resolveSandboxPreviewProxyImage,
+} from "../sandbox/SandboxRuntimeManager.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { normalizeDispatchCommand } from "./Normalizer.ts";
@@ -100,6 +105,7 @@ export const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry;
   const serverSettings = yield* ServerSettingsService;
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
+  const projectFileLoader = yield* T3ProjectFileLoader;
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -410,6 +416,14 @@ export const make = Effect.gen(function* () {
         return yield* new OrchestrationDispatchCommandError({
           message: `Project '${create.projectId}' was not found.`,
         });
+      const projectFile = Option.getOrUndefined(
+        yield* projectFileLoader.load(project.workspaceRoot),
+      );
+      if (
+        resolveSandboxImage(projectFile) === undefined ||
+        resolveSandboxPreviewProxyImage() === undefined
+      )
+        return resolvedCommand;
       const local = yield* gitWorkflow
         .localStatus({ cwd: project.workspaceRoot })
         .pipe(
