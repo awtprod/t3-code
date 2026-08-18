@@ -311,19 +311,39 @@ describe("ContainerSandboxBackend", () => {
     expect(verifyIndex).toBeLessThan(copyIndex);
   });
 
-  it("clones the seed bundle without a pre-clone verify", async () => {
+  it("fetches the seed bundle by its ref instead of cloning it", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);
     const base = input();
+    const bundleRef = "refs/t3-sandbox-seed/abc123.42";
     await backend.ensureReady({
       ...base,
-      bootstrap: { ...base.bootstrap, repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle" },
+      bootstrap: {
+        ...base.bootstrap,
+        repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle",
+        repositoryBundleRef: bundleRef,
+      },
     });
 
-    // The container has no repository until the clone runs, so a pre-clone
-    // `bundle verify` could only ever fail. The clone is also the stronger
-    // check: verify passes on a bundle truncated mid-pack, the clone does not.
     const containerBundle = "/tmp/t3-repository.bundle";
+    // `git clone` only fetches `refs/heads/*`, so cloning a bundle whose only
+    // ref is private succeeds while landing nothing -- and the checkout that
+    // follows fails with "reference is not a tree". The refspec must be explicit.
+    expect(
+      executor.commands.some(
+        (command) => command.args.includes("clone") && command.args.includes(containerBundle),
+      ),
+    ).toBe(false);
+    expect(
+      executor.commands.some(
+        (command) =>
+          command.args.includes("fetch") &&
+          command.args.includes(containerBundle) &&
+          command.args.includes(`${bundleRef}:${bundleRef}`),
+      ),
+    ).toBe(true);
+    // Nothing verifies the bundle beforehand: there is no repository to verify
+    // against, and the fetch rejects a truncated bundle that verify accepts.
     expect(
       executor.commands.some(
         (command) =>
@@ -332,11 +352,18 @@ describe("ContainerSandboxBackend", () => {
           command.args.includes(containerBundle),
       ),
     ).toBe(false);
-    expect(
-      executor.commands.some(
-        (command) => command.args.includes("clone") && command.args.includes(containerBundle),
-      ),
-    ).toBe(true);
+  });
+
+  it("refuses a seed bundle whose ref was not supplied", async () => {
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const base = input();
+    await expect(
+      backend.ensureReady({
+        ...base,
+        bootstrap: { ...base.bootstrap, repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle" },
+      }),
+    ).rejects.toThrow(/repositoryBundleRef/);
   });
 
   it("samples bounded runtime and writable-volume usage", async () => {

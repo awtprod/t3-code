@@ -289,7 +289,11 @@ export const makeSandboxRuntimeManager = (
         });
         provisionInput = {
           ...input,
-          bootstrap: { ...input.bootstrap, repositoryBundlePath: seedBundle },
+          bootstrap: {
+            ...input.bootstrap,
+            repositoryBundlePath: seedBundle,
+            repositoryBundleRef: seedRef,
+          },
         };
       }
       const ready = yield* attempt(() => managed.backend.ensureReady(provisionInput)).pipe(

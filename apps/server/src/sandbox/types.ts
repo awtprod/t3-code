@@ -39,6 +39,13 @@ export type SandboxBootstrap = {
   readonly inheritedPatch?: string;
   /** Manager-generated verified bundle path; never a user-supplied mount. */
   readonly repositoryBundlePath?: string;
+  /**
+   * Ref the bundle records the base commit under. Set with
+   * `repositoryBundlePath`: the bundle names exactly this ref, and `git clone`
+   * would ignore it (its default refspec only matches `refs/heads/*`), so the
+   * seeding fetch has to ask for it by name.
+   */
+  readonly repositoryBundleRef?: string;
 };
 
 export type SandboxProvisionInput = {

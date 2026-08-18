@@ -338,20 +338,43 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       await this.#mustRun(runArgs, setupTimeoutMs);
       if (input.bootstrap.repositoryBundlePath !== undefined) {
         const containerBundle = "/tmp/t3-repository.bundle";
+        const bundleRef = input.bootstrap.repositoryBundleRef;
+        if (bundleRef === undefined)
+          throw new SandboxRuntimeError(
+            "repositoryBundlePath requires repositoryBundleRef: the bundle's ref cannot be guessed",
+          );
         await this.#mustRun(
           ["cp", input.bootstrap.repositoryBundlePath, `${containerName}:${containerBundle}`],
           setupTimeoutMs,
         );
-        // No `git bundle verify` here: it needs a repository to resolve
-        // prerequisites against and there is none until the clone below runs.
-        // Nothing is lost -- verify passes on a bundle truncated mid-pack, while
-        // the clone rejects it ("remote transport reported error"), so the clone
-        // is the stronger check as well as the only runnable one.
+        // `git clone` cannot be used here: the seed bundle records the base
+        // commit under a private ref, and clone only fetches what its default
+        // refspec matches (`refs/heads/*`). It reports success, warns "you
+        // appear to have cloned an empty repository", and leaves a repo with no
+        // refs -- the checkout below then fails with "reference is not a tree".
+        // `fetch` takes the refspec explicitly, and leaves behind no `origin`
+        // remote pointing at a bundle that is deleted moments later.
+        //
+        // No `git bundle verify` either: it needs a repository to resolve
+        // prerequisites against, and the fetch is the stronger check anyway --
+        // verify passes on a bundle truncated mid-pack, a fetch does not.
+        await this.#mustExec(
+          containerName,
+          { executable: "git", args: ["init", "--quiet", "/workspace/repo"] },
+          setupTimeoutMs,
+        );
         await this.#mustExec(
           containerName,
           {
             executable: "git",
-            args: ["clone", "--no-checkout", containerBundle, "/workspace/repo"],
+            args: [
+              "-C",
+              "/workspace/repo",
+              "fetch",
+              "--no-tags",
+              containerBundle,
+              `${bundleRef}:${bundleRef}`,
+            ],
           },
           setupTimeoutMs,
         );
