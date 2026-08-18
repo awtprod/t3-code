@@ -208,18 +208,19 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           MANAGED_LABEL,
           "--label",
           `${THREAD_LABEL}=${threadId}`,
-          "--opt",
-          desktopQuota,
+          ...(storageQuotaDisabled() ? [] : ["--opt", desktopQuota]),
           desktopVolumeName,
         ],
         30_000,
       );
-      const desktopQuotaReadback = await this.#mustRun(
-        ["volume", "inspect", "--format", `{{index .Options "o"}}`, desktopVolumeName],
-        10_000,
-      );
-      if (desktopQuotaReadback.stdout.trim() !== desktopQuota.slice(2))
-        throw new SandboxRuntimeError("runtime did not preserve the desktop volume quota");
+      if (!storageQuotaDisabled()) {
+        const desktopQuotaReadback = await this.#mustRun(
+          ["volume", "inspect", "--format", `{{index .Options "o"}}`, desktopVolumeName],
+          10_000,
+        );
+        if (desktopQuotaReadback.stdout.trim() !== desktopQuota.slice(2))
+          throw new SandboxRuntimeError("runtime did not preserve the desktop volume quota");
+      }
       const workspaceQuota = `o=size=${Math.floor(limits.diskBytes * 0.9)}`;
       await this.#mustRun(
         [
@@ -229,18 +230,19 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           MANAGED_LABEL,
           "--label",
           `${THREAD_LABEL}=${threadId}`,
-          "--opt",
-          workspaceQuota,
+          ...(storageQuotaDisabled() ? [] : ["--opt", workspaceQuota]),
           workspaceVolumeName,
         ],
         30_000,
       );
-      const workspaceQuotaReadback = await this.#mustRun(
-        ["volume", "inspect", "--format", `{{index .Options "o"}}`, workspaceVolumeName],
-        10_000,
-      );
-      if (workspaceQuotaReadback.stdout.trim() !== workspaceQuota.slice(2))
-        throw new SandboxRuntimeError("runtime did not preserve the workspace volume quota");
+      if (!storageQuotaDisabled()) {
+        const workspaceQuotaReadback = await this.#mustRun(
+          ["volume", "inspect", "--format", `{{index .Options "o"}}`, workspaceVolumeName],
+          10_000,
+        );
+        if (workspaceQuotaReadback.stdout.trim() !== workspaceQuota.slice(2))
+          throw new SandboxRuntimeError("runtime did not preserve the workspace volume quota");
+      }
       for (const cache of input.caches ?? []) {
         const name = `t3-cache-${cache.digest.toLowerCase()}`;
         const existing = await this.#run(
@@ -900,7 +902,14 @@ function makeReady(
   };
 }
 
-/** `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled` omits the `--storage-opt` pair. */
+/**
+ * `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled` omits the container's
+ * `--storage-opt` pair and the workspace/desktop volumes' `--opt o=size=`
+ * pair. Rootless podman needs `CAP_SYS_ADMIN` in the filesystem's owning
+ * namespace to administer XFS project quotas, which it never has -- so on
+ * hosts without a privileged quota helper, every quota-bearing volume create
+ * fails outright, not just the container's own storage-opt.
+ */
 function storageQuotaDisabled(): boolean {
   return process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA?.trim().toLowerCase() === "disabled";
 }

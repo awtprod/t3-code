@@ -145,8 +145,19 @@ describe("container run flags", () => {
     expect(defaultRun.args).toEqual(
       expect.arrayContaining(["--storage-opt", `size=${20 * 1024 ** 3}`]),
     );
+    // Both quota-bearing volume creates also carry `--opt o=size=...` by default.
+    const defaultVolumeCreates = withQuota.commands.filter(
+      (command) => command.args[0] === "volume" && command.args[1] === "create",
+    );
+    expect(defaultVolumeCreates).toHaveLength(2);
+    for (const create of defaultVolumeCreates) expect(create.args).toContain("--opt");
 
     // `podman --remote` rejects `--storage-opt size=`; the opt-out drops both args.
+    // Rootless podman also cannot administer XFS project quotas on volumes it
+    // doesn't own the filesystem's namespace for, so the same opt-out must
+    // drop `--opt o=size=...` from both volume creates -- otherwise they fail
+    // outright ("Filesystem does not support Project Quota") instead of just
+    // going unenforced.
     process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA = "disabled";
     const withoutQuota = new FakeExecutor();
     await new ContainerSandboxBackend("podman", withoutQuota).ensureReady(provisionInput());
@@ -155,6 +166,17 @@ describe("container run flags", () => {
     )!;
     expect(gatedRun.args).not.toContain("--storage-opt");
     expect(gatedRun.args).toContain("--read-only");
+    const gatedVolumeCreates = withoutQuota.commands.filter(
+      (command) => command.args[0] === "volume" && command.args[1] === "create",
+    );
+    expect(gatedVolumeCreates).toHaveLength(2);
+    for (const create of gatedVolumeCreates) expect(create.args).not.toContain("--opt");
+    // No readback inspect for either volume when there is no quota to verify.
+    expect(
+      withoutQuota.commands.some(
+        (command) => command.args[0] === "volume" && command.args[1] === "inspect",
+      ),
+    ).toBe(false);
   });
 
   it("configures a repo-local git identity right after the thread branch is created", async () => {

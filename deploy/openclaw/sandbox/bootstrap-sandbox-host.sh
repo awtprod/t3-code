@@ -67,6 +67,19 @@ readonly PODMAN_STATIC_SHA256_ARM64=a2f6b73cc0f7018e2e8518338a4ec27db70148e1af86
 # service user. Override for an air-gapped host with a local mirror.
 VERIFY_IMAGE="${VERIFY_IMAGE:-docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc}"
 
+# Mirrors T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled (see 50-sandbox.conf).
+# Set this before running Step 8 on a host where the backend is (or will be)
+# deployed with quotas disabled -- e.g. because rootless podman cannot
+# administer XFS project quotas here. With it set, Step 8 skips the
+# quota-create/enforcement checks and drops --storage-opt from the hardened
+# run, so verification mirrors what the backend will actually issue instead
+# of hard-failing on a known, accepted limitation.
+case "${T3_SANDBOX_CONTAINER_STORAGE_QUOTA:-}" in
+  [Dd][Ii][Ss][Aa][Bb][Ll][Ee][Dd]) STORAGE_QUOTA_DISABLED=1 ;;
+  *) STORAGE_QUOTA_DISABLED=0 ;;
+esac
+readonly STORAGE_QUOTA_DISABLED
+
 STEPS="${STEPS:-1,2,3,4,5,6,7,8,9}"
 
 say() { printf '\n== %s\n' "$*"; }
@@ -509,52 +522,68 @@ if wants_step 8; then
   # 20GiB disk limit. The backend compares `volume inspect` output against the
   # option string with the leading "o=" stripped, so the runtime must echo it
   # back verbatim -- not normalised, not reordered.
-  info "8b. volume quota with echo-back"
-  V_QUOTA="o=size=$(( (20 * 1024 * 1024 * 1024 * 9) / 10 ))"
-  as_service_user podman volume create \
-    --label com.t3tools.sandbox.managed=true \
-    --opt "$V_QUOTA" "$V_VOL" >/dev/null ||
-    die "podman volume create --opt $V_QUOTA failed"
-  readback="$(as_service_user podman volume inspect --format '{{index .Options "o"}}' "$V_VOL")"
-  [ "$readback" = "${V_QUOTA#o=}" ] ||
-    die "volume quota was not echoed back verbatim.
+  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
+    info "8b. volume quota with echo-back -- SKIPPED (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled)"
+    as_service_user podman volume create \
+      --label com.t3tools.sandbox.managed=true "$V_VOL" >/dev/null ||
+      die "podman volume create (no quota) failed"
+  else
+    info "8b. volume quota with echo-back"
+    V_QUOTA="o=size=$(( (20 * 1024 * 1024 * 1024 * 9) / 10 ))"
+    as_service_user podman volume create \
+      --label com.t3tools.sandbox.managed=true \
+      --opt "$V_QUOTA" "$V_VOL" >/dev/null ||
+      die "podman volume create --opt $V_QUOTA failed.
+       If this host's rootless podman cannot administer XFS project quotas
+       (confirm with: sudo xfs_quota -x -c 'report -p' $SANDBOX_MOUNT succeeding
+       as real root while this fails), re-run with
+       T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled to accept that limitation
+       instead of enforcing per-thread quotas."
+    readback="$(as_service_user podman volume inspect --format '{{index .Options "o"}}' "$V_VOL")"
+    [ "$readback" = "${V_QUOTA#o=}" ] ||
+      die "volume quota was not echoed back verbatim.
        expected: ${V_QUOTA#o=}
        actual  : $readback
        The backend treats any difference as fatal ('runtime did not preserve the
        workspace volume quota')."
-  info "    quota echoed back as '$readback'"
+    info "    quota echoed back as '$readback'"
+  fi
 
   # -- 8c. quota actually enforced -------------------------------------------
   # The echo-back above passes even when nothing is enforced (that is exactly the
   # rootless-docker trap). The only trustworthy check is writing past the limit
   # and demanding failure. A small volume keeps this fast.
-  info "8c. quota enforcement (writing past the limit must fail)"
-  V_SMALL="t3-quota-${V_SUFFIX}"
-  as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
-  # Byte count rather than "16m": the backend always emits a raw byte value
-  # (Math.floor(diskBytes * 0.9)), so this exercises the same code path.
-  as_service_user podman volume create --opt "o=size=16777216" "$V_SMALL" >/dev/null ||
-    die "could not create the small probe volume"
-  # dd alone is not enough -- busybox dd can report success on a short write.
-  # Demand that the file really is smaller than what we asked for.
-  # The probe body runs inside the container, so it must reach the container's
-  # shell unexpanded -- single quotes are required here, not a style choice.
-  # shellcheck disable=SC2016
-  quota_probe='dd if=/dev/zero of=/quota/fill bs=1M count=64 2>/dev/null; [ "$(stat -c %s /quota/fill)" -ge 67108864 ]'
-  if as_service_user podman run --rm \
-      --mount "type=volume,src=${V_SMALL},dst=/quota" \
-      "$VERIFY_IMAGE" \
-      sh -c "$quota_probe" \
-      >/dev/null 2>&1; then
+  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
+    info "8c. quota enforcement -- SKIPPED (no quota is applied when disabled; nothing to enforce)"
+  else
+    info "8c. quota enforcement (writing past the limit must fail)"
+    V_SMALL="t3-quota-${V_SUFFIX}"
     as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
-    die "wrote a full 64MiB file into a volume with a 16MiB quota.
+    # Byte count rather than "16m": the backend always emits a raw byte value
+    # (Math.floor(diskBytes * 0.9)), so this exercises the same code path.
+    as_service_user podman volume create --opt "o=size=16777216" "$V_SMALL" >/dev/null ||
+      die "could not create the small probe volume"
+    # dd alone is not enough -- busybox dd can report success on a short write.
+    # Demand that the file really is smaller than what we asked for.
+    # The probe body runs inside the container, so it must reach the container's
+    # shell unexpanded -- single quotes are required here, not a style choice.
+    # shellcheck disable=SC2016
+    quota_probe='dd if=/dev/zero of=/quota/fill bs=1M count=64 2>/dev/null; [ "$(stat -c %s /quota/fill)" -ge 67108864 ]'
+    if as_service_user podman run --rm \
+        --mount "type=volume,src=${V_SMALL},dst=/quota" \
+        "$VERIFY_IMAGE" \
+        sh -c "$quota_probe" \
+        >/dev/null 2>&1; then
+      as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
+      die "wrote a full 64MiB file into a volume with a 16MiB quota.
        The quota is NOT being enforced. This is the failure mode that rootless
        docker exhibits and that the echo-back check in 8b cannot detect.
        Confirm $SANDBOX_MOUNT is XFS mounted with pquota and that the podman
        graphroot really is on it (podman info --format '{{.Store.GraphRoot}}')."
+    fi
+    as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
+    info "    writing past the quota failed with ENOSPC, as required"
   fi
-  as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
-  info "    writing past the quota failed with ENOSPC, as required"
 
   # -- 8d. internal network DNS ----------------------------------------------
   # The workspace container resolves 'egress-proxy', 'credential-proxy' and
@@ -570,6 +599,11 @@ if wants_step 8; then
 
   # -- 8e. hardened run, mirroring the backend's workspace container flags ----
   info "8e. hardened container run"
+  storage_opt_args=(--storage-opt "size=21474836480")
+  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
+    storage_opt_args=()
+    info "    omitting --storage-opt (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled)"
+  fi
   as_service_user podman run --detach --name "$V_CTR" \
     --label com.t3tools.sandbox.managed=true \
     --network "$V_NET" \
@@ -577,7 +611,7 @@ if wants_step 8; then
     --cpus 2 \
     --memory 4294967296 \
     --pids-limit 512 \
-    --storage-opt "size=21474836480" \
+    "${storage_opt_args[@]}" \
     --read-only \
     --init \
     --tmpfs "/tmp:rw,nosuid,nodev,noexec,size=1g" \
