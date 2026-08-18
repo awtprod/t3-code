@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { ContainerSandboxBackend } from "./ContainerSandboxBackend.ts";
+import { CREDENTIAL_PROXY_ALIAS } from "./SandboxCredentialProxy.ts";
 import type {
   SandboxCommand,
   SandboxCommandExecutor,
@@ -124,13 +125,29 @@ describe("ContainerSandboxBackend", () => {
         "--env",
         `ALL_PROXY=${["http:/", "/egress-proxy:3128"].join("")}`,
         "--env",
-        "NO_PROXY=localhost,127.0.0.1,::1",
+        "NO_PROXY=localhost,127.0.0.1,::1,credential-proxy",
       ]),
     );
     const proxy = executor.commands.find((command) => command.args.includes("t3-egress-proxy"))!;
     expect(proxy.args).toEqual(
       expect.arrayContaining(["--deny-private", "--deny-metadata", "--resolve-before-connect"]),
     );
+  });
+
+  it("bypasses the egress proxy for the credential proxy sidecar", async () => {
+    const executor = successfulExecutor();
+    await new ContainerSandboxBackend("docker", executor).ensureReady(
+      input({ egressProxyImage: `egress@sha256:${"e".repeat(64)}` }),
+    );
+    const run = executor.commands.find(
+      (command) => command.args[0] === "run" && command.args.includes(input().image),
+    )!;
+    const entry = run.args.find((arg) => arg.startsWith("NO_PROXY="))!;
+    // The credential proxy answers on a private address and the egress proxy
+    // denies those, so a provider CLI reaching it through the proxy env is
+    // refused by our own policy -- surfacing as "403 egress denied: private
+    // address", which Claude Code reports as an authentication failure.
+    expect(entry.slice("NO_PROXY=".length).split(",")).toContain(CREDENTIAL_PROXY_ALIAS);
   });
 
   it("cleans container, network, and workspace volume after setup failure and stop", async () => {

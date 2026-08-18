@@ -22,6 +22,7 @@ import {
   validateExec,
   validateHook,
 } from "./validation.ts";
+import { CREDENTIAL_PROXY_ALIAS } from "./SandboxCredentialProxy.ts";
 import * as NodeCrypto from "node:crypto";
 
 const MANAGED_LABEL = "com.t3tools.sandbox.managed=true";
@@ -34,6 +35,17 @@ const ROLE_LABEL = "com.t3tools.sandbox.role";
 const CACHE_DIGEST_LABEL = "com.t3tools.sandbox.cache-digest";
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 const INTERNAL_EGRESS_PROXY_URL = ["http:/", "/egress-proxy:3128"].join("");
+/**
+ * Hosts the workload must dial directly rather than through the egress proxy.
+ *
+ * The credential proxy answers on a private address and the egress proxy runs
+ * with `--deny-private`, so without this a provider CLI's call to the
+ * credential proxy is refused by our own egress policy ("403 egress denied:
+ * private address") -- which Claude Code reports as an authentication failure.
+ * The bypass loosens nothing: the alias resolves only on the `--internal`
+ * network the container is already confined to.
+ */
+const INTERNAL_NO_PROXY_HOSTS = ["localhost", "127.0.0.1", "::1", CREDENTIAL_PROXY_ALIAS];
 const MAX_HOOK_TIMEOUT_MS = 10 * 60_000;
 
 export class SandboxRuntimeError extends Error {
@@ -325,7 +337,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
               "--env",
               `HTTP_PROXY=${input.egressProxyImage === undefined ? validateProxy(input.egressProxyUrl!) : INTERNAL_EGRESS_PROXY_URL}`,
               "--env",
-              "NO_PROXY=localhost,127.0.0.1,::1",
+              `NO_PROXY=${INTERNAL_NO_PROXY_HOSTS.join(",")}`,
             ]),
         ...(input.caches ?? []).flatMap((cache) => [
           "--mount",
