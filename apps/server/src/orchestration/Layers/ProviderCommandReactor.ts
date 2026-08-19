@@ -2263,13 +2263,15 @@ export const make = Effect.gen(function* () {
     if (postReadyClaim.supersededBySameMessage || postReadyClaim.interruptedAfter) {
       return;
     }
-    const executionCwd =
-      executionTarget.kind === "sandbox" ? executionTarget.workspaceCwd : executionTarget.cwd;
-
     const isFirstUserMessageTurn =
       thread.messages.filter((entry) => entry.role === "user").length === 1;
     if (isFirstUserMessageTurn) {
-      const generationCwd = executionCwd;
+      // Title generation runs a text-generation CLI on the HOST, so it needs a
+      // host path -- not the execution target's cwd, which for a sandboxed
+      // thread is the in-container `/workspace/repo` and makes the spawn die
+      // with ENOENT on every first turn of an isolated thread. The branch-name
+      // generation below already uses the host worktree for the same reason.
+      const generationCwd = legacyCwd ?? process.cwd();
       const generationInput = {
         messageText: message.text,
         ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),

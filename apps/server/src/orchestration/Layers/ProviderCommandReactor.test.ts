@@ -957,6 +957,11 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.generateThreadTitle.mock.calls.length === 1);
     expect(harness.generateThreadTitle.mock.calls[0]?.[0]).toMatchObject({
       message: "Please investigate reconnect failures after restarting the session.",
+      // The host workspace, not the execution target's cwd. This thread is
+      // sandboxed (the provider runs in `/workspace/repo`), but the title model
+      // is spawned on the host, where that path does not exist -- passing it
+      // through made every first turn of an isolated thread log an ENOENT.
+      cwd: "/tmp/provider-project",
     });
 
     await waitFor(async () => {
