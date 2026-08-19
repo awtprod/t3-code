@@ -83,6 +83,21 @@ describe("ContainerSandboxBackend", () => {
     );
   });
 
+  it("creates the provider HOME on the writable volume before any provider spawn", async () => {
+    // Provider spawns run with HOME=/thread-data/provider-home and the CLI
+    // writes its config there on startup. The image only creates /thread-data
+    // and the rootfs is read-only, so nothing else can create this directory.
+    const executor = successfulExecutor();
+    await new ContainerSandboxBackend("docker", executor).ensureReady(input());
+    const mkdir = executor.commands.findIndex(
+      (command) =>
+        command.args[0] === "exec" && command.args.includes("/thread-data/provider-home"),
+    );
+    expect(mkdir).toBeGreaterThanOrEqual(0);
+    const run = executor.commands.findIndex((command) => command.args[0] === "run");
+    expect(mkdir).toBeGreaterThan(run);
+  });
+
   it("coalesces concurrent provisioning and is idempotent once ready", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);

@@ -1,5 +1,5 @@
 import * as NodePath from "node:path";
-import * as NodeUrl from "node:url";
+import * as NodeURL from "node:url";
 
 import { describe, expect, it } from "@effect/vitest";
 import { SandboxId, ThreadId } from "@t3tools/contracts";
@@ -39,7 +39,7 @@ describe("SandboxProviderProcess", () => {
         {
           ...spawnTarget,
           runtime: NodePath.join(
-            NodePath.dirname(NodeUrl.fileURLToPath(import.meta.url)),
+            NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
             "__fixtures__",
             "fake-runtime-closed-stdin.sh",
           ) as unknown as (typeof spawnTarget)["runtime"],
@@ -94,7 +94,27 @@ describe("SandboxProviderProcess", () => {
     expect(invocation.args).toContain("/workspace/repo");
     expect(invocation.args).not.toContain("/host/escape");
     expect(invocation.args).not.toContain("SSH_AUTH_SOCK");
-    expect(invocation.env.HOME).toBe("/thread-data/provider-home");
+    expect(invocation.args).toContain("HOME=/thread-data/provider-home");
+  });
+
+  it("keeps the container HOME out of the host runtime process environment", () => {
+    // Bare `--env HOME` makes the runtime CLI read HOME from its own process
+    // env, so a container-only value there becomes the *host* CLI's config
+    // root: podman exits with "cannot resolve /thread-data/provider-home"
+    // before it ever reaches the container, and the turn fails with nothing
+    // but "process exited with code 1".
+    const invocation = sandboxProviderInvocation(target, "codex", [], undefined, {
+      LANG: "C.UTF-8",
+    });
+    expect(invocation.env.HOME).not.toBe("/thread-data/provider-home");
+    expect(invocation.env.TMPDIR).toBeUndefined();
+    expect(invocation.env.USER).toBeUndefined();
+    // Inlined into argv instead, so the container still gets them. These are
+    // non-secret literals, unlike the credential values that stay bare.
+    expect(invocation.args).toContain("HOME=/thread-data/provider-home");
+    expect(invocation.args).toContain("USER=sandbox");
+    expect(invocation.args).toContain("LANG");
+    expect(invocation.args).not.toContain("LANG=C.UTF-8");
   });
 
   it("rejects replacing a live binding with another sandbox generation", () => {

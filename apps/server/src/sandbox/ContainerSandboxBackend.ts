@@ -348,6 +348,15 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         "infinity",
       ];
       await this.#mustRun(runArgs, setupTimeoutMs);
+      // The provider CLI runs with HOME here (see SANDBOX_PROVIDER_ENV) and
+      // writes its config and session state on startup. The container rootfs is
+      // read-only, so this must be created on the writable volume up front --
+      // otherwise every provider spawn dies before the first token.
+      await this.#mustExec(
+        containerName,
+        { executable: "mkdir", args: ["-p", "/thread-data/provider-home"] },
+        30_000,
+      );
       if (input.bootstrap.repositoryBundlePath !== undefined) {
         const containerBundle = "/tmp/t3-repository.bundle";
         const bundleRef = input.bootstrap.repositoryBundleRef;

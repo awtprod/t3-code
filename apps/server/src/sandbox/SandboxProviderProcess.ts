@@ -35,6 +35,17 @@ const SANDBOX_PROVIDER_ENV = {
 const IN_IMAGE_PROVIDER_COMMANDS = ["claude", "codex"] as const;
 
 /**
+ * True for the container-only constants above.
+ *
+ * Sound because they are the sole source of those keys: the allowlist regex
+ * names every variable it admits and lists none of them, and the proxy sets
+ * only base-URL/token pairs.
+ */
+function isSandboxConstant(key: string): boolean {
+  return Object.hasOwn(SANDBOX_PROVIDER_ENV, key);
+}
+
+/**
  * Maps a host-resolved provider binary onto its in-image command name.
  *
  * Provider spawn inside a sandbox goes through `podman exec`, so a host path
@@ -105,7 +116,20 @@ function execArgs(
     "1000:1000",
     "--workdir",
     target.workspaceCwd,
-    ...Object.entries(env).flatMap(([key, value]) => (value === undefined ? [] : ["--env", key])),
+    // Bare `--env KEY` makes the runtime read the value from its own process
+    // environment, which keeps credentials out of a world-readable argv. The
+    // sandbox constants get the opposite treatment: they are non-secret
+    // literals, and passing them bare would set them on the *host* runtime
+    // process too -- a container `HOME` of /thread-data/provider-home then
+    // becomes the host CLI's config root and it exits before it ever reaches
+    // the container ("cannot resolve /thread-data/provider-home").
+    ...Object.entries(env).flatMap(([key, value]) =>
+      value === undefined
+        ? []
+        : isSandboxConstant(key)
+          ? ["--env", `${key}=${value}`]
+          : ["--env", key],
+    ),
     "--",
     target.runtimeRef,
     command,
@@ -167,10 +191,21 @@ export function sandboxProviderInvocation(
     target.threadId,
     requestedEnvironment,
   );
+  // Only the values delivered by bare `--env KEY` belong in the host runtime
+  // process; the inlined constants are already in argv and must not displace
+  // the host's own HOME/TMPDIR, which the runtime CLI reads for its config and
+  // socket paths.
+  const hostEnvironment = Object.fromEntries(
+    Object.entries(forwardedEnvironment).filter(([key]) => !isSandboxConstant(key)),
+  );
   return {
     executable: target.runtime,
     args: execArgs(target, inImageProviderCommand(command), args, cwd, forwardedEnvironment),
-    env: { PATH: process.env.PATH, ...forwardedEnvironment } as Record<string, string | undefined>,
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      ...hostEnvironment,
+    } as Record<string, string | undefined>,
   } as const;
 }
 
