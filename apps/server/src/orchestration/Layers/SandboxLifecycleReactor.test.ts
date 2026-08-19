@@ -290,4 +290,80 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         expect(notice.activity.kind).toBe("sandbox.disabled");
       }),
   );
+
+  it.effect("reports the underlying runtime error when a lifecycle event fails", () =>
+    Effect.gen(function* () {
+      // `String(cause)` renders an Effect Cause as `Cause([Fail(Error: ...)])`,
+      // which is what the thread's failure notice used to carry -- the operator
+      // saw the wrapper, not the sentence naming what the runtime refused.
+      vi.stubEnv("T3_SANDBOX_PREVIEW_PROXY_IMAGE", `preview@sha256:${"e".repeat(64)}`);
+      const failed = yield* Deferred.make<void>();
+      const events = yield* PubSub.unbounded<OrchestrationEvent>();
+      const dispatched: OrchestrationCommand[] = [];
+      const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(
+          Layer.mock(GitWorkflowService)({
+            localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+            resolveRemoteTrackingCommit: () =>
+              Effect.fail(new Error("git rev-parse failed: no upstream for 'main'")),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(
+          Layer.succeed(T3ProjectFileLoader, {
+            load: () =>
+              Effect.succeed(
+                Option.some({
+                  sandbox: {
+                    image:
+                      "registry.example/t3-desktop@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  },
+                } as never),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(SandboxRuntimeManager, {
+            provision: () => Effect.die("provisioning is not reached on this path"),
+            reconcile: () =>
+              Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
+          } as never),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery)({
+            getSnapshot: () => Effect.succeed(snapshot),
+            getThreadDetailById: (id) =>
+              Effect.succeed(id === threadId ? Option.some(snapshot.threads[0]!) : Option.none()),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(OrchestrationEngineService)({
+            dispatch: (command) =>
+              Effect.gen(function* () {
+                dispatched.push(command);
+                if (command.type === "sandbox.operation.fail") {
+                  yield* Deferred.succeed(failed, undefined);
+                }
+                return { sequence: dispatched.length };
+              }),
+            streamDomainEvents: Stream.concat(Stream.make(request), Stream.fromPubSub(events)),
+          }),
+        ),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* Deferred.await(failed).pipe(Effect.timeout("5 seconds"));
+          yield* reactor.drain;
+        }).pipe(Effect.provide(layer)),
+      );
+
+      const failure = dispatched.find((command) => command.type === "sandbox.operation.fail");
+      if (failure?.type !== "sandbox.operation.fail") throw new Error("expected failure command");
+      expect(failure.failure.message).toBe("git rev-parse failed: no upstream for 'main'");
+    }),
+  );
 });

@@ -8,6 +8,7 @@ import {
   type OrchestrationEvent,
 } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -498,6 +499,20 @@ export const make = Effect.gen(function* () {
       });
     }
   });
+  /**
+   * The operator-facing sentence behind a lifecycle failure.
+   *
+   * `String(cause)` renders as `Cause([Fail(Error: ...)])`, and the default
+   * structured log of a `Cause` object collapses to `{ failures: [ [Object] ] }`
+   * -- both hide the one line that says what podman actually refused to do.
+   */
+  const failureMessage = (cause: Cause.Cause<unknown>): string => {
+    const failure = cause.reasons.find(Cause.isFailReason)?.error;
+    if (failure instanceof Error && failure.message.trim().length > 0) return failure.message;
+    if (typeof failure === "string" && failure.trim().length > 0) return failure;
+    return "The sandbox operation failed. Check the server logs for technical details.";
+  };
+
   const worker = yield* makeDrainableWorker((event: SandboxRequestEvent) =>
     processEvent(event).pipe(
       Effect.catchCause((cause) =>
@@ -518,14 +533,18 @@ export const make = Effect.gen(function* () {
                       ? "teardown"
                       : "runtime",
                 code: "sandbox_lifecycle_failed",
-                message: String(cause),
+                message: failureMessage(cause),
                 retryable: true,
                 occurredAt,
               },
               createdAt: occurredAt,
             })
             .pipe(Effect.ignore);
-          yield* Effect.logWarning("sandbox lifecycle event failed", { type: event.type, cause });
+          yield* Effect.logWarning("sandbox lifecycle event failed", {
+            type: event.type,
+            threadId,
+            cause: Cause.pretty(cause),
+          });
         }),
       ),
     ),
