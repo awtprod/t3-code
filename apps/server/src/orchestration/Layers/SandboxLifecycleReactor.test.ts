@@ -1,6 +1,7 @@
 import {
   CommandId,
   EventId,
+  GitCommandError,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -306,7 +307,14 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           Layer.mock(GitWorkflowService)({
             localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
             resolveRemoteTrackingCommit: () =>
-              Effect.fail(new Error("git rev-parse failed: no upstream for 'main'")),
+              Effect.fail(
+                new GitCommandError({
+                  operation: "resolveRemoteTrackingCommit",
+                  command: "git",
+                  cwd: "/tmp/project",
+                  detail: "git rev-parse failed: no upstream for 'main'",
+                }),
+              ),
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
@@ -363,7 +371,9 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
 
       const failure = dispatched.find((command) => command.type === "sandbox.operation.fail");
       if (failure?.type !== "sandbox.operation.fail") throw new Error("expected failure command");
-      expect(failure.failure.message).toBe("git rev-parse failed: no upstream for 'main'");
+      expect(failure.failure.message).toBe(
+        "Git command failed in resolveRemoteTrackingCommit (/tmp/project): git rev-parse failed: no upstream for 'main'",
+      );
     }),
   );
 });

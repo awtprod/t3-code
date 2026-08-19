@@ -69,6 +69,9 @@ describe("SandboxRuntimeManager wiring", () => {
       Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-sandbox-wiring-test-" })),
       Effect.provide(VcsProcess.layer),
       Effect.provide(NodeServices.layer),
-    ) as Effect.Effect<void>;
+      // A checkpoint failure is a test failure here, so surface it as a defect
+      // rather than asserting the error channel away.
+      Effect.orDie,
+    );
   });
 });

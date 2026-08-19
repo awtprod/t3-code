@@ -172,6 +172,10 @@ export const make = Effect.gen(function* () {
         args,
         cwd,
         ...(options?.env === undefined ? {} : { env: options.env }),
+        // Without this the backend throws on any non-zero exit and the
+        // `allowNonZero` branch below is unreachable -- so a `rev-parse` probe
+        // for an absent ref failed the turn instead of answering "no".
+        ...(options?.allowNonZero === true ? { allowNonZeroExit: true } : {}),
         timeoutMs: 30_000,
       })
       .pipe(

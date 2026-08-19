@@ -287,6 +287,46 @@ describe("ContainerSandboxBackend", () => {
     await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
   });
 
+  it("returns the result of a non-zero exec when the caller allows it", async () => {
+    // A checkpoint ref probe runs `git rev-parse --verify <ref>`, which exits 1
+    // when the ref does not exist yet -- the normal state on a thread's first
+    // turn. Throwing on that made `CheckpointStore.sandboxGit`'s `allowNonZero`
+    // branch unreachable and failed every pre-turn baseline for a sandboxed
+    // thread.
+    const executor = new FakeExecutor((command) => {
+      if (command.args[0] === "info")
+        return { exitCode: 0, stdout: '["name=rootless"]', stderr: "" };
+      if (command.args[0] === "inspect" && command.args.length === 2)
+        return { exitCode: 1, stdout: "", stderr: "missing" };
+      if (command.args[0] === "volume" && command.args[1] === "inspect") {
+        const name = command.args.at(-1) ?? "";
+        if (name.startsWith("t3-cache-")) return { exitCode: 1, stdout: "", stderr: "missing" };
+        const bytes = name.startsWith("t3-desktop-")
+          ? Math.max(256 * 1024 ** 2, Math.floor(20 * 1024 ** 3 * 0.1))
+          : Math.floor(20 * 1024 ** 3 * 0.9);
+        return { exitCode: 0, stdout: `size=${bytes}\n`, stderr: "" };
+      }
+      if (command.args[0] === "exec" && command.args.includes("rev-parse"))
+        return { exitCode: 1, stdout: "", stderr: "fatal: Needed a single revision\n" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+
+    const probe = await backend.exec("thread-1", {
+      executable: "git",
+      args: ["rev-parse", "--verify", "refs/t3/checkpoint^{commit}"],
+      allowNonZeroExit: true,
+    });
+    expect(probe.exitCode).toBe(1);
+    expect(probe.stderr).toContain("Needed a single revision");
+
+    // Without the flag the same failure is still an error.
+    await expect(
+      backend.exec("thread-1", { executable: "git", args: ["rev-parse", "--verify", "HEAD"] }),
+    ).rejects.toThrow("sandbox command git failed");
+  });
+
   it("exports commit and patch through argv-only exec", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);

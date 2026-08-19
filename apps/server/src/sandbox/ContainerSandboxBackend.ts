@@ -917,8 +917,9 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       timeoutMs,
       ...("stdin" in input && input.stdin !== undefined ? { stdin: input.stdin } : {}),
     };
+    const allowNonZeroExit = "allowNonZeroExit" in input && input.allowNonZeroExit === true;
     return this.#executor.run(command).then((result) => {
-      if (result.exitCode !== 0)
+      if (result.exitCode !== 0 && !allowNonZeroExit)
         throw new SandboxRuntimeError(`sandbox command ${input.executable} failed`, result.stderr);
       return result;
     });

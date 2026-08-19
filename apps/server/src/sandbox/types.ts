@@ -85,6 +85,14 @@ export type SandboxExecInput = {
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
   readonly stdin?: string;
+  /**
+   * Return the result instead of throwing when the command exits non-zero.
+   *
+   * Probes need this: `git rev-parse --verify <ref>` exits 1 for a ref that does
+   * not exist yet, which is an answer, not a failure. Mirrors
+   * `allowNonZeroExit` on the host-side git driver.
+   */
+  readonly allowNonZeroExit?: boolean;
 };
 
 export type SandboxExport = {
