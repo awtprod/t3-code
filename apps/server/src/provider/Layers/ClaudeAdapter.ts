@@ -3648,7 +3648,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // local and already carries process-level detail.
         yield* Effect.logError("claude.runtime.stream-failed", {
           threadId: context.session.threadId,
-          cause: exit.cause,
+          // Rendered here rather than passed raw: a structured logger
+          // serializes a Cause as "[Object]", which is no more useful than the
+          // failure tag the event already carries.
+          cause: Cause.pretty(exit.cause),
         });
         yield* emitRuntimeError(context, message, {
           failureCount: failures.length,

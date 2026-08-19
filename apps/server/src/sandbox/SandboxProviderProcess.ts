@@ -225,5 +225,20 @@ export function spawnClaudeInSandbox(
       windowsHide: true,
     },
   );
+  // The runtime CLI writes its own diagnostics here -- "no such container",
+  // "exec failed", an image without the provider binary. The SDK only consumes
+  // stdout, so without this the single most useful line about a failed spawn is
+  // read by nobody and the turn fails with an unexplained stream error.
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    const text = chunk.toString().trim();
+    if (text.length > 0) process.stderr.write(`[sandbox-exec] ${text}\n`);
+  });
+  // A sandbox spawn that dies early leaves the SDK writing into a closed pipe.
+  // `stdin` has no default listener, so that EPIPE reaches the process as an
+  // unhandled 'error' event and takes the whole server down with it -- one
+  // thread's container failing must not stop every other thread.
+  child.stdin?.on("error", (cause: NodeJS.ErrnoException) => {
+    process.stderr.write(`[sandbox-exec] stdin closed: ${cause.code ?? cause.message}\n`);
+  });
   return child as SpawnedProcess;
 }

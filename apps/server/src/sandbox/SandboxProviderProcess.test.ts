@@ -1,3 +1,6 @@
+import * as NodePath from "node:path";
+import * as NodeUrl from "node:url";
+
 import { describe, expect, it } from "@effect/vitest";
 import { SandboxId, ThreadId } from "@t3tools/contracts";
 import {
@@ -5,6 +8,7 @@ import {
   makeSandboxProviderBindingOwner,
   sandboxProviderInvocation,
   sandboxProviderTarget,
+  spawnClaudeInSandbox,
   unbindSandboxProviderTarget,
 } from "./SandboxProviderProcess.ts";
 
@@ -18,6 +22,43 @@ const target = {
 };
 
 describe("SandboxProviderProcess", () => {
+  it("survives a sandbox process that closes stdin while the SDK is still writing", async () => {
+    // The real failure shape: the container is up but the process inside it has
+    // closed stdin, and the SDK keeps streaming into it. Node delivers that
+    // EPIPE as an 'error' event on stdin, which has no default listener -- so
+    // unhandled it terminates the whole server, taking every other thread's
+    // session down with one thread's broken container.
+    const owner = makeSandboxProviderBindingOwner();
+    const spawnTarget = { ...target, threadId: ThreadId.make("thread-stdin-epipe") };
+    bindSandboxProviderTarget(spawnTarget, owner);
+    const errors: Array<unknown> = [];
+    const capture = (cause: unknown) => errors.push(cause);
+    process.on("uncaughtException", capture);
+    try {
+      const child = spawnClaudeInSandbox(
+        {
+          ...spawnTarget,
+          runtime: NodePath.join(
+            NodePath.dirname(NodeUrl.fileURLToPath(import.meta.url)),
+            "__fixtures__",
+            "fake-runtime-closed-stdin.sh",
+          ) as unknown as (typeof spawnTarget)["runtime"],
+        },
+        { command: "claude", args: [], cwd: undefined, env: {} } as never,
+      ) as unknown as { readonly stdin: NodeJS.WritableStream };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        child.stdin.write("x".repeat(1024));
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(errors).toEqual([]);
+    } finally {
+      process.off("uncaughtException", capture);
+      unbindSandboxProviderTarget(spawnTarget.threadId, owner);
+    }
+  });
+
   it("keeps credential values out of process argv", () => {
     const invocation = sandboxProviderInvocation(target, "codex", ["app-server"], undefined, {
       HTTPS_PROXY: "http://credential-proxy.example:8080",

@@ -23,7 +23,6 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, describe, it } from "@effect/vitest";
-import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -2063,9 +2062,12 @@ describe("ClaudeAdapterLive", () => {
 
       const entry = logged.find((parts) => parts[0] === "claude.runtime.stream-failed");
       assert.ok(entry !== undefined, "expected a stream-failure log line");
-      // Walk the logged value rather than serializing it: `Error` fields are
-      // invisible to JSON.stringify but render fine through the real logger.
-      const rendered = Cause.pretty((entry[1] as { readonly cause: Cause.Cause<unknown> }).cause);
+      // Asserted as a string on purpose: the adapter renders the cause before
+      // logging it, because a structured logger serializes a raw Cause as
+      // "[Object]" -- which tells an operator no more than the failure tag the
+      // event already carries.
+      const rendered = (entry[1] as { readonly cause: string }).cause;
+      assert.equal(typeof rendered, "string");
       assert.ok(
         rendered.includes("spawn ENOENT /usr/local/bin/claude"),
         `expected the spawn cause in the logged cause, got ${rendered}`,
