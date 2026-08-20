@@ -43,6 +43,7 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -357,6 +358,7 @@ export const make = Effect.gen(function* () {
   const threadSandboxRuntime = yield* ThreadSandboxRuntime;
   const sandboxRuntimeManager = yield* SandboxRuntimeManager;
   const projectFileLoader = yield* T3ProjectFileLoader;
+  const providerSessionDirectory = yield* ProviderSessionDirectory;
   const sandboxProvisionLocks = new Map<string, Semaphore.Semaphore>();
   const provisionedTargets = new Map<
     string,
@@ -370,6 +372,28 @@ export const make = Effect.gen(function* () {
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
+  /**
+   * Forget the provider resume cursor persisted for a thread that is about to
+   * get a container it has never run in.
+   *
+   * Best-effort on purpose: if the cursor cannot be cleared the next turn
+   * fails exactly the way it does today, so a persistence hiccup here should
+   * not also fail the turn that was about to repair the thread.
+   */
+  const clearSandboxResumeCursor = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const binding = Option.getOrUndefined(yield* providerSessionDirectory.getBinding(threadId));
+      if (binding === undefined || binding.resumeCursor == null) return;
+      yield* providerSessionDirectory.upsert({ ...binding, resumeCursor: null });
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning(
+          "provider command reactor failed to clear the resume cursor before provisioning a sandbox",
+          { threadId, cause },
+        ),
+      ),
+    );
+
   const ensureExecutionTarget = Effect.fn("ProviderCommandReactor.ensureExecutionTarget")(
     function* (
       thread: Parameters<typeof threadSandboxRuntime.ensureReady>[0],
@@ -463,6 +487,15 @@ export const make = Effect.gen(function* () {
                     }),
               ),
             ));
+          // The provider CLI keeps its conversation store inside the
+          // container, so whatever conversation a persisted resume cursor
+          // names does not exist in the one about to be created -- the turn
+          // would fail outright with "No conversation found with session ID".
+          // Placed here rather than beside the cache eviction above because
+          // this is the point where a fresh container is certain: the
+          // host-fallback return is behind us, and a thread that stays on the
+          // host keeps a cursor that is still good.
+          yield* clearSandboxResumeCursor(thread.id);
           yield* orchestrationEngine.dispatch({
             type: "sandbox.provision",
             commandId: yield* serverCommandId("sandbox-provision"),
