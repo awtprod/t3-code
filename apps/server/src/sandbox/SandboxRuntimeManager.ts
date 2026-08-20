@@ -81,6 +81,19 @@ export function resolveSandboxDesktopMode(): "enabled" | "disabled" {
     : "enabled";
 }
 
+/**
+ * Ceiling on an archived provider conversation store, in bytes.
+ *
+ * Exists because nothing prunes the artifact directory: a store past this size
+ * is skipped rather than kept forever. Measured on a real host, one long
+ * thread's transcript alone reached ~30MB, so the default is set well above
+ * ordinary threads while still bounding the pathological ones.
+ */
+export function resolveSandboxStoreMaxBytes(): number {
+  const raw = Number.parseInt(process.env.T3_SANDBOX_STORE_MAX_BYTES?.trim() ?? "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 50 * 1024 * 1024;
+}
+
 /** One-shot credential boundary used immediately before provider process spawn. */
 export function redeemSandboxProviderEnvironment(
   threadId: string,
@@ -230,9 +243,37 @@ export const makeSandboxRuntimeManager = (
         });
         return undefined;
       }
+      // A store is optional in a way the bundle is not: exports written before
+      // stores existed have no digest, and a mismatch or missing file just
+      // means the provider starts fresh.
+      const storePath = yield* Effect.gen(function* () {
+        if (restore.storeSha256 === undefined) return undefined;
+        const candidate = NodePath.resolve(artifactRoot, `${restore.artifactId}.store.tar`);
+        const storeDigest = yield* Effect.tryPromise(async () =>
+          NodeCrypto.createHash("sha256")
+            .update(await NodeFSP.readFile(candidate))
+            .digest("hex"),
+        ).pipe(Effect.orElseSucceed(() => undefined));
+        if (storeDigest === undefined) {
+          yield* Effect.logWarning(
+            "sandbox restore provider store is missing; provider will start without prior context",
+            { threadId: input.bootstrap.threadId, store: candidate },
+          );
+          return undefined;
+        }
+        if (storeDigest !== restore.storeSha256.toLowerCase()) {
+          yield* Effect.logWarning(
+            "sandbox restore provider store failed its digest check; provider will start without prior context",
+            { threadId: input.bootstrap.threadId, store: candidate },
+          );
+          return undefined;
+        }
+        return candidate;
+      });
       return {
         ...input.bootstrap,
         repositoryBundlePath: bundle,
+        ...(storePath === undefined ? {} : { providerStorePath: storePath }),
         // `exportBundle` writes `git bundle create --all`, so the thread branch
         // is in there under its ordinary heads ref -- the seeding fetch has to
         // name it, since a bundle fetch takes no default refspec.
@@ -505,24 +546,61 @@ export const makeSandboxRuntimeManager = (
           `.${name}.${process.pid}.json.tmp`,
         );
         const manifestDestination = NodePath.resolve(artifactRoot, `${name}.json`);
+        const storeTemporary = NodePath.resolve(artifactRoot, `.${name}.${process.pid}.store.tmp`);
+        const storeDestination = NodePath.resolve(artifactRoot, `${name}.store.tar`);
         try {
           const result = await get(runtime).backend.exportBranch(threadId, hint);
           await get(runtime).backend.exportBundle(threadId, bundleTemporary, hint);
           const bundleSha256 = NodeCrypto.createHash("sha256")
             .update(await NodeFSP.readFile(bundleTemporary))
             .digest("hex");
+          // The conversation store is a bonus, the branch is the point: a store
+          // that fails to archive costs the next turn its context, while a
+          // failure propagated from here would strand the user's commits inside
+          // a container that is about to be deleted.
+          const storeBytes = await get(runtime)
+            .backend.exportProviderStore(
+              threadId,
+              storeTemporary,
+              resolveSandboxStoreMaxBytes(),
+              hint,
+            )
+            .catch(() => undefined);
+          const storeSha256 =
+            storeBytes === undefined
+              ? undefined
+              : await NodeFSP.readFile(storeTemporary)
+                  .then((contents) =>
+                    NodeCrypto.createHash("sha256").update(contents).digest("hex"),
+                  )
+                  .catch(() => undefined);
           await NodeFSP.writeFile(
             manifestTemporary,
-            JSON.stringify({ threadId, bundle: `${name}.bundle`, bundleSha256, ...result }),
+            JSON.stringify({
+              threadId,
+              bundle: `${name}.bundle`,
+              bundleSha256,
+              ...(storeSha256 === undefined
+                ? {}
+                : { store: `${name}.store.tar`, storeSha256, storeBytes }),
+              ...result,
+            }),
             { mode: 0o600, flag: "wx" },
           );
           await NodeFSP.rename(bundleTemporary, bundleDestination);
+          if (storeSha256 !== undefined) await NodeFSP.rename(storeTemporary, storeDestination);
           await NodeFSP.rename(manifestTemporary, manifestDestination);
-          return { ...result, artifactId: name, bundleSha256 };
+          return {
+            ...result,
+            artifactId: name,
+            bundleSha256,
+            ...(storeSha256 === undefined ? {} : { storeSha256 }),
+          };
         } finally {
           await Promise.all([
             NodeFSP.rm(bundleTemporary, { force: true }),
             NodeFSP.rm(manifestTemporary, { force: true }),
+            NodeFSP.rm(storeTemporary, { force: true }),
           ]);
         }
       }),

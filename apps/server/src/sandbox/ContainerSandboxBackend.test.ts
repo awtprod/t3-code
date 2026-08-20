@@ -32,8 +32,19 @@ const input = (overrides: Partial<SandboxProvisionInput> = {}): SandboxProvision
   ...overrides,
 });
 
-function successfulExecutor() {
+/**
+ * A responder that answers every command a clean provision issues.
+ *
+ * `override` runs first and wins whenever it returns a result, so a test that
+ * cares about one command -- a `stat` size, a failing `tar` -- says only that
+ * much and still gets a container out the other end.
+ */
+function successfulExecutor(
+  override?: (command: SandboxCommand) => SandboxCommandResult | undefined,
+) {
   return new FakeExecutor((command) => {
+    const overridden = override?.(command);
+    if (overridden !== undefined) return overridden;
     if (command.args[0] === "info") return { exitCode: 0, stdout: '["name=rootless"]', stderr: "" };
     if (command.args[0] === "inspect" && command.args.length === 2)
       return { exitCode: 1, stdout: "", stderr: "missing" };
@@ -96,6 +107,103 @@ describe("ContainerSandboxBackend", () => {
     expect(mkdir).toBeGreaterThanOrEqual(0);
     const run = executor.commands.findIndex((command) => command.args[0] === "run");
     expect(mkdir).toBeGreaterThan(run);
+  });
+
+  it("never archives provider credentials into an exported store", async () => {
+    // The provider home holds live auth material (.credentials.json,
+    // sessions/*.key) beside the transcripts, and the archive outlives the
+    // container in a host directory. The exclusions are the security boundary,
+    // so they are asserted directly rather than assumed from the happy path.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("stat")
+        ? { exitCode: 0, stdout: "4096\n", stderr: "" }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    await backend.exportProviderStore("thread-1", "/artifacts/store.tar", 50 * 1024 * 1024);
+
+    const tar = executor.commands.find(
+      (command) => command.args[0] === "exec" && command.args.includes("tar"),
+    );
+    expect(tar).toBeDefined();
+    for (const denied of [".credentials.json", "sessions", "*.key", "*token*", "*auth*"]) {
+      const at = tar!.args.indexOf(denied);
+      expect(at).toBeGreaterThan(0);
+      expect(tar!.args[at - 1]).toBe("--exclude");
+    }
+    // Archived from the provider home itself, so nothing outside it -- the
+    // workspace, /tmp -- can ride along.
+    expect(tar!.args).toContain("/thread-data/provider-home");
+  });
+
+  it("skips a provider store larger than the ceiling instead of copying it out", async () => {
+    // Nothing prunes the artifact directory, so an oversized store is dropped
+    // at the boundary: it must never reach the host.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("stat")
+        ? { exitCode: 0, stdout: `${256 * 1024 * 1024}\n`, stderr: "" }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    const bytes = await backend.exportProviderStore(
+      "thread-1",
+      "/artifacts/store.tar",
+      50 * 1024 * 1024,
+    );
+
+    expect(bytes).toBeUndefined();
+    expect(
+      executor.commands.some(
+        (command) => command.args[0] === "cp" && command.args.includes("/artifacts/store.tar"),
+      ),
+    ).toBe(false);
+  });
+
+  it("restores a provider store into the container home before the repository is seeded", async () => {
+    // The CLI reads its home on first spawn, so the store has to be in place
+    // before anything can run -- and before the repo work that follows.
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    const extract = executor.commands.findIndex(
+      (command) => command.args[0] === "exec" && command.args.includes("--extract"),
+    );
+    const clone = executor.commands.findIndex(
+      (command) => command.args[0] === "exec" && command.args.includes("clone"),
+    );
+    expect(extract).toBeGreaterThanOrEqual(0);
+    expect(extract).toBeLessThan(clone);
+  });
+
+  it("provisions anyway when a restored provider store fails to extract", async () => {
+    // Losing the conversation costs the next turn its context; failing the
+    // provision would cost the user the thread.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("--extract")
+        ? { exitCode: 1, stdout: "", stderr: "corrupt archive" }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const ready = await backend.ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    expect(ready.containerName).toContain("t3-thread-");
   });
 
   it("coalesces concurrent provisioning and is idempotent once ready", async () => {

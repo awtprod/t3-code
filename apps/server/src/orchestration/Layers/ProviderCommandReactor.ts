@@ -495,7 +495,14 @@ export const make = Effect.gen(function* () {
           // this is the point where a fresh container is certain: the
           // host-fallback return is behind us, and a thread that stays on the
           // host keeps a cursor that is still good.
-          yield* clearSandboxResumeCursor(thread.id);
+          //
+          // Unless the teardown archived the store: the provision below then
+          // restores it to the same in-container home, under the same cwd the
+          // transcripts are keyed by, so the cursor resolves again and the
+          // thread comes back with its context. Clearing it there would throw
+          // away the conversation the export went out of its way to save.
+          if (thread.sandbox?.lastExport?.storeSha256 === undefined)
+            yield* clearSandboxResumeCursor(thread.id);
           yield* orchestrationEngine.dispatch({
             type: "sandbox.provision",
             commandId: yield* serverCommandId("sandbox-provision"),

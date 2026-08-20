@@ -48,6 +48,32 @@ const INTERNAL_EGRESS_PROXY_URL = ["http:/", "/egress-proxy:3128"].join("");
  */
 const INTERNAL_NO_PROXY_HOSTS = ["localhost", "127.0.0.1", "::1", CREDENTIAL_PROXY_ALIAS];
 const MAX_HOOK_TIMEOUT_MS = 10 * 60_000;
+/**
+ * Where the provider CLI keeps its config and conversation store inside the
+ * container. Must stay in step with `SANDBOX_PROVIDER_ENV.HOME` in
+ * `SandboxProviderProcess.ts` -- that is the `HOME` every provider spawn runs
+ * with, and this is the directory archived and restored across a teardown.
+ */
+const PROVIDER_HOME = "/thread-data/provider-home";
+/**
+ * Paths excluded from the archived provider store, relative to `PROVIDER_HOME`.
+ *
+ * Credentials first: the provider home holds live auth material next to the
+ * transcripts, and an exported archive lands in a host directory that outlives
+ * the container. Excluding at archive time means a credential is never written
+ * into the tar in the first place. The rest is churn -- crash-time temp files
+ * and caches that a restored store is better off without.
+ */
+const PROVIDER_STORE_EXCLUDES = [
+  ".credentials.json",
+  "*.credentials.json",
+  ".claude.json.tmp.*",
+  "sessions",
+  "*.key",
+  "*token*",
+  "*auth*",
+  ".cache",
+] as const;
 
 export class SandboxRuntimeError extends Error {
   override readonly name = "SandboxRuntimeError";
@@ -357,9 +383,43 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       // otherwise every provider spawn dies before the first token.
       await this.#mustExec(
         containerName,
-        { executable: "mkdir", args: ["-p", "/thread-data/provider-home"] },
+        { executable: "mkdir", args: ["-p", PROVIDER_HOME] },
         30_000,
       );
+      if (input.bootstrap.providerStorePath !== undefined) {
+        // Extracted here, before the repository is seeded and long before any
+        // provider can spawn, so the CLI's first look at its home already has
+        // the earlier conversation in it.
+        //
+        // Best-effort: a store that fails to copy or extract leaves the home
+        // empty, which is exactly the state a thread without a prior export
+        // starts in. The provision continues either way -- the branch is the
+        // part worth failing over, and the reactor clears the now-stale resume
+        // cursor so the next turn starts a fresh conversation cleanly.
+        const containerArchive = "/tmp/t3-provider-store.tar";
+        try {
+          await this.#mustRun(
+            ["cp", input.bootstrap.providerStorePath, `${containerName}:${containerArchive}`],
+            setupTimeoutMs,
+          );
+          await this.#mustExec(
+            containerName,
+            {
+              executable: "tar",
+              args: ["--extract", "--file", containerArchive, "--directory", PROVIDER_HOME],
+            },
+            setupTimeoutMs,
+          );
+        } catch {
+          // Intentionally swallowed; see above.
+        } finally {
+          await this.#mustExec(
+            containerName,
+            { executable: "rm", args: ["-f", containerArchive] },
+            10_000,
+          ).catch(() => undefined);
+        }
+      }
       if (input.bootstrap.repositoryBundlePath !== undefined) {
         const containerBundle = "/tmp/t3-repository.bundle";
         const bundleRef = input.bootstrap.repositoryBundleRef;
@@ -604,6 +664,79 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           executable: "rm",
           args: ["-f", containerBundle],
         },
+        10_000,
+      ).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Copy the provider's conversation store out of the container so a
+   * re-provisioned thread can resume the conversation instead of starting cold.
+   *
+   * Returns the archived byte count, or `undefined` when nothing was archived
+   * -- an absent store, or one past `maxBytes`. Callers treat that as "no store
+   * this time" and carry on: losing the conversation degrades the next turn,
+   * losing the branch bundle would lose the user's work.
+   *
+   * The exclusions are not hygiene. The provider home also holds live
+   * credentials (`.credentials.json`, `sessions/*.key`), so they are dropped at
+   * archive time rather than filtered afterwards -- a credential that is never
+   * written into the tar cannot leak out of one.
+   */
+  async exportProviderStore(
+    threadIdValue: string,
+    destination: string,
+    maxBytes: number,
+    hint?: SandboxAdoptionHint,
+  ): Promise<number | undefined> {
+    const threadId = sanitizeId(threadIdValue, "threadId");
+    const record = await this.#resolveRecord(threadId, hint);
+    if (record === undefined)
+      throw new SandboxRuntimeError(`sandbox for thread ${threadId} is not ready`);
+    if (!destination.startsWith("/") || destination.includes("\0"))
+      throw new SandboxRuntimeError("store destination must be an absolute host path");
+    const containerArchive = "/tmp/t3-provider-store.tar";
+    try {
+      const archived = await this.#mustExec(
+        record.ready.containerName,
+        {
+          executable: "tar",
+          args: [
+            "--create",
+            "--file",
+            containerArchive,
+            "--directory",
+            PROVIDER_HOME,
+            ...PROVIDER_STORE_EXCLUDES.flatMap((pattern) => ["--exclude", pattern]),
+            ".",
+          ],
+          // An empty or absent provider home is the ordinary first-turn case,
+          // not a failure worth failing the export over.
+          allowNonZeroExit: true,
+        },
+        120_000,
+      );
+      if (archived.exitCode !== 0) return undefined;
+      // Measured inside the container, before the copy: an oversized store
+      // should never cross the boundary at all, let alone land in an artifact
+      // directory that nothing prunes.
+      const measured = await this.#mustExec(
+        record.ready.containerName,
+        { executable: "stat", args: ["-c", "%s", containerArchive], allowNonZeroExit: true },
+        30_000,
+      );
+      const bytes = Number.parseInt(measured.stdout.trim(), 10);
+      if (measured.exitCode !== 0 || !Number.isFinite(bytes)) return undefined;
+      if (bytes > maxBytes) return undefined;
+      await this.#mustRun(
+        ["cp", `${record.ready.containerName}:${containerArchive}`, destination],
+        120_000,
+      );
+      return bytes;
+    } finally {
+      await this.#mustExec(
+        record.ready.containerName,
+        { executable: "rm", args: ["-f", containerArchive] },
         10_000,
       ).catch(() => undefined);
     }

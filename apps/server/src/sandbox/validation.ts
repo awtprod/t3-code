@@ -59,6 +59,14 @@ export function validateBootstrap(input: SandboxBootstrap): void {
   }
   if (input.restoreCommit !== undefined && !COMMIT.test(input.restoreCommit))
     throw new SandboxValidationError("restoreCommit must be an immutable full commit hash");
+  // Server-generated like the bundle path above, and lands on a command line
+  // the same way, so it gets the same shape check.
+  if (
+    input.providerStorePath !== undefined &&
+    (!SAFE_ABSOLUTE_PATH.test(input.providerStorePath) || input.providerStorePath.includes(".."))
+  ) {
+    throw new SandboxValidationError("provider store path is invalid");
+  }
   if (
     input.inheritedPatch !== undefined &&
     Buffer.byteLength(input.inheritedPatch) > 16 * 1024 * 1024

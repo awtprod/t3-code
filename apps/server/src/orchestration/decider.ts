@@ -2096,6 +2096,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         headCommit: command.headCommit,
         artifactId: command.artifactId,
         bundleSha256: command.bundleSha256,
+        // Spread rather than assigned: the key is optional on both the command
+        // and the event, and writing `storeSha256: undefined` would fail the
+        // schema instead of meaning "no store".
+        ...(command.storeSha256 === undefined ? {} : { storeSha256: command.storeSha256 }),
       };
       return yield* sandboxTransition(command.threadId, command.commandId, event.type, event, {
         ...current,
@@ -2104,6 +2108,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           headCommit: command.headCommit,
           artifactId: command.artifactId,
           bundleSha256: command.bundleSha256,
+          ...(command.storeSha256 === undefined ? {} : { storeSha256: command.storeSha256 }),
           exportedAt: command.createdAt,
         },
         lastActiveAt: command.createdAt,

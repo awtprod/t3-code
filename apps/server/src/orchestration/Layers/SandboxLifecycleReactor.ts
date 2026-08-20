@@ -137,6 +137,7 @@ export const make = Effect.gen(function* () {
       createdAt: yield* nowIso,
       artifactId: result.artifactId,
       bundleSha256: result.bundleSha256,
+      ...(result.storeSha256 === undefined ? {} : { storeSha256: result.storeSha256 }),
     });
   });
 

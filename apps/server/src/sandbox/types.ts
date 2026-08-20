@@ -55,6 +55,16 @@ export type SandboxBootstrap = {
    * moved it would make the sandbox unrecognizable to label-verified adoption.
    */
   readonly restoreCommit?: string;
+  /**
+   * Manager-generated verified tar of a previously exported provider
+   * conversation store, extracted over the container's provider home before
+   * any provider can spawn.
+   *
+   * Absent whenever the store could not be carried across -- no prior export,
+   * a digest mismatch, an oversized store. The thread still provisions; the
+   * provider just starts without the earlier conversation.
+   */
+  readonly providerStorePath?: string;
 };
 
 /**
@@ -71,6 +81,13 @@ export type SandboxRestoreSource = {
   readonly bundleSha256: string;
   readonly headCommit: string;
   readonly branchName: string;
+  /**
+   * Digest of the archived provider conversation store, when the export
+   * captured one. Absent for exports written before stores were captured, and
+   * for stores skipped as oversized -- the restore then seeds the repository
+   * but leaves the provider without prior context.
+   */
+  readonly storeSha256?: string;
 };
 
 export type SandboxProvisionInput = {
@@ -147,6 +164,12 @@ export type SandboxExport = {
 export type SandboxArtifactExport = SandboxExport & {
   readonly artifactId: string;
   readonly bundleSha256: string;
+  /**
+   * Digest of the archived provider conversation store, when the export
+   * captured one. Absent when there was no store to archive, or when it
+   * exceeded the size ceiling -- the branch still exported either way.
+   */
+  readonly storeSha256?: string;
 };
 export type SandboxUsageSample = {
   readonly cpuPercent: number;

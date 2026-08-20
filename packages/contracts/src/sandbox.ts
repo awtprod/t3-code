@@ -170,6 +170,16 @@ export const SandboxBranchExport = Schema.Struct({
   headCommit: gitObjectId,
   artifactId: TrimmedNonEmptyString.check(Schema.isPattern(/^[0-9a-f]{64}$/i)),
   bundleSha256: TrimmedNonEmptyString.check(Schema.isPattern(/^[0-9a-f]{64}$/i)),
+  /**
+   * Digest of the provider conversation store archived alongside the bundle,
+   * when one was captured.
+   *
+   * Optional because a store is best-effort: it is absent for exports written
+   * before stores were captured at all, and skipped for a store that exceeds
+   * the size ceiling or fails to archive. A restore without it simply starts
+   * the provider fresh, which is what happened for every export until now.
+   */
+  storeSha256: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isPattern(/^[0-9a-f]{64}$/i))),
   exportedAt: IsoDateTime,
 });
 export type SandboxBranchExport = typeof SandboxBranchExport.Type;
@@ -277,6 +287,10 @@ export const SandboxEvent = Schema.Union([
     headCommit: gitObjectId,
     artifactId: TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
     bundleSha256: TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+    /** Digest of the archived provider conversation store, when one was captured. */
+    storeSha256: Schema.optionalKey(
+      TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+    ),
   }),
 ]);
 export type SandboxEvent = typeof SandboxEvent.Type;

@@ -792,6 +792,104 @@ describe("ProviderCommandReactor", () => {
     expect(Option.getOrUndefined(binding)?.resumeCursor).toBeNull();
   });
 
+  it("keeps the resume cursor when the teardown archived the provider store", async () => {
+    // The whole point of archiving the store: the fresh container gets the
+    // same conversation back under the same in-container cwd the transcripts
+    // are keyed by, so the cursor names something real again. Clearing it here
+    // would discard the conversation the export just went out of its way to
+    // save.
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const resumeCursor = { resume: "restorable-session-id" };
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-store-export"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-before-store-export"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+
+    // The export a teardown performs, carrying a store -- dispatched rather
+    // than mocked so the digest travels the real command -> event -> thread
+    // path the re-provision below reads it back from.
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "sandbox.branch-export.result",
+        commandId: CommandId.make("cmd-sandbox-export-with-store"),
+        threadId,
+        branchName: "t3/thread/thread-1",
+        headCommit: "a".repeat(40),
+        artifactId: "b".repeat(64),
+        bundleSha256: "c".repeat(64),
+        storeSha256: "d".repeat(64),
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "sandbox.stop",
+        commandId: CommandId.make("cmd-sandbox-stop-with-store"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "sandbox.stop.complete",
+        commandId: CommandId.make("cmd-sandbox-stopped-with-store"),
+        threadId,
+        expired: false,
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.providerSessionDirectory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        resumeCursor,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-store-export"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-after-store-export"),
+          role: "user",
+          text: "back again",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.provisionSandbox.mock.calls.length === 2);
+    const binding = await harness.runEffect(harness.providerSessionDirectory.getBinding(threadId));
+    expect(Option.getOrUndefined(binding)?.resumeCursor).toEqual(resumeCursor);
+    // ...and the store the cursor depends on is actually requested back.
+    expect(harness.provisionSandbox.mock.calls.at(-1)?.[0]?.restore?.storeSha256).toBe(
+      "d".repeat(64),
+    );
+  });
+
   it("keeps the resume cursor of a legacy-host thread", async () => {
     // Same code path -- a host thread has no sandbox, so it takes the same
     // branch -- but its conversation store is on the host and outlives

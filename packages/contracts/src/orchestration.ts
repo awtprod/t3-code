@@ -1419,6 +1419,14 @@ const SandboxBranchExportResultCommand = Schema.Struct({
   headCommit: TrimmedNonEmptyString,
   artifactId: TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
   bundleSha256: TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  /**
+   * Digest of the provider conversation store archived alongside the bundle.
+   *
+   * Optional because a store is best-effort: an export skips it when the store
+   * is absent, oversized, or fails to archive, and the branch export still has
+   * to go through -- the commits are the part that cannot be lost.
+   */
+  storeSha256: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/))),
   createdAt: IsoDateTime,
 });
 
