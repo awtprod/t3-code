@@ -488,4 +488,142 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
       expect(event.payload.sandbox.desktop.readyAt).toBe(NOW);
     }),
   );
+
+  const LIMITS = {
+    cpuCount: 2,
+    memoryBytes: 4_294_967_296,
+    diskBytes: 21_474_836_480,
+    processCount: 512,
+    idleTimeoutSeconds: 3600,
+    maximumLifetimeSeconds: 28800,
+  };
+
+  const stopped = {
+    lifecycle: "stopped" as const,
+    sandboxId: "sandbox-1" as never,
+    runtime: "podman" as const,
+    runtimeRef: "t3-thread-abc",
+    branch: BRANCH,
+    limits: LIMITS,
+    usage: {
+      cpuPercent: 4,
+      memoryBytes: 1024,
+      diskBytes: 2048,
+      processCount: 3,
+      sampledAt: NOW,
+    },
+    desktop: { status: "unavailable" as const },
+    services: [],
+    controller: { kind: "none" as const },
+    lastExport: {
+      branchName: BRANCH.branchName,
+      headCommit: "89abcdef0123456789abcdef0123456789abcdef",
+      artifactId: "a".repeat(64),
+      bundleSha256: "b".repeat(64),
+      exportedAt: NOW,
+    },
+    createdAt: NOW,
+    lastActiveAt: NOW,
+  };
+
+  it.effect("re-provisions a stopped sandbox instead of leaving a one-way door", () =>
+    Effect.gen(function* () {
+      const event = (yield* decideOrchestrationCommand({
+        readModel: readModel(stopped),
+        command: {
+          type: "sandbox.provision",
+          commandId: CommandId.make("reprovision"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+        },
+      })) as Omit<
+        Extract<OrchestrationEvent, { type: "sandbox.provisioning-started" }>,
+        "sequence"
+      >;
+
+      expect(event.payload.sandbox.lifecycle).toBe("provisioning");
+      // The branch and the recorded export survive -- they are what the new
+      // container gets seeded from.
+      expect(event.payload.sandbox.branch).toEqual(BRANCH);
+      expect(event.payload.sandbox.lastExport?.artifactId).toBe("a".repeat(64));
+      // Everything describing the destroyed container does not.
+      expect(event.payload.sandbox.runtimeRef).toBeUndefined();
+      expect(event.payload.sandbox.sandboxId).toBeUndefined();
+      expect(event.payload.sandbox.usage).toBeUndefined();
+    }),
+  );
+
+  it.effect("accepts a new turn on a stopped sandbox", () =>
+    Effect.gen(function* () {
+      const exit = yield* Effect.exit(
+        decideOrchestrationCommand({
+          readModel: readModel({ ...stopped, lifecycle: "expired" as const }),
+          command: {
+            type: "thread.turn.start",
+            commandId: CommandId.make("turn-after-settle"),
+            threadId: ThreadId.make("thread-1"),
+            message: {
+              messageId: "message-1" as never,
+              role: "user",
+              text: "back to it",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: NOW,
+          },
+        }),
+      );
+      expect(exit._tag).toBe("Success");
+    }),
+  );
+
+  it.effect("still refuses to provision on top of an in-flight sandbox", () =>
+    Effect.gen(function* () {
+      for (const lifecycle of ["provisioning", "ready", "stopping", "pausing"] as const) {
+        const exit = yield* Effect.exit(
+          decideOrchestrationCommand({
+            readModel: readModel({ ...stopped, lifecycle }),
+            command: {
+              type: "sandbox.provision",
+              commandId: CommandId.make(`reprovision-${lifecycle}`),
+              threadId: ThreadId.make("thread-1"),
+              createdAt: NOW,
+            },
+          }),
+        );
+        expect(exit._tag, lifecycle).toBe("Failure");
+      }
+    }),
+  );
+
+  it.effect("records the exported bundle so a re-provision can seed from it", () =>
+    Effect.gen(function* () {
+      // Strip rather than set `undefined`: `lastExport` is an optional key, so
+      // this fixture has to be a sandbox that has never exported at all.
+      const { lastExport: _never, ...withoutExport } = stopped;
+      const ready = { ...withoutExport, lifecycle: "ready" as const };
+      const event = (yield* decideOrchestrationCommand({
+        readModel: readModel(ready),
+        command: {
+          type: "sandbox.branch-export.result",
+          commandId: CommandId.make("exported"),
+          threadId: ThreadId.make("thread-1"),
+          branchName: BRANCH.branchName,
+          headCommit: "89abcdef0123456789abcdef0123456789abcdef",
+          artifactId: "c".repeat(64),
+          bundleSha256: "d".repeat(64),
+          createdAt: NOW,
+        },
+      })) as Omit<Extract<OrchestrationEvent, { type: "sandbox.branch-exported" }>, "sequence">;
+
+      expect(event.payload.sandbox.lastExport).toEqual({
+        branchName: BRANCH.branchName,
+        headCommit: "89abcdef0123456789abcdef0123456789abcdef",
+        artifactId: "c".repeat(64),
+        bundleSha256: "d".repeat(64),
+        exportedAt: NOW,
+      });
+    }),
+  );
 });

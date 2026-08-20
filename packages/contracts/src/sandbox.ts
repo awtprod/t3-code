@@ -158,6 +158,22 @@ export const SandboxFailure = Schema.Struct({
 });
 export type SandboxFailure = typeof SandboxFailure.Type;
 
+/**
+ * The branch bundle written by the most recent export, so a sandbox that was
+ * torn down can be re-provisioned with the thread's work instead of at its base
+ * commit. The digest is recorded here, in the event log, rather than read back
+ * from the artifact directory -- a bundle that verifies only against a manifest
+ * sitting beside it verifies against nothing.
+ */
+export const SandboxBranchExport = Schema.Struct({
+  branchName: shortText,
+  headCommit: gitObjectId,
+  artifactId: TrimmedNonEmptyString.check(Schema.isPattern(/^[0-9a-f]{64}$/i)),
+  bundleSha256: TrimmedNonEmptyString.check(Schema.isPattern(/^[0-9a-f]{64}$/i)),
+  exportedAt: IsoDateTime,
+});
+export type SandboxBranchExport = typeof SandboxBranchExport.Type;
+
 export const SandboxState = Schema.Struct({
   lifecycle: SandboxLifecycle,
   sandboxId: Schema.optionalKey(SandboxId),
@@ -171,6 +187,7 @@ export const SandboxState = Schema.Struct({
   controller: SandboxController,
   pauseReason: Schema.optionalKey(SandboxPauseReason),
   failure: Schema.optionalKey(SandboxFailure),
+  lastExport: Schema.optionalKey(SandboxBranchExport),
   createdAt: IsoDateTime,
   lastActiveAt: IsoDateTime,
   expiresAt: Schema.optionalKey(IsoDateTime),

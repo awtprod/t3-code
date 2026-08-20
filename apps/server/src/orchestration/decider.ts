@@ -7,6 +7,7 @@ import {
   type OrchestrationReadModel,
   type SandboxEvent,
   type SandboxState,
+  type SandboxLifecycle,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -35,6 +36,22 @@ const sandboxInvariant = (commandType: string, detail: string) =>
 // window is a failed/stale start, not pending work. Mirrors the client's
 // QUEUED_TURN_START_GRACE_MS in client-runtime threadSettled.ts.
 const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
+
+/**
+ * Lifecycles a sandbox can be (re-)provisioned from.
+ *
+ * `stopped`/`expired` are here so settling a thread, hitting Stop, or being
+ * reaped by the idle sweep is not a one-way door: coming back to the thread
+ * provisions a fresh sandbox seeded from the branch export the teardown wrote.
+ * The in-flight states are deliberately absent -- a second provision on top of
+ * `provisioning`, `pausing`, or `stopping` would race the reactor mid-operation.
+ */
+const RE_PROVISIONABLE_SANDBOX_LIFECYCLES: ReadonlySet<SandboxLifecycle> = new Set([
+  "unprovisioned",
+  "failed",
+  "stopped",
+  "expired",
+]);
 
 /**
  * Blocked-on-you work derived from the thread's retained activities: an
@@ -994,7 +1011,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       }
       if (
         targetThread.sandbox != null &&
-        !["unprovisioned", "ready", "failed"].includes(targetThread.sandbox.lifecycle)
+        !RE_PROVISIONABLE_SANDBOX_LIFECYCLES.has(targetThread.sandbox.lifecycle) &&
+        targetThread.sandbox.lifecycle !== "ready"
       ) {
         return yield* sandboxInvariant(
           command.type,
@@ -1677,10 +1695,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const current = thread.sandbox ?? null;
-      if (current !== null && current.lifecycle !== "unprovisioned") {
+      if (current !== null && !RE_PROVISIONABLE_SANDBOX_LIFECYCLES.has(current.lifecycle)) {
         return yield* sandboxInvariant(
           command.type,
-          `thread ${command.threadId} sandbox is not unprovisioned`,
+          `thread ${command.threadId} sandbox cannot be provisioned from ${current.lifecycle}`,
         );
       }
       const branch = current?.branch ?? command.branch;
@@ -1714,7 +1732,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               createdAt: command.createdAt,
               lastActiveAt: command.createdAt,
             }
-          : (({ failure: _failure, ...rest }) => rest)(current);
+          : // A re-provision from a terminal lifecycle starts a brand new
+            // container, so every field describing the old one has to go with
+            // it -- a stale `runtimeRef` would point exec and checkpointing at
+            // a container that no longer exists.
+            (({
+              failure: _failure,
+              sandboxId: _sandboxId,
+              runtimeRef: _runtimeRef,
+              usage: _usage,
+              pauseReason: _pauseReason,
+              expiresAt: _expiresAt,
+              ...rest
+            }) => rest)(current);
       const sandbox: SandboxState = {
         ...currentWithoutFailure,
         lifecycle: "provisioning",
@@ -2069,6 +2099,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
       return yield* sandboxTransition(command.threadId, command.commandId, event.type, event, {
         ...current,
+        lastExport: {
+          branchName: command.branchName,
+          headCommit: command.headCommit,
+          artifactId: command.artifactId,
+          bundleSha256: command.bundleSha256,
+          exportedAt: command.createdAt,
+        },
         lastActiveAt: command.createdAt,
       });
     }

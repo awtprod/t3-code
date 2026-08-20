@@ -57,6 +57,8 @@ export function validateBootstrap(input: SandboxBootstrap): void {
   ) {
     throw new SandboxValidationError("repository bundle ref is unsafe");
   }
+  if (input.restoreCommit !== undefined && !COMMIT.test(input.restoreCommit))
+    throw new SandboxValidationError("restoreCommit must be an immutable full commit hash");
   if (
     input.inheritedPatch !== undefined &&
     Buffer.byteLength(input.inheritedPatch) > 16 * 1024 * 1024

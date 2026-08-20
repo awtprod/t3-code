@@ -191,6 +191,57 @@ export const makeSandboxRuntimeManager = (
     runtimes.set(runtime, value);
     return value;
   };
+  /**
+   * Bootstrap fields that seed a sandbox from the branch bundle a previous
+   * teardown exported, or `undefined` when this is not a restore.
+   *
+   * A missing or tampered artifact is not fatal: the thread still gets a
+   * sandbox, seeded the ordinary way at its recorded base commit. Losing the
+   * previous session's commits is bad, but refusing to provision at all would
+   * leave the user with a thread they cannot use either way.
+   */
+  const resolveRestoreBootstrap = Effect.fn("SandboxRuntimeManager.resolveRestoreBootstrap")(
+    function* (input: SandboxProvisionInput) {
+      const restore = input.restore;
+      if (restore === undefined || artifactRoot === undefined) return undefined;
+      if (!/^[a-f0-9]{64}$/i.test(restore.artifactId)) {
+        yield* Effect.logWarning("sandbox restore artifact id is malformed", {
+          threadId: input.bootstrap.threadId,
+        });
+        return undefined;
+      }
+      const bundle = NodePath.resolve(artifactRoot, `${restore.artifactId}.bundle`);
+      const digest = yield* Effect.tryPromise(async () =>
+        NodeCrypto.createHash("sha256")
+          .update(await NodeFSP.readFile(bundle))
+          .digest("hex"),
+      ).pipe(Effect.orElseSucceed(() => undefined));
+      if (digest === undefined) {
+        yield* Effect.logWarning("sandbox restore bundle is missing; seeding from base commit", {
+          threadId: input.bootstrap.threadId,
+          bundle,
+        });
+        return undefined;
+      }
+      if (digest !== restore.bundleSha256.toLowerCase()) {
+        yield* Effect.logWarning("sandbox restore bundle failed its digest check", {
+          threadId: input.bootstrap.threadId,
+          bundle,
+        });
+        return undefined;
+      }
+      return {
+        ...input.bootstrap,
+        repositoryBundlePath: bundle,
+        // `exportBundle` writes `git bundle create --all`, so the thread branch
+        // is in there under its ordinary heads ref -- the seeding fetch has to
+        // name it, since a bundle fetch takes no default refspec.
+        repositoryBundleRef: `refs/heads/${restore.branchName}`,
+        restoreCommit: restore.headCommit,
+      };
+    },
+  );
+
   const attempt = <A>(run: () => Promise<A>) =>
     Effect.tryPromise({
       try: run,
@@ -236,7 +287,10 @@ export const makeSandboxRuntimeManager = (
       const managed = get(runtime);
       let provisionInput = input;
       let seedBundle: string | undefined;
-      if (!/^(?:https|ssh):\/\//i.test(input.bootstrap.repositoryUrl)) {
+      const restored = yield* resolveRestoreBootstrap(input);
+      if (restored !== undefined) {
+        provisionInput = { ...input, bootstrap: restored };
+      } else if (!/^(?:https|ssh):\/\//i.test(input.bootstrap.repositoryUrl)) {
         if (artifactRoot === undefined)
           return yield* new SandboxManagerError({
             message: "local repository seeding requires configured server artifact storage",

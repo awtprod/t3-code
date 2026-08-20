@@ -46,10 +46,36 @@ export type SandboxBootstrap = {
    * seeding fetch has to ask for it by name.
    */
   readonly repositoryBundleRef?: string;
+  /**
+   * Commit to check the thread branch out at, when the bundle above is a
+   * previously exported sandbox rather than a fresh seed of `baseCommit`.
+   *
+   * `baseCommit` deliberately keeps naming the thread's recorded base: it is
+   * part of the label signature stamped on the container, and a restore that
+   * moved it would make the sandbox unrecognizable to label-verified adoption.
+   */
+  readonly restoreCommit?: string;
+};
+
+/**
+ * A previously exported branch bundle to seed a re-provisioned sandbox from,
+ * so a thread that was settled, stopped, or idle-reaped comes back with its
+ * work rather than at the project's base commit.
+ *
+ * The manager resolves this against its artifact root and verifies the digest
+ * before use; a missing or corrupt artifact degrades to a normal clone at
+ * `bootstrap.baseCommit` rather than failing the provision.
+ */
+export type SandboxRestoreSource = {
+  readonly artifactId: string;
+  readonly bundleSha256: string;
+  readonly headCommit: string;
+  readonly branchName: string;
 };
 
 export type SandboxProvisionInput = {
   readonly bootstrap: SandboxBootstrap;
+  readonly restore?: SandboxRestoreSource;
   readonly config?: SandboxConfig;
   readonly image: string;
   readonly caches?: ReadonlyArray<SandboxCache>;

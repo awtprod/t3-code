@@ -417,11 +417,22 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           setupTimeoutMs,
         );
       }
+      // A restore seeds from a bundle of the thread's own previous sandbox, so
+      // it lands on the work the thread had already done rather than the base
+      // commit -- and its bundle already carries the thread branch, which is
+      // why the switch below has to be `-C` rather than `-c`.
+      const restoreCommit = input.bootstrap.restoreCommit;
       await this.#mustExec(
         containerName,
         {
           executable: "git",
-          args: ["-C", "/workspace/repo", "checkout", "--detach", input.bootstrap.baseCommit],
+          args: [
+            "-C",
+            "/workspace/repo",
+            "checkout",
+            "--detach",
+            restoreCommit ?? input.bootstrap.baseCommit,
+          ],
         },
         setupTimeoutMs,
       );
@@ -429,7 +440,13 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         containerName,
         {
           executable: "git",
-          args: ["-C", "/workspace/repo", "switch", "-c", input.bootstrap.branchName],
+          args: [
+            "-C",
+            "/workspace/repo",
+            "switch",
+            restoreCommit === undefined ? "-c" : "-C",
+            input.bootstrap.branchName,
+          ],
         },
         setupTimeoutMs,
       );

@@ -239,6 +239,7 @@ export const make = Effect.gen(function* () {
         },
         config,
         image,
+        ...(thread.sandbox?.lastExport ? { restore: thread.sandbox.lastExport } : {}),
         ...(process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE?.trim()
           ? { egressProxyImage: process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE.trim() }
           : {}),

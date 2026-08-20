@@ -378,10 +378,20 @@ export const make = Effect.gen(function* () {
       if (
         thread.sandbox != null &&
         thread.sandbox.lifecycle !== "unprovisioned" &&
-        thread.sandbox.lifecycle !== "failed"
+        thread.sandbox.lifecycle !== "failed" &&
+        thread.sandbox.lifecycle !== "stopped" &&
+        thread.sandbox.lifecycle !== "expired"
       ) {
         return yield* threadSandboxRuntime.ensureReady(thread, legacyCwd);
       }
+      // Anything cached below describes a container that a stop, an expiry, or
+      // a failed provision already destroyed. Handing it back would point the
+      // provider at a container id that no longer resolves, so drop it and let
+      // this call provision a fresh one.
+      provisionedTargets.delete(thread.id);
+      // The lock itself is deliberately kept: it is a per-thread mutex, not
+      // state about a container, and replacing one another fiber currently
+      // holds would let two provisions run at once.
       let lock = sandboxProvisionLocks.get(thread.id);
       if (lock === undefined) {
         lock = yield* Semaphore.make(1);
@@ -476,6 +486,10 @@ export const make = Effect.gen(function* () {
               },
               config: thread.sandboxConfig ?? {},
               image,
+              // Re-provisioning a settled or reaped thread: seed from the
+              // bundle its teardown exported so the user comes back to their
+              // work rather than to the project's base commit.
+              ...(thread.sandbox?.lastExport ? { restore: thread.sandbox.lastExport } : {}),
               ...(process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE?.trim()
                 ? { egressProxyImage: process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE.trim() }
                 : {}),

@@ -1,7 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - test creates a real scratch directory for the seed bundle.
 import { describe, expect, it } from "@effect/vitest";
 import { afterEach } from "vite-plus/test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import * as NodeCrypto from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Effect from "effect/Effect";
@@ -215,6 +216,113 @@ describe("local repository seeding", () => {
 
         // The throwaway ref is deleted once the bundle exists, regardless of outcome.
         expect(unpin!.args.at(-1)).toBe(seedRef);
+      } finally {
+        rmSync(artifactRoot, { recursive: true, force: true });
+      }
+    }),
+  );
+});
+
+describe("restoring a re-provisioned sandbox", () => {
+  const BRANCH = "thread/thread-restore";
+  const HEAD_COMMIT = "e".repeat(40);
+  const ARTIFACT_ID = "f".repeat(64);
+
+  /** Every `git ...` line the backend ran inside the container, in order. */
+  const containerGitLines = (executor: FakeExecutor) =>
+    executor.commands
+      .filter((command) => command.args[0] === "exec" && command.args.includes("git"))
+      .map((command) => command.args.slice(command.args.indexOf("git")).join(" "));
+
+  const restoreInput = (bundleSha256: string) =>
+    provisionInput({
+      bootstrap: {
+        threadId: "thread-restore",
+        projectId: "project-1",
+        repositoryUrl: "https://example.test/repository.git",
+        baseCommit: "a".repeat(40),
+        branchName: BRANCH,
+      },
+      restore: {
+        artifactId: ARTIFACT_ID,
+        bundleSha256,
+        headCommit: HEAD_COMMIT,
+        branchName: BRANCH,
+      },
+    });
+
+  /** Artifact root holding one bundle whose real digest is returned alongside it. */
+  const seedArtifact = () => {
+    const artifactRoot = mkdtempSync(join(tmpdir(), "t3-sandbox-artifacts-"));
+    const bundle = join(artifactRoot, `${ARTIFACT_ID}.bundle`);
+    const bytes = Buffer.from("not a real bundle, but a real digest\n");
+    writeFileSync(bundle, bytes, { mode: 0o600 });
+    return {
+      artifactRoot,
+      bundle,
+      sha256: NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
+    };
+  };
+
+  it.effect("seeds a re-provision from the branch bundle the last teardown exported", () =>
+    Effect.gen(function* () {
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      const { artifactRoot, bundle, sha256 } = seedArtifact();
+      const executor = new FakeExecutor();
+      try {
+        yield* makeSandboxRuntimeManager(artifactRoot, "linux", executor).provision(
+          restoreInput(sha256),
+        );
+
+        // The exported bundle is copied in verbatim -- nothing is re-bundled
+        // from the project repository, so the thread's own commits survive.
+        const copied = executor.commands.find((command) => command.args[0] === "cp")!;
+        expect(copied.args[1]).toBe(bundle);
+        expect(copied.args[2]).toMatch(/:\/tmp\/t3-repository\.bundle$/);
+        expect(
+          executor.commands.some(
+            (command) => command.args[2] === "bundle" && command.args[3] === "create",
+          ),
+        ).toBe(false);
+
+        const git = containerGitLines(executor);
+        // `exportBundle` writes `git bundle create --all`, so the thread branch
+        // is in there under its ordinary heads ref and the fetch must name it:
+        // a bundle fetch has no default refspec.
+        expect(git).toContain(
+          `git -C /workspace/repo fetch --no-tags /tmp/t3-repository.bundle refs/heads/${BRANCH}:refs/heads/${BRANCH}`,
+        );
+        // Checked out at the exported head, not at the recorded base commit.
+        expect(git).toContain(`git -C /workspace/repo checkout --detach ${HEAD_COMMIT}`);
+        // ...and `-C`, because that same bundle already carries the branch.
+        expect(git).toContain(`git -C /workspace/repo switch -C ${BRANCH}`);
+        expect(git.some((line) => line.startsWith("git clone"))).toBe(false);
+      } finally {
+        rmSync(artifactRoot, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("provisions from the project repository when the bundle fails its digest check", () =>
+    Effect.gen(function* () {
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      const { artifactRoot } = seedArtifact();
+      const executor = new FakeExecutor();
+      try {
+        // A tampered or truncated artifact must not fail the provision: losing
+        // the previous session's commits is bad, refusing to give the user a
+        // sandbox at all is worse.
+        yield* makeSandboxRuntimeManager(artifactRoot, "linux", executor).provision(
+          restoreInput("b".repeat(64)),
+        );
+
+        expect(executor.commands.some((command) => command.args[0] === "cp")).toBe(false);
+        const git = containerGitLines(executor);
+        expect(git).toContain(
+          "git clone --no-checkout https://example.test/repository.git /workspace/repo",
+        );
+        expect(git).toContain(`git -C /workspace/repo checkout --detach ${"a".repeat(40)}`);
+        expect(git).toContain(`git -C /workspace/repo switch -c ${BRANCH}`);
       } finally {
         rmSync(artifactRoot, { recursive: true, force: true });
       }
