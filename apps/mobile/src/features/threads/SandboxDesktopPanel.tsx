@@ -24,6 +24,7 @@ export function SandboxDesktopPanel(props: {
   const exportBranch = useAtomCommand(threadEnvironment.exportSandboxBranch, {
     reportFailure: false,
   });
+  const stop = useAtomCommand(threadEnvironment.stopSandbox, { reportFailure: false });
   const viewerTicket = useAtomCommand(threadEnvironment.requestSandboxViewerTicket, {
     reportFailure: false,
   });
@@ -45,6 +46,11 @@ export function SandboxDesktopPanel(props: {
   );
   const target = { environmentId: props.environmentId } as const;
   const human = sandbox?.controller.kind === "human" ? sandbox.controller : null;
+  // Headless deployments run the sandbox with no desktop, so there is nothing
+  // to view or take control of -- but stopping and exporting still apply.
+  const desktopUnavailable = sandbox != null && sandbox.desktop.status === "unavailable";
+  const stoppable =
+    sandbox != null && !["stopped", "expired", "deleted"].includes(sandbox.lifecycle);
   const openViewer = async () => {
     if (busy) return;
     setBusy(true);
@@ -67,7 +73,9 @@ export function SandboxDesktopPanel(props: {
     <View className="border-t border-border bg-card px-4 py-2">
       <View className="flex-row items-center gap-2">
         <View className="min-w-0 flex-1">
-          <Text className="text-xs font-t3-bold text-foreground">Isolated desktop</Text>
+          <Text className="text-xs font-t3-bold text-foreground">
+            {desktopUnavailable ? "Isolated sandbox" : "Isolated desktop"}
+          </Text>
           <Text className="text-xs text-foreground-muted" numberOfLines={1}>
             {sandbox
               ? `${sandbox.lifecycle.replaceAll("-", " ")} · ${sandbox.branch.branchName}`
@@ -90,7 +98,7 @@ export function SandboxDesktopPanel(props: {
             <Text className="text-sm font-t3-bold text-accent">Open</Text>
           </Pressable>
         ) : null}
-        {sandbox && human === null && sandbox.lifecycle === "ready" ? (
+        {sandbox && human === null && sandbox.lifecycle === "ready" && !desktopUnavailable ? (
           <Pressable
             disabled={busy}
             onPress={() =>
@@ -133,6 +141,16 @@ export function SandboxDesktopPanel(props: {
             }
           >
             <Text className="text-sm font-t3-bold text-accent">Export</Text>
+          </Pressable>
+        ) : null}
+        {stoppable ? (
+          <Pressable
+            disabled={busy || human !== null}
+            onPress={() =>
+              void run(() => stop({ ...target, input: { threadId: props.thread.id } }))
+            }
+          >
+            <Text className="text-sm font-t3-bold text-danger-foreground">Stop</Text>
           </Pressable>
         ) : null}
       </View>

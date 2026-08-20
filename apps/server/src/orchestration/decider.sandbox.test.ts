@@ -416,4 +416,76 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
       expect(completed.payload.sandbox.lifecycle).toBe("stopped");
     }),
   );
+
+  const provisioning = {
+    lifecycle: "provisioning" as const,
+    branch: BRANCH,
+    limits: {
+      cpuCount: 2,
+      memoryBytes: 4_294_967_296,
+      diskBytes: 21_474_836_480,
+      processCount: 512,
+      idleTimeoutSeconds: 3600,
+      maximumLifetimeSeconds: 28800,
+    },
+    desktop: {
+      status: "starting" as const,
+      resolution: { width: 1440, height: 900, webRtcEnabled: true },
+    },
+    services: [],
+    controller: { kind: "none" as const },
+    createdAt: NOW,
+    lastActiveAt: NOW,
+  };
+
+  it.effect("reports the desktop unavailable when a headless runtime started none", () =>
+    Effect.gen(function* () {
+      // A headless deployment (`T3_SANDBOX_DESKTOP=disabled`) provisions with no
+      // desktop session. Calling it "ready" anyway pointed every client at a
+      // viewer that the desktop routes answer with 409.
+      const event = (yield* decideOrchestrationCommand({
+        readModel: readModel(provisioning),
+        command: {
+          type: "sandbox.provision.ready",
+          commandId: CommandId.make("headless-ready"),
+          threadId: ThreadId.make("thread-1"),
+          sandboxId: "sandbox-1" as never,
+          runtime: "podman",
+          runtimeRef: "t3-thread-abc",
+          createdAt: NOW,
+        },
+      })) as Omit<Extract<OrchestrationEvent, { type: "sandbox.ready" }>, "sequence">;
+
+      expect(event.payload.sandbox.lifecycle).toBe("ready");
+      expect(event.payload.sandbox.desktop.status).toBe("unavailable");
+      expect(event.payload.sandbox.desktop.sessionId).toBeUndefined();
+      // The requested resolution survives so a later desktop-enabled restart
+      // still knows what geometry the thread asked for.
+      expect(event.payload.sandbox.desktop.resolution?.width).toBe(1440);
+    }),
+  );
+
+  it.effect("reports the desktop ready when the runtime started one", () =>
+    Effect.gen(function* () {
+      const event = (yield* decideOrchestrationCommand({
+        readModel: readModel(provisioning),
+        command: {
+          type: "sandbox.provision.ready",
+          commandId: CommandId.make("desktop-ready"),
+          threadId: ThreadId.make("thread-1"),
+          sandboxId: "sandbox-1" as never,
+          runtime: "podman",
+          runtimeRef: "t3-thread-abc",
+          desktopSessionId: "desktop-1",
+          desktopStreamPath: "/sandbox/desktop/thread-1",
+          createdAt: NOW,
+        },
+      })) as Omit<Extract<OrchestrationEvent, { type: "sandbox.ready" }>, "sequence">;
+
+      expect(event.payload.sandbox.desktop.status).toBe("ready");
+      expect(event.payload.sandbox.desktop.sessionId).toBe("desktop-1");
+      expect(event.payload.sandbox.desktop.streamPath).toBe("/sandbox/desktop/thread-1");
+      expect(event.payload.sandbox.desktop.readyAt).toBe(NOW);
+    }),
+  );
 });

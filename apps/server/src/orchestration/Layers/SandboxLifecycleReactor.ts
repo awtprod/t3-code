@@ -226,6 +226,12 @@ export const make = Effect.gen(function* () {
         sandboxId: SandboxId.make(provision.sandboxId),
         runtime: provision.runtime,
         runtimeRef: provision.containerName,
+        ...(provision.desktopSessionId === undefined
+          ? {}
+          : { desktopSessionId: provision.desktopSessionId }),
+        ...(provision.desktopStreamPath === undefined
+          ? {}
+          : { desktopStreamPath: provision.desktopStreamPath }),
         createdAt: yield* nowIso,
       });
       const readyThread = yield* getThread(thread.id);
@@ -403,6 +409,12 @@ export const make = Effect.gen(function* () {
         sandboxId: SandboxId.make(provision.sandboxId),
         runtime: provision.runtime,
         runtimeRef: provision.containerName,
+        ...(provision.desktopSessionId === undefined
+          ? {}
+          : { desktopSessionId: provision.desktopSessionId }),
+        ...(provision.desktopStreamPath === undefined
+          ? {}
+          : { desktopStreamPath: provision.desktopStreamPath }),
         createdAt: yield* nowIso,
       });
       const readyChild = yield* getThread(event.payload.childThreadId);

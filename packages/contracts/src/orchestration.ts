@@ -1366,6 +1366,14 @@ const SandboxProvisionReadyCommand = Schema.Struct({
   sandboxId: SandboxId,
   runtime: SandboxRuntime,
   runtimeRef: TrimmedNonEmptyString,
+  /**
+   * The streamed desktop the runtime actually started. Absent on headless
+   * deployments (`T3_SANDBOX_DESKTOP=disabled`), which provision a sandbox with
+   * no desktop at all -- the readiness the projection reports has to follow, or
+   * clients offer a viewer that the desktop routes answer with 409.
+   */
+  desktopSessionId: Schema.optionalKey(TrimmedNonEmptyString),
+  desktopStreamPath: Schema.optionalKey(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
 });
 const SandboxOperationFailCommand = Schema.Struct({

@@ -1759,7 +1759,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         sandboxId: command.sandboxId,
         runtime: command.runtime,
         runtimeRef: command.runtimeRef,
-        desktop: { ...current.desktop, status: "ready", readyAt: command.createdAt },
+        // A headless deployment starts no desktop, so the command carries no
+        // session. Reporting "ready" anyway pointed every client at a viewer
+        // the desktop routes answer with 409.
+        desktop:
+          command.desktopSessionId === undefined
+            ? {
+                status: "unavailable" as const,
+                ...(current.desktop.resolution === undefined
+                  ? {}
+                  : { resolution: current.desktop.resolution }),
+              }
+            : {
+                ...current.desktop,
+                status: "ready" as const,
+                sessionId: command.desktopSessionId,
+                ...(command.desktopStreamPath === undefined
+                  ? {}
+                  : { streamPath: command.desktopStreamPath }),
+                readyAt: command.createdAt,
+              },
         lastActiveAt: command.createdAt,
       };
       const event: SandboxEvent = {

@@ -56,4 +56,35 @@ describe("SandboxDesktopPanel", () => {
     expect(markup).toContain("Services 1/1");
     expect(markup).toContain("The desktop stream is not ready");
   });
+
+  it("keeps the sandbox controls but drops the viewer when the deployment is headless", () => {
+    // T3_SANDBOX_DESKTOP=disabled provisions a sandbox with no desktop. Stop
+    // and export still act on the sandbox, but "Take control" and the viewer
+    // would only ever reach a desktop route that answers 409.
+    const headless = {
+      ...state,
+      lifecycle: "ready",
+      desktop: { status: "unavailable" },
+      controller: { kind: "none" },
+    } as unknown as SandboxState;
+    const markup = renderToStaticMarkup(
+      <SandboxDesktopPanel
+        sandbox={headless}
+        onProvision={vi.fn()}
+        onTakeover={vi.fn()}
+        onResume={vi.fn()}
+        onStop={vi.fn()}
+        onExport={vi.fn()}
+        onReconnect={vi.fn()}
+        onRequestViewerUrl={vi.fn(async () => "https://environment.example/never")}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Stop sandbox"');
+    expect(markup).toContain('aria-label="Export sandbox branch"');
+    expect(markup).toContain("Isolated sandbox");
+    expect(markup).toContain("runs sandboxes headless");
+    expect(markup).not.toContain("Take control");
+    expect(markup).not.toContain("<iframe");
+  });
 });
