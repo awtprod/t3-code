@@ -95,6 +95,25 @@ export type SandboxExecInput = {
   readonly allowNonZeroExit?: boolean;
 };
 
+/**
+ * Everything needed to rebuild a lost in-memory sandbox record from the
+ * projection. Container/network/volume names derive from
+ * `(projectId, threadId)`, and the remaining fields reproduce the label
+ * signature stamped at provision time, so a container found at the derived
+ * name can be proven to be the one this thread provisioned.
+ *
+ * Only export and teardown accept a hint. Both act on a container the caller
+ * is finished with; neither re-arms credentials, preview routes, or automation
+ * targets, which is what reconcile's fail-closed adoption refusal protects.
+ */
+export type SandboxAdoptionHint = {
+  readonly projectId: string;
+  readonly image: string;
+  readonly baseCommit: string;
+  readonly branchName: string;
+  readonly teardownTimeoutMs?: number;
+};
+
 export type SandboxExport = {
   readonly commit: string;
   readonly patch: string;
@@ -126,8 +145,12 @@ export interface ThreadSandboxBackend {
   readonly runtime: SandboxRuntime;
   readonly ensureReady: (input: SandboxProvisionInput) => Promise<SandboxReady>;
   readonly exec: (threadId: string, input: SandboxExecInput) => Promise<SandboxCommandResult>;
-  readonly exportBranch: (threadId: string) => Promise<SandboxExport>;
+  readonly exportBranch: (threadId: string, hint?: SandboxAdoptionHint) => Promise<SandboxExport>;
   readonly sampleUsage: (threadId: string) => Promise<SandboxUsageSample>;
-  readonly stop: (threadId: string, teardown?: ReadonlyArray<SandboxHook>) => Promise<void>;
+  readonly stop: (
+    threadId: string,
+    teardown?: ReadonlyArray<SandboxHook>,
+    hint?: SandboxAdoptionHint,
+  ) => Promise<void>;
   readonly reconcile: (input: SandboxReconcileInput) => Promise<SandboxReconcileResult>;
 }

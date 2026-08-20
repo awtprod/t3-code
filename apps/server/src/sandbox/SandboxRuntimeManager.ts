@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - artifact export is an explicit Node filesystem boundary.
 import type {
+  SandboxAdoptionHint,
   SandboxProvisionInput,
   SandboxReady,
   SandboxArtifactExport,
@@ -115,13 +116,20 @@ export interface SandboxRuntimeManagerShape {
   readonly provision: (
     input: SandboxProvisionInput & { services?: ReadonlyArray<ThreadServiceDeclaration> },
   ) => Effect.Effect<ManagedSandboxReady, SandboxManagerError>;
+  /**
+   * `hint` lets export and teardown reach a sandbox this manager generation
+   * never provisioned -- a server restart empties the backend's per-thread
+   * records, which otherwise strands the thread's commits in its volume.
+   */
   readonly exportBranch: (
     runtime: "docker" | "podman",
     threadId: string,
+    hint?: SandboxAdoptionHint,
   ) => Effect.Effect<SandboxArtifactExport, SandboxManagerError>;
   readonly stop: (
     runtime: "docker" | "podman",
     threadId: string,
+    hint?: SandboxAdoptionHint,
   ) => Effect.Effect<void, SandboxManagerError>;
   readonly reconcile: (
     runtime: "docker" | "podman",
@@ -427,7 +435,7 @@ export const makeSandboxRuntimeManager = (
         })),
       };
     }),
-    exportBranch: (runtime, threadId) =>
+    exportBranch: (runtime, threadId, hint) =>
       attempt(async () => {
         if (artifactRoot === undefined)
           throw new Error("sandbox artifact storage requires the configured server runtime layer");
@@ -444,8 +452,8 @@ export const makeSandboxRuntimeManager = (
         );
         const manifestDestination = NodePath.resolve(artifactRoot, `${name}.json`);
         try {
-          const result = await get(runtime).backend.exportBranch(threadId);
-          await get(runtime).backend.exportBundle(threadId, bundleTemporary);
+          const result = await get(runtime).backend.exportBranch(threadId, hint);
+          await get(runtime).backend.exportBundle(threadId, bundleTemporary, hint);
           const bundleSha256 = NodeCrypto.createHash("sha256")
             .update(await NodeFSP.readFile(bundleTemporary))
             .digest("hex");
@@ -464,7 +472,7 @@ export const makeSandboxRuntimeManager = (
           ]);
         }
       }),
-    stop: Effect.fn("SandboxRuntimeManager.stop")(function* (runtime, threadId) {
+    stop: Effect.fn("SandboxRuntimeManager.stop")(function* (runtime, threadId, hint) {
       const managed = get(runtime);
       if (resolveSandboxDesktopMode() !== "disabled")
         yield* Effect.promise(() => managed.desktop.stop(threadId));
@@ -473,7 +481,7 @@ export const makeSandboxRuntimeManager = (
       yield* Effect.promise(() => managed.services.stop(threadId));
       credentialBroker.revokeThread(threadId);
       desktopGateway.removeThread(threadId);
-      yield* attempt(() => managed.backend.stop(threadId, teardownHooks.get(threadId) ?? []));
+      yield* attempt(() => managed.backend.stop(threadId, teardownHooks.get(threadId) ?? [], hint));
       teardownHooks.delete(threadId);
     }),
     reconcile: (runtime, expectedThreadIds) =>

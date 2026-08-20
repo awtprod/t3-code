@@ -460,4 +460,101 @@ describe("ContainerSandboxBackend", () => {
       processCount: 7,
     });
   });
+
+  // A server restart empties the backend's in-memory records. Until these
+  // cases existed, the adopt path had no coverage at all -- `successfulExecutor`
+  // answers the bare `inspect` with exit 1 precisely so every other test takes
+  // the create path.
+  const ADOPTED_LABELS = [
+    "thread-1",
+    "project-1",
+    "true",
+    `sandbox@sha256:${"b".repeat(64)}`,
+    "a".repeat(40),
+    "thread/thread-1",
+    "workspace",
+    "true",
+  ].join("\t");
+
+  const hint = () => ({
+    projectId: "project-1",
+    image: `sandbox@sha256:${"b".repeat(64)}`,
+    baseCommit: "a".repeat(40),
+    branchName: "thread/thread-1",
+  });
+
+  function adoptedExecutor(labels = ADOPTED_LABELS) {
+    return new FakeExecutor((command) => {
+      if (command.args[0] === "inspect" && command.args[1] === "--format")
+        return { exitCode: 0, stdout: `${labels}\n`, stderr: "" };
+      if (command.args[0] === "exec" && command.args.includes("rev-parse"))
+        return { exitCode: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+  }
+
+  it("exports a branch from a sandbox this process never provisioned", async () => {
+    const executor = adoptedExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    // No `ensureReady` -- this is the post-restart state exactly.
+    const exported = await backend.exportBranch("thread-1", hint());
+    expect(exported.commit).toBe("c".repeat(40));
+    expect(
+      executor.commands
+        .filter((command) => command.args[0] === "exec")
+        .every((command) => command.args.includes("t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5")),
+    ).toBe(true);
+  });
+
+  it("refuses to adopt a container whose labels do not match the thread", async () => {
+    // Same derived name, different provenance: another thread's project, or a
+    // container left over from an earlier base commit.
+    const executor = adoptedExecutor(ADOPTED_LABELS.replace("project-1", "project-2"));
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await expect(backend.exportBranch("thread-1", hint())).rejects.toThrow("not ready");
+    await expect(backend.exportBundle("thread-1", "/tmp/thread-1.bundle", hint())).rejects.toThrow(
+      "not ready",
+    );
+    // Adoption never widens to resumption: `exec` has no hint parameter at all.
+    await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
+    expect(executor.commands.some((command) => command.args[0] === "exec")).toBe(false);
+  });
+
+  it("tears down a sandbox this process never provisioned", async () => {
+    const executor = new FakeExecutor((command) => {
+      if (command.args[0] === "inspect" && command.args[1] === "--format")
+        return { exitCode: 0, stdout: `${ADOPTED_LABELS}\n`, stderr: "" };
+      // Whether an egress sidecar was ever provisioned is not recorded, so its
+      // absence must not turn teardown into a failure.
+      if (command.args.at(-1)?.startsWith("t3-egress-"))
+        return { exitCode: 1, stdout: "", stderr: "no such container" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.stop("thread-1", [{ executable: "should-not-run" }], hint());
+    expect(
+      executor.commands
+        .filter((command) => command.args[0] === "rm" || command.args[1] === "rm")
+        .map((command) => command.args.at(-1)),
+    ).toEqual([
+      "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-egress-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-net-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-egress-net-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-workspace-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-desktop-921ca543f9cf4d28fe0b81d81cdb33b5",
+    ]);
+    // The hook declarations died with the restart, so an adopted record runs
+    // none of them rather than pretending it can.
+    expect(executor.commands.some((command) => command.args.includes("should-not-run"))).toBe(
+      false,
+    );
+  });
+
+  it("does nothing for a thread with no record and no hint", async () => {
+    const executor = adoptedExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.stop("thread-1");
+    expect(executor.commands).toEqual([]);
+  });
 });

@@ -6,6 +6,7 @@ import {
   MessageId,
   SandboxId,
   type OrchestrationEvent,
+  type OrchestrationThread,
 } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
@@ -92,13 +93,41 @@ export const make = Effect.gen(function* () {
   const getThread = (threadId: Parameters<typeof snapshots.getThreadDetailById>[0]) =>
     snapshots.getThreadDetailById(threadId).pipe(Effect.map(Option.getOrUndefined));
 
+  /**
+   * Everything the backend needs to re-derive a sandbox record the running
+   * server never provisioned. Undefined when the project's sandbox image cannot
+   * be resolved, since the image digest is part of the label signature that
+   * proves the container belongs to this thread.
+   */
+  const adoptionHint = Effect.fn("SandboxLifecycleReactor.adoptionHint")(function* (
+    thread: OrchestrationThread,
+  ) {
+    if (thread.sandbox == null) return undefined;
+    const snapshot = yield* snapshots.getSnapshot();
+    const project = snapshot.projects.find((item) => item.id === thread.projectId);
+    if (!project) return undefined;
+    const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
+    const image = resolveSandboxImage(projectFile);
+    if (!image) return undefined;
+    const teardownTimeoutSeconds = thread.sandboxConfig?.teardownTimeoutSeconds;
+    return {
+      projectId: thread.projectId,
+      image,
+      baseCommit: thread.sandbox.branch.baseCommit,
+      branchName: thread.sandbox.branch.branchName,
+      ...(teardownTimeoutSeconds === undefined
+        ? {}
+        : { teardownTimeoutMs: teardownTimeoutSeconds * 1000 }),
+    };
+  });
+
   const exportBranch = Effect.fn("SandboxLifecycleReactor.exportBranch")(function* (
     threadId: Parameters<typeof getThread>[0],
   ) {
     const thread = yield* getThread(threadId);
     const runtime = thread?.sandbox?.runtime;
     if (thread?.sandbox == null || (runtime !== "docker" && runtime !== "podman")) return;
-    const result = yield* runtimes.exportBranch(runtime, threadId);
+    const result = yield* runtimes.exportBranch(runtime, threadId, yield* adoptionHint(thread));
     yield* engine.dispatch({
       type: "sandbox.branch-export.result",
       commandId: yield* commandId("sandbox-export"),
@@ -122,7 +151,7 @@ export const make = Effect.gen(function* () {
     if (sessions.some((session) => session.threadId === threadId))
       yield* providers.stopSession({ threadId });
     yield* exportBranch(threadId);
-    yield* runtimes.stop(runtime, threadId);
+    yield* runtimes.stop(runtime, threadId, yield* adoptionHint(thread));
     yield* engine.dispatch({
       type: "sandbox.stop.complete",
       commandId: yield* commandId("sandbox-stop-complete"),
