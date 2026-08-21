@@ -197,12 +197,16 @@ describe("ProviderCommandReactor", () => {
       model: "gpt-5-codex",
     };
     const startSessionEffect = input?.startSessionEffect;
+    // Generation-suffixed names: a re-provision after a teardown creates a NEW
+    // container, so a test asserting the fresh name can prove a stale cached
+    // target (naming the destroyed generation) was not served.
+    let provisionGeneration = 0;
     const provisionSandbox = vi.fn(
       (request: Parameters<SandboxRuntimeManagerShape["provision"]>[0]) =>
         Effect.succeed({
           sandboxId: request.bootstrap.threadId,
           runtime: "docker" as const,
-          containerName: `sandbox-${request.bootstrap.threadId}`,
+          containerName: `sandbox-${request.bootstrap.threadId}-gen${++provisionGeneration}`,
           networkName: `network-${request.bootstrap.threadId}`,
           workspaceVolumeName: `workspace-${request.bootstrap.threadId}`,
           desktopVolumeName: `desktop-${request.bootstrap.threadId}`,
@@ -213,7 +217,7 @@ describe("ProviderCommandReactor", () => {
           services: [],
         }),
     );
-    const startSession = vi.fn((_: unknown, input: unknown) => {
+    const startSession = vi.fn((_: unknown, input: unknown, _executionTarget?: unknown) => {
       const sessionIndex = nextSessionIndex++;
       const resumeCursor =
         typeof input === "object" && input !== null && "resumeCursor" in input
@@ -888,6 +892,87 @@ describe("ProviderCommandReactor", () => {
     expect(harness.provisionSandbox.mock.calls.at(-1)?.[0]?.restore?.storeSha256).toBe(
       "d".repeat(64),
     );
+  });
+
+  it("never serves a cached execution target that names a torn-down container", async () => {
+    // The per-thread target cache is only invalidated by validating against
+    // the current sandbox projection at point of use. Without that, the
+    // second turn below gets a cache hit for the gen1 container the stop
+    // already destroyed: no re-provision, and the provider session is started
+    // against a container name that no longer resolves.
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-stale-cache"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-before-stale-cache"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[2]).toMatchObject({
+      kind: "sandbox",
+      runtimeRef: "sandbox-thread-1-gen1",
+    });
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.stop",
+        commandId: CommandId.make("cmd-sandbox-stop-stale-cache"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.stop.complete",
+        commandId: CommandId.make("cmd-sandbox-stopped-stale-cache"),
+        threadId,
+        expired: false,
+        createdAt: now,
+      }),
+    );
+    // The real teardown kills the in-container provider process with the
+    // container; mirror that so the next turn must start a fresh session and
+    // hand its execution target to the adapter, where it can be observed.
+    harness.runtimeSessions.length = 0;
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-stale-cache"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-after-stale-cache"),
+          role: "user",
+          text: "back again",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    // A stale cache hit would skip the re-provision entirely (one provision
+    // call) and hand the dead gen1 name to the new session.
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    expect(harness.provisionSandbox).toHaveBeenCalledTimes(2);
+    expect(harness.startSession.mock.calls[1]?.[2]).toMatchObject({
+      kind: "sandbox",
+      runtimeRef: "sandbox-thread-1-gen2",
+    });
   });
 
   it("keeps the resume cursor of a legacy-host thread", async () => {
