@@ -21,12 +21,15 @@ type ThreadSettledEvent = Extract<OrchestrationEvent, { type: "thread.settled" }
 /**
  * Lifecycles a settle may tear down.
  *
- * Deliberately narrow. `sandbox.stop` passes the decider's guard for an
- * `unprovisioned` sandbox and drives it to `stopping`, but the lifecycle
- * reactor then returns early without ever dispatching `sandbox.stop.complete`
- * -- wedging the thread in `stopping` forever. The in-flight states are absent
- * for the same reason a re-provision refuses them: they race an operation the
- * lifecycle reactor is already running.
+ * Deliberately narrow. The trap this guard originally worked around --
+ * `sandbox.stop` driving an `unprovisioned` sandbox to `stopping` while the
+ * lifecycle reactor returned early without ever dispatching
+ * `sandbox.stop.complete`, wedging the thread -- is fixed: the reactor now
+ * completes the stop even when there is no container to tear down. The guard
+ * is kept anyway (candidate for relaxing separately): stopping lifecycles
+ * with nothing provisioned is pointless housekeeping, and the in-flight
+ * states are absent for the same reason a re-provision refuses them -- they
+ * race an operation the lifecycle reactor is already running.
  */
 const RECLAIMABLE_SANDBOX_LIFECYCLES = new Set(["ready", "paused"]);
 

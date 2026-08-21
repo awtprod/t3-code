@@ -417,6 +417,57 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
     }),
   );
 
+  it.effect("resolves a failed teardown from stopping to failed, not a permanent wedge", () =>
+    Effect.gen(function* () {
+      // The lifecycle reactor leans on this transition: when container
+      // teardown throws after the provider session is already gone, it
+      // dispatches `sandbox.operation.fail` instead of `sandbox.stop.complete`
+      // so the thread lands in `failed` -- a re-provisionable lifecycle --
+      // rather than staying in `stopping`, where turn starts are rejected
+      // forever.
+      const stopping = {
+        lifecycle: "stopping" as const,
+        sandboxId: "sandbox-1" as never,
+        runtime: "docker" as const,
+        runtimeRef: "container-1",
+        branch: BRANCH,
+        limits: {
+          cpuCount: 2,
+          memoryBytes: 4_294_967_296,
+          diskBytes: 21_474_836_480,
+          processCount: 512,
+          idleTimeoutSeconds: 3600,
+          maximumLifetimeSeconds: 28800,
+        },
+        desktop: { status: "unavailable" as const },
+        services: [],
+        controller: { kind: "none" as const },
+        createdAt: NOW,
+        lastActiveAt: NOW,
+      };
+      const failure = {
+        stage: "teardown" as const,
+        code: "sandbox_lifecycle_failed",
+        message: "podman rm failed: container is in use by another process",
+        retryable: true,
+        occurredAt: NOW,
+      };
+      const failedEvent = (yield* decideOrchestrationCommand({
+        readModel: readModel(stopping),
+        command: {
+          type: "sandbox.operation.fail",
+          commandId: CommandId.make("teardown-failed"),
+          threadId: ThreadId.make("thread-1"),
+          failure,
+          createdAt: NOW,
+        },
+      })) as Omit<Extract<OrchestrationEvent, { type: "sandbox.failed" }>, "sequence">;
+      expect(failedEvent.type).toBe("sandbox.failed");
+      expect(failedEvent.payload.sandbox.lifecycle).toBe("failed");
+      expect(failedEvent.payload.sandbox.failure).toEqual(failure);
+    }),
+  );
+
   const provisioning = {
     lifecycle: "provisioning" as const,
     branch: BRANCH,
