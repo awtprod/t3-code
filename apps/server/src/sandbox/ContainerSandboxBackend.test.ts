@@ -336,6 +336,84 @@ describe("ContainerSandboxBackend", () => {
     ]);
   });
 
+  it("never removes its own workspace container as a sibling during stop", async () => {
+    // The sibling listing filters on the exact labels the workspace container
+    // carries, so the workspace container is always part of its own listing.
+    // The exclusion used to compare the listed container ID against the
+    // workspace NAME -- never equal -- so stop() force-removed its own
+    // workspace container as a "sibling", the later cleanup `rm` by name
+    // failed, and the thread wedged in `stopping`. Every prior stop test
+    // stubbed `ps` as empty, which is exactly why this was missed.
+    const base = successfulExecutor();
+    const respond = base.respond!;
+    const workspaceName = "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5";
+    const workspaceId = "aaaa1111bbbb";
+    const executor = new FakeExecutor((command) => {
+      // Answer whichever `ps` format the implementation asked for, so a code
+      // change that narrows the listing back to bare IDs still receives a
+      // non-empty listing (and this test then catches the regression).
+      if (command.args[0] === "ps") {
+        const format = command.args.at(-1) ?? "";
+        return {
+          exitCode: 0,
+          stdout: format.includes("{{.Names}}")
+            ? `${workspaceId}\t${workspaceName}\n`
+            : `${workspaceId}\n`,
+          stderr: "",
+        };
+      }
+      // The per-candidate label verification, confirming the listed container
+      // really is this thread's -- which the workspace container is.
+      if (command.args[0] === "inspect" && command.args.at(-1) === workspaceId)
+        return { exitCode: 0, stdout: "thread-1\ttrue\n", stderr: "" };
+      return respond(command);
+    });
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    await backend.stop("thread-1");
+    // The only container removal is cleanup's, by name. A second `rm` naming
+    // the workspace ID is the sibling phase destroying its own container.
+    expect(
+      executor.commands
+        .filter((command) => command.args[0] === "rm")
+        .map((command) => command.args.at(-1)),
+    ).toEqual([workspaceName]);
+  });
+
+  it("removes a genuine labeled sibling container during stop", async () => {
+    const base = successfulExecutor();
+    const respond = base.respond!;
+    const workspaceName = "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5";
+    const workspaceId = "aaaa1111bbbb";
+    const siblingId = "cccc2222dddd";
+    const executor = new FakeExecutor((command) => {
+      if (command.args[0] === "ps") {
+        const format = command.args.at(-1) ?? "";
+        return {
+          exitCode: 0,
+          stdout: format.includes("{{.Names}}")
+            ? `${workspaceId}\t${workspaceName}\n${siblingId}\tt3-svc-thread-1-db\n`
+            : `${workspaceId}\n${siblingId}\n`,
+          stderr: "",
+        };
+      }
+      if (
+        command.args[0] === "inspect" &&
+        (command.args.at(-1) === siblingId || command.args.at(-1) === workspaceId)
+      )
+        return { exitCode: 0, stdout: "thread-1\ttrue\n", stderr: "" };
+      return respond(command);
+    });
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    await backend.stop("thread-1");
+    expect(
+      executor.commands
+        .filter((command) => command.args[0] === "rm")
+        .map((command) => command.args.at(-1)),
+    ).toEqual([siblingId, workspaceName]);
+  });
+
   it("rejects malformed commits, paths, mounts, and environment keys before container launch", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);
