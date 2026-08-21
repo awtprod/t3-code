@@ -1,10 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off - test creates a real scratch directory for the seed bundle.
 import { describe, expect, it } from "@effect/vitest";
 import { afterEach } from "vite-plus/test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import * as NodeFS from "node:fs";
 import * as NodeCrypto from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import { SandboxId, ThreadId } from "@t3tools/contracts";
 import { ContainerSandboxBackend } from "./ContainerSandboxBackend.ts";
@@ -164,7 +164,9 @@ describe("local repository seeding", () => {
   it.effect("bundles the base commit by a pinned ref instead of a bare SHA", () =>
     Effect.gen(function* () {
       process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
-      const artifactRoot = mkdtempSync(join(tmpdir(), "t3-sandbox-artifacts-"));
+      const artifactRoot = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-sandbox-artifacts-"),
+      );
       const localRepoPath = "/var/lib/command-center/runtime/sandbox-canary-scratch/repo";
       const baseCommit = "d".repeat(40);
       const executor = new FakeExecutor();
@@ -217,7 +219,7 @@ describe("local repository seeding", () => {
         // The throwaway ref is deleted once the bundle exists, regardless of outcome.
         expect(unpin!.args.at(-1)).toBe(seedRef);
       } finally {
-        rmSync(artifactRoot, { recursive: true, force: true });
+        NodeFS.rmSync(artifactRoot, { recursive: true, force: true });
       }
     }),
   );
@@ -253,10 +255,12 @@ describe("restoring a re-provisioned sandbox", () => {
 
   /** Artifact root holding one bundle whose real digest is returned alongside it. */
   const seedArtifact = () => {
-    const artifactRoot = mkdtempSync(join(tmpdir(), "t3-sandbox-artifacts-"));
-    const bundle = join(artifactRoot, `${ARTIFACT_ID}.bundle`);
+    const artifactRoot = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-sandbox-artifacts-"),
+    );
+    const bundle = NodePath.join(artifactRoot, `${ARTIFACT_ID}.bundle`);
     const bytes = Buffer.from("not a real bundle, but a real digest\n");
-    writeFileSync(bundle, bytes, { mode: 0o600 });
+    NodeFS.writeFileSync(bundle, bytes, { mode: 0o600 });
     return {
       artifactRoot,
       bundle,
@@ -298,7 +302,7 @@ describe("restoring a re-provisioned sandbox", () => {
         expect(git).toContain(`git -C /workspace/repo switch -C ${BRANCH}`);
         expect(git.some((line) => line.startsWith("git clone"))).toBe(false);
       } finally {
-        rmSync(artifactRoot, { recursive: true, force: true });
+        NodeFS.rmSync(artifactRoot, { recursive: true, force: true });
       }
     }),
   );
@@ -324,7 +328,7 @@ describe("restoring a re-provisioned sandbox", () => {
         expect(git).toContain(`git -C /workspace/repo checkout --detach ${"a".repeat(40)}`);
         expect(git).toContain(`git -C /workspace/repo switch -c ${BRANCH}`);
       } finally {
-        rmSync(artifactRoot, { recursive: true, force: true });
+        NodeFS.rmSync(artifactRoot, { recursive: true, force: true });
       }
     }),
   );
