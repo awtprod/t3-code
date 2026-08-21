@@ -101,6 +101,7 @@ const MUTATED_ENV = [
   "T3_SANDBOX_PREVIEW_PROXY_IMAGE",
   "T3_SANDBOX_CREDENTIAL_PROXY_IMAGE",
   "T3_SANDBOX_STORE_MAX_BYTES",
+  "T3_SANDBOX_ARTIFACT_MAX_AGE_SECONDS",
 ] as const;
 const originalEnv = new Map(MUTATED_ENV.map((key) => [key, process.env[key]] as const));
 
@@ -286,6 +287,114 @@ describe("provider conversation store artifacts", () => {
     Effect.gen(function* () {
       const manager = makeSandboxRuntimeManager(undefined, "linux", new FakeExecutor());
       yield* manager.removeThreadArtifacts(THREAD_ID);
+    }),
+  );
+});
+
+describe("expired artifact retention sweep", () => {
+  const artifactSet = (root: string, threadId: string, ageMs: number) => {
+    const name = NodeCrypto.createHash("sha256").update(threadId).digest("hex");
+    // @effect-diagnostics-next-line globalDate:off - backdates real filesystem mtimes, which the sweep reads with wall-clock time.
+    const mtime = new Date(Date.now() - ageMs);
+    for (const file of [`${name}.bundle`, `${name}.json`, `${name}.store.tar`]) {
+      const path = NodePath.join(root, file);
+      NodeFS.writeFileSync(path, "artifact", "utf8");
+      NodeFS.utimesSync(path, mtime, mtime);
+    }
+    return name;
+  };
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  it.effect("deletes sets past the age cap and keeps young ones", () =>
+    Effect.gen(function* () {
+      const root = makeRoot();
+      const old = artifactSet(root, "thread-old", 45 * DAY_MS);
+      const young = artifactSet(root, "thread-young", 5 * DAY_MS);
+      const manager = makeSandboxRuntimeManager(root, "linux", new FakeExecutor());
+
+      const removed = yield* manager.sweepExpiredArtifacts(new Set());
+
+      expect(removed).toBe(1);
+      const remaining = NodeFS.readdirSync(root).sort();
+      expect(remaining).toEqual([`${young}.bundle`, `${young}.json`, `${young}.store.tar`]);
+      expect(remaining.some((file) => file.startsWith(old))).toBe(false);
+    }),
+  );
+
+  it.effect("a set is as young as its newest file", () =>
+    Effect.gen(function* () {
+      // Exports rename bundle, store, and manifest together; a set whose
+      // manifest is fresh exported recently even if an older sibling survived
+      // a partial overwrite. It must not be deleted piecemeal.
+      const root = makeRoot();
+      const name = artifactSet(root, "thread-mixed", 45 * DAY_MS);
+      // @effect-diagnostics-next-line globalDateInEffect:off - freshens a real filesystem mtime, which the sweep reads with wall-clock time.
+      const now = new Date();
+      NodeFS.utimesSync(NodePath.join(root, `${name}.json`), now, now);
+      const manager = makeSandboxRuntimeManager(root, "linux", new FakeExecutor());
+
+      expect(yield* manager.sweepExpiredArtifacts(new Set())).toBe(0);
+      expect(NodeFS.readdirSync(root)).toHaveLength(3);
+    }),
+  );
+
+  it.effect("keeps a set belonging to an active thread regardless of age", () =>
+    Effect.gen(function* () {
+      // A non-terminal sandbox will overwrite its set on the next stop; in the
+      // meantime that set may be the seed a re-provision restores from.
+      const root = makeRoot();
+      const kept = artifactSet(root, "thread-active", 90 * DAY_MS);
+      artifactSet(root, "thread-gone", 90 * DAY_MS);
+      const manager = makeSandboxRuntimeManager(root, "linux", new FakeExecutor());
+
+      const removed = yield* manager.sweepExpiredArtifacts(new Set(["thread-active"]));
+
+      expect(removed).toBe(1);
+      expect(NodeFS.readdirSync(root).sort()).toEqual([
+        `${kept}.bundle`,
+        `${kept}.json`,
+        `${kept}.store.tar`,
+      ]);
+    }),
+  );
+
+  it.effect("an explicit zero disables the sweep entirely", () =>
+    Effect.gen(function* () {
+      process.env.T3_SANDBOX_ARTIFACT_MAX_AGE_SECONDS = "0";
+      const root = makeRoot();
+      artifactSet(root, "thread-ancient", 400 * DAY_MS);
+      const manager = makeSandboxRuntimeManager(root, "linux", new FakeExecutor());
+
+      expect(yield* manager.sweepExpiredArtifacts(new Set())).toBe(0);
+      expect(NodeFS.readdirSync(root)).toHaveLength(3);
+    }),
+  );
+
+  it.effect("ignores in-flight export temporaries and foreign files", () =>
+    Effect.gen(function* () {
+      const root = makeRoot();
+      // @effect-diagnostics-next-line globalDateInEffect:off - backdates real filesystem mtimes, which the sweep reads with wall-clock time.
+      const past = new Date(Date.now() - 60 * DAY_MS);
+      for (const file of [`.${"a".repeat(64)}.1234.bundle.tmp`, "seeds"]) {
+        const path = NodePath.join(root, file);
+        NodeFS.writeFileSync(path, "not-an-artifact", "utf8");
+        NodeFS.utimesSync(path, past, past);
+      }
+      const manager = makeSandboxRuntimeManager(root, "linux", new FakeExecutor());
+
+      expect(yield* manager.sweepExpiredArtifacts(new Set())).toBe(0);
+      expect(NodeFS.readdirSync(root)).toHaveLength(2);
+    }),
+  );
+
+  it.effect("sweeps nothing without configured artifact storage or a directory", () =>
+    Effect.gen(function* () {
+      const unconfigured = makeSandboxRuntimeManager(undefined, "linux", new FakeExecutor());
+      expect(yield* unconfigured.sweepExpiredArtifacts(new Set())).toBe(0);
+      // A root that exists in config but was never written to (no exports yet).
+      const missing = NodePath.join(makeRoot(), "never-created");
+      const manager = makeSandboxRuntimeManager(missing, "linux", new FakeExecutor());
+      expect(yield* manager.sweepExpiredArtifacts(new Set())).toBe(0);
     }),
   );
 });

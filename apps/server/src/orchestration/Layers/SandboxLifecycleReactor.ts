@@ -712,6 +712,30 @@ export const make = Effect.gen(function* () {
 
   const expire = Effect.fn("SandboxLifecycleReactor.expire")(function* () {
     const snapshot = yield* snapshots.getSnapshot();
+    // Piggybacks on the periodic pass rather than owning a timer: exported
+    // artifact sets for threads that settled long ago (or were deleted
+    // out-of-band) otherwise accumulate forever. Threads whose sandbox is
+    // still in a non-terminal lifecycle are protected regardless of age --
+    // their next stop overwrites the set, and deleting it early would cost a
+    // re-provision its restore seed. Best-effort: a sweep failure must not
+    // stall expiry.
+    yield* Effect.suspend(() =>
+      runtimes.sweepExpiredArtifacts(
+        new Set(
+          snapshot.threads
+            .filter(
+              (thread) =>
+                thread.sandbox != null &&
+                !["stopped", "expired", "deleted"].includes(thread.sandbox.lifecycle),
+            )
+            .map((thread) => thread.id),
+        ),
+      ),
+    ).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("sandbox artifact sweep failed", { cause: Cause.pretty(cause) }),
+      ),
+    );
     const now = DateTime.toEpochMillis(yield* DateTime.now);
     const activeSessions = new Set(
       (yield* providers.listSessions()).map((session) => session.threadId),
