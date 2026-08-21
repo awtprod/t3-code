@@ -460,6 +460,7 @@ export const makeOrchestrationIntegrationHarness = (
         sampleUsage: () => Effect.die("sampleUsage should not be called in this test"),
         recoverPreview: () => Effect.die("recoverPreview should not be called in this test"),
         revokeCredentials: () => Effect.succeed(0),
+        removeThreadArtifacts: () => Effect.void,
       });
     }
     const projectFileLoaderLayer = Layer.succeed(T3ProjectFileLoader, {

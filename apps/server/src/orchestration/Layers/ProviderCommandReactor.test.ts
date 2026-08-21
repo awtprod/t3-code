@@ -495,6 +495,7 @@ describe("ProviderCommandReactor", () => {
             Effect.succeed({ cpuPercent: 0, memoryBytes: 0, diskBytes: 0, processCount: 0 }),
           recoverPreview: () => Effect.succeed(false),
           revokeCredentials: () => Effect.succeed(0),
+          removeThreadArtifacts: () => Effect.void,
         } satisfies SandboxRuntimeManagerShape),
       ),
       // The real directory over the in-memory database: the reactor clears a

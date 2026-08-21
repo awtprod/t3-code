@@ -147,6 +147,7 @@ export interface SandboxRuntimeManagerShape {
   readonly reconcile: (
     runtime: "docker" | "podman",
     expectedThreadIds: ReadonlySet<string>,
+    adoptionHints?: ReadonlyMap<string, SandboxAdoptionHint>,
   ) => Effect.Effect<SandboxReconcileResult, SandboxManagerError>;
   readonly sampleUsage: (
     runtime: "docker" | "podman",
@@ -159,6 +160,13 @@ export interface SandboxRuntimeManagerShape {
     ports: ReadonlyArray<number>,
   ) => Effect.Effect<boolean, SandboxManagerError>;
   readonly revokeCredentials: (threadId: string) => Effect.Effect<number>;
+  /**
+   * Deletes the thread's exported sandbox artifacts -- the branch bundle,
+   * manifest, and archived provider conversation store. Called when the thread
+   * itself is deleted: the transcripts and commits in the artifact directory
+   * must not outlive the thread they belong to.
+   */
+  readonly removeThreadArtifacts: (threadId: string) => Effect.Effect<void, SandboxManagerError>;
 }
 
 export class SandboxManagerError extends Schema.TaggedErrorClass<SandboxManagerError>()(
@@ -421,28 +429,50 @@ export const makeSandboxRuntimeManager = (
         input.bootstrap.threadId,
         services.map((service) => ({ name: service.hostname, healthy: true })),
       );
-      const serviceGrants = services.flatMap((service) => {
-        const declaration = input.services?.find(
-          (candidate) => candidate.name === service.hostname,
-        );
-        return (declaration?.generatedEnvironment ?? []).map((entry) => {
-          const value = service.environment[entry.key];
-          if (value === undefined)
-            throw new Error(
-              `generated service credential ${service.hostname}:${entry.key} is missing`,
+      // A typed failure, not a bare `throw`: a defect thrown from inside this
+      // generator escapes every `tapError` unwind below and leaks everything
+      // provisioned so far -- containers, networks, and issued grants.
+      const serviceGrants = yield* Effect.try({
+        try: () =>
+          services.flatMap((service) => {
+            const declaration = input.services?.find(
+              (candidate) => candidate.name === service.hostname,
             );
-          const scope = `service:${service.hostname}:${entry.key}`;
-          return {
-            ...desktopGateway.credentials.issue({
-              threadId: input.bootstrap.threadId,
-              scope,
-              value,
-              ttlMs: 15 * 60_000,
-            }),
-            scope,
-          };
-        });
-      });
+            return (declaration?.generatedEnvironment ?? []).map((entry) => {
+              const value = service.environment[entry.key];
+              if (value === undefined)
+                throw new Error(
+                  `generated service credential ${service.hostname}:${entry.key} is missing`,
+                );
+              const scope = `service:${service.hostname}:${entry.key}`;
+              return {
+                ...desktopGateway.credentials.issue({
+                  threadId: input.bootstrap.threadId,
+                  scope,
+                  value,
+                  ttlMs: 15 * 60_000,
+                }),
+                scope,
+              };
+            });
+          }),
+        catch: (cause) =>
+          new SandboxManagerError({
+            message: cause instanceof Error ? cause.message : String(cause),
+            cause,
+          }),
+      }).pipe(
+        Effect.tapError(() =>
+          Effect.promise(async () => {
+            // Grants issued before the failing service are revoked with the
+            // rest of the thread's gateway state.
+            desktopGateway.removeThread(input.bootstrap.threadId);
+            teardownHooks.delete(input.bootstrap.threadId);
+            await managed.services.stop(input.bootstrap.threadId);
+            await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
+          }),
+        ),
+      );
       desktopGateway.setServiceCredentialGrants(input.bootstrap.threadId, serviceGrants);
       managed.services.redactCredentials(input.bootstrap.threadId);
       yield* attempt(() =>
@@ -450,6 +480,10 @@ export const makeSandboxRuntimeManager = (
       ).pipe(
         Effect.tapError(() =>
           Effect.promise(async () => {
+            // Service status and credential grants are already registered on
+            // the gateway at this point; a failed provision must not leave
+            // them readable against a container that is being destroyed.
+            desktopGateway.removeThread(input.bootstrap.threadId);
             await managed.previews.stop(input.bootstrap.threadId);
             await managed.services.stop(input.bootstrap.threadId);
             teardownHooks.delete(input.bootstrap.threadId);
@@ -457,7 +491,7 @@ export const makeSandboxRuntimeManager = (
           }),
         ),
       );
-      desktopGateway.setPreviewProxy(managed.previews);
+      desktopGateway.setPreviewProxy(input.bootstrap.threadId, managed.previews);
       const credentialImage = resolveSandboxCredentialProxyImage();
       if (credentialImage !== undefined) {
         yield* attempt(() =>
@@ -470,6 +504,7 @@ export const makeSandboxRuntimeManager = (
         ).pipe(
           Effect.tapError(() =>
             Effect.promise(async () => {
+              desktopGateway.removeThread(input.bootstrap.threadId);
               await managed.credentials.stop(input.bootstrap.threadId);
               await managed.previews.stop(input.bootstrap.threadId);
               await managed.services.stop(input.bootstrap.threadId);
@@ -503,6 +538,11 @@ export const makeSandboxRuntimeManager = (
             ).pipe(
               Effect.tapError(() =>
                 Effect.promise(async () => {
+                  // Clears preview routes, the thread's preview-proxy entry,
+                  // service status, and credential grants -- the gateway state
+                  // registered above that would otherwise outlive the
+                  // containers this unwind destroys.
+                  desktopGateway.removeThread(input.bootstrap.threadId);
                   await managed.credentials.stop(input.bootstrap.threadId);
                   await managed.services.stop(input.bootstrap.threadId);
                   await managed.previews.stop(input.bootstrap.threadId);
@@ -616,10 +656,14 @@ export const makeSandboxRuntimeManager = (
       yield* attempt(() => managed.backend.stop(threadId, teardownHooks.get(threadId) ?? [], hint));
       teardownHooks.delete(threadId);
     }),
-    reconcile: (runtime, expectedThreadIds) =>
+    reconcile: (runtime, expectedThreadIds, adoptionHints) =>
       attempt(async () => {
         const managed = get(runtime);
-        const result = await managed.backend.reconcile({ expectedThreadIds, removeOrphans: true });
+        const result = await managed.backend.reconcile({
+          expectedThreadIds,
+          removeOrphans: true,
+          ...(adoptionHints === undefined ? {} : { adoptionHints }),
+        });
         const headless = resolveSandboxDesktopMode() === "disabled";
         for (const threadId of result.activeThreadIds) {
           await managed.credentials.recover(threadId);
@@ -650,7 +694,7 @@ export const makeSandboxRuntimeManager = (
         if (ports.length === 0) return false;
         const previews = get(runtime).previews;
         if (!(await previews.recover(threadId))) return false;
-        desktopGateway.setPreviewProxy(previews);
+        desktopGateway.setPreviewProxy(threadId, previews);
         for (const port of ports)
           desktopGateway.registerPreviewRoute({
             routeId: NodeCrypto.createHash("sha256")
@@ -665,6 +709,18 @@ export const makeSandboxRuntimeManager = (
         return true;
       }),
     revokeCredentials: (threadId) => Effect.sync(() => credentialBroker.revokeThread(threadId)),
+    removeThreadArtifacts: (threadId) =>
+      attempt(async () => {
+        if (artifactRoot === undefined) return;
+        // The artifact id is derived from the thread id exactly as
+        // `exportBranch` derives it, so deletion needs no manifest lookup.
+        const name = NodeCrypto.createHash("sha256").update(threadId).digest("hex");
+        await Promise.all(
+          [`${name}.bundle`, `${name}.json`, `${name}.store.tar`].map((file) =>
+            NodeFSP.rm(NodePath.resolve(artifactRoot, file), { force: true }),
+          ),
+        );
+      }),
   };
 };
 
