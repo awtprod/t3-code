@@ -35,6 +35,14 @@ const BRANCH_LABEL = "com.t3tools.sandbox.branch";
 const ROLE_LABEL = "com.t3tools.sandbox.role";
 const CACHE_DIGEST_LABEL = "com.t3tools.sandbox.cache-digest";
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
+/**
+ * Resource ceilings for the egress proxy sidecar. The workspace container's
+ * limits come from per-thread config, but a runaway or compromised sidecar
+ * would otherwise share the host unbounded -- conservative constants, matching
+ * the sibling sidecars in `SandboxCredentialProxy` / `ThreadPreviewProxy`.
+ */
+const EGRESS_PROXY_MEMORY = "256m";
+const EGRESS_PROXY_CPUS = "0.5";
 const INTERNAL_EGRESS_PROXY_URL = ["http:/", "/egress-proxy:3128"].join("");
 /**
  * Hosts the workload must dial directly rather than through the egress proxy.
@@ -222,6 +230,17 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
             "no-new-privileges",
             "--pids-limit",
             "128",
+            "--memory",
+            EGRESS_PROXY_MEMORY,
+            "--memory-swap",
+            EGRESS_PROXY_MEMORY,
+            "--cpus",
+            EGRESS_PROXY_CPUS,
+            // The rootfs is --read-only; without a tmpfs the proxy has no
+            // writable scratch space at all. Same options as the credential
+            // proxy sidecar's tmpfs.
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=16m",
             input.egressProxyImage,
             "t3-egress-proxy",
             "serve",
@@ -336,6 +355,11 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         "--cpus",
         String(limits.cpuCount),
         "--memory",
+        String(limits.memoryBytes),
+        // Equal to --memory: without it docker defaults swap to 2x memory,
+        // letting the workload consume double its configured ceiling. Podman
+        // accepts the flag identically.
+        "--memory-swap",
         String(limits.memoryBytes),
         "--pids-limit",
         String(limits.processCount),
@@ -854,7 +878,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         "--filter",
         "status=running",
         "--format",
-        `{{.ID}}\t{{.Label \"${THREAD_LABEL}\"}}\t{{.Label \"${PROJECT_LABEL}\"}}`,
+        `{{.ID}}\t{{.Label "${THREAD_LABEL}"}}\t{{.Label "${PROJECT_LABEL}"}}`,
       ],
       30_000,
     );
@@ -891,7 +915,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           [
             "inspect",
             "--format",
-            `{{index .Config.Labels \"${THREAD_LABEL}\"}}\t{{index .Config.Labels \"com.t3tools.sandbox.managed\"}}`,
+            `{{index .Config.Labels "${THREAD_LABEL}"}}\t{{index .Config.Labels "com.t3tools.sandbox.managed"}}`,
             runtimeRef,
           ],
           10_000,
@@ -936,7 +960,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
             "--filter",
             `label=${MANAGED_LABEL}`,
             "--format",
-            `{{.Name}}\t{{.Label \"${THREAD_LABEL}\"}}`,
+            `{{.Name}}\t{{.Label "${THREAD_LABEL}"}}`,
           ],
           30_000,
         );
@@ -955,7 +979,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
               kind,
               "inspect",
               "--format",
-              `{{index .Labels \"${THREAD_LABEL}\"}}\t{{index .Labels \"com.t3tools.sandbox.managed\"}}`,
+              `{{index .Labels "${THREAD_LABEL}"}}\t{{index .Labels "com.t3tools.sandbox.managed"}}`,
               name,
             ],
             10_000,
@@ -968,9 +992,56 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     }
     // A running workspace label alone cannot prove the project declarations,
     // teardown hooks, services, credentials, caches, or egress generation that
-    // produced it. Only records retained by this manager generation are safe to
-    // adopt; restart-discovered containers remain fail-closed for reconciliation.
-    const adopted = [...active.keys()].filter((id) => expected.has(id) && this.#records.has(id));
+    // produced it. Records retained by this manager generation are adopted
+    // outright. A restart-discovered container can be adopted for reconcile
+    // ACCOUNTING only, and only when the caller supplies the thread's full
+    // label signature and the container matches it -- the same verification
+    // `#resolveRecord` applies for export and teardown. Verified adoption is
+    // never cached in `#records`, so `exec` stays fail-closed either way.
+    // A discovered container that cannot be verified is stopped rather than
+    // left running unaccounted: its thread is still reported missing (the
+    // fail-closed outcome), and a container nothing can address or tear down
+    // must not keep running the workload.
+    const adopted: string[] = [];
+    for (const [id, info] of active) {
+      if (!expected.has(id)) continue;
+      if (this.#records.has(id)) {
+        adopted.push(id);
+        continue;
+      }
+      const hint = input.adoptionHints?.get(id);
+      if (hint !== undefined) {
+        const projectId = sanitizeId(hint.projectId, "projectId");
+        const matches = await this.#matchesThreadLabels(
+          resourceNames(projectId, id).containerName,
+          {
+            threadId: id,
+            projectId,
+            image: hint.image,
+            baseCommit: hint.baseCommit,
+            branchName: hint.branchName,
+          },
+        );
+        if (matches) {
+          adopted.push(id);
+          continue;
+        }
+      }
+      if (!input.removeOrphans) continue;
+      const inspect = await this.#run(
+        [
+          "inspect",
+          "--format",
+          `{{index .Config.Labels "${THREAD_LABEL}"}}\t{{index .Config.Labels "com.t3tools.sandbox.managed"}}`,
+          info.runtimeRef,
+        ],
+        10_000,
+        true,
+      );
+      if (inspect.exitCode !== 0 || inspect.stdout.trim() !== `${id}\ttrue`) continue;
+      await this.#mustRun(["rm", "--force", info.runtimeRef], 30_000);
+      removedRuntimeRefs.push(info.runtimeRef);
+    }
     return {
       activeThreadIds: adopted,
       missingThreadIds: [...expected].filter((id) => !adopted.includes(id)),
