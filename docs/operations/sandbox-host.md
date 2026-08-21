@@ -27,8 +27,9 @@ container binary by bare name through `PATH`, and `NodeSandboxCommandExecutor`
 spawns it with `env: { PATH: process.env.PATH }` — every other variable is
 stripped. `CONTAINER_HOST` set in the systemd unit never reaches the CLI. The fix
 is a wrapper at `/opt/command-center/bin/podman` that sets `CONTAINER_HOST`
-itself and execs `/usr/bin/podman --remote`. That directory is already first on
-the service's `PATH`.
+itself and execs `/usr/local/bin/podman --remote` (the pinned podman-static
+binary — see the fourth constraint). That directory is already first on the
+service's `PATH`.
 
 **Rootless docker cannot enforce volume quotas.** `volume create --opt o=size=N`
 passes the backend's echo-back check, and the volume then fails to mount because
@@ -40,12 +41,23 @@ It also works under `NoNewPrivileges` because the daemon lives outside the unit.
 sparse XFS loopback image mounted at `/var/lib/command-center/sandbox` and used
 as the podman graphroot.
 
-**Ubuntu 24.04 ships netavark 1.4, which has no DNS on `--internal` networks.**
-The design requires the workspace container to resolve `egress-proxy`,
-`credential-proxy`, and preview aliases by name on exactly such a network. The
-script installs SHA256-pinned newer helpers — but only after empirically proving
-the stock version fails, so a future Ubuntu update silently makes the override
-disappear rather than becoming permanent cruft.
+**Ubuntu 24.04's apt podman (4.9.3 with netavark 1.14.0) has a structural
+rootless-netns bug this design trips over.** Rootless podman's shared per-UID
+pause namespace never bind-mounts a custom network's JSON config into its view
+for graphroots under `/var/lib`-class paths, so `podman run --network <custom>`
+fails with "network not found" once the pause process is already alive from an
+earlier network. This is not a netavark-version or DNS-feature threshold, so no
+empirical "does the distro version already work" probe can catch it — the probe
+network is typically the first one created, before the bug's precondition
+holds. (An earlier revision of the bootstrap pinned only newer
+netavark/aardvark-dns behind exactly such a probe; that both missed this bug
+and left the 4.9.3 podman in place.) The script therefore unconditionally
+installs a pinned **podman-static v5.8.4** bundle (podman, netavark 1.17.2,
+aardvark-dns, conmon, crun, catatonit) into `/usr/local`, verified directly on
+this host against a `/var/lib`-class graphroot with the pause process already
+live. It also fixes internal-network DNS, which the design requires for the
+workspace container to resolve `egress-proxy`, `credential-proxy`, and preview
+aliases by name.
 
 ## 2. Prerequisites
 
@@ -60,8 +72,9 @@ Confirm before running anything:
   headroom. Sparse means it consumes only what containers actually write, but it
   can grow to its full size, so the check counts the full size deliberately.
   Override with `SANDBOX_IMAGE_SIZE_GIB=…` if the volume has been grown.
-- Outbound HTTPS to `github.com` (pinned helper binaries) and to the registry
-  holding the sandbox images.
+- Outbound HTTPS to `github.com` (the ~45 MB podman-static bundle from
+  `mgoltzsche/podman-static` releases — see "Supply chain" below) and to the
+  registry holding the sandbox images.
 
 ## 3. Running the bootstrap
 
@@ -78,33 +91,39 @@ sudo STEPS=8 /opt/command-center/current/deploy/openclaw/sandbox/bootstrap-sandb
 
 The steps, in execution order:
 
-| Step | What it does                                                                                                                   |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------ |
-| 1    | Installs `uidmap`, `slirp4netns`, `passt`, `podman`, `netavark`, `aardvark-dns`, `catatonit`, `xfsprogs`, `dbus-user-session`. |
-| 3    | Appends `commandcenter:231072:65536` to `/etc/subuid` and `/etc/subgid`, refusing on overlap.                                  |
-| 4    | Enables linger, then waits for the uid 986 user manager to actually be active.                                                 |
-| 5    | Creates and formats the sparse XFS image, installs and starts the mount unit, writes `storage.conf`.                           |
-| 6    | Enables the **user** `podman.socket` for uid 986.                                                                              |
-| 7    | Installs the `podman` wrapper and verifies it wins the `PATH` lookup.                                                          |
-| 2    | Probes internal-network DNS; installs pinned netavark/aardvark-dns only if the probe fails.                                    |
-| 8    | Verification. See section 4.                                                                                                   |
-| 9    | Installs the systemd drop-in with every setting commented out.                                                                 |
+| Step | What it does                                                                                                                                                                                                                                                                                                         |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Installs `uidmap`, `slirp4netns`, `passt`, `xfsprogs`, `dbus-user-session`. Podman itself deliberately does **not** come from apt.                                                                                                                                                                                   |
+| 2    | Installs the SHA256-pinned podman-static v5.8.4 bundle into `/usr/local` (manifest-tracked), cleans up the previous strategy's leftovers, pins `helper_binaries_dir` via a `containers.conf.d` drop-in, and installs an AppArmor `userns` profile for `/usr/local/bin/podman` when the kernel restriction is active. |
+| 3    | Appends `commandcenter:231072:65536` to `/etc/subuid` and `/etc/subgid`, refusing on overlap.                                                                                                                                                                                                                        |
+| 4    | Enables linger, then waits for the uid 986 user manager to actually be active.                                                                                                                                                                                                                                       |
+| 5    | Creates and formats the sparse XFS image, installs and starts the mount unit, writes `storage.conf`.                                                                                                                                                                                                                 |
+| 6    | Enables the **user** `podman.socket` for uid 986.                                                                                                                                                                                                                                                                    |
+| 7    | Installs the `podman` wrapper and verifies it wins the `PATH` lookup.                                                                                                                                                                                                                                                |
+| 8    | Verification. See section 4.                                                                                                                                                                                                                                                                                         |
+| 9    | Installs the systemd drop-in with every setting commented out.                                                                                                                                                                                                                                                       |
 
-**Ordering is load-bearing.** Step 2 runs late on purpose: its gate is a real
-container-to-container DNS lookup, which needs a working rootless podman, which
-needs subuid ranges (3), linger (4), storage (5), and the socket (6). Steps 3 and
-4 must precede 6 — without subuid, rootless podman cannot create a user
-namespace at all; without linger, there is no user manager to enable a user unit
-in. Step 5 must precede 6 so the graphroot is on the XFS mount before podman
-initialises it. Running `STEPS=2` or `STEPS=6` alone assumes the earlier steps
-already completed; both assert their prerequisites and refuse rather than
-proceeding.
+**Ordering is load-bearing, but less than it used to be.** Step 2 now runs
+early and in numeric order: installing binaries into `/usr/local` needs no user
+namespace, subuid ranges, linger, or storage — it merely has to happen before
+step 6, which asserts the bundle's
+`podman.socket` unit exists. (An earlier revision ran step 2 _after_ step 7
+because it gated on a live container-to-container DNS probe; that probe is
+gone.) Steps 3 and 4 must precede 6 — without subuid, rootless podman cannot
+create a user namespace at all; without linger, there is no user manager to
+enable a user unit in. Step 5 must precede 6 so the graphroot is on the XFS
+mount before podman initialises it. Running `STEPS=6` alone assumes the earlier
+steps already completed; it asserts its prerequisites and refuses rather than
+proceeding. `STEPS=2` alone is safe on a live host: if it must stop the running
+podman socket to swap binaries, it records what was active and restores it
+before finishing.
 
 ## 4. What the verification proves
 
 Step 8 is the point of the exercise. Every command runs **as the service user,
-through the wrapper** — the same path the server takes. Running them as root, or
-against `/usr/bin/podman` directly, proves nothing.
+through the wrapper** — the same path the server takes. Running them as root,
+or against the podman binary directly instead of over the wrapper's `--remote`
+socket, proves nothing.
 
 - **Rootless check.** Runs `podman info --format '{{.Host.Security.Rootless}}'`
   and requires exactly `true`. The backend compares this string exactly and
@@ -118,11 +137,19 @@ against `/usr/bin/podman` directly, proves nothing.
   writing past the limit cannot tell the two apart.
 - **Internal-network DNS.** Creates an `--internal` network and resolves both a
   peer container's name and the `egress-proxy` alias from inside the workspace
-  container. Proves the netavark decision was right.
+  container. Proves the pinned podman-static runtime (with its bundled netavark
+  and aardvark-dns) is the one actually answering, and that no stale distro or
+  legacy pinned helper shadows it.
 - **Hardened run.** Starts a container with the backend's complete flag set —
   `--read-only`, `--init`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
-  `--user 1000:1000`, `--tmpfs /tmp`, `--cpus`, `--memory`, `--pids-limit`,
-  `--storage-opt size=`. Any one of these being unsupported fails provisioning.
+  `--user 1000:1000`, `--tmpfs /tmp`, `--cpus`, `--memory`, `--pids-limit`.
+  Any one of these being unsupported fails provisioning. `--storage-opt size=`
+  is deliberately **omitted** by default: `podman --remote` rejects it, so the
+  backend drops the pair on socket deployments
+  (`T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled`, see
+  `ContainerSandboxBackend.ts`), and the verification mirrors the backend
+  exactly. The XFS project quotas on the workspace volumes — proven enforced by
+  the quota checks above — are the real disk bound.
 - **`exec --interactive` stdin round-trip.** Provider sessions speak their entire
   protocol over that pipe. If stdin does not survive the socket, providers hang
   with no error — the worst failure mode to debug in production. Also checks
@@ -137,6 +164,43 @@ against `/usr/bin/podman` directly, proves nothing.
 
 Any failure aborts with a diagnostic naming the likely cause. Do not proceed to
 section 6 with a failing verification.
+
+### Supply chain: the podman-static bundle
+
+The runtime does not come from Ubuntu's archive. Step 2 downloads a release
+asset of [`mgoltzsche/podman-static`](https://github.com/mgoltzsche/podman-static)
+— a **third-party repackager** of upstream podman, not a containers-project or
+distro artifact. This is an explicit, signed-off trust decision, and it is
+worth knowing exactly what the pin does and does not prove:
+
+- The script pins SHA256 hashes for the `v5.8.4` amd64 and arm64 tarballs and
+  refuses to install on any mismatch. Upstream publishes only a detached GPG
+  `.asc` signature per asset, no `sha256sums.txt`.
+- The pinned hashes were **captured by hand on 2026-08-18** from downloaded
+  copies of the assets whose contents were inspected and then verified working
+  on this host. Keyserver access from this host was blocked at the time, so
+  the GPG signature was **not** checked. This is trust-on-first-use: the pin
+  guarantees every future install gets byte-identical artifacts to the ones
+  inspected, not that those artifacts were authentic upstream releases.
+- **Re-verify when keyserver access is available.** Upstream's documented
+  procedure, using their published signing key fingerprint:
+
+  ```sh
+  gpg --keyserver hkps://keyserver.ubuntu.com \
+      --recv-keys 0CCF102C4F95D89E583FF1D4F8B5AF50344BB503
+  curl -fsSLO https://github.com/mgoltzsche/podman-static/releases/download/v5.8.4/podman-linux-amd64.tar.gz
+  curl -fsSLO https://github.com/mgoltzsche/podman-static/releases/download/v5.8.4/podman-linux-amd64.tar.gz.asc
+  gpg --batch --verify podman-linux-amd64.tar.gz.asc podman-linux-amd64.tar.gz
+  sha256sum podman-linux-amd64.tar.gz   # must match PODMAN_STATIC_SHA256_AMD64 in the script
+  ```
+
+  If the signature verifies and the hash matches the script's pin, the TOFU
+  gap is closed; record that here. If either fails, treat the host as running
+  an unverified runtime and escalate before the next bootstrap run.
+
+- Bumping the pinned version means repeating this: download, verify the `.asc`
+  when possible, inspect, update both hashes and the version constant in
+  `bootstrap-sandbox-host.sh` together.
 
 ## 5. Building the images, and the credential the sandbox runs on
 
@@ -380,7 +444,15 @@ systemctl status "$(systemd-escape -p --suffix=mount /var/lib/command-center/san
 The verification's graphroot check (`STEPS=8`) confirms the store is on XFS.
 
 **AppArmor restricts unprivileged user namespaces on this host**
-(`kernel.apparmor_restrict_unprivileged_userns=1`). Stock profiles for
-`/usr/bin/podman` and `rootlesskit` grant `userns`, so the packaged binaries are
-fine. If a future change moves podman to an unprofiled path, rootless containers
-will fail to start with a confusing permission error.
+(`kernel.apparmor_restrict_unprivileged_userns=1`). Ubuntu's stock profiles
+cover only `/usr/bin/podman` and `rootlesskit`; the pinned runtime lives at
+`/usr/local/bin/podman`, which unprofiled would fail to start any rootless
+container, with a confusing permission error. Step 2 therefore installs
+`/etc/apparmor.d/podman-static` — modeled on the stock `podman` profile:
+`flags=(unconfined)` plus the `userns` grant, nothing else — whenever AppArmor
+is active and the restriction sysctl is 1, and reloads it with
+`apparmor_parser -r` only when the content changed. Verification step 8a
+(`podman info` as the service user through the wrapper) is the assertion that
+catches a missing or unloaded profile. If rootless podman ever fails with
+`EPERM` creating user namespaces after a kernel or AppArmor update, check that
+profile is still loaded before debugging anything else.
