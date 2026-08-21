@@ -246,6 +246,11 @@ describe("thread desktop infrastructure", () => {
     expect(run.args.join(" ")).not.toContain("not-in-argv");
     expect(run.stdin).toContain("DATABASE_PASSWORD=not-in-argv");
     expect(run.args).toContain("t3-net-authoritative");
+    // Service containers are bounded like the workload: memory (with swap
+    // pinned to it) and cpu, not just a pids ceiling.
+    expect(run.args).toEqual(
+      expect.arrayContaining(["--memory", "1g", "--memory-swap", "1g", "--cpus", "1"]),
+    );
   });
 
   it("generates thread-scoped service credentials only in stdin", async () => {
@@ -420,5 +425,65 @@ describe("thread desktop infrastructure", () => {
     expect(commands.at(-1)?.args[0]).toBe("rm");
     expect(commands.at(-1)?.args[1]).toBe("--force");
     expect(commands.at(-1)?.args[2]).toMatch(/^t3-preview-[a-f0-9]{24}$/);
+  });
+
+  it("bounds the preview sidecar's memory, swap, and cpu", async () => {
+    const commands: SandboxCommand[] = [];
+    const executor = {
+      run: async (command: SandboxCommand): Promise<SandboxCommandResult> => {
+        commands.push(command);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+    const proxy = new ThreadPreviewProxy("podman", executor, new AuthenticatedPreviewRouter());
+    await proxy.start("thread-limits", "t3-net-authoritative", `proxy@sha256:${"a".repeat(64)}`);
+    expect(commands[0]?.args).toEqual(
+      expect.arrayContaining(["--memory", "256m", "--memory-swap", "256m", "--cpus", "0.5"]),
+    );
+    await proxy.stop("thread-limits");
+  });
+
+  it("resolves each thread's preview proxy independently across runtimes", async () => {
+    // One global previewProxy slot meant a podman thread's provision replaced
+    // the proxy every docker thread resolved through -- and the podman proxy's
+    // per-runtime container map has no entry for the docker thread, so every
+    // docker preview, CDP, and WebRTC call started failing at once.
+    const executor = {
+      run: async (command: SandboxCommand): Promise<SandboxCommandResult> =>
+        command.args.includes("signal")
+          ? { exitCode: 0, stdout: JSON.stringify({ messages: [] }), stderr: "" }
+          : { exitCode: 0, stdout: "", stderr: "" },
+    };
+    const dockerProxy = new ThreadPreviewProxy("docker", executor, desktopGateway.previews);
+    const podmanProxy = new ThreadPreviewProxy("podman", executor, desktopGateway.previews);
+    const image = `proxy@sha256:${"a".repeat(64)}`;
+    try {
+      await dockerProxy.start("thread-docker", "t3-net-docker", image);
+      desktopGateway.setPreviewProxy("thread-docker", dockerProxy);
+      // Thread B provisioning on podman must not replace thread A's proxy.
+      await podmanProxy.start("thread-podman", "t3-net-podman", image);
+      desktopGateway.setPreviewProxy("thread-podman", podmanProxy);
+
+      expect(desktopGateway.previewProxy("thread-docker")).toBe(dockerProxy);
+      expect(desktopGateway.previewProxy("thread-podman")).toBe(podmanProxy);
+      // The docker thread's signaling still resolves through ITS proxy, which
+      // still knows its container.
+      await expect(desktopGateway.relaySignal("thread-docker", { type: "poll" })).resolves.toEqual({
+        messages: [],
+      });
+
+      // removeThread clears only its own thread's entry.
+      desktopGateway.removeThread("thread-docker");
+      expect(desktopGateway.previewProxy("thread-docker")).toBeNull();
+      expect(desktopGateway.previewProxy("thread-podman")).toBe(podmanProxy);
+      await expect(desktopGateway.relaySignal("thread-docker", { type: "poll" })).rejects.toThrow(
+        "unavailable",
+      );
+    } finally {
+      await dockerProxy.stop("thread-docker");
+      await podmanProxy.stop("thread-podman");
+      desktopGateway.removeThread("thread-docker");
+      desktopGateway.removeThread("thread-podman");
+    }
   });
 });

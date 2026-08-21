@@ -225,7 +225,7 @@ export const sandboxPreviewResolveHttpRouteLayer = HttpRouter.add(
     const threadId = url.value.searchParams.get("threadId") ?? "";
     const token = request.headers["x-t3-preview-token"] ?? "";
     if (!routeId) return HttpServerResponse.text("Bad Request", { status: 400 });
-    const proxy = desktopGateway.previewProxy();
+    const proxy = desktopGateway.previewProxy(threadId);
     if (proxy === null)
       return HttpServerResponse.text("Preview proxy unavailable", { status: 503 });
     if (request.headers.upgrade?.toLowerCase() === "websocket") {
