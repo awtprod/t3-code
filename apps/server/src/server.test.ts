@@ -7822,7 +7822,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
         const resolveRemoteTrackingCommit = vi.fn(
           (_: Parameters<GitVcsDriver.GitVcsDriver["Service"]["resolveRemoteTrackingCommit"]>[0]) =>
-            Effect.succeed({ commitSha: "deadbeef" }),
+            Effect.succeed({ commitSha: "deadbeef", remoteRefName: "refs/remotes/origin/main" }),
         );
 
         yield* buildAppUnderTest({

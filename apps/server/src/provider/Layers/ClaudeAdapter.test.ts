@@ -2074,8 +2074,7 @@ describe("ClaudeAdapterLive", () => {
       );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
-      Effect.provide(Logger.layer([logger])),
+      Effect.provide(Layer.mergeAll(harness.layer, Logger.layer([logger]))),
     );
   });
 

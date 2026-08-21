@@ -57,18 +57,23 @@ describe("SandboxRuntimeManager wiring", () => {
       });
       expect(calls.length).toBeGreaterThan(0);
     }).pipe(
-      Effect.provide(CheckpointingLayerLive),
-      // Provided outside the layer under test, exactly as server.ts does it.
-      Effect.provide(Layer.succeed(SandboxRuntimeManager, rootManager)),
       Effect.provide(
-        Layer.succeed(
-          ProjectionSnapshotQuery.ProjectionSnapshotQuery,
-          {} as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQueryShape,
+        CheckpointingLayerLive.pipe(
+          // Provided outside the layer under test, exactly as server.ts does it.
+          Layer.provide(Layer.succeed(SandboxRuntimeManager, rootManager)),
+          Layer.provide(
+            Layer.succeed(
+              ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+              {} as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQueryShape,
+            ),
+          ),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-sandbox-wiring-test-" }),
+          ),
+          Layer.provide(VcsProcess.layer),
+          Layer.provide(NodeServices.layer),
         ),
       ),
-      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-sandbox-wiring-test-" })),
-      Effect.provide(VcsProcess.layer),
-      Effect.provide(NodeServices.layer),
       // A checkpoint failure is a test failure here, so surface it as a defect
       // rather than asserting the error channel away.
       Effect.orDie,

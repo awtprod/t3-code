@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - test spawns a real fixture process and waits on its stdin EPIPE at the Node boundary.
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
