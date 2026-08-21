@@ -670,9 +670,14 @@ export const makeSandboxRuntimeManager = (
               threadId,
               bundle: `${name}.bundle`,
               bundleSha256,
+              // `storeServed: false` marks the store as a server-internal
+              // artifact: re-provision reads it from disk to restore the
+              // provider's conversation, but the artifact HTTP route serves
+              // only `bundle` and `manifest` -- a client following the
+              // manifest must not treat `store` as downloadable.
               ...(storeSha256 === undefined
                 ? {}
-                : { store: `${name}.store.tar`, storeSha256, storeBytes }),
+                : { store: `${name}.store.tar`, storeServed: false, storeSha256, storeBytes }),
               ...result,
             }),
             { mode: 0o600, flag: "wx" },

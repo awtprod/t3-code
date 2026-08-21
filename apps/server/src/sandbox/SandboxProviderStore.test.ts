@@ -150,10 +150,14 @@ describe("provider conversation store artifacts", () => {
         NodeFS.readFileSync(NodePath.join(root, `${ARTIFACT_ID}.json`), "utf8"),
       ) as {
         store?: string;
+        storeServed?: boolean;
         storeSha256?: string;
         storeBytes?: number;
       };
       expect(manifest.store).toBe(`${ARTIFACT_ID}.store.tar`);
+      // The artifact HTTP route serves only `bundle` and `manifest`; the
+      // manifest must say so rather than advertise a 404.
+      expect(manifest.storeServed).toBe(false);
       expect(manifest.storeSha256).toBe(exported.storeSha256);
       expect(manifest.storeBytes).toBe(STORE_CONTENTS.length);
     }),
