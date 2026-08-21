@@ -422,6 +422,12 @@ describe("thread-scoped credential proxy", () => {
     expect(runCommands.length).toBeGreaterThan(0);
     for (const command of runCommands) expect(command.args.join(" ")).not.toContain(SECRET);
 
+    // The sidecar is resource-bounded: memory (with swap pinned to it) and
+    // cpu beside the existing pids ceiling.
+    expect(runCommands[0]?.args).toEqual(
+      expect.arrayContaining(["--memory", "256m", "--memory-swap", "256m", "--cpus", "0.5"]),
+    );
+
     // 2. It reaches the sidecar only over exec stdin, in the shared document shape.
     const push = executor.commands.find(
       (command) => command.args[0] === "exec" && command.stdin !== undefined,

@@ -56,7 +56,7 @@ export const planThreadServiceStack = (
       image: service.image,
       internalPorts: [...ports],
       hostPorts: [],
-      environment: { ...(service.environment ?? {}), T3_THREAD_ID: threadId },
+      environment: { ...service.environment, T3_THREAD_ID: threadId },
       volumes: (service.volumes ?? []).map((volume) => ({
         name: `t3-vol-${suffix}-${volume.name}`,
         target: volume.target,
@@ -64,6 +64,14 @@ export const planThreadServiceStack = (
     };
   });
 };
+
+/**
+ * Resource ceilings for thread service containers (databases and the like).
+ * Roomier than the proxy sidecars but still bounded: a service without limits
+ * shares the host with every other thread's sandbox.
+ */
+const SERVICE_MEMORY = "1g";
+const SERVICE_CPUS = "1";
 
 export class ThreadServiceStackRuntime {
   readonly #executor: SandboxCommandExecutor;
@@ -85,7 +93,7 @@ export class ThreadServiceStackRuntime {
     const materialized = declarations.map((service) => ({
       ...service,
       environment: {
-        ...(service.environment ?? {}),
+        ...service.environment,
         ...Object.fromEntries(
           (service.generatedEnvironment ?? []).map((entry) => [
             entry.key,
@@ -120,6 +128,12 @@ export class ThreadServiceStackRuntime {
         "no-new-privileges",
         "--pids-limit",
         "256",
+        "--memory",
+        SERVICE_MEMORY,
+        "--memory-swap",
+        SERVICE_MEMORY,
+        "--cpus",
+        SERVICE_CPUS,
         ...(declarations.find((item) => item.name === service.hostname)?.healthCheck
           ? healthCheckArgs(
               declarations.find((item) => item.name === service.hostname)!.healthCheck!,
@@ -176,7 +190,7 @@ export class ThreadServiceStackRuntime {
 
   async stop(threadId: string) {
     const services = this.#active.get(threadId) ?? [];
-    for (const service of [...services].reverse())
+    for (const service of [...services].toReversed())
       await this.#executor
         .run({
           executable: this.#runtime,

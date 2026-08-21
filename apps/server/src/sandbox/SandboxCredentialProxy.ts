@@ -19,6 +19,9 @@ export const CREDENTIAL_PROXY_BASE_URL = [
 ].join("");
 const CREDENTIAL_DOCUMENT_PATH = "/tmp/credential.json";
 const INTERNAL_EGRESS_PROXY_URL = ["http:/", "/egress-proxy:3128"].join("");
+/** Conservative sidecar ceilings; mirrors the egress and preview sidecars. */
+const CREDENTIAL_PROXY_MEMORY = "256m";
+const CREDENTIAL_PROXY_CPUS = "0.5";
 
 /**
  * Shared contract with the proxy binary. The first path segment of an inbound
@@ -233,6 +236,12 @@ export class ThreadCredentialProxySidecar {
         "no-new-privileges",
         "--pids-limit",
         "64",
+        "--memory",
+        CREDENTIAL_PROXY_MEMORY,
+        "--memory-swap",
+        CREDENTIAL_PROXY_MEMORY,
+        "--cpus",
+        CREDENTIAL_PROXY_CPUS,
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,noexec,size=16m",
         "--env",
