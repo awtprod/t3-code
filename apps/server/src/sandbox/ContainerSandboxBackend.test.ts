@@ -85,6 +85,12 @@ describe("ContainerSandboxBackend", () => {
         "512",
         "--storage-opt",
         `size=${20 * 1024 ** 3}`,
+        // Swap pinned to the memory limit: docker's default of 2x memory
+        // would let the workload consume double its configured ceiling.
+        "--memory",
+        String(4 * 1024 ** 3),
+        "--memory-swap",
+        String(4 * 1024 ** 3),
       ]),
     );
     expect(run.args.join(" ")).not.toContain("type=bind");
@@ -254,6 +260,20 @@ describe("ContainerSandboxBackend", () => {
     const proxy = executor.commands.find((command) => command.args.includes("t3-egress-proxy"))!;
     expect(proxy.args).toEqual(
       expect.arrayContaining(["--deny-private", "--deny-metadata", "--resolve-before-connect"]),
+    );
+    // The sidecar is bounded like the workload: memory (with swap pinned to
+    // it), cpu, and -- since the rootfs is --read-only -- a tmpfs for scratch.
+    expect(proxy.args).toEqual(
+      expect.arrayContaining([
+        "--memory",
+        "256m",
+        "--memory-swap",
+        "256m",
+        "--cpus",
+        "0.5",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,noexec,size=16m",
+      ]),
     );
   });
 
@@ -742,5 +762,88 @@ describe("ContainerSandboxBackend", () => {
     const backend = new ContainerSandboxBackend("docker", executor);
     await backend.stop("thread-1");
     expect(executor.commands).toEqual([]);
+  });
+
+  it("adopts a label-verified surviving container during reconcile instead of reporting it missing", async () => {
+    // A server restart empties `#records`, but the containers keep running.
+    // Reconcile used to report every one of them missing -- the reactor then
+    // failed the thread while its container kept running the workload, and
+    // `removeOrphans` skipped it because the thread was still expected.
+    const workspaceName = "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5";
+    const executor = new FakeExecutor((command) => {
+      if (command.args[0] === "ps")
+        return { exitCode: 0, stdout: "abcdef123456\tthread-1\tproject-1\n", stderr: "" };
+      // The label-signature verification, addressed by the derived name.
+      if (command.args[0] === "inspect" && command.args.at(-1) === workspaceName)
+        return { exitCode: 0, stdout: `${ADOPTED_LABELS}\n`, stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const result = await backend.reconcile({
+      expectedThreadIds: new Set(["thread-1"]),
+      removeOrphans: true,
+      adoptionHints: new Map([["thread-1", hint()]]),
+    });
+    expect(result.activeThreadIds).toEqual(["thread-1"]);
+    expect(result.missingThreadIds).toEqual([]);
+    expect(result.removedRuntimeRefs).toEqual([]);
+    // Adoption is reconcile accounting only, never a cached record: `exec`
+    // stays fail-closed exactly as before.
+    await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
+  });
+
+  it("stops an expected container whose label signature cannot be verified", async () => {
+    // Fail-closed both ways: the thread is still reported missing (nothing can
+    // prove the container is safe to resume), AND the unverifiable container
+    // is removed rather than left running unaccounted -- expected threads are
+    // skipped by removeOrphans, so nothing else would ever reclaim it.
+    const workspaceName = "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5";
+    const executor = new FakeExecutor((command) => {
+      if (command.args[0] === "ps")
+        return { exitCode: 0, stdout: "abcdef123456\tthread-1\tproject-1\n", stderr: "" };
+      // Signature check by name fails (another base commit's container)...
+      if (command.args[0] === "inspect" && command.args.at(-1) === workspaceName)
+        return {
+          exitCode: 0,
+          stdout: `${ADOPTED_LABELS.replace("a".repeat(40), "f".repeat(40))}\n`,
+          stderr: "",
+        };
+      // ...but the managed-label check by id still confirms it is ours to stop.
+      if (command.args[0] === "inspect" && command.args.at(-1) === "abcdef123456")
+        return { exitCode: 0, stdout: "thread-1\ttrue\n", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const result = await backend.reconcile({
+      expectedThreadIds: new Set(["thread-1"]),
+      removeOrphans: true,
+      adoptionHints: new Map([["thread-1", hint()]]),
+    });
+    expect(result.activeThreadIds).toEqual([]);
+    expect(result.missingThreadIds).toEqual(["thread-1"]);
+    expect(result.removedRuntimeRefs).toEqual(["abcdef123456"]);
+    expect(
+      executor.commands
+        .filter((command) => command.args[0] === "rm")
+        .map((command) => command.args.at(-1)),
+    ).toEqual(["abcdef123456"]);
+  });
+
+  it("still adopts in-memory records without any hint", async () => {
+    // The pre-restart path is unchanged: a record this generation provisioned
+    // is adopted outright, no hint or extra inspect required.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "ps"
+        ? { exitCode: 0, stdout: "abcdef123456\tthread-1\tproject-1\n", stderr: "" }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    const result = await backend.reconcile({
+      expectedThreadIds: new Set(["thread-1"]),
+      removeOrphans: true,
+    });
+    expect(result.activeThreadIds).toEqual(["thread-1"]);
+    expect(result.missingThreadIds).toEqual([]);
   });
 });

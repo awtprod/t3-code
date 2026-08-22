@@ -63,6 +63,7 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
           commandId: CommandId.make("provision"),
           threadId: ThreadId.make("thread-1"),
           branch: BRANCH,
+          provisionsInline: true,
           createdAt: NOW,
         },
       });
@@ -577,14 +578,37 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
     lastActiveAt: NOW,
   };
 
+  it.effect("asks the reactor to re-provision a stopped sandbox the UI button hit", () =>
+    Effect.gen(function* () {
+      // The Provision button sends `{ threadId }` and no branch
+      // (ChatView.tsx). Keying the fast path on the RESOLVED branch used to
+      // route this straight to `sandbox.provisioning-started` -- projector-only
+      // -- so the thread went to `provisioning` with nothing provisioning it.
+      const requested = (yield* decideOrchestrationCommand({
+        readModel: readModel(stopped),
+        command: {
+          type: "sandbox.provision",
+          commandId: CommandId.make("reprovision-from-client"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+        },
+      })) as Omit<Extract<OrchestrationEvent, { type: "sandbox.provision-requested" }>, "sequence">;
+      expect(requested.type).toBe("sandbox.provision-requested");
+      expect(requested.payload.threadId).toBe(ThreadId.make("thread-1"));
+    }),
+  );
+
   it.effect("re-provisions a stopped sandbox instead of leaving a one-way door", () =>
     Effect.gen(function* () {
+      // The reactor's own follow-up dispatch carries the branch it resolved.
       const event = (yield* decideOrchestrationCommand({
         readModel: readModel(stopped),
         command: {
           type: "sandbox.provision",
           commandId: CommandId.make("reprovision"),
           threadId: ThreadId.make("thread-1"),
+          branch: BRANCH,
+          provisionsInline: true,
           createdAt: NOW,
         },
       })) as Omit<

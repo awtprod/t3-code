@@ -258,4 +258,34 @@ describe("provider conversation store artifacts", () => {
       ).toBe(true);
     }),
   );
+
+  it.effect("removes every artifact of a deleted thread and only that thread's", () =>
+    Effect.gen(function* () {
+      // The exported bundle and provider store hold the thread's commits and
+      // transcripts; thread deletion must not leave them behind on the host.
+      const root = makeRoot();
+      const otherId = NodeCrypto.createHash("sha256").update("thread-other").digest("hex");
+      for (const name of [
+        `${ARTIFACT_ID}.bundle`,
+        `${ARTIFACT_ID}.json`,
+        `${ARTIFACT_ID}.store.tar`,
+        `${otherId}.bundle`,
+      ])
+        NodeFS.writeFileSync(NodePath.join(root, name), "artifact", "utf8");
+      const manager = makeSandboxRuntimeManager(root, "linux", new FakeExecutor());
+
+      yield* manager.removeThreadArtifacts(THREAD_ID);
+
+      expect(NodeFS.readdirSync(root).sort()).toEqual([`${otherId}.bundle`]);
+      // Idempotent: deleting again (nothing left) is not an error.
+      yield* manager.removeThreadArtifacts(THREAD_ID);
+    }),
+  );
+
+  it.effect("tolerates artifact removal without configured artifact storage", () =>
+    Effect.gen(function* () {
+      const manager = makeSandboxRuntimeManager(undefined, "linux", new FakeExecutor());
+      yield* manager.removeThreadArtifacts(THREAD_ID);
+    }),
+  );
 });

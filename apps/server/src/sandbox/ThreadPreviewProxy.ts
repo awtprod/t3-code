@@ -4,6 +4,9 @@ import { AuthenticatedPreviewRouter } from "./AuthenticatedPreviewRouter.ts";
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Conservative sidecar ceilings; mirrors the egress and credential sidecars. */
+const PREVIEW_PROXY_MEMORY = "256m";
+const PREVIEW_PROXY_CPUS = "0.5";
 
 export type PreviewProxyRequest = {
   readonly routeId: string;
@@ -57,6 +60,12 @@ export class ThreadPreviewProxy {
         "no-new-privileges",
         "--pids-limit",
         "64",
+        "--memory",
+        PREVIEW_PROXY_MEMORY,
+        "--memory-swap",
+        PREVIEW_PROXY_MEMORY,
+        "--cpus",
+        PREVIEW_PROXY_CPUS,
         image,
         "t3-preview-bridge",
         "serve",

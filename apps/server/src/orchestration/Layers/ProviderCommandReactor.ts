@@ -537,6 +537,10 @@ export const make = Effect.gen(function* () {
             threadId: thread.id,
             config: thread.sandboxConfig ?? {},
             ...(thread.sandbox === null ? { branch } : {}),
+            // This reactor calls `runtimes.provision` immediately below, so it
+            // takes the decider's inline path rather than asking the lifecycle
+            // reactor to do the work a second time.
+            provisionsInline: true,
             createdAt: occurredAt,
           });
           const provision = yield* sandboxRuntimeManager

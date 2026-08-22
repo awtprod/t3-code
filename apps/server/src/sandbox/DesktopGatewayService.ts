@@ -24,7 +24,14 @@ const serviceCredentialGrants = new Map<
   string,
   ReadonlyArray<{ id: string; token: string; scope: string; expiresAt: number }>
 >();
-let previewProxy: ThreadPreviewProxy | null = null;
+/**
+ * Per-thread preview proxies. Keyed by thread rather than held as a single
+ * shared reference: each runtime's `ThreadPreviewProxy` tracks only its own
+ * containers, so one global slot meant provisioning a podman thread replaced
+ * the proxy every docker thread's preview, CDP, and WebRTC traffic resolved
+ * through -- breaking all of them at once.
+ */
+const previewProxies = new Map<string, ThreadPreviewProxy>();
 const tickets = new Map<string, { threadId: string; hash: Buffer; expiresAt: number }>();
 
 /** Server-lifetime singleton shared by HTTP routes and sandbox lifecycle. */
@@ -107,8 +114,9 @@ export const desktopGateway = {
   },
   async invokeAutomation(threadId: string, operation: string, input: unknown, timeoutMs: number) {
     const target = targets.get(threadId);
-    if (target === undefined || previewProxy === null) return null;
-    return previewProxy.automate({
+    const proxy = previewProxies.get(threadId);
+    if (target === undefined || proxy === undefined) return null;
+    return proxy.automate({
       routeId: NodeCrypto.createHash("sha256")
         .update(`${threadId}\0cdp`)
         .digest("hex")
@@ -121,8 +129,9 @@ export const desktopGateway = {
     });
   },
   async relaySignal(threadId: string, payload: unknown) {
-    if (previewProxy === null) throw new Error("thread signaling sidecar is unavailable");
-    return previewProxy.signal(threadId, payload);
+    const proxy = previewProxies.get(threadId);
+    if (proxy === undefined) throw new Error("thread signaling sidecar is unavailable");
+    return proxy.signal(threadId, payload);
   },
   setCapabilityFailure(threadId: string, missing: ReadonlyArray<string>) {
     failures.set(threadId, [...missing]);
@@ -150,8 +159,8 @@ export const desktopGateway = {
   acceptsHumanInput(threadId: string) {
     return humanControllers.has(threadId);
   },
-  setPreviewProxy(proxy: ThreadPreviewProxy) {
-    previewProxy = proxy;
+  setPreviewProxy(threadId: string, proxy: ThreadPreviewProxy) {
+    previewProxies.set(threadId, proxy);
   },
   registerPreviewRoute(input: {
     routeId: string;
@@ -171,8 +180,8 @@ export const desktopGateway = {
       },
     ]);
   },
-  previewProxy() {
-    return previewProxy;
+  previewProxy(threadId: string) {
+    return previewProxies.get(threadId) ?? null;
   },
   status(threadId: string) {
     return {
@@ -186,6 +195,7 @@ export const desktopGateway = {
   },
   removeThread(threadId: string) {
     viewers.delete(threadId);
+    previewProxies.delete(threadId);
     targets.delete(threadId);
     failures.delete(threadId);
     services.delete(threadId);

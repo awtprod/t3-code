@@ -27,6 +27,7 @@ import {
   resolveSandboxImage,
   resolveSandboxPreviewProxyImage,
 } from "../../sandbox/SandboxRuntimeManager.ts";
+import type { SandboxAdoptionHint } from "../../sandbox/types.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -145,20 +146,31 @@ export const make = Effect.gen(function* () {
     threadId: Parameters<typeof getThread>[0],
     expired: boolean,
   ) {
-    const thread = yield* getThread(threadId);
+    const detail = yield* getThread(threadId);
+    // A deleted thread is invisible to the detail query (`deleted_at IS NULL`)
+    // but its projection row -- and its running sandbox -- survive. A
+    // deletion-triggered stop must still find the sandbox and tear the
+    // container down, or deletion strands it running forever.
+    const deletedThread =
+      detail !== undefined
+        ? undefined
+        : (yield* snapshots.getSnapshot()).threads.find(
+            (item) => item.id === threadId && item.deletedAt !== null,
+          );
+    const thread = detail ?? deletedThread;
     // No thread, or no sandbox projection: `stopping` is a state OF the
     // sandbox projection, so a thread without one cannot be wedged in it --
-    // there is nothing to tear down and nothing to complete. (This is the
-    // deleted-thread case; the decider writes the sandbox into `stopping`
-    // before this reactor ever sees the event, so a live thread always
-    // arrives here with a sandbox.)
+    // there is nothing to tear down and nothing to complete.
     if (thread?.sandbox == null) return;
     const runtime = thread.sandbox.runtime;
     if (runtime === "docker" || runtime === "podman") {
       const sessions = yield* providers.listSessions();
       if (sessions.some((session) => session.threadId === threadId))
         yield* providers.stopSession({ threadId });
-      yield* exportBranch(threadId);
+      // No export for a deleted thread: there is no returning user to restore
+      // for, and the export would recreate the very artifacts the deletion
+      // flow removes -- transcripts must not outlive the thread.
+      if (deletedThread === undefined) yield* exportBranch(threadId);
       // A failure here propagates to the worker's catchCause, which dispatches
       // `sandbox.operation.fail` (stage `teardown`) -- the decider moves the
       // thread from `stopping` to `failed` rather than leaving it wedged.
@@ -246,6 +258,9 @@ export const make = Effect.gen(function* () {
         threadId: thread.id,
         config,
         branch,
+        // Already handling `sandbox.provision-requested`; the provision runs
+        // inline below, so this must not request itself again.
+        provisionsInline: true,
         createdAt,
       });
       const provision = yield* runtimes.provision({
@@ -569,7 +584,14 @@ export const make = Effect.gen(function* () {
    */
   const failureMessage = (cause: Cause.Cause<unknown>): string => {
     const failure = cause.reasons.find(Cause.isFailReason)?.error;
-    if (failure instanceof Error && failure.message.trim().length > 0) return failure.message;
+    if (failure instanceof Error && failure.message.trim().length > 0) {
+      // `SandboxRuntimeError` carries the runtime's own stderr, and it is the
+      // only thing that says WHY -- without it every container failure reads as
+      // a bare "podman network failed" and is undiagnosable from logs alone.
+      const stderr =
+        "stderr" in failure && typeof failure.stderr === "string" ? failure.stderr.trim() : "";
+      return stderr.length > 0 ? `${failure.message}: ${stderr}` : failure.message;
+    }
     if (typeof failure === "string" && failure.trim().length > 0) return failure;
     return "The sandbox operation failed. Check the server logs for technical details.";
   };
@@ -614,16 +636,25 @@ export const make = Effect.gen(function* () {
   const reconcile = Effect.fn("SandboxLifecycleReactor.reconcile")(function* () {
     const snapshot = yield* snapshots.getSnapshot();
     for (const runtime of ["docker", "podman"] as const) {
-      const expected = new Set(
-        snapshot.threads
-          .filter(
-            (thread) =>
-              thread.sandbox?.runtime === runtime &&
-              !["stopped", "expired", "deleted"].includes(thread.sandbox.lifecycle),
-          )
-          .map((thread) => thread.id),
+      const expectedThreads = snapshot.threads.filter(
+        (thread) =>
+          thread.sandbox?.runtime === runtime &&
+          !["stopped", "expired", "deleted"].includes(thread.sandbox.lifecycle),
       );
-      const result = yield* runtimes.reconcile(runtime, expected).pipe(Effect.option);
+      const expected = new Set(expectedThreads.map((thread) => thread.id));
+      // Label signatures let the backend adopt containers that survived a
+      // server restart (which empties its in-memory records) instead of
+      // reporting every one of them missing and failing its thread while the
+      // container keeps running. Adoption is for reconcile accounting only;
+      // `exec` still requires a record this generation provisioned.
+      const adoptionHints = new Map<string, SandboxAdoptionHint>();
+      for (const thread of expectedThreads) {
+        const hint = yield* adoptionHint(thread).pipe(Effect.orElseSucceed(() => undefined));
+        if (hint !== undefined) adoptionHints.set(thread.id, hint);
+      }
+      const result = yield* runtimes
+        .reconcile(runtime, expected, adoptionHints)
+        .pipe(Effect.option);
       if (Option.isNone(result)) continue;
       for (const threadId of result.value.activeThreadIds) {
         const thread = snapshot.threads.find((item) => item.id === threadId);

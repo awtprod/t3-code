@@ -1702,7 +1702,29 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         );
       }
       const branch = current?.branch ?? command.branch;
-      if (branch === undefined) {
+      // Keyed on the COMMAND's branch, not the resolved one. The states below
+      // drive the sandbox to `provisioning` and emit
+      // `sandbox.provisioning-started`, which only the projector consumes --
+      // they are correct solely for `SandboxLifecycleReactor`'s own follow-up
+      // dispatch, which carries the branch it just resolved and then provisions
+      // inline. A client never sends a branch, so keying on the resolved value
+      // meant a re-provision (where `current.branch` survives from the previous
+      // sandbox) skipped `sandbox.provision-requested` -- the only event the
+      // reactor listens for -- and parked the thread in `provisioning` forever
+      // with nothing running and no error. The reactor re-resolves the branch
+      // from the projection, so routing every client provision through the
+      // request event loses nothing.
+      // Only a caller that provisions inline right after this may take the
+      // states below: they move the sandbox to `provisioning` and emit
+      // `sandbox.provisioning-started`, which nothing but the projector reads.
+      // Everyone else -- the UI's Provision button, any automation -- gets
+      // `sandbox.provision-requested`, the event SandboxLifecycleReactor
+      // listens for. Keying this on `branch` instead left every client
+      // re-provision parked in `provisioning` with no container and no error,
+      // because a thread that has run once keeps its branch across teardown.
+      // An inline provision without a resolvable branch has nothing to seed
+      // from, so it takes the request path too rather than inventing one.
+      if (command.provisionsInline !== true || branch === undefined) {
         return {
           ...(yield* withEventBase({
             aggregateKind: "thread",

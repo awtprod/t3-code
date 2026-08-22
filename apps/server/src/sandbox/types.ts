@@ -181,6 +181,14 @@ export type SandboxUsageSample = {
 export type SandboxReconcileInput = {
   readonly expectedThreadIds: ReadonlySet<string>;
   readonly removeOrphans?: boolean;
+  /**
+   * Label signatures for expected threads, so a reconcile that runs after a
+   * restart (empty in-memory records) can prove a surviving container is the
+   * one its thread provisioned instead of reporting it missing. Adoption here
+   * is for reconcile accounting only -- verified containers are never cached
+   * for `exec`, which stays fail-closed on the in-memory record.
+   */
+  readonly adoptionHints?: ReadonlyMap<string, SandboxAdoptionHint>;
 };
 
 export type SandboxReconcileResult = {

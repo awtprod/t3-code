@@ -99,6 +99,10 @@ export const seedTransferBudgetHistory = Effect.fn("TransferBudget.seedHistory")
       branchName: `t3/thread/${TRANSFER_THREAD_ID}`,
       baseCommit: harness.baseCommit,
     },
+    // This scenario stands in for the reactor: it drives the sandbox to
+    // `provisioning` and sends `sandbox.provision.ready` itself, so it takes
+    // the decider's inline path rather than the request path.
+    provisionsInline: true,
     createdAt: turnTimestamp(0),
   });
   yield* harness.waitForThread(

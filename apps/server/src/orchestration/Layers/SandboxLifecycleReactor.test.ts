@@ -686,4 +686,105 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       );
     }),
   );
+
+  it.effect("tears down the container of a deleted thread's stop", () =>
+    Effect.gen(function* () {
+      // The thread-detail query hides deleted threads (`deleted_at IS NULL`),
+      // but their sandbox projection -- and the running container -- survive.
+      // A deletion-triggered `sandbox.stopping` must fall back to the full
+      // snapshot, tear the container down, skip the branch export (transcripts
+      // must not outlive the thread), and complete the stop.
+      const completed = yield* Deferred.make<void>();
+      const dispatched: OrchestrationCommand[] = [];
+      const stopped: Array<string> = [];
+      const deletedThread = {
+        ...snapshot.threads[0]!,
+        deletedAt: NOW,
+        sandbox: {
+          lifecycle: "stopping" as const,
+          runtime: "podman" as const,
+          branch: { branchName: `t3/thread/${threadId}`, baseCommit: "a".repeat(40) },
+          limits: {
+            cpuCount: 2,
+            memoryBytes: 4_294_967_296,
+            diskBytes: 21_474_836_480,
+            processCount: 512,
+            idleTimeoutSeconds: 3600,
+            maximumLifetimeSeconds: 28_800,
+          },
+          desktop: { status: "unavailable" as const },
+          services: [],
+          controller: { kind: "none" as const },
+          createdAt: NOW,
+          lastActiveAt: NOW,
+        },
+      };
+      const stoppingEvent: OrchestrationEvent = {
+        ...request,
+        eventId: EventId.make("stop-deleted-thread"),
+        type: "sandbox.stopping",
+        payload: {
+          threadId,
+          event: { type: "sandbox.stopping", threadId, occurredAt: NOW, expired: false },
+          sandbox: deletedThread.sandbox,
+        },
+      };
+      const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(
+          Layer.mock(GitWorkflowService)({
+            localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(
+          Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
+        ),
+        Layer.provide(
+          Layer.succeed(SandboxRuntimeManager, {
+            stop: (_runtime: string, id: string) =>
+              Effect.sync(() => {
+                stopped.push(id);
+              }),
+            exportBranch: () => Effect.die("a deleted thread's transcripts must not be exported"),
+          } as never),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery)({
+            getSnapshot: () =>
+              Effect.succeed({ ...snapshot, threads: [deletedThread] } as typeof snapshot),
+            // The detail query behaves exactly as production does for a
+            // deleted thread: not found.
+            getThreadDetailById: () => Effect.succeed(Option.none()),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(OrchestrationEngineService)({
+            dispatch: (command) =>
+              Effect.gen(function* () {
+                dispatched.push(command);
+                if (command.type === "sandbox.stop.complete")
+                  yield* Deferred.succeed(completed, undefined);
+                return { sequence: dispatched.length };
+              }),
+            streamDomainEvents: Stream.make(stoppingEvent),
+          }),
+        ),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* Deferred.await(completed).pipe(Effect.timeout("5 seconds"));
+          yield* reactor.drain;
+        }).pipe(Effect.provide(layer)),
+      );
+
+      // The container was actually stopped, not skipped as "no thread".
+      expect(stopped).toEqual([threadId]);
+      // No export result: only the completion.
+      expect(dispatched.map((command) => command.type)).toEqual(["sandbox.stop.complete"]);
+    }),
+  );
 });

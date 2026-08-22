@@ -1,13 +1,17 @@
-import type { OrchestrationEvent } from "@t3tools/contracts";
+import { CommandId, type OrchestrationEvent } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { SandboxRuntimeManager } from "../../sandbox/SandboxRuntimeManager.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ThreadDeletionReactor,
   type ThreadDeletionReactorShape,
@@ -15,6 +19,13 @@ import {
 import { forkParked } from "../../serverActivation.ts";
 
 type ThreadDeletedEvent = Extract<OrchestrationEvent, { type: "thread.deleted" }>;
+
+/**
+ * Sandbox lifecycles a deletion can drive to `stopping`. Mirrors the decider's
+ * own `sandbox.stop` guard: terminal lifecycles have nothing left to stop, and
+ * every other state holds -- or is about to hold -- real container resources.
+ */
+const TERMINAL_SANDBOX_LIFECYCLES = new Set(["stopped", "expired", "deleted"]);
 
 export const logCleanupCauseUnlessInterrupted = <R, E>({
   effect,
@@ -37,10 +48,13 @@ export const logCleanupCauseUnlessInterrupted = <R, E>({
     }),
   );
 
-const make = Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const providerService = yield* ProviderService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const snapshots = yield* ProjectionSnapshotQuery;
+  const sandboxManager = yield* SandboxRuntimeManager;
+  const crypto = yield* Crypto.Crypto;
 
   const stopProviderSession = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
     logCleanupCauseUnlessInterrupted({
@@ -56,12 +70,54 @@ const make = Effect.gen(function* () {
       threadId,
     });
 
+  /**
+   * Deleting a thread must also reclaim its sandbox: without this the
+   * container, its network, and its volumes keep running -- and reconcile
+   * keeps them as `expected` forever, so nothing else ever removes them.
+   * Dispatched rather than torn down inline so the sandbox lifecycle reactor
+   * owns the teardown exactly as it does for settle and expiry; it completes
+   * stops safely even for sandboxes that never provisioned a container.
+   */
+  const stopThreadSandbox = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
+    logCleanupCauseUnlessInterrupted({
+      effect: Effect.gen(function* () {
+        // The detail query excludes deleted threads, so the sandbox has to be
+        // read from the full snapshot, which retains them.
+        const snapshot = yield* snapshots.getSnapshot();
+        const sandbox = snapshot.threads.find((thread) => thread.id === threadId)?.sandbox;
+        if (sandbox == null || TERMINAL_SANDBOX_LIFECYCLES.has(sandbox.lifecycle)) return;
+        const id = yield* crypto.randomUUIDv4;
+        yield* orchestrationEngine.dispatch({
+          type: "sandbox.stop",
+          commandId: CommandId.make(`server:thread-deletion-sandbox-stop:${id}`),
+          threadId,
+          createdAt: yield* DateTime.now.pipe(Effect.map(DateTime.formatIso)),
+        });
+      }),
+      message: "thread deletion cleanup skipped sandbox stop",
+      threadId,
+    });
+
+  /**
+   * Exported sandbox artifacts hold the thread's transcripts and commits;
+   * data retention says they must not outlive the thread. Best-effort like
+   * the other cleanup steps, but the failure is logged with its cause.
+   */
+  const removeSandboxArtifacts = (threadId: ThreadDeletedEvent["payload"]["threadId"]) =>
+    logCleanupCauseUnlessInterrupted({
+      effect: sandboxManager.removeThreadArtifacts(threadId),
+      message: "thread deletion cleanup skipped sandbox artifact removal",
+      threadId,
+    });
+
   const processThreadDeleted = Effect.fn("processThreadDeleted")(function* (
     event: ThreadDeletedEvent,
   ) {
     const { threadId } = event.payload;
     yield* stopProviderSession(threadId);
     yield* closeThreadTerminals(threadId);
+    yield* stopThreadSandbox(threadId);
+    yield* removeSandboxArtifacts(threadId);
   });
 
   const processThreadDeletedSafely = (event: ThreadDeletedEvent) =>
