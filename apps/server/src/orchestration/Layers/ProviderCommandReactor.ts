@@ -359,6 +359,14 @@ export const make = Effect.gen(function* () {
   const sandboxRuntimeManager = yield* SandboxRuntimeManager;
   const projectFileLoader = yield* T3ProjectFileLoader;
   const providerSessionDirectory = yield* ProviderSessionDirectory;
+  // Both maps hold one tiny per-thread entry (a mutex; a target descriptor)
+  // and are bounded by the number of sandbox threads this server generation
+  // ever provisioned, so neither needs an eviction scheme for memory. What the
+  // target cache DOES need is staleness protection: a stop, an expiry, or a
+  // failure destroys the container an entry names without touching the map, so
+  // every read is validated against the current sandbox projection before it
+  // is served (see the cache hit in `ensureExecutionTarget`). The locks carry
+  // no container state at all and never go stale.
   const sandboxProvisionLocks = new Map<string, Semaphore.Semaphore>();
   const provisionedTargets = new Map<
     string,
@@ -408,14 +416,13 @@ export const make = Effect.gen(function* () {
       ) {
         return yield* threadSandboxRuntime.ensureReady(thread, legacyCwd);
       }
-      // Anything cached below describes a container that a stop, an expiry, or
-      // a failed provision already destroyed. Handing it back would point the
-      // provider at a container id that no longer resolves, so drop it and let
-      // this call provision a fresh one.
-      provisionedTargets.delete(thread.id);
-      // The lock itself is deliberately kept: it is a per-thread mutex, not
-      // state about a container, and replacing one another fiber currently
-      // holds would let two provisions run at once.
+      // Cache invalidation happens under the lock below, against the CURRENT
+      // projection, not here against the caller's snapshot: this snapshot was
+      // read before any lock wait, and evicting on it can throw away an entry
+      // another fiber just provisioned. The lock itself is deliberately kept
+      // across provisions: it is a per-thread mutex, not state about a
+      // container, and replacing one another fiber currently holds would let
+      // two provisions run at once.
       let lock = sandboxProvisionLocks.get(thread.id);
       if (lock === undefined) {
         lock = yield* Semaphore.make(1);
@@ -423,8 +430,29 @@ export const make = Effect.gen(function* () {
       }
       return yield* lock.withPermits(1)(
         Effect.gen(function* () {
+          // A hit only proves some fiber provisioned this thread once, not
+          // that the container still exists: the entry survives every stop,
+          // expiry, and failure, and this reactor never observes sandbox
+          // lifecycle events to evict it. Point-of-use validation against the
+          // CURRENT projection (not the caller's snapshot, which is from
+          // before the lock wait) is what keeps a dead container's name from
+          // being handed to the provider. Valid means the projection still
+          // names this exact container and calls it ready -- anything else
+          // evicts the entry and re-provisions below.
           const cached = provisionedTargets.get(thread.id);
-          if (cached !== undefined) return cached;
+          if (cached !== undefined) {
+            const currentSandbox = Option.getOrUndefined(
+              yield* projectionSnapshotQuery.getThreadDetailById(thread.id),
+            )?.sandbox;
+            if (
+              currentSandbox != null &&
+              currentSandbox.lifecycle === "ready" &&
+              currentSandbox.sandboxId === cached.sandboxId &&
+              currentSandbox.runtimeRef === cached.runtimeRef
+            )
+              return cached;
+            provisionedTargets.delete(thread.id);
+          }
           const project = yield* resolveProject(thread.projectId);
           if (project === undefined) {
             return yield* new ProviderAdapterRequestError({

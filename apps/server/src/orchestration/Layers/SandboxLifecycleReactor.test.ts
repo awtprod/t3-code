@@ -22,7 +22,7 @@ import * as Stream from "effect/Stream";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { T3ProjectFileLoader } from "../../project/T3ProjectFileLoader.ts";
-import { SandboxRuntimeManager } from "../../sandbox/SandboxRuntimeManager.ts";
+import { SandboxManagerError, SandboxRuntimeManager } from "../../sandbox/SandboxRuntimeManager.ts";
 import type { SandboxRuntimeManagerShape } from "../../sandbox/SandboxRuntimeManager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -385,6 +385,220 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         throw new Error("expected an export result command");
       expect(result.storeSha256).toBe("e".repeat(64));
       expect(result.bundleSha256).toBe("d".repeat(64));
+    }),
+  );
+
+  it.effect("completes a stop even when the sandbox never recorded a runtime", () =>
+    Effect.gen(function* () {
+      // The decider accepts `sandbox.stop` from every non-terminal lifecycle --
+      // including `unprovisioned` and `failed`, which never recorded a runtime
+      // -- and moves the thread to `stopping` unconditionally. The reactor
+      // used to return early for those threads without dispatching
+      // `sandbox.stop.complete`, wedging them in `stopping` forever, where
+      // every `thread.turn.start` is rejected.
+      const completed = yield* Deferred.make<void>();
+      const dispatched: OrchestrationCommand[] = [];
+      const unprovisionedStopping = {
+        ...snapshot.threads[0]!,
+        sandbox: {
+          lifecycle: "stopping" as const,
+          branch: { branchName: `t3/thread/${threadId}`, baseCommit: "a".repeat(40) },
+          limits: {
+            cpuCount: 2,
+            memoryBytes: 4_294_967_296,
+            diskBytes: 21_474_836_480,
+            processCount: 512,
+            idleTimeoutSeconds: 3600,
+            maximumLifetimeSeconds: 28_800,
+          },
+          desktop: { status: "unavailable" as const },
+          services: [],
+          controller: { kind: "none" as const },
+          createdAt: NOW,
+          lastActiveAt: NOW,
+        },
+      };
+      const stoppingEvent: OrchestrationEvent = {
+        ...request,
+        eventId: EventId.make("stop-unprovisioned"),
+        type: "sandbox.stopping",
+        payload: {
+          threadId,
+          event: { type: "sandbox.stopping", threadId, occurredAt: NOW, expired: false },
+          sandbox: unprovisionedStopping.sandbox,
+        },
+      };
+      const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(
+          Layer.mock(GitWorkflowService)({
+            localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(
+          Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
+        ),
+        Layer.provide(
+          Layer.succeed(SandboxRuntimeManager, {
+            stop: () => Effect.die("no container exists for an unprovisioned sandbox"),
+            exportBranch: () => Effect.die("nothing to export without a container"),
+          } as never),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery)({
+            getSnapshot: () => Effect.succeed(snapshot),
+            getThreadDetailById: (id) =>
+              Effect.succeed(id === threadId ? Option.some(unprovisionedStopping) : Option.none()),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(OrchestrationEngineService)({
+            dispatch: (command) =>
+              Effect.gen(function* () {
+                dispatched.push(command);
+                if (command.type === "sandbox.stop.complete")
+                  yield* Deferred.succeed(completed, undefined);
+                return { sequence: dispatched.length };
+              }),
+            streamDomainEvents: Stream.make(stoppingEvent),
+          }),
+        ),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* Deferred.await(completed).pipe(Effect.timeout("5 seconds"));
+          yield* reactor.drain;
+        }).pipe(Effect.provide(layer)),
+      );
+
+      const complete = dispatched.find((command) => command.type === "sandbox.stop.complete");
+      if (complete?.type !== "sandbox.stop.complete")
+        throw new Error("expected a stop completion command");
+      expect(complete.threadId).toBe(threadId);
+      expect(complete.expired).toBe(false);
+      // Nothing was torn down and nothing failed: completion is the only
+      // lifecycle command this stop produces.
+      expect(dispatched.map((command) => command.type)).toEqual(["sandbox.stop.complete"]);
+    }),
+  );
+
+  it.effect("fails the stop instead of wedging when container teardown throws", () =>
+    Effect.gen(function* () {
+      // `runtimes.stop` failing used to propagate out of the reactor with the
+      // provider session already stopped and no completion dispatched -- the
+      // decider stayed in `stopping` with nothing left to move it. The worker
+      // converts the failure into `sandbox.operation.fail` (stage `teardown`,
+      // carrying the runtime's own message), which the decider accepts from
+      // `stopping` and resolves to `failed` -- a re-provisionable state.
+      const failed = yield* Deferred.make<void>();
+      const dispatched: OrchestrationCommand[] = [];
+      const stoppingThread = {
+        ...snapshot.threads[0]!,
+        sandbox: {
+          lifecycle: "stopping" as const,
+          runtime: "podman" as const,
+          branch: { branchName: `t3/thread/${threadId}`, baseCommit: "a".repeat(40) },
+          limits: {
+            cpuCount: 2,
+            memoryBytes: 4_294_967_296,
+            diskBytes: 21_474_836_480,
+            processCount: 512,
+            idleTimeoutSeconds: 3600,
+            maximumLifetimeSeconds: 28_800,
+          },
+          desktop: { status: "unavailable" as const },
+          services: [],
+          controller: { kind: "none" as const },
+          createdAt: NOW,
+          lastActiveAt: NOW,
+        },
+      };
+      const stoppingEvent: OrchestrationEvent = {
+        ...request,
+        eventId: EventId.make("stop-teardown-failure"),
+        type: "sandbox.stopping",
+        payload: {
+          threadId,
+          event: { type: "sandbox.stopping", threadId, occurredAt: NOW, expired: false },
+          sandbox: stoppingThread.sandbox,
+        },
+      };
+      const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(
+          Layer.mock(GitWorkflowService)({
+            localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(
+          Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
+        ),
+        Layer.provide(
+          Layer.succeed(SandboxRuntimeManager, {
+            exportBranch: () =>
+              Effect.succeed({
+                commit: "b".repeat(40),
+                patch: "",
+                artifactId: "c".repeat(64),
+                bundleSha256: "d".repeat(64),
+              }),
+            stop: () =>
+              Effect.fail(
+                new SandboxManagerError({
+                  message: "podman rm failed: container is in use by another process",
+                }),
+              ),
+          } as never),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery)({
+            getSnapshot: () => Effect.succeed(snapshot),
+            getThreadDetailById: (id) =>
+              Effect.succeed(id === threadId ? Option.some(stoppingThread) : Option.none()),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(OrchestrationEngineService)({
+            dispatch: (command) =>
+              Effect.gen(function* () {
+                dispatched.push(command);
+                if (command.type === "sandbox.operation.fail")
+                  yield* Deferred.succeed(failed, undefined);
+                return { sequence: dispatched.length };
+              }),
+            streamDomainEvents: Stream.make(stoppingEvent),
+          }),
+        ),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* Deferred.await(failed).pipe(Effect.timeout("5 seconds"));
+          yield* reactor.drain;
+        }).pipe(Effect.provide(layer)),
+      );
+
+      const failure = dispatched.find((command) => command.type === "sandbox.operation.fail");
+      if (failure?.type !== "sandbox.operation.fail") throw new Error("expected failure command");
+      expect(failure.failure.stage).toBe("teardown");
+      // The real runtime error, not a swallowed or re-wrapped one.
+      expect(failure.failure.message).toBe(
+        "podman rm failed: container is in use by another process",
+      );
+      // A completion after the failure would fail the decider's `stopping`
+      // guard (the failure already moved the sandbox to `failed`); the export
+      // that ran before the teardown attempt is recorded as usual.
+      expect(dispatched.map((command) => command.type)).toEqual([
+        "sandbox.branch-export.result",
+        "sandbox.operation.fail",
+      ]);
     }),
   );
 

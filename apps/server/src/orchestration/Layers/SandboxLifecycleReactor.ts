@@ -146,13 +146,31 @@ export const make = Effect.gen(function* () {
     expired: boolean,
   ) {
     const thread = yield* getThread(threadId);
-    const runtime = thread?.sandbox?.runtime;
-    if (thread?.sandbox == null || (runtime !== "docker" && runtime !== "podman")) return;
-    const sessions = yield* providers.listSessions();
-    if (sessions.some((session) => session.threadId === threadId))
-      yield* providers.stopSession({ threadId });
-    yield* exportBranch(threadId);
-    yield* runtimes.stop(runtime, threadId, yield* adoptionHint(thread));
+    // No thread, or no sandbox projection: `stopping` is a state OF the
+    // sandbox projection, so a thread without one cannot be wedged in it --
+    // there is nothing to tear down and nothing to complete. (This is the
+    // deleted-thread case; the decider writes the sandbox into `stopping`
+    // before this reactor ever sees the event, so a live thread always
+    // arrives here with a sandbox.)
+    if (thread?.sandbox == null) return;
+    const runtime = thread.sandbox.runtime;
+    if (runtime === "docker" || runtime === "podman") {
+      const sessions = yield* providers.listSessions();
+      if (sessions.some((session) => session.threadId === threadId))
+        yield* providers.stopSession({ threadId });
+      yield* exportBranch(threadId);
+      // A failure here propagates to the worker's catchCause, which dispatches
+      // `sandbox.operation.fail` (stage `teardown`) -- the decider moves the
+      // thread from `stopping` to `failed` rather than leaving it wedged.
+      yield* runtimes.stop(runtime, threadId, yield* adoptionHint(thread));
+    }
+    // Dispatched even when there was no container to tear down. The decider
+    // accepts `sandbox.stop` from every non-terminal lifecycle -- including
+    // `unprovisioned`, `provisioning`, and `failed`, none of which ever
+    // recorded a runtime -- and moves the thread to `stopping` unconditionally.
+    // Returning early here without completing left such threads in `stopping`
+    // forever, where `thread.turn.start` is rejected: a permanently unusable
+    // thread.
     yield* engine.dispatch({
       type: "sandbox.stop.complete",
       commandId: yield* commandId("sandbox-stop-complete"),

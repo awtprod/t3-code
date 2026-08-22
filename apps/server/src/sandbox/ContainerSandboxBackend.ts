@@ -805,8 +805,18 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         failures.push(`teardown ${hook.executable}: ${String(error)}`);
       }
     }
+    // Containers #cleanup below removes by name. The sibling phase must skip
+    // them: removing one here makes the corresponding `rm --force <name>` in
+    // #cleanup fail, which turns an orderly stop into a reported failure.
     failures.push(
-      ...(await this.#removeManagedSiblingContainers(threadId, record.ready.containerName)),
+      ...(await this.#removeManagedSiblingContainers(
+        threadId,
+        new Set(
+          [record.ready.containerName, record.ready.egressProxyContainerName].filter(
+            (name): name is string => name !== undefined,
+          ),
+        ),
+      )),
     );
     failures.push(
       ...(await this.#cleanup(
@@ -1070,7 +1080,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
 
   async #removeManagedSiblingContainers(
     threadId: string,
-    workspaceContainer: string,
+    ownedContainers: ReadonlySet<string>,
   ): Promise<string[]> {
     const failures: string[] = [];
     const listed = await this.#run(
@@ -1082,17 +1092,26 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         "--filter",
         `label=${THREAD_LABEL}=${threadId}`,
         "--format",
-        "{{.ID}}",
+        "{{.ID}}\t{{.Names}}",
       ],
       30_000,
       true,
     );
     if (listed.exitCode !== 0) return [`list sibling containers: ${listed.stderr}`];
-    for (const candidate of listed.stdout
-      .split("\n")
-      .map((item) => item.trim())
-      .filter(Boolean)) {
-      if (candidate === workspaceContainer || !/^[A-Za-z0-9_.-]{1,128}$/.test(candidate)) continue;
+    for (const line of listed.stdout.split("\n")) {
+      const [rawId, rawNames] = line.split("\t");
+      const candidate = rawId?.trim() ?? "";
+      if (candidate.length === 0 || !/^[A-Za-z0-9_.-]{1,128}$/.test(candidate)) continue;
+      // The listing filters on the exact labels the workspace container itself
+      // carries, so it is always part of its own listing. Excluding it by
+      // comparing the listed ID against the workspace NAME can never match --
+      // that comparison force-removed the workspace container as its own
+      // "sibling", made #cleanup's `rm --force <name>` fail, and wedged the
+      // thread in `stopping`. `{{.Names}}` prints the plain name under
+      // --format on both docker and podman (no leading slash, same tab-column
+      // parsing as `reconcile`'s label listing), so compare name to name.
+      const names = (rawNames ?? "").split(",").map((item) => item.trim());
+      if (names.some((name) => ownedContainers.has(name))) continue;
       const inspected = await this.#run(
         [
           "inspect",
