@@ -33,6 +33,8 @@ import { ServerConfig } from "../config.ts";
 
 const credentialBroker = new ThreadCredentialBroker();
 
+const noop = () => {};
+
 /**
  * Resolves the sandbox container image for a project: the `.t3` project file's
  * `sandbox.image` wins over the `T3_SANDBOX_IMAGE` environment default.
@@ -237,6 +239,53 @@ export const makeSandboxRuntimeManager = (
     }
   >();
   const teardownHooks = new Map<string, NonNullable<SandboxProvisionInput["teardown"]>>();
+  /**
+   * Serializes everything that writes or deletes one thread's artifact set.
+   *
+   * Export and deletion used to race: deletion removed the set immediately
+   * after enqueuing the stop, and an export already in flight then renamed
+   * fresh canonical files into place behind it -- leaving a deleted thread's
+   * transcripts and commits on disk forever. One entry per thread with an
+   * in-flight operation, deleted as soon as the chain drains.
+   */
+  const artifactLocks = new Map<string, Promise<unknown>>();
+  const withArtifactLock = async <A>(threadId: string, run: () => Promise<A>): Promise<A> => {
+    const previous = artifactLocks.get(threadId);
+    // Chained off the predecessor's settlement, not its value: one failed
+    // export must not poison every later operation on the same thread.
+    const settled = previous === undefined ? Promise.resolve() : previous.then(noop, noop);
+    const started = settled.then(run);
+    const tail = started.then(noop, noop);
+    artifactLocks.set(threadId, tail);
+    try {
+      return await started;
+    } finally {
+      // Only the last link clears the entry; an operation queued behind this
+      // one has already replaced it.
+      if (artifactLocks.get(threadId) === tail) artifactLocks.delete(threadId);
+    }
+  };
+  /**
+   * Threads whose artifacts have been deleted, so an export that was already
+   * running when the deletion landed discards its temporaries instead of
+   * renaming them into place after the removal.
+   *
+   * The lock above orders the two operations but cannot decide them: an export
+   * that wins the lock still finishes by publishing files for a thread that no
+   * longer exists. Bounded and FIFO -- a tombstone only has to outlive exports
+   * in flight at deletion time, so evicting the oldest once the ring is full
+   * cannot resurrect anything.
+   */
+  const deletedThreadArtifacts = new Set<string>();
+  const DELETED_ARTIFACT_TOMBSTONES = 4096;
+  const tombstoneThreadArtifacts = (threadId: string) => {
+    deletedThreadArtifacts.add(threadId);
+    while (deletedThreadArtifacts.size > DELETED_ARTIFACT_TOMBSTONES) {
+      const oldest = deletedThreadArtifacts.values().next();
+      if (oldest.done === true) break;
+      deletedThreadArtifacts.delete(oldest.value);
+    }
+  };
   const get = (runtime: "docker" | "podman") => {
     const existing = runtimes.get(runtime);
     if (existing) return existing;
@@ -621,84 +670,103 @@ export const makeSandboxRuntimeManager = (
       };
     }),
     exportBranch: (runtime, threadId, hint) =>
-      attempt(async () => {
-        if (artifactRoot === undefined)
-          throw new Error("sandbox artifact storage requires the configured server runtime layer");
-        await NodeFSP.mkdir(artifactRoot, { recursive: true, mode: 0o700 });
-        const name = NodeCrypto.createHash("sha256").update(threadId).digest("hex");
-        const bundleTemporary = NodePath.resolve(
-          artifactRoot,
-          `.${name}.${process.pid}.bundle.tmp`,
-        );
-        const bundleDestination = NodePath.resolve(artifactRoot, `${name}.bundle`);
-        const manifestTemporary = NodePath.resolve(
-          artifactRoot,
-          `.${name}.${process.pid}.json.tmp`,
-        );
-        const manifestDestination = NodePath.resolve(artifactRoot, `${name}.json`);
-        const storeTemporary = NodePath.resolve(artifactRoot, `.${name}.${process.pid}.store.tmp`);
-        const storeDestination = NodePath.resolve(artifactRoot, `${name}.store.tar`);
-        try {
-          const result = await get(runtime).backend.exportBranch(threadId, hint);
-          await get(runtime).backend.exportBundle(threadId, bundleTemporary, hint);
-          const bundleSha256 = NodeCrypto.createHash("sha256")
-            .update(await NodeFSP.readFile(bundleTemporary))
-            .digest("hex");
-          // The conversation store is a bonus, the branch is the point: a store
-          // that fails to archive costs the next turn its context, while a
-          // failure propagated from here would strand the user's commits inside
-          // a container that is about to be deleted.
-          const storeBytes = await get(runtime)
-            .backend.exportProviderStore(
-              threadId,
-              storeTemporary,
-              resolveSandboxStoreMaxBytes(),
-              hint,
-            )
-            .catch(() => undefined);
-          const storeSha256 =
-            storeBytes === undefined
-              ? undefined
-              : await NodeFSP.readFile(storeTemporary)
-                  .then((contents) =>
-                    NodeCrypto.createHash("sha256").update(contents).digest("hex"),
-                  )
-                  .catch(() => undefined);
-          await NodeFSP.writeFile(
-            manifestTemporary,
-            JSON.stringify({
-              threadId,
-              bundle: `${name}.bundle`,
-              bundleSha256,
-              // `storeServed: false` marks the store as a server-internal
-              // artifact: re-provision reads it from disk to restore the
-              // provider's conversation, but the artifact HTTP route serves
-              // only `bundle` and `manifest` -- a client following the
-              // manifest must not treat `store` as downloadable.
-              ...(storeSha256 === undefined
-                ? {}
-                : { store: `${name}.store.tar`, storeServed: false, storeSha256, storeBytes }),
-              ...result,
-            }),
-            { mode: 0o600, flag: "wx" },
+      // Under the per-thread artifact lock so an export and a thread deletion
+      // cannot interleave their filesystem work.
+      attempt(() =>
+        withArtifactLock(threadId, async () => {
+          if (artifactRoot === undefined)
+            throw new Error(
+              "sandbox artifact storage requires the configured server runtime layer",
+            );
+          await NodeFSP.mkdir(artifactRoot, { recursive: true, mode: 0o700 });
+          const name = NodeCrypto.createHash("sha256").update(threadId).digest("hex");
+          const bundleTemporary = NodePath.resolve(
+            artifactRoot,
+            `.${name}.${process.pid}.bundle.tmp`,
           );
-          await NodeFSP.rename(bundleTemporary, bundleDestination);
-          if (storeSha256 !== undefined) await NodeFSP.rename(storeTemporary, storeDestination);
-          await NodeFSP.rename(manifestTemporary, manifestDestination);
-          return {
-            ...result,
-            artifactId: name,
-            bundleSha256,
-            ...(storeSha256 === undefined ? {} : { storeSha256 }),
-          };
-        } finally {
-          await Promise.all([
-            NodeFSP.rm(bundleTemporary, { force: true }),
-            NodeFSP.rm(manifestTemporary, { force: true }),
-            NodeFSP.rm(storeTemporary, { force: true }),
-          ]);
-        }
-      }),
+          const bundleDestination = NodePath.resolve(artifactRoot, `${name}.bundle`);
+          const manifestTemporary = NodePath.resolve(
+            artifactRoot,
+            `.${name}.${process.pid}.json.tmp`,
+          );
+          const manifestDestination = NodePath.resolve(artifactRoot, `${name}.json`);
+          const storeTemporary = NodePath.resolve(
+            artifactRoot,
+            `.${name}.${process.pid}.store.tmp`,
+          );
+          const storeDestination = NodePath.resolve(artifactRoot, `${name}.store.tar`);
+          try {
+            const result = await get(runtime).backend.exportBranch(threadId, hint);
+            await get(runtime).backend.exportBundle(threadId, bundleTemporary, hint);
+            const bundleSha256 = NodeCrypto.createHash("sha256")
+              .update(await NodeFSP.readFile(bundleTemporary))
+              .digest("hex");
+            // The conversation store is a bonus, the branch is the point: a store
+            // that fails to archive costs the next turn its context, while a
+            // failure propagated from here would strand the user's commits inside
+            // a container that is about to be deleted.
+            const storeBytes = await get(runtime)
+              .backend.exportProviderStore(
+                threadId,
+                storeTemporary,
+                resolveSandboxStoreMaxBytes(),
+                hint,
+              )
+              .catch(() => undefined);
+            const storeSha256 =
+              storeBytes === undefined
+                ? undefined
+                : await NodeFSP.readFile(storeTemporary)
+                    .then((contents) =>
+                      NodeCrypto.createHash("sha256").update(contents).digest("hex"),
+                    )
+                    .catch(() => undefined);
+            await NodeFSP.writeFile(
+              manifestTemporary,
+              JSON.stringify({
+                threadId,
+                bundle: `${name}.bundle`,
+                bundleSha256,
+                // `storeServed: false` marks the store as a server-internal
+                // artifact: re-provision reads it from disk to restore the
+                // provider's conversation, but the artifact HTTP route serves
+                // only `bundle` and `manifest` -- a client following the
+                // manifest must not treat `store` as downloadable.
+                ...(storeSha256 === undefined
+                  ? {}
+                  : { store: `${name}.store.tar`, storeServed: false, storeSha256, storeBytes }),
+                ...result,
+              }),
+              { mode: 0o600, flag: "wx" },
+            );
+            // Checked immediately before the renames, under the per-thread
+            // artifact lock: a deletion that landed while this export was
+            // running has already removed the set, and publishing now would put
+            // a deleted thread's transcripts and commits back on disk with
+            // nothing left to ever remove them. The export still reports the
+            // digests it computed -- the caller's event is about a container
+            // that is going away either way, and the thread it belonged to no
+            // longer exists to restore from them.
+            if (!deletedThreadArtifacts.has(threadId)) {
+              await NodeFSP.rename(bundleTemporary, bundleDestination);
+              if (storeSha256 !== undefined) await NodeFSP.rename(storeTemporary, storeDestination);
+              await NodeFSP.rename(manifestTemporary, manifestDestination);
+            }
+            return {
+              ...result,
+              artifactId: name,
+              bundleSha256,
+              ...(storeSha256 === undefined ? {} : { storeSha256 }),
+            };
+          } finally {
+            await Promise.all([
+              NodeFSP.rm(bundleTemporary, { force: true }),
+              NodeFSP.rm(manifestTemporary, { force: true }),
+              NodeFSP.rm(storeTemporary, { force: true }),
+            ]);
+          }
+        }),
+      ),
     stop: Effect.fn("SandboxRuntimeManager.stop")(function* (runtime, threadId, hint) {
       const managed = get(runtime);
       if (resolveSandboxDesktopMode() !== "disabled")
@@ -765,17 +833,25 @@ export const makeSandboxRuntimeManager = (
       }),
     revokeCredentials: (threadId) => Effect.sync(() => credentialBroker.revokeThread(threadId)),
     removeThreadArtifacts: (threadId) =>
-      attempt(async () => {
-        if (artifactRoot === undefined) return;
-        // The artifact id is derived from the thread id exactly as
-        // `exportBranch` derives it, so deletion needs no manifest lookup.
-        const name = NodeCrypto.createHash("sha256").update(threadId).digest("hex");
-        await Promise.all(
-          [`${name}.bundle`, `${name}.json`, `${name}.store.tar`].map((file) =>
-            NodeFSP.rm(NodePath.resolve(artifactRoot, file), { force: true }),
-          ),
-        );
-      }),
+      attempt(() =>
+        withArtifactLock(threadId, async () => {
+          // Tombstoned before the lock's work and outside the artifactRoot
+          // guard: an export that is already past its own lock check but has
+          // not yet renamed still has to see this, and a manager without
+          // artifact storage has no files to remove but can still be asked to
+          // delete a thread.
+          tombstoneThreadArtifacts(threadId);
+          if (artifactRoot === undefined) return;
+          // The artifact id is derived from the thread id exactly as
+          // `exportBranch` derives it, so deletion needs no manifest lookup.
+          const name = NodeCrypto.createHash("sha256").update(threadId).digest("hex");
+          await Promise.all(
+            [`${name}.bundle`, `${name}.json`, `${name}.store.tar`].map((file) =>
+              NodeFSP.rm(NodePath.resolve(artifactRoot, file), { force: true }),
+            ),
+          );
+        }),
+      ),
     sweepExpiredArtifacts: Effect.fn("SandboxRuntimeManager.sweepExpiredArtifacts")(
       function* (protectedThreadIds) {
         const maxAgeSeconds = resolveSandboxArtifactMaxAgeSeconds();

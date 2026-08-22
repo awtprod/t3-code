@@ -287,6 +287,54 @@ describe("provider conversation store artifacts", () => {
     }),
   );
 
+  it.effect("an export that finishes after a deletion leaves nothing behind", () =>
+    Effect.gen(function* () {
+      // Deletion removes the artifact set right after enqueuing the stop, but
+      // an export already in flight used to rename fresh canonical files into
+      // place behind it -- resurrecting a deleted thread's transcripts and
+      // commits with nothing left that would ever remove them.
+      headless();
+      const root = makeRoot();
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(root, "linux", executor);
+      yield* manager.provision(provisionInput());
+
+      // The deletion is issued while the export is mid-flight, and both are
+      // allowed to run to completion.
+      const [exported] = yield* Effect.all(
+        [manager.exportBranch("docker", THREAD_ID), manager.removeThreadArtifacts(THREAD_ID)],
+        { concurrency: "unbounded" },
+      );
+
+      // The export still reports what it captured -- its caller's event is
+      // about a container that is going away regardless.
+      expect(exported.bundleSha256).toBe(
+        NodeCrypto.createHash("sha256").update(BUNDLE_CONTENTS).digest("hex"),
+      );
+      // But nothing of the deleted thread is on disk, including the
+      // dot-prefixed temporaries the export writes on its way through.
+      expect(NodeFS.readdirSync(root)).toEqual([]);
+    }),
+  );
+
+  it.effect("a deleted thread's later export never republishes its artifacts", () =>
+    Effect.gen(function* () {
+      // The tombstone has to outlive the deletion call itself: a settle-driven
+      // export can be dispatched after the deletion has already swept the
+      // directory.
+      headless();
+      const root = makeRoot();
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(root, "linux", executor);
+      yield* manager.provision(provisionInput());
+
+      yield* manager.removeThreadArtifacts(THREAD_ID);
+      yield* manager.exportBranch("docker", THREAD_ID);
+
+      expect(NodeFS.readdirSync(root)).toEqual([]);
+    }),
+  );
+
   it.effect("tolerates artifact removal without configured artifact storage", () =>
     Effect.gen(function* () {
       const manager = makeSandboxRuntimeManager(undefined, "linux", new FakeExecutor());
