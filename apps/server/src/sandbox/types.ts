@@ -160,6 +160,18 @@ export type SandboxAdoptionHint = {
 export type SandboxExport = {
   readonly commit: string;
   readonly patch: string;
+  /**
+   * Commit pinned under `refs/t3/export-snapshot` in the exported bundle,
+   * capturing the working tree -- dirty tracked files and untracked ones --
+   * at export time.
+   *
+   * Absent when the working tree was clean, and when the snapshot could not be
+   * written (the branch still exports; the export never fails over a
+   * snapshot). A restore that finds the ref in the bundle unpacks it over the
+   * checked-out head commit, which is what stops an automatic settle from
+   * destroying uncommitted work.
+   */
+  readonly snapshotCommit?: string;
 };
 export type SandboxArtifactExport = SandboxExport & {
   readonly artifactId: string;

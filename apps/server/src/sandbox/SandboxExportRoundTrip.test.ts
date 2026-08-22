@@ -1,0 +1,318 @@
+// @effect-diagnostics nodeBuiltinImport:off - the round trip is only meaningful against real git and a real artifact directory.
+import { describe, expect, it } from "@effect/vitest";
+import { afterEach } from "vite-plus/test";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as Effect from "effect/Effect";
+
+import { makeSandboxRuntimeManager } from "./SandboxRuntimeManager.ts";
+import type { SandboxCommand, SandboxCommandExecutor, SandboxCommandResult } from "./types.ts";
+
+const PREVIEW_IMAGE = `preview@sha256:${"a".repeat(64)}`;
+const SANDBOX_IMAGE = `sandbox@sha256:${"b".repeat(64)}`;
+const THREAD_ID = "thread-roundtrip";
+
+const scratch: string[] = [];
+const makeDirectory = (prefix: string) => {
+  const path = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), prefix));
+  scratch.push(path);
+  return path;
+};
+
+const MUTATED_ENV = ["T3_SANDBOX_DESKTOP", "T3_SANDBOX_PREVIEW_PROXY_IMAGE"] as const;
+const originalEnv = new Map(MUTATED_ENV.map((key) => [key, process.env[key]] as const));
+
+afterEach(() => {
+  for (const [key, value] of originalEnv) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  while (scratch.length > 0) NodeFS.rmSync(scratch.pop()!, { recursive: true, force: true });
+});
+
+const GIT_IDENTITY = {
+  GIT_AUTHOR_NAME: "Sandbox",
+  GIT_AUTHOR_EMAIL: "sandbox@example.test",
+  GIT_COMMITTER_NAME: "Sandbox",
+  GIT_COMMITTER_EMAIL: "sandbox@example.test",
+} as const;
+
+const git = (cwd: string, ...args: string[]) => {
+  const result = NodeChildProcess.spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, ...GIT_IDENTITY },
+  });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+  return result.stdout;
+};
+
+/**
+ * A container the fake runtime "runs": a directory standing in for the
+ * container's filesystem, with real git executing inside it.
+ *
+ * The export/restore round trip is a sequence of git plumbing commands whose
+ * whole point is which bytes survive. A responder that returns canned output
+ * would assert the argv and prove nothing about the files, so this executor
+ * runs the commands for real against mapped paths.
+ */
+class GitBackedExecutor implements SandboxCommandExecutor {
+  readonly commands: SandboxCommand[] = [];
+  readonly root: string;
+  constructor() {
+    this.root = makeDirectory("t3-sandbox-fs-");
+    for (const directory of ["workspace", "thread-data", "tmp"])
+      NodeFS.mkdirSync(NodePath.join(this.root, directory), { recursive: true });
+  }
+  /** Container absolute paths resolve inside this fake container's root. */
+  #map(value: string): string {
+    return /^\/(?:workspace|thread-data|tmp)(?:\/|$)/.test(value)
+      ? NodePath.join(this.root, value)
+      : value;
+  }
+  get repository(): string {
+    return NodePath.join(this.root, "workspace/repo");
+  }
+  async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+    this.commands.push(command);
+    const args = [...command.args];
+    const [verb] = args;
+    if (verb === "info") return { exitCode: 0, stdout: '["name=rootless"]', stderr: "" };
+    if (verb === "inspect" && args.length === 2)
+      return { exitCode: 1, stdout: "", stderr: "no such container" };
+    if (verb === "volume" && args[1] === "inspect") {
+      const name = args.at(-1) ?? "";
+      if (name.startsWith("t3-cache-")) return { exitCode: 1, stdout: "", stderr: "missing" };
+      const bytes = name.startsWith("t3-desktop-")
+        ? Math.max(256 * 1024 ** 2, Math.floor(20 * 1024 ** 3 * 0.1))
+        : Math.floor(20 * 1024 ** 3 * 0.9);
+      return { exitCode: 0, stdout: `size=${bytes}\n`, stderr: "" };
+    }
+    if (verb === "cp") {
+      const [source, destination] = [args[1] ?? "", args[2] ?? ""];
+      // Only the `container:/path` side is mapped into the fake container
+      // root; the other side is a real host path (the artifact directory,
+      // which also lives under /tmp).
+      const strip = (value: string) =>
+        value.includes(":") ? this.#map(value.slice(value.indexOf(":") + 1)) : value;
+      const to = strip(destination);
+      NodeFS.mkdirSync(NodePath.dirname(to), { recursive: true });
+      NodeFS.copyFileSync(strip(source), to);
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
+    if (verb === "exec") return this.#exec(command, args);
+    // Seed-bundle creation runs git on the host, outside the container.
+    if (command.executable === "git") return this.#spawn("git", args, {}, command.stdin);
+    return { exitCode: 0, stdout: "", stderr: "" };
+  }
+  #exec(command: SandboxCommand, args: string[]): SandboxCommandResult {
+    const separator = args.indexOf("--");
+    const environment: Record<string, string> = {};
+    for (let index = 0; index < separator; index += 1) {
+      if (args[index] !== "--env") continue;
+      const [key, ...rest] = (args[index + 1] ?? "").split("=");
+      if (key) environment[key] = this.#map(rest.join("="));
+    }
+    const workdirAt = args.indexOf("--workdir");
+    // args[separator + 1] is the container name.
+    const [executable, ...rest] = args.slice(separator + 2);
+    return this.#spawn(
+      executable ?? "",
+      rest.map((value) => this.#map(value)),
+      environment,
+      command.stdin,
+      workdirAt === -1 ? undefined : this.#map(args[workdirAt + 1] ?? ""),
+    );
+  }
+  #spawn(
+    executable: string,
+    args: ReadonlyArray<string>,
+    environment: Record<string, string>,
+    stdin?: string,
+    cwd?: string,
+  ): SandboxCommandResult {
+    const result = NodeChildProcess.spawnSync(executable, args, {
+      encoding: "utf8",
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(stdin === undefined ? {} : { input: stdin }),
+      env: { ...process.env, ...GIT_IDENTITY, ...environment },
+    });
+    return {
+      exitCode: result.status ?? 1,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? String(result.error ?? ""),
+    };
+  }
+}
+
+const headless = () => {
+  process.env.T3_SANDBOX_DESKTOP = "disabled";
+  process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+};
+
+/** A source repository with one commit, standing in for the project checkout. */
+const sourceRepository = () => {
+  const path = makeDirectory("t3-sandbox-src-");
+  git(path, "init", "--quiet", "--initial-branch=main", ".");
+  git(path, "config", "user.name", "Source");
+  git(path, "config", "user.email", "source@example.test");
+  NodeFS.writeFileSync(NodePath.join(path, "tracked.txt"), "first line\n", "utf8");
+  git(path, "add", "-A");
+  git(path, "commit", "--quiet", "-m", "base");
+  return { path, baseCommit: git(path, "rev-parse", "HEAD").trim() };
+};
+
+const provisionInput = (repositoryUrl: string, baseCommit: string) => ({
+  bootstrap: {
+    threadId: THREAD_ID,
+    projectId: "project-1",
+    repositoryUrl,
+    baseCommit,
+    branchName: `thread/${THREAD_ID}`,
+  },
+  image: SANDBOX_IMAGE,
+});
+
+describe("sandbox export round trip", () => {
+  it.effect("carries dirty and untracked work across a settle and restore", () =>
+    Effect.gen(function* () {
+      // The failure this covers destroyed user work silently: an automatic
+      // settle exported only the branch bundle, and everything the user had
+      // edited or newly created without committing was gone when the thread
+      // came back.
+      headless();
+      const artifacts = makeDirectory("t3-sandbox-artifacts-");
+      const source = sourceRepository();
+
+      const first = new GitBackedExecutor();
+      const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
+      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+
+      // A commit the user made, plus work they had not committed.
+      NodeFS.writeFileSync(
+        NodePath.join(first.repository, "tracked.txt"),
+        "first line\ncommitted line\n",
+        "utf8",
+      );
+      git(first.repository, "add", "-A");
+      git(first.repository, "commit", "--quiet", "-m", "committed work");
+      NodeFS.appendFileSync(NodePath.join(first.repository, "tracked.txt"), "dirty line\n", "utf8");
+      NodeFS.mkdirSync(NodePath.join(first.repository, "notes"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(first.repository, "notes/scratch.md"),
+        "untracked note\n",
+        "utf8",
+      );
+
+      const exported = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(exported.snapshotCommit).toMatch(/^[0-9a-f]{40,64}$/);
+
+      // A fresh manager and container: the thread was torn down and comes back
+      // on the next turn, seeded from the artifact set alone.
+      const second = new GitBackedExecutor();
+      yield* makeSandboxRuntimeManager(artifacts, "linux", second).provision({
+        ...provisionInput(source.path, source.baseCommit),
+        restore: {
+          artifactId: exported.artifactId,
+          bundleSha256: exported.bundleSha256,
+          headCommit: exported.commit,
+          branchName: `thread/${THREAD_ID}`,
+        },
+      });
+
+      expect(NodeFS.readFileSync(NodePath.join(second.repository, "tracked.txt"), "utf8")).toBe(
+        "first line\ncommitted line\ndirty line\n",
+      );
+      expect(
+        NodeFS.readFileSync(NodePath.join(second.repository, "notes/scratch.md"), "utf8"),
+      ).toBe("untracked note\n");
+      // The branch still points at the exported head, and the carried work is
+      // uncommitted exactly as the user left it -- not silently staged, and not
+      // committed on their behalf.
+      expect(git(second.repository, "rev-parse", "HEAD").trim()).toBe(exported.commit);
+      expect(git(second.repository, "status", "--porcelain")).toBe(" M tracked.txt\n?? notes/\n");
+      // The transport ref does not survive into the user's repository.
+      expect(
+        NodeChildProcess.spawnSync("git", ["rev-parse", "--verify", "refs/t3/export-snapshot"], {
+          cwd: second.repository,
+          encoding: "utf8",
+        }).status,
+      ).not.toBe(0);
+    }),
+  );
+
+  it.effect("restores a clean sandbox without a snapshot", () =>
+    Effect.gen(function* () {
+      // Nothing uncommitted means no snapshot commit and nothing to unpack;
+      // the restore must still land on the exported head rather than fail
+      // looking for a ref the bundle never named.
+      headless();
+      const artifacts = makeDirectory("t3-sandbox-artifacts-");
+      const source = sourceRepository();
+
+      const first = new GitBackedExecutor();
+      const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
+      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      NodeFS.writeFileSync(
+        NodePath.join(first.repository, "tracked.txt"),
+        "first line\ncommitted only\n",
+        "utf8",
+      );
+      git(first.repository, "add", "-A");
+      git(first.repository, "commit", "--quiet", "-m", "committed work");
+
+      const exported = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(exported.snapshotCommit).toBeUndefined();
+
+      const second = new GitBackedExecutor();
+      yield* makeSandboxRuntimeManager(artifacts, "linux", second).provision({
+        ...provisionInput(source.path, source.baseCommit),
+        restore: {
+          artifactId: exported.artifactId,
+          bundleSha256: exported.bundleSha256,
+          headCommit: exported.commit,
+          branchName: `thread/${THREAD_ID}`,
+        },
+      });
+
+      expect(git(second.repository, "rev-parse", "HEAD").trim()).toBe(exported.commit);
+      expect(git(second.repository, "status", "--porcelain")).toBe("");
+    }),
+  );
+
+  it.effect("a later clean export does not resurrect an earlier snapshot", () =>
+    Effect.gen(function* () {
+      // Threads export more than once. If the ref from an export with dirty
+      // work survived into a later, clean export's bundle, restore would put
+      // files back that the user had since deleted.
+      headless();
+      const artifacts = makeDirectory("t3-sandbox-artifacts-");
+      const source = sourceRepository();
+
+      const first = new GitBackedExecutor();
+      const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
+      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      NodeFS.writeFileSync(NodePath.join(first.repository, "notes.md"), "temporary note\n", "utf8");
+      expect((yield* manager.exportBranch("docker", THREAD_ID)).snapshotCommit).toBeDefined();
+
+      NodeFS.rmSync(NodePath.join(first.repository, "notes.md"));
+      const exported = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(exported.snapshotCommit).toBeUndefined();
+
+      const second = new GitBackedExecutor();
+      yield* makeSandboxRuntimeManager(artifacts, "linux", second).provision({
+        ...provisionInput(source.path, source.baseCommit),
+        restore: {
+          artifactId: exported.artifactId,
+          bundleSha256: exported.bundleSha256,
+          headCommit: exported.commit,
+          branchName: `thread/${THREAD_ID}`,
+        },
+      });
+
+      expect(NodeFS.existsSync(NodePath.join(second.repository, "notes.md"))).toBe(false);
+    }),
+  );
+});

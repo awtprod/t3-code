@@ -64,6 +64,29 @@ const MAX_HOOK_TIMEOUT_MS = 10 * 60_000;
  */
 const PROVIDER_HOME = "/thread-data/provider-home";
 /**
+ * Ref the export pins its dirty-and-untracked snapshot commit under.
+ *
+ * The bundle is `--all`, so naming the snapshot as a ref is what carries the
+ * working tree across a teardown: the branch tip alone records only what the
+ * user committed, and everything they had merely edited or newly created would
+ * be destroyed by an automatic settle. Under `refs/t3/` rather than
+ * `refs/heads/` so it is invisible to `git branch`, never checked out, and
+ * removed from the restored repository the moment its contents are unpacked.
+ */
+const EXPORT_SNAPSHOT_REF = "refs/t3/export-snapshot";
+/**
+ * Identity for the snapshot commit. It is a container for a tree, never a
+ * commit the user authored, and the sandbox's own `user.name`/`user.email` are
+ * optional (`T3_SANDBOX_GIT_USER_*`), so `commit-tree` gets an explicit one
+ * rather than failing on a repository with no identity configured.
+ */
+const EXPORT_SNAPSHOT_IDENTITY = {
+  GIT_AUTHOR_NAME: "T3 Sandbox Export",
+  GIT_AUTHOR_EMAIL: "sandbox-export@example.test",
+  GIT_COMMITTER_NAME: "T3 Sandbox Export",
+  GIT_COMMITTER_EMAIL: "sandbox-export@example.test",
+} as const;
+/**
  * Paths excluded from the archived provider store, relative to `PROVIDER_HOME`.
  *
  * Credentials first: the provider home holds live auth material next to the
@@ -444,6 +467,10 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           ).catch(() => undefined);
         }
       }
+      // A restore seeds from this thread's own previous export, which is the
+      // only bundle that can carry a working-tree snapshot.
+      const restoresFromExport = input.bootstrap.restoreCommit !== undefined;
+      let restoreSnapshot = false;
       if (input.bootstrap.repositoryBundlePath !== undefined) {
         const containerBundle = "/tmp/t3-repository.bundle";
         const bundleRef = input.bootstrap.repositoryBundleRef;
@@ -486,6 +513,33 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           },
           setupTimeoutMs,
         );
+        // The export's working-tree snapshot, when the bundle carries one. A
+        // separate fetch with its own failure allowance rather than a second
+        // refspec on the one above: bundles written before snapshots existed
+        // (and exports that had nothing uncommitted) do not name the ref, and
+        // a fetch that asks for a missing ref fails as a whole -- which would
+        // turn every older restore into a failed provision.
+        const snapshotFetched =
+          restoresFromExport &&
+          (
+            await this.#mustExec(
+              containerName,
+              {
+                executable: "git",
+                args: [
+                  "-C",
+                  "/workspace/repo",
+                  "fetch",
+                  "--no-tags",
+                  containerBundle,
+                  `${EXPORT_SNAPSHOT_REF}:${EXPORT_SNAPSHOT_REF}`,
+                ],
+                allowNonZeroExit: true,
+              },
+              setupTimeoutMs,
+            )
+          ).exitCode === 0;
+        restoreSnapshot = snapshotFetched;
         await this.#mustExec(
           containerName,
           { executable: "rm", args: ["-f", containerBundle] },
@@ -534,6 +588,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         },
         setupTimeoutMs,
       );
+      if (restoreSnapshot) await this.#restoreExportSnapshot(containerName, setupTimeoutMs);
       const gitIdentity = sandboxGitIdentity();
       if (gitIdentity !== undefined) {
         for (const [key, value] of [
@@ -631,7 +686,12 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         },
         60_000,
       );
-      return { commit: commit.stdout.trim(), patch: fullPatch.stdout };
+      const snapshot = await this.#writeExportSnapshot(record.ready.containerName, env);
+      return {
+        commit: commit.stdout.trim(),
+        patch: fullPatch.stdout,
+        ...(snapshot === undefined ? {} : { snapshotCommit: snapshot }),
+      };
     } finally {
       await this.#mustExec(
         record.ready.containerName,
@@ -639,6 +699,127 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         10_000,
       ).catch(() => undefined);
     }
+  }
+
+  /**
+   * Pin the working tree -- dirty tracked files AND untracked ones -- as a
+   * commit under `EXPORT_SNAPSHOT_REF`, so the `--all` bundle written next
+   * carries it out of the sandbox.
+   *
+   * Without this, an export saves only what was committed. The patch computed
+   * above describes the rest, but a patch has nowhere to live: the manifest
+   * records the bundle and the head commit, and restore checks that commit out
+   * verbatim. Everything the user had edited or created and not committed was
+   * silently destroyed by an automatic settle. A snapshot commit rides inside
+   * the artifact that is already digest-verified, so no second artifact and no
+   * second digest have to be kept in step.
+   *
+   * `env` carries the temporary `GIT_INDEX_FILE` the caller already populated
+   * with `add -A`: the tree is written from that index, so the repository's
+   * real index and working tree are never touched. Returns `undefined` when
+   * the tree matches HEAD (nothing uncommitted, so the branch tip already
+   * carries everything) and on any failure -- the branch export is the part
+   * that must not be lost, and refusing it because a snapshot could not be
+   * written would trade a partial loss for a total one.
+   */
+  async #writeExportSnapshot(
+    containerName: string,
+    env: Readonly<Record<string, string>>,
+  ): Promise<string | undefined> {
+    try {
+      // Clear any ref an earlier export left behind first. A thread can export
+      // more than once (a manual export, then a settle), and a later export
+      // with a clean tree writes no snapshot -- the stale ref would ride out in
+      // its bundle and restore would resurrect files the user had since
+      // deleted or committed.
+      await this.#mustExec(
+        containerName,
+        {
+          executable: "git",
+          args: ["-C", "/workspace/repo", "update-ref", "-d", EXPORT_SNAPSHOT_REF],
+        },
+        30_000,
+      );
+      const tree = await this.#mustExec(
+        containerName,
+        { executable: "git", args: ["-C", "/workspace/repo", "write-tree"], env },
+        60_000,
+      );
+      const headTree = await this.#mustExec(
+        containerName,
+        { executable: "git", args: ["-C", "/workspace/repo", "rev-parse", "HEAD^{tree}"] },
+        30_000,
+      );
+      if (tree.stdout.trim() === headTree.stdout.trim()) return undefined;
+      const snapshot = await this.#mustExec(
+        containerName,
+        {
+          executable: "git",
+          args: [
+            "-C",
+            "/workspace/repo",
+            "commit-tree",
+            tree.stdout.trim(),
+            "-p",
+            "HEAD",
+            "-m",
+            "t3 sandbox export snapshot",
+          ],
+          env: { ...env, ...EXPORT_SNAPSHOT_IDENTITY },
+        },
+        60_000,
+      );
+      const snapshotCommit = snapshot.stdout.trim();
+      if (!/^[0-9a-f]{40,64}$/.test(snapshotCommit)) return undefined;
+      await this.#mustExec(
+        containerName,
+        {
+          executable: "git",
+          args: ["-C", "/workspace/repo", "update-ref", EXPORT_SNAPSHOT_REF, snapshotCommit],
+        },
+        30_000,
+      );
+      return snapshotCommit;
+    } catch {
+      // Deliberately swallowed; see above.
+      return undefined;
+    }
+  }
+
+  /**
+   * Put the exported working tree back over the checked-out branch, then drop
+   * the snapshot ref.
+   *
+   * `read-tree -u --reset` writes the snapshot's files into the working tree
+   * without moving HEAD, so the branch still points at the exported head
+   * commit; `reset --mixed` then rewrites the index from HEAD, which is what
+   * makes the restored files show up as ordinary dirty and untracked changes
+   * rather than as staged ones. The snapshot ref is deleted afterwards: it is
+   * a transport detail, and leaving it behind would make the next export
+   * bundle a stale one and show it in the user's `git log --all`.
+   */
+  async #restoreExportSnapshot(containerName: string, timeoutMs: number): Promise<void> {
+    await this.#mustExec(
+      containerName,
+      {
+        executable: "git",
+        args: ["-C", "/workspace/repo", "read-tree", "-u", "--reset", EXPORT_SNAPSHOT_REF],
+      },
+      timeoutMs,
+    );
+    await this.#mustExec(
+      containerName,
+      { executable: "git", args: ["-C", "/workspace/repo", "reset", "--quiet", "--mixed", "HEAD"] },
+      timeoutMs,
+    );
+    await this.#mustExec(
+      containerName,
+      {
+        executable: "git",
+        args: ["-C", "/workspace/repo", "update-ref", "-d", EXPORT_SNAPSHOT_REF],
+      },
+      timeoutMs,
+    );
   }
 
   /** Copy a self-contained Git bundle through the container runtime boundary
