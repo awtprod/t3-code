@@ -44,21 +44,58 @@ const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
  * Running workspace containers, read through the same argv-only executor the
  * backend uses, so the canary observes the runtime exactly as production does.
  */
-const threadContainers: Effect.Effect<ReadonlyArray<string>> = Effect.promise(async () => {
+const runtimeLines = async (args: ReadonlyArray<string>): Promise<ReadonlyArray<string>> => {
   const executor = new NodeSandboxCommandExecutor(process.platform);
   try {
     const result = await executor.run({
       executable: resolveSandboxRuntime(),
-      args: ["ps", "--format", "{{.Names}}"],
+      args: [...args],
       timeoutMs: 30_000,
     });
     return result.stdout
       .split("\n")
       .map((line) => line.trim())
-      .filter((name) => name.startsWith("t3-thread-"));
+      .filter(Boolean);
   } catch {
-    return [] as ReadonlyArray<string>;
+    return [];
   }
+};
+
+const threadContainers: Effect.Effect<ReadonlyArray<string>> = Effect.promise(async () =>
+  (await runtimeLines(["ps", "--format", "{{.Names}}"])).filter((name) =>
+    name.startsWith("t3-thread-"),
+  ),
+);
+
+/**
+ * Reap this run's leftover networks.
+ *
+ * Each provision takes two subnets out of the runtime's default pool, and a run
+ * that fails partway leaves them behind. The pool is small enough that a
+ * handful of canary runs exhausts it, and the next run then fails at
+ * `network create` for reasons that have nothing to do with the code under
+ * test. Only networks with no attached container are removed, so a concurrent
+ * sandbox is never disturbed.
+ */
+const reapOrphanedNetworks = Effect.promise(async () => {
+  const networks = (await runtimeLines(["network", "ls", "--format", "{{.Name}}"])).filter((name) =>
+    name.startsWith("t3-"),
+  );
+  let removed = 0;
+  for (const network of networks) {
+    const attached = await runtimeLines([
+      "ps",
+      "--all",
+      "--filter",
+      `network=${network}`,
+      "--format",
+      "{{.Names}}",
+    ]);
+    if (attached.length > 0) continue;
+    await runtimeLines(["network", "rm", network]);
+    removed += 1;
+  }
+  return removed;
 });
 
 export const runSandboxCanary = Effect.gen(function* () {
@@ -164,6 +201,16 @@ export const runSandboxCanary = Effect.gen(function* () {
   });
   yield* settlesInto(["ready", "failed"], 600_000);
   const provisionedState = yield* lifecycle;
+  if (provisionedState !== "ready") {
+    // The runtime's own stderr is the only thing that says WHY; the thrown
+    // error carries it but nothing logs it.
+    const failure = yield* harness
+      .waitForThread(THREAD, () => true, 5_000)
+      .pipe(Effect.map((thread) => thread.sandbox?.failure));
+    yield* Console.log(
+      `    provision failure: stage=${failure?.stage ?? "?"} code=${failure?.code ?? "?"} message=${failure?.message ?? "?"}`,
+    );
+  }
   yield* check(provisionedState === "ready", `sandbox reached 'ready' (saw '${provisionedState}')`);
   yield* check(
     yield* awaitHost(
@@ -242,6 +289,8 @@ export const runSandboxCanary = Effect.gen(function* () {
   );
 
   yield* harness.dispose;
+  const reaped = yield* reapOrphanedNetworks;
+  if (reaped > 0) yield* Console.log(`   (reaped ${reaped} leftover sandbox network(s))`);
   yield* Console.log(`== Summary: ${failures.length === 0 ? "all checks passed" : "FAILURES"}`);
   for (const failure of failures) yield* Console.log(`  FAILED: ${failure}`);
   return failures.length;
