@@ -14,6 +14,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -266,6 +267,59 @@ export const makeSandboxRuntimeManager = (
     }
   };
   /**
+   * Serializes a thread's WHOLE provision against its whole stop.
+   *
+   * The backend has a tombstone of its own, and it stays the inner guard --
+   * but it only spans `ensureReady`. A provision keeps going long after that
+   * returns: it starts the service stack, the preview proxy, the credential
+   * proxy, and the desktop sidecar, and publishes the thread's gateway state.
+   * A stop synchronized against the backend alone therefore destroyed whatever
+   * existed at that instant, reported the thread stopped, and left every
+   * sidecar created moments afterwards running forever -- unreferenced
+   * containers, live preview routes, and readable credential grants belonging
+   * to a thread nothing would ever stop again.
+   *
+   * Held here because this is the only level where the whole lifecycle is
+   * visible. A stop arriving mid-provision now waits for the provision to
+   * finish publishing and then tears down exactly what it published.
+   *
+   * Re-entrancy is not a concern: every unwind inside the provision drives the
+   * per-runtime components directly (`managed.backend.stop`,
+   * `managed.previews.stop`, ...) rather than this manager's `stop`, so
+   * nothing running under this lock ever asks for it again.
+   *
+   * Refcounted rather than left in place: unlike the artifact lock below,
+   * whose presence is read as "this thread still has work queued", this one
+   * carries no meaning once idle, and a permanent entry per thread would leak
+   * on a long-lived server.
+   */
+  const lifecycleLocks = new Map<
+    string,
+    { readonly semaphore: Semaphore.Semaphore; waiting: number }
+  >();
+  const withLifecycleLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
+    Effect.suspend(() => {
+      const existing = lifecycleLocks.get(threadId);
+      const entry = existing ?? { semaphore: Semaphore.makeUnsafe(1), waiting: 0 };
+      // Counted BEFORE the wait, not after acquisition: an operation queued
+      // behind the current holder has to keep the entry alive, or the holder's
+      // release would drop it and the waiter would be admitted against a fresh
+      // semaphore that grants immediately.
+      entry.waiting += 1;
+      if (existing === undefined) lifecycleLocks.set(threadId, entry);
+      return entry.semaphore
+        .withPermits(1)(effect)
+        .pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              entry.waiting -= 1;
+              if (entry.waiting === 0 && lifecycleLocks.get(threadId) === entry)
+                lifecycleLocks.delete(threadId);
+            }),
+          ),
+        );
+    });
+  /**
    * Threads whose artifacts have been deleted, so an export that was already
    * running when the deletion landed discards its temporaries instead of
    * renaming them into place after the removal.
@@ -417,190 +471,208 @@ export const makeSandboxRuntimeManager = (
         });
       },
     });
-  return {
-    exec: Effect.fn("SandboxRuntimeManager.exec")(function* (runtime, threadId, input) {
-      return yield* attempt(() => get(runtime).backend.exec(threadId, input));
-    }),
-    provision: Effect.fn("SandboxRuntimeManager.provision")(function* (input) {
-      const previewImage = resolveSandboxPreviewProxyImage();
-      if (!previewImage)
+  const provisionUnsynchronized = Effect.fn("SandboxRuntimeManager.provision")(function* (
+    input: Parameters<SandboxRuntimeManagerShape["provision"]>[0],
+  ) {
+    const previewImage = resolveSandboxPreviewProxyImage();
+    if (!previewImage)
+      return yield* new SandboxManagerError({
+        message:
+          "T3_SANDBOX_PREVIEW_PROXY_IMAGE is required for the internal desktop signaling sidecar",
+      });
+    // Per-thread config wins, then the deployment default. Callers validate the
+    // runtime before dispatching but pass `config` through verbatim, so the
+    // deployment default has to be applied here or a podman-only host runs
+    // docker.
+    const runtime = input.config?.runtime ?? resolveSandboxRuntime();
+    if (runtime !== "docker" && runtime !== "podman")
+      return yield* new SandboxManagerError({
+        message: `unsupported sandbox runtime: ${runtime}`,
+      });
+    const trustedCaches = new Set(
+      (process.env.T3_SANDBOX_TRUSTED_CACHE_DIGESTS ?? "")
+        .split(",")
+        .map((value) => value.trim().toLowerCase())
+        .filter(Boolean),
+    );
+    for (const cache of input.caches ?? []) {
+      if (!trustedCaches.has(cache.digest.toLowerCase())) {
         return yield* new SandboxManagerError({
-          message:
-            "T3_SANDBOX_PREVIEW_PROXY_IMAGE is required for the internal desktop signaling sidecar",
+          message: `cache ${cache.digest} is absent from the server-trusted cache manifest`,
         });
-      // Per-thread config wins, then the deployment default. Callers validate the
-      // runtime before dispatching but pass `config` through verbatim, so the
-      // deployment default has to be applied here or a podman-only host runs
-      // docker.
-      const runtime = input.config?.runtime ?? resolveSandboxRuntime();
-      if (runtime !== "docker" && runtime !== "podman")
-        return yield* new SandboxManagerError({
-          message: `unsupported sandbox runtime: ${runtime}`,
-        });
-      const trustedCaches = new Set(
-        (process.env.T3_SANDBOX_TRUSTED_CACHE_DIGESTS ?? "")
-          .split(",")
-          .map((value) => value.trim().toLowerCase())
-          .filter(Boolean),
-      );
-      for (const cache of input.caches ?? []) {
-        if (!trustedCaches.has(cache.digest.toLowerCase())) {
-          return yield* new SandboxManagerError({
-            message: `cache ${cache.digest} is absent from the server-trusted cache manifest`,
-          });
-        }
       }
-      const managed = get(runtime);
-      let provisionInput = input;
-      let seedBundle: string | undefined;
-      const restored = yield* resolveRestoreBootstrap(input);
-      if (restored !== undefined) {
-        provisionInput = { ...input, bootstrap: restored };
-      } else if (!/^(?:https|ssh):\/\//i.test(input.bootstrap.repositoryUrl)) {
-        if (artifactRoot === undefined)
-          return yield* new SandboxManagerError({
-            message: "local repository seeding requires configured server artifact storage",
-          });
-        const seedRoot = NodePath.resolve(artifactRoot, "seeds");
-        yield* attempt(() => NodeFSP.mkdir(seedRoot, { recursive: true, mode: 0o700 }));
-        const seedHash = NodeCrypto.createHash("sha256")
-          .update(input.bootstrap.threadId)
-          .digest("hex");
-        seedBundle = NodePath.resolve(seedRoot, `.${seedHash}.${process.pid}.bundle`);
-        // `git bundle create` refuses a bare commit SHA ("Refusing to create empty
-        // bundle") because a bundle records named refs, not anonymous commits. Pin a
-        // throwaway ref at the base commit so the bundle has something to name, then
-        // remove it once the bundle is written.
-        const seedRef = `refs/t3-sandbox-seed/${seedHash}.${process.pid}`;
-        yield* attempt(async () => {
-          const refUpdated = await executor.run({
+    }
+    const managed = get(runtime);
+    let provisionInput = input;
+    let seedBundle: string | undefined;
+    const restored = yield* resolveRestoreBootstrap(input);
+    if (restored !== undefined) {
+      provisionInput = { ...input, bootstrap: restored };
+    } else if (!/^(?:https|ssh):\/\//i.test(input.bootstrap.repositoryUrl)) {
+      if (artifactRoot === undefined)
+        return yield* new SandboxManagerError({
+          message: "local repository seeding requires configured server artifact storage",
+        });
+      const seedRoot = NodePath.resolve(artifactRoot, "seeds");
+      yield* attempt(() => NodeFSP.mkdir(seedRoot, { recursive: true, mode: 0o700 }));
+      const seedHash = NodeCrypto.createHash("sha256")
+        .update(input.bootstrap.threadId)
+        .digest("hex");
+      seedBundle = NodePath.resolve(seedRoot, `.${seedHash}.${process.pid}.bundle`);
+      // `git bundle create` refuses a bare commit SHA ("Refusing to create empty
+      // bundle") because a bundle records named refs, not anonymous commits. Pin a
+      // throwaway ref at the base commit so the bundle has something to name, then
+      // remove it once the bundle is written.
+      const seedRef = `refs/t3-sandbox-seed/${seedHash}.${process.pid}`;
+      yield* attempt(async () => {
+        const refUpdated = await executor.run({
+          executable: "git",
+          args: [
+            "-C",
+            input.bootstrap.repositoryUrl,
+            "update-ref",
+            seedRef,
+            input.bootstrap.baseCommit,
+          ],
+          timeoutMs: 30_000,
+        });
+        if (refUpdated.exitCode !== 0)
+          throw new Error(refUpdated.stderr || "failed to pin local repository seed ref");
+        try {
+          const created = await executor.run({
             executable: "git",
-            args: [
-              "-C",
-              input.bootstrap.repositoryUrl,
-              "update-ref",
-              seedRef,
-              input.bootstrap.baseCommit,
-            ],
+            args: ["-C", input.bootstrap.repositoryUrl, "bundle", "create", seedBundle!, seedRef],
+            timeoutMs: 120_000,
+          });
+          if (created.exitCode !== 0)
+            throw new Error(created.stderr || "failed to create local repository seed bundle");
+          // `bundle verify` resolves the bundle's prerequisites against a
+          // repository, so it needs `-C` even though the bundle names a full
+          // history; without it git exits with "need a repository to verify a
+          // bundle" wherever the server happens to be running.
+          const verified = await executor.run({
+            executable: "git",
+            args: ["-C", input.bootstrap.repositoryUrl, "bundle", "verify", seedBundle!],
+            timeoutMs: 60_000,
+          });
+          if (verified.exitCode !== 0)
+            throw new Error(verified.stderr || "local repository seed bundle failed verification");
+        } finally {
+          await executor.run({
+            executable: "git",
+            args: ["-C", input.bootstrap.repositoryUrl, "update-ref", "-d", seedRef],
             timeoutMs: 30_000,
           });
-          if (refUpdated.exitCode !== 0)
-            throw new Error(refUpdated.stderr || "failed to pin local repository seed ref");
-          try {
-            const created = await executor.run({
-              executable: "git",
-              args: ["-C", input.bootstrap.repositoryUrl, "bundle", "create", seedBundle!, seedRef],
-              timeoutMs: 120_000,
-            });
-            if (created.exitCode !== 0)
-              throw new Error(created.stderr || "failed to create local repository seed bundle");
-            // `bundle verify` resolves the bundle's prerequisites against a
-            // repository, so it needs `-C` even though the bundle names a full
-            // history; without it git exits with "need a repository to verify a
-            // bundle" wherever the server happens to be running.
-            const verified = await executor.run({
-              executable: "git",
-              args: ["-C", input.bootstrap.repositoryUrl, "bundle", "verify", seedBundle!],
-              timeoutMs: 60_000,
-            });
-            if (verified.exitCode !== 0)
+        }
+      });
+      provisionInput = {
+        ...input,
+        bootstrap: {
+          ...input.bootstrap,
+          repositoryBundlePath: seedBundle,
+          repositoryBundleRef: seedRef,
+        },
+      };
+    }
+    const ready = yield* attempt(() => managed.backend.ensureReady(provisionInput)).pipe(
+      Effect.ensuring(
+        seedBundle === undefined
+          ? Effect.void
+          : Effect.promise(() => NodeFSP.rm(seedBundle!, { force: true })),
+      ),
+    );
+    teardownHooks.set(input.bootstrap.threadId, input.teardown ?? []);
+    const services = yield* attempt(() =>
+      managed.services.start(input.bootstrap.threadId, input.services ?? [], ready.networkName),
+    ).pipe(
+      Effect.tapError(() =>
+        Effect.promise(async () => {
+          teardownHooks.delete(input.bootstrap.threadId);
+          await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
+        }),
+      ),
+    );
+    desktopGateway.setServiceStatus(
+      input.bootstrap.threadId,
+      services.map((service) => ({ name: service.hostname, healthy: true })),
+    );
+    // A typed failure, not a bare `throw`: a defect thrown from inside this
+    // generator escapes every `tapError` unwind below and leaks everything
+    // provisioned so far -- containers, networks, and issued grants.
+    const serviceGrants = yield* Effect.try({
+      try: () =>
+        services.flatMap((service) => {
+          const declaration = input.services?.find(
+            (candidate) => candidate.name === service.hostname,
+          );
+          return (declaration?.generatedEnvironment ?? []).map((entry) => {
+            const value = service.environment[entry.key];
+            if (value === undefined)
               throw new Error(
-                verified.stderr || "local repository seed bundle failed verification",
+                `generated service credential ${service.hostname}:${entry.key} is missing`,
               );
-          } finally {
-            await executor.run({
-              executable: "git",
-              args: ["-C", input.bootstrap.repositoryUrl, "update-ref", "-d", seedRef],
-              timeoutMs: 30_000,
-            });
-          }
-        });
-        provisionInput = {
-          ...input,
-          bootstrap: {
-            ...input.bootstrap,
-            repositoryBundlePath: seedBundle,
-            repositoryBundleRef: seedRef,
-          },
-        };
-      }
-      const ready = yield* attempt(() => managed.backend.ensureReady(provisionInput)).pipe(
-        Effect.ensuring(
-          seedBundle === undefined
-            ? Effect.void
-            : Effect.promise(() => NodeFSP.rm(seedBundle!, { force: true })),
-        ),
-      );
-      teardownHooks.set(input.bootstrap.threadId, input.teardown ?? []);
-      const services = yield* attempt(() =>
-        managed.services.start(input.bootstrap.threadId, input.services ?? [], ready.networkName),
-      ).pipe(
-        Effect.tapError(() =>
-          Effect.promise(async () => {
-            teardownHooks.delete(input.bootstrap.threadId);
-            await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
-          }),
-        ),
-      );
-      desktopGateway.setServiceStatus(
-        input.bootstrap.threadId,
-        services.map((service) => ({ name: service.hostname, healthy: true })),
-      );
-      // A typed failure, not a bare `throw`: a defect thrown from inside this
-      // generator escapes every `tapError` unwind below and leaks everything
-      // provisioned so far -- containers, networks, and issued grants.
-      const serviceGrants = yield* Effect.try({
-        try: () =>
-          services.flatMap((service) => {
-            const declaration = input.services?.find(
-              (candidate) => candidate.name === service.hostname,
-            );
-            return (declaration?.generatedEnvironment ?? []).map((entry) => {
-              const value = service.environment[entry.key];
-              if (value === undefined)
-                throw new Error(
-                  `generated service credential ${service.hostname}:${entry.key} is missing`,
-                );
-              const scope = `service:${service.hostname}:${entry.key}`;
-              return {
-                ...desktopGateway.credentials.issue({
-                  threadId: input.bootstrap.threadId,
-                  scope,
-                  value,
-                  ttlMs: 15 * 60_000,
-                }),
+            const scope = `service:${service.hostname}:${entry.key}`;
+            return {
+              ...desktopGateway.credentials.issue({
+                threadId: input.bootstrap.threadId,
                 scope,
-              };
-            });
-          }),
-        catch: (cause) =>
-          new SandboxManagerError({
-            message: cause instanceof Error ? cause.message : String(cause),
-            cause,
-          }),
-      }).pipe(
-        Effect.tapError(() =>
-          Effect.promise(async () => {
-            // Grants issued before the failing service are revoked with the
-            // rest of the thread's gateway state.
-            desktopGateway.removeThread(input.bootstrap.threadId);
-            teardownHooks.delete(input.bootstrap.threadId);
-            await managed.services.stop(input.bootstrap.threadId);
-            await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
-          }),
-        ),
-      );
-      desktopGateway.setServiceCredentialGrants(input.bootstrap.threadId, serviceGrants);
-      managed.services.redactCredentials(input.bootstrap.threadId);
+                value,
+                ttlMs: 15 * 60_000,
+              }),
+              scope,
+            };
+          });
+        }),
+      catch: (cause) =>
+        new SandboxManagerError({
+          message: cause instanceof Error ? cause.message : String(cause),
+          cause,
+        }),
+    }).pipe(
+      Effect.tapError(() =>
+        Effect.promise(async () => {
+          // Grants issued before the failing service are revoked with the
+          // rest of the thread's gateway state.
+          desktopGateway.removeThread(input.bootstrap.threadId);
+          teardownHooks.delete(input.bootstrap.threadId);
+          await managed.services.stop(input.bootstrap.threadId);
+          await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
+        }),
+      ),
+    );
+    desktopGateway.setServiceCredentialGrants(input.bootstrap.threadId, serviceGrants);
+    managed.services.redactCredentials(input.bootstrap.threadId);
+    yield* attempt(() =>
+      managed.previews.start(input.bootstrap.threadId, ready.networkName, previewImage),
+    ).pipe(
+      Effect.tapError(() =>
+        Effect.promise(async () => {
+          // Service status and credential grants are already registered on
+          // the gateway at this point; a failed provision must not leave
+          // them readable against a container that is being destroyed.
+          desktopGateway.removeThread(input.bootstrap.threadId);
+          await managed.previews.stop(input.bootstrap.threadId);
+          await managed.services.stop(input.bootstrap.threadId);
+          teardownHooks.delete(input.bootstrap.threadId);
+          await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
+        }),
+      ),
+    );
+    desktopGateway.setPreviewProxy(input.bootstrap.threadId, managed.previews);
+    const credentialImage = resolveSandboxCredentialProxyImage();
+    if (credentialImage !== undefined) {
       yield* attempt(() =>
-        managed.previews.start(input.bootstrap.threadId, ready.networkName, previewImage),
+        managed.credentials.start(
+          input.bootstrap.threadId,
+          ready.networkName,
+          credentialImage,
+          input.egressProxyImage !== undefined || input.egressProxyUrl !== undefined,
+        ),
       ).pipe(
         Effect.tapError(() =>
           Effect.promise(async () => {
-            // Service status and credential grants are already registered on
-            // the gateway at this point; a failed provision must not leave
-            // them readable against a container that is being destroyed.
             desktopGateway.removeThread(input.bootstrap.threadId);
+            await managed.credentials.stop(input.bootstrap.threadId);
             await managed.previews.stop(input.bootstrap.threadId);
             await managed.services.stop(input.bootstrap.threadId);
             teardownHooks.delete(input.bootstrap.threadId);
@@ -608,85 +680,87 @@ export const makeSandboxRuntimeManager = (
           }),
         ),
       );
-      desktopGateway.setPreviewProxy(input.bootstrap.threadId, managed.previews);
-      const credentialImage = resolveSandboxCredentialProxyImage();
-      if (credentialImage !== undefined) {
-        yield* attempt(() =>
-          managed.credentials.start(
-            input.bootstrap.threadId,
-            ready.networkName,
-            credentialImage,
-            input.egressProxyImage !== undefined || input.egressProxyUrl !== undefined,
-          ),
-        ).pipe(
-          Effect.tapError(() =>
-            Effect.promise(async () => {
-              desktopGateway.removeThread(input.bootstrap.threadId);
-              await managed.credentials.stop(input.bootstrap.threadId);
-              await managed.previews.stop(input.bootstrap.threadId);
-              await managed.services.stop(input.bootstrap.threadId);
-              teardownHooks.delete(input.bootstrap.threadId);
-              await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
-            }),
-          ),
-        );
-      }
-      for (const port of input.previewPorts ?? []) {
-        desktopGateway.registerPreviewRoute({
-          routeId: `${NodeCrypto.createHash("sha256").update(`${input.bootstrap.threadId}\0${port}`).digest("hex").slice(0, 24)}`,
-          threadId: input.bootstrap.threadId,
-          hostname: ready.containerName,
-          internalPort: port,
-          token: NodeCrypto.randomBytes(32).toString("base64url"),
-        });
-      }
-      // Headless deployments stop here: no desktop runtime, no automation
-      // target. The preview sidecar above still runs, since preview routing is
-      // independent of the streamed desktop.
-      const desktop =
-        resolveSandboxDesktopMode() === "disabled"
-          ? undefined
-          : yield* attempt(() =>
-              managed.desktop.start(
-                input.bootstrap.threadId,
-                desktopGateway.bridge(input.bootstrap.threadId),
-                managed.previews.internalSignalingOrigin(input.bootstrap.threadId),
-              ),
-            ).pipe(
-              Effect.tapError(() =>
-                Effect.promise(async () => {
-                  // Clears preview routes, the thread's preview-proxy entry,
-                  // service status, and credential grants -- the gateway state
-                  // registered above that would otherwise outlive the
-                  // containers this unwind destroys.
-                  desktopGateway.removeThread(input.bootstrap.threadId);
-                  await managed.credentials.stop(input.bootstrap.threadId);
-                  await managed.services.stop(input.bootstrap.threadId);
-                  await managed.previews.stop(input.bootstrap.threadId);
-                  teardownHooks.delete(input.bootstrap.threadId);
-                  await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
-                }),
-              ),
-            );
-      if (desktop !== undefined) {
-        const automation = managed.desktop.automationTarget(input.bootstrap.threadId);
-        desktopGateway.setAutomationTarget(
-          input.bootstrap.threadId,
-          ready.containerName,
-          automation.profilePath,
-        );
-      }
-      return {
-        ...ready,
-        ...(desktop === undefined
-          ? {}
-          : { desktopSessionId: desktop.sessionId, desktopStreamPath: desktop.signalingPath }),
-        services: services.map((service) => ({
-          name: service.hostname,
-          internalPorts: service.internalPorts,
-        })),
-      };
+    }
+    for (const port of input.previewPorts ?? []) {
+      desktopGateway.registerPreviewRoute({
+        routeId: `${NodeCrypto.createHash("sha256").update(`${input.bootstrap.threadId}\0${port}`).digest("hex").slice(0, 24)}`,
+        threadId: input.bootstrap.threadId,
+        hostname: ready.containerName,
+        internalPort: port,
+        token: NodeCrypto.randomBytes(32).toString("base64url"),
+      });
+    }
+    // Headless deployments stop here: no desktop runtime, no automation
+    // target. The preview sidecar above still runs, since preview routing is
+    // independent of the streamed desktop.
+    const desktop =
+      resolveSandboxDesktopMode() === "disabled"
+        ? undefined
+        : yield* attempt(() =>
+            managed.desktop.start(
+              input.bootstrap.threadId,
+              desktopGateway.bridge(input.bootstrap.threadId),
+              managed.previews.internalSignalingOrigin(input.bootstrap.threadId),
+            ),
+          ).pipe(
+            Effect.tapError(() =>
+              Effect.promise(async () => {
+                // Clears preview routes, the thread's preview-proxy entry,
+                // service status, and credential grants -- the gateway state
+                // registered above that would otherwise outlive the
+                // containers this unwind destroys.
+                desktopGateway.removeThread(input.bootstrap.threadId);
+                await managed.credentials.stop(input.bootstrap.threadId);
+                await managed.services.stop(input.bootstrap.threadId);
+                await managed.previews.stop(input.bootstrap.threadId);
+                teardownHooks.delete(input.bootstrap.threadId);
+                await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
+              }),
+            ),
+          );
+    if (desktop !== undefined) {
+      const automation = managed.desktop.automationTarget(input.bootstrap.threadId);
+      desktopGateway.setAutomationTarget(
+        input.bootstrap.threadId,
+        ready.containerName,
+        automation.profilePath,
+      );
+    }
+    return {
+      ...ready,
+      ...(desktop === undefined
+        ? {}
+        : { desktopSessionId: desktop.sessionId, desktopStreamPath: desktop.signalingPath }),
+      services: services.map((service) => ({
+        name: service.hostname,
+        internalPorts: service.internalPorts,
+      })),
+    };
+  });
+
+  const stopUnsynchronized = Effect.fn("SandboxRuntimeManager.stop")(function* (
+    runtime: "docker" | "podman",
+    threadId: string,
+    hint: SandboxAdoptionHint | undefined,
+  ) {
+    const managed = get(runtime);
+    if (resolveSandboxDesktopMode() !== "disabled")
+      yield* Effect.promise(() => managed.desktop.stop(threadId));
+    yield* Effect.promise(() => managed.credentials.stop(threadId));
+    yield* Effect.promise(() => managed.previews.stop(threadId));
+    yield* Effect.promise(() => managed.services.stop(threadId));
+    credentialBroker.revokeThread(threadId);
+    desktopGateway.removeThread(threadId);
+    yield* attempt(() => managed.backend.stop(threadId, teardownHooks.get(threadId) ?? [], hint));
+    teardownHooks.delete(threadId);
+  });
+
+  return {
+    exec: Effect.fn("SandboxRuntimeManager.exec")(function* (runtime, threadId, input) {
+      return yield* attempt(() => get(runtime).backend.exec(threadId, input));
     }),
+    provision: (input) =>
+      withLifecycleLock(input.bootstrap.threadId, provisionUnsynchronized(input)),
     exportBranch: (runtime, threadId, hint) =>
       // Under the per-thread artifact lock so an export and a thread deletion
       // cannot interleave their filesystem work.
@@ -785,18 +859,8 @@ export const makeSandboxRuntimeManager = (
           }
         }),
       ),
-    stop: Effect.fn("SandboxRuntimeManager.stop")(function* (runtime, threadId, hint) {
-      const managed = get(runtime);
-      if (resolveSandboxDesktopMode() !== "disabled")
-        yield* Effect.promise(() => managed.desktop.stop(threadId));
-      yield* Effect.promise(() => managed.credentials.stop(threadId));
-      yield* Effect.promise(() => managed.previews.stop(threadId));
-      yield* Effect.promise(() => managed.services.stop(threadId));
-      credentialBroker.revokeThread(threadId);
-      desktopGateway.removeThread(threadId);
-      yield* attempt(() => managed.backend.stop(threadId, teardownHooks.get(threadId) ?? [], hint));
-      teardownHooks.delete(threadId);
-    }),
+    stop: (runtime, threadId, hint) =>
+      withLifecycleLock(threadId, stopUnsynchronized(runtime, threadId, hint)),
     reconcile: (runtime, expectedThreadIds, adoptionHints) =>
       attempt(async () => {
         const managed = get(runtime);

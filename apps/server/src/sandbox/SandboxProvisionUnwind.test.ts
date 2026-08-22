@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "@effect/vitest";
 import { afterEach } from "vite-plus/test";
 import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 
 import { desktopGateway } from "./DesktopGatewayService.ts";
 import { makeSandboxRuntimeManager } from "./SandboxRuntimeManager.ts";
@@ -182,6 +183,122 @@ describe("provision failure unwinds", () => {
       const status = desktopGateway.status(THREAD_ID);
       expect(status.services).toEqual([]);
       expect(status.serviceCredentialGrants).toEqual([]);
+    }),
+  );
+});
+
+describe("stop against an in-flight provision", () => {
+  /** Every container name the run created with `run --detach`. */
+  const created = (executor: FakeExecutor) =>
+    executor.commands
+      .filter((command) => command.args[0] === "run")
+      .map((command) => command.args[command.args.indexOf("--name") + 1]);
+
+  it.effect("tears down the sidecars a concurrent provision publishes after the backend", () =>
+    Effect.gen(function* () {
+      // Synchronizing the stop against the BACKEND was not enough. The backend
+      // only owns `ensureReady`; the manager keeps going afterwards, starting
+      // the service stack, the preview proxy, the credential proxy, and the
+      // desktop sidecar and publishing the thread's gateway state. A stop that
+      // waited only on the backend destroyed what existed at that instant,
+      // reported the thread stopped, and left everything created after it
+      // running forever -- unreferenced containers, live preview routes, and
+      // readable credential grants belonging to a thread nothing would ever
+      // stop again.
+      //
+      // The provision parks in the preview sidecar's `run`, which is AFTER the
+      // backend has finished and the service stack and its credential grants
+      // are already published: exactly the window the old synchronization
+      // could not see.
+      process.env.T3_SANDBOX_DESKTOP = "disabled";
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      delete process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE;
+      let reachedPreview = () => {};
+      const atPreview = new Promise<void>((resolve) => {
+        reachedPreview = resolve;
+      });
+      let releasePreview = () => {};
+      const previewReleased = new Promise<void>((resolve) => {
+        releasePreview = resolve;
+      });
+      class ParkingExecutor extends FakeExecutor {
+        override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+          if (
+            command.args[0] === "run" &&
+            (command.args[command.args.indexOf("--name") + 1] ?? "").startsWith("t3-preview-")
+          ) {
+            reachedPreview();
+            await previewReleased;
+          }
+          return super.run(command);
+        }
+      }
+      const executor = new ParkingExecutor();
+      const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
+
+      const provisioning = yield* manager
+        .provision(
+          provisionInput({
+            previewPorts: [3000],
+            services: [
+              {
+                name: "database",
+                image: `postgres@sha256:${"c".repeat(64)}`,
+                generatedEnvironment: [{ key: "POSTGRES_PASSWORD", kind: "password" }],
+              },
+            ],
+          }),
+        )
+        .pipe(Effect.exit, Effect.forkScoped);
+      yield* Effect.promise(() => atPreview);
+      // Issued while the provision is parked mid-way, past the backend.
+      const stopping = yield* manager
+        .stop("docker", THREAD_ID)
+        .pipe(Effect.exit, Effect.forkScoped);
+      // Give the stop every opportunity to run to completion while the
+      // provision is still parked. Its executor calls all settle on the
+      // microtask queue, so yielding repeatedly is enough for it to finish --
+      // unless something is holding it back, which is the property under test.
+      yield* Effect.forEach(Array.from({ length: 200 }), () => Effect.yieldNow, {
+        discard: true,
+      });
+      releasePreview();
+      yield* Fiber.join(provisioning);
+      yield* Fiber.join(stopping);
+
+      // Everything the provision created is gone, including the sidecars it
+      // published after the backend step the old guard synchronized on.
+      const removed = new Set(forcedRemovals(executor));
+      for (const name of created(executor)) expect(removed).toContain(name);
+      // ...and no gateway state outlives the containers: no preview routes, no
+      // readable credential grants, no service status, no per-thread proxy.
+      const status = desktopGateway.status(THREAD_ID);
+      expect(status.previewRoutes).toEqual([]);
+      expect(status.serviceCredentialGrants).toEqual([]);
+      expect(status.services).toEqual([]);
+      expect(desktopGateway.previewProxy(THREAD_ID)).toBeNull();
+    }),
+  );
+
+  it.effect("stops a thread that has no provision in flight", () =>
+    Effect.gen(function* () {
+      // The lock must not require a provision to exist: a stop for a thread
+      // this manager generation never provisioned (a server restart, an
+      // already-stopped thread) still has to run its teardown rather than wait
+      // on something that will never arrive.
+      process.env.T3_SANDBOX_DESKTOP = "disabled";
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      delete process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE;
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
+
+      yield* manager.stop("docker", THREAD_ID);
+
+      // A second stop, after a real provision, still tears the container down:
+      // the lock is released rather than stranded by the no-op above.
+      yield* manager.provision(provisionInput());
+      yield* manager.stop("docker", THREAD_ID);
+      expect(forcedRemovals(executor)).toContain(CONTAINER_NAME);
     }),
   );
 });
