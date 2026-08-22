@@ -168,7 +168,11 @@ socket, proves nothing.
   The two are separate variables on purpose. While one switch governed both,
   there was no working bounded setting: enabling quotas made provisioning fail
   on remote podman, and disabling them also discarded the volume quotas that
-  work over the socket. Full description in
+  work over the socket. A host that set the old single switch to `disabled`
+  keeps its volume quotas off after the split: with
+  `T3_SANDBOX_VOLUME_STORAGE_QUOTA` unset, both this script and the server
+  still honour `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled` as also disabling
+  them, and warn to migrate. Full description in
   [sandbox-runtime.md](./sandbox-runtime.md), section "Disk quotas".
 
 - **`exec --interactive` stdin round-trip.** Provider sessions speak their entire

@@ -24,6 +24,7 @@ import {
   validateHook,
 } from "./validation.ts";
 import { CREDENTIAL_PROXY_ALIAS } from "./SandboxCredentialProxy.ts";
+import * as Effect from "effect/Effect";
 import * as NodeCrypto from "node:crypto";
 
 const MANAGED_LABEL = "com.t3tools.sandbox.managed=true";
@@ -1564,6 +1565,11 @@ function containerStorageQuotaEnabled(): boolean {
  * (rootless podman needs `CAP_SYS_ADMIN` in the filesystem's owning namespace
  * for XFS project quotas, or a privileged helper): there, a quota-bearing
  * volume create fails outright rather than going quietly unenforced.
+ *
+ * With the new variable unset, a legacy `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=
+ * disabled` is honoured as the same opt-out -- that one switch used to gate
+ * both controls, and the hosts that set it are precisely the ones that cannot
+ * administer quotas.
  */
 /**
  * Names the switch when a host simply cannot administer XFS project quotas.
@@ -1578,8 +1584,35 @@ function quotaUnsupportedHint(args: ReadonlyArray<string>, stderr: string): stri
   return " (this host cannot administer XFS project quotas; set T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled to provision without per-volume limits)";
 }
 
+/**
+ * Warned at most once per process: the answer is read several times per
+ * provision, and a deprecation notice repeated per volume create would bury
+ * the provisioning log it is meant to appear in.
+ */
+let warnedLegacyVolumeQuotaOptOut = false;
+
 function volumeStorageQuotaEnabled(): boolean {
-  return process.env.T3_SANDBOX_VOLUME_STORAGE_QUOTA?.trim().toLowerCase() !== "disabled";
+  const explicit = process.env.T3_SANDBOX_VOLUME_STORAGE_QUOTA?.trim().toLowerCase();
+  // An explicit value for the variable that governs volume quotas always wins,
+  // including an explicit re-enable on a host that still sets the legacy one.
+  if (explicit !== undefined && explicit.length > 0) return explicit !== "disabled";
+  // Before the two controls were split, `T3_SANDBOX_CONTAINER_STORAGE_QUOTA`
+  // gated BOTH, and hosts that cannot administer XFS project quotas were
+  // documented to set it to `disabled`. Honouring only the new variable would
+  // silently re-enable volume quotas on exactly those hosts at upgrade time,
+  // and every provision would then die on the first quota-bearing `volume
+  // create`. The legacy value keeps them off until the host is migrated.
+  if (process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA?.trim().toLowerCase() !== "disabled")
+    return true;
+  if (!warnedLegacyVolumeQuotaOptOut) {
+    warnedLegacyVolumeQuotaOptOut = true;
+    Effect.runFork(
+      Effect.logWarning(
+        "T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled is deprecated for volume quotas; set T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled instead",
+      ),
+    );
+  }
+  return false;
 }
 
 /**

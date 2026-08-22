@@ -408,6 +408,36 @@ describe("container run flags", () => {
     expect(run.args).toContain("--read-only");
   });
 
+  it("keeps volume quotas off on a host that only set the legacy opt-out", async () => {
+    // Before the split, T3_SANDBOX_CONTAINER_STORAGE_QUOTA gated BOTH controls,
+    // and hosts that cannot administer XFS project quotas were documented to
+    // set it to `disabled`. Reading only the new variable would silently
+    // re-enable volume quotas on exactly those hosts at upgrade time, and every
+    // provision would then die on the first quota-bearing `volume create`.
+    process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA = "disabled";
+    delete process.env.T3_SANDBOX_VOLUME_STORAGE_QUOTA;
+    const executor = new FakeExecutor();
+    await new ContainerSandboxBackend("podman", executor).ensureReady(provisionInput());
+
+    expect(quotaBearingVolumeCreates(executor)).toHaveLength(0);
+    expect(
+      executor.commands.some(
+        (command) => command.args[0] === "volume" && command.args[1] === "inspect",
+      ),
+    ).toBe(false);
+  });
+
+  it("lets an explicit volume flag override the legacy opt-out", async () => {
+    // The legacy value is only a fallback for hosts that have not migrated. An
+    // operator who has set the new variable has said what they want.
+    process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA = "disabled";
+    process.env.T3_SANDBOX_VOLUME_STORAGE_QUOTA = "enabled";
+    const executor = new FakeExecutor();
+    await new ContainerSandboxBackend("podman", executor).ensureReady(provisionInput());
+
+    expect(quotaBearingVolumeCreates(executor)).toHaveLength(2);
+  });
+
   it("configures a repo-local git identity right after the thread branch is created", async () => {
     process.env.T3_SANDBOX_GIT_USER_NAME = "Sandbox Bot";
     process.env.T3_SANDBOX_GIT_USER_EMAIL = "sandbox@example.test";

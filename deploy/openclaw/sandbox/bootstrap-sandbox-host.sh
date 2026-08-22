@@ -95,11 +95,29 @@ readonly CONTAINER_STORAGE_QUOTA
 # these are the real per-thread disk bound in this deployment and they work
 # over the socket. Only disable it on a host where rootless podman cannot
 # administer XFS project quotas at all -- and accept unbounded thread disk.
+#
+# With it unset, a legacy T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled is
+# honoured as the same opt-out, exactly as the backend does. That one switch
+# used to gate BOTH controls, and the hosts documented to set it to `disabled`
+# are precisely the ones that cannot administer quotas -- reading only the new
+# variable would re-enable volume quotas underneath them at upgrade time and
+# fail every check in step 8b/8c.
+LEGACY_VOLUME_QUOTA_OPT_OUT=0
 case "${T3_SANDBOX_VOLUME_STORAGE_QUOTA:-}" in
   [Dd][Ii][Ss][Aa][Bb][Ll][Ee][Dd]) VOLUME_STORAGE_QUOTA=0 ;;
+  "")
+    case "${T3_SANDBOX_CONTAINER_STORAGE_QUOTA:-}" in
+      [Dd][Ii][Ss][Aa][Bb][Ll][Ee][Dd])
+        VOLUME_STORAGE_QUOTA=0
+        LEGACY_VOLUME_QUOTA_OPT_OUT=1
+        ;;
+      *) VOLUME_STORAGE_QUOTA=1 ;;
+    esac
+    ;;
   *) VOLUME_STORAGE_QUOTA=1 ;;
 esac
 readonly VOLUME_STORAGE_QUOTA
+readonly LEGACY_VOLUME_QUOTA_OPT_OUT
 
 STEPS="${STEPS:-1,2,3,4,5,6,7,8,9}"
 
@@ -766,6 +784,10 @@ if wants_step 8; then
   # option string with the leading "o=" stripped, so the runtime must echo it
   # back verbatim -- not normalised, not reordered.
   if [ "$VOLUME_STORAGE_QUOTA" = 0 ]; then
+    if [ "$LEGACY_VOLUME_QUOTA_OPT_OUT" = 1 ]; then
+      warn "T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled is deprecated for volume quotas;"
+      warn "set T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled instead (here and on the server)."
+    fi
     info "8b. volume quota with echo-back -- SKIPPED (T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled)"
     as_service_user podman volume create \
       --label com.t3tools.sandbox.managed=true "$V_VOL" >/dev/null ||

@@ -52,6 +52,18 @@ remote podman, and disabling it also discarded the volume quotas that do work.
 `bootstrap-sandbox-host.sh` step 8 reads both variables with the same defaults,
 so its verification mirrors what the server will issue.
 
+**Upgrading from the single switch.** While one variable governed both, a host
+that could not administer XFS project quotas was told to set
+`T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled`. So that the split does not
+silently re-enable volume quotas on exactly those hosts — where every provision
+would then fail on the first quota-bearing `volume create` — a `disabled` there
+is still honoured as disabling the volume quotas **when
+`T3_SANDBOX_VOLUME_STORAGE_QUOTA` is unset**, with a deprecation warning naming
+the new variable. An explicit `T3_SANDBOX_VOLUME_STORAGE_QUOTA` always wins,
+including an explicit `enabled` on a host that still sets the legacy one.
+The fallback is a migration aid, not a supported configuration: set
+`T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled` on such hosts.
+
 ## Lifecycle
 
 A sandboxed thread's container moves through `provisioning → ready`, then
