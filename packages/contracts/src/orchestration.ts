@@ -1106,6 +1106,32 @@ const SandboxStopCommand = Schema.Struct({
   type: Schema.Literal("sandbox.stop"),
   commandId: CommandId,
   threadId: ThreadId,
+  /**
+   * Stop the sandbox even while a human holds the desktop takeover lease,
+   * revoking it.
+   *
+   * SERVER-ONLY. Absent from `ClientSandboxStopCommand`, which is what the
+   * client union admits, so a remote caller cannot pull the desktop out from
+   * under whoever is using it.
+   *
+   * An ordinary stop is refused under a lease on purpose: a takeover means a
+   * person is at the keyboard, and their session must not be closed by a
+   * background reactor or another client. Thread deletion is the one caller
+   * that cannot honour that. The thread is gone; nothing will ever resume it,
+   * nothing will ever release the lease, and reconcile still counts the
+   * deleted thread as expected, so orphan removal skips its container too --
+   * the sandbox runs forever. Deletion therefore sends this variant, which
+   * takes the same `stopping` transition and clears the controller.
+   */
+  force: Schema.optional(Schema.Boolean),
+  createdAt: IsoDateTime,
+});
+
+/** The stop a client may ask for: never one that revokes a takeover lease. */
+const ClientSandboxStopCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
   createdAt: IsoDateTime,
 });
 const SandboxBranchExportCommand = Schema.Struct({
@@ -1212,7 +1238,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   SandboxPauseCommand,
   SandboxTakeoverCommand,
   SandboxResumeCommand,
-  SandboxStopCommand,
+  ClientSandboxStopCommand,
   SandboxBranchExportCommand,
   SandboxWorkerSpawnCommand,
   SandboxWorkerStatusCommand,

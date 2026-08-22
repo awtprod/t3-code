@@ -91,6 +91,12 @@ export const make = Effect.gen(function* () {
           type: "sandbox.stop",
           commandId: CommandId.make(`server:thread-deletion-sandbox-stop:${id}`),
           threadId,
+          // A plain stop is refused while a human holds the desktop takeover
+          // lease. For a deleted thread that refusal is permanent: nothing
+          // resumes it, nothing releases the lease, and reconcile still counts
+          // it as expected so orphan removal skips the container -- it runs
+          // forever. Deletion revokes the lease instead.
+          force: true,
           createdAt: yield* DateTime.now.pipe(Effect.map(DateTime.formatIso)),
         });
       }),
