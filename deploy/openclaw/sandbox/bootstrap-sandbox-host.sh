@@ -76,18 +76,30 @@ readonly PODMAN_STATIC_MANIFEST_DIR=/usr/local/share/podman-static
 # service user. Override for an air-gapped host with a local mirror.
 VERIFY_IMAGE="${VERIFY_IMAGE:-docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc}"
 
-# Mirrors T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled (see 50-sandbox.conf).
-# Set this before running Step 8 on a host where the backend is (or will be)
-# deployed with quotas disabled -- e.g. because rootless podman cannot
-# administer XFS project quotas here. With it set, Step 8 skips the
-# quota-create/enforcement checks and drops --storage-opt from the hardened
-# run, so verification mirrors what the backend will actually issue instead
-# of hard-failing on a known, accepted limitation.
+# Two independent quota controls, mirroring the backend exactly (see
+# ContainerSandboxBackend.ts and 50-sandbox.conf). They used to be one switch
+# here and in the backend, which left no working bounded configuration: over
+# `podman --remote` the container flag is rejected outright, and turning it off
+# also threw away the volume quotas that do work.
+#
+# T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled adds `--storage-opt size=` to the
+# hardened run. OFF by default: everything in step 8 goes through the wrapper,
+# which is `podman --remote` by construction, and remote podman rejects it.
 case "${T3_SANDBOX_CONTAINER_STORAGE_QUOTA:-}" in
-  [Dd][Ii][Ss][Aa][Bb][Ll][Ee][Dd]) STORAGE_QUOTA_DISABLED=1 ;;
-  *) STORAGE_QUOTA_DISABLED=0 ;;
+  [Ee][Nn][Aa][Bb][Ll][Ee][Dd]) CONTAINER_STORAGE_QUOTA=1 ;;
+  *) CONTAINER_STORAGE_QUOTA=0 ;;
 esac
-readonly STORAGE_QUOTA_DISABLED
+readonly CONTAINER_STORAGE_QUOTA
+# T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled drops the volume `--opt o=size=`
+# quotas and skips their create/echo-back/enforcement checks. ON by default:
+# these are the real per-thread disk bound in this deployment and they work
+# over the socket. Only disable it on a host where rootless podman cannot
+# administer XFS project quotas at all -- and accept unbounded thread disk.
+case "${T3_SANDBOX_VOLUME_STORAGE_QUOTA:-}" in
+  [Dd][Ii][Ss][Aa][Bb][Ll][Ee][Dd]) VOLUME_STORAGE_QUOTA=0 ;;
+  *) VOLUME_STORAGE_QUOTA=1 ;;
+esac
+readonly VOLUME_STORAGE_QUOTA
 
 STEPS="${STEPS:-1,2,3,4,5,6,7,8,9}"
 
@@ -695,8 +707,8 @@ if wants_step 8; then
   # 20GiB disk limit. The backend compares `volume inspect` output against the
   # option string with the leading "o=" stripped, so the runtime must echo it
   # back verbatim -- not normalised, not reordered.
-  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
-    info "8b. volume quota with echo-back -- SKIPPED (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled)"
+  if [ "$VOLUME_STORAGE_QUOTA" = 0 ]; then
+    info "8b. volume quota with echo-back -- SKIPPED (T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled)"
     as_service_user podman volume create \
       --label com.t3tools.sandbox.managed=true "$V_VOL" >/dev/null ||
       die "podman volume create (no quota) failed"
@@ -710,8 +722,9 @@ if wants_step 8; then
        If this host's rootless podman cannot administer XFS project quotas
        (confirm with: sudo xfs_quota -x -c 'report -p' $SANDBOX_MOUNT succeeding
        as real root while this fails), re-run with
-       T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled to accept that limitation
-       instead of enforcing per-thread quotas."
+       T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled to accept that limitation
+       instead of enforcing per-thread quotas -- and set the same variable on
+       the server, or every provision will fail on the same volume create."
     readback="$(as_service_user podman volume inspect --format '{{index .Options "o"}}' "$V_VOL")"
     [ "$readback" = "${V_QUOTA#o=}" ] ||
       die "volume quota was not echoed back verbatim.
@@ -726,8 +739,8 @@ if wants_step 8; then
   # The echo-back above passes even when nothing is enforced (that is exactly the
   # rootless-docker trap). The only trustworthy check is writing past the limit
   # and demanding failure. A small volume keeps this fast.
-  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
-    info "8c. quota enforcement -- SKIPPED (no quota is applied when disabled; nothing to enforce)"
+  if [ "$VOLUME_STORAGE_QUOTA" = 0 ]; then
+    info "8c. quota enforcement -- SKIPPED (no volume quota is applied when disabled; nothing to enforce)"
   else
     info "8c. quota enforcement (writing past the limit must fail)"
     V_SMALL="t3-quota-${V_SUFFIX}"
@@ -775,23 +788,22 @@ if wants_step 8; then
     "$VERIFY_IMAGE" sleep 300 >/dev/null || die "could not start the DNS peer container"
 
   # -- 8e. hardened run, mirroring the backend's workspace container flags ----
-  # --storage-opt size= mirrors ContainerSandboxBackend.ts (see the comment at
-  # its runArgs, ~line 299): `podman --remote` rejects `--storage-opt size=`,
-  # so deployments that talk to a user socket set
-  # T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled and the backend omits the pair.
-  # Everything in this step runs through the wrapper, which is `podman --remote`
-  # by construction, so THIS deployment is exactly that case: default to
-  # omitting the pair, same as the backend will at runtime. Export
-  # T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled to exercise the flag on a
-  # non-remote setup. Dropping it costs no disk bound: the rootfs is
-  # --read-only and every writable path is a volume under the XFS prjquota
-  # `o=size=` quotas that 8b/8c prove are enforced -- those volume-level quotas
-  # are the real disk limit in this deployment, not --storage-opt.
+  # --storage-opt size= mirrors ContainerSandboxBackend.ts: `podman --remote`
+  # rejects it, so the backend leaves it off unless
+  # T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled. Everything in this step runs
+  # through the wrapper, which is `podman --remote` by construction, so THIS
+  # deployment is exactly the case the default is for. Omitting it costs no
+  # disk bound: the rootfs is --read-only and every writable path is a volume
+  # under the XFS prjquota `o=size=` quotas that 8b/8c prove are enforced --
+  # those volume-level quotas are the real disk limit here, not --storage-opt,
+  # and they are governed by their own T3_SANDBOX_VOLUME_STORAGE_QUOTA.
   info "8e. hardened container run"
-  storage_opt_args=(--storage-opt "size=21474836480")
-  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
-    storage_opt_args=()
-    info "    omitting --storage-opt (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled)"
+  storage_opt_args=()
+  if [ "$CONTAINER_STORAGE_QUOTA" = 1 ]; then
+    storage_opt_args=(--storage-opt "size=21474836480")
+    info "    including --storage-opt (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled)"
+  else
+    info "    omitting --storage-opt (rejected by podman --remote; the default)"
   fi
   as_service_user podman run --detach --name "$V_CTR" \
     --label com.t3tools.sandbox.managed=true \

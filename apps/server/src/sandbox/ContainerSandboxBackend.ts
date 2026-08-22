@@ -291,12 +291,12 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           MANAGED_LABEL,
           "--label",
           `${THREAD_LABEL}=${threadId}`,
-          ...(storageQuotaDisabled() ? [] : ["--opt", desktopQuota]),
+          ...(volumeStorageQuotaEnabled() ? ["--opt", desktopQuota] : []),
           desktopVolumeName,
         ],
         30_000,
       );
-      if (!storageQuotaDisabled()) {
+      if (volumeStorageQuotaEnabled()) {
         const desktopQuotaReadback = await this.#mustRun(
           ["volume", "inspect", "--format", `{{index .Options "o"}}`, desktopVolumeName],
           10_000,
@@ -313,12 +313,12 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           MANAGED_LABEL,
           "--label",
           `${THREAD_LABEL}=${threadId}`,
-          ...(storageQuotaDisabled() ? [] : ["--opt", workspaceQuota]),
+          ...(volumeStorageQuotaEnabled() ? ["--opt", workspaceQuota] : []),
           workspaceVolumeName,
         ],
         30_000,
       );
-      if (!storageQuotaDisabled()) {
+      if (volumeStorageQuotaEnabled()) {
         const workspaceQuotaReadback = await this.#mustRun(
           ["volume", "inspect", "--format", `{{index .Options "o"}}`, workspaceVolumeName],
           10_000,
@@ -386,11 +386,11 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         String(limits.memoryBytes),
         "--pids-limit",
         String(limits.processCount),
-        // `podman --remote` rejects `--storage-opt size=`, so deployments that
-        // talk to a user socket opt out. Dropping it is safe: the container
-        // rootfs is `--read-only`, and every writable path is either a
-        // quota'd volume (/workspace, /thread-data) or a size-bounded tmpfs.
-        ...(storageQuotaDisabled() ? [] : ["--storage-opt", `size=${limits.diskBytes}`]),
+        // Off by default: `podman --remote` rejects `--storage-opt size=` and
+        // every socket deployment is remote. Safe to omit -- the rootfs is
+        // `--read-only`, and every writable path is either a quota'd volume
+        // (/workspace, /thread-data) or a size-bounded tmpfs.
+        ...(containerStorageQuotaEnabled() ? ["--storage-opt", `size=${limits.diskBytes}`] : []),
         "--read-only",
         "--init",
         "--tmpfs",
@@ -1520,15 +1520,39 @@ function makeReady(
 }
 
 /**
- * `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled` omits the container's
- * `--storage-opt` pair and the workspace/desktop volumes' `--opt o=size=`
- * pair. Rootless podman needs `CAP_SYS_ADMIN` in the filesystem's owning
- * namespace to administer XFS project quotas, which it never has -- so on
- * hosts without a privileged quota helper, every quota-bearing volume create
- * fails outright, not just the container's own storage-opt.
+ * Whether the container's writable layer carries `--storage-opt size=`.
+ *
+ * Off unless `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled`. `podman --remote`
+ * rejects the flag outright, and every socket deployment is remote by
+ * construction (see `deploy/openclaw/sandbox/podman-wrapper.sh`), so a default
+ * of "on" made provisioning fail on exactly the hosts this runtime targets.
+ * Dropping it costs no disk bound: the rootfs is `--read-only`, and every
+ * writable path is either a quota-bearing volume or a size-bounded tmpfs.
+ *
+ * Deployments on a local daemon that does accept it can opt back in.
  */
-function storageQuotaDisabled(): boolean {
-  return process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA?.trim().toLowerCase() === "disabled";
+function containerStorageQuotaEnabled(): boolean {
+  return process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA?.trim().toLowerCase() === "enabled";
+}
+
+/**
+ * Whether the workspace and desktop volumes carry `--opt o=size=` XFS project
+ * quotas.
+ *
+ * On unless `T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled`. These are the real
+ * per-thread disk bound in a socket deployment, and they work over
+ * `--remote` -- which is why they are governed separately from the container
+ * flag above. A single switch over both left no configuration that was
+ * simultaneously working and bounded: enabling it broke provisioning on remote
+ * podman, and disabling it also threw away the volume limits that do hold.
+ *
+ * The opt-out exists for hosts where quotas cannot be administered at all
+ * (rootless podman needs `CAP_SYS_ADMIN` in the filesystem's owning namespace
+ * for XFS project quotas, or a privileged helper): there, a quota-bearing
+ * volume create fails outright rather than going quietly unenforced.
+ */
+function volumeStorageQuotaEnabled(): boolean {
+  return process.env.T3_SANDBOX_VOLUME_STORAGE_QUOTA?.trim().toLowerCase() !== "disabled";
 }
 
 /**

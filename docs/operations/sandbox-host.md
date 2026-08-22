@@ -132,7 +132,9 @@ socket, proves nothing.
   refuses to provision otherwise. Catches a socket pointing at a rootful daemon.
 - **Volume quota echo-back.** Creates a volume with `--opt o=size=…` using the
   same byte value the backend computes, then checks `volume inspect` returns the
-  option verbatim. The backend treats any difference as fatal.
+  option verbatim. The backend treats any difference as fatal. Governed by
+  `T3_SANDBOX_VOLUME_STORAGE_QUOTA` (on by default); `disabled` skips this
+  check and the enforcement check below, and must be set on the server too.
 - **Quota enforcement.** Writes 64 MiB into a volume with a 16 MiB quota and
   demands failure. This is the check that matters: the echo-back above _also
   passes on rootless docker_, where nothing is enforced. Anything less than
@@ -147,11 +149,19 @@ socket, proves nothing.
   `--user 1000:1000`, `--tmpfs /tmp`, `--cpus`, `--memory`, `--pids-limit`.
   Any one of these being unsupported fails provisioning. `--storage-opt size=`
   is deliberately **omitted** by default: `podman --remote` rejects it, so the
-  backend drops the pair on socket deployments
-  (`T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled`, see
-  `ContainerSandboxBackend.ts`), and the verification mirrors the backend
-  exactly. The XFS project quotas on the workspace volumes — proven enforced by
-  the quota checks above — are the real disk bound.
+  backend leaves it off unless `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled`
+  (see `ContainerSandboxBackend.ts`), and this step reads the same variable
+  with the same default so the verification mirrors the backend exactly. The
+  XFS project quotas on the workspace volumes — proven enforced by the quota
+  checks above, and controlled separately by
+  `T3_SANDBOX_VOLUME_STORAGE_QUOTA` — are the real disk bound.
+
+  The two are separate variables on purpose. While one switch governed both,
+  there was no working bounded setting: enabling quotas made provisioning fail
+  on remote podman, and disabling them also discarded the volume quotas that
+  work over the socket. Full description in
+  [sandbox-runtime.md](./sandbox-runtime.md), section "Disk quotas".
+
 - **`exec --interactive` stdin round-trip.** Provider sessions speak their entire
   protocol over that pipe. If stdin does not survive the socket, providers hang
   with no error — the worst failure mode to debug in production. Also checks

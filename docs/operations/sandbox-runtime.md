@@ -19,9 +19,38 @@ Two variables gate everything, both digest-pinned images:
 
 Everything else is optional: `T3_SANDBOX_EGRESS_PROXY_IMAGE` (no egress
 without it), `T3_SANDBOX_CREDENTIAL_PROXY_IMAGE`, `T3_SANDBOX_DESKTOP=disabled`
-for headless hosts, `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled` for hosts
-that cannot enforce XFS project quotas. The full list with defaults is in the
-repository root `.env.example`.
+for headless hosts. The full list with defaults is in the repository root
+`.env.example`.
+
+## Disk quotas
+
+Two independent controls, because the two mechanisms behave differently over a
+remote podman socket:
+
+- `T3_SANDBOX_VOLUME_STORAGE_QUOTA` — the XFS project quotas on the thread's
+  workspace and desktop volumes (`--opt o=size=`). **On by default.** These
+  work over `podman --remote` and are the real per-thread disk bound. Each
+  quota is read back after the volume is created, and a runtime that does not
+  echo it verbatim fails the provision rather than pretending to enforce it.
+  Set `disabled` only on a host where rootless podman cannot administer XFS
+  project quotas at all — it needs `CAP_SYS_ADMIN` in the filesystem's owning
+  namespace, or a privileged helper — where a quota-bearing volume create
+  fails outright instead of going quietly unenforced. Disabling it leaves
+  thread disk use unbounded.
+- `T3_SANDBOX_CONTAINER_STORAGE_QUOTA` — the container writable layer's
+  `--storage-opt size=`. **Off by default**, enable with `enabled`.
+  `podman --remote` rejects the flag, and every socket deployment is remote by
+  construction (see `deploy/openclaw/sandbox/podman-wrapper.sh`), so leaving it
+  on would fail every provision. Omitting it loses nothing: the container
+  rootfs is `--read-only` and every writable path is either one of the
+  quota-bearing volumes above or a size-bounded tmpfs. Turn it on only on a
+  local daemon that accepts it.
+
+These were a single switch until they were split. That configuration had no
+setting that was both working and bounded: enabling it broke provisioning on
+remote podman, and disabling it also discarded the volume quotas that do work.
+`bootstrap-sandbox-host.sh` step 8 reads both variables with the same defaults,
+so its verification mirrors what the server will issue.
 
 ## Lifecycle
 

@@ -89,6 +89,7 @@ const MUTATED_ENV = [
   "T3_SANDBOX_PREVIEW_PROXY_IMAGE",
   "T3_SANDBOX_CREDENTIAL_PROXY_IMAGE",
   "T3_SANDBOX_CONTAINER_STORAGE_QUOTA",
+  "T3_SANDBOX_VOLUME_STORAGE_QUOTA",
   "T3_SANDBOX_GIT_USER_NAME",
   "T3_SANDBOX_GIT_USER_EMAIL",
   "T3_SANDBOX_ANTHROPIC_AUTH_TOKEN",
@@ -335,48 +336,76 @@ describe("restoring a re-provisioned sandbox", () => {
 });
 
 describe("container run flags", () => {
-  it("applies the disk quota by default and omits it when explicitly disabled", async () => {
-    const withQuota = new FakeExecutor();
-    delete process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA;
-    await new ContainerSandboxBackend("podman", withQuota).ensureReady(provisionInput());
-    const defaultRun = withQuota.commands.find(
-      (command) => command.args[0] === "run" && command.args.includes(SANDBOX_IMAGE),
-    )!;
-    expect(defaultRun.args).toEqual(
-      expect.arrayContaining(["--storage-opt", `size=${20 * 1024 ** 3}`]),
+  /** Volume creates that carry an XFS project quota. */
+  const quotaBearingVolumeCreates = (executor: FakeExecutor) =>
+    executor.commands.filter(
+      (command) =>
+        command.args[0] === "volume" &&
+        command.args[1] === "create" &&
+        command.args.includes("--opt"),
     );
-    // Both quota-bearing volume creates also carry `--opt o=size=...` by default.
-    const defaultVolumeCreates = withQuota.commands.filter(
-      (command) => command.args[0] === "volume" && command.args[1] === "create",
-    );
-    expect(defaultVolumeCreates).toHaveLength(2);
-    for (const create of defaultVolumeCreates) expect(create.args).toContain("--opt");
 
-    // `podman --remote` rejects `--storage-opt size=`; the opt-out drops both args.
-    // Rootless podman also cannot administer XFS project quotas on volumes it
-    // doesn't own the filesystem's namespace for, so the same opt-out must
-    // drop `--opt o=size=...` from both volume creates -- otherwise they fail
-    // outright ("Filesystem does not support Project Quota") instead of just
-    // going unenforced.
-    process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA = "disabled";
-    const withoutQuota = new FakeExecutor();
-    await new ContainerSandboxBackend("podman", withoutQuota).ensureReady(provisionInput());
-    const gatedRun = withoutQuota.commands.find(
+  it("keeps volume quotas on and the container storage-opt off by default", async () => {
+    // The two used to share one switch, which left no configuration that was
+    // both working and bounded: `podman --remote` rejects `--storage-opt
+    // size=` so enabling it failed provisioning outright, and disabling it
+    // also dropped the volume `--opt o=size=` limits that DO work over the
+    // socket. They are independent now, defaulting to the combination a
+    // remote-podman deployment actually needs.
+    delete process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA;
+    delete process.env.T3_SANDBOX_VOLUME_STORAGE_QUOTA;
+    const executor = new FakeExecutor();
+    await new ContainerSandboxBackend("podman", executor).ensureReady(provisionInput());
+
+    const run = executor.commands.find(
       (command) => command.args[0] === "run" && command.args.includes(SANDBOX_IMAGE),
     )!;
-    expect(gatedRun.args).not.toContain("--storage-opt");
-    expect(gatedRun.args).toContain("--read-only");
-    const gatedVolumeCreates = withoutQuota.commands.filter(
+    expect(run.args).not.toContain("--storage-opt");
+    // Both writable volumes are still bounded, and each quota is read back.
+    expect(quotaBearingVolumeCreates(executor)).toHaveLength(2);
+    expect(
+      executor.commands.filter(
+        (command) => command.args[0] === "volume" && command.args[1] === "inspect",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("applies the container storage-opt only when explicitly enabled", async () => {
+    // For a deployment on a local daemon that accepts the flag.
+    process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA = "enabled";
+    const executor = new FakeExecutor();
+    await new ContainerSandboxBackend("podman", executor).ensureReady(provisionInput());
+    const run = executor.commands.find(
+      (command) => command.args[0] === "run" && command.args.includes(SANDBOX_IMAGE),
+    )!;
+    expect(run.args).toEqual(expect.arrayContaining(["--storage-opt", `size=${20 * 1024 ** 3}`]));
+    // Enabling the container flag does not touch the volume quotas.
+    expect(quotaBearingVolumeCreates(executor)).toHaveLength(2);
+  });
+
+  it("drops volume quotas only when they are disabled on their own flag", async () => {
+    // Rootless podman needs CAP_SYS_ADMIN in the filesystem's owning namespace
+    // to administer XFS project quotas; where it cannot, a quota-bearing
+    // volume create fails outright rather than going unenforced.
+    process.env.T3_SANDBOX_VOLUME_STORAGE_QUOTA = "disabled";
+    const executor = new FakeExecutor();
+    await new ContainerSandboxBackend("podman", executor).ensureReady(provisionInput());
+
+    const volumeCreates = executor.commands.filter(
       (command) => command.args[0] === "volume" && command.args[1] === "create",
     );
-    expect(gatedVolumeCreates).toHaveLength(2);
-    for (const create of gatedVolumeCreates) expect(create.args).not.toContain("--opt");
+    expect(volumeCreates).toHaveLength(2);
+    for (const create of volumeCreates) expect(create.args).not.toContain("--opt");
     // No readback inspect for either volume when there is no quota to verify.
     expect(
-      withoutQuota.commands.some(
+      executor.commands.some(
         (command) => command.args[0] === "volume" && command.args[1] === "inspect",
       ),
     ).toBe(false);
+    const run = executor.commands.find(
+      (command) => command.args[0] === "run" && command.args.includes(SANDBOX_IMAGE),
+    )!;
+    expect(run.args).toContain("--read-only");
   });
 
   it("configures a repo-local git identity right after the thread branch is created", async () => {

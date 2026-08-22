@@ -83,8 +83,6 @@ describe("ContainerSandboxBackend", () => {
         "no-new-privileges",
         "--pids-limit",
         "512",
-        "--storage-opt",
-        `size=${20 * 1024 ** 3}`,
         // Swap pinned to the memory limit: docker's default of 2x memory
         // would let the workload consume double its configured ceiling.
         "--memory",
@@ -93,6 +91,10 @@ describe("ContainerSandboxBackend", () => {
         String(4 * 1024 ** 3),
       ]),
     );
+    // `--storage-opt size=` is off unless a deployment opts in: podman
+    // --remote rejects it, and the writable-layer bound it would add is
+    // already covered by the read-only rootfs plus quota'd volumes.
+    expect(run.args).not.toContain("--storage-opt");
     expect(run.args.join(" ")).not.toContain("type=bind");
     expect(run.args.join(" ")).not.toContain("/var/run/docker.sock");
     expect(executor.commands.find((command) => command.args[0] === "network")?.args).toContain(
