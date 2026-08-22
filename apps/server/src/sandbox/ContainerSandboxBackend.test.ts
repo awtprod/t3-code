@@ -78,6 +78,40 @@ function successfulExecutor(
   });
 }
 
+/**
+ * Answers a `find` the way the container's own `find` would, against a fixed
+ * set of directories.
+ *
+ * The probe under test is entirely about WHICH directory names it asks for, so
+ * a responder that returned a canned hit would pass no matter what the argv
+ * said. This reads the `-name` predicates and the depth bounds out of the
+ * command and matches them, so a probe that stops asking for a provider's
+ * layout stops finding that provider's store.
+ */
+function findAgainst(
+  command: SandboxCommand,
+  present: ReadonlyArray<string>,
+): SandboxCommandResult {
+  const args = command.args;
+  const root = args[args.indexOf("find") + 1] ?? "";
+  const names = new Set(
+    args.flatMap((value, index) => (value === "-name" ? [args[index + 1] ?? ""] : [])),
+  );
+  const bound = (flag: string, fallback: number) => {
+    const at = args.indexOf(flag);
+    return at === -1 ? fallback : Number.parseInt(args[at + 1] ?? "", 10);
+  };
+  const minimum = bound("-mindepth", 0);
+  const maximum = bound("-maxdepth", Number.POSITIVE_INFINITY);
+  const matched = present.filter((path) => {
+    if (!path.startsWith(`${root}/`)) return false;
+    const segments = path.slice(root.length + 1).split("/");
+    if (segments.length < minimum || segments.length > maximum) return false;
+    return names.has(segments.at(-1) ?? "");
+  });
+  return { exitCode: 0, stdout: matched.map((path) => `${path}\n`).join(""), stderr: "" };
+}
+
 describe("ContainerSandboxBackend", () => {
   it("names the opt-out when the host cannot administer project quotas", async () => {
     // Volume quotas are on by default, and podman's own wording says what
@@ -353,6 +387,51 @@ describe("ContainerSandboxBackend", () => {
     // user their branch.
     expect(ready.containerName).toContain("t3-thread-");
     expect(ready.providerStore).toBe("unavailable");
+  });
+
+  it("reports a restored store for Claude's projects layout, not just Codex's sessions", async () => {
+    // Claude is one of only two providers that can run sandboxed, and it does
+    // not use Codex's `sessions` directory: a default install nests transcripts
+    // under `~/.claude/projects` (the same layout `UsageService` probes for on
+    // the host). A probe that accepted only `sessions` classified EVERY valid
+    // Claude restore as `unavailable`, which clears the thread's resume cursor
+    // -- so a Claude thread silently lost its conversation on every
+    // re-provision, with the archive sitting correctly extracted in the
+    // container.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("find")
+        ? findAgainst(command, ["/thread-data/provider-home/.claude/projects"])
+        : undefined,
+    );
+    const ready = await new ContainerSandboxBackend("docker", executor).ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    expect(ready.providerStore).toBe("restored");
+  });
+
+  it("still reports a restored store for Codex's sessions layout", async () => {
+    // The Claude layout is accepted IN ADDITION to Codex's, not instead of it.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("find")
+        ? findAgainst(command, ["/thread-data/provider-home/.codex/sessions"])
+        : undefined,
+    );
+    const ready = await new ContainerSandboxBackend("docker", executor).ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    expect(ready.providerStore).toBe("restored");
   });
 
   it("coalesces concurrent provisioning and is idempotent once ready", async () => {

@@ -135,6 +135,25 @@ const PROVIDER_STORE_EXCLUDES = [
   ".cache",
 ] as const;
 
+/**
+ * Directory names, anywhere in the top two levels of `PROVIDER_HOME`, whose
+ * presence means a provider's conversation store really is there.
+ *
+ * One name per provider layout, and both providers that can run sandboxed are
+ * covered:
+ *
+ * - `sessions` -- Codex, at `~/.codex/sessions`.
+ * - `projects` -- Claude, at `~/.claude/projects` on a default install and at
+ *   `<config dir>/projects` when the config directory is overridden (the same
+ *   pair `UsageService.resolveClaudeTranscriptDir` probes for on the host).
+ *
+ * Depth 1 is admitted alongside depth 2 for that second Claude shape. Anything
+ * added here must be a directory the CLI itself creates for its transcripts:
+ * a name that also occurs in a checked-out repository would report a
+ * conversation that is not there.
+ */
+const PROVIDER_STORE_DIRECTORIES = ["sessions", "projects"] as const;
+
 export class SandboxRuntimeError extends Error {
   override readonly name = "SandboxRuntimeError";
   readonly stderr: string;
@@ -1003,6 +1022,17 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
    * rather than a content check: what makes a cursor resolvable is the CLI's
    * own session directory being where it left it, and enumerating transcripts
    * would couple this to each provider's on-disk format.
+   *
+   * A union of the layouts rather than one per thread: the provision input
+   * carries no provider identity (the same provider home is handed to whichever
+   * CLI the thread's model selection resolves to, and that selection can change
+   * between turns), so the probe has to accept every store a sandboxed provider
+   * can leave behind. Being permissive is the safe direction here -- the two
+   * failure modes are not symmetric. A missed layout reports `unavailable`,
+   * which CLEARS the thread's resume cursor and silently loses the conversation
+   * on every re-provision; a layout matched too eagerly costs at most one turn
+   * a resume error. `sessions` alone was exactly the missed-layout case for
+   * Claude, one of the two providers that can run sandboxed at all.
    */
   async #providerStorePopulated(containerName: string, timeoutMs: number): Promise<boolean> {
     const probed = await this.#mustExec(
@@ -1012,13 +1042,16 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         args: [
           PROVIDER_HOME,
           "-mindepth",
-          "2",
+          "1",
           "-maxdepth",
           "2",
           "-type",
           "d",
-          "-name",
-          "sessions",
+          "(",
+          ...PROVIDER_STORE_DIRECTORIES.flatMap((name, index) =>
+            index === 0 ? ["-name", name] : ["-o", "-name", name],
+          ),
+          ")",
         ],
         allowNonZeroExit: true,
       },
