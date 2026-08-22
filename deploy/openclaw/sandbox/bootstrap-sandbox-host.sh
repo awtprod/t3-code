@@ -288,6 +288,42 @@ if wants_step 2; then
   # the two never contend.
   trap 'restore_podman_services warn' EXIT
 
+  # Record what each installed file IS and what it CONTAINS, tab-separated:
+  #
+  #   f<TAB><sha256><TAB><path>   regular file
+  #   l<TAB><target><TAB><path>   symlink, by its link target
+  #
+  # A bare list of paths could only ever prove existence, and both of the
+  # damage modes a same-version re-run is meant to repair -- an interrupted
+  # `cp`, a hand-truncated helper -- leave the path present.
+  #
+  # Read from the extracted bundle rather than from /usr/local: identical
+  # contents, and reading the source keeps the record independent of whatever
+  # the copy actually produced.
+  write_podman_manifest() {
+    local bundle_root="$1" manifest="$2" relative absolute
+    : >"$manifest"
+    chmod 0644 "$manifest"
+    while IFS= read -r relative; do
+      absolute="/usr/local${relative#.}"
+      if [ -h "${bundle_root}/${relative#./}" ]; then
+        printf 'l\t%s\t%s\n' "$(readlink "${bundle_root}/${relative#./}")" "$absolute"
+      else
+        printf 'f\t%s\t%s\n' \
+          "$(sha256sum "${bundle_root}/${relative#./}" | cut -d' ' -f1)" "$absolute"
+      fi
+    done < <(cd "$bundle_root" && find . \( -type f -o -type l \) | sort) >>"$manifest"
+  }
+
+  # The path from a manifest line, tolerating the pre-digest format (a bare
+  # path per line) so an upgrade can still remove what an older run installed.
+  manifest_entry_path() {
+    case "$1" in
+      [fl]$'\t'*) printf '%s' "${1#*$'\t'*$'\t'}" ;;
+      *) printf '%s' "$1" ;;
+    esac
+  }
+
   # A function so `trap ... RETURN` actually fires: RETURN traps only run on
   # function (or sourced-script) return, so at top level the temp dir -- ~45MB
   # once the bundle is extracted -- would leak on every run.
@@ -336,6 +372,8 @@ if wants_step 2; then
     manifest="${PODMAN_STATIC_MANIFEST_DIR}/manifest"
     if [ -f "$manifest" ]; then
       while IFS= read -r old; do
+        old="$(manifest_entry_path "$old")"
+        [ -n "$old" ] || continue
         case "$old" in
           /usr/local/*) rm -f "$old" ;;
           *) warn "ignoring suspicious manifest entry '$old'" ;;
@@ -349,7 +387,7 @@ if wants_step 2; then
     # would silently replace the ones this script manages.
     cp -r "${bundle_root}/." /usr/local/
     install -d -o root -g root -m 0755 "$PODMAN_STATIC_MANIFEST_DIR"
-    (cd "$bundle_root" && find . \( -type f -o -type l \) | sed 's|^\.|/usr/local|') >"$manifest"
+    write_podman_manifest "$bundle_root" "$manifest"
     info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local ($(wc -l <"$manifest") files recorded in $manifest)"
   }
 
@@ -362,26 +400,66 @@ if wants_step 2; then
   # podman reports the pinned version and cannot start a container, and a
   # same-version re-run that says "already installed" and changes nothing.
   #
-  # So the recorded manifest is validated too: it must exist, be non-empty, and
-  # every path it lists must still be present. Any gap reinstalls the pinned
-  # bundle -- which removes what the manifest lists and rewrites it -- instead
-  # of skipping.
+  # So the recorded manifest is validated too. Existence alone was not enough:
+  # an interrupted `cp` and a hand-truncated helper both leave a file that is
+  # PRESENT and unusable, which counted as complete and skipped the repair the
+  # re-run exists to perform. The manifest records what each entry is and what
+  # it contains, and every field is checked:
+  #
+  #   f<TAB><sha256><TAB><path>   regular file, verified by content digest
+  #   l<TAB><target><TAB><path>   symlink, verified by its link target
+  #
+  # Digests are the cheap complete check here: the bundle is ~150 files, and a
+  # sha256 pass over it costs a fraction of the download it avoids. Mode is not
+  # recorded -- `cp -r` reproduces it, and a mode-only drift does not produce
+  # the "reports the right version, cannot start a container" failure this
+  # guards. Any gap reinstalls the pinned bundle -- which removes what the
+  # manifest lists and rewrites it -- instead of skipping.
   podman_install_is_complete() {
-    local manifest="${PODMAN_STATIC_MANIFEST_DIR}/manifest" entry missing=0
+    local manifest="${PODMAN_STATIC_MANIFEST_DIR}/manifest" kind expected entry damaged=0
     if [ ! -s "$manifest" ]; then
       info "no bundle manifest at $manifest; reinstalling to record one"
       return 1
     fi
-    while IFS= read -r entry; do
-      [ -n "$entry" ] || continue
-      # -e, not -f: the bundle ships symlinks, and a dangling one is missing.
-      if [ ! -e "$entry" ]; then
-        missing=$((missing + 1))
-        [ "$missing" -gt 5 ] || warn "bundle file recorded in the manifest is missing: $entry"
-      fi
+    # A manifest from before digests were recorded (a bare path per line)
+    # cannot be validated, so it is treated as damage and rewritten by the
+    # reinstall rather than trusted.
+    if ! head -n1 "$manifest" | grep -q '^[fl]	'; then
+      info "bundle manifest at $manifest predates digest recording; reinstalling to record one"
+      return 1
+    fi
+    while IFS=$'\t' read -r kind expected entry; do
+      [ -n "${entry:-}" ] || continue
+      case "$kind" in
+        l)
+          # -h, not -e: a dangling symlink is still the symlink the bundle
+          # shipped, and podman resolves it the same way. What matters is that
+          # it still points where the bundle pointed it.
+          if [ ! -h "$entry" ]; then
+            damaged=$((damaged + 1))
+            [ "$damaged" -gt 5 ] || warn "bundle symlink is missing or is no longer a symlink: $entry"
+          elif [ "$(readlink "$entry")" != "$expected" ]; then
+            damaged=$((damaged + 1))
+            [ "$damaged" -gt 5 ] || warn "bundle symlink points somewhere else now: $entry"
+          fi
+          ;;
+        f)
+          if [ ! -f "$entry" ]; then
+            damaged=$((damaged + 1))
+            [ "$damaged" -gt 5 ] || warn "bundle file recorded in the manifest is missing: $entry"
+          elif [ "$(sha256sum "$entry" | cut -d' ' -f1)" != "$expected" ]; then
+            damaged=$((damaged + 1))
+            [ "$damaged" -gt 5 ] || warn "bundle file does not match its recorded digest: $entry"
+          fi
+          ;;
+        *)
+          damaged=$((damaged + 1))
+          [ "$damaged" -gt 5 ] || warn "unrecognized manifest entry kind '$kind' for: $entry"
+          ;;
+      esac
     done <"$manifest"
-    if [ "$missing" -gt 0 ]; then
-      info "$missing file(s) from the recorded bundle are missing; reinstalling"
+    if [ "$damaged" -gt 0 ]; then
+      info "$damaged file(s) from the recorded bundle are missing or altered; reinstalling"
       return 1
     fi
     return 0
