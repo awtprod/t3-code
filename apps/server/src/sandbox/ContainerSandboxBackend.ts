@@ -144,6 +144,16 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
   readonly #executor: SandboxCommandExecutor;
   readonly #records = new Map<string, RecordEntry>();
   readonly #provisioning = new Map<string, Promise<SandboxReady>>();
+  /**
+   * Threads with a `stop` in flight.
+   *
+   * A stop used to run straight past a provision that was still creating
+   * things: it tore down whatever existed at that instant, and the containers,
+   * sidecars, networks, and volumes the provision created a moment later
+   * survived with nothing left holding a reference to them. Held for the
+   * duration of one stop, so a later legitimate provision is unaffected.
+   */
+  readonly #stopping = new Set<string>();
   #validatedRootless = false;
 
   constructor(runtime: "docker" | "podman", executor: SandboxCommandExecutor) {
@@ -652,6 +662,15 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       }
       for (const hook of input.setup ?? [])
         await this.#mustExec(containerName, hook, setupTimeoutMs);
+      // A stop landed while this was building. Everything above it is a
+      // resource the stop could not see -- it waits on this promise, and the
+      // record below is published after that wait would have read it. Unwind
+      // here, where the names are all in hand, rather than hand the caller a
+      // sandbox the deletion already accounted for as gone.
+      if (this.#stopping.has(threadId))
+        throw new SandboxRuntimeError(
+          `sandbox for thread ${threadId} was stopped while provisioning`,
+        );
     } catch (error) {
       await this.#cleanup(
         containerName,
@@ -663,6 +682,12 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           ? undefined
           : { container: egressProxyContainerName, network: egressNetworkName },
       );
+      // Sidecars this backend never created (credential/preview proxies, the
+      // thread's service stack) also carry the thread label, and a stop that
+      // raced this provision has already come and gone. Sweep them here or
+      // they outlive the deletion with nothing left holding a reference.
+      if (this.#stopping.has(threadId))
+        await this.#removeManagedSiblingContainers(threadId, new Set());
       throw error;
     }
     const ready = {
@@ -1142,6 +1167,33 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     hint?: SandboxAdoptionHint,
   ): Promise<void> {
     const threadId = sanitizeId(threadIdValue, "threadId");
+    this.#stopping.add(threadId);
+    try {
+      // Let an in-flight provision finish before tearing anything down.
+      //
+      // A stop that ran concurrently with one destroyed whatever existed at
+      // that instant and returned; the container, sidecars, network, and
+      // volumes the provision created moments afterwards were left running
+      // with nothing holding a reference to them -- unreachable, unaccounted
+      // for, and never reclaimed. A forced deletion looked complete while the
+      // workload was still up.
+      //
+      // Its outcome is irrelevant here: a provision that failed already
+      // unwound itself, and one that succeeded left a record for the teardown
+      // below to act on. Either way the tombstone above makes `#provision`
+      // unwind rather than publish, so nothing survives this await.
+      await this.#provisioning.get(threadId)?.catch(() => undefined);
+      await this.#stopUnsynchronized(threadId, teardown, hint);
+    } finally {
+      this.#stopping.delete(threadId);
+    }
+  }
+
+  async #stopUnsynchronized(
+    threadId: string,
+    teardown: ReadonlyArray<SandboxHook>,
+    hint: SandboxAdoptionHint | undefined,
+  ): Promise<void> {
     const record = await this.#resolveRecord(threadId, hint);
     if (record === undefined) return;
     const failures: string[] = [];

@@ -384,6 +384,75 @@ describe("ContainerSandboxBackend", () => {
     expect(entry.slice("NO_PROXY=".length).split(",")).toContain(CREDENTIAL_PROXY_ALIAS);
   });
 
+  it("leaves nothing running when a stop lands in the middle of a provision", async () => {
+    // A stop used to run straight past an in-flight provision: it tore down
+    // whatever existed at that instant and returned, while the container,
+    // sidecars, network, and volumes the provision created moments later
+    // survived with nothing holding a reference to them. A forced deletion
+    // looked complete while the workload was still up.
+    // The provision parks inside its setup hook -- the container, network, and
+    // both volumes exist by then and the record has not been published, which
+    // is precisely the window the stop used to run through.
+    let reachedSetupHook = () => {};
+    const atSetupHook = new Promise<void>((resolve) => {
+      reachedSetupHook = resolve;
+    });
+    let releaseSetupHook = () => {};
+    const setupHookReleased = new Promise<void>((resolve) => {
+      releaseSetupHook = resolve;
+    });
+    const respond = successfulExecutor().respond!;
+    const executor = new (class extends FakeExecutor {
+      override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+        if (command.args[0] === "exec" && command.args.includes("provision-marker")) {
+          this.commands.push(command);
+          reachedSetupHook();
+          await setupHookReleased;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return super.run(command);
+      }
+    })(respond);
+    const backend = new ContainerSandboxBackend("docker", executor);
+
+    const provisioning = backend
+      .ensureReady(input({ setup: [{ executable: "provision-marker" }] }))
+      .then(
+        (ready) => ({ ready, error: undefined }),
+        (error: unknown) => ({ ready: undefined, error }),
+      );
+    await atSetupHook;
+    // Issued while the provision is still inside the hook.
+    const stopping = backend.stop("thread-1");
+    releaseSetupHook();
+    await stopping;
+    const outcome = await provisioning;
+
+    // The provision does not hand back a sandbox the deletion already
+    // accounted for as gone.
+    expect(outcome.ready).toBeUndefined();
+    expect(String(outcome.error)).toContain("stopped while provisioning");
+    // ...and every resource it created was reclaimed.
+    const removals = executor.commands
+      .filter(
+        (command) =>
+          (command.args[0] === "rm" && command.args[1] === "--force") ||
+          ((command.args[0] === "network" || command.args[0] === "volume") &&
+            command.args[1] === "rm"),
+      )
+      .map((command) => command.args.at(-1));
+    expect(removals).toEqual(
+      expect.arrayContaining([
+        "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5",
+        "t3-net-921ca543f9cf4d28fe0b81d81cdb33b5",
+        "t3-workspace-921ca543f9cf4d28fe0b81d81cdb33b5",
+        "t3-desktop-921ca543f9cf4d28fe0b81d81cdb33b5",
+      ]),
+    );
+    // Nothing is left addressable: a later exec finds no record at all.
+    await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
+  });
+
   it("cleans container, network, and workspace volume after setup failure and stop", async () => {
     const failing = successfulExecutor();
     const original = failing.respond!;
