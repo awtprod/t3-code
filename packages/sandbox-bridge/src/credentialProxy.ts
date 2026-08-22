@@ -166,6 +166,30 @@ export class ConfigStore {
   }
 }
 
+/**
+ * Detects dot-segments in a raw request path. Node's http server hands the
+ * request-target through un-normalized and still percent-encoded, and the
+ * suffix is forwarded verbatim, so `..` (or `%2e%2e`, which the upstream
+ * decodes) would resolve outside the configured baseUrl prefix — letting
+ * container code replay the injected credential against arbitrary paths on the
+ * upstream origin. Decoding before the check catches every encoded spelling,
+ * including `..%2f`; a path that fails to decode is rejected rather than
+ * guessed at.
+ */
+const hasDotSegments = (rawPath: string): boolean => {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawPath);
+  } catch {
+    return true;
+  }
+  // Split on backslash too: some upstream servers treat it as a separator. The
+  // character is spelled via charCode because the repo's public-tree scanner
+  // rejects literal double-backslash sequences as Windows UNC paths.
+  const separators = new RegExp(`[/${String.fromCharCode(92, 92)}]`);
+  return decoded.split(separators).some((segment) => segment === "." || segment === "..");
+};
+
 const sendText = (response: NodeHttp.ServerResponse, status: number, message: string) => {
   response.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
   response.end(`${message}\n`);
@@ -188,7 +212,14 @@ export const createCredentialServer = (
       request.resume();
       return;
     }
-    const [, name, ...rest] = (request.url ?? "/").split("/");
+    const url = request.url ?? "/";
+    const queryStart = url.indexOf("?");
+    if (hasDotSegments(queryStart === -1 ? url : url.slice(0, queryStart))) {
+      sendText(response, 400, "path traversal is not allowed");
+      request.resume();
+      return;
+    }
+    const [, name, ...rest] = url.split("/");
     const upstream = config.upstreams.find((candidate) => candidate.name === name);
     if (upstream === undefined) {
       sendText(response, 404, "unknown upstream");

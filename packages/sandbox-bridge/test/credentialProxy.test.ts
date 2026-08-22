@@ -201,6 +201,47 @@ describe("t3-credential-proxy authorization and routing", () => {
     expect(answer.status).toBe(404);
     expect(upstream.seen).toHaveLength(before);
   });
+
+  // Node's http server does not normalize request.url, so without an explicit
+  // check a `..` segment would be forwarded verbatim and resolve upstream to a
+  // path outside the configured baseUrl prefix — with the injected credential
+  // attached. Every rejection below also asserts the upstream saw nothing.
+  it.each([
+    ["/anthropic/../../whatever", "a literal dot-dot segment"],
+    ["/anthropic/%2e%2e/whatever", "a percent-encoded dot-dot segment"],
+    ["/anthropic/%2E%2E/whatever", "an uppercase percent-encoded dot-dot segment"],
+    ["/anthropic/..%2fwhatever", "a dot-dot joined by an encoded slash"],
+    ["/anthropic/..%5cwhatever", "a dot-dot joined by an encoded backslash"],
+    ["/anthropic/.%2e/whatever", "a mixed literal-and-encoded dot-dot segment"],
+    ["/anthropic/./whatever", "a single-dot segment"],
+    ["/anthropic/%2e/whatever", "a percent-encoded single-dot segment"],
+  ])("rejects %s (%s) without contacting the upstream", async (path) => {
+    const { proxy, upstream } = await ready();
+    const before = upstream.seen.length;
+    const answer = await call(proxy.port, path, {
+      authorization: `Bearer ${THREAD_TOKEN}`,
+    });
+    expect(answer.status).toBe(400);
+    expect(upstream.seen).toHaveLength(before);
+  });
+
+  it("still forwards a nested path, keeping its query string", async () => {
+    const { proxy, upstream } = await ready();
+    const answer = await call(proxy.port, "/anthropic/v1/models/claude-3?beta=true", {
+      authorization: `Bearer ${THREAD_TOKEN}`,
+    });
+    expect(answer.status).toBe(200);
+    expect(upstream.seen.at(-1)!.url).toBe("/v1/models/claude-3?beta=true");
+  });
+
+  it("still forwards an empty suffix as the upstream root", async () => {
+    const { proxy, upstream } = await ready();
+    const answer = await call(proxy.port, "/anthropic", {
+      authorization: `Bearer ${THREAD_TOKEN}`,
+    });
+    expect(answer.status).toBe(200);
+    expect(upstream.seen.at(-1)!.url).toBe("/");
+  });
 });
 
 describe("t3-credential-proxy streaming", () => {
