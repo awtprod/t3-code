@@ -6,6 +6,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 
 import { makeSandboxRuntimeManager } from "./SandboxRuntimeManager.ts";
 import type {
@@ -389,6 +390,60 @@ describe("provider conversation store artifacts", () => {
 
       expect(NodeFS.readdirSync(root)).toEqual([]);
     }),
+  );
+
+  it.effect("keeps a deleted thread's tombstone until its in-flight export drains", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // Tombstones were evicted FIFO at a fixed cap. A busy server that deletes
+        // enough threads while one slow export is still running dropped that
+        // thread's tombstone, and the export then republished a deleted thread's
+        // transcripts and commits -- with nothing left to ever remove them. A
+        // tombstone is now only evictable once that thread's artifact work has
+        // drained.
+        headless();
+        const root = makeRoot();
+        // Parks inside the export, holding the thread's artifact lock while the
+        // deletions below flood the tombstone set.
+        let releaseExport = () => {};
+        const exportParked = new Promise<void>((resolve) => {
+          releaseExport = resolve;
+        });
+        let reachedExport = () => {};
+        const atExport = new Promise<void>((resolve) => {
+          reachedExport = resolve;
+        });
+        class ParkingExecutor extends FakeExecutor {
+          override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+            if (command.args.includes("bundle") && command.args.includes("create")) {
+              reachedExport();
+              await exportParked;
+            }
+            return super.run(command);
+          }
+        }
+        const manager = makeSandboxRuntimeManager(root, "linux", new ParkingExecutor());
+        yield* manager.provision(provisionInput());
+        yield* manager.removeThreadArtifacts(THREAD_ID);
+
+        const exporting = yield* manager
+          .exportBranch("docker", THREAD_ID)
+          .pipe(Effect.orDie, Effect.forkScoped);
+        yield* Effect.promise(() => atExport);
+        // Far more deletions than the tombstone cap, all while the export above
+        // is still parked.
+        yield* Effect.forEach(
+          Array.from({ length: 5000 }, (_, index) => `flood-thread-${index}`),
+          (threadId) => manager.removeThreadArtifacts(threadId),
+          { discard: true },
+        );
+        releaseExport();
+        yield* Fiber.join(exporting);
+
+        // The export saw its tombstone and published nothing.
+        expect(NodeFS.readdirSync(root)).toEqual([]);
+      }),
+    ),
   );
 
   it.effect("tolerates artifact removal without configured artifact storage", () =>

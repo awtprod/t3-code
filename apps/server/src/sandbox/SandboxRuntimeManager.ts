@@ -272,18 +272,30 @@ export const makeSandboxRuntimeManager = (
    *
    * The lock above orders the two operations but cannot decide them: an export
    * that wins the lock still finishes by publishing files for a thread that no
-   * longer exists. Bounded and FIFO -- a tombstone only has to outlive exports
-   * in flight at deletion time, so evicting the oldest once the ring is full
-   * cannot resurrect anything.
+   * longer exists.
+   *
+   * Bounded, but never at the cost of correctness: a tombstone is only
+   * evictable once every operation queued on that thread's artifact lock has
+   * drained. Plain FIFO eviction at a fixed cap was wrong -- a busy server that
+   * deletes 4096 threads while one slow export is still running drops that
+   * thread's tombstone, and the export then republishes a deleted thread's
+   * transcripts and commits with nothing left to ever remove them. An entry in
+   * `artifactLocks` is exactly "this thread still has artifact work queued",
+   * so the cap is enforced against everything else and the set holds at most a
+   * few extra entries while those settle.
    */
   const deletedThreadArtifacts = new Set<string>();
   const DELETED_ARTIFACT_TOMBSTONES = 4096;
   const tombstoneThreadArtifacts = (threadId: string) => {
     deletedThreadArtifacts.add(threadId);
-    while (deletedThreadArtifacts.size > DELETED_ARTIFACT_TOMBSTONES) {
-      const oldest = deletedThreadArtifacts.values().next();
-      if (oldest.done === true) break;
-      deletedThreadArtifacts.delete(oldest.value);
+    if (deletedThreadArtifacts.size <= DELETED_ARTIFACT_TOMBSTONES) return;
+    for (const candidate of deletedThreadArtifacts) {
+      if (deletedThreadArtifacts.size <= DELETED_ARTIFACT_TOMBSTONES) break;
+      // Oldest first, but never one an export could still be racing. The
+      // thread being tombstoned right now always has a lock (this runs inside
+      // it), so it is never its own eviction victim.
+      if (artifactLocks.has(candidate)) continue;
+      deletedThreadArtifacts.delete(candidate);
     }
   };
   const get = (runtime: "docker" | "podman") => {
