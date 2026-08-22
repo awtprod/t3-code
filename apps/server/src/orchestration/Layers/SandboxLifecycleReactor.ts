@@ -727,6 +727,47 @@ export const make = Effect.gen(function* () {
             .pipe(Effect.ignore);
         }
       }
+      // A container that survived a restart and proved its identity, but that
+      // this manager generation cannot drive. It is reported as missing too,
+      // so the loop below fails its thread and lets it re-provision -- but
+      // doing only that leaves the container RUNNING under a `failed`
+      // projection: the workload keeps burning the host, the next provision
+      // can collide with the surviving sidecars, and its unwind deletes the
+      // workspace volume with the user's commits still in it.
+      //
+      // So it is drained here first, before anything marks the thread failed.
+      // Export strictly before stop: the export is what saves the work, and a
+      // stop runs the teardown and destroys the volume. A failed export must
+      // still be followed by the stop -- leaving the container running is the
+      // outcome this exists to prevent -- but it is reported rather than
+      // swallowed, because it means the thread is about to re-provision from
+      // its previous export or from the base commit.
+      for (const threadId of result.value.unresumableThreadIds ?? []) {
+        const thread = snapshot.threads.find((item) => item.id === threadId);
+        if (thread?.sandbox == null) continue;
+        yield* exportBranch(thread.id).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              "could not export an unresumable sandbox before stopping it; its uncommitted work is lost",
+              { threadId: thread.id, cause: Cause.pretty(cause) },
+            ),
+          ),
+        );
+        yield* runtimes
+          .stop(
+            runtime,
+            thread.id,
+            yield* adoptionHint(thread).pipe(Effect.orElseSucceed(() => undefined)),
+          )
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("could not stop an unresumable sandbox", {
+                threadId: thread.id,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+          );
+      }
       for (const threadId of result.value.missingThreadIds) {
         const thread = snapshot.threads.find((item) => item.id === threadId);
         if (!thread?.sandbox) continue;

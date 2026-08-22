@@ -1247,4 +1247,182 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       expect(dispatched.map((command) => command.type)).toContain("sandbox.provision.ready");
     }),
   );
+
+  /**
+   * Layer for the reconcile tests below, over a thread whose container survived
+   * a restart but which this manager generation cannot drive.
+   */
+  const unresumableLayer = (options: {
+    readonly calls: string[];
+    readonly dispatched: OrchestrationCommand[];
+    readonly exportBranch: SandboxRuntimeManagerShape["exportBranch"];
+    readonly stop: SandboxRuntimeManagerShape["stop"];
+  }) => {
+    const sandboxThread = {
+      ...snapshot.threads[0]!,
+      sandbox: {
+        lifecycle: "ready" as const,
+        runtime: "podman" as const,
+        branch: { branchName: `t3/thread/${threadId}`, baseCommit: "a".repeat(40) },
+        limits: {
+          cpuCount: 2,
+          memoryBytes: 4_294_967_296,
+          diskBytes: 21_474_836_480,
+          processCount: 512,
+          idleTimeoutSeconds: 3600,
+          maximumLifetimeSeconds: 28_800,
+        },
+        desktop: { status: "unavailable" as const },
+        services: [],
+        controller: { kind: "none" as const },
+        createdAt: NOW,
+        lastActiveAt: NOW,
+      },
+    };
+    return Layer.effect(SandboxLifecycleReactor, make).pipe(
+      Layer.provide(NodeServices.layer),
+      Layer.provide(
+        Layer.mock(GitWorkflowService)({
+          localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+        }),
+      ),
+      Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+      Layer.provide(sessionDirectory().layer),
+      Layer.provide(
+        Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
+      ),
+      Layer.provide(
+        Layer.succeed(SandboxRuntimeManager, {
+          sweepExpiredArtifacts: () => Effect.succeed(0),
+          sampleUsage: () => Effect.fail(new SandboxManagerError({ message: "no container" })),
+          exportBranch: options.exportBranch,
+          stop: options.stop,
+          // Reported as missing too, deliberately: a caller that ignores the
+          // distinction still fails the thread and lets it re-provision. The
+          // reconcile pass asks each runtime in turn, and only the one this
+          // thread was provisioned on knows about its container.
+          reconcile: (runtime: "docker" | "podman") =>
+            Effect.succeed({
+              activeThreadIds: [],
+              missingThreadIds: runtime === "podman" ? [threadId] : [],
+              unresumableThreadIds: runtime === "podman" ? [threadId] : [],
+              orphanThreadIds: [],
+              removedRuntimeRefs: [],
+            }),
+        } as never),
+      ),
+      Layer.provide(
+        Layer.mock(ProjectionSnapshotQuery)({
+          getSnapshot: () =>
+            Effect.succeed({ ...snapshot, threads: [sandboxThread] } as typeof snapshot),
+          getThreadDetailById: (id) =>
+            Effect.succeed(id === threadId ? Option.some(sandboxThread) : Option.none()),
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(OrchestrationEngineService)({
+          dispatch: (command) =>
+            Effect.sync(() => {
+              options.dispatched.push(command);
+              return { sequence: options.dispatched.length };
+            }),
+          streamDomainEvents: Stream.empty,
+        }),
+      ),
+    );
+  };
+
+  it.effect("exports an unresumable sandbox before stopping it", () =>
+    Effect.gen(function* () {
+      // Reconcile used to ignore `unresumableThreadIds` entirely. The thread
+      // was failed and left free to re-provision while its container kept
+      // RUNNING: the next provision could collide with the surviving sidecars,
+      // and its unwind deleted a workspace volume whose commits had never been
+      // exported. Order matters as much as the fact -- the export is what
+      // saves the work, and the stop destroys the volume.
+      const calls: string[] = [];
+      const dispatched: OrchestrationCommand[] = [];
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+        }).pipe(
+          Effect.provide(
+            unresumableLayer({
+              calls,
+              dispatched,
+              exportBranch: () =>
+                Effect.sync(() => {
+                  calls.push("export");
+                  return {
+                    commit: "b".repeat(40),
+                    patch: "",
+                    artifactId: "c".repeat(64),
+                    bundleSha256: "d".repeat(64),
+                  };
+                }) as never,
+              stop: () =>
+                Effect.sync(() => {
+                  calls.push("stop");
+                }) as never,
+            }),
+          ),
+        ),
+      );
+
+      expect(calls).toEqual(["export", "stop"]);
+      // The export result is published, so the re-provision seeds from it.
+      expect(dispatched.map((command) => command.type)).toContain("sandbox.branch-export.result");
+      // ...and the thread is still failed, so it is free to re-provision.
+      const missing = dispatched.find((command) => command.type === "sandbox.reconcile.result");
+      if (missing?.type !== "sandbox.reconcile.result")
+        throw new Error("expected a reconcile result command");
+      expect(missing.disposition).toBe("missing");
+    }),
+  );
+
+  it.effect("still stops an unresumable sandbox whose export fails", () =>
+    Effect.gen(function* () {
+      // A container nothing can drive must not keep running just because its
+      // work could not be saved -- that is the outcome this exists to prevent.
+      const calls: string[] = [];
+      const dispatched: OrchestrationCommand[] = [];
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+        }).pipe(
+          Effect.provide(
+            unresumableLayer({
+              calls,
+              dispatched,
+              exportBranch: () =>
+                Effect.sync(() => {
+                  calls.push("export");
+                }).pipe(
+                  Effect.andThen(
+                    Effect.fail(new SandboxManagerError({ message: "bundle verify failed" })),
+                  ),
+                ) as never,
+              stop: () =>
+                Effect.sync(() => {
+                  calls.push("stop");
+                }) as never,
+            }),
+          ),
+        ),
+      );
+
+      expect(calls).toEqual(["export", "stop"]);
+      // Nothing was saved, so nothing is published for a re-provision to seed
+      // from -- the failure is reported in the logs, not silently swallowed.
+      expect(dispatched.map((command) => command.type)).not.toContain(
+        "sandbox.branch-export.result",
+      );
+    }),
+  );
 });
