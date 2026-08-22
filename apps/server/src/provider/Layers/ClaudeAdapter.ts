@@ -3641,6 +3641,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           Cause.isFailReason(reason) ? [reason.error] : [],
         );
         const message = failures[0]?.detail ?? "Claude runtime stream failed.";
+        // The emitted event stays structural on purpose -- a cause chain can
+        // carry credential material and runtime events are persisted and
+        // broadcast to every client. The operator still needs the cause to
+        // diagnose a failure, so it goes to the server log instead, which is
+        // local and already carries process-level detail.
+        yield* Effect.logError("claude.runtime.stream-failed", {
+          threadId: context.session.threadId,
+          // Rendered here rather than passed raw: a structured logger
+          // serializes a Cause as "[Object]", which is no more useful than the
+          // failure tag the event already carries.
+          cause: Cause.pretty(exit.cause),
+        });
         yield* emitRuntimeError(context, message, {
           failureCount: failures.length,
           failureTags: failures.map((failure) => failure._tag),

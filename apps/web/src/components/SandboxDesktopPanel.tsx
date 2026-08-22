@@ -13,6 +13,7 @@ import { Download, Expand, MonitorUp, Pause, Play, RefreshCw, Square } from "luc
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
+import { cn } from "~/lib/utils";
 
 export interface SandboxDesktopPanelProps {
   sandbox: SandboxState | null;
@@ -39,6 +40,12 @@ export function SandboxDesktopPanel(props: SandboxDesktopPanelProps) {
   const sandbox = props.sandbox;
   const humanController = sandbox?.controller.kind === "human" ? sandbox.controller : null;
   const desktopReady = sandbox?.desktop.status === "ready";
+  /**
+   * Headless deployments (`T3_SANDBOX_DESKTOP=disabled`) run a sandbox with no
+   * desktop at all. The lifecycle controls below stay live -- they act on the
+   * sandbox, not the desktop -- but the viewer would only ever 409.
+   */
+  const desktopUnavailable = sandbox !== null && sandbox.desktop.status === "unavailable";
 
   const fullscreen = () => void frameRef.current?.requestFullscreen();
   const requestViewer = async () => {
@@ -88,7 +95,9 @@ export function SandboxDesktopPanel(props: SandboxDesktopPanelProps) {
       <header className="flex min-h-11 items-center gap-2 border-b px-3">
         <MonitorUp className="size-4 text-muted-foreground" />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium">Isolated desktop</div>
+          <div className="truncate text-sm font-medium">
+            {desktopUnavailable ? "Isolated sandbox" : "Isolated desktop"}
+          </div>
           <div className="truncate text-xs text-muted-foreground">
             {sandbox === null
               ? "Starts automatically on first use"
@@ -117,7 +126,7 @@ export function SandboxDesktopPanel(props: SandboxDesktopPanelProps) {
           >
             <Play /> Resume agent
           </Button>
-        ) : sandbox.lifecycle === "ready" ? (
+        ) : sandbox.lifecycle === "ready" && !desktopUnavailable ? (
           <Button size="sm" disabled={busy} onClick={() => void runAction(props.onTakeover)}>
             <Pause /> Take control
           </Button>
@@ -160,7 +169,7 @@ export function SandboxDesktopPanel(props: SandboxDesktopPanelProps) {
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 bg-black">
+      <div className={cn("min-h-0 flex-1", desktopUnavailable ? "bg-muted/30" : "bg-black")}>
         {desktopReady && viewerUrl ? (
           <iframe
             ref={frameRef}
@@ -174,12 +183,14 @@ export function SandboxDesktopPanel(props: SandboxDesktopPanelProps) {
           />
         ) : (
           <div className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground">
-            {viewerBusy
-              ? "Connecting to desktop…"
-              : (sandbox?.desktop.failure ??
-                (sandbox?.desktop.status === "starting"
-                  ? "Desktop is starting…"
-                  : "The desktop stream is not ready."))}
+            {desktopUnavailable
+              ? "This deployment runs sandboxes headless. The controls above still stop and export this sandbox."
+              : viewerBusy
+                ? "Connecting to desktop…"
+                : (sandbox?.desktop.failure ??
+                  (sandbox?.desktop.status === "starting"
+                    ? "Desktop is starting…"
+                    : "The desktop stream is not ready."))}
           </div>
         )}
       </div>

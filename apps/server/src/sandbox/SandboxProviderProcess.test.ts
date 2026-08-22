@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - test spawns a real fixture process and waits on its stdin EPIPE at the Node boundary.
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+
 import { describe, expect, it } from "@effect/vitest";
 import { SandboxId, ThreadId } from "@t3tools/contracts";
 import {
@@ -5,6 +9,7 @@ import {
   makeSandboxProviderBindingOwner,
   sandboxProviderInvocation,
   sandboxProviderTarget,
+  spawnClaudeInSandbox,
   unbindSandboxProviderTarget,
 } from "./SandboxProviderProcess.ts";
 
@@ -18,6 +23,43 @@ const target = {
 };
 
 describe("SandboxProviderProcess", () => {
+  it("survives a sandbox process that closes stdin while the SDK is still writing", async () => {
+    // The real failure shape: the container is up but the process inside it has
+    // closed stdin, and the SDK keeps streaming into it. Node delivers that
+    // EPIPE as an 'error' event on stdin, which has no default listener -- so
+    // unhandled it terminates the whole server, taking every other thread's
+    // session down with one thread's broken container.
+    const owner = makeSandboxProviderBindingOwner();
+    const spawnTarget = { ...target, threadId: ThreadId.make("thread-stdin-epipe") };
+    bindSandboxProviderTarget(spawnTarget, owner);
+    const errors: Array<unknown> = [];
+    const capture = (cause: unknown) => errors.push(cause);
+    process.on("uncaughtException", capture);
+    try {
+      const child = spawnClaudeInSandbox(
+        {
+          ...spawnTarget,
+          runtime: NodePath.join(
+            NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+            "__fixtures__",
+            "fake-runtime-closed-stdin.sh",
+          ) as unknown as (typeof spawnTarget)["runtime"],
+        },
+        { command: "claude", args: [], cwd: undefined, env: {} } as never,
+      ) as unknown as { readonly stdin: NodeJS.WritableStream };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        child.stdin.write("x".repeat(1024));
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(errors).toEqual([]);
+    } finally {
+      process.off("uncaughtException", capture);
+      unbindSandboxProviderTarget(spawnTarget.threadId, owner);
+    }
+  });
+
   it("keeps credential values out of process argv", () => {
     const invocation = sandboxProviderInvocation(target, "codex", ["app-server"], undefined, {
       HTTPS_PROXY: "http://credential-proxy.example:8080",
@@ -53,7 +95,27 @@ describe("SandboxProviderProcess", () => {
     expect(invocation.args).toContain("/workspace/repo");
     expect(invocation.args).not.toContain("/host/escape");
     expect(invocation.args).not.toContain("SSH_AUTH_SOCK");
-    expect(invocation.env.HOME).toBe("/thread-data/provider-home");
+    expect(invocation.args).toContain("HOME=/thread-data/provider-home");
+  });
+
+  it("keeps the container HOME out of the host runtime process environment", () => {
+    // Bare `--env HOME` makes the runtime CLI read HOME from its own process
+    // env, so a container-only value there becomes the *host* CLI's config
+    // root: podman exits with "cannot resolve /thread-data/provider-home"
+    // before it ever reaches the container, and the turn fails with nothing
+    // but "process exited with code 1".
+    const invocation = sandboxProviderInvocation(target, "codex", [], undefined, {
+      LANG: "C.UTF-8",
+    });
+    expect(invocation.env.HOME).not.toBe("/thread-data/provider-home");
+    expect(invocation.env.TMPDIR).toBeUndefined();
+    expect(invocation.env.USER).toBeUndefined();
+    // Inlined into argv instead, so the container still gets them. These are
+    // non-secret literals, unlike the credential values that stay bare.
+    expect(invocation.args).toContain("HOME=/thread-data/provider-home");
+    expect(invocation.args).toContain("USER=sandbox");
+    expect(invocation.args).toContain("LANG");
+    expect(invocation.args).not.toContain("LANG=C.UTF-8");
   });
 
   it("rejects replacing a live binding with another sandbox generation", () => {

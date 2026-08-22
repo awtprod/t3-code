@@ -35,6 +35,17 @@ const SANDBOX_PROVIDER_ENV = {
 const IN_IMAGE_PROVIDER_COMMANDS = ["claude", "codex"] as const;
 
 /**
+ * True for the container-only constants above.
+ *
+ * Sound because they are the sole source of those keys: the allowlist regex
+ * names every variable it admits and lists none of them, and the proxy sets
+ * only base-URL/token pairs.
+ */
+function isSandboxConstant(key: string): boolean {
+  return Object.hasOwn(SANDBOX_PROVIDER_ENV, key);
+}
+
+/**
  * Maps a host-resolved provider binary onto its in-image command name.
  *
  * Provider spawn inside a sandbox goes through `podman exec`, so a host path
@@ -105,7 +116,20 @@ function execArgs(
     "1000:1000",
     "--workdir",
     target.workspaceCwd,
-    ...Object.entries(env).flatMap(([key, value]) => (value === undefined ? [] : ["--env", key])),
+    // Bare `--env KEY` makes the runtime read the value from its own process
+    // environment, which keeps credentials out of a world-readable argv. The
+    // sandbox constants get the opposite treatment: they are non-secret
+    // literals, and passing them bare would set them on the *host* runtime
+    // process too -- a container `HOME` of /thread-data/provider-home then
+    // becomes the host CLI's config root and it exits before it ever reaches
+    // the container ("cannot resolve /thread-data/provider-home").
+    ...Object.entries(env).flatMap(([key, value]) =>
+      value === undefined
+        ? []
+        : isSandboxConstant(key)
+          ? ["--env", `${key}=${value}`]
+          : ["--env", key],
+    ),
     "--",
     target.runtimeRef,
     command,
@@ -167,10 +191,21 @@ export function sandboxProviderInvocation(
     target.threadId,
     requestedEnvironment,
   );
+  // Only the values delivered by bare `--env KEY` belong in the host runtime
+  // process; the inlined constants are already in argv and must not displace
+  // the host's own HOME/TMPDIR, which the runtime CLI reads for its config and
+  // socket paths.
+  const hostEnvironment = Object.fromEntries(
+    Object.entries(forwardedEnvironment).filter(([key]) => !isSandboxConstant(key)),
+  );
   return {
     executable: target.runtime,
     args: execArgs(target, inImageProviderCommand(command), args, cwd, forwardedEnvironment),
-    env: { PATH: process.env.PATH, ...forwardedEnvironment } as Record<string, string | undefined>,
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      ...hostEnvironment,
+    } as Record<string, string | undefined>,
   } as const;
 }
 
@@ -225,5 +260,20 @@ export function spawnClaudeInSandbox(
       windowsHide: true,
     },
   );
+  // The runtime CLI writes its own diagnostics here -- "no such container",
+  // "exec failed", an image without the provider binary. The SDK only consumes
+  // stdout, so without this the single most useful line about a failed spawn is
+  // read by nobody and the turn fails with an unexplained stream error.
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    const text = chunk.toString().trim();
+    if (text.length > 0) process.stderr.write(`[sandbox-exec] ${text}\n`);
+  });
+  // A sandbox spawn that dies early leaves the SDK writing into a closed pipe.
+  // `stdin` has no default listener, so that EPIPE reaches the process as an
+  // unhandled 'error' event and takes the whole server down with it -- one
+  // thread's container failing must not stop every other thread.
+  child.stdin?.on("error", (cause: NodeJS.ErrnoException) => {
+    process.stderr.write(`[sandbox-exec] stdin closed: ${cause.code ?? cause.message}\n`);
+  });
   return child as SpawnedProcess;
 }

@@ -4,6 +4,7 @@ import {
   type SandboxRuntime,
 } from "@t3tools/contracts";
 import type {
+  SandboxAdoptionHint,
   SandboxCommandExecutor,
   SandboxExecInput,
   SandboxExport,
@@ -22,6 +23,7 @@ import {
   validateExec,
   validateHook,
 } from "./validation.ts";
+import { CREDENTIAL_PROXY_ALIAS } from "./SandboxCredentialProxy.ts";
 import * as NodeCrypto from "node:crypto";
 
 const MANAGED_LABEL = "com.t3tools.sandbox.managed=true";
@@ -34,7 +36,44 @@ const ROLE_LABEL = "com.t3tools.sandbox.role";
 const CACHE_DIGEST_LABEL = "com.t3tools.sandbox.cache-digest";
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 const INTERNAL_EGRESS_PROXY_URL = ["http:/", "/egress-proxy:3128"].join("");
+/**
+ * Hosts the workload must dial directly rather than through the egress proxy.
+ *
+ * The credential proxy answers on a private address and the egress proxy runs
+ * with `--deny-private`, so without this a provider CLI's call to the
+ * credential proxy is refused by our own egress policy ("403 egress denied:
+ * private address") -- which Claude Code reports as an authentication failure.
+ * The bypass loosens nothing: the alias resolves only on the `--internal`
+ * network the container is already confined to.
+ */
+const INTERNAL_NO_PROXY_HOSTS = ["localhost", "127.0.0.1", "::1", CREDENTIAL_PROXY_ALIAS];
 const MAX_HOOK_TIMEOUT_MS = 10 * 60_000;
+/**
+ * Where the provider CLI keeps its config and conversation store inside the
+ * container. Must stay in step with `SANDBOX_PROVIDER_ENV.HOME` in
+ * `SandboxProviderProcess.ts` -- that is the `HOME` every provider spawn runs
+ * with, and this is the directory archived and restored across a teardown.
+ */
+const PROVIDER_HOME = "/thread-data/provider-home";
+/**
+ * Paths excluded from the archived provider store, relative to `PROVIDER_HOME`.
+ *
+ * Credentials first: the provider home holds live auth material next to the
+ * transcripts, and an exported archive lands in a host directory that outlives
+ * the container. Excluding at archive time means a credential is never written
+ * into the tar in the first place. The rest is churn -- crash-time temp files
+ * and caches that a restored store is better off without.
+ */
+const PROVIDER_STORE_EXCLUDES = [
+  ".credentials.json",
+  "*.credentials.json",
+  ".claude.json.tmp.*",
+  "sessions",
+  "*.key",
+  "*token*",
+  "*auth*",
+  ".cache",
+] as const;
 
 export class SandboxRuntimeError extends Error {
   override readonly name = "SandboxRuntimeError";
@@ -45,7 +84,16 @@ export class SandboxRuntimeError extends Error {
   }
 }
 
-type RecordEntry = { ready: SandboxReady; teardownTimeoutMs: number };
+type RecordEntry = {
+  ready: SandboxReady;
+  teardownTimeoutMs: number;
+  /**
+   * Rebuilt from the projection rather than provisioned by this manager
+   * generation. Teardown hooks cannot run against an adopted record -- the hook
+   * declarations live in the manager's memory and died with the restart.
+   */
+  adopted?: boolean;
+};
 
 export class ContainerSandboxBackend implements ThreadSandboxBackend {
   readonly runtime: SandboxRuntime;
@@ -87,16 +135,14 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
 
     const threadId = sanitizeId(input.bootstrap.threadId, "threadId");
     const projectId = sanitizeId(input.bootstrap.projectId, "projectId");
-    const suffix = NodeCrypto.createHash("sha256")
-      .update(`${projectId}\0${threadId}`)
-      .digest("hex")
-      .slice(0, 32);
-    const containerName = `t3-thread-${suffix}`;
-    const networkName = `t3-net-${suffix}`;
-    const workspaceVolumeName = `t3-workspace-${suffix}`;
-    const desktopVolumeName = `t3-desktop-${suffix}`;
-    const egressProxyContainerName = `t3-egress-${suffix}`;
-    const egressNetworkName = `t3-egress-net-${suffix}`;
+    const {
+      containerName,
+      networkName,
+      workspaceVolumeName,
+      desktopVolumeName,
+      egressProxyContainerName,
+      egressNetworkName,
+    } = resourceNames(projectId, threadId);
     const config = input.config ?? {};
     const limits = { ...DEFAULT_SANDBOX_RESOURCE_LIMITS, ...config.limits };
     validateLimits(limits);
@@ -105,19 +151,14 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
 
     const inspected = await this.#run(["inspect", containerName], 10_000, true);
     if (inspected.exitCode === 0) {
-      const labels = await this.#run(
-        [
-          "inspect",
-          "--format",
-          `{{index .Config.Labels "${THREAD_LABEL}"}}\t{{index .Config.Labels "${PROJECT_LABEL}"}}\t{{index .Config.Labels "com.t3tools.sandbox.managed"}}\t{{index .Config.Labels "${IMAGE_LABEL}"}}\t{{index .Config.Labels "${BASE_LABEL}"}}\t{{index .Config.Labels "${BRANCH_LABEL}"}}\t{{index .Config.Labels "${ROLE_LABEL}"}}\t{{.State.Running}}`,
-          containerName,
-        ],
-        10_000,
-      );
-      if (
-        labels.stdout.trim() !==
-        `${threadId}\t${projectId}\ttrue\t${input.image}\t${input.bootstrap.baseCommit}\t${input.bootstrap.branchName}\tworkspace\ttrue`
-      ) {
+      const matches = await this.#matchesThreadLabels(containerName, {
+        threadId,
+        projectId,
+        image: input.image,
+        baseCommit: input.bootstrap.baseCommit,
+        branchName: input.bootstrap.branchName,
+      });
+      if (!matches) {
         throw new SandboxRuntimeError(`existing sandbox name collision for thread ${threadId}`);
       }
       const existing = makeReady(
@@ -208,18 +249,19 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           MANAGED_LABEL,
           "--label",
           `${THREAD_LABEL}=${threadId}`,
-          "--opt",
-          desktopQuota,
+          ...(storageQuotaDisabled() ? [] : ["--opt", desktopQuota]),
           desktopVolumeName,
         ],
         30_000,
       );
-      const desktopQuotaReadback = await this.#mustRun(
-        ["volume", "inspect", "--format", `{{index .Options "o"}}`, desktopVolumeName],
-        10_000,
-      );
-      if (desktopQuotaReadback.stdout.trim() !== desktopQuota.slice(2))
-        throw new SandboxRuntimeError("runtime did not preserve the desktop volume quota");
+      if (!storageQuotaDisabled()) {
+        const desktopQuotaReadback = await this.#mustRun(
+          ["volume", "inspect", "--format", `{{index .Options "o"}}`, desktopVolumeName],
+          10_000,
+        );
+        if (desktopQuotaReadback.stdout.trim() !== desktopQuota.slice(2))
+          throw new SandboxRuntimeError("runtime did not preserve the desktop volume quota");
+      }
       const workspaceQuota = `o=size=${Math.floor(limits.diskBytes * 0.9)}`;
       await this.#mustRun(
         [
@@ -229,18 +271,19 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           MANAGED_LABEL,
           "--label",
           `${THREAD_LABEL}=${threadId}`,
-          "--opt",
-          workspaceQuota,
+          ...(storageQuotaDisabled() ? [] : ["--opt", workspaceQuota]),
           workspaceVolumeName,
         ],
         30_000,
       );
-      const workspaceQuotaReadback = await this.#mustRun(
-        ["volume", "inspect", "--format", `{{index .Options "o"}}`, workspaceVolumeName],
-        10_000,
-      );
-      if (workspaceQuotaReadback.stdout.trim() !== workspaceQuota.slice(2))
-        throw new SandboxRuntimeError("runtime did not preserve the workspace volume quota");
+      if (!storageQuotaDisabled()) {
+        const workspaceQuotaReadback = await this.#mustRun(
+          ["volume", "inspect", "--format", `{{index .Options "o"}}`, workspaceVolumeName],
+          10_000,
+        );
+        if (workspaceQuotaReadback.stdout.trim() !== workspaceQuota.slice(2))
+          throw new SandboxRuntimeError("runtime did not preserve the workspace volume quota");
+      }
       for (const cache of input.caches ?? []) {
         const name = `t3-cache-${cache.digest.toLowerCase()}`;
         const existing = await this.#run(
@@ -323,7 +366,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
               "--env",
               `HTTP_PROXY=${input.egressProxyImage === undefined ? validateProxy(input.egressProxyUrl!) : INTERNAL_EGRESS_PROXY_URL}`,
               "--env",
-              "NO_PROXY=localhost,127.0.0.1,::1",
+              `NO_PROXY=${INTERNAL_NO_PROXY_HOSTS.join(",")}`,
             ]),
         ...(input.caches ?? []).flatMap((cache) => [
           "--mount",
@@ -334,22 +377,88 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         "infinity",
       ];
       await this.#mustRun(runArgs, setupTimeoutMs);
+      // The provider CLI runs with HOME here (see SANDBOX_PROVIDER_ENV) and
+      // writes its config and session state on startup. The container rootfs is
+      // read-only, so this must be created on the writable volume up front --
+      // otherwise every provider spawn dies before the first token.
+      await this.#mustExec(
+        containerName,
+        { executable: "mkdir", args: ["-p", PROVIDER_HOME] },
+        30_000,
+      );
+      if (input.bootstrap.providerStorePath !== undefined) {
+        // Extracted here, before the repository is seeded and long before any
+        // provider can spawn, so the CLI's first look at its home already has
+        // the earlier conversation in it.
+        //
+        // Best-effort: a store that fails to copy or extract leaves the home
+        // empty, which is exactly the state a thread without a prior export
+        // starts in. The provision continues either way -- the branch is the
+        // part worth failing over, and the reactor clears the now-stale resume
+        // cursor so the next turn starts a fresh conversation cleanly.
+        const containerArchive = "/tmp/t3-provider-store.tar";
+        try {
+          await this.#mustRun(
+            ["cp", input.bootstrap.providerStorePath, `${containerName}:${containerArchive}`],
+            setupTimeoutMs,
+          );
+          await this.#mustExec(
+            containerName,
+            {
+              executable: "tar",
+              args: ["--extract", "--file", containerArchive, "--directory", PROVIDER_HOME],
+            },
+            setupTimeoutMs,
+          );
+        } catch {
+          // Intentionally swallowed; see above.
+        } finally {
+          await this.#mustExec(
+            containerName,
+            { executable: "rm", args: ["-f", containerArchive] },
+            10_000,
+          ).catch(() => undefined);
+        }
+      }
       if (input.bootstrap.repositoryBundlePath !== undefined) {
         const containerBundle = "/tmp/t3-repository.bundle";
+        const bundleRef = input.bootstrap.repositoryBundleRef;
+        if (bundleRef === undefined)
+          throw new SandboxRuntimeError(
+            "repositoryBundlePath requires repositoryBundleRef: the bundle's ref cannot be guessed",
+          );
         await this.#mustRun(
           ["cp", input.bootstrap.repositoryBundlePath, `${containerName}:${containerBundle}`],
           setupTimeoutMs,
         );
+        // `git clone` cannot be used here: the seed bundle records the base
+        // commit under a private ref, and clone only fetches what its default
+        // refspec matches (`refs/heads/*`). It reports success, warns "you
+        // appear to have cloned an empty repository", and leaves a repo with no
+        // refs -- the checkout below then fails with "reference is not a tree".
+        // `fetch` takes the refspec explicitly, and leaves behind no `origin`
+        // remote pointing at a bundle that is deleted moments later.
+        //
+        // No `git bundle verify` either: it needs a repository to resolve
+        // prerequisites against, and the fetch is the stronger check anyway --
+        // verify passes on a bundle truncated mid-pack, a fetch does not.
         await this.#mustExec(
           containerName,
-          { executable: "git", args: ["bundle", "verify", containerBundle] },
+          { executable: "git", args: ["init", "--quiet", "/workspace/repo"] },
           setupTimeoutMs,
         );
         await this.#mustExec(
           containerName,
           {
             executable: "git",
-            args: ["clone", "--no-checkout", containerBundle, "/workspace/repo"],
+            args: [
+              "-C",
+              "/workspace/repo",
+              "fetch",
+              "--no-tags",
+              containerBundle,
+              `${bundleRef}:${bundleRef}`,
+            ],
           },
           setupTimeoutMs,
         );
@@ -368,11 +477,22 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           setupTimeoutMs,
         );
       }
+      // A restore seeds from a bundle of the thread's own previous sandbox, so
+      // it lands on the work the thread had already done rather than the base
+      // commit -- and its bundle already carries the thread branch, which is
+      // why the switch below has to be `-C` rather than `-c`.
+      const restoreCommit = input.bootstrap.restoreCommit;
       await this.#mustExec(
         containerName,
         {
           executable: "git",
-          args: ["-C", "/workspace/repo", "checkout", "--detach", input.bootstrap.baseCommit],
+          args: [
+            "-C",
+            "/workspace/repo",
+            "checkout",
+            "--detach",
+            restoreCommit ?? input.bootstrap.baseCommit,
+          ],
         },
         setupTimeoutMs,
       );
@@ -380,7 +500,13 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         containerName,
         {
           executable: "git",
-          args: ["-C", "/workspace/repo", "switch", "-c", input.bootstrap.branchName],
+          args: [
+            "-C",
+            "/workspace/repo",
+            "switch",
+            restoreCommit === undefined ? "-c" : "-C",
+            input.bootstrap.branchName,
+          ],
         },
         setupTimeoutMs,
       );
@@ -449,9 +575,9 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     );
   }
 
-  async exportBranch(threadIdValue: string): Promise<SandboxExport> {
+  async exportBranch(threadIdValue: string, hint?: SandboxAdoptionHint): Promise<SandboxExport> {
     const threadId = sanitizeId(threadIdValue, "threadId");
-    const record = this.#records.get(threadId);
+    const record = await this.#resolveRecord(threadId, hint);
     if (record === undefined)
       throw new SandboxRuntimeError(`sandbox for thread ${threadId} is not ready`);
     const commit = await this.#mustExec(
@@ -493,9 +619,13 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
 
   /** Copy a self-contained Git bundle through the container runtime boundary
    * and verify it before the sandbox can be deleted. */
-  async exportBundle(threadIdValue: string, destination: string): Promise<void> {
+  async exportBundle(
+    threadIdValue: string,
+    destination: string,
+    hint?: SandboxAdoptionHint,
+  ): Promise<void> {
     const threadId = sanitizeId(threadIdValue, "threadId");
-    const record = this.#records.get(threadId);
+    const record = await this.#resolveRecord(threadId, hint);
     if (record === undefined)
       throw new SandboxRuntimeError(`sandbox for thread ${threadId} is not ready`);
     if (!destination.startsWith("/") || destination.includes("\0"))
@@ -510,17 +640,23 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         },
         120_000,
       );
+      // Verify in the container, against the repository the bundle came from:
+      // `bundle verify` resolves prerequisites against a repository and fails
+      // with "need a repository to verify a bundle" if run from wherever the
+      // server happens to live. Verifying before `cp` also keeps a bundle that
+      // failed its own check from reaching the host artifact directory at all.
+      await this.#mustExec(
+        record.ready.containerName,
+        {
+          executable: "git",
+          args: ["-C", "/workspace/repo", "bundle", "verify", containerBundle],
+        },
+        60_000,
+      );
       await this.#mustRun(
         ["cp", `${record.ready.containerName}:${containerBundle}`, destination],
         120_000,
       );
-      const verified = await this.#executor.run({
-        executable: "git",
-        args: ["bundle", "verify", destination],
-        timeoutMs: 60_000,
-      });
-      if (verified.exitCode !== 0)
-        throw new SandboxRuntimeError("exported Git bundle failed verification", verified.stderr);
     } finally {
       await this.#mustExec(
         record.ready.containerName,
@@ -528,6 +664,79 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           executable: "rm",
           args: ["-f", containerBundle],
         },
+        10_000,
+      ).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Copy the provider's conversation store out of the container so a
+   * re-provisioned thread can resume the conversation instead of starting cold.
+   *
+   * Returns the archived byte count, or `undefined` when nothing was archived
+   * -- an absent store, or one past `maxBytes`. Callers treat that as "no store
+   * this time" and carry on: losing the conversation degrades the next turn,
+   * losing the branch bundle would lose the user's work.
+   *
+   * The exclusions are not hygiene. The provider home also holds live
+   * credentials (`.credentials.json`, `sessions/*.key`), so they are dropped at
+   * archive time rather than filtered afterwards -- a credential that is never
+   * written into the tar cannot leak out of one.
+   */
+  async exportProviderStore(
+    threadIdValue: string,
+    destination: string,
+    maxBytes: number,
+    hint?: SandboxAdoptionHint,
+  ): Promise<number | undefined> {
+    const threadId = sanitizeId(threadIdValue, "threadId");
+    const record = await this.#resolveRecord(threadId, hint);
+    if (record === undefined)
+      throw new SandboxRuntimeError(`sandbox for thread ${threadId} is not ready`);
+    if (!destination.startsWith("/") || destination.includes("\0"))
+      throw new SandboxRuntimeError("store destination must be an absolute host path");
+    const containerArchive = "/tmp/t3-provider-store.tar";
+    try {
+      const archived = await this.#mustExec(
+        record.ready.containerName,
+        {
+          executable: "tar",
+          args: [
+            "--create",
+            "--file",
+            containerArchive,
+            "--directory",
+            PROVIDER_HOME,
+            ...PROVIDER_STORE_EXCLUDES.flatMap((pattern) => ["--exclude", pattern]),
+            ".",
+          ],
+          // An empty or absent provider home is the ordinary first-turn case,
+          // not a failure worth failing the export over.
+          allowNonZeroExit: true,
+        },
+        120_000,
+      );
+      if (archived.exitCode !== 0) return undefined;
+      // Measured inside the container, before the copy: an oversized store
+      // should never cross the boundary at all, let alone land in an artifact
+      // directory that nothing prunes.
+      const measured = await this.#mustExec(
+        record.ready.containerName,
+        { executable: "stat", args: ["-c", "%s", containerArchive], allowNonZeroExit: true },
+        30_000,
+      );
+      const bytes = Number.parseInt(measured.stdout.trim(), 10);
+      if (measured.exitCode !== 0 || !Number.isFinite(bytes)) return undefined;
+      if (bytes > maxBytes) return undefined;
+      await this.#mustRun(
+        ["cp", `${record.ready.containerName}:${containerArchive}`, destination],
+        120_000,
+      );
+      return bytes;
+    } finally {
+      await this.#mustExec(
+        record.ready.containerName,
+        { executable: "rm", args: ["-f", containerArchive] },
         10_000,
       ).catch(() => undefined);
     }
@@ -576,12 +785,19 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     };
   }
 
-  async stop(threadIdValue: string, teardown: ReadonlyArray<SandboxHook> = []): Promise<void> {
+  async stop(
+    threadIdValue: string,
+    teardown: ReadonlyArray<SandboxHook> = [],
+    hint?: SandboxAdoptionHint,
+  ): Promise<void> {
     const threadId = sanitizeId(threadIdValue, "threadId");
-    const record = this.#records.get(threadId);
+    const record = await this.#resolveRecord(threadId, hint);
     if (record === undefined) return;
     const failures: string[] = [];
-    for (const hook of teardown) {
+    // An adopted record carries no teardown hooks: the declarations were held
+    // in the manager's memory and did not survive the restart. Reclaiming the
+    // resources is still worth doing, so skip the hooks rather than the stop.
+    for (const hook of record.adopted ? [] : teardown) {
       validateHook(hook);
       try {
         await this.#mustExec(record.ready.containerName, hook, record.teardownTimeoutMs);
@@ -603,6 +819,10 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           ? {
               container: record.ready.egressProxyContainerName,
               network: record.ready.egressNetworkName,
+              // An adopted record cannot know whether an egress sidecar was
+              // ever provisioned, only what it would have been named. Removing
+              // one that never existed is not a teardown failure.
+              optional: record.adopted === true,
             }
           : undefined,
       )),
@@ -764,6 +984,90 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     this.#validatedRootless = true;
   }
 
+  /**
+   * Whether the container is the running workspace this exact thread
+   * provisioned. The label set is stamped once at `docker run` and never
+   * updated, so a match proves identity and provenance -- not that setup hooks
+   * completed, that sidecars are still up, or that any of it is safe to resume.
+   */
+  async #matchesThreadLabels(
+    containerName: string,
+    expected: {
+      readonly threadId: string;
+      readonly projectId: string;
+      readonly image: string;
+      readonly baseCommit: string;
+      readonly branchName: string;
+    },
+  ): Promise<boolean> {
+    const labels = await this.#run(
+      [
+        "inspect",
+        "--format",
+        `{{index .Config.Labels "${THREAD_LABEL}"}}\t{{index .Config.Labels "${PROJECT_LABEL}"}}\t{{index .Config.Labels "com.t3tools.sandbox.managed"}}\t{{index .Config.Labels "${IMAGE_LABEL}"}}\t{{index .Config.Labels "${BASE_LABEL}"}}\t{{index .Config.Labels "${BRANCH_LABEL}"}}\t{{index .Config.Labels "${ROLE_LABEL}"}}\t{{.State.Running}}`,
+        containerName,
+      ],
+      10_000,
+      true,
+    );
+    if (labels.exitCode !== 0) return false;
+    return (
+      labels.stdout.trim() ===
+      `${expected.threadId}\t${expected.projectId}\ttrue\t${expected.image}\t${expected.baseCommit}\t${expected.branchName}\tworkspace\ttrue`
+    );
+  }
+
+  /**
+   * The record for a thread, rebuilding it from `hint` when this manager
+   * generation never provisioned the sandbox -- a server restart empties
+   * `#records`, which otherwise strands the thread's commits inside a volume
+   * that can no longer be exported or removed.
+   *
+   * Adoption here is deliberately narrower than `reconcile`'s: it is granted
+   * only for export and teardown, only for a container whose labels still match
+   * the thread that provisioned it, and it re-arms nothing.
+   */
+  async #resolveRecord(
+    threadId: string,
+    hint: SandboxAdoptionHint | undefined,
+  ): Promise<RecordEntry | undefined> {
+    const record = this.#records.get(threadId);
+    if (record !== undefined) return record;
+    if (hint === undefined) return undefined;
+    const projectId = sanitizeId(hint.projectId, "projectId");
+    const names = resourceNames(projectId, threadId);
+    const matches = await this.#matchesThreadLabels(names.containerName, {
+      threadId,
+      projectId,
+      image: hint.image,
+      baseCommit: hint.baseCommit,
+      branchName: hint.branchName,
+    });
+    if (!matches) return undefined;
+    // Not cached in `#records`: an adopted container is only ever addressed for
+    // the operation that adopted it. Caching would make it reachable from
+    // `exec` and `runtimeRef`, which is exactly the resumption reconcile
+    // refuses.
+    return {
+      ready: {
+        sandboxId: threadId,
+        runtime: this.runtime,
+        containerName: names.containerName,
+        networkName: names.networkName,
+        workspaceVolumeName: names.workspaceVolumeName,
+        desktopVolumeName: names.desktopVolumeName,
+        // Whether an egress sidecar was ever started is not recorded anywhere,
+        // so cleanup probes for it rather than assuming either way.
+        egressProxyContainerName: names.egressProxyContainerName,
+        egressNetworkName: names.egressNetworkName,
+        branchName: hint.branchName,
+        limits: DEFAULT_SANDBOX_RESOURCE_LIMITS,
+      },
+      teardownTimeoutMs: hint.teardownTimeoutMs ?? boundedTimeout(undefined, 120),
+      adopted: true,
+    };
+  }
+
   async #removeManagedSiblingContainers(
     threadId: string,
     workspaceContainer: string,
@@ -812,23 +1116,29 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     volume: string,
     desktopVolume: string,
     timeoutMs: number,
-    egress?: { readonly container: string; readonly network: string },
+    egress?: {
+      readonly container: string;
+      readonly network: string;
+      readonly optional?: boolean;
+    },
   ): Promise<string[]> {
     const failures: string[] = [];
-    for (const args of [
-      ["rm", "--force", container],
-      ...(egress ? [["rm", "--force", egress.container] as const] : []),
-      ["network", "rm", network],
-      ...(egress ? [["network", "rm", egress.network] as const] : []),
-      ["volume", "rm", volume],
-      ["volume", "rm", desktopVolume],
-    ] as const) {
+    const egressOptional = egress?.optional === true;
+    for (const [args, optional] of [
+      [["rm", "--force", container], false],
+      ...(egress ? [[["rm", "--force", egress.container], egressOptional] as const] : []),
+      [["network", "rm", network], false],
+      ...(egress ? [[["network", "rm", egress.network], egressOptional] as const] : []),
+      [["volume", "rm", volume], false],
+      [["volume", "rm", desktopVolume], false],
+    ] as ReadonlyArray<readonly [ReadonlyArray<string>, boolean]>) {
       const result = await this.#run(args, timeoutMs, true).catch((error) => ({
         exitCode: 1,
         stdout: "",
         stderr: String(error),
       }));
-      if (result.exitCode !== 0) failures.push(`${args[0]} ${args.at(-1)}: ${result.stderr}`);
+      if (result.exitCode !== 0 && !optional)
+        failures.push(`${args[0]} ${args.at(-1)}: ${result.stderr}`);
     }
     return failures;
   }
@@ -865,12 +1175,33 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       timeoutMs,
       ...("stdin" in input && input.stdin !== undefined ? { stdin: input.stdin } : {}),
     };
+    const allowNonZeroExit = "allowNonZeroExit" in input && input.allowNonZeroExit === true;
     return this.#executor.run(command).then((result) => {
-      if (result.exitCode !== 0)
+      if (result.exitCode !== 0 && !allowNonZeroExit)
         throw new SandboxRuntimeError(`sandbox command ${input.executable} failed`, result.stderr);
       return result;
     });
   }
+}
+
+/**
+ * Every per-thread resource name derives from `(projectId, threadId)` alone, so
+ * a sandbox provisioned by an earlier server generation can be addressed again
+ * without consulting any in-memory state.
+ */
+function resourceNames(projectId: string, threadId: string) {
+  const suffix = NodeCrypto.createHash("sha256")
+    .update(`${projectId}\0${threadId}`)
+    .digest("hex")
+    .slice(0, 32);
+  return {
+    containerName: `t3-thread-${suffix}`,
+    networkName: `t3-net-${suffix}`,
+    workspaceVolumeName: `t3-workspace-${suffix}`,
+    desktopVolumeName: `t3-desktop-${suffix}`,
+    egressProxyContainerName: `t3-egress-${suffix}`,
+    egressNetworkName: `t3-egress-net-${suffix}`,
+  };
 }
 
 function makeReady(
@@ -891,16 +1222,28 @@ function makeReady(
     desktopVolumeName,
     ...(input.egressProxyImage === undefined
       ? {}
-      : {
-          egressProxyContainerName: `t3-egress-${NodeCrypto.createHash("sha256").update(`${input.bootstrap.projectId}\0${input.bootstrap.threadId}`).digest("hex").slice(0, 32)}`,
-          egressNetworkName: `t3-egress-net-${NodeCrypto.createHash("sha256").update(`${input.bootstrap.projectId}\0${input.bootstrap.threadId}`).digest("hex").slice(0, 32)}`,
-        }),
+      : (({ egressProxyContainerName, egressNetworkName }) => ({
+          egressProxyContainerName,
+          egressNetworkName,
+        }))(
+          resourceNames(
+            sanitizeId(input.bootstrap.projectId, "projectId"),
+            sanitizeId(input.bootstrap.threadId, "threadId"),
+          ),
+        )),
     branchName: input.bootstrap.branchName,
     limits,
   };
 }
 
-/** `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled` omits the `--storage-opt` pair. */
+/**
+ * `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled` omits the container's
+ * `--storage-opt` pair and the workspace/desktop volumes' `--opt o=size=`
+ * pair. Rootless podman needs `CAP_SYS_ADMIN` in the filesystem's owning
+ * namespace to administer XFS project quotas, which it never has -- so on
+ * hosts without a privileged quota helper, every quota-bearing volume create
+ * fails outright, not just the container's own storage-opt.
+ */
 function storageQuotaDisabled(): boolean {
   return process.env.T3_SANDBOX_CONTAINER_STORAGE_QUOTA?.trim().toLowerCase() === "disabled";
 }

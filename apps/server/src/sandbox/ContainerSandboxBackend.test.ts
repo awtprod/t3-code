@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { ContainerSandboxBackend } from "./ContainerSandboxBackend.ts";
+import { CREDENTIAL_PROXY_ALIAS } from "./SandboxCredentialProxy.ts";
 import type {
   SandboxCommand,
   SandboxCommandExecutor,
@@ -31,8 +32,19 @@ const input = (overrides: Partial<SandboxProvisionInput> = {}): SandboxProvision
   ...overrides,
 });
 
-function successfulExecutor() {
+/**
+ * A responder that answers every command a clean provision issues.
+ *
+ * `override` runs first and wins whenever it returns a result, so a test that
+ * cares about one command -- a `stat` size, a failing `tar` -- says only that
+ * much and still gets a container out the other end.
+ */
+function successfulExecutor(
+  override?: (command: SandboxCommand) => SandboxCommandResult | undefined,
+) {
   return new FakeExecutor((command) => {
+    const overridden = override?.(command);
+    if (overridden !== undefined) return overridden;
     if (command.args[0] === "info") return { exitCode: 0, stdout: '["name=rootless"]', stderr: "" };
     if (command.args[0] === "inspect" && command.args.length === 2)
       return { exitCode: 1, stdout: "", stderr: "missing" };
@@ -82,6 +94,118 @@ describe("ContainerSandboxBackend", () => {
     );
   });
 
+  it("creates the provider HOME on the writable volume before any provider spawn", async () => {
+    // Provider spawns run with HOME=/thread-data/provider-home and the CLI
+    // writes its config there on startup. The image only creates /thread-data
+    // and the rootfs is read-only, so nothing else can create this directory.
+    const executor = successfulExecutor();
+    await new ContainerSandboxBackend("docker", executor).ensureReady(input());
+    const mkdir = executor.commands.findIndex(
+      (command) =>
+        command.args[0] === "exec" && command.args.includes("/thread-data/provider-home"),
+    );
+    expect(mkdir).toBeGreaterThanOrEqual(0);
+    const run = executor.commands.findIndex((command) => command.args[0] === "run");
+    expect(mkdir).toBeGreaterThan(run);
+  });
+
+  it("never archives provider credentials into an exported store", async () => {
+    // The provider home holds live auth material (.credentials.json,
+    // sessions/*.key) beside the transcripts, and the archive outlives the
+    // container in a host directory. The exclusions are the security boundary,
+    // so they are asserted directly rather than assumed from the happy path.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("stat")
+        ? { exitCode: 0, stdout: "4096\n", stderr: "" }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    await backend.exportProviderStore("thread-1", "/artifacts/store.tar", 50 * 1024 * 1024);
+
+    const tar = executor.commands.find(
+      (command) => command.args[0] === "exec" && command.args.includes("tar"),
+    );
+    expect(tar).toBeDefined();
+    for (const denied of [".credentials.json", "sessions", "*.key", "*token*", "*auth*"]) {
+      const at = tar!.args.indexOf(denied);
+      expect(at).toBeGreaterThan(0);
+      expect(tar!.args[at - 1]).toBe("--exclude");
+    }
+    // Archived from the provider home itself, so nothing outside it -- the
+    // workspace, /tmp -- can ride along.
+    expect(tar!.args).toContain("/thread-data/provider-home");
+  });
+
+  it("skips a provider store larger than the ceiling instead of copying it out", async () => {
+    // Nothing prunes the artifact directory, so an oversized store is dropped
+    // at the boundary: it must never reach the host.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("stat")
+        ? { exitCode: 0, stdout: `${256 * 1024 * 1024}\n`, stderr: "" }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    const bytes = await backend.exportProviderStore(
+      "thread-1",
+      "/artifacts/store.tar",
+      50 * 1024 * 1024,
+    );
+
+    expect(bytes).toBeUndefined();
+    expect(
+      executor.commands.some(
+        (command) => command.args[0] === "cp" && command.args.includes("/artifacts/store.tar"),
+      ),
+    ).toBe(false);
+  });
+
+  it("restores a provider store into the container home before the repository is seeded", async () => {
+    // The CLI reads its home on first spawn, so the store has to be in place
+    // before anything can run -- and before the repo work that follows.
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    const extract = executor.commands.findIndex(
+      (command) => command.args[0] === "exec" && command.args.includes("--extract"),
+    );
+    const clone = executor.commands.findIndex(
+      (command) => command.args[0] === "exec" && command.args.includes("clone"),
+    );
+    expect(extract).toBeGreaterThanOrEqual(0);
+    expect(extract).toBeLessThan(clone);
+  });
+
+  it("provisions anyway when a restored provider store fails to extract", async () => {
+    // Losing the conversation costs the next turn its context; failing the
+    // provision would cost the user the thread.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("--extract")
+        ? { exitCode: 1, stdout: "", stderr: "corrupt archive" }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const ready = await backend.ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    expect(ready.containerName).toContain("t3-thread-");
+  });
+
   it("coalesces concurrent provisioning and is idempotent once ready", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);
@@ -124,13 +248,29 @@ describe("ContainerSandboxBackend", () => {
         "--env",
         `ALL_PROXY=${["http:/", "/egress-proxy:3128"].join("")}`,
         "--env",
-        "NO_PROXY=localhost,127.0.0.1,::1",
+        "NO_PROXY=localhost,127.0.0.1,::1,credential-proxy",
       ]),
     );
     const proxy = executor.commands.find((command) => command.args.includes("t3-egress-proxy"))!;
     expect(proxy.args).toEqual(
       expect.arrayContaining(["--deny-private", "--deny-metadata", "--resolve-before-connect"]),
     );
+  });
+
+  it("bypasses the egress proxy for the credential proxy sidecar", async () => {
+    const executor = successfulExecutor();
+    await new ContainerSandboxBackend("docker", executor).ensureReady(
+      input({ egressProxyImage: `egress@sha256:${"e".repeat(64)}` }),
+    );
+    const run = executor.commands.find(
+      (command) => command.args[0] === "run" && command.args.includes(input().image),
+    )!;
+    const entry = run.args.find((arg) => arg.startsWith("NO_PROXY="))!;
+    // The credential proxy answers on a private address and the egress proxy
+    // denies those, so a provider CLI reaching it through the proxy env is
+    // refused by our own policy -- surfacing as "403 egress denied: private
+    // address", which Claude Code reports as an authentication failure.
+    expect(entry.slice("NO_PROXY=".length).split(",")).toContain(CREDENTIAL_PROXY_ALIAS);
   });
 
   it("cleans container, network, and workspace volume after setup failure and stop", async () => {
@@ -255,6 +395,46 @@ describe("ContainerSandboxBackend", () => {
     await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
   });
 
+  it("returns the result of a non-zero exec when the caller allows it", async () => {
+    // A checkpoint ref probe runs `git rev-parse --verify <ref>`, which exits 1
+    // when the ref does not exist yet -- the normal state on a thread's first
+    // turn. Throwing on that made `CheckpointStore.sandboxGit`'s `allowNonZero`
+    // branch unreachable and failed every pre-turn baseline for a sandboxed
+    // thread.
+    const executor = new FakeExecutor((command) => {
+      if (command.args[0] === "info")
+        return { exitCode: 0, stdout: '["name=rootless"]', stderr: "" };
+      if (command.args[0] === "inspect" && command.args.length === 2)
+        return { exitCode: 1, stdout: "", stderr: "missing" };
+      if (command.args[0] === "volume" && command.args[1] === "inspect") {
+        const name = command.args.at(-1) ?? "";
+        if (name.startsWith("t3-cache-")) return { exitCode: 1, stdout: "", stderr: "missing" };
+        const bytes = name.startsWith("t3-desktop-")
+          ? Math.max(256 * 1024 ** 2, Math.floor(20 * 1024 ** 3 * 0.1))
+          : Math.floor(20 * 1024 ** 3 * 0.9);
+        return { exitCode: 0, stdout: `size=${bytes}\n`, stderr: "" };
+      }
+      if (command.args[0] === "exec" && command.args.includes("rev-parse"))
+        return { exitCode: 1, stdout: "", stderr: "fatal: Needed a single revision\n" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+
+    const probe = await backend.exec("thread-1", {
+      executable: "git",
+      args: ["rev-parse", "--verify", "refs/t3/checkpoint^{commit}"],
+      allowNonZeroExit: true,
+    });
+    expect(probe.exitCode).toBe(1);
+    expect(probe.stderr).toContain("Needed a single revision");
+
+    // Without the flag the same failure is still an error.
+    await expect(
+      backend.exec("thread-1", { executable: "git", args: ["rev-parse", "--verify", "HEAD"] }),
+    ).rejects.toThrow("sandbox command git failed");
+  });
+
   it("exports commit and patch through argv-only exec", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);
@@ -292,12 +472,78 @@ describe("ContainerSandboxBackend", () => {
             "/tmp/thread-1.bundle",
           ],
         }),
-        expect.objectContaining({
-          executable: "git",
-          args: ["bundle", "verify", "/tmp/thread-1.bundle"],
-        }),
       ]),
     );
+
+    // Verification runs in the container against the repository the bundle came
+    // from -- `git bundle verify` needs a repository to resolve prerequisites
+    // against, so a host-side check with no `-C` fails outright. It also has to
+    // precede the `cp`, so a bad bundle never reaches the host.
+    const verifyIndex = executor.commands.findIndex(
+      (command) => command.args.includes("bundle") && command.args.includes("verify"),
+    );
+    const copyIndex = executor.commands.findIndex((command) => command.args[0] === "cp");
+    expect(verifyIndex).toBeGreaterThanOrEqual(0);
+    expect(executor.commands[verifyIndex]).toMatchObject({
+      executable: "docker",
+      args: expect.arrayContaining(["-C", "/workspace/repo", "bundle", "verify"]),
+    });
+    expect(verifyIndex).toBeLessThan(copyIndex);
+  });
+
+  it("fetches the seed bundle by its ref instead of cloning it", async () => {
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const base = input();
+    const bundleRef = "refs/t3-sandbox-seed/abc123.42";
+    await backend.ensureReady({
+      ...base,
+      bootstrap: {
+        ...base.bootstrap,
+        repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle",
+        repositoryBundleRef: bundleRef,
+      },
+    });
+
+    const containerBundle = "/tmp/t3-repository.bundle";
+    // `git clone` only fetches `refs/heads/*`, so cloning a bundle whose only
+    // ref is private succeeds while landing nothing -- and the checkout that
+    // follows fails with "reference is not a tree". The refspec must be explicit.
+    expect(
+      executor.commands.some(
+        (command) => command.args.includes("clone") && command.args.includes(containerBundle),
+      ),
+    ).toBe(false);
+    expect(
+      executor.commands.some(
+        (command) =>
+          command.args.includes("fetch") &&
+          command.args.includes(containerBundle) &&
+          command.args.includes(`${bundleRef}:${bundleRef}`),
+      ),
+    ).toBe(true);
+    // Nothing verifies the bundle beforehand: there is no repository to verify
+    // against, and the fetch rejects a truncated bundle that verify accepts.
+    expect(
+      executor.commands.some(
+        (command) =>
+          command.args.includes("bundle") &&
+          command.args.includes("verify") &&
+          command.args.includes(containerBundle),
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses a seed bundle whose ref was not supplied", async () => {
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const base = input();
+    await expect(
+      backend.ensureReady({
+        ...base,
+        bootstrap: { ...base.bootstrap, repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle" },
+      }),
+    ).rejects.toThrow(/repositoryBundleRef/);
   });
 
   it("samples bounded runtime and writable-volume usage", async () => {
@@ -321,5 +567,102 @@ describe("ContainerSandboxBackend", () => {
       diskBytes: 3072,
       processCount: 7,
     });
+  });
+
+  // A server restart empties the backend's in-memory records. Until these
+  // cases existed, the adopt path had no coverage at all -- `successfulExecutor`
+  // answers the bare `inspect` with exit 1 precisely so every other test takes
+  // the create path.
+  const ADOPTED_LABELS = [
+    "thread-1",
+    "project-1",
+    "true",
+    `sandbox@sha256:${"b".repeat(64)}`,
+    "a".repeat(40),
+    "thread/thread-1",
+    "workspace",
+    "true",
+  ].join("\t");
+
+  const hint = () => ({
+    projectId: "project-1",
+    image: `sandbox@sha256:${"b".repeat(64)}`,
+    baseCommit: "a".repeat(40),
+    branchName: "thread/thread-1",
+  });
+
+  function adoptedExecutor(labels = ADOPTED_LABELS) {
+    return new FakeExecutor((command) => {
+      if (command.args[0] === "inspect" && command.args[1] === "--format")
+        return { exitCode: 0, stdout: `${labels}\n`, stderr: "" };
+      if (command.args[0] === "exec" && command.args.includes("rev-parse"))
+        return { exitCode: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+  }
+
+  it("exports a branch from a sandbox this process never provisioned", async () => {
+    const executor = adoptedExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    // No `ensureReady` -- this is the post-restart state exactly.
+    const exported = await backend.exportBranch("thread-1", hint());
+    expect(exported.commit).toBe("c".repeat(40));
+    expect(
+      executor.commands
+        .filter((command) => command.args[0] === "exec")
+        .every((command) => command.args.includes("t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5")),
+    ).toBe(true);
+  });
+
+  it("refuses to adopt a container whose labels do not match the thread", async () => {
+    // Same derived name, different provenance: another thread's project, or a
+    // container left over from an earlier base commit.
+    const executor = adoptedExecutor(ADOPTED_LABELS.replace("project-1", "project-2"));
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await expect(backend.exportBranch("thread-1", hint())).rejects.toThrow("not ready");
+    await expect(backend.exportBundle("thread-1", "/tmp/thread-1.bundle", hint())).rejects.toThrow(
+      "not ready",
+    );
+    // Adoption never widens to resumption: `exec` has no hint parameter at all.
+    await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
+    expect(executor.commands.some((command) => command.args[0] === "exec")).toBe(false);
+  });
+
+  it("tears down a sandbox this process never provisioned", async () => {
+    const executor = new FakeExecutor((command) => {
+      if (command.args[0] === "inspect" && command.args[1] === "--format")
+        return { exitCode: 0, stdout: `${ADOPTED_LABELS}\n`, stderr: "" };
+      // Whether an egress sidecar was ever provisioned is not recorded, so its
+      // absence must not turn teardown into a failure.
+      if (command.args.at(-1)?.startsWith("t3-egress-"))
+        return { exitCode: 1, stdout: "", stderr: "no such container" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.stop("thread-1", [{ executable: "should-not-run" }], hint());
+    expect(
+      executor.commands
+        .filter((command) => command.args[0] === "rm" || command.args[1] === "rm")
+        .map((command) => command.args.at(-1)),
+    ).toEqual([
+      "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-egress-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-net-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-egress-net-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-workspace-921ca543f9cf4d28fe0b81d81cdb33b5",
+      "t3-desktop-921ca543f9cf4d28fe0b81d81cdb33b5",
+    ]);
+    // The hook declarations died with the restart, so an adopted record runs
+    // none of them rather than pretending it can.
+    expect(executor.commands.some((command) => command.args.includes("should-not-run"))).toBe(
+      false,
+    );
+  });
+
+  it("does nothing for a thread with no record and no hint", async () => {
+    const executor = adoptedExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.stop("thread-1");
+    expect(executor.commands).toEqual([]);
   });
 });

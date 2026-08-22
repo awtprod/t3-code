@@ -69,6 +69,7 @@ import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRun
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
+import { SandboxSettleCleanupReactorLive } from "./orchestration/Layers/SandboxSettleCleanupReactor.ts";
 import { SandboxLifecycleReactorLive } from "./orchestration/Layers/SandboxLifecycleReactor.ts";
 import { SandboxRuntimeManagerLive } from "./sandbox/SandboxRuntimeManager.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
@@ -329,13 +330,13 @@ const PlatformServicesLive = Layer.unwrap(
 );
 
 const ReactorLayerLive = Layer.empty.pipe(
-  Layer.provideMerge(SandboxRuntimeManagerLive),
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(SandboxLifecycleReactorLive),
+  Layer.provideMerge(SandboxSettleCleanupReactorLive),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
@@ -490,14 +491,23 @@ const VcsLayerLive = Layer.empty.pipe(
   Layer.provideMerge(VcsStatusBroadcaster.layer.pipe(Layer.provide(GitWorkflowLayerLive))),
 );
 
-const CheckpointingLayerLive = Layer.empty.pipe(
+/**
+ * Exported so `SandboxRuntimeManagerWiring.test.ts` can assert on this exact
+ * composition rather than a replica of it -- a copy would keep passing after a
+ * regression here.
+ */
+export const CheckpointingLayerLive = Layer.empty.pipe(
   Layer.provideMerge(CheckpointDiffQuery.layer),
-  Layer.provideMerge(
-    CheckpointStore.layer.pipe(
-      Layer.provide(VcsDriverRegistryLayerLive),
-      Layer.provide(SandboxRuntimeManagerLive),
-    ),
-  ),
+  // `SandboxRuntimeManagerLive` is deliberately NOT provided here. The manager
+  // holds the per-thread container records in memory, so the reactors that
+  // provision a sandbox and the store that runs git inside it must share one
+  // instance. `Layer.provide` scopes a dependency privately to the layer it
+  // wraps, which gave the store its own manager while the reactors fell
+  // through to the `Context.Reference` default -- a second, empty manager, and
+  // silently, because a default value cannot fail. Checkpoints then failed with
+  // "sandbox for thread <id> is not ready" against a sandbox that was ready and
+  // actively running a turn. It is provided once at the composition root below.
+  Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
 );
 
 const PortScannerLayerLive = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
@@ -519,6 +529,7 @@ const OrchestrationCommandDispatcherLayerLive = OrchestrationCommandDispatcher.l
   Layer.provide(ProviderRegistryLive),
   Layer.provide(ProjectSetupScriptRunnerLayerLive),
   Layer.provide(ServerSettingsLayerLive),
+  Layer.provide(T3ProjectFileLoader.layer),
   Layer.provide(VcsStatusBroadcaster.layer.pipe(Layer.provide(GitWorkflowLayerLive))),
   Layer.provide(WorkspacePaths.layer),
 );
@@ -591,7 +602,15 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
   Layer.provideMerge(Layer.mergeAll(OrchestrationRuntimeStateLayerLive, ServerSettingsLayerLive)),
   Layer.provideMerge(CheckpointingLayerLive),
-  Layer.provideMerge(SourceControlProviderRegistryLayerLive),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      SourceControlProviderRegistryLayerLive,
+      // Shared by every consumer: the reactors that provision and tear down
+      // sandboxes, and the checkpoint store that execs git inside them. See
+      // the note on `CheckpointingLayerLive`.
+      SandboxRuntimeManagerLive,
+    ),
+  ),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),

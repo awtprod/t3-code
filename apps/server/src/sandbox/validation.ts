@@ -46,6 +46,27 @@ export function validateBootstrap(input: SandboxBootstrap): void {
   ) {
     throw new SandboxValidationError("repository bundle path is invalid");
   }
+  // Server-generated, but it lands on a git command line as a refspec, so it
+  // gets the same shape check as every other value that does.
+  if (
+    input.repositoryBundleRef !== undefined &&
+    (!input.repositoryBundleRef.startsWith("refs/") ||
+      !SAFE_BRANCH.test(input.repositoryBundleRef) ||
+      input.repositoryBundleRef.endsWith("/") ||
+      input.repositoryBundleRef.endsWith(".lock"))
+  ) {
+    throw new SandboxValidationError("repository bundle ref is unsafe");
+  }
+  if (input.restoreCommit !== undefined && !COMMIT.test(input.restoreCommit))
+    throw new SandboxValidationError("restoreCommit must be an immutable full commit hash");
+  // Server-generated like the bundle path above, and lands on a command line
+  // the same way, so it gets the same shape check.
+  if (
+    input.providerStorePath !== undefined &&
+    (!SAFE_ABSOLUTE_PATH.test(input.providerStorePath) || input.providerStorePath.includes(".."))
+  ) {
+    throw new SandboxValidationError("provider store path is invalid");
+  }
   if (
     input.inheritedPatch !== undefined &&
     Buffer.byteLength(input.inheritedPatch) > 16 * 1024 * 1024

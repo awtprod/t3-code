@@ -21,7 +21,6 @@ readonly SERVICE_HOME=/var/lib/command-center
 readonly SANDBOX_MOUNT=/var/lib/command-center/sandbox
 readonly SANDBOX_IMAGE_FILE=/var/lib/command-center/sandbox-storage.img
 readonly WRAPPER_DIR=/opt/command-center/bin
-readonly HELPER_DIR=/usr/local/libexec/podman
 readonly DROPIN_DIR=/etc/systemd/system/command-center.service.d
 # Referenced by the drop-in as `EnvironmentFile=-`, holds the provider token.
 # This script never creates or reads it: it is a secret, and a bootstrap script
@@ -41,24 +40,45 @@ SANDBOX_IMAGE_SIZE_GIB="${SANDBOX_IMAGE_SIZE_GIB:-40}"
 # less than this much headroom, counting the image at its full (not sparse) size.
 readonly FREE_SPACE_MARGIN_GIB=15
 
-# Pinned network helpers. Ubuntu 24.04 ships netavark 1.4, which has no DNS on
-# --internal networks; the sandbox design needs a workspace container to resolve
-# `egress-proxy` and preview aliases by name on exactly such a network.
+# Pinned podman runtime. Apt's podman 4.9.3 + netavark 1.14.0 (Ubuntu 24.04) has
+# a structural bug in rootless podman's shared per-UID rootless-netns pause
+# namespace: it never bind-mounts a custom network's actual JSON config into its
+# view for graphroots under /var/lib-class paths (only netavark.lock ever shows
+# up there), so `podman run --network <custom>` fails with "network not found"
+# once the pause process is already alive from an earlier network -- not a
+# netavark-version/DNS-threshold issue, so no empirical "does the distro version
+# already work" probe can catch it (the probe network is often the first one
+# created, before the bug's precondition holds).
 #
-# NOTE ON THE VERSION: the design brief says "netavark >= 1.6". Upstream never
-# released a 1.6 -- the series went 1.4 -> 1.5 -> 1.14 -> 1.15 -> ... -> 2.x.
-# 1.14.0 is the pinned successor here. Step 2 does not trust this reasoning: it
-# empirically tests internal-network DNS with the distro version first and skips
-# the override entirely if the distro version already works.
-readonly NETAVARK_VERSION=v1.14.0
-readonly NETAVARK_SHA256=abd60bb32af8a9f794739734d78e1add1017aef05c96611d19466736072bfdc1
-readonly AARDVARK_VERSION=v1.14.0
-readonly AARDVARK_SHA256=259ca357fbe2768607f8dc2f8364378e0cb47f8d71adf39eb2c1f7bda1e76df1
+# podman v5.8.4 via the mgoltzsche/podman-static static bundle (bundled netavark
+# 1.17.2) fixes both this and internal-network DNS; verified directly on this
+# host against a /var/lib-class graphroot with the pause process already live.
+#
+# NOTE ON VERIFICATION: upstream publishes only a detached GPG .asc signature
+# for this release, no sha256sums.txt, and this host's keyserver access is
+# blocked. These hashes were captured by hand from a downloaded, inspected copy
+# of the release asset and pinned here; there is no GPG signature check.
+readonly PODMAN_STATIC_VERSION=v5.8.4
+readonly PODMAN_STATIC_SHA256_AMD64=a58765fe8be6ab3fb79f892f1a027b4ce4a7e8eb589df1ef960c167cbde08d69
+readonly PODMAN_STATIC_SHA256_ARM64=a2f6b73cc0f7018e2e8518338a4ec27db70148e1af86e16719235605aefd1df3
 
 # Image used by the verification step only. Never used at runtime by the server.
 # Pinned by digest so a compromised tag cannot change what we execute as the
 # service user. Override for an air-gapped host with a local mirror.
 VERIFY_IMAGE="${VERIFY_IMAGE:-docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc}"
+
+# Mirrors T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled (see 50-sandbox.conf).
+# Set this before running Step 8 on a host where the backend is (or will be)
+# deployed with quotas disabled -- e.g. because rootless podman cannot
+# administer XFS project quotas here. With it set, Step 8 skips the
+# quota-create/enforcement checks and drops --storage-opt from the hardened
+# run, so verification mirrors what the backend will actually issue instead
+# of hard-failing on a known, accepted limitation.
+case "${T3_SANDBOX_CONTAINER_STORAGE_QUOTA:-}" in
+  [Dd][Ii][Ss][Aa][Bb][Ll][Ee][Dd]) STORAGE_QUOTA_DISABLED=1 ;;
+  *) STORAGE_QUOTA_DISABLED=0 ;;
+esac
+readonly STORAGE_QUOTA_DISABLED
 
 STEPS="${STEPS:-1,2,3,4,5,6,7,8,9}"
 
@@ -127,9 +147,10 @@ if wants_step 1; then
   say "Step 1: install container runtime packages"
   # uidmap provides newuidmap/newgidmap. Without them rootless podman cannot
   # create a user namespace at all and fails before doing anything useful.
-  # catatonit backs the backend's `--init` flag; podman only Recommends it, and
-  # apt-get install --no-install-recommends elsewhere could leave it out.
-  packages=(uidmap slirp4netns passt podman netavark aardvark-dns catatonit xfsprogs dbus-user-session)
+  # podman/netavark/aardvark-dns/catatonit deliberately are NOT installed from
+  # apt: Step 2 installs a pinned podman-static bundle instead (see its comment
+  # for why).
+  packages=(uidmap slirp4netns passt xfsprogs dbus-user-session)
   missing=()
   for pkg in "${packages[@]}"; do
     if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$'; then
@@ -144,18 +165,88 @@ if wants_step 1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
   fi
   command -v newuidmap >/dev/null || die "newuidmap missing after installing uidmap"
-  command -v podman >/dev/null || die "podman missing after install"
   command -v mkfs.xfs >/dev/null || die "mkfs.xfs missing after installing xfsprogs"
-  info "podman: $(podman --version)"
 fi
 
 # --------------------------------------------------------------------------
-# Step 3 before step 2: the DNS probe in step 2 needs a working rootless podman,
-# which needs subuid/subgid and linger. Steps are numbered to match the design
-# document, but subuid/linger are genuine prerequisites of the probe, so they are
-# executed first when a full run is requested. Running STEPS=2 alone assumes
-# steps 3 and 4 already happened.
+# Step 2: pinned podman-static runtime
 # --------------------------------------------------------------------------
+# `podman --version` needs no user namespace, subuid, or linger, so this step
+# has no dependency on steps 3/4 and can run immediately after step 1 -- unlike
+# the DNS probe this step used to run (deferred to after step 7, since it needed
+# a live rootless environment). It only has to run before step 6, which checks
+# for a podman.socket unit to exist.
+if wants_step 2; then
+  say "Step 2: install the pinned podman-static runtime (podman/netavark/aardvark-dns/conmon/crun/catatonit)"
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) podman_static_asset=podman-linux-amd64.tar.gz; podman_static_sha256="$PODMAN_STATIC_SHA256_AMD64" ;;
+    aarch64) podman_static_asset=podman-linux-arm64.tar.gz; podman_static_sha256="$PODMAN_STATIC_SHA256_ARM64" ;;
+    *) die "unsupported architecture '$arch'; only x86_64 and aarch64 have pinned podman-static checksums in this script" ;;
+  esac
+
+  installed_version="$(/usr/local/bin/podman --version 2>/dev/null | awk '{print $3}' || true)"
+  if [ "$installed_version" = "${PODMAN_STATIC_VERSION#v}" ]; then
+    info "podman-static ${PODMAN_STATIC_VERSION} already installed"
+  else
+    info "installing podman-static ${PODMAN_STATIC_VERSION} (${podman_static_asset})"
+    tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064 # expand tmp now; the trap must survive this block
+    trap "rm -rf '$tmp'" RETURN
+    curl --fail --silent --show-error --location --max-time 180 \
+      --output "${tmp}/podman.tar.gz" \
+      "https://github.com/mgoltzsche/podman-static/releases/download/${PODMAN_STATIC_VERSION}/${podman_static_asset}" ||
+      die "could not download podman-static ${PODMAN_STATIC_VERSION}"
+    actual="$(sha256sum "${tmp}/podman.tar.gz" | cut -d' ' -f1)"
+    [ "$actual" = "$podman_static_sha256" ] ||
+      die "SHA256 mismatch for podman-static ${PODMAN_STATIC_VERSION} ${podman_static_asset}
+         expected $podman_static_sha256
+         actual   $actual
+         Refusing to install an unverified binary. (This upstream project only
+         publishes a detached GPG .asc signature, not a checksums file; this
+         hash was captured by hand from a verified download.)"
+
+    # If a previous version is a live, running daemon (podman.service), `cp`
+    # truncating its backing file in place would fail with ETXTBSY. Stop it
+    # first; step 6 re-enables it unconditionally.
+    if as_service_user systemctl --user is-active --quiet podman.socket 2>/dev/null ||
+       as_service_user systemctl --user is-active --quiet podman.service 2>/dev/null; then
+      info "stopping the running podman socket/service before replacing binaries"
+      as_service_user systemctl --user stop podman.service podman.socket || true
+    fi
+
+    tar -xzf "${tmp}/podman.tar.gz" -C "$tmp"
+    # Only usr/local/{bin,lib,libexec,share}: never the tarball's own etc/, which
+    # ships its own containers.conf/storage.conf/registries.conf/policy.json that
+    # would silently replace the ones this script manages.
+    cp -r "${tmp}"/podman-linux-*/usr/local/. /usr/local/
+    info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local"
+  fi
+  command -v /usr/local/bin/podman >/dev/null || die "podman missing at /usr/local/bin/podman after install"
+  info "podman: $(/usr/local/bin/podman --version)"
+
+  # The bundle's usr/local/lib/podman layout matches podman's own compiled-in
+  # default helper_binaries_dir search path, so no config is normally needed.
+  # BUT: a prior run of an earlier version of this script wrote an explicit
+  # helper_binaries_dir into /etc/containers/containers.conf pointing only at
+  # /usr/local/libexec/podman (the old pinned-netavark-only install). An
+  # explicit list REPLACES podman's compiled defaults rather than extending
+  # them, so left alone it would shadow this bundle's netavark and silently
+  # keep resolving the old, buggy 1.14.0 binary. A containers.conf.d drop-in
+  # loads after and overrides the base file for this key, so it wins regardless
+  # of what an older script run left behind -- no need to edit or delete that
+  # old text.
+  install -d -o root -g root -m 0755 /etc/containers/containers.conf.d
+  cat >/etc/containers/containers.conf.d/10-podman-static.conf <<EOF
+# Installed by deploy/openclaw/sandbox/bootstrap-sandbox-host.sh (step 2).
+# Pins helper_binaries_dir to the pinned podman-static bundle installed by this
+# script, overriding any narrower helper_binaries_dir an older version of this
+# script may have written directly into /etc/containers/containers.conf.
+[network]
+helper_binaries_dir = ["/usr/local/lib/podman"]
+EOF
+  info "wrote /etc/containers/containers.conf.d/10-podman-static.conf"
+fi
 
 # --------------------------------------------------------------------------
 # Step 3: subuid / subgid ranges
@@ -324,8 +415,8 @@ if wants_step 6; then
   # user unit in, and `systemctl --user` below fails with a connection error.
   [ -e "/var/lib/systemd/linger/${SERVICE_USER}" ] ||
     die "linger is not enabled for $SERVICE_USER; run step 4 first (STEPS=4)"
-  [ -f /usr/lib/systemd/user/podman.socket ] ||
-    die "/usr/lib/systemd/user/podman.socket is missing; run step 1 first (STEPS=1)"
+  [ -f /usr/local/lib/systemd/user/podman.socket ] ||
+    die "/usr/local/lib/systemd/user/podman.socket is missing; run step 2 first (STEPS=2)"
   findmnt --mountpoint "$SANDBOX_MOUNT" >/dev/null ||
     die "$SANDBOX_MOUNT is not mounted; run step 5 first (STEPS=5).
        Starting podman without it would initialise a graphroot on ext4, where
@@ -392,127 +483,6 @@ if wants_step 7; then
 fi
 
 # --------------------------------------------------------------------------
-# Step 2 (deferred): pinned network helpers, gated on an empirical DNS test
-# --------------------------------------------------------------------------
-# Placed after the socket exists because the gate is an actual container-to-
-# container DNS lookup on an --internal network, which needs a working podman.
-
-# Probe: can two containers on an --internal network resolve each other by name?
-# Returns 0 if yes. Cleans up after itself in all paths.
-internal_dns_works() {
-  local net="t3-dnsprobe-$$" a="t3-dnsprobe-a-$$" rc=0
-  as_service_user podman rm -f "$a" >/dev/null 2>&1 || true
-  as_service_user podman network rm -f "$net" >/dev/null 2>&1 || true
-
-  if ! as_service_user podman network create --internal "$net" >/dev/null 2>&1; then
-    warn "could not create a probe network; treating internal DNS as broken"
-    return 1
-  fi
-  if as_service_user podman run --detach --name "$a" --network "$net" \
-      "$VERIFY_IMAGE" sleep 120 >/dev/null 2>&1; then
-    # aardvark-dns registers the container asynchronously, so a single immediate
-    # lookup can fail on a working setup. Retry briefly before concluding the
-    # feature is missing -- a false negative here installs pinned binaries this
-    # host does not need.
-    rc=1
-    for _ in 1 2 3 4 5; do
-      if as_service_user podman run --rm --network "$net" \
-          "$VERIFY_IMAGE" getent hosts "$a" >/dev/null 2>&1; then
-        rc=0
-        break
-      fi
-      sleep 2
-    done
-  else
-    rc=1
-  fi
-
-  as_service_user podman rm -f "$a" >/dev/null 2>&1 || true
-  as_service_user podman network rm -f "$net" >/dev/null 2>&1 || true
-  return "$rc"
-}
-
-download_pinned() {
-  local url="$1" expected="$2" dest="$3" tmp actual
-  tmp="$(mktemp)"
-  # shellcheck disable=SC2064 # expand tmp now; the trap must survive this function
-  trap "rm -f '$tmp' '$tmp.bin'" RETURN
-  curl --fail --silent --show-error --location --max-time 120 --output "$tmp" "$url" ||
-    die "could not download $url"
-  actual="$(sha256sum "$tmp" | cut -d' ' -f1)"
-  [ "$actual" = "$expected" ] ||
-    die "SHA256 mismatch for $url
-       expected $expected
-       actual   $actual
-       Refusing to install an unverified binary."
-  gunzip -c "$tmp" >"$tmp.bin" || die "could not decompress $url"
-  install -o root -g root -m 0755 "$tmp.bin" "$dest"
-  info "installed $dest (sha256 $expected verified)"
-}
-
-if wants_step 2; then
-  say "Step 2: network helpers (gated on an internal-network DNS test)"
-  info "distro netavark: $(dpkg-query -W -f='${Version}' netavark 2>/dev/null || echo unknown)"
-  info "pulling the probe image as $SERVICE_USER"
-  as_service_user podman pull --quiet "$VERIFY_IMAGE" >/dev/null ||
-    die "could not pull $VERIFY_IMAGE as $SERVICE_USER; check egress and registry access"
-
-  info "probing container-to-container DNS on an --internal network..."
-  if internal_dns_works; then
-    info "the installed netavark already resolves names on --internal networks."
-    info "SKIPPING the pinned helper override -- distro packages stay in charge."
-  else
-    info "internal-network DNS does NOT work with the distro netavark, as expected on 24.04."
-    info "installing pinned netavark ${NETAVARK_VERSION} and aardvark-dns ${AARDVARK_VERSION}"
-    install -d -o root -g root -m 0755 "$HELPER_DIR"
-    download_pinned \
-      "https://github.com/containers/netavark/releases/download/${NETAVARK_VERSION}/netavark.gz" \
-      "$NETAVARK_SHA256" "${HELPER_DIR}/netavark"
-    download_pinned \
-      "https://github.com/containers/aardvark-dns/releases/download/${AARDVARK_VERSION}/aardvark-dns.gz" \
-      "$AARDVARK_SHA256" "${HELPER_DIR}/aardvark-dns"
-
-    # helper_binaries_dir is a search path; putting ours first makes podman prefer
-    # the pinned binaries while leaving the distro ones as a fallback.
-    if [ -f /etc/containers/containers.conf ] &&
-       grep -q "helper_binaries_dir" /etc/containers/containers.conf; then
-      grep -q "$HELPER_DIR" /etc/containers/containers.conf ||
-        warn "/etc/containers/containers.conf already sets helper_binaries_dir without $HELPER_DIR; review it by hand"
-      info "left existing /etc/containers/containers.conf helper_binaries_dir in place"
-    else
-      install -d -o root -g root -m 0755 /etc/containers
-      cat >>/etc/containers/containers.conf <<EOF
-[network]
-# Pinned by deploy/openclaw/sandbox/bootstrap-sandbox-host.sh: Ubuntu 24.04's
-# netavark 1.4 provides no DNS on --internal networks, which the thread sandbox
-# design requires.
-helper_binaries_dir = ["${HELPER_DIR}", "/usr/lib/podman", "/usr/libexec/podman"]
-EOF
-      info "appended helper_binaries_dir to /etc/containers/containers.conf"
-    fi
-
-    # A stale aardvark-dns keeps running with the old binary and would keep
-    # serving the next network. Kill just the DNS helper and restart the socket.
-    #
-    # Deliberately NOT `podman system reset --force`: that destroys every volume
-    # and image the user owns. On a re-run against a host where sandboxing is
-    # already live, that would delete running threads' workspaces.
-    as_service_user podman network prune --force >/dev/null 2>&1 || true
-    as_service_user systemctl --user restart podman.socket || true
-
-    info "re-probing internal-network DNS with the pinned helpers..."
-    internal_dns_works ||
-      die "internal-network DNS still fails after installing netavark ${NETAVARK_VERSION}.
-       The sandbox design requires the workspace container to resolve
-       'egress-proxy' and preview aliases by name on an --internal network.
-       Do NOT enable sandboxing until this is resolved.
-       Debug with: runuser -u $SERVICE_USER -- env HOME=$SERVICE_HOME \\
-         XDG_RUNTIME_DIR=/run/user/${SERVICE_UID} podman network create --internal probe"
-    info "internal-network DNS now works"
-  fi
-fi
-
-# --------------------------------------------------------------------------
 # Step 8: verification -- mirror the backend's exact commands
 # --------------------------------------------------------------------------
 if wants_step 8; then
@@ -552,52 +522,68 @@ if wants_step 8; then
   # 20GiB disk limit. The backend compares `volume inspect` output against the
   # option string with the leading "o=" stripped, so the runtime must echo it
   # back verbatim -- not normalised, not reordered.
-  info "8b. volume quota with echo-back"
-  V_QUOTA="o=size=$(( (20 * 1024 * 1024 * 1024 * 9) / 10 ))"
-  as_service_user podman volume create \
-    --label com.t3tools.sandbox.managed=true \
-    --opt "$V_QUOTA" "$V_VOL" >/dev/null ||
-    die "podman volume create --opt $V_QUOTA failed"
-  readback="$(as_service_user podman volume inspect --format '{{index .Options "o"}}' "$V_VOL")"
-  [ "$readback" = "${V_QUOTA#o=}" ] ||
-    die "volume quota was not echoed back verbatim.
+  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
+    info "8b. volume quota with echo-back -- SKIPPED (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled)"
+    as_service_user podman volume create \
+      --label com.t3tools.sandbox.managed=true "$V_VOL" >/dev/null ||
+      die "podman volume create (no quota) failed"
+  else
+    info "8b. volume quota with echo-back"
+    V_QUOTA="o=size=$(( (20 * 1024 * 1024 * 1024 * 9) / 10 ))"
+    as_service_user podman volume create \
+      --label com.t3tools.sandbox.managed=true \
+      --opt "$V_QUOTA" "$V_VOL" >/dev/null ||
+      die "podman volume create --opt $V_QUOTA failed.
+       If this host's rootless podman cannot administer XFS project quotas
+       (confirm with: sudo xfs_quota -x -c 'report -p' $SANDBOX_MOUNT succeeding
+       as real root while this fails), re-run with
+       T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled to accept that limitation
+       instead of enforcing per-thread quotas."
+    readback="$(as_service_user podman volume inspect --format '{{index .Options "o"}}' "$V_VOL")"
+    [ "$readback" = "${V_QUOTA#o=}" ] ||
+      die "volume quota was not echoed back verbatim.
        expected: ${V_QUOTA#o=}
        actual  : $readback
        The backend treats any difference as fatal ('runtime did not preserve the
        workspace volume quota')."
-  info "    quota echoed back as '$readback'"
+    info "    quota echoed back as '$readback'"
+  fi
 
   # -- 8c. quota actually enforced -------------------------------------------
   # The echo-back above passes even when nothing is enforced (that is exactly the
   # rootless-docker trap). The only trustworthy check is writing past the limit
   # and demanding failure. A small volume keeps this fast.
-  info "8c. quota enforcement (writing past the limit must fail)"
-  V_SMALL="t3-quota-${V_SUFFIX}"
-  as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
-  # Byte count rather than "16m": the backend always emits a raw byte value
-  # (Math.floor(diskBytes * 0.9)), so this exercises the same code path.
-  as_service_user podman volume create --opt "o=size=16777216" "$V_SMALL" >/dev/null ||
-    die "could not create the small probe volume"
-  # dd alone is not enough -- busybox dd can report success on a short write.
-  # Demand that the file really is smaller than what we asked for.
-  # The probe body runs inside the container, so it must reach the container's
-  # shell unexpanded -- single quotes are required here, not a style choice.
-  # shellcheck disable=SC2016
-  quota_probe='dd if=/dev/zero of=/quota/fill bs=1M count=64 2>/dev/null; [ "$(stat -c %s /quota/fill)" -ge 67108864 ]'
-  if as_service_user podman run --rm \
-      --mount "type=volume,src=${V_SMALL},dst=/quota" \
-      "$VERIFY_IMAGE" \
-      sh -c "$quota_probe" \
-      >/dev/null 2>&1; then
+  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
+    info "8c. quota enforcement -- SKIPPED (no quota is applied when disabled; nothing to enforce)"
+  else
+    info "8c. quota enforcement (writing past the limit must fail)"
+    V_SMALL="t3-quota-${V_SUFFIX}"
     as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
-    die "wrote a full 64MiB file into a volume with a 16MiB quota.
+    # Byte count rather than "16m": the backend always emits a raw byte value
+    # (Math.floor(diskBytes * 0.9)), so this exercises the same code path.
+    as_service_user podman volume create --opt "o=size=16777216" "$V_SMALL" >/dev/null ||
+      die "could not create the small probe volume"
+    # dd alone is not enough -- busybox dd can report success on a short write.
+    # Demand that the file really is smaller than what we asked for.
+    # The probe body runs inside the container, so it must reach the container's
+    # shell unexpanded -- single quotes are required here, not a style choice.
+    # shellcheck disable=SC2016
+    quota_probe='dd if=/dev/zero of=/quota/fill bs=1M count=64 2>/dev/null; [ "$(stat -c %s /quota/fill)" -ge 67108864 ]'
+    if as_service_user podman run --rm \
+        --mount "type=volume,src=${V_SMALL},dst=/quota" \
+        "$VERIFY_IMAGE" \
+        sh -c "$quota_probe" \
+        >/dev/null 2>&1; then
+      as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
+      die "wrote a full 64MiB file into a volume with a 16MiB quota.
        The quota is NOT being enforced. This is the failure mode that rootless
        docker exhibits and that the echo-back check in 8b cannot detect.
        Confirm $SANDBOX_MOUNT is XFS mounted with pquota and that the podman
        graphroot really is on it (podman info --format '{{.Store.GraphRoot}}')."
+    fi
+    as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
+    info "    writing past the quota failed with ENOSPC, as required"
   fi
-  as_service_user podman volume rm -f "$V_SMALL" >/dev/null 2>&1 || true
-  info "    writing past the quota failed with ENOSPC, as required"
 
   # -- 8d. internal network DNS ----------------------------------------------
   # The workspace container resolves 'egress-proxy', 'credential-proxy' and
@@ -606,13 +592,22 @@ if wants_step 8; then
   as_service_user podman network create --internal \
     --label com.t3tools.sandbox.managed=true "$V_NET" >/dev/null ||
     die "podman network create --internal failed"
-  as_service_user podman run --detach --name "$V_PEER" --network "$V_NET" \
+  # The extended --network syntax registers both the container-name alias and
+  # 'egress-proxy' in the same attachment. A separate `network connect --alias`
+  # call to a network the container is already on fails (podman refuses a
+  # second connect to the same network) -- that failure was previously
+  # swallowed by `|| true`, which is why the alias never actually landed.
+  as_service_user podman run --detach --name "$V_PEER" \
+    --network "${V_NET}:alias=egress-proxy" \
     "$VERIFY_IMAGE" sleep 300 >/dev/null || die "could not start the DNS peer container"
-  # --alias mirrors how the backend attaches the egress proxy.
-  as_service_user podman network connect --alias egress-proxy "$V_NET" "$V_PEER" >/dev/null 2>&1 || true
 
   # -- 8e. hardened run, mirroring the backend's workspace container flags ----
   info "8e. hardened container run"
+  storage_opt_args=(--storage-opt "size=21474836480")
+  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
+    storage_opt_args=()
+    info "    omitting --storage-opt (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled)"
+  fi
   as_service_user podman run --detach --name "$V_CTR" \
     --label com.t3tools.sandbox.managed=true \
     --network "$V_NET" \
@@ -620,7 +615,7 @@ if wants_step 8; then
     --cpus 2 \
     --memory 4294967296 \
     --pids-limit 512 \
-    --storage-opt "size=21474836480" \
+    "${storage_opt_args[@]}" \
     --read-only \
     --init \
     --tmpfs "/tmp:rw,nosuid,nodev,noexec,size=1g" \

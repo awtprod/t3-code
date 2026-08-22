@@ -690,6 +690,7 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(gitWorkflowLayer),
       Layer.provide(projectSetupScriptRunnerLayer),
+      Layer.provide(T3ProjectFileLoader.layer),
       Layer.provide(vcsStatusBroadcasterLayer),
       Layer.provide(WorkspacePaths.layer),
       Layer.provide(layerConfig),
@@ -7801,6 +7802,89 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
       assertTrue(dispatchedCommands.every((command) => command.type !== "thread.delete"));
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "does not inject a sandbox branch or touch Git when no sandbox image is configured",
+    () =>
+      Effect.gen(function* () {
+        const dispatchedCommands: Array<OrchestrationCommand> = [];
+        const localStatus = vi.fn(
+          (_: Parameters<GitManager.GitManager["Service"]["localStatus"]>[0]) =>
+            Effect.succeed({
+              isRepo: true,
+              hasPrimaryRemote: true,
+              isDefaultRef: true,
+              refName: "main",
+              hasWorkingTreeChanges: false,
+              workingTree: { files: [], insertions: 0, deletions: 0 },
+            }),
+        );
+        const resolveRemoteTrackingCommit = vi.fn(
+          (_: Parameters<GitVcsDriver.GitVcsDriver["Service"]["resolveRemoteTrackingCommit"]>[0]) =>
+            Effect.succeed({ commitSha: "deadbeef", remoteRefName: "refs/remotes/origin/main" }),
+        );
+
+        yield* buildAppUnderTest({
+          layers: {
+            gitManager: { localStatus },
+            gitVcsDriver: { resolveRemoteTrackingCommit },
+            orchestrationEngine: {
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  dispatchedCommands.push(command);
+                  return { sequence: dispatchedCommands.length };
+                }),
+              readEvents: () => Stream.empty,
+            },
+          },
+        });
+
+        const createdAt = "2026-01-01T00:00:00.000Z";
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const response = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              type: "thread.turn.start",
+              commandId: CommandId.make("cmd-no-sandbox-image-configured"),
+              threadId: ThreadId.make("thread-no-sandbox-image-configured"),
+              message: {
+                messageId: MessageId.make("msg-no-sandbox-image-configured"),
+                role: "user",
+                text: "hello",
+                attachments: [],
+              },
+              modelSelection: defaultModelSelection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              bootstrap: {
+                createThread: {
+                  projectId: defaultProjectId,
+                  title: "No Sandbox Image Thread",
+                  modelSelection: defaultModelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  branch: "main",
+                  worktreePath: null,
+                  createdAt,
+                },
+              },
+              createdAt,
+            }),
+          ),
+        );
+
+        assert.equal(response.sequence, dispatchedCommands.length);
+        const createCommand = dispatchedCommands.find(
+          (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+            command.type === "thread.create",
+        );
+        assert.isDefined(createCommand);
+        assert.isUndefined(createCommand?.sandboxBranch);
+        assert.isUndefined(createCommand?.sandboxConfig);
+        assert.equal(localStatus.mock.calls.length, 0);
+        assert.equal(resolveRemoteTrackingCommit.mock.calls.length, 0);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("does not misattribute setup activity dispatch failures as setup launch failures", () =>

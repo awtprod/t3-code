@@ -1,6 +1,7 @@
 import {
   CommandId,
   EventId,
+  GitCommandError,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -10,6 +11,7 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it, vi } from "@effect/vitest";
+import { afterEach } from "vite-plus/test";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -87,9 +89,14 @@ const request: OrchestrationEvent = {
   occurredAt: NOW,
 };
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
   it.effect("resolves immutable provenance and invokes the sandbox runtime", () =>
     Effect.gen(function* () {
+      vi.stubEnv("T3_SANDBOX_PREVIEW_PROXY_IMAGE", `preview@sha256:${"e".repeat(64)}`);
       const provisioned = yield* Deferred.make<void>();
       const events = yield* PubSub.unbounded<OrchestrationEvent>();
       const dispatched: OrchestrationCommand[] = [];
@@ -217,22 +224,114 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
     }),
   );
 
-  it.effect("waits for provisioning projection before recording a missing-image failure", () =>
+  it.effect(
+    "disables sandboxing and notifies the thread instead of failing when no image is configured",
+    () =>
+      Effect.gen(function* () {
+        const notified = yield* Deferred.make<void>();
+        const events = yield* PubSub.unbounded<OrchestrationEvent>();
+        const dispatched: OrchestrationCommand[] = [];
+        const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+          Layer.provide(NodeServices.layer),
+          Layer.provide(
+            Layer.mock(GitWorkflowService)({
+              localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+              resolveRemoteTrackingCommit: () =>
+                Effect.succeed({
+                  commitSha: "0123456789abcdef0123456789abcdef01234567",
+                  remoteRefName: "origin/main",
+                }),
+            }),
+          ),
+          Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+          Layer.provide(
+            Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
+          ),
+          Layer.provide(
+            Layer.succeed(SandboxRuntimeManager, {
+              provision: () => Effect.die("runtime must not run without an image"),
+              reconcile: () =>
+                Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
+            } as never),
+          ),
+          Layer.provide(
+            Layer.mock(ProjectionSnapshotQuery)({
+              getSnapshot: () => Effect.succeed(snapshot),
+              getThreadDetailById: (id) =>
+                Effect.succeed(id === threadId ? Option.some(snapshot.threads[0]!) : Option.none()),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(OrchestrationEngineService)({
+              dispatch: (command) =>
+                Effect.gen(function* () {
+                  dispatched.push(command);
+                  if (command.type === "thread.activity.append") {
+                    yield* Deferred.succeed(notified, undefined);
+                  }
+                  return { sequence: dispatched.length };
+                }),
+              streamDomainEvents: Stream.concat(Stream.make(request), Stream.fromPubSub(events)),
+            }),
+          ),
+        );
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const reactor = yield* SandboxLifecycleReactor;
+            yield* reactor.start();
+            yield* Deferred.await(notified).pipe(Effect.timeout("5 seconds"));
+            yield* reactor.drain;
+          }).pipe(Effect.provide(layer)),
+        );
+
+        expect(dispatched.map((command) => command.type)).toEqual(["thread.activity.append"]);
+        const notice = dispatched[0];
+        if (notice?.type !== "thread.activity.append") throw new Error("expected notice command");
+        expect(notice.activity.kind).toBe("sandbox.disabled");
+      }),
+  );
+
+  it.effect("carries the archived store digest onto the export result", () =>
     Effect.gen(function* () {
-      const failed = yield* Deferred.make<void>();
-      const events = yield* PubSub.unbounded<OrchestrationEvent>();
+      // The digest is what a later re-provision checks the archive against and
+      // what tells the provider reactor the resume cursor is still good, so it
+      // has to survive the hop from the runtime manager onto the command --
+      // dropping it here would silently downgrade every restore to a cold start.
+      const exported = yield* Deferred.make<void>();
       const dispatched: OrchestrationCommand[] = [];
-      let projected = false;
+      const sandboxThread = {
+        ...snapshot.threads[0]!,
+        sandbox: {
+          lifecycle: "ready" as const,
+          runtime: "podman" as const,
+          branch: { branchName: `t3/thread/${threadId}`, baseCommit: "a".repeat(40) },
+          limits: {
+            cpuCount: 2,
+            memoryBytes: 4_294_967_296,
+            diskBytes: 21_474_836_480,
+            processCount: 512,
+            idleTimeoutSeconds: 3600,
+            maximumLifetimeSeconds: 28_800,
+          },
+          desktop: { status: "unavailable" as const },
+          services: [],
+          controller: { kind: "none" as const },
+          createdAt: NOW,
+          lastActiveAt: NOW,
+        },
+      };
+      const exportRequest: OrchestrationEvent = {
+        ...request,
+        eventId: EventId.make("manual-export-request"),
+        type: "sandbox.branch-export-requested",
+        payload: { threadId },
+      };
       const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
         Layer.provide(NodeServices.layer),
         Layer.provide(
           Layer.mock(GitWorkflowService)({
             localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
-            resolveRemoteTrackingCommit: () =>
-              Effect.succeed({
-                commitSha: "0123456789abcdef0123456789abcdef01234567",
-                remoteRefName: "origin/main",
-              }),
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
@@ -241,7 +340,96 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
-            provision: () => Effect.die("runtime must not run without an image"),
+            exportBranch: () =>
+              Effect.succeed({
+                commit: "b".repeat(40),
+                patch: "",
+                artifactId: "c".repeat(64),
+                bundleSha256: "d".repeat(64),
+                storeSha256: "e".repeat(64),
+              }),
+          } as never),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery)({
+            getSnapshot: () => Effect.succeed(snapshot),
+            getThreadDetailById: (id) =>
+              Effect.succeed(id === threadId ? Option.some(sandboxThread) : Option.none()),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(OrchestrationEngineService)({
+            dispatch: (command) =>
+              Effect.gen(function* () {
+                dispatched.push(command);
+                if (command.type === "sandbox.branch-export.result")
+                  yield* Deferred.succeed(exported, undefined);
+                return { sequence: dispatched.length };
+              }),
+            streamDomainEvents: Stream.make(exportRequest),
+          }),
+        ),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* Deferred.await(exported).pipe(Effect.timeout("5 seconds"));
+          yield* reactor.drain;
+        }).pipe(Effect.provide(layer)),
+      );
+
+      const result = dispatched.find((command) => command.type === "sandbox.branch-export.result");
+      if (result?.type !== "sandbox.branch-export.result")
+        throw new Error("expected an export result command");
+      expect(result.storeSha256).toBe("e".repeat(64));
+      expect(result.bundleSha256).toBe("d".repeat(64));
+    }),
+  );
+
+  it.effect("reports the underlying runtime error when a lifecycle event fails", () =>
+    Effect.gen(function* () {
+      // `String(cause)` renders an Effect Cause as `Cause([Fail(Error: ...)])`,
+      // which is what the thread's failure notice used to carry -- the operator
+      // saw the wrapper, not the sentence naming what the runtime refused.
+      vi.stubEnv("T3_SANDBOX_PREVIEW_PROXY_IMAGE", `preview@sha256:${"e".repeat(64)}`);
+      const failed = yield* Deferred.make<void>();
+      const events = yield* PubSub.unbounded<OrchestrationEvent>();
+      const dispatched: OrchestrationCommand[] = [];
+      const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(
+          Layer.mock(GitWorkflowService)({
+            localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+            resolveRemoteTrackingCommit: () =>
+              Effect.fail(
+                new GitCommandError({
+                  operation: "resolveRemoteTrackingCommit",
+                  command: "git",
+                  cwd: "/tmp/project",
+                  detail: "git rev-parse failed: no upstream for 'main'",
+                }),
+              ),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(
+          Layer.succeed(T3ProjectFileLoader, {
+            load: () =>
+              Effect.succeed(
+                Option.some({
+                  sandbox: {
+                    image:
+                      "registry.example/t3-desktop@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  },
+                } as never),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(SandboxRuntimeManager, {
+            provision: () => Effect.die("provisioning is not reached on this path"),
             reconcile: () =>
               Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
           } as never),
@@ -258,43 +446,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
             dispatch: (command) =>
               Effect.gen(function* () {
                 dispatched.push(command);
-                if (command.type === "sandbox.provision") {
-                  projected = true;
-                  yield* PubSub.publish(events, {
-                    ...request,
-                    sequence: 2,
-                    eventId: EventId.make("missing-image-provisioning"),
-                    commandId: command.commandId,
-                    type: "sandbox.provisioning-started",
-                    payload: {
-                      threadId,
-                      event: { type: "sandbox.provisioning-started", threadId, occurredAt: NOW },
-                      sandbox: {
-                        lifecycle: "provisioning",
-                        runtime: "podman",
-                        branch: command.branch!,
-                        limits: {
-                          cpuCount: 2,
-                          memoryBytes: 4_294_967_296,
-                          diskBytes: 21_474_836_480,
-                          processCount: 512,
-                          idleTimeoutSeconds: 3600,
-                          maximumLifetimeSeconds: 28_800,
-                        },
-                        desktop: {
-                          status: "starting",
-                          resolution: { width: 1440, height: 900, webRtcEnabled: true },
-                        },
-                        services: [],
-                        controller: { kind: "none" },
-                        createdAt: NOW,
-                        lastActiveAt: NOW,
-                      },
-                    },
-                  });
-                }
                 if (command.type === "sandbox.operation.fail") {
-                  expect(projected).toBe(true);
                   yield* Deferred.succeed(failed, undefined);
                 }
                 return { sequence: dispatched.length };
@@ -313,10 +465,11 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         }).pipe(Effect.provide(layer)),
       );
 
-      expect(dispatched.map((command) => command.type)).toEqual([
-        "sandbox.provision",
-        "sandbox.operation.fail",
-      ]);
+      const failure = dispatched.find((command) => command.type === "sandbox.operation.fail");
+      if (failure?.type !== "sandbox.operation.fail") throw new Error("expected failure command");
+      expect(failure.failure.message).toBe(
+        "Git command failed in resolveRemoteTrackingCommit (/tmp/project): git rev-parse failed: no upstream for 'main'",
+      );
     }),
   );
 });

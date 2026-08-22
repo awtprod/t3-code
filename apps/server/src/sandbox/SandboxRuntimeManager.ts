@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - artifact export is an explicit Node filesystem boundary.
 import type {
+  SandboxAdoptionHint,
   SandboxProvisionInput,
   SandboxReady,
   SandboxArtifactExport,
@@ -80,6 +81,19 @@ export function resolveSandboxDesktopMode(): "enabled" | "disabled" {
     : "enabled";
 }
 
+/**
+ * Ceiling on an archived provider conversation store, in bytes.
+ *
+ * Exists because nothing prunes the artifact directory: a store past this size
+ * is skipped rather than kept forever. Measured on a real host, one long
+ * thread's transcript alone reached ~30MB, so the default is set well above
+ * ordinary threads while still bounding the pathological ones.
+ */
+export function resolveSandboxStoreMaxBytes(): number {
+  const raw = Number.parseInt(process.env.T3_SANDBOX_STORE_MAX_BYTES?.trim() ?? "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 50 * 1024 * 1024;
+}
+
 /** One-shot credential boundary used immediately before provider process spawn. */
 export function redeemSandboxProviderEnvironment(
   threadId: string,
@@ -115,13 +129,20 @@ export interface SandboxRuntimeManagerShape {
   readonly provision: (
     input: SandboxProvisionInput & { services?: ReadonlyArray<ThreadServiceDeclaration> },
   ) => Effect.Effect<ManagedSandboxReady, SandboxManagerError>;
+  /**
+   * `hint` lets export and teardown reach a sandbox this manager generation
+   * never provisioned -- a server restart empties the backend's per-thread
+   * records, which otherwise strands the thread's commits in its volume.
+   */
   readonly exportBranch: (
     runtime: "docker" | "podman",
     threadId: string,
+    hint?: SandboxAdoptionHint,
   ) => Effect.Effect<SandboxArtifactExport, SandboxManagerError>;
   readonly stop: (
     runtime: "docker" | "podman",
     threadId: string,
+    hint?: SandboxAdoptionHint,
   ) => Effect.Effect<void, SandboxManagerError>;
   readonly reconcile: (
     runtime: "docker" | "podman",
@@ -183,6 +204,85 @@ export const makeSandboxRuntimeManager = (
     runtimes.set(runtime, value);
     return value;
   };
+  /**
+   * Bootstrap fields that seed a sandbox from the branch bundle a previous
+   * teardown exported, or `undefined` when this is not a restore.
+   *
+   * A missing or tampered artifact is not fatal: the thread still gets a
+   * sandbox, seeded the ordinary way at its recorded base commit. Losing the
+   * previous session's commits is bad, but refusing to provision at all would
+   * leave the user with a thread they cannot use either way.
+   */
+  const resolveRestoreBootstrap = Effect.fn("SandboxRuntimeManager.resolveRestoreBootstrap")(
+    function* (input: SandboxProvisionInput) {
+      const restore = input.restore;
+      if (restore === undefined || artifactRoot === undefined) return undefined;
+      if (!/^[a-f0-9]{64}$/i.test(restore.artifactId)) {
+        yield* Effect.logWarning("sandbox restore artifact id is malformed", {
+          threadId: input.bootstrap.threadId,
+        });
+        return undefined;
+      }
+      const bundle = NodePath.resolve(artifactRoot, `${restore.artifactId}.bundle`);
+      const digest = yield* Effect.tryPromise(async () =>
+        NodeCrypto.createHash("sha256")
+          .update(await NodeFSP.readFile(bundle))
+          .digest("hex"),
+      ).pipe(Effect.orElseSucceed(() => undefined));
+      if (digest === undefined) {
+        yield* Effect.logWarning("sandbox restore bundle is missing; seeding from base commit", {
+          threadId: input.bootstrap.threadId,
+          bundle,
+        });
+        return undefined;
+      }
+      if (digest !== restore.bundleSha256.toLowerCase()) {
+        yield* Effect.logWarning("sandbox restore bundle failed its digest check", {
+          threadId: input.bootstrap.threadId,
+          bundle,
+        });
+        return undefined;
+      }
+      // A store is optional in a way the bundle is not: exports written before
+      // stores existed have no digest, and a mismatch or missing file just
+      // means the provider starts fresh.
+      const storePath = yield* Effect.gen(function* () {
+        if (restore.storeSha256 === undefined) return undefined;
+        const candidate = NodePath.resolve(artifactRoot, `${restore.artifactId}.store.tar`);
+        const storeDigest = yield* Effect.tryPromise(async () =>
+          NodeCrypto.createHash("sha256")
+            .update(await NodeFSP.readFile(candidate))
+            .digest("hex"),
+        ).pipe(Effect.orElseSucceed(() => undefined));
+        if (storeDigest === undefined) {
+          yield* Effect.logWarning(
+            "sandbox restore provider store is missing; provider will start without prior context",
+            { threadId: input.bootstrap.threadId, store: candidate },
+          );
+          return undefined;
+        }
+        if (storeDigest !== restore.storeSha256.toLowerCase()) {
+          yield* Effect.logWarning(
+            "sandbox restore provider store failed its digest check; provider will start without prior context",
+            { threadId: input.bootstrap.threadId, store: candidate },
+          );
+          return undefined;
+        }
+        return candidate;
+      });
+      return {
+        ...input.bootstrap,
+        repositoryBundlePath: bundle,
+        ...(storePath === undefined ? {} : { providerStorePath: storePath }),
+        // `exportBundle` writes `git bundle create --all`, so the thread branch
+        // is in there under its ordinary heads ref -- the seeding fetch has to
+        // name it, since a bundle fetch takes no default refspec.
+        repositoryBundleRef: `refs/heads/${restore.branchName}`,
+        restoreCommit: restore.headCommit,
+      };
+    },
+  );
+
   const attempt = <A>(run: () => Promise<A>) =>
     Effect.tryPromise({
       try: run,
@@ -203,7 +303,11 @@ export const makeSandboxRuntimeManager = (
           message:
             "T3_SANDBOX_PREVIEW_PROXY_IMAGE is required for the internal desktop signaling sidecar",
         });
-      const runtime = input.config?.runtime ?? "docker";
+      // Per-thread config wins, then the deployment default. Callers validate the
+      // runtime before dispatching but pass `config` through verbatim, so the
+      // deployment default has to be applied here or a podman-only host runs
+      // docker.
+      const runtime = input.config?.runtime ?? resolveSandboxRuntime();
       if (runtime !== "docker" && runtime !== "podman")
         return yield* new SandboxManagerError({
           message: `unsupported sandbox runtime: ${runtime}`,
@@ -224,43 +328,75 @@ export const makeSandboxRuntimeManager = (
       const managed = get(runtime);
       let provisionInput = input;
       let seedBundle: string | undefined;
-      if (!/^(?:https|ssh):\/\//i.test(input.bootstrap.repositoryUrl)) {
+      const restored = yield* resolveRestoreBootstrap(input);
+      if (restored !== undefined) {
+        provisionInput = { ...input, bootstrap: restored };
+      } else if (!/^(?:https|ssh):\/\//i.test(input.bootstrap.repositoryUrl)) {
         if (artifactRoot === undefined)
           return yield* new SandboxManagerError({
             message: "local repository seeding requires configured server artifact storage",
           });
         const seedRoot = NodePath.resolve(artifactRoot, "seeds");
         yield* attempt(() => NodeFSP.mkdir(seedRoot, { recursive: true, mode: 0o700 }));
-        seedBundle = NodePath.resolve(
-          seedRoot,
-          `.${NodeCrypto.createHash("sha256").update(input.bootstrap.threadId).digest("hex")}.${process.pid}.bundle`,
-        );
+        const seedHash = NodeCrypto.createHash("sha256")
+          .update(input.bootstrap.threadId)
+          .digest("hex");
+        seedBundle = NodePath.resolve(seedRoot, `.${seedHash}.${process.pid}.bundle`);
+        // `git bundle create` refuses a bare commit SHA ("Refusing to create empty
+        // bundle") because a bundle records named refs, not anonymous commits. Pin a
+        // throwaway ref at the base commit so the bundle has something to name, then
+        // remove it once the bundle is written.
+        const seedRef = `refs/t3-sandbox-seed/${seedHash}.${process.pid}`;
         yield* attempt(async () => {
-          const created = await executor.run({
+          const refUpdated = await executor.run({
             executable: "git",
             args: [
               "-C",
               input.bootstrap.repositoryUrl,
-              "bundle",
-              "create",
-              seedBundle!,
+              "update-ref",
+              seedRef,
               input.bootstrap.baseCommit,
             ],
-            timeoutMs: 120_000,
+            timeoutMs: 30_000,
           });
-          if (created.exitCode !== 0)
-            throw new Error(created.stderr || "failed to create local repository seed bundle");
-          const verified = await executor.run({
-            executable: "git",
-            args: ["bundle", "verify", seedBundle!],
-            timeoutMs: 60_000,
-          });
-          if (verified.exitCode !== 0)
-            throw new Error(verified.stderr || "local repository seed bundle failed verification");
+          if (refUpdated.exitCode !== 0)
+            throw new Error(refUpdated.stderr || "failed to pin local repository seed ref");
+          try {
+            const created = await executor.run({
+              executable: "git",
+              args: ["-C", input.bootstrap.repositoryUrl, "bundle", "create", seedBundle!, seedRef],
+              timeoutMs: 120_000,
+            });
+            if (created.exitCode !== 0)
+              throw new Error(created.stderr || "failed to create local repository seed bundle");
+            // `bundle verify` resolves the bundle's prerequisites against a
+            // repository, so it needs `-C` even though the bundle names a full
+            // history; without it git exits with "need a repository to verify a
+            // bundle" wherever the server happens to be running.
+            const verified = await executor.run({
+              executable: "git",
+              args: ["-C", input.bootstrap.repositoryUrl, "bundle", "verify", seedBundle!],
+              timeoutMs: 60_000,
+            });
+            if (verified.exitCode !== 0)
+              throw new Error(
+                verified.stderr || "local repository seed bundle failed verification",
+              );
+          } finally {
+            await executor.run({
+              executable: "git",
+              args: ["-C", input.bootstrap.repositoryUrl, "update-ref", "-d", seedRef],
+              timeoutMs: 30_000,
+            });
+          }
         });
         provisionInput = {
           ...input,
-          bootstrap: { ...input.bootstrap, repositoryBundlePath: seedBundle },
+          bootstrap: {
+            ...input.bootstrap,
+            repositoryBundlePath: seedBundle,
+            repositoryBundleRef: seedRef,
+          },
         };
       }
       const ready = yield* attempt(() => managed.backend.ensureReady(provisionInput)).pipe(
@@ -394,7 +530,7 @@ export const makeSandboxRuntimeManager = (
         })),
       };
     }),
-    exportBranch: (runtime, threadId) =>
+    exportBranch: (runtime, threadId, hint) =>
       attempt(async () => {
         if (artifactRoot === undefined)
           throw new Error("sandbox artifact storage requires the configured server runtime layer");
@@ -410,28 +546,65 @@ export const makeSandboxRuntimeManager = (
           `.${name}.${process.pid}.json.tmp`,
         );
         const manifestDestination = NodePath.resolve(artifactRoot, `${name}.json`);
+        const storeTemporary = NodePath.resolve(artifactRoot, `.${name}.${process.pid}.store.tmp`);
+        const storeDestination = NodePath.resolve(artifactRoot, `${name}.store.tar`);
         try {
-          const result = await get(runtime).backend.exportBranch(threadId);
-          await get(runtime).backend.exportBundle(threadId, bundleTemporary);
+          const result = await get(runtime).backend.exportBranch(threadId, hint);
+          await get(runtime).backend.exportBundle(threadId, bundleTemporary, hint);
           const bundleSha256 = NodeCrypto.createHash("sha256")
             .update(await NodeFSP.readFile(bundleTemporary))
             .digest("hex");
+          // The conversation store is a bonus, the branch is the point: a store
+          // that fails to archive costs the next turn its context, while a
+          // failure propagated from here would strand the user's commits inside
+          // a container that is about to be deleted.
+          const storeBytes = await get(runtime)
+            .backend.exportProviderStore(
+              threadId,
+              storeTemporary,
+              resolveSandboxStoreMaxBytes(),
+              hint,
+            )
+            .catch(() => undefined);
+          const storeSha256 =
+            storeBytes === undefined
+              ? undefined
+              : await NodeFSP.readFile(storeTemporary)
+                  .then((contents) =>
+                    NodeCrypto.createHash("sha256").update(contents).digest("hex"),
+                  )
+                  .catch(() => undefined);
           await NodeFSP.writeFile(
             manifestTemporary,
-            JSON.stringify({ threadId, bundle: `${name}.bundle`, bundleSha256, ...result }),
+            JSON.stringify({
+              threadId,
+              bundle: `${name}.bundle`,
+              bundleSha256,
+              ...(storeSha256 === undefined
+                ? {}
+                : { store: `${name}.store.tar`, storeSha256, storeBytes }),
+              ...result,
+            }),
             { mode: 0o600, flag: "wx" },
           );
           await NodeFSP.rename(bundleTemporary, bundleDestination);
+          if (storeSha256 !== undefined) await NodeFSP.rename(storeTemporary, storeDestination);
           await NodeFSP.rename(manifestTemporary, manifestDestination);
-          return { ...result, artifactId: name, bundleSha256 };
+          return {
+            ...result,
+            artifactId: name,
+            bundleSha256,
+            ...(storeSha256 === undefined ? {} : { storeSha256 }),
+          };
         } finally {
           await Promise.all([
             NodeFSP.rm(bundleTemporary, { force: true }),
             NodeFSP.rm(manifestTemporary, { force: true }),
+            NodeFSP.rm(storeTemporary, { force: true }),
           ]);
         }
       }),
-    stop: Effect.fn("SandboxRuntimeManager.stop")(function* (runtime, threadId) {
+    stop: Effect.fn("SandboxRuntimeManager.stop")(function* (runtime, threadId, hint) {
       const managed = get(runtime);
       if (resolveSandboxDesktopMode() !== "disabled")
         yield* Effect.promise(() => managed.desktop.stop(threadId));
@@ -440,7 +613,7 @@ export const makeSandboxRuntimeManager = (
       yield* Effect.promise(() => managed.services.stop(threadId));
       credentialBroker.revokeThread(threadId);
       desktopGateway.removeThread(threadId);
-      yield* attempt(() => managed.backend.stop(threadId, teardownHooks.get(threadId) ?? []));
+      yield* attempt(() => managed.backend.stop(threadId, teardownHooks.get(threadId) ?? [], hint));
       teardownHooks.delete(threadId);
     }),
     reconcile: (runtime, expectedThreadIds) =>

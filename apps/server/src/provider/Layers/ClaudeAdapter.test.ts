@@ -27,6 +27,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -2028,6 +2029,52 @@ describe("ClaudeAdapterLive", () => {
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("logs the Claude stream failure cause for the operator", () => {
+    const harness = makeHarness();
+    const logged: Array<ReadonlyArray<unknown>> = [];
+    const logger = Logger.make<unknown, void>(({ message }) => {
+      logged.push(message as ReadonlyArray<unknown>);
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "hello",
+        attachments: [],
+      });
+
+      // Without this the only record of why a turn died is a failure tag: the
+      // sandbox spawn path can fail for reasons (missing binary, exec refused)
+      // that are indistinguishable from an auth failure in the emitted event.
+      harness.query.fail(new Error("spawn ENOENT /usr/local/bin/claude"));
+
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+
+      const entry = logged.find((parts) => parts[0] === "claude.runtime.stream-failed");
+      assert.ok(entry !== undefined, "expected a stream-failure log line");
+      // Asserted as a string on purpose: the adapter renders the cause before
+      // logging it, because a structured logger serializes a raw Cause as
+      // "[Object]" -- which tells an operator no more than the failure tag the
+      // event already carries.
+      const rendered = (entry[1] as { readonly cause: string }).cause;
+      assert.equal(typeof rendered, "string");
+      assert.ok(
+        rendered.includes("spawn ENOENT /usr/local/bin/claude"),
+        `expected the spawn cause in the logged cause, got ${rendered}`,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(Layer.mergeAll(harness.layer, Logger.layer([logger]))),
     );
   });
 

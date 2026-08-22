@@ -300,6 +300,12 @@ thread provisions a container and then cannot run its provider.
 Disabling the desktop stack for the first flip is recommended; it removes a large
 moving part from the critical path of starting a thread.
 
+With `T3_SANDBOX_DESKTOP=disabled`, the thread's Sandbox panel (right panel →
+`+` → Sandbox) reports the desktop as unavailable and hides the viewer and
+"Take control". Stop and export stay available there — that panel is the only
+place to release a sandbox or pull its branch bundle out, so operators should
+know where it lives before the flip.
+
 ```sh
 sudo systemctl daemon-reload
 sudo systemctl restart command-center.service

@@ -43,6 +43,7 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -357,6 +358,7 @@ export const make = Effect.gen(function* () {
   const threadSandboxRuntime = yield* ThreadSandboxRuntime;
   const sandboxRuntimeManager = yield* SandboxRuntimeManager;
   const projectFileLoader = yield* T3ProjectFileLoader;
+  const providerSessionDirectory = yield* ProviderSessionDirectory;
   const sandboxProvisionLocks = new Map<string, Semaphore.Semaphore>();
   const provisionedTargets = new Map<
     string,
@@ -370,6 +372,28 @@ export const make = Effect.gen(function* () {
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
+  /**
+   * Forget the provider resume cursor persisted for a thread that is about to
+   * get a container it has never run in.
+   *
+   * Best-effort on purpose: if the cursor cannot be cleared the next turn
+   * fails exactly the way it does today, so a persistence hiccup here should
+   * not also fail the turn that was about to repair the thread.
+   */
+  const clearSandboxResumeCursor = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const binding = Option.getOrUndefined(yield* providerSessionDirectory.getBinding(threadId));
+      if (binding === undefined || binding.resumeCursor == null) return;
+      yield* providerSessionDirectory.upsert({ ...binding, resumeCursor: null });
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning(
+          "provider command reactor failed to clear the resume cursor before provisioning a sandbox",
+          { threadId, cause },
+        ),
+      ),
+    );
+
   const ensureExecutionTarget = Effect.fn("ProviderCommandReactor.ensureExecutionTarget")(
     function* (
       thread: Parameters<typeof threadSandboxRuntime.ensureReady>[0],
@@ -378,10 +402,20 @@ export const make = Effect.gen(function* () {
       if (
         thread.sandbox != null &&
         thread.sandbox.lifecycle !== "unprovisioned" &&
-        thread.sandbox.lifecycle !== "failed"
+        thread.sandbox.lifecycle !== "failed" &&
+        thread.sandbox.lifecycle !== "stopped" &&
+        thread.sandbox.lifecycle !== "expired"
       ) {
         return yield* threadSandboxRuntime.ensureReady(thread, legacyCwd);
       }
+      // Anything cached below describes a container that a stop, an expiry, or
+      // a failed provision already destroyed. Handing it back would point the
+      // provider at a container id that no longer resolves, so drop it and let
+      // this call provision a fresh one.
+      provisionedTargets.delete(thread.id);
+      // The lock itself is deliberately kept: it is a per-thread mutex, not
+      // state about a container, and replacing one another fiber currently
+      // holds would let two provisions run at once.
       let lock = sandboxProvisionLocks.get(thread.id);
       if (lock === undefined) {
         lock = yield* Semaphore.make(1);
@@ -453,6 +487,22 @@ export const make = Effect.gen(function* () {
                     }),
               ),
             ));
+          // The provider CLI keeps its conversation store inside the
+          // container, so whatever conversation a persisted resume cursor
+          // names does not exist in the one about to be created -- the turn
+          // would fail outright with "No conversation found with session ID".
+          // Placed here rather than beside the cache eviction above because
+          // this is the point where a fresh container is certain: the
+          // host-fallback return is behind us, and a thread that stays on the
+          // host keeps a cursor that is still good.
+          //
+          // Unless the teardown archived the store: the provision below then
+          // restores it to the same in-container home, under the same cwd the
+          // transcripts are keyed by, so the cursor resolves again and the
+          // thread comes back with its context. Clearing it there would throw
+          // away the conversation the export went out of its way to save.
+          if (thread.sandbox?.lastExport?.storeSha256 === undefined)
+            yield* clearSandboxResumeCursor(thread.id);
           yield* orchestrationEngine.dispatch({
             type: "sandbox.provision",
             commandId: yield* serverCommandId("sandbox-provision"),
@@ -476,6 +526,10 @@ export const make = Effect.gen(function* () {
               },
               config: thread.sandboxConfig ?? {},
               image,
+              // Re-provisioning a settled or reaped thread: seed from the
+              // bundle its teardown exported so the user comes back to their
+              // work rather than to the project's base commit.
+              ...(thread.sandbox?.lastExport ? { restore: thread.sandbox.lastExport } : {}),
               ...(process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE?.trim()
                 ? { egressProxyImage: process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE.trim() }
                 : {}),
@@ -525,6 +579,12 @@ export const make = Effect.gen(function* () {
             sandboxId: SandboxId.make(provision.sandboxId),
             runtime: provision.runtime,
             runtimeRef: provision.containerName,
+            ...(provision.desktopSessionId === undefined
+              ? {}
+              : { desktopSessionId: provision.desktopSessionId }),
+            ...(provision.desktopStreamPath === undefined
+              ? {}
+              : { desktopStreamPath: provision.desktopStreamPath }),
             createdAt: readyAt,
           });
           const readyThread = Option.getOrUndefined(
@@ -2263,13 +2323,15 @@ export const make = Effect.gen(function* () {
     if (postReadyClaim.supersededBySameMessage || postReadyClaim.interruptedAfter) {
       return;
     }
-    const executionCwd =
-      executionTarget.kind === "sandbox" ? executionTarget.workspaceCwd : executionTarget.cwd;
-
     const isFirstUserMessageTurn =
       thread.messages.filter((entry) => entry.role === "user").length === 1;
     if (isFirstUserMessageTurn) {
-      const generationCwd = executionCwd;
+      // Title generation runs a text-generation CLI on the HOST, so it needs a
+      // host path -- not the execution target's cwd, which for a sandboxed
+      // thread is the in-container `/workspace/repo` and makes the spawn die
+      // with ENOENT on every first turn of an isolated thread. The branch-name
+      // generation below already uses the host worktree for the same reason.
+      const generationCwd = legacyCwd ?? process.cwd();
       const generationInput = {
         messageText: message.text,
         ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),

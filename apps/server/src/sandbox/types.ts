@@ -39,10 +39,60 @@ export type SandboxBootstrap = {
   readonly inheritedPatch?: string;
   /** Manager-generated verified bundle path; never a user-supplied mount. */
   readonly repositoryBundlePath?: string;
+  /**
+   * Ref the bundle records the base commit under. Set with
+   * `repositoryBundlePath`: the bundle names exactly this ref, and `git clone`
+   * would ignore it (its default refspec only matches `refs/heads/*`), so the
+   * seeding fetch has to ask for it by name.
+   */
+  readonly repositoryBundleRef?: string;
+  /**
+   * Commit to check the thread branch out at, when the bundle above is a
+   * previously exported sandbox rather than a fresh seed of `baseCommit`.
+   *
+   * `baseCommit` deliberately keeps naming the thread's recorded base: it is
+   * part of the label signature stamped on the container, and a restore that
+   * moved it would make the sandbox unrecognizable to label-verified adoption.
+   */
+  readonly restoreCommit?: string;
+  /**
+   * Manager-generated verified tar of a previously exported provider
+   * conversation store, extracted over the container's provider home before
+   * any provider can spawn.
+   *
+   * Absent whenever the store could not be carried across -- no prior export,
+   * a digest mismatch, an oversized store. The thread still provisions; the
+   * provider just starts without the earlier conversation.
+   */
+  readonly providerStorePath?: string;
+};
+
+/**
+ * A previously exported branch bundle to seed a re-provisioned sandbox from,
+ * so a thread that was settled, stopped, or idle-reaped comes back with its
+ * work rather than at the project's base commit.
+ *
+ * The manager resolves this against its artifact root and verifies the digest
+ * before use; a missing or corrupt artifact degrades to a normal clone at
+ * `bootstrap.baseCommit` rather than failing the provision.
+ */
+export type SandboxRestoreSource = {
+  readonly artifactId: string;
+  readonly bundleSha256: string;
+  readonly headCommit: string;
+  readonly branchName: string;
+  /**
+   * Digest of the archived provider conversation store, when the export
+   * captured one. Absent for exports written before stores were captured, and
+   * for stores skipped as oversized -- the restore then seeds the repository
+   * but leaves the provider without prior context.
+   */
+  readonly storeSha256?: string;
 };
 
 export type SandboxProvisionInput = {
   readonly bootstrap: SandboxBootstrap;
+  readonly restore?: SandboxRestoreSource;
   readonly config?: SandboxConfig;
   readonly image: string;
   readonly caches?: ReadonlyArray<SandboxCache>;
@@ -78,6 +128,33 @@ export type SandboxExecInput = {
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
   readonly stdin?: string;
+  /**
+   * Return the result instead of throwing when the command exits non-zero.
+   *
+   * Probes need this: `git rev-parse --verify <ref>` exits 1 for a ref that does
+   * not exist yet, which is an answer, not a failure. Mirrors
+   * `allowNonZeroExit` on the host-side git driver.
+   */
+  readonly allowNonZeroExit?: boolean;
+};
+
+/**
+ * Everything needed to rebuild a lost in-memory sandbox record from the
+ * projection. Container/network/volume names derive from
+ * `(projectId, threadId)`, and the remaining fields reproduce the label
+ * signature stamped at provision time, so a container found at the derived
+ * name can be proven to be the one this thread provisioned.
+ *
+ * Only export and teardown accept a hint. Both act on a container the caller
+ * is finished with; neither re-arms credentials, preview routes, or automation
+ * targets, which is what reconcile's fail-closed adoption refusal protects.
+ */
+export type SandboxAdoptionHint = {
+  readonly projectId: string;
+  readonly image: string;
+  readonly baseCommit: string;
+  readonly branchName: string;
+  readonly teardownTimeoutMs?: number;
 };
 
 export type SandboxExport = {
@@ -87,6 +164,12 @@ export type SandboxExport = {
 export type SandboxArtifactExport = SandboxExport & {
   readonly artifactId: string;
   readonly bundleSha256: string;
+  /**
+   * Digest of the archived provider conversation store, when the export
+   * captured one. Absent when there was no store to archive, or when it
+   * exceeded the size ceiling -- the branch still exported either way.
+   */
+  readonly storeSha256?: string;
 };
 export type SandboxUsageSample = {
   readonly cpuPercent: number;
@@ -111,8 +194,12 @@ export interface ThreadSandboxBackend {
   readonly runtime: SandboxRuntime;
   readonly ensureReady: (input: SandboxProvisionInput) => Promise<SandboxReady>;
   readonly exec: (threadId: string, input: SandboxExecInput) => Promise<SandboxCommandResult>;
-  readonly exportBranch: (threadId: string) => Promise<SandboxExport>;
+  readonly exportBranch: (threadId: string, hint?: SandboxAdoptionHint) => Promise<SandboxExport>;
   readonly sampleUsage: (threadId: string) => Promise<SandboxUsageSample>;
-  readonly stop: (threadId: string, teardown?: ReadonlyArray<SandboxHook>) => Promise<void>;
+  readonly stop: (
+    threadId: string,
+    teardown?: ReadonlyArray<SandboxHook>,
+    hint?: SandboxAdoptionHint,
+  ) => Promise<void>;
   readonly reconcile: (input: SandboxReconcileInput) => Promise<SandboxReconcileResult>;
 }

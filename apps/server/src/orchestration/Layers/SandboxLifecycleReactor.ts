@@ -6,8 +6,10 @@ import {
   MessageId,
   SandboxId,
   type OrchestrationEvent,
+  type OrchestrationThread,
 } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -23,6 +25,7 @@ import {
   SandboxManagerError,
   SandboxRuntimeManager,
   resolveSandboxImage,
+  resolveSandboxPreviewProxyImage,
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -90,13 +93,41 @@ export const make = Effect.gen(function* () {
   const getThread = (threadId: Parameters<typeof snapshots.getThreadDetailById>[0]) =>
     snapshots.getThreadDetailById(threadId).pipe(Effect.map(Option.getOrUndefined));
 
+  /**
+   * Everything the backend needs to re-derive a sandbox record the running
+   * server never provisioned. Undefined when the project's sandbox image cannot
+   * be resolved, since the image digest is part of the label signature that
+   * proves the container belongs to this thread.
+   */
+  const adoptionHint = Effect.fn("SandboxLifecycleReactor.adoptionHint")(function* (
+    thread: OrchestrationThread,
+  ) {
+    if (thread.sandbox == null) return undefined;
+    const snapshot = yield* snapshots.getSnapshot();
+    const project = snapshot.projects.find((item) => item.id === thread.projectId);
+    if (!project) return undefined;
+    const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
+    const image = resolveSandboxImage(projectFile);
+    if (!image) return undefined;
+    const teardownTimeoutSeconds = thread.sandboxConfig?.teardownTimeoutSeconds;
+    return {
+      projectId: thread.projectId,
+      image,
+      baseCommit: thread.sandbox.branch.baseCommit,
+      branchName: thread.sandbox.branch.branchName,
+      ...(teardownTimeoutSeconds === undefined
+        ? {}
+        : { teardownTimeoutMs: teardownTimeoutSeconds * 1000 }),
+    };
+  });
+
   const exportBranch = Effect.fn("SandboxLifecycleReactor.exportBranch")(function* (
     threadId: Parameters<typeof getThread>[0],
   ) {
     const thread = yield* getThread(threadId);
     const runtime = thread?.sandbox?.runtime;
     if (thread?.sandbox == null || (runtime !== "docker" && runtime !== "podman")) return;
-    const result = yield* runtimes.exportBranch(runtime, threadId);
+    const result = yield* runtimes.exportBranch(runtime, threadId, yield* adoptionHint(thread));
     yield* engine.dispatch({
       type: "sandbox.branch-export.result",
       commandId: yield* commandId("sandbox-export"),
@@ -106,6 +137,7 @@ export const make = Effect.gen(function* () {
       createdAt: yield* nowIso,
       artifactId: result.artifactId,
       bundleSha256: result.bundleSha256,
+      ...(result.storeSha256 === undefined ? {} : { storeSha256: result.storeSha256 }),
     });
   });
 
@@ -120,7 +152,7 @@ export const make = Effect.gen(function* () {
     if (sessions.some((session) => session.threadId === threadId))
       yield* providers.stopSession({ threadId });
     yield* exportBranch(threadId);
-    yield* runtimes.stop(runtime, threadId);
+    yield* runtimes.stop(runtime, threadId, yield* adoptionHint(thread));
     yield* engine.dispatch({
       type: "sandbox.stop.complete",
       commandId: yield* commandId("sandbox-stop-complete"),
@@ -142,6 +174,32 @@ export const make = Effect.gen(function* () {
         return yield* new SandboxManagerError({
           message: `project '${thread.projectId}' was not found`,
         });
+      const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
+      const declaration = projectFile?.sandbox;
+      const image = resolveSandboxImage(projectFile);
+      const previewProxyImage = resolveSandboxPreviewProxyImage();
+      if (!image || !previewProxyImage) {
+        const disabledAt = yield* nowIso;
+        yield* engine
+          .dispatch({
+            type: "thread.activity.append",
+            commandId: yield* commandId("sandbox-disabled-notice"),
+            threadId: thread.id,
+            createdAt: disabledAt,
+            activity: {
+              id: EventId.make(yield* crypto.randomUUIDv4),
+              tone: "info",
+              kind: "sandbox.disabled",
+              summary:
+                "Sandbox isolation is disabled — this server has no sandbox image configured. This thread will keep running normally.",
+              payload: {},
+              turnId: null,
+              createdAt: disabledAt,
+            },
+          })
+          .pipe(Effect.ignore);
+        return;
+      }
       const branch =
         thread.sandbox?.branch ??
         thread.sandboxBranch ??
@@ -172,13 +230,6 @@ export const make = Effect.gen(function* () {
         branch,
         createdAt,
       });
-      const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
-      const declaration = projectFile?.sandbox;
-      const image = resolveSandboxImage(projectFile);
-      if (!image)
-        return yield* new SandboxManagerError({
-          message: "T3_SANDBOX_IMAGE must name a digest-pinned desktop sandbox image.",
-        });
       const provision = yield* runtimes.provision({
         bootstrap: {
           threadId: thread.id,
@@ -189,6 +240,7 @@ export const make = Effect.gen(function* () {
         },
         config,
         image,
+        ...(thread.sandbox?.lastExport ? { restore: thread.sandbox.lastExport } : {}),
         ...(process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE?.trim()
           ? { egressProxyImage: process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE.trim() }
           : {}),
@@ -205,6 +257,12 @@ export const make = Effect.gen(function* () {
         sandboxId: SandboxId.make(provision.sandboxId),
         runtime: provision.runtime,
         runtimeRef: provision.containerName,
+        ...(provision.desktopSessionId === undefined
+          ? {}
+          : { desktopSessionId: provision.desktopSessionId }),
+        ...(provision.desktopStreamPath === undefined
+          ? {}
+          : { desktopStreamPath: provision.desktopStreamPath }),
         createdAt: yield* nowIso,
       });
       const readyThread = yield* getThread(thread.id);
@@ -297,10 +355,29 @@ export const make = Effect.gen(function* () {
       const projectFile = Option.getOrUndefined(yield* projectFiles.load(project.workspaceRoot));
       const declaration = projectFile?.sandbox;
       const image = resolveSandboxImage(projectFile);
-      if (!image)
-        return yield* new SandboxManagerError({
-          message: "A digest-pinned sandbox image is required to spawn an isolated worker",
-        });
+      const previewProxyImage = resolveSandboxPreviewProxyImage();
+      if (!image || !previewProxyImage) {
+        const disabledAt = yield* nowIso;
+        yield* engine
+          .dispatch({
+            type: "thread.activity.append",
+            commandId: yield* commandId("sandbox-disabled-notice"),
+            threadId: parent.id,
+            createdAt: disabledAt,
+            activity: {
+              id: EventId.make(yield* crypto.randomUUIDv4),
+              tone: "info",
+              kind: "sandbox.disabled",
+              summary:
+                "Skipped spawning an isolated worker thread — sandbox isolation isn't configured on this server.",
+              payload: {},
+              turnId: null,
+              createdAt: disabledAt,
+            },
+          })
+          .pipe(Effect.ignore);
+        return;
+      }
       yield* engine.dispatch({
         type: "thread.create",
         commandId: yield* commandId("sandbox-worker-create"),
@@ -363,6 +440,12 @@ export const make = Effect.gen(function* () {
         sandboxId: SandboxId.make(provision.sandboxId),
         runtime: provision.runtime,
         runtimeRef: provision.containerName,
+        ...(provision.desktopSessionId === undefined
+          ? {}
+          : { desktopSessionId: provision.desktopSessionId }),
+        ...(provision.desktopStreamPath === undefined
+          ? {}
+          : { desktopStreamPath: provision.desktopStreamPath }),
         createdAt: yield* nowIso,
       });
       const readyChild = yield* getThread(event.payload.childThreadId);
@@ -459,6 +542,20 @@ export const make = Effect.gen(function* () {
       });
     }
   });
+  /**
+   * The operator-facing sentence behind a lifecycle failure.
+   *
+   * `String(cause)` renders as `Cause([Fail(Error: ...)])`, and the default
+   * structured log of a `Cause` object collapses to `{ failures: [ [Object] ] }`
+   * -- both hide the one line that says what podman actually refused to do.
+   */
+  const failureMessage = (cause: Cause.Cause<unknown>): string => {
+    const failure = cause.reasons.find(Cause.isFailReason)?.error;
+    if (failure instanceof Error && failure.message.trim().length > 0) return failure.message;
+    if (typeof failure === "string" && failure.trim().length > 0) return failure;
+    return "The sandbox operation failed. Check the server logs for technical details.";
+  };
+
   const worker = yield* makeDrainableWorker((event: SandboxRequestEvent) =>
     processEvent(event).pipe(
       Effect.catchCause((cause) =>
@@ -479,14 +576,18 @@ export const make = Effect.gen(function* () {
                       ? "teardown"
                       : "runtime",
                 code: "sandbox_lifecycle_failed",
-                message: String(cause),
+                message: failureMessage(cause),
                 retryable: true,
                 occurredAt,
               },
               createdAt: occurredAt,
             })
             .pipe(Effect.ignore);
-          yield* Effect.logWarning("sandbox lifecycle event failed", { type: event.type, cause });
+          yield* Effect.logWarning("sandbox lifecycle event failed", {
+            type: event.type,
+            threadId,
+            cause: Cause.pretty(cause),
+          });
         }),
       ),
     ),
