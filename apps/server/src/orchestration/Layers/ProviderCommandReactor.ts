@@ -529,8 +529,13 @@ export const make = Effect.gen(function* () {
           // transcripts are keyed by, so the cursor resolves again and the
           // thread comes back with its context. Clearing it there would throw
           // away the conversation the export went out of its way to save.
-          if (thread.sandbox?.lastExport?.storeSha256 === undefined)
-            yield* clearSandboxResumeCursor(thread.id);
+          // Deferred until after the provision below reports what it actually
+          // restored. Deciding here from `lastExport.storeSha256` alone was
+          // wrong in the case that matters: the artifact may have been swept,
+          // or the copy/extract may have failed (it is best-effort), and the
+          // thread then came back to a clean container while the host kept a
+          // cursor naming a conversation that no longer exists -- every
+          // following turn dying on "No conversation found with session ID".
           yield* orchestrationEngine.dispatch({
             type: "sandbox.provision",
             commandId: yield* serverCommandId("sandbox-provision"),
@@ -608,6 +613,10 @@ export const make = Effect.gen(function* () {
                 }),
               ),
             );
+          // The provision knows whether the archived conversation is really in
+          // the new container. Keep the cursor only then; otherwise forget it
+          // so the next turn starts a fresh conversation cleanly.
+          if (provision.providerStoreRestored !== true) yield* clearSandboxResumeCursor(thread.id);
           const readyAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
           yield* orchestrationEngine.dispatch({
             type: "sandbox.provision.ready",

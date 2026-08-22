@@ -215,6 +215,9 @@ describe("ProviderCommandReactor", () => {
           desktopSessionId: `desktop-${request.bootstrap.threadId}`,
           desktopStreamPath: `/desktop/${request.bootstrap.threadId}`,
           services: [],
+          // Mirrors the backend: the store only comes back when the export
+          // recorded one AND the archive extracted into the new container.
+          providerStoreRestored: request.restore?.storeSha256 !== undefined,
         }),
     );
     const startSession = vi.fn((_: unknown, input: unknown, _executionTarget?: unknown) => {
