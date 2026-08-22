@@ -63,6 +63,29 @@ function successfulExecutor(
 }
 
 describe("ContainerSandboxBackend", () => {
+  it("names the opt-out when the host cannot administer project quotas", async () => {
+    // Volume quotas are on by default, and podman's own wording says what
+    // failed but not what to set -- so on a host that cannot administer XFS
+    // project quotas at all, provisioning died without ever mentioning the
+    // flag that fixes it.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "volume" && command.args[1] === "create"
+        ? {
+            exitCode: 125,
+            stdout: "",
+            stderr:
+              "Error: volume options size and inodes not supported. Filesystem does not support Project Quota",
+          }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const failure = await backend.ensureReady(input()).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(String(failure)).toContain("T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled");
+  });
+
   it("constructs a hardened, per-thread container without host bind mounts", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);

@@ -1440,7 +1440,10 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
   #run(args: ReadonlyArray<string>, timeoutMs: number, allowFailure = false) {
     return this.#executor.run({ executable: this.#binary, args, timeoutMs }).then((result) => {
       if (!allowFailure && result.exitCode !== 0)
-        throw new SandboxRuntimeError(`${this.#binary} ${args[0]} failed`, result.stderr);
+        throw new SandboxRuntimeError(
+          `${this.#binary} ${args[0]} failed${quotaUnsupportedHint(args, result.stderr)}`,
+          result.stderr,
+        );
       return result;
     });
   }
@@ -1562,6 +1565,19 @@ function containerStorageQuotaEnabled(): boolean {
  * for XFS project quotas, or a privileged helper): there, a quota-bearing
  * volume create fails outright rather than going quietly unenforced.
  */
+/**
+ * Names the switch when a host simply cannot administer XFS project quotas.
+ *
+ * The runtime's own wording ("Filesystem does not support Project Quota") says
+ * what failed but not what to do, and quotas are on by default -- so without
+ * this an operator on such a host sees provisioning die with a message that
+ * never mentions the flag that fixes it.
+ */
+function quotaUnsupportedHint(args: ReadonlyArray<string>, stderr: string): string {
+  if (args[0] !== "volume" || !/project quota/i.test(stderr)) return "";
+  return " (this host cannot administer XFS project quotas; set T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled to provision without per-volume limits)";
+}
+
 function volumeStorageQuotaEnabled(): boolean {
   return process.env.T3_SANDBOX_VOLUME_STORAGE_QUOTA?.trim().toLowerCase() !== "disabled";
 }
