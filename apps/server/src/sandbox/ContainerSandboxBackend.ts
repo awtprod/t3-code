@@ -101,17 +101,34 @@ const EXPORT_SNAPSHOT_IDENTITY = {
 /**
  * Paths excluded from the archived provider store, relative to `PROVIDER_HOME`.
  *
- * Credentials first: the provider home holds live auth material next to the
- * transcripts, and an exported archive lands in a host directory that outlives
- * the container. Excluding at archive time means a credential is never written
- * into the tar in the first place. The rest is churn -- crash-time temp files
- * and caches that a restored store is better off without.
+ * The provider home holds live auth material next to the transcripts, and an
+ * exported archive lands in a host directory that outlives the container.
+ * Excluding at archive time means a credential is never written into the tar in
+ * the first place -- so every pattern here is load-bearing, and each is listed
+ * with what it is for:
+ *
+ * - `.credentials.json` / `*.credentials.json` -- Claude Code's OAuth store,
+ *   at `~/.claude/.credentials.json` and its per-profile variants.
+ * - `*auth*` -- Codex's `~/.codex/auth.json` and anything else that names
+ *   itself auth material.
+ * - `*token*` -- bare token files providers drop beside their config.
+ * - `*.key` -- private key material anywhere under the home, INCLUDING inside
+ *   a `sessions/` directory (a tar exclude glob matches across `/`).
+ * - `.claude.json.tmp.*` -- crash-time temporaries, not a credential.
+ * - `.cache` -- churn a restored store is better off without.
+ *
+ * A bare `sessions` used to be in this list. It was aimed at `sessions/*.key`,
+ * which `*.key` already covers -- and it stripped Codex's `~/.codex/sessions`
+ * transcripts, which ARE the conversation the archive exists to carry. The
+ * extraction still reported success, so the thread came back with a retained
+ * cursor naming a conversation that was never in the tar, and every following
+ * turn failed to resume. Exclusions must target credentials, not a directory
+ * name that two providers use for different things.
  */
 const PROVIDER_STORE_EXCLUDES = [
   ".credentials.json",
   "*.credentials.json",
   ".claude.json.tmp.*",
-  "sessions",
   "*.key",
   "*token*",
   "*auth*",
@@ -493,7 +510,14 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
             },
             setupTimeoutMs,
           );
-          providerStoreRestored = true;
+          // A successful extraction does not mean the conversation arrived.
+          // The archive is built with credential exclusions, and an exclusion
+          // aimed too broadly strips the transcripts while tar still exits 0 --
+          // exactly what a bare `sessions` exclude did to Codex. Report a
+          // restore only when a provider's conversation state is actually in
+          // the home, so the caller's cursor decision is made on what is
+          // there rather than on what was attempted.
+          providerStoreRestored = await this.#providerStorePopulated(containerName, setupTimeoutMs);
         } catch {
           // Intentionally swallowed; see above.
         } finally {
@@ -961,6 +985,46 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     // one it recorded. Drop the lot rather than let it ride out again.
     await this.#deleteExportSnapshotRefs(containerName, timeoutMs);
     return undefined;
+  }
+
+  /**
+   * Whether a provider's conversation state is actually present in the
+   * container's provider home.
+   *
+   * `tar --extract` exiting 0 only proves the archive unpacked, not that the
+   * conversation was in it: the archive is built with credential exclusions,
+   * and one aimed too broadly (a bare `sessions`, which stripped Codex's
+   * `~/.codex/sessions` transcripts) produces a tar that extracts cleanly and
+   * restores nothing the provider can resume from. A cursor kept on the
+   * strength of that fails every following turn with "No conversation found
+   * with session ID", so the caller is told what is really there.
+   *
+   * Deliberately a directory-existence probe over the known provider stores
+   * rather than a content check: what makes a cursor resolvable is the CLI's
+   * own session directory being where it left it, and enumerating transcripts
+   * would couple this to each provider's on-disk format.
+   */
+  async #providerStorePopulated(containerName: string, timeoutMs: number): Promise<boolean> {
+    const probed = await this.#mustExec(
+      containerName,
+      {
+        executable: "find",
+        args: [
+          PROVIDER_HOME,
+          "-mindepth",
+          "2",
+          "-maxdepth",
+          "2",
+          "-type",
+          "d",
+          "-name",
+          "sessions",
+        ],
+        allowNonZeroExit: true,
+      },
+      timeoutMs,
+    );
+    return probed.exitCode === 0 && probed.stdout.trim().length > 0;
   }
 
   /** Remove every snapshot ref, so none rides out in a later export bundle. */

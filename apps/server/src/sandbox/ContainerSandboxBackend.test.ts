@@ -65,6 +65,15 @@ function successfulExecutor(
       (command.args.includes("rev-parse") || command.args.includes("write-tree"))
     )
       return { exitCode: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
+    // The post-extraction probe for a provider's own session directory. An
+    // archive that unpacked cleanly but carried no conversation would answer
+    // empty here, which is the case the probe exists for.
+    if (command.args[0] === "exec" && command.args.includes("find"))
+      return {
+        exitCode: 0,
+        stdout: "/thread-data/provider-home/.codex/sessions\n",
+        stderr: "",
+      };
     return { exitCode: 0, stdout: "", stderr: "" };
   });
 }
@@ -149,9 +158,10 @@ describe("ContainerSandboxBackend", () => {
 
   it("never archives provider credentials into an exported store", async () => {
     // The provider home holds live auth material (.credentials.json,
-    // sessions/*.key) beside the transcripts, and the archive outlives the
-    // container in a host directory. The exclusions are the security boundary,
-    // so they are asserted directly rather than assumed from the happy path.
+    // sessions/*.key, .codex/auth.json) beside the transcripts, and the archive
+    // outlives the container in a host directory. The exclusions are the
+    // security boundary, so they are asserted directly rather than assumed
+    // from the happy path.
     const executor = successfulExecutor((command) =>
       command.args[0] === "exec" && command.args.includes("stat")
         ? { exitCode: 0, stdout: "4096\n", stderr: "" }
@@ -165,11 +175,25 @@ describe("ContainerSandboxBackend", () => {
       (command) => command.args[0] === "exec" && command.args.includes("tar"),
     );
     expect(tar).toBeDefined();
-    for (const denied of [".credentials.json", "sessions", "*.key", "*token*", "*auth*"]) {
+    for (const denied of [
+      ".credentials.json",
+      "*.credentials.json",
+      // Covers private key material anywhere under the home, including inside
+      // a `sessions/` directory -- a tar exclude glob matches across `/`.
+      "*.key",
+      "*token*",
+      // Codex's ~/.codex/auth.json.
+      "*auth*",
+    ]) {
       const at = tar!.args.indexOf(denied);
       expect(at).toBeGreaterThan(0);
       expect(tar!.args[at - 1]).toBe("--exclude");
     }
+    // ...but NOT a bare `sessions`. That stripped Codex's ~/.codex/sessions
+    // transcripts -- the very conversation the archive exists to carry -- while
+    // tar still exited 0, so the thread came back with a retained cursor
+    // naming a conversation that was never in the tar.
+    expect(tar!.args).not.toContain("sessions");
     // Archived from the provider home itself, so nothing outside it -- the
     // workspace, /tmp -- can ride along.
     expect(tar!.args).toContain("/thread-data/provider-home");
@@ -301,6 +325,34 @@ describe("ContainerSandboxBackend", () => {
       ),
     ).ensureReady(input());
     expect(survivor.providerStore).toBe("preserved");
+  });
+
+  it("reports no restored store when the archive unpacked without a conversation", async () => {
+    // `tar --extract` exiting 0 only proves the archive unpacked. The archive
+    // is built with credential exclusions, and one aimed too broadly -- the
+    // bare `sessions` this list used to carry, which took Codex's
+    // ~/.codex/sessions transcripts with it -- produces a tar that extracts
+    // cleanly and restores nothing resumable. Reporting that as restored kept
+    // a cursor naming a conversation that was never in the tar, and every
+    // following turn died on "No conversation found with session ID".
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("find")
+        ? { exitCode: 0, stdout: "", stderr: "" }
+        : undefined,
+    );
+    const ready = await new ContainerSandboxBackend("docker", executor).ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    // The thread still comes back -- losing the conversation must not cost the
+    // user their branch.
+    expect(ready.containerName).toContain("t3-thread-");
+    expect(ready.providerStore).toBe("unavailable");
   });
 
   it("coalesces concurrent provisioning and is idempotent once ready", async () => {
