@@ -18,6 +18,7 @@ import type {
 } from "./types.ts";
 import {
   sanitizeId,
+  validateBranchName,
   validateBootstrap,
   validateCache,
   validateExec,
@@ -67,7 +68,8 @@ const PROVIDER_HOME = "/thread-data/provider-home";
 /**
  * Namespace the export pins its dirty-and-untracked snapshot commit under.
  *
- * The bundle is `--all`, so naming the snapshot as a ref is what carries the
+ * The export bundles this namespace alongside the thread branch, so naming the
+ * snapshot as a ref is what carries the
  * working tree across a teardown: the branch tip alone records only what the
  * user committed, and everything they had merely edited or newly created would
  * be destroyed by an automatic settle. Under `refs/t3/` rather than
@@ -814,8 +816,8 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
 
   /**
    * Pin the working tree -- dirty tracked files AND untracked ones -- as a
-   * commit under this export's own snapshot ref, so the `--all` bundle written
-   * next carries it out of the sandbox.
+   * commit under this export's own snapshot ref, so the bundle written next --
+   * which names this namespace explicitly -- carries it out of the sandbox.
    *
    * Without this, an export saves only what was committed. The patch computed
    * above describes the rest, but a patch has nowhere to live: the manifest
@@ -841,6 +843,15 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     containerName: string,
     env: Readonly<Record<string, string>>,
   ): Promise<string | undefined> {
+    // Every snapshot ref this container still holds is from an EARLIER export
+    // and describes a working tree that no longer exists. Dropping them first
+    // is what keeps the bundle below to this export's own state: they used to
+    // accumulate and ride out in every later bundle, so a file the user
+    // deleted after one export stayed recoverable from a newer artifact that
+    // is supposed to represent current state. Before the dirty check, not
+    // after -- a clean tree writes no snapshot of its own and must still not
+    // ship someone else's.
+    await this.#deleteExportSnapshotRefs(containerName, 30_000);
     const tree = (
       await this.#mustExec(
         containerName,
@@ -1103,13 +1114,41 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       throw new SandboxRuntimeError(`sandbox for thread ${threadId} is not ready`);
     if (!destination.startsWith("/") || destination.includes("\0"))
       throw new SandboxRuntimeError("bundle destination must be an absolute host path");
+    // The branch comes off a record that adoption may have rebuilt from a hint
+    // rather than from a validated provision, and it lands here as a refspec.
+    validateBranchName(record.ready.branchName);
     const containerBundle = "/tmp/t3-thread-export.bundle";
     try {
+      // Exactly what a restore reads back -- the thread branch and this
+      // export's own working-tree snapshot -- and nothing else.
+      //
+      // `--all` was a data-retention bug, not merely wasteful. Every snapshot
+      // ref an earlier export left in the repository rode out in every later
+      // bundle, so a file the user deleted after one export was still
+      // recoverable from a NEWER artifact that is supposed to represent
+      // current state. The restore-side commit check stopped a stale snapshot
+      // from being UNPACKED (see `#resolveExportSnapshot`), but the deleted
+      // bytes were still in the artifact on disk.
+      //
+      // A glob for the snapshot namespace rather than a named ref: the ref is
+      // named by the commit it points at, this export just wrote its own, and
+      // a glob that matches nothing is not an error -- which is what a clean
+      // tree needs, since it writes no snapshot at all. Restore still holds
+      // whatever arrives to the commit the event log recorded, so pruning here
+      // relaxes nothing.
       await this.#mustExec(
         record.ready.containerName,
         {
           executable: "git",
-          args: ["-C", "/workspace/repo", "bundle", "create", containerBundle, "--all"],
+          args: [
+            "-C",
+            "/workspace/repo",
+            "bundle",
+            "create",
+            containerBundle,
+            `refs/heads/${record.ready.branchName}`,
+            `--glob=${EXPORT_SNAPSHOT_NAMESPACE}/*`,
+          ],
         },
         120_000,
       );

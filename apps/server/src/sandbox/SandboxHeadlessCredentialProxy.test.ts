@@ -296,9 +296,9 @@ describe("restoring a re-provisioned sandbox", () => {
         ).toBe(false);
 
         const git = containerGitLines(executor);
-        // `exportBundle` writes `git bundle create --all`, so the thread branch
-        // is in there under its ordinary heads ref and the fetch must name it:
-        // a bundle fetch has no default refspec.
+        // `exportBundle` names the thread branch explicitly, so it is in there
+        // under its ordinary heads ref and the fetch must name it too: a bundle
+        // fetch has no default refspec.
         expect(git).toContain(
           `git -C /workspace/repo fetch --no-tags /tmp/t3-repository.bundle refs/heads/${BRANCH}:refs/heads/${BRANCH}`,
         );

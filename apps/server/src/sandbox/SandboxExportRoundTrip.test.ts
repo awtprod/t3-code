@@ -391,6 +391,79 @@ describe("sandbox export round trip", () => {
     }),
   );
 
+  it.effect("does not carry a file deleted after an earlier export into a later bundle", () =>
+    Effect.gen(function* () {
+      // A data-retention bug, not just wasted bytes. Every export pins its
+      // working tree under a ref named by its own commit, and the bundle was
+      // written with `--all` -- so every snapshot an earlier export left behind
+      // rode out in every LATER bundle. A secret the user wrote, exported, and
+      // then deleted was still sitting in the newest artifact, which is
+      // supposed to represent current state and is what the retention sweep
+      // ages out.
+      //
+      // Read against the bundle bytes, not against a restored checkout: the
+      // restore-side commit check already refuses to UNPACK a stale snapshot,
+      // so a checkout assertion passes while the deleted content is still on
+      // disk in the artifact.
+      headless();
+      const artifacts = makeDirectory("t3-sandbox-artifacts-");
+      const source = sourceRepository();
+
+      const executor = new GitBackedExecutor();
+      const manager = makeSandboxRuntimeManager(artifacts, "linux", executor);
+      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      NodeFS.writeFileSync(
+        NodePath.join(executor.repository, "secret.txt"),
+        "credential the user deleted\n",
+        "utf8",
+      );
+      const first = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(first.snapshotCommit).toBeDefined();
+
+      NodeFS.rmSync(NodePath.join(executor.repository, "secret.txt"));
+      NodeFS.appendFileSync(
+        NodePath.join(executor.repository, "tracked.txt"),
+        "second line\n",
+        "utf8",
+      );
+      const second = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(second.snapshotCommit).toBeDefined();
+      expect(second.snapshotCommit).not.toBe(first.snapshotCommit);
+
+      // Unbundle the newest artifact into a scratch repository and look for the
+      // deleted content anywhere in its object graph.
+      const inspect = makeDirectory("t3-sandbox-bundle-");
+      git(inspect, "init", "--quiet", "--bare", ".");
+      git(
+        inspect,
+        "fetch",
+        NodePath.join(artifacts, `${second.artifactId}.bundle`),
+        "refs/*:refs/bundled/*",
+      );
+      // Exactly what a restore reads back, and nothing else. `--all` swept in
+      // every ref the repository happened to hold -- the seeding ref, and any
+      // snapshot ref a failed prune left behind -- each one a way for content
+      // this export never captured to reach the artifact.
+      expect(git(inspect, "for-each-ref", "--format=%(refname)").trim().split("\n")).toEqual([
+        `refs/bundled/heads/thread/${THREAD_ID}`,
+        `refs/bundled/t3/export-snapshot/${second.snapshotCommit!}`,
+      ]);
+      const reachable = git(inspect, "rev-list", "--objects", "--all");
+      expect(reachable).not.toContain("secret.txt");
+      expect(reachable).toContain("tracked.txt");
+      // The export this bundle IS still has to be in it -- pruning must not cost
+      // the current snapshot, or the fix trades a retention bug for data loss.
+      expect(git(inspect, "cat-file", "-t", second.snapshotCommit!).trim()).toBe("commit");
+      // ...and the earlier export's snapshot is gone from it entirely.
+      expect(
+        NodeChildProcess.spawnSync("git", ["cat-file", "-e", first.snapshotCommit!], {
+          cwd: inspect,
+          encoding: "utf8",
+        }).status,
+      ).not.toBe(0);
+    }),
+  );
+
   it.effect("fails the export when a dirty tree cannot be snapshotted", () =>
     Effect.gen(function* () {
       // The snapshot used to be best-effort: a failure returned `undefined`

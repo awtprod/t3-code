@@ -847,11 +847,16 @@ describe("ContainerSandboxBackend", () => {
       expect.arrayContaining([
         expect.objectContaining({
           executable: "docker",
+          // The thread branch and this export's own snapshot namespace, NOT
+          // `--all`: every ref in the repository would put an earlier export's
+          // snapshot -- and files the user has since deleted -- into this
+          // artifact.
           args: expect.arrayContaining([
             "bundle",
             "create",
             "/tmp/t3-thread-export.bundle",
-            "--all",
+            "refs/heads/thread/thread-1",
+            "--glob=refs/t3/export-snapshot/*",
           ]),
         }),
         expect.objectContaining({

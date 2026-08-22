@@ -436,9 +436,9 @@ export const makeSandboxRuntimeManager = (
         ...input.bootstrap,
         repositoryBundlePath: bundle,
         ...(storePath === undefined ? {} : { providerStorePath: storePath }),
-        // `exportBundle` writes `git bundle create --all`, so the thread branch
-        // is in there under its ordinary heads ref -- the seeding fetch has to
-        // name it, since a bundle fetch takes no default refspec.
+        // `exportBundle` names the thread branch explicitly, so it is in there
+        // under its ordinary heads ref -- the seeding fetch has to name it too,
+        // since a bundle fetch takes no default refspec.
         repositoryBundleRef: `refs/heads/${restore.branchName}`,
         restoreCommit: restore.headCommit,
         // From the event log, which is the only record of this that verifies
