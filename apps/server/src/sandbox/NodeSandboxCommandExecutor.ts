@@ -22,7 +22,7 @@ const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
  * otherwise only deliverable through a PATH wrapper (see
  * `deploy/openclaw/sandbox/podman-wrapper.sh`).
  */
-const FORWARDED_RUNTIME_ENV = [
+export const FORWARDED_RUNTIME_ENV = [
   "XDG_RUNTIME_DIR",
   "HOME",
   "CONTAINER_HOST",
@@ -31,7 +31,7 @@ const FORWARDED_RUNTIME_ENV = [
   "CONTAINERS_STORAGE_CONF",
 ] as const;
 
-const runtimeEnvironment = (): Record<string, string> => {
+export const runtimeEnvironment = (): Record<string, string> => {
   const environment: Record<string, string> = {};
   if (process.env.PATH !== undefined) environment.PATH = process.env.PATH;
   for (const name of FORWARDED_RUNTIME_ENV) {
