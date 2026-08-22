@@ -85,6 +85,12 @@ sudo /opt/command-center/current/deploy/openclaw/sandbox/bootstrap-sandbox-host.
 ```
 
 It is idempotent; re-running is the supported way to repair a partial run.
+That includes a run at the same pinned version: step 2 does not skip on
+`podman --version` alone, it also checks that every file recorded in the
+bundle manifest (`/usr/local/share/podman-static/manifest`) is still present,
+and reinstalls the pinned bundle when any is missing. A helper deleted by hand,
+an interrupted copy, or an absent manifest is therefore repaired rather than
+reported as "already installed".
 Individual steps can be re-run in isolation:
 
 ```sh

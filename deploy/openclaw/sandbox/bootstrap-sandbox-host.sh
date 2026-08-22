@@ -335,9 +335,43 @@ if wants_step 2; then
     info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local ($(wc -l <"$manifest") files recorded in $manifest)"
   }
 
+  # A matching `podman --version` proves one binary, not a complete bundle.
+  # Re-running this script is the documented way to repair a partial run, but
+  # the version check alone made that impossible for the most likely damage: a
+  # helper (netavark, aardvark-dns, conmon, crun, catatonit) deleted or
+  # truncated by hand, an interrupted `cp -r` that copied podman first, or a
+  # manifest that never got written. Every one of those leaves a host whose
+  # podman reports the pinned version and cannot start a container, and a
+  # same-version re-run that says "already installed" and changes nothing.
+  #
+  # So the recorded manifest is validated too: it must exist, be non-empty, and
+  # every path it lists must still be present. Any gap reinstalls the pinned
+  # bundle -- which removes what the manifest lists and rewrites it -- instead
+  # of skipping.
+  podman_install_is_complete() {
+    local manifest="${PODMAN_STATIC_MANIFEST_DIR}/manifest" entry missing=0
+    if [ ! -s "$manifest" ]; then
+      info "no bundle manifest at $manifest; reinstalling to record one"
+      return 1
+    fi
+    while IFS= read -r entry; do
+      [ -n "$entry" ] || continue
+      # -e, not -f: the bundle ships symlinks, and a dangling one is missing.
+      if [ ! -e "$entry" ]; then
+        missing=$((missing + 1))
+        [ "$missing" -gt 5 ] || warn "bundle file recorded in the manifest is missing: $entry"
+      fi
+    done <"$manifest"
+    if [ "$missing" -gt 0 ]; then
+      info "$missing file(s) from the recorded bundle are missing; reinstalling"
+      return 1
+    fi
+    return 0
+  }
+
   installed_version="$(/usr/local/bin/podman --version 2>/dev/null | awk '{print $3}' || true)"
-  if [ "$installed_version" = "${PODMAN_STATIC_VERSION#v}" ]; then
-    info "podman-static ${PODMAN_STATIC_VERSION} already installed"
+  if [ "$installed_version" = "${PODMAN_STATIC_VERSION#v}" ] && podman_install_is_complete; then
+    info "podman-static ${PODMAN_STATIC_VERSION} already installed and complete"
   else
     info "installing podman-static ${PODMAN_STATIC_VERSION} (${podman_static_asset})"
     install_podman_static "$podman_static_asset" "$podman_static_sha256"
