@@ -57,6 +57,9 @@ import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackground
 import * as ThreadPlanProgress from "../src/orchestration/ThreadPlanProgress.ts";
 import { RuntimeReceiptBusTest } from "../src/orchestration/Layers/RuntimeReceiptBus.ts";
 import { OrchestrationReactorLive } from "../src/orchestration/Layers/OrchestrationReactor.ts";
+import { SandboxLifecycleReactorLive } from "../src/orchestration/Layers/SandboxLifecycleReactor.ts";
+import { SandboxSettleCleanupReactorLive } from "../src/orchestration/Layers/SandboxSettleCleanupReactor.ts";
+import { ThreadDeletionReactorLive } from "../src/orchestration/Layers/ThreadDeletionReactor.ts";
 import {
   make as makeProviderCommandReactor,
   ProviderCommandReactorLive,
@@ -69,6 +72,8 @@ import {
   type OrchestrationEngineShape,
 } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../src/orchestration/Services/ThreadDeletionReactor.ts";
+import { SandboxLifecycleReactor } from "../src/orchestration/Services/SandboxLifecycleReactor.ts";
+import { SandboxSettleCleanupReactor } from "../src/orchestration/Services/SandboxSettleCleanupReactor.ts";
 import { ProviderCommandReactor } from "../src/orchestration/Services/ProviderCommandReactor.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -88,11 +93,13 @@ import * as VcsDriverRegistry from "../src/vcs/VcsDriverRegistry.ts";
 import { VcsStatusBroadcaster } from "../src/vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
+import * as TerminalManager from "../src/terminal/Manager.ts";
 import * as AgentAwarenessRelay from "../src/relay/AgentAwarenessRelay.ts";
 import { ThreadSandboxRuntime } from "../src/sandbox/ThreadSandboxRuntime.ts";
 import {
   SandboxManagerError,
   SandboxRuntimeManager,
+  SandboxRuntimeManagerLive,
 } from "../src/sandbox/SandboxRuntimeManager.ts";
 import { T3ProjectFileLoader } from "../src/project/T3ProjectFileLoader.ts";
 
@@ -243,6 +250,14 @@ export interface OrchestrationIntegrationHarness {
 interface MakeOrchestrationIntegrationHarnessOptions {
   readonly provider?: ProviderDriverKind;
   readonly realCodex?: boolean;
+  /**
+   * Wire the real sandbox lifecycle, settle-cleanup, and thread-deletion
+   * reactors instead of the stubs. Off by default: decider/projection tests
+   * dispatch sandbox states by hand and must not touch a container runtime.
+   * On, `sandbox.provision` really provisions -- so the host needs a working
+   * rootless docker/podman and digest-pinned `T3_SANDBOX_*` images.
+   */
+  readonly realSandboxReactors?: boolean;
 }
 
 export const makeOrchestrationIntegrationHarness = (
@@ -254,6 +269,7 @@ export const makeOrchestrationIntegrationHarness = (
 
     const provider = options?.provider ?? ProviderDriverKind.make("codex");
     const useRealCodex = options?.realCodex === true;
+    const useRealSandboxReactors = options?.realSandboxReactors === true;
     const adapterHarness = useRealCodex
       ? null
       : yield* makeTestProviderAdapterHarness({
@@ -267,6 +283,14 @@ export const makeOrchestrationIntegrationHarness = (
       : null;
     const rootDir = yield* fileSystem.makeTempDirectoryScoped({
       prefix: "t3-orchestration-integration-",
+      // With the real reactors, the container runtime reads seed bundles off
+      // this path by absolute name. A private /tmp (systemd `PrivateTmp`, or a
+      // sandboxed agent shell) is invisible to the runtime's own namespace, so
+      // `podman cp` reports "could not be found on the host". Honour
+      // T3_INTEGRATION_TMPDIR to place the root somewhere both sides can see.
+      ...(useRealSandboxReactors && process.env.T3_INTEGRATION_TMPDIR
+        ? { directory: process.env.T3_INTEGRATION_TMPDIR }
+        : {}),
     });
     const workspaceDir = path.join(rootDir, "workspace");
     const { stateDir, dbPath } = yield* deriveServerPaths(rootDir, undefined).pipe(
@@ -315,7 +339,13 @@ export const makeOrchestrationIntegrationHarness = (
         );
     const providerRegistryLayer = makeProviderRegistryLayer();
 
-    const sandboxRuntimeManagerLayer = makeSandboxRuntimeManagerLayer();
+    // The fake manager answers `exec` by shelling out in the workspace dir and
+    // reports provisioning as instantly-ready -- right for decider tests, but it
+    // never touches a container runtime. `realSandboxReactors` swaps in the Live
+    // manager so provisioning really creates containers, networks, and volumes.
+    const sandboxRuntimeManagerLayer = useRealSandboxReactors
+      ? SandboxRuntimeManagerLive
+      : makeSandboxRuntimeManagerLayer();
     const checkpointStoreCommonLayer = CheckpointStore.layer.pipe(
       Layer.provide(VcsDriverRegistry.layer),
     );
@@ -523,15 +553,51 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(VcsProcess.layer),
     );
     const checkpointReactorLayer = checkpointReactorCommonLayer;
+    const sandboxReactorSupportLayer = Layer.mergeAll(
+      runtimeServicesLayer,
+      gitWorkflowLayer,
+      sandboxRuntimeManagerLayer,
+    ).pipe(
+      // ThreadDeletionReactor closes a deleted thread's terminals, and the
+      // lifecycle reactor's git work runs through VcsProcess. The real
+      // TerminalManager drags in PTY and port-discovery adapters that nothing
+      // under test needs, so deletion sees a no-op terminal manager.
+      Layer.provideMerge(
+        Layer.mock(TerminalManager.TerminalManager)({
+          close: () => Effect.void,
+        }),
+      ),
+      Layer.provideMerge(VcsProcess.layer),
+    );
+    const threadDeletionReactorLayer = useRealSandboxReactors
+      ? ThreadDeletionReactorLive.pipe(Layer.provideMerge(sandboxReactorSupportLayer))
+      : Layer.succeed(ThreadDeletionReactor, {
+          start: () => Effect.void,
+          drain: Effect.void,
+        });
     const orchestrationReactorLayer = OrchestrationReactorLive.pipe(
       Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(providerCommandReactorLayer),
       Layer.provideMerge(checkpointReactorLayer),
+      Layer.provideMerge(threadDeletionReactorLayer),
+      // The sandbox reactors are what actually call the container runtime.
+      // Stubs keep decider/projection tests hermetic; the real Lives make
+      // `sandbox.provision` provision for real (see `realSandboxReactors`).
       Layer.provideMerge(
-        Layer.succeed(ThreadDeletionReactor, {
-          start: () => Effect.void,
-          drain: Effect.void,
-        }),
+        useRealSandboxReactors
+          ? SandboxLifecycleReactorLive.pipe(Layer.provideMerge(sandboxReactorSupportLayer))
+          : Layer.succeed(SandboxLifecycleReactor, {
+              start: () => Effect.void,
+              drain: Effect.void,
+            }),
+      ),
+      Layer.provideMerge(
+        useRealSandboxReactors
+          ? SandboxSettleCleanupReactorLive.pipe(Layer.provideMerge(sandboxReactorSupportLayer))
+          : Layer.succeed(SandboxSettleCleanupReactor, {
+              start: () => Effect.void,
+              drain: Effect.void,
+            }),
       ),
       Layer.provideMerge(
         Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
