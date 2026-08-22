@@ -230,6 +230,46 @@ if wants_step 2; then
   podman_socket_was_active=0
   podman_service_was_active=0
 
+  # Restores exactly what install_podman_static stopped. Idempotent: it clears
+  # the flags, so the success-path call and the EXIT trap cannot both act.
+  #
+  # It has to be reachable from a trap because everything between the stop and
+  # the restore runs under `set -e` -- the binary copy, the manifest write, the
+  # containers.conf drop-in, the AppArmor profile load. Any one of them failing
+  # used to exit with the host's podman socket still down, taking the running
+  # server's sandboxes with it. Called with "fatal" on the success path (a
+  # socket that will not come back is worth failing the step over) and with
+  # "warn" from the trap, where an exit is already in progress and a `die`
+  # would only mask the real error.
+  restore_podman_services() {
+    local severity="${1:-warn}" socket_was="$podman_socket_was_active" service_was="$podman_service_was_active"
+    podman_socket_was_active=0
+    podman_service_was_active=0
+    [ "$socket_was" = 1 ] || [ "$service_was" = 1 ] || return 0
+    info "restarting the podman socket/service stopped for the binary swap"
+    if [ "$socket_was" = 1 ]; then
+      if ! as_service_user systemctl --user start podman.socket; then
+        local message="podman.socket was active before this step and failed to restart.
+       Bring it back by hand: STEPS=6, or
+       runuser -u $SERVICE_USER -- env XDG_RUNTIME_DIR=/run/user/${SERVICE_UID} \\
+         systemctl --user start podman.socket"
+        if [ "$severity" = fatal ]; then die "$message"; else warn "$message"; fi
+      fi
+    fi
+    if [ "$service_was" = 1 ]; then
+      # Socket-activated; starting the service directly is only needed if it
+      # was running on its own. Failure is not fatal -- the socket re-spawns it
+      # on first use.
+      as_service_user systemctl --user start podman.service ||
+        warn "podman.service did not restart; the socket will re-activate it on demand"
+    fi
+    info "podman socket/service restored"
+  }
+  # Armed for the whole step, before anything can stop the socket. Step 8
+  # installs its own EXIT trap later; step 2 clears this one when it ends, so
+  # the two never contend.
+  trap 'restore_podman_services warn' EXIT
+
   # A function so `trap ... RETURN` actually fires: RETURN traps only run on
   # function (or sourced-script) return, so at top level the temp dir -- ~45MB
   # once the bundle is extracted -- would leak on every run.
@@ -408,24 +448,8 @@ EOF
   # Restore whatever install_podman_static stopped, so STEPS=2 on its own does
   # not leave the host without its podman socket (the header promises each step
   # is independently re-runnable; a full run's step 6 would mask this).
-  if [ "$podman_socket_was_active" = 1 ] || [ "$podman_service_was_active" = 1 ]; then
-    info "restarting the podman socket/service stopped for the binary swap"
-    if [ "$podman_socket_was_active" = 1 ]; then
-      as_service_user systemctl --user start podman.socket ||
-        die "podman.socket was active before this step and failed to restart.
-       Bring it back by hand: STEPS=6, or
-       runuser -u $SERVICE_USER -- env XDG_RUNTIME_DIR=/run/user/${SERVICE_UID} \\
-         systemctl --user start podman.socket"
-    fi
-    if [ "$podman_service_was_active" = 1 ]; then
-      # Socket-activated; starting the service directly is only needed if it
-      # was running on its own. Failure is not fatal -- the socket re-spawns it
-      # on first use.
-      as_service_user systemctl --user start podman.service ||
-        warn "podman.service did not restart; the socket will re-activate it on demand"
-    fi
-    info "podman socket/service restored"
-  fi
+  restore_podman_services fatal
+  trap - EXIT
 fi
 
 # --------------------------------------------------------------------------

@@ -118,7 +118,10 @@ mount before podman initialises it. Running `STEPS=6` alone assumes the earlier
 steps already completed; it asserts its prerequisites and refuses rather than
 proceeding. `STEPS=2` alone is safe on a live host: if it must stop the running
 podman socket to swap binaries, it records what was active and restores it
-before finishing.
+before finishing — from an EXIT trap armed before the stop, so a failure
+anywhere in between (the binary copy, the manifest write, the
+`containers.conf` drop-in, the AppArmor profile load) still brings the socket
+back rather than exiting with it down.
 
 ## 4. What the verification proves
 
