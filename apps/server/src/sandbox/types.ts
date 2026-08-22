@@ -119,6 +119,21 @@ export type SandboxReady = {
   readonly egressNetworkName?: string;
   readonly branchName: string;
   readonly limits: SandboxResourceLimits;
+  /**
+   * Whether the previously exported provider conversation store was actually
+   * unpacked into this container.
+   *
+   * `false` whenever no store was carried across AND whenever one was supplied
+   * but failed to copy or extract -- the extraction is best-effort and never
+   * fails the provision. A caller deciding whether to keep the thread's
+   * provider resume cursor has to read this rather than the recorded
+   * `storeSha256`: the artifact may have been swept, or the extraction may have
+   * failed silently, and a cursor kept against a container with no conversation
+   * in it makes every following turn fail to resume.
+   *
+   * Absent from a record rebuilt by adoption, which provisioned nothing.
+   */
+  readonly providerStoreRestored?: boolean;
 };
 
 export type SandboxExecInput = {

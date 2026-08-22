@@ -193,13 +193,60 @@ describe("provider conversation store artifacts", () => {
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
 
-      yield* manager.provision(
+      const provisioned = yield* manager.provision(
         provisionInput({
           restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
         }),
       );
 
       expect(storePushed(executor)).toBeDefined();
+      expect(provisioned.providerStoreRestored).toBe(true);
+    }),
+  );
+
+  it.effect("reports no restored store when the archive never reaches the container", () =>
+    Effect.gen(function* () {
+      // Whether the conversation actually landed cannot be inferred from the
+      // recorded digest: the artifact may have been swept, and the extraction
+      // is best-effort and swallows its own failures. A caller that keeps the
+      // thread's provider resume cursor on the strength of that digest points
+      // it at a container with no conversation in it, and every following turn
+      // fails to resume -- so the provision reports what actually happened.
+      headless();
+      const root = makeRoot();
+      NodeFS.writeFileSync(NodePath.join(root, `${ARTIFACT_ID}.bundle`), BUNDLE_CONTENTS, "utf8");
+      NodeFS.writeFileSync(NodePath.join(root, `${ARTIFACT_ID}.store.tar`), STORE_CONTENTS, "utf8");
+      // The copy into the container fails; everything else provisions cleanly.
+      class FailingStoreCopyExecutor extends FakeExecutor {
+        override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+          const result = await super.run(command);
+          return command.args[0] === "cp" && (command.args[1] ?? "").endsWith(".store.tar")
+            ? { exitCode: 1, stdout: "", stderr: "no such container" }
+            : result;
+        }
+      }
+      const executor = new FailingStoreCopyExecutor();
+      const manager = makeSandboxRuntimeManager(root, "linux", executor);
+
+      const provisioned = yield* manager.provision(
+        provisionInput({
+          restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
+        }),
+      );
+
+      // The thread still comes back -- losing the conversation must not cost
+      // the user their branch.
+      expect(provisioned.containerName).toBeDefined();
+      expect(provisioned.providerStoreRestored).toBe(false);
+    }),
+  );
+
+  it.effect("reports no restored store for a thread with no prior export", () =>
+    Effect.gen(function* () {
+      headless();
+      const manager = makeSandboxRuntimeManager(makeRoot(), "linux", new FakeExecutor());
+      const provisioned = yield* manager.provision(provisionInput());
+      expect(provisioned.providerStoreRestored).toBe(false);
     }),
   );
 

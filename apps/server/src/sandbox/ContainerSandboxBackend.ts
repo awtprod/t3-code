@@ -180,6 +180,9 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     const setupTimeoutMs = boundedTimeout(config.setupTimeoutSeconds, 300);
     const teardownTimeoutMs = boundedTimeout(config.teardownTimeoutSeconds, 120);
 
+    // Set only once the archive is actually unpacked in the container.
+    let providerStoreRestored = false;
+
     const inspected = await this.#run(["inspect", containerName], 10_000, true);
     if (inspected.exitCode === 0) {
       const matches = await this.#matchesThreadLabels(containerName, {
@@ -441,8 +444,12 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         // Best-effort: a store that fails to copy or extract leaves the home
         // empty, which is exactly the state a thread without a prior export
         // starts in. The provision continues either way -- the branch is the
-        // part worth failing over, and the reactor clears the now-stale resume
-        // cursor so the next turn starts a fresh conversation cleanly.
+        // part worth failing over. What the failure must not do is stay
+        // silent: the caller decides whether to keep the thread's provider
+        // resume cursor, and a cursor kept against a container whose store
+        // never arrived makes every turn fail to resume. Hence
+        // `providerStoreRestored` on the result, reporting what actually
+        // happened rather than what was attempted.
         const containerArchive = "/tmp/t3-provider-store.tar";
         try {
           await this.#mustRun(
@@ -457,6 +464,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
             },
             setupTimeoutMs,
           );
+          providerStoreRestored = true;
         } catch {
           // Intentionally swallowed; see above.
         } finally {
@@ -628,15 +636,18 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       );
       throw error;
     }
-    const ready = makeReady(
-      this.runtime,
-      containerName,
-      networkName,
-      workspaceVolumeName,
-      desktopVolumeName,
-      input,
-      limits,
-    );
+    const ready = {
+      ...makeReady(
+        this.runtime,
+        containerName,
+        networkName,
+        workspaceVolumeName,
+        desktopVolumeName,
+        input,
+        limits,
+      ),
+      providerStoreRestored,
+    };
     this.#records.set(threadId, { ready, teardownTimeoutMs });
     return ready;
   }
