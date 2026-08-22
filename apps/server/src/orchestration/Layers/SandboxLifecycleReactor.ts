@@ -258,6 +258,9 @@ export const make = Effect.gen(function* () {
         threadId: thread.id,
         config,
         branch,
+        // Already handling `sandbox.provision-requested`; the provision runs
+        // inline below, so this must not request itself again.
+        provisionsInline: true,
         createdAt,
       });
       const provision = yield* runtimes.provision({

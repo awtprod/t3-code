@@ -1052,6 +1052,32 @@ const SandboxProvisionCommand = Schema.Struct({
   threadId: ThreadId,
   config: Schema.optional(SandboxConfig),
   branch: Schema.optional(SandboxBranchProvenance),
+  /**
+   * SERVER-ONLY. Absent from `ClientSandboxProvisionCommand`.
+   *
+   * The decider has two provision paths and they are not interchangeable.
+   * `provisionsInline` takes the thread straight to `provisioning`; only a
+   * caller that goes on to provision may ask for it, because the event it emits
+   * (`sandbox.provisioning-started`) is read by the projector and nobody else.
+   * Everyone else gets `sandbox.provision-requested`, which is what
+   * `SandboxLifecycleReactor` listens for.
+   *
+   * It cannot be inferred from `branch`: `ProviderCommandReactor` provisions
+   * inline and deliberately omits the branch when re-provisioning, while the UI
+   * omits it always. Inferring left every client re-provision emitting an event
+   * no reactor consumes -- the thread sat in `provisioning` with no container
+   * and no error.
+   */
+  provisionsInline: Schema.optional(Schema.Boolean),
+  createdAt: IsoDateTime,
+});
+
+/** The provision a client may ask for: no inline-provisioning claim. */
+const ClientSandboxProvisionCommand = Schema.Struct({
+  type: Schema.Literal("sandbox.provision"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  config: Schema.optional(SandboxConfig),
   createdAt: IsoDateTime,
 });
 const SandboxPauseCommand = Schema.Struct({
@@ -1182,7 +1208,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
   ClientThreadSessionStopCommand,
-  SandboxProvisionCommand,
+  ClientSandboxProvisionCommand,
   SandboxPauseCommand,
   SandboxTakeoverCommand,
   SandboxResumeCommand,

@@ -79,8 +79,12 @@ export const runSandboxCanary = Effect.gen(function* () {
     model: DEFAULT_MODEL_BY_PROVIDER[provider] ?? DEFAULT_MODEL,
   };
   const artifactsDir = path.join(harness.rootDir, "userdata", "sandbox-artifacts");
+  // Only a thread's own export set counts. `seeds/` is a sibling directory the
+  // manager keeps for in-flight provisioning bundles, and dot-prefixed names are
+  // its temporaries -- neither is a retained artifact, so neither should make
+  // the deletion assertion fail.
   const listArtifacts = fileSystem.readDirectory(artifactsDir).pipe(
-    Effect.map((entries) => entries.filter((entry) => !entry.startsWith("."))),
+    Effect.map((entries) => entries.filter((entry) => !entry.startsWith(".") && entry !== "seeds")),
     Effect.orElseSucceed(() => [] as ReadonlyArray<string>),
   );
 
@@ -225,13 +229,16 @@ export const runSandboxCanary = Effect.gen(function* () {
     ),
     "containers torn down on thread deletion",
   );
+  const artifactsCleared = yield* awaitHost(
+    "artifacts removed",
+    60,
+    listArtifacts.pipe(Effect.map((entries) => entries.length === 0)),
+  );
+  const remaining = yield* listArtifacts;
   yield* check(
-    yield* awaitHost(
-      "artifacts removed",
-      60,
-      listArtifacts.pipe(Effect.map((entries) => entries.length === 0)),
-    ),
-    `transcript artifacts removed on deletion (had ${beforeDelete} before)`,
+    artifactsCleared,
+    `transcript artifacts removed on deletion (had ${beforeDelete} before` +
+      (remaining.length === 0 ? ")" : `, left ${remaining.join(", ")})`),
   );
 
   yield* harness.dispose;
