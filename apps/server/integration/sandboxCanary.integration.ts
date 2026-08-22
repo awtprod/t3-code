@@ -28,6 +28,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Schedule from "effect/Schedule";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
@@ -35,7 +36,6 @@ import { NodeSandboxCommandExecutor } from "../src/sandbox/NodeSandboxCommandExe
 import { resolveSandboxRuntime } from "../src/sandbox/SandboxRuntimeManager.ts";
 import { makeOrchestrationIntegrationHarness } from "./OrchestrationEngineHarness.integration.ts";
 
-const THREAD = ThreadId.make("canary-thread-0000000000000001");
 const PROJECT = ProjectId.make("canary-project-000000000000001");
 
 const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
@@ -44,8 +44,10 @@ const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
  * Running workspace containers, read through the same argv-only executor the
  * backend uses, so the canary observes the runtime exactly as production does.
  */
+const hostPlatform = Effect.runSync(HostProcessPlatform);
+
 const runtimeLines = async (args: ReadonlyArray<string>): Promise<ReadonlyArray<string>> => {
-  const executor = new NodeSandboxCommandExecutor(process.platform);
+  const executor = new NodeSandboxCommandExecutor(hostPlatform);
   try {
     const result = await executor.run({
       executable: resolveSandboxRuntime(),
@@ -110,6 +112,11 @@ export const runSandboxCanary = Effect.gen(function* () {
     });
 
   const harness = yield* makeOrchestrationIntegrationHarness({ realSandboxReactors: true });
+  // Unique per run. Container and network names derive from the thread id, so a
+  // fixed one collides with whatever the previous run left behind ("network
+  // name ... already used"). The harness root is already unique per run, so it
+  // is the natural seed -- no clock or RNG, which this repo's lint forbids.
+  const THREAD = ThreadId.make(`canary-${harness.rootDir.split("-").at(-1) ?? "0"}`);
   const provider = harness.adapterHarness?.provider ?? ProviderDriverKind.make("codex");
   const modelSelection = {
     instanceId: defaultInstanceIdForDriver(provider),
@@ -152,6 +159,11 @@ export const runSandboxCanary = Effect.gen(function* () {
         Effect.as(true),
         Effect.orElseSucceed(() => false),
       );
+
+  // Reap first as well as last: a run killed mid-flight leaves its networks
+  // behind, and the next run must not inherit them.
+  const preReaped = yield* reapOrphanedNetworks;
+  if (preReaped > 0) yield* Console.log(`   (reaped ${preReaped} stale sandbox network(s))`);
 
   yield* Console.log("== Phase 0: seed project and thread");
   yield* harness.engine.dispatch({

@@ -584,7 +584,14 @@ export const make = Effect.gen(function* () {
    */
   const failureMessage = (cause: Cause.Cause<unknown>): string => {
     const failure = cause.reasons.find(Cause.isFailReason)?.error;
-    if (failure instanceof Error && failure.message.trim().length > 0) return failure.message;
+    if (failure instanceof Error && failure.message.trim().length > 0) {
+      // `SandboxRuntimeError` carries the runtime's own stderr, and it is the
+      // only thing that says WHY -- without it every container failure reads as
+      // a bare "podman network failed" and is undiagnosable from logs alone.
+      const stderr =
+        "stderr" in failure && typeof failure.stderr === "string" ? failure.stderr.trim() : "";
+      return stderr.length > 0 ? `${failure.message}: ${stderr}` : failure.message;
+    }
     if (typeof failure === "string" && failure.trim().length > 0) return failure;
     return "The sandbox operation failed. Check the server logs for technical details.";
   };

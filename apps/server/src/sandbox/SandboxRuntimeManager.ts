@@ -61,6 +61,10 @@ export function resolveSandboxPreviewProxyImage(): string | undefined {
  * rejects a typo loudly instead of silently routing threads at the wrong
  * runtime. Unset yields "docker", so nothing changes by default.
  */
+/** The container runtime's stderr, when the failure carries one. */
+const runtimeStderr = (error: Error): string =>
+  "stderr" in error && typeof error.stderr === "string" ? error.stderr.trim() : "";
+
 export function resolveSandboxRuntime(): string {
   const configured = process.env.T3_SANDBOX_RUNTIME?.trim().toLowerCase();
   return configured ? configured : "docker";
@@ -294,11 +298,22 @@ export const makeSandboxRuntimeManager = (
   const attempt = <A>(run: () => Promise<A>) =>
     Effect.tryPromise({
       try: run,
-      catch: (cause) =>
-        new SandboxManagerError({
-          message: cause instanceof Error ? cause.message : String(cause),
+      catch: (cause) => {
+        // `SandboxRuntimeError` carries the container runtime's stderr, and it
+        // is the only thing that says WHY a command failed. Dropping it here
+        // left every failure reading as a bare "podman network failed" --
+        // undiagnosable from the thread's recorded failure or from the logs.
+        const detail = cause instanceof Error ? runtimeStderr(cause) : "";
+        return new SandboxManagerError({
+          message:
+            cause instanceof Error
+              ? detail.length > 0
+                ? `${cause.message}: ${detail}`
+                : cause.message
+              : String(cause),
           cause,
-        }),
+        });
+      },
     });
   return {
     exec: Effect.fn("SandboxRuntimeManager.exec")(function* (runtime, threadId, input) {
