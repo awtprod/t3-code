@@ -411,6 +411,15 @@ export const make = Effect.gen(function* () {
           .pipe(Effect.ignore);
         return;
       }
+      const workerBranch = {
+        branchName: event.payload.branchName,
+        baseCommit: event.payload.inheritedCommit,
+        parentThreadId: event.payload.parentThreadId,
+        inheritedCommit: event.payload.inheritedCommit,
+        ...(event.payload.inheritedPatch
+          ? { inheritedPatchSha256: event.payload.inheritedPatch.sha256 }
+          : {}),
+      };
       yield* engine.dispatch({
         type: "thread.create",
         commandId: yield* commandId("sandbox-worker-create"),
@@ -425,22 +434,21 @@ export const make = Effect.gen(function* () {
         branch: null,
         worktreePath: null,
         sandboxConfig: event.payload.config,
-        sandboxBranch: {
-          branchName: event.payload.branchName,
-          baseCommit: event.payload.inheritedCommit,
-          parentThreadId: event.payload.parentThreadId,
-          inheritedCommit: event.payload.inheritedCommit,
-          ...(event.payload.inheritedPatch
-            ? { inheritedPatchSha256: event.payload.inheritedPatch.sha256 }
-            : {}),
-        },
+        sandboxBranch: workerBranch,
         createdAt,
       });
-      yield* engine.dispatch({
+      yield* dispatchAndAwaitProjection({
         type: "sandbox.provision",
         commandId: yield* commandId("sandbox-worker-provision"),
         threadId: event.payload.childThreadId,
         config: event.payload.config ?? {},
+        branch: workerBranch,
+        // Same contract as the manual path above: this handler provisions
+        // inline on the next line, so the decider must drive the sandbox to
+        // `provisioning` rather than emit `sandbox.provision-requested` --
+        // which this very reactor consumes, and would have provisioned the
+        // worker a second time.
+        provisionsInline: true,
         createdAt,
       });
       const provision = yield* runtimes.provision({

@@ -19,6 +19,9 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
 
+import * as Crypto from "effect/Crypto";
+
+import { decideOrchestrationCommand } from "../decider.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { T3ProjectFileLoader } from "../../project/T3ProjectFileLoader.ts";
@@ -896,5 +899,157 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }).pipe(Effect.provide(layer)),
         );
       }),
+  );
+
+  it.effect("provisions a spawned worker exactly once, through the inline path", () =>
+    Effect.gen(function* () {
+      // The worker spawn dispatched `sandbox.provision` without a branch and
+      // without `provisionsInline`, then provisioned inline anyway. The decider
+      // read that as a request rather than an inline claim: it emitted
+      // `sandbox.provision-requested` -- which THIS reactor consumes -- so the
+      // worker was provisioned a second time, and the inline
+      // `sandbox.provision.ready` that followed was rejected because the
+      // sandbox had never entered `provisioning`. The dispatch runs through the
+      // real decider here so the assertion is about the event actually emitted,
+      // not about the fields the reactor happens to set.
+      vi.stubEnv("T3_SANDBOX_PREVIEW_PROXY_IMAGE", `preview@sha256:${"e".repeat(64)}`);
+      const childThreadId = ThreadId.make("thread-worker");
+      const inheritedCommit = "1".repeat(40);
+      const ran = yield* Deferred.make<void>();
+      const events = yield* PubSub.unbounded<OrchestrationEvent>();
+      const dispatched: OrchestrationCommand[] = [];
+      const decidedTypes: string[] = [];
+      const crypto = yield* Crypto.Crypto;
+      const childThread = {
+        ...snapshot.threads[0]!,
+        id: childThreadId,
+        title: "Worker",
+        sandbox: null,
+      };
+      const workerReadModel: OrchestrationReadModel = {
+        ...snapshot,
+        threads: [snapshot.threads[0]!, childThread],
+      };
+      const provision = vi.fn((_input: Parameters<SandboxRuntimeManagerShape["provision"]>[0]) =>
+        Effect.succeed({
+          sandboxId: "sandbox-worker",
+          runtime: "podman" as const,
+          containerName: "t3-thread-worker",
+          services: [],
+        }),
+      );
+      const spawnRequest: OrchestrationEvent = {
+        ...request,
+        eventId: EventId.make("worker-spawn-request"),
+        type: "sandbox.worker-spawn-requested",
+        payload: {
+          parentThreadId: threadId,
+          childThreadId,
+          task: "ship the worker",
+          inheritedCommit,
+          config: { runtime: "podman" },
+          branchName: `t3/thread/${childThreadId}`,
+        },
+      };
+      const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(
+          Layer.mock(GitWorkflowService)({
+            localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+            resolveRemoteTrackingCommit: () =>
+              Effect.succeed({
+                commitSha: "0123456789abcdef0123456789abcdef01234567",
+                remoteRefName: "origin/main",
+              }),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(
+          Layer.succeed(T3ProjectFileLoader, {
+            load: () =>
+              Effect.succeed(
+                Option.some({
+                  sandbox: {
+                    image: `registry.example/t3-desktop@sha256:${"a".repeat(64)}`,
+                  },
+                } as never),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(SandboxRuntimeManager, {
+            sweepExpiredArtifacts: () => Effect.succeed(0),
+            provision,
+            reconcile: () =>
+              Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
+          } as never),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery)({
+            getSnapshot: () => Effect.succeed(workerReadModel),
+            getThreadDetailById: (id) =>
+              Effect.succeed(
+                id === threadId
+                  ? Option.some(snapshot.threads[0]!)
+                  : id === childThreadId
+                    ? Option.some(childThread)
+                    : Option.none(),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(OrchestrationEngineService)({
+            dispatch: (command) =>
+              Effect.gen(function* () {
+                dispatched.push(command);
+                if (command.type === "thread.turn.start") yield* Deferred.succeed(ran, undefined);
+                if (command.type !== "sandbox.provision") return { sequence: dispatched.length };
+                // Run the real decider so the emitted event -- and the reactor's
+                // reaction to it -- is the thing under test.
+                const decided = yield* decideOrchestrationCommand({
+                  readModel: workerReadModel,
+                  command,
+                }).pipe(Effect.provideService(Crypto.Crypto, crypto), Effect.orDie);
+                for (const base of Array.isArray(decided) ? decided : [decided]) {
+                  decidedTypes.push(base.type);
+                  yield* PubSub.publish(events, {
+                    ...base,
+                    sequence: dispatched.length,
+                  } as OrchestrationEvent);
+                }
+                return { sequence: dispatched.length };
+              }),
+            streamDomainEvents: Stream.concat(Stream.make(spawnRequest), Stream.fromPubSub(events)),
+          }),
+        ),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* Deferred.await(ran).pipe(Effect.timeout("10 seconds"));
+          yield* reactor.drain;
+        }).pipe(Effect.provide(layer)),
+      );
+
+      // The inline path, not the request path: `sandbox.provision-requested`
+      // here is what re-enters this reactor and provisions a second container.
+      expect(decidedTypes).toEqual(["sandbox.provisioning-started"]);
+      expect(provision).toHaveBeenCalledTimes(1);
+      expect(dispatched.filter((command) => command.type === "sandbox.provision")).toHaveLength(1);
+      const provisionCommand = dispatched.find((command) => command.type === "sandbox.provision");
+      if (provisionCommand?.type !== "sandbox.provision")
+        throw new Error("expected a provision command");
+      expect(provisionCommand.provisionsInline).toBe(true);
+      expect(provisionCommand.branch).toMatchObject({
+        branchName: `t3/thread/${childThreadId}`,
+        baseCommit: inheritedCommit,
+        parentThreadId: threadId,
+      });
+      // The inline readiness is accepted rather than rejected for "sandbox is
+      // not provisioning", so the worker reaches a running turn.
+      expect(dispatched.map((command) => command.type)).toContain("sandbox.provision.ready");
+    }),
   );
 });
