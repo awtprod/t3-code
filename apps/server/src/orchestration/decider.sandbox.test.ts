@@ -785,4 +785,50 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
       expect(clientForced._tag).toBe("Failure");
     }),
   );
+
+  it.effect("records the runtime the inline provision command carries", () =>
+    Effect.gen(function* () {
+      // The decider is pure, so an absent `config.runtime` can only fall back
+      // to docker -- but the runtime manager honours `T3_SANDBOX_RUNTIME`. On a
+      // podman deployment the projection therefore claimed docker for the whole
+      // provisioning window, and a stop or delete landing in that window
+      // addressed a backend that was never used. The server callers now resolve
+      // the runtime before dispatching; this pins the decider's half of that
+      // contract: whatever the command says is what gets recorded.
+      const provisioned = (yield* decideOrchestrationCommand({
+        readModel: readModel(),
+        command: {
+          type: "sandbox.provision",
+          commandId: CommandId.make("provision-podman"),
+          threadId: ThreadId.make("thread-1"),
+          config: { runtime: "podman" },
+          branch: BRANCH,
+          provisionsInline: true,
+          createdAt: NOW,
+        },
+      })) as Omit<
+        Extract<OrchestrationEvent, { type: "sandbox.provisioning-started" }>,
+        "sequence"
+      >;
+      expect(provisioned.payload.sandbox.runtime).toBe("podman");
+
+      // The fallback is still docker, so a caller that forgets to resolve keeps
+      // the old behaviour rather than producing an invalid projection.
+      const defaulted = (yield* decideOrchestrationCommand({
+        readModel: readModel(),
+        command: {
+          type: "sandbox.provision",
+          commandId: CommandId.make("provision-default"),
+          threadId: ThreadId.make("thread-1"),
+          branch: BRANCH,
+          provisionsInline: true,
+          createdAt: NOW,
+        },
+      })) as Omit<
+        Extract<OrchestrationEvent, { type: "sandbox.provisioning-started" }>,
+        "sequence"
+      >;
+      expect(defaulted.payload.sandbox.runtime).toBe("docker");
+    }),
+  );
 });

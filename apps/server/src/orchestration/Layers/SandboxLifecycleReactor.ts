@@ -26,6 +26,7 @@ import {
   SandboxRuntimeManager,
   resolveSandboxImage,
   resolveSandboxPreviewProxyImage,
+  resolveSandboxRuntime,
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import type { SandboxAdoptionHint } from "../../sandbox/types.ts";
 import { forkParked } from "../../serverActivation.ts";
@@ -69,6 +70,28 @@ export const make = Effect.gen(function* () {
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((id) => CommandId.make(`server:${tag}:${id}`)));
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+  /**
+   * The config to record on an inline provision, with the runtime resolved.
+   *
+   * The decider is pure and defaults an absent `config.runtime` to `"docker"`,
+   * while the runtime manager honours `T3_SANDBOX_RUNTIME`. On a podman
+   * deployment the projection therefore claimed docker for the whole
+   * provisioning window, and a stop or delete landing in it addressed a backend
+   * that was never used. Resolving here -- rather than teaching the decider
+   * about env vars -- keeps the projection matching what actually runs.
+   */
+  const resolvedConfig = Effect.fn("SandboxLifecycleReactor.resolvedConfig")(function* <
+    Config extends { readonly runtime?: "docker" | "podman" | "microvm" },
+  >(config: Config) {
+    if (config.runtime !== undefined) return config;
+    const runtime = resolveSandboxRuntime();
+    if (runtime !== "docker" && runtime !== "podman")
+      return yield* new SandboxManagerError({
+        message: `unsupported sandbox runtime: ${runtime}`,
+      });
+    return { ...config, runtime };
+  });
 
   const dispatchAndAwaitProjection = Effect.fn(
     "SandboxLifecycleReactor.dispatchAndAwaitProjection",
@@ -249,7 +272,7 @@ export const make = Effect.gen(function* () {
             baseCommit: base.commitSha,
           };
         }));
-      const config = event.payload.config ?? thread.sandboxConfig ?? {};
+      const config = yield* resolvedConfig(event.payload.config ?? thread.sandboxConfig ?? {});
       const createdAt = yield* nowIso;
       const provisionCommandId = yield* commandId("sandbox-manual-provision");
       yield* dispatchAndAwaitProjection({
@@ -411,6 +434,7 @@ export const make = Effect.gen(function* () {
           .pipe(Effect.ignore);
         return;
       }
+      const workerConfig = yield* resolvedConfig(event.payload.config ?? {});
       const workerBranch = {
         branchName: event.payload.branchName,
         baseCommit: event.payload.inheritedCommit,
@@ -441,7 +465,7 @@ export const make = Effect.gen(function* () {
         type: "sandbox.provision",
         commandId: yield* commandId("sandbox-worker-provision"),
         threadId: event.payload.childThreadId,
-        config: event.payload.config ?? {},
+        config: workerConfig,
         branch: workerBranch,
         // Same contract as the manual path above: this handler provisions
         // inline on the next line, so the decider must drive the sandbox to
@@ -463,7 +487,7 @@ export const make = Effect.gen(function* () {
             ? { inheritedPatch: inheritedPatch.content }
             : {}),
         },
-        config: event.payload.config ?? {},
+        config: workerConfig,
         image,
         ...(process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE?.trim()
           ? { egressProxyImage: process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE.trim() }

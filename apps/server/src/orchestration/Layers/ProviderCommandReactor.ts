@@ -535,7 +535,12 @@ export const make = Effect.gen(function* () {
             type: "sandbox.provision",
             commandId: yield* serverCommandId("sandbox-provision"),
             threadId: thread.id,
-            config: thread.sandboxConfig ?? {},
+            // The RESOLVED runtime, not the raw config. The decider is pure and
+            // defaults an absent `config.runtime` to docker, while the runtime
+            // manager honours `T3_SANDBOX_RUNTIME` -- so a podman deployment's
+            // projection claimed docker for the whole provisioning window, and
+            // a stop or delete landing in it addressed the wrong backend.
+            config: { ...(thread.sandboxConfig ?? {}), runtime },
             ...(thread.sandbox === null ? { branch } : {}),
             // This reactor calls `runtimes.provision` immediately below, so it
             // takes the decider's inline path rather than asking the lifecycle
@@ -556,7 +561,7 @@ export const make = Effect.gen(function* () {
                   ? { parentThreadId: branch.parentThreadId }
                   : {}),
               },
-              config: thread.sandboxConfig ?? {},
+              config: { ...(thread.sandboxConfig ?? {}), runtime },
               image,
               // Re-provisioning a settled or reaped thread: seed from the
               // bundle its teardown exported so the user comes back to their

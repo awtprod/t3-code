@@ -655,6 +655,48 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("records the deployment runtime on the provisioning projection", async () => {
+    // The decider is pure and defaults an absent `config.runtime` to docker,
+    // while the runtime manager honours `T3_SANDBOX_RUNTIME`. On a podman host
+    // the projection therefore claimed docker for the entire provisioning
+    // window, and a stop or delete landing in that window addressed a backend
+    // that was never used. The reactor already resolves the runtime to validate
+    // it, so it dispatches the resolved value.
+    vi.stubEnv("T3_SANDBOX_RUNTIME", "podman");
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-runtime"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-runtime"),
+          role: "user",
+          text: "hello podman",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.provisionSandbox.mock.calls.length === 1);
+    expect(harness.provisionSandbox.mock.calls[0]?.[0]).toMatchObject({
+      config: { runtime: "podman" },
+    });
+    const events = await harness.runEffect(Stream.runCollect(harness.engine.readEvents(0)));
+    const started = Array.from(events).find(
+      (event) => event.type === "sandbox.provisioning-started",
+    );
+    expect(started).toBeDefined();
+    if (started?.type !== "sandbox.provisioning-started")
+      throw new Error("expected a provisioning-started event");
+    expect(started.payload.sandbox.runtime).toBe("podman");
+  });
+
   it("falls back to host execution when no sandbox image is configured", async () => {
     const harness = await createHarness({ sandboxImages: "none" });
     const now = "2026-01-01T00:00:00.000Z";

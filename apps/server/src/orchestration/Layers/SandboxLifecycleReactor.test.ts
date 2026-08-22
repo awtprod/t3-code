@@ -913,6 +913,11 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       // real decider here so the assertion is about the event actually emitted,
       // not about the fields the reactor happens to set.
       vi.stubEnv("T3_SANDBOX_PREVIEW_PROXY_IMAGE", `preview@sha256:${"e".repeat(64)}`);
+      // No per-thread runtime in the spawn payload, so the deployment default
+      // has to be resolved before dispatch -- the decider is pure and would
+      // otherwise record docker on a podman host for the whole provisioning
+      // window, sending any stop or delete in it to the wrong backend.
+      vi.stubEnv("T3_SANDBOX_RUNTIME", "podman");
       const childThreadId = ThreadId.make("thread-worker");
       const inheritedCommit = "1".repeat(40);
       const ran = yield* Deferred.make<void>();
@@ -947,7 +952,6 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           childThreadId,
           task: "ship the worker",
           inheritedCommit,
-          config: { runtime: "podman" },
           branchName: `t3/thread/${childThreadId}`,
         },
       };
@@ -1042,6 +1046,10 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       if (provisionCommand?.type !== "sandbox.provision")
         throw new Error("expected a provision command");
       expect(provisionCommand.provisionsInline).toBe(true);
+      // The resolved deployment runtime, so the projection matches the
+      // container that is actually being created.
+      expect(provisionCommand.config?.runtime).toBe("podman");
+      expect(provision.mock.calls[0]?.[0]).toMatchObject({ config: { runtime: "podman" } });
       expect(provisionCommand.branch).toMatchObject({
         branchName: `t3/thread/${childThreadId}`,
         baseCommit: inheritedCommit,
