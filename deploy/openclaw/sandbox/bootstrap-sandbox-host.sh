@@ -56,11 +56,20 @@ readonly FREE_SPACE_MARGIN_GIB=15
 #
 # NOTE ON VERIFICATION: upstream publishes only a detached GPG .asc signature
 # for this release, no sha256sums.txt, and this host's keyserver access is
-# blocked. These hashes were captured by hand from a downloaded, inspected copy
-# of the release asset and pinned here; there is no GPG signature check.
+# blocked. These hashes were captured by hand (2026-08-18) from a downloaded,
+# inspected copy of the release assets and pinned here; there is no GPG
+# signature check. This is trust-on-first-use of a third-party repackager --
+# the explicit sign-off, the upstream signing-key fingerprint, and the
+# re-verification procedure for when keyserver access is available live in
+# docs/operations/sandbox-host.md, section "Supply chain".
 readonly PODMAN_STATIC_VERSION=v5.8.4
 readonly PODMAN_STATIC_SHA256_AMD64=a58765fe8be6ab3fb79f892f1a027b4ce4a7e8eb589df1ef960c167cbde08d69
 readonly PODMAN_STATIC_SHA256_ARM64=a2f6b73cc0f7018e2e8518338a4ec27db70148e1af86e16719235605aefd1df3
+# Every file a bundle places under /usr/local is recorded here, so the next
+# upgrade can remove exactly what the previous one installed (a bare cp merge
+# can never delete, so a future bundle that drops a helper binary would leave
+# the old copy first on podman's search path forever).
+readonly PODMAN_STATIC_MANIFEST_DIR=/usr/local/share/podman-static
 
 # Image used by the verification step only. Never used at runtime by the server.
 # Pinned by digest so a compromised tag cannot change what we execute as the
@@ -175,7 +184,9 @@ fi
 # has no dependency on steps 3/4 and can run immediately after step 1 -- unlike
 # the DNS probe this step used to run (deferred to after step 7, since it needed
 # a live rootless environment). It only has to run before step 6, which checks
-# for a podman.socket unit to exist.
+# for a podman.socket unit to exist. If it has to stop a running socket/service
+# to replace the binaries, it restarts them itself before it ends, so STEPS=2
+# alone leaves the host as it found it.
 if wants_step 2; then
   say "Step 2: install the pinned podman-static runtime (podman/netavark/aardvark-dns/conmon/crun/catatonit)"
   arch="$(uname -m)"
@@ -185,57 +196,147 @@ if wants_step 2; then
     *) die "unsupported architecture '$arch'; only x86_64 and aarch64 have pinned podman-static checksums in this script" ;;
   esac
 
+  # A rootless per-user containers.conf would outrank both /etc/containers/
+  # containers.conf and the conf.d drop-in this step writes for the service
+  # user -- every pin below would be silently overridden. Nothing in this
+  # deployment creates one, so its existence means someone configured podman by
+  # hand as uid 986. Assert this FIRST, before the install stops any live
+  # socket, so failing leaves the host untouched.
+  rootless_conf="${SERVICE_HOME}/.config/containers/containers.conf"
+  if [ -e "$rootless_conf" ]; then
+    die "$rootless_conf exists.
+       A rootless containers.conf overrides /etc/containers/containers.conf AND
+       /etc/containers/containers.conf.d for the service user, so it would
+       outrank the helper_binaries_dir pin this step writes and could point
+       podman back at the buggy distro netavark. Nothing in this deployment
+       creates that file. Review it, merge anything intentional into the
+       system-level config, delete it, and re-run STEPS=2."
+  fi
+
+  # Set by install_podman_static when it has to stop a live socket/service to
+  # replace the binaries; the end of this step restores exactly what was active.
+  podman_socket_was_active=0
+  podman_service_was_active=0
+
+  # A function so `trap ... RETURN` actually fires: RETURN traps only run on
+  # function (or sourced-script) return, so at top level the temp dir -- ~45MB
+  # once the bundle is extracted -- would leak on every run.
+  install_podman_static() {
+    local asset="$1" expected="$2" tmp actual bundle_root manifest old
+    tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064 # expand tmp now; the trap must survive this function
+    trap "rm -rf '$tmp'" RETURN
+    curl --fail --silent --show-error --location --max-time 180 \
+      --output "${tmp}/podman.tar.gz" \
+      "https://github.com/mgoltzsche/podman-static/releases/download/${PODMAN_STATIC_VERSION}/${asset}" ||
+      die "could not download podman-static ${PODMAN_STATIC_VERSION}"
+    actual="$(sha256sum "${tmp}/podman.tar.gz" | cut -d' ' -f1)"
+    [ "$actual" = "$expected" ] ||
+      die "SHA256 mismatch for podman-static ${PODMAN_STATIC_VERSION} ${asset}
+         expected $expected
+         actual   $actual
+         Refusing to install an unverified binary. (This upstream project only
+         publishes a detached GPG .asc signature, not a checksums file; this
+         hash was captured by hand from a verified download -- see
+         docs/operations/sandbox-host.md, section 'Supply chain'.)"
+
+    tar -xzf "${tmp}/podman.tar.gz" -C "$tmp"
+    bundle_root="$(printf '%s\n' "${tmp}"/podman-linux-*/usr/local | head -n1)"
+    [ -d "$bundle_root" ] ||
+      die "unexpected bundle layout: no usr/local directory inside ${asset}"
+
+    # If a previous version is a live, running daemon (podman.service), `cp`
+    # truncating its backing file in place would fail with ETXTBSY. Record what
+    # was active, stop it, and let the end of this step restore it.
+    if as_service_user systemctl --user is-active --quiet podman.socket 2>/dev/null; then
+      podman_socket_was_active=1
+    fi
+    if as_service_user systemctl --user is-active --quiet podman.service 2>/dev/null; then
+      podman_service_was_active=1
+    fi
+    if [ "$podman_socket_was_active" = 1 ] || [ "$podman_service_was_active" = 1 ]; then
+      info "stopping the running podman socket/service before replacing binaries"
+      as_service_user systemctl --user stop podman.service podman.socket || true
+    fi
+
+    # Remove exactly what the previous bundle installed before copying the new
+    # one in. A bare `cp -r` merge can only ever add files, so a future bundle
+    # that drops a helper binary would otherwise leave the old version's copy
+    # behind, first on podman's search path.
+    manifest="${PODMAN_STATIC_MANIFEST_DIR}/manifest"
+    if [ -f "$manifest" ]; then
+      while IFS= read -r old; do
+        case "$old" in
+          /usr/local/*) rm -f "$old" ;;
+          *) warn "ignoring suspicious manifest entry '$old'" ;;
+        esac
+      done <"$manifest"
+      info "removed the previous bundle's files (recorded in $manifest)"
+    fi
+
+    # Only usr/local/{bin,lib,libexec,share}: never the tarball's own etc/, which
+    # ships its own containers.conf/storage.conf/registries.conf/policy.json that
+    # would silently replace the ones this script manages.
+    cp -r "${bundle_root}/." /usr/local/
+    install -d -o root -g root -m 0755 "$PODMAN_STATIC_MANIFEST_DIR"
+    (cd "$bundle_root" && find . \( -type f -o -type l \) | sed 's|^\.|/usr/local|') >"$manifest"
+    info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local ($(wc -l <"$manifest") files recorded in $manifest)"
+  }
+
   installed_version="$(/usr/local/bin/podman --version 2>/dev/null | awk '{print $3}' || true)"
   if [ "$installed_version" = "${PODMAN_STATIC_VERSION#v}" ]; then
     info "podman-static ${PODMAN_STATIC_VERSION} already installed"
   else
     info "installing podman-static ${PODMAN_STATIC_VERSION} (${podman_static_asset})"
-    tmp="$(mktemp -d)"
-    # shellcheck disable=SC2064 # expand tmp now; the trap must survive this block
-    trap "rm -rf '$tmp'" RETURN
-    curl --fail --silent --show-error --location --max-time 180 \
-      --output "${tmp}/podman.tar.gz" \
-      "https://github.com/mgoltzsche/podman-static/releases/download/${PODMAN_STATIC_VERSION}/${podman_static_asset}" ||
-      die "could not download podman-static ${PODMAN_STATIC_VERSION}"
-    actual="$(sha256sum "${tmp}/podman.tar.gz" | cut -d' ' -f1)"
-    [ "$actual" = "$podman_static_sha256" ] ||
-      die "SHA256 mismatch for podman-static ${PODMAN_STATIC_VERSION} ${podman_static_asset}
-         expected $podman_static_sha256
-         actual   $actual
-         Refusing to install an unverified binary. (This upstream project only
-         publishes a detached GPG .asc signature, not a checksums file; this
-         hash was captured by hand from a verified download.)"
-
-    # If a previous version is a live, running daemon (podman.service), `cp`
-    # truncating its backing file in place would fail with ETXTBSY. Stop it
-    # first; step 6 re-enables it unconditionally.
-    if as_service_user systemctl --user is-active --quiet podman.socket 2>/dev/null ||
-       as_service_user systemctl --user is-active --quiet podman.service 2>/dev/null; then
-      info "stopping the running podman socket/service before replacing binaries"
-      as_service_user systemctl --user stop podman.service podman.socket || true
-    fi
-
-    tar -xzf "${tmp}/podman.tar.gz" -C "$tmp"
-    # Only usr/local/{bin,lib,libexec,share}: never the tarball's own etc/, which
-    # ships its own containers.conf/storage.conf/registries.conf/policy.json that
-    # would silently replace the ones this script manages.
-    cp -r "${tmp}"/podman-linux-*/usr/local/. /usr/local/
-    info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local"
+    install_podman_static "$podman_static_asset" "$podman_static_sha256"
   fi
   command -v /usr/local/bin/podman >/dev/null || die "podman missing at /usr/local/bin/podman after install"
   info "podman: $(/usr/local/bin/podman --version)"
 
+  # Leftovers from this script's previous strategy (pinned netavark/aardvark-dns
+  # only, into their own libexec dir). They predate the bundle manifest, resolve
+  # ahead of nothing now that the drop-in below pins /usr/local/lib/podman, and
+  # are the buggy versions this step exists to replace. Remove only the two
+  # files that old script placed; the directory may hold bundle files (quadlet).
+  for legacy_helper in /usr/local/libexec/podman/netavark /usr/local/libexec/podman/aardvark-dns; do
+    if [ -e "$legacy_helper" ]; then
+      rm -f "$legacy_helper"
+      info "removed stale legacy helper $legacy_helper"
+    fi
+  done
+
+  # The old script also appended a [network] helper_binaries_dir block directly
+  # to /etc/containers/containers.conf. Remove it when the file is exactly that
+  # block (the old script created the file itself on a fresh host, so this is
+  # the common case); if an operator has since added anything else, leave the
+  # file alone -- the conf.d drop-in below outranks it either way.
+  legacy_conf=/etc/containers/containers.conf
+  if [ -f "$legacy_conf" ] &&
+     grep -q '^# Pinned by deploy/openclaw/sandbox/bootstrap-sandbox-host.sh' "$legacy_conf"; then
+    legacy_block='[network]
+# Pinned by deploy/openclaw/sandbox/bootstrap-sandbox-host.sh: Ubuntu 24.04'"'"'s
+# netavark 1.4 provides no DNS on --internal networks, which the thread sandbox
+# design requires.
+helper_binaries_dir = ["/usr/local/libexec/podman", "/usr/lib/podman", "/usr/libexec/podman"]'
+    if [ "$(cat "$legacy_conf")" = "$legacy_block" ]; then
+      rm -f "$legacy_conf"
+      info "removed the old script's appended helper_binaries_dir block ($legacy_conf)"
+    else
+      warn "$legacy_conf contains the old pinned-netavark block plus other content;"
+      warn "leaving it alone (the containers.conf.d drop-in below overrides it)."
+      warn "Reconcile by hand when convenient."
+    fi
+  fi
+
   # The bundle's usr/local/lib/podman layout matches podman's own compiled-in
   # default helper_binaries_dir search path, so no config is normally needed.
-  # BUT: a prior run of an earlier version of this script wrote an explicit
-  # helper_binaries_dir into /etc/containers/containers.conf pointing only at
-  # /usr/local/libexec/podman (the old pinned-netavark-only install). An
+  # BUT: the old block above (when it survives, or on hosts where an operator
+  # merged other keys into it) pins an explicit helper_binaries_dir, and an
   # explicit list REPLACES podman's compiled defaults rather than extending
-  # them, so left alone it would shadow this bundle's netavark and silently
+  # them -- left alone it would shadow this bundle's netavark and silently
   # keep resolving the old, buggy 1.14.0 binary. A containers.conf.d drop-in
   # loads after and overrides the base file for this key, so it wins regardless
-  # of what an older script run left behind -- no need to edit or delete that
-  # old text.
+  # of what an older script run left behind.
   install -d -o root -g root -m 0755 /etc/containers/containers.conf.d
   cat >/etc/containers/containers.conf.d/10-podman-static.conf <<EOF
 # Installed by deploy/openclaw/sandbox/bootstrap-sandbox-host.sh (step 2).
@@ -246,6 +347,73 @@ if wants_step 2; then
 helper_binaries_dir = ["/usr/local/lib/podman"]
 EOF
   info "wrote /etc/containers/containers.conf.d/10-podman-static.conf"
+
+  # AppArmor: with kernel.apparmor_restrict_unprivileged_userns=1, only binaries
+  # with a profile granting `userns` may create unprivileged user namespaces.
+  # Ubuntu's stock profiles cover /usr/bin/podman and rootlesskit -- not the
+  # /usr/local/bin/podman this bundle installs -- so without a profile every
+  # rootless container fails with a confusing permission error (the exact trap
+  # docs/operations/sandbox-host.md section 8 warns about). Model the stock
+  # /etc/apparmor.d/podman profile: unconfined flags, userns grant, nothing else.
+  userns_restricted="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
+  if [ -d /sys/kernel/security/apparmor ] && [ "$userns_restricted" = "1" ]; then
+    apparmor_profile=/etc/apparmor.d/podman-static
+    apparmor_tmp="$(mktemp)"
+    cat >"$apparmor_tmp" <<'EOF'
+# Installed by deploy/openclaw/sandbox/bootstrap-sandbox-host.sh (step 2).
+# Modeled on Ubuntu's stock /etc/apparmor.d/podman profile: it allows
+# everything and exists only so the binary has a label with the `userns`
+# permission, which kernel.apparmor_restrict_unprivileged_userns=1 requires
+# for creating unprivileged user namespaces. The stock profile covers only
+# /usr/bin/podman; this one covers the pinned podman-static binary.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile podman-static /usr/local/bin/podman flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/podman-static>
+}
+EOF
+    if [ -f "$apparmor_profile" ] && cmp -s "$apparmor_tmp" "$apparmor_profile"; then
+      info "AppArmor profile for /usr/local/bin/podman already installed"
+      rm -f "$apparmor_tmp"
+    else
+      install -o root -g root -m 0644 "$apparmor_tmp" "$apparmor_profile"
+      rm -f "$apparmor_tmp"
+      apparmor_parser -r "$apparmor_profile" ||
+        die "apparmor_parser failed to load $apparmor_profile.
+       With apparmor_restrict_unprivileged_userns=1 and no profile, rootless
+       podman at /usr/local/bin/podman cannot create user namespaces at all."
+      info "installed and loaded AppArmor profile $apparmor_profile"
+    fi
+  else
+    info "AppArmor userns restriction not active; no profile needed"
+  fi
+
+  # Restore whatever install_podman_static stopped, so STEPS=2 on its own does
+  # not leave the host without its podman socket (the header promises each step
+  # is independently re-runnable; a full run's step 6 would mask this).
+  if [ "$podman_socket_was_active" = 1 ] || [ "$podman_service_was_active" = 1 ]; then
+    info "restarting the podman socket/service stopped for the binary swap"
+    if [ "$podman_socket_was_active" = 1 ]; then
+      as_service_user systemctl --user start podman.socket ||
+        die "podman.socket was active before this step and failed to restart.
+       Bring it back by hand: STEPS=6, or
+       runuser -u $SERVICE_USER -- env XDG_RUNTIME_DIR=/run/user/${SERVICE_UID} \\
+         systemctl --user start podman.socket"
+    fi
+    if [ "$podman_service_was_active" = 1 ]; then
+      # Socket-activated; starting the service directly is only needed if it
+      # was running on its own. Failure is not fatal -- the socket re-spawns it
+      # on first use.
+      as_service_user systemctl --user start podman.service ||
+        warn "podman.service did not restart; the socket will re-activate it on demand"
+    fi
+    info "podman socket/service restored"
+  fi
 fi
 
 # --------------------------------------------------------------------------
@@ -508,6 +676,11 @@ if wants_step 8; then
     die "could not pull the verification image $VERIFY_IMAGE"
 
   # -- 8a. rootless check, byte-for-byte what #validateRootless runs ---------
+  # This is also the step-8 assertion that `podman info` works at all as the
+  # service user through the wrapper: with apparmor_restrict_unprivileged_userns=1
+  # and no profile on /usr/local/bin/podman (step 2 installs one), the daemon
+  # behind the socket cannot create its user namespace and this fails here,
+  # loudly, rather than at first thread provisioning.
   info "8a. rootless check"
   rootless="$(as_service_user podman info --format '{{.Host.Security.Rootless}}' || true)"
   [ "$rootless" = "true" ] ||
@@ -602,6 +775,18 @@ if wants_step 8; then
     "$VERIFY_IMAGE" sleep 300 >/dev/null || die "could not start the DNS peer container"
 
   # -- 8e. hardened run, mirroring the backend's workspace container flags ----
+  # --storage-opt size= mirrors ContainerSandboxBackend.ts (see the comment at
+  # its runArgs, ~line 299): `podman --remote` rejects `--storage-opt size=`,
+  # so deployments that talk to a user socket set
+  # T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled and the backend omits the pair.
+  # Everything in this step runs through the wrapper, which is `podman --remote`
+  # by construction, so THIS deployment is exactly that case: default to
+  # omitting the pair, same as the backend will at runtime. Export
+  # T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled to exercise the flag on a
+  # non-remote setup. Dropping it costs no disk bound: the rootfs is
+  # --read-only and every writable path is a volume under the XFS prjquota
+  # `o=size=` quotas that 8b/8c prove are enforced -- those volume-level quotas
+  # are the real disk limit in this deployment, not --storage-opt.
   info "8e. hardened container run"
   storage_opt_args=(--storage-opt "size=21474836480")
   if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
@@ -625,8 +810,9 @@ if wants_step 8; then
     --workdir /workspace \
     "$VERIFY_IMAGE" sleep infinity >/dev/null ||
     die "the hardened 'podman run' the backend issues failed.
-       Re-run it by hand to see the error; --storage-opt size= in particular
-       requires an overlay graphroot on a quota-capable filesystem."
+       Re-run it by hand to see the error. If it mentions --storage-opt, note
+       that flag is rejected over --remote connections and should have been
+       omitted here (see the comment above this run)."
   info "    container started with the backend's full flag set"
 
   # DNS resolution from inside the workspace container, both by name and alias.
@@ -645,7 +831,11 @@ if wants_step 8; then
   resolves_from_workspace "$V_PEER" ||
     die "the workspace container cannot resolve peer '$V_PEER' on the internal network.
        Internal-network DNS is required so the workspace can reach its sidecars.
-       Re-run step 2 (STEPS=2)."
+       Check which netavark/aardvark-dns podman actually resolves
+       (as the service user: podman info --format '{{.Host.NetworkBackendInfo.Path}}')
+       -- it must be the bundle's /usr/local/lib/podman copy, not a stale
+       distro or legacy pinned binary. Re-running step 2 (STEPS=2) reinstalls
+       the bundle and the helper_binaries_dir drop-in."
   resolves_from_workspace egress-proxy ||
     die "the workspace container cannot resolve the network alias 'egress-proxy'.
        The backend attaches its egress proxy under exactly this alias, so
