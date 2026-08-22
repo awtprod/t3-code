@@ -204,8 +204,29 @@ export type SandboxReconcileInput = {
 };
 
 export type SandboxReconcileResult = {
+  /**
+   * Threads whose sandbox this manager generation provisioned and can still
+   * drive: `exec`, checkpointing, and provider spawn all work against them.
+   */
   readonly activeThreadIds: ReadonlyArray<string>;
   readonly missingThreadIds: ReadonlyArray<string>;
+  /**
+   * Threads whose container survived a restart and proved its identity by
+   * label signature, but which this manager generation cannot drive: adoption
+   * grants export and teardown only, never `exec`, so nothing can run in them.
+   *
+   * These are reported in `missingThreadIds` as well, deliberately. A caller
+   * that does nothing special still fails the thread and lets it
+   * re-provision -- the fail-closed outcome -- instead of leaving a projection
+   * that says `ready` while every operation throws "not ready". A caller that
+   * reads this list can do better: the container is intact and addressable
+   * with an adoption hint, so stopping it exports the thread's work first and
+   * the re-provision restores from that export.
+   *
+   * Optional so a stub reconcile that reports nothing unresumable can stay
+   * silent; absent means none.
+   */
+  readonly unresumableThreadIds?: ReadonlyArray<string>;
   readonly orphanThreadIds: ReadonlyArray<string>;
   readonly removedRuntimeRefs: ReadonlyArray<string>;
 };

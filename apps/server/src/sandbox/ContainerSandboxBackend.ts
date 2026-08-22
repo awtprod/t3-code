@@ -1174,16 +1174,27 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     // A running workspace label alone cannot prove the project declarations,
     // teardown hooks, services, credentials, caches, or egress generation that
     // produced it. Records retained by this manager generation are adopted
-    // outright. A restart-discovered container can be adopted for reconcile
-    // ACCOUNTING only, and only when the caller supplies the thread's full
-    // label signature and the container matches it -- the same verification
-    // `#resolveRecord` applies for export and teardown. Verified adoption is
-    // never cached in `#records`, so `exec` stays fail-closed either way.
-    // A discovered container that cannot be verified is stopped rather than
-    // left running unaccounted: its thread is still reported missing (the
-    // fail-closed outcome), and a container nothing can address or tear down
-    // must not keep running the workload.
+    // outright and are genuinely usable.
+    //
+    // A restart-discovered container is different. Its label signature proves
+    // identity and provenance, which is enough to export and tear it down --
+    // but not enough to resume: the declarations that would re-arm credentials,
+    // preview routes, and automation targets died with the restart, and
+    // adoption is deliberately never cached in `#records`, so `exec`,
+    // `runtimeRef`, and checkpointing all still throw. Reporting such a thread
+    // as active claimed a sandbox the caller could not use anywhere -- the
+    // projection said `ready` while every operation failed. It is reported
+    // separately instead: still missing (so a caller that ignores the
+    // distinction fails the thread and lets it re-provision, the fail-closed
+    // outcome), and additionally unresumable, so a caller that understands the
+    // state can stop it -- which exports its work first -- rather than
+    // abandoning a container holding the user's commits.
+    //
+    // A discovered container that cannot be verified at all is stopped rather
+    // than left running unaccounted: a container nothing can address or tear
+    // down must not keep running the workload.
     const adopted: string[] = [];
+    const unresumable: string[] = [];
     for (const [id, info] of active) {
       if (!expected.has(id)) continue;
       if (this.#records.has(id)) {
@@ -1204,7 +1215,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
           },
         );
         if (matches) {
-          adopted.push(id);
+          unresumable.push(id);
           continue;
         }
       }
@@ -1226,6 +1237,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     return {
       activeThreadIds: adopted,
       missingThreadIds: [...expected].filter((id) => !adopted.includes(id)),
+      unresumableThreadIds: unresumable,
       orphanThreadIds,
       removedRuntimeRefs,
     };

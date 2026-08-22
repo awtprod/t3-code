@@ -482,6 +482,7 @@ describe("ContainerSandboxBackend", () => {
     expect(result).toEqual({
       activeThreadIds: [],
       missingThreadIds: ["thread-1", "missing-1"],
+      unresumableThreadIds: [],
       orphanThreadIds: ["orphan-1"],
       removedRuntimeRefs: ["abcdef654321"],
     });
@@ -764,11 +765,15 @@ describe("ContainerSandboxBackend", () => {
     expect(executor.commands).toEqual([]);
   });
 
-  it("adopts a label-verified surviving container during reconcile instead of reporting it missing", async () => {
+  it("reports a label-verified survivor as unresumable rather than active", async () => {
     // A server restart empties `#records`, but the containers keep running.
-    // Reconcile used to report every one of them missing -- the reactor then
-    // failed the thread while its container kept running the workload, and
-    // `removeOrphans` skipped it because the thread was still expected.
+    // Verifying the label signature proves the container is this thread's, and
+    // is enough to export and tear it down -- but adoption is never cached, so
+    // `exec`, `runtimeRef`, and checkpointing all still throw. Reporting it
+    // active left the projection claiming `ready` for a sandbox in which
+    // nothing could run. It is reported missing (so the thread fails and
+    // re-provisions) AND unresumable (so a caller can stop it, exporting its
+    // work, instead of abandoning the container).
     const workspaceName = "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5";
     const executor = new FakeExecutor((command) => {
       if (command.args[0] === "ps")
@@ -784,12 +789,14 @@ describe("ContainerSandboxBackend", () => {
       removeOrphans: true,
       adoptionHints: new Map([["thread-1", hint()]]),
     });
-    expect(result.activeThreadIds).toEqual(["thread-1"]);
-    expect(result.missingThreadIds).toEqual([]);
+    expect(result.activeThreadIds).toEqual([]);
+    expect(result.unresumableThreadIds).toEqual(["thread-1"]);
+    expect(result.missingThreadIds).toEqual(["thread-1"]);
+    // Verified: not removed, so its commits are still exportable with a hint.
     expect(result.removedRuntimeRefs).toEqual([]);
-    // Adoption is reconcile accounting only, never a cached record: `exec`
-    // stays fail-closed exactly as before.
+    // Adoption never widens to resumption.
     await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
+    expect(backend.runtimeRef("thread-1")).toBeUndefined();
   });
 
   it("stops an expected container whose label signature cannot be verified", async () => {
@@ -821,6 +828,9 @@ describe("ContainerSandboxBackend", () => {
     });
     expect(result.activeThreadIds).toEqual([]);
     expect(result.missingThreadIds).toEqual(["thread-1"]);
+    // Nothing proved this container is the thread's, so it is not exportable
+    // either -- unresumable is for survivors worth stopping gracefully.
+    expect(result.unresumableThreadIds).toEqual([]);
     expect(result.removedRuntimeRefs).toEqual(["abcdef123456"]);
     expect(
       executor.commands
@@ -845,5 +855,8 @@ describe("ContainerSandboxBackend", () => {
     });
     expect(result.activeThreadIds).toEqual(["thread-1"]);
     expect(result.missingThreadIds).toEqual([]);
+    // A record this generation holds is usable, so it is never unresumable.
+    expect(result.unresumableThreadIds).toEqual([]);
+    expect(backend.runtimeRef("thread-1")).toBe("t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5");
   });
 });
