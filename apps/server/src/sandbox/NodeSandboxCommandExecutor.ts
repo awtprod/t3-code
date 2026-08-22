@@ -5,6 +5,42 @@ import type { SandboxCommand, SandboxCommandExecutor, SandboxCommandResult } fro
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
+/**
+ * Host variables forwarded to the container CLI, on top of `PATH`.
+ *
+ * The spawn environment is an allowlist rather than the host's: a sandbox
+ * command must never inherit provider credentials or anything else ambient.
+ * These few entries are what the CLI needs to find the runtime it is supposed
+ * to talk to, and none of them carry a secret.
+ *
+ * `XDG_RUNTIME_DIR` is load-bearing for rootless podman -- it locates the user
+ * socket and libpod's runtime root, and without it every command fails at
+ * `podman info` with "set sticky bit on: chmod /run/user/<uid>/libpod", which
+ * surfaces as a provisioning failure no unit test can catch (they all fake this
+ * executor). `HOME` resolves the rootless storage config; `CONTAINER_HOST` and
+ * `DOCKER_HOST` name a remote socket when the deployment uses one, which is
+ * otherwise only deliverable through a PATH wrapper (see
+ * `deploy/openclaw/sandbox/podman-wrapper.sh`).
+ */
+const FORWARDED_RUNTIME_ENV = [
+  "XDG_RUNTIME_DIR",
+  "HOME",
+  "CONTAINER_HOST",
+  "DOCKER_HOST",
+  "CONTAINERS_CONF",
+  "CONTAINERS_STORAGE_CONF",
+] as const;
+
+const runtimeEnvironment = (): Record<string, string> => {
+  const environment: Record<string, string> = {};
+  if (process.env.PATH !== undefined) environment.PATH = process.env.PATH;
+  for (const name of FORWARDED_RUNTIME_ENV) {
+    const value = process.env[name];
+    if (value !== undefined && value !== "") environment[name] = value;
+  }
+  return environment;
+};
+
 export class NodeSandboxCommandExecutor implements SandboxCommandExecutor {
   private readonly platform: NodeJS.Platform;
 
@@ -18,7 +54,7 @@ export class NodeSandboxCommandExecutor implements SandboxCommandExecutor {
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
         detached: this.platform !== "win32",
-        env: { PATH: process.env.PATH },
+        env: runtimeEnvironment(),
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
