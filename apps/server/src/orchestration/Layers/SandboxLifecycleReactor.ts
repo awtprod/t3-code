@@ -165,6 +165,10 @@ export const make = Effect.gen(function* () {
       artifactId: result.artifactId,
       bundleSha256: result.bundleSha256,
       ...(result.storeSha256 === undefined ? {} : { storeSha256: result.storeSha256 }),
+      // Recorded in the event log, not just in the manifest beside the bundle:
+      // restore holds the bundle's snapshot ref to exactly this commit, and a
+      // manifest is written by whoever wrote the bundle it sits next to.
+      ...(result.snapshotCommit === undefined ? {} : { snapshotCommit: result.snapshotCommit }),
     });
   });
 

@@ -56,6 +56,18 @@ export type SandboxBootstrap = {
    */
   readonly restoreCommit?: string;
   /**
+   * Commit the export recorded its working-tree snapshot at, carried from the
+   * event log rather than read out of the bundle.
+   *
+   * The restore refuses to unpack a snapshot that does not match: the ref in
+   * the bundle is named by its own commit, so a ref naming anything else is a
+   * bundle that was truncated, rewritten, or built by a different export, and
+   * unpacking its tree would overwrite the user's checkout with someone
+   * else's. Absent when the export's tree was clean and for bundles written
+   * before snapshots existed -- both correctly restore to the exported head.
+   */
+  readonly restoreSnapshotCommit?: string;
+  /**
    * Manager-generated verified tar of a previously exported provider
    * conversation store, extracted over the container's provider home before
    * any provider can spawn.
@@ -88,6 +100,17 @@ export type SandboxRestoreSource = {
    * but leaves the provider without prior context.
    */
   readonly storeSha256?: string;
+  /**
+   * Commit the export pinned its working-tree snapshot at, when the tree was
+   * dirty.
+   *
+   * Restore requires the bundle's snapshot ref to resolve to exactly this
+   * commit before it will unpack that tree over the checked-out branch: the
+   * ref is named by its own commit, so a mismatch means the bundle was
+   * truncated, rewritten, or assembled from a different export. Absent when
+   * the tree was clean, and for exports written before snapshots existed.
+   */
+  readonly snapshotCommit?: string;
 };
 
 export type SandboxProvisionInput = {

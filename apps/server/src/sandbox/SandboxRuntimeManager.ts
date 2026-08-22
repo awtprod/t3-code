@@ -375,6 +375,12 @@ export const makeSandboxRuntimeManager = (
         // name it, since a bundle fetch takes no default refspec.
         repositoryBundleRef: `refs/heads/${restore.branchName}`,
         restoreCommit: restore.headCommit,
+        // From the event log, which is the only record of this that verifies
+        // against anything -- a manifest sitting beside the bundle is written
+        // by whoever wrote the bundle.
+        ...(restore.snapshotCommit === undefined
+          ? {}
+          : { restoreSnapshotCommit: restore.snapshotCommit }),
       };
     },
   );

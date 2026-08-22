@@ -180,6 +180,21 @@ export const SandboxBranchExport = Schema.Struct({
    * the provider fresh, which is what happened for every export until now.
    */
   storeSha256: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isPattern(/^[0-9a-f]{64}$/i))),
+  /**
+   * Commit the export pinned its working-tree snapshot at -- the dirty tracked
+   * and untracked files the branch tip does not carry.
+   *
+   * Recorded here rather than read back from the manifest beside the bundle,
+   * for the same reason the bundle digest is: an artifact that verifies only
+   * against a file sitting next to it verifies against nothing. Restore
+   * requires the bundle's snapshot ref to resolve to exactly this commit
+   * before it will unpack that tree over the user's checkout.
+   *
+   * Absent when the working tree was clean, and for every export written
+   * before snapshots existed -- both restore to the exported head with no
+   * working-tree changes, which is correct for them.
+   */
+  snapshotCommit: Schema.optionalKey(gitObjectId),
   exportedAt: IsoDateTime,
 });
 export type SandboxBranchExport = typeof SandboxBranchExport.Type;
@@ -291,6 +306,8 @@ export const SandboxEvent = Schema.Union([
     storeSha256: Schema.optionalKey(
       TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
     ),
+    /** Commit the working-tree snapshot was pinned at, when the tree was dirty. */
+    snapshotCommit: Schema.optionalKey(gitObjectId),
   }),
 ]);
 export type SandboxEvent = typeof SandboxEvent.Type;

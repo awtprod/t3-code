@@ -219,6 +219,11 @@ describe("sandbox export round trip", () => {
           bundleSha256: exported.bundleSha256,
           headCommit: exported.commit,
           branchName: `thread/${THREAD_ID}`,
+          // What the decider records on `lastExport`; restore refuses to unpack
+          // any snapshot that is not this exact commit.
+          ...(exported.snapshotCommit === undefined
+            ? {}
+            : { snapshotCommit: exported.snapshotCommit }),
         },
       });
 
@@ -274,6 +279,11 @@ describe("sandbox export round trip", () => {
           bundleSha256: exported.bundleSha256,
           headCommit: exported.commit,
           branchName: `thread/${THREAD_ID}`,
+          // What the decider records on `lastExport`; restore refuses to unpack
+          // any snapshot that is not this exact commit.
+          ...(exported.snapshotCommit === undefined
+            ? {}
+            : { snapshotCommit: exported.snapshotCommit }),
         },
       });
 
@@ -309,10 +319,113 @@ describe("sandbox export round trip", () => {
           bundleSha256: exported.bundleSha256,
           headCommit: exported.commit,
           branchName: `thread/${THREAD_ID}`,
+          // What the decider records on `lastExport`; restore refuses to unpack
+          // any snapshot that is not this exact commit.
+          ...(exported.snapshotCommit === undefined
+            ? {}
+            : { snapshotCommit: exported.snapshotCommit }),
         },
       });
 
       expect(NodeFS.existsSync(NodePath.join(second.repository, "notes.md"))).toBe(false);
+    }),
+  );
+
+  it.effect("refuses a snapshot ref that is not the one the export recorded", () =>
+    Effect.gen(function* () {
+      // The ref deletion an export performs can fail, and the snapshot used to
+      // live under one fixed name -- so a stale ref rode out in the next
+      // bundle and restore unpacked an OLD working tree over the user's newer
+      // state, silently. Restore now takes the commit from the event log and
+      // unpacks nothing else.
+      headless();
+      const artifacts = makeDirectory("t3-sandbox-artifacts-");
+      const source = sourceRepository();
+
+      const first = new GitBackedExecutor();
+      const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
+      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      NodeFS.writeFileSync(
+        NodePath.join(first.repository, "stale.md"),
+        "work the user later deleted\n",
+        "utf8",
+      );
+      const stale = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(stale.snapshotCommit).toBeDefined();
+
+      // The user deletes that file and exports again. This bundle still
+      // carries the earlier snapshot ref -- as it would after a failed ref
+      // deletion -- but the export recorded no snapshot of its own.
+      NodeFS.rmSync(NodePath.join(first.repository, "stale.md"));
+      git(
+        first.repository,
+        "update-ref",
+        `refs/t3/export-snapshot/${stale.snapshotCommit!}`,
+        stale.snapshotCommit!,
+      );
+      const exported = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(exported.snapshotCommit).toBeUndefined();
+
+      const second = new GitBackedExecutor();
+      yield* makeSandboxRuntimeManager(artifacts, "linux", second).provision({
+        ...provisionInput(source.path, source.baseCommit),
+        restore: {
+          artifactId: exported.artifactId,
+          bundleSha256: exported.bundleSha256,
+          headCommit: exported.commit,
+          branchName: `thread/${THREAD_ID}`,
+        },
+      });
+
+      // The deleted file stays deleted, and the working tree is exactly what
+      // the export actually captured.
+      expect(NodeFS.existsSync(NodePath.join(second.repository, "stale.md"))).toBe(false);
+      expect(git(second.repository, "status", "--porcelain")).toBe("");
+      // The stale ref does not survive into the user's repository either.
+      expect(
+        NodeChildProcess.spawnSync("git", ["for-each-ref", "refs/t3/export-snapshot"], {
+          cwd: second.repository,
+          encoding: "utf8",
+        }).stdout,
+      ).toBe("");
+    }),
+  );
+
+  it.effect("fails the export when a dirty tree cannot be snapshotted", () =>
+    Effect.gen(function* () {
+      // The snapshot used to be best-effort: a failure returned `undefined`
+      // and the export shipped a bundle that looked complete while silently
+      // dropping everything the user had not committed -- which the settle
+      // that triggered the export then destroyed. Failing leaves the container
+      // and the work intact for a retry.
+      headless();
+      const artifacts = makeDirectory("t3-sandbox-artifacts-");
+      const source = sourceRepository();
+
+      class BrokenCommitTreeExecutor extends GitBackedExecutor {
+        override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+          const result = await super.run(command);
+          return command.args.includes("commit-tree")
+            ? { exitCode: 1, stdout: "", stderr: "fatal: unable to write commit object" }
+            : result;
+        }
+      }
+      const executor = new BrokenCommitTreeExecutor();
+      const manager = makeSandboxRuntimeManager(artifacts, "linux", executor);
+      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      NodeFS.appendFileSync(
+        NodePath.join(executor.repository, "tracked.txt"),
+        "work that must not be silently dropped\n",
+        "utf8",
+      );
+
+      const failure = yield* manager.exportBranch("docker", THREAD_ID).pipe(Effect.flip);
+      expect(failure.message).toContain("working-tree snapshot");
+      // Nothing was published: a bundle that drops the user's work must not
+      // become the artifact a re-provision restores from.
+      expect(NodeFS.readdirSync(artifacts).filter((entry) => entry.endsWith(".bundle"))).toEqual(
+        [],
+      );
     }),
   );
 });

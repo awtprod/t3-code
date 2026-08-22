@@ -57,7 +57,12 @@ function defaultRespond(command: SandboxCommand): SandboxCommandResult {
       : Math.floor(20 * 1024 ** 3 * 0.9);
     return { exitCode: 0, stdout: `size=${bytes}\n`, stderr: "" };
   }
-  if (command.args[0] === "exec" && command.args.includes("rev-parse"))
+  // Same object for `rev-parse` and `write-tree`: a clean working tree, so the
+  // export writes no working-tree snapshot.
+  if (
+    command.args[0] === "exec" &&
+    (command.args.includes("rev-parse") || command.args.includes("write-tree"))
+  )
     return { exitCode: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
   return { exitCode: 0, stdout: "", stderr: "" };
 }

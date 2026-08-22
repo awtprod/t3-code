@@ -56,7 +56,14 @@ function successfulExecutor(
         : Math.floor(20 * 1024 ** 3 * 0.9);
       return { exitCode: 0, stdout: `size=${bytes}\n`, stderr: "" };
     }
-    if (command.args[0] === "exec" && command.args.includes("rev-parse"))
+    // `rev-parse HEAD`, `rev-parse HEAD^{tree}`, and `write-tree` all answer
+    // the same object here: a freshly provisioned container has a clean
+    // working tree, so the export writes no snapshot. A test that wants a
+    // dirty tree overrides `write-tree`.
+    if (
+      command.args[0] === "exec" &&
+      (command.args.includes("rev-parse") || command.args.includes("write-tree"))
+    )
       return { exitCode: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
     return { exitCode: 0, stdout: "", stderr: "" };
   });
@@ -778,7 +785,12 @@ describe("ContainerSandboxBackend", () => {
     return new FakeExecutor((command) => {
       if (command.args[0] === "inspect" && command.args[1] === "--format")
         return { exitCode: 0, stdout: `${labels}\n`, stderr: "" };
-      if (command.args[0] === "exec" && command.args.includes("rev-parse"))
+      // Same object for `rev-parse` and `write-tree`: a clean working tree, so
+      // the export writes no working-tree snapshot.
+      if (
+        command.args[0] === "exec" &&
+        (command.args.includes("rev-parse") || command.args.includes("write-tree"))
+      )
         return { exitCode: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     });

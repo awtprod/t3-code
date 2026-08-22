@@ -2131,6 +2131,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         // and the event, and writing `storeSha256: undefined` would fail the
         // schema instead of meaning "no store".
         ...(command.storeSha256 === undefined ? {} : { storeSha256: command.storeSha256 }),
+        ...(command.snapshotCommit === undefined ? {} : { snapshotCommit: command.snapshotCommit }),
       };
       return yield* sandboxTransition(command.threadId, command.commandId, event.type, event, {
         ...current,
@@ -2140,6 +2141,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           artifactId: command.artifactId,
           bundleSha256: command.bundleSha256,
           ...(command.storeSha256 === undefined ? {} : { storeSha256: command.storeSha256 }),
+          ...(command.snapshotCommit === undefined
+            ? {}
+            : { snapshotCommit: command.snapshotCommit }),
           exportedAt: command.createdAt,
         },
         lastActiveAt: command.createdAt,

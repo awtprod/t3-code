@@ -1479,6 +1479,14 @@ const SandboxBranchExportResultCommand = Schema.Struct({
    * to go through -- the commits are the part that cannot be lost.
    */
   storeSha256: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isPattern(/^[a-f0-9]{64}$/))),
+  /**
+   * Commit the export pinned its working-tree snapshot at, when the tree was
+   * dirty. Restore requires the bundle's snapshot ref to resolve to exactly
+   * this commit before unpacking that tree over the user's checkout.
+   */
+  snapshotCommit: Schema.optionalKey(
+    TrimmedNonEmptyString.check(Schema.isPattern(/^[0-9a-f]{40,64}$/i)),
+  ),
   createdAt: IsoDateTime,
 });
 
