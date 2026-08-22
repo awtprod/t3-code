@@ -118,6 +118,42 @@ describe("SandboxProviderProcess", () => {
     expect(invocation.args).not.toContain("LANG=C.UTF-8");
   });
 
+  it("carries the runtime-locating environment provisioning uses, and no secrets", () => {
+    // Provisioning spawns the container CLI through NodeSandboxCommandExecutor,
+    // which forwards a wider non-secret allowlist because rootless podman needs
+    // `XDG_RUNTIME_DIR` to find its user socket and a remote one needs
+    // `CONTAINER_HOST`/`DOCKER_HOST`. Exec used to pass `PATH`/`HOME` only, so a
+    // deployment could provision a container and then exec against a different
+    // daemon -- or none at all.
+    const previous = {
+      XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+      CONTAINER_HOST: process.env.CONTAINER_HOST,
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK,
+    };
+    process.env.XDG_RUNTIME_DIR = "/run/user/1000";
+    process.env.CONTAINER_HOST = "unix:///run/user/1000/podman/podman.sock";
+    process.env.ANTHROPIC_API_KEY = "sk-host-secret";
+    process.env.SSH_AUTH_SOCK = "/host/agent.sock";
+    try {
+      const invocation = sandboxProviderInvocation(target, "codex", [], undefined, {
+        LANG: "C.UTF-8",
+      });
+      expect(invocation.env.XDG_RUNTIME_DIR).toBe("/run/user/1000");
+      expect(invocation.env.CONTAINER_HOST).toBe("unix:///run/user/1000/podman/podman.sock");
+      // Credential stripping is unchanged: the allowlist names only variables
+      // that locate the runtime, so nothing secret rides along with them.
+      expect(invocation.env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(invocation.env.SSH_AUTH_SOCK).toBeUndefined();
+      expect(Object.values(invocation.env)).not.toContain("sk-host-secret");
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("rejects replacing a live binding with another sandbox generation", () => {
     const owner = makeSandboxProviderBindingOwner();
     bindSandboxProviderTarget(target, owner);
