@@ -88,15 +88,40 @@ export function resolveSandboxDesktopMode(): "enabled" | "disabled" {
 /**
  * Ceiling on an archived provider conversation store, in bytes.
  *
- * Exists because nothing prunes the artifact directory: a store past this size
- * is skipped rather than kept forever. Measured on a real host, one long
- * thread's transcript alone reached ~30MB, so the default is set well above
- * ordinary threads while still bounding the pathological ones.
+ * The age-based artifact sweep only reclaims whole sets long after their last
+ * export; this bounds each set's size at write time. Measured on a real host,
+ * one long thread's transcript alone reached ~30MB, so the default is set well
+ * above ordinary threads while still bounding the pathological ones.
  */
 export function resolveSandboxStoreMaxBytes(): number {
   const raw = Number.parseInt(process.env.T3_SANDBOX_STORE_MAX_BYTES?.trim() ?? "", 10);
   return Number.isFinite(raw) && raw > 0 ? raw : 50 * 1024 * 1024;
 }
+
+/**
+ * Age ceiling for exported sandbox artifact sets, in seconds.
+ *
+ * Filenames are `sha256(threadId)` and every export overwrites the same set,
+ * so per-thread growth is already bounded -- what leaks is sets for threads
+ * that were deleted out-of-band or settled long ago. Defaults to 30 days: old
+ * enough that a returning thread almost always finds its export (deleting a
+ * set degrades re-provision to a plain clone and loses the provider's archived
+ * conversation), young enough that the directory stops growing without bound.
+ * An explicit `T3_SANDBOX_ARTIFACT_MAX_AGE_SECONDS=0` disables the sweep;
+ * anything unparseable or negative falls back to the default.
+ */
+export function resolveSandboxArtifactMaxAgeSeconds(): number {
+  const raw = Number.parseInt(process.env.T3_SANDBOX_ARTIFACT_MAX_AGE_SECONDS?.trim() ?? "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30 * 24 * 60 * 60;
+}
+
+/**
+ * Ceiling on artifact sets removed by one sweep pass. The directory is flat
+ * and one set is three files, so a pass is cheap -- the cap only exists so a
+ * pathological backlog cannot pin the sweep for minutes; the remainder goes
+ * on the next pass.
+ */
+const ARTIFACT_SWEEP_MAX_SETS = 1000;
 
 /** One-shot credential boundary used immediately before provider process spawn. */
 export function redeemSandboxProviderEnvironment(
@@ -171,6 +196,16 @@ export interface SandboxRuntimeManagerShape {
    * must not outlive the thread they belong to.
    */
   readonly removeThreadArtifacts: (threadId: string) => Effect.Effect<void, SandboxManagerError>;
+  /**
+   * Deletes exported artifact sets whose newest file is older than
+   * `T3_SANDBOX_ARTIFACT_MAX_AGE_SECONDS`, except sets belonging to
+   * `protectedThreadIds` -- threads whose sandbox is still in a non-terminal
+   * lifecycle, whose next stop will overwrite the set anyway. Returns the
+   * number of sets removed.
+   */
+  readonly sweepExpiredArtifacts: (
+    protectedThreadIds: ReadonlySet<string>,
+  ) => Effect.Effect<number, SandboxManagerError>;
 }
 
 export class SandboxManagerError extends Schema.TaggedErrorClass<SandboxManagerError>()(
@@ -635,9 +670,14 @@ export const makeSandboxRuntimeManager = (
               threadId,
               bundle: `${name}.bundle`,
               bundleSha256,
+              // `storeServed: false` marks the store as a server-internal
+              // artifact: re-provision reads it from disk to restore the
+              // provider's conversation, but the artifact HTTP route serves
+              // only `bundle` and `manifest` -- a client following the
+              // manifest must not treat `store` as downloadable.
               ...(storeSha256 === undefined
                 ? {}
-                : { store: `${name}.store.tar`, storeSha256, storeBytes }),
+                : { store: `${name}.store.tar`, storeServed: false, storeSha256, storeBytes }),
               ...result,
             }),
             { mode: 0o600, flag: "wx" },
@@ -736,6 +776,78 @@ export const makeSandboxRuntimeManager = (
           ),
         );
       }),
+    sweepExpiredArtifacts: Effect.fn("SandboxRuntimeManager.sweepExpiredArtifacts")(
+      function* (protectedThreadIds) {
+        const maxAgeSeconds = resolveSandboxArtifactMaxAgeSeconds();
+        if (maxAgeSeconds === 0 || artifactRoot === undefined) return 0;
+        const protectedNames = new Set(
+          [...protectedThreadIds].map((threadId) =>
+            NodeCrypto.createHash("sha256").update(threadId).digest("hex"),
+          ),
+        );
+        const { removed, capped } = yield* attempt(async () => {
+          const entries = await NodeFSP.readdir(artifactRoot).catch((cause: unknown) => {
+            // No directory means no exports have happened yet: nothing to sweep.
+            if ((cause as NodeJS.ErrnoException).code === "ENOENT") return [] as string[];
+            throw cause;
+          });
+          // One set per thread: `<sha256(threadId)>.{bundle,json,store.tar}`.
+          // Dot-prefixed names are in-flight temporaries owned by `exportBranch`
+          // and never eligible.
+          const sets = new Map<string, string[]>();
+          for (const entry of entries) {
+            const match = /^([a-f0-9]{64})\.(?:bundle|json|store\.tar)$/.exec(entry);
+            if (match?.[1] === undefined) continue;
+            const files = sets.get(match[1]) ?? [];
+            files.push(entry);
+            sets.set(match[1], files);
+          }
+          // @effect-diagnostics-next-line globalDate:off - ages are real filesystem mtimes; the virtual test clock would misdate them.
+          const cutoff = Date.now() - maxAgeSeconds * 1000;
+          let removedCount = 0;
+          let cappedAtLimit = false;
+          for (const [name, files] of sets) {
+            if (protectedNames.has(name)) continue;
+            // The newest file's mtime dates the set as a whole: exports rename
+            // all three files together, so a set with one young file is a set
+            // that exported recently.
+            const times = await Promise.all(
+              files.map((file) =>
+                NodeFSP.stat(NodePath.resolve(artifactRoot, file))
+                  .then((stat) => stat.mtimeMs)
+                  // A file deleted mid-sweep (thread deletion, another export)
+                  // simply no longer dates the set.
+                  .catch(() => undefined),
+              ),
+            );
+            const newest = Math.max(...times.map((time) => time ?? Number.NEGATIVE_INFINITY));
+            if (!Number.isFinite(newest) || newest > cutoff) continue;
+            if (removedCount >= ARTIFACT_SWEEP_MAX_SETS) {
+              cappedAtLimit = true;
+              break;
+            }
+            await Promise.all(
+              files.map((file) =>
+                NodeFSP.rm(NodePath.resolve(artifactRoot, file), { force: true }),
+              ),
+            );
+            removedCount += 1;
+          }
+          return { removed: removedCount, capped: cappedAtLimit };
+        });
+        if (capped)
+          yield* Effect.logWarning("sandbox artifact sweep hit its per-run deletion cap", {
+            removed,
+            cap: ARTIFACT_SWEEP_MAX_SETS,
+          });
+        if (removed > 0)
+          yield* Effect.logInfo("sandbox artifact sweep removed expired export sets", {
+            removed,
+            maxAgeSeconds,
+          });
+        return removed;
+      },
+    ),
   };
 };
 

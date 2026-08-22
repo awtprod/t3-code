@@ -140,6 +140,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
+            sweepExpiredArtifacts: () => Effect.succeed(0),
             provision,
             reconcile: () =>
               Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
@@ -249,6 +250,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           ),
           Layer.provide(
             Layer.succeed(SandboxRuntimeManager, {
+              sweepExpiredArtifacts: () => Effect.succeed(0),
               provision: () => Effect.die("runtime must not run without an image"),
               reconcile: () =>
                 Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
@@ -340,6 +342,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
+            sweepExpiredArtifacts: () => Effect.succeed(0),
             exportBranch: () =>
               Effect.succeed({
                 commit: "b".repeat(40),
@@ -441,6 +444,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
+            sweepExpiredArtifacts: () => Effect.succeed(0),
             stop: () => Effect.die("no container exists for an unprovisioned sandbox"),
             exportBranch: () => Effect.die("nothing to export without a container"),
           } as never),
@@ -540,6 +544,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
+            sweepExpiredArtifacts: () => Effect.succeed(0),
             exportBranch: () =>
               Effect.succeed({
                 commit: "b".repeat(40),
@@ -643,6 +648,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
+            sweepExpiredArtifacts: () => Effect.succeed(0),
             provision: () => Effect.die("provisioning is not reached on this path"),
             reconcile: () =>
               Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
@@ -742,6 +748,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
+            sweepExpiredArtifacts: () => Effect.succeed(0),
             stop: (_runtime: string, id: string) =>
               Effect.sync(() => {
                 stopped.push(id);
@@ -786,5 +793,108 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       // No export result: only the completion.
       expect(dispatched.map((command) => command.type)).toEqual(["sandbox.stop.complete"]);
     }),
+  );
+
+  it.effect(
+    "the periodic pass sweeps expired artifacts, shields active threads, and survives a sweep failure",
+    () =>
+      Effect.gen(function* () {
+        // The sweep rides the same periodic pass as expiry. Threads whose
+        // sandbox is in a non-terminal lifecycle must arrive in the protected
+        // set (their artifact set may seed a re-provision), terminal ones must
+        // not -- and a failing sweep must not stall the rest of the pass.
+        const swept = yield* Deferred.make<ReadonlySet<string>>();
+        const continued = yield* Deferred.make<void>();
+        const dispatched: OrchestrationCommand[] = [];
+        const OLD = "2026-08-15T00:00:00.000Z";
+        const sandboxOf = (lifecycle: "ready" | "stopped") => ({
+          lifecycle,
+          runtime: "podman" as const,
+          branch: { branchName: "t3/thread/x", baseCommit: "a".repeat(40) },
+          limits: {
+            cpuCount: 2,
+            memoryBytes: 4_294_967_296,
+            diskBytes: 21_474_836_480,
+            processCount: 512,
+            idleTimeoutSeconds: 60,
+            maximumLifetimeSeconds: 60,
+          },
+          desktop: { status: "unavailable" as const },
+          services: [],
+          controller: { kind: "none" as const },
+          createdAt: OLD,
+          lastActiveAt: OLD,
+        });
+        const activeThread = { ...snapshot.threads[0]!, sandbox: sandboxOf("ready") };
+        const stoppedThread = {
+          ...snapshot.threads[0]!,
+          id: ThreadId.make("thread-stopped"),
+          sandbox: sandboxOf("stopped"),
+        };
+        const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+          Layer.provide(NodeServices.layer),
+          Layer.provide(
+            Layer.mock(GitWorkflowService)({
+              localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+            }),
+          ),
+          Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+          Layer.provide(
+            Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
+          ),
+          Layer.provide(
+            Layer.succeed(SandboxRuntimeManager, {
+              sweepExpiredArtifacts: (protectedThreadIds: ReadonlySet<string>) =>
+                Deferred.succeed(swept, protectedThreadIds).pipe(
+                  Effect.andThen(
+                    Effect.fail(new SandboxManagerError({ message: "artifact directory io" })),
+                  ),
+                ),
+              // Called for every ready/paused thread right after the sweep --
+              // reaching it proves the sweep failure was contained.
+              sampleUsage: () =>
+                Deferred.succeed(continued, undefined).pipe(
+                  Effect.andThen(Effect.fail(new SandboxManagerError({ message: "no container" }))),
+                ),
+              reconcile: () =>
+                Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
+            } as never),
+          ),
+          Layer.provide(
+            Layer.mock(ProjectionSnapshotQuery)({
+              getSnapshot: () =>
+                Effect.succeed({
+                  ...snapshot,
+                  threads: [activeThread, stoppedThread],
+                } as typeof snapshot),
+              getThreadDetailById: () => Effect.succeed(Option.none()),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(OrchestrationEngineService)({
+              dispatch: (command) =>
+                Effect.gen(function* () {
+                  dispatched.push(command);
+                  return { sequence: dispatched.length };
+                }),
+              streamDomainEvents: Stream.empty,
+            }),
+          ),
+        );
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const reactor = yield* SandboxLifecycleReactor;
+            yield* reactor.start();
+            const protectedIds = yield* Deferred.await(swept).pipe(Effect.timeout("5 seconds"));
+            // The ready thread is shielded; the stopped one is fair game.
+            expect([...protectedIds]).toEqual([threadId]);
+            // The pass reached per-thread work after the sweep failed: the
+            // failure was logged and contained, not propagated.
+            yield* Deferred.await(continued).pipe(Effect.timeout("5 seconds"));
+            yield* reactor.drain;
+          }).pipe(Effect.provide(layer)),
+        );
+      }),
   );
 });

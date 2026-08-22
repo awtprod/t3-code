@@ -491,6 +491,7 @@ export const makeOrchestrationIntegrationHarness = (
         recoverPreview: () => Effect.die("recoverPreview should not be called in this test"),
         revokeCredentials: () => Effect.succeed(0),
         removeThreadArtifacts: () => Effect.void,
+        sweepExpiredArtifacts: () => Effect.succeed(0),
       });
     }
     const projectFileLoaderLayer = Layer.succeed(T3ProjectFileLoader, {

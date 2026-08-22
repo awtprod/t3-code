@@ -6,7 +6,9 @@ it needs is not installed, and the environment variables that switch it on are
 not set.
 
 This runbook covers making the runtime available, proving it works, switching
-sandboxing on deliberately, and switching it back off.
+sandboxing on deliberately, and switching it back off. What the server does
+with the runtime once it exists — lifecycle, export artifacts, retention — is
+covered separately in [sandbox-runtime.md](./sandbox-runtime.md).
 
 Everything root-required lives in one reviewed script,
 `deploy/openclaw/sandbox/bootstrap-sandbox-host.sh`. The service account
