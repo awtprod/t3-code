@@ -6,6 +6,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  type SandboxBranchExport,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -1257,8 +1258,15 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
     readonly dispatched: OrchestrationCommand[];
     readonly exportBranch: SandboxRuntimeManagerShape["exportBranch"];
     readonly stop: SandboxRuntimeManagerShape["stop"];
+    /** `lastExport` the thread carries before this reconcile pass runs. */
+    readonly priorExport?: SandboxBranchExport;
   }) => {
-    const sandboxThread = {
+    // Mutable, because the projection is: a `sandbox.branch-export.result`
+    // dispatched partway through the reconcile writes a fresh `lastExport`
+    // that everything read AFTER it must see. A frozen fixture cannot tell a
+    // reactor that re-reads the projection apart from one that reuses the
+    // snapshot it captured before the export.
+    let sandboxThread: OrchestrationReadModel["threads"][number] = {
       ...snapshot.threads[0]!,
       sandbox: {
         lifecycle: "ready" as const,
@@ -1277,6 +1285,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         controller: { kind: "none" as const },
         createdAt: NOW,
         lastActiveAt: NOW,
+        ...(options.priorExport === undefined ? {} : { lastExport: options.priorExport }),
       },
     };
     return Layer.effect(SandboxLifecycleReactor, make).pipe(
@@ -1324,6 +1333,25 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           dispatch: (command) =>
             Effect.sync(() => {
               options.dispatched.push(command);
+              // Stands in for the decider's own write: a successful export
+              // records its artifact on the thread's projected sandbox, which
+              // is precisely the state a later command in the same pass has to
+              // be built on top of.
+              if (command.type === "sandbox.branch-export.result") {
+                sandboxThread = {
+                  ...sandboxThread,
+                  sandbox: {
+                    ...sandboxThread.sandbox,
+                    lastExport: {
+                      branchName: command.branchName,
+                      headCommit: command.headCommit,
+                      artifactId: command.artifactId,
+                      bundleSha256: command.bundleSha256,
+                      exportedAt: command.createdAt,
+                    },
+                  },
+                } as OrchestrationReadModel["threads"][number];
+              }
               return { sequence: options.dispatched.length };
             }),
           streamDomainEvents: Stream.empty,
@@ -1380,6 +1408,73 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       if (missing?.type !== "sandbox.reconcile.result")
         throw new Error("expected a reconcile result command");
       expect(missing.disposition).toBe("missing");
+    }),
+  );
+
+  it.effect("keeps the fresh export on the reconcile result that follows the drain", () =>
+    Effect.gen(function* () {
+      // The drain exports the thread's work, which writes a NEW `lastExport`
+      // into the projection. The `missing` result dispatched immediately
+      // afterwards REPLACES the whole sandbox value -- and it used to be built
+      // from the snapshot captured before the export, so it erased the pointer
+      // to that export moments after the container and its volume had already
+      // been destroyed. The next provision then seeded from the project's base
+      // commit and the user's exported work was unreachable: silent data loss
+      // caused by the very code path that exists to save the work.
+      const calls: string[] = [];
+      const dispatched: OrchestrationCommand[] = [];
+      const stale = {
+        branchName: `t3/thread/${threadId}`,
+        headCommit: "1".repeat(40),
+        artifactId: "2".repeat(64),
+        bundleSha256: "3".repeat(64),
+        exportedAt: NOW,
+      };
+      const fresh = {
+        commit: "b".repeat(40),
+        patch: "",
+        artifactId: "c".repeat(64),
+        bundleSha256: "d".repeat(64),
+      };
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+        }).pipe(
+          Effect.provide(
+            unresumableLayer({
+              calls,
+              dispatched,
+              priorExport: stale,
+              exportBranch: () =>
+                Effect.sync(() => {
+                  calls.push("export");
+                  return fresh;
+                }) as never,
+              stop: () =>
+                Effect.sync(() => {
+                  calls.push("stop");
+                }) as never,
+            }),
+          ),
+        ),
+      );
+
+      expect(calls).toEqual(["export", "stop"]);
+      const missing = dispatched.find((command) => command.type === "sandbox.reconcile.result");
+      if (missing?.type !== "sandbox.reconcile.result")
+        throw new Error("expected a reconcile result command");
+      // The artifact the drain just wrote, not the one the thread carried into
+      // this pass -- that older bundle predates everything the export saved.
+      expect(missing.sandbox.lastExport?.artifactId).toBe(fresh.artifactId);
+      expect(missing.sandbox.lastExport?.artifactId).not.toBe(stale.artifactId);
+      expect(missing.sandbox.lastExport?.headCommit).toBe(fresh.commit);
+      // ...and the rest of the reconcile result is unchanged: the thread is
+      // still failed, so it is free to re-provision from that fresh export.
+      expect(missing.disposition).toBe("missing");
+      expect(missing.sandbox.lifecycle).toBe("failed");
     }),
   );
 

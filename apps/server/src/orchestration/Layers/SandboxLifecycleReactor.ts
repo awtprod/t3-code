@@ -746,17 +746,30 @@ export const make = Effect.gen(function* () {
       // outcome this exists to prevent -- but it is reported rather than
       // swallowed, because it means the thread is about to re-provision from
       // its previous export or from the base commit.
+
+      /**
+       * Threads whose work this pass exported.
+       *
+       * Their projected sandbox now carries a `lastExport` written by the
+       * export's own command -- something `snapshot`, read at the top of this
+       * function and therefore from before the export, cannot know about.
+       */
+      const drainedThreadIds = new Set<string>();
       for (const threadId of result.value.unresumableThreadIds ?? []) {
         const thread = snapshot.threads.find((item) => item.id === threadId);
         if (thread?.sandbox == null) continue;
-        yield* exportBranch(thread.id).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning(
-              "could not export an unresumable sandbox before stopping it; its uncommitted work is lost",
-              { threadId: thread.id, cause: Cause.pretty(cause) },
+        if (
+          yield* exportBranch(thread.id).pipe(
+            Effect.as(true),
+            Effect.catchCause((cause) =>
+              Effect.logWarning(
+                "could not export an unresumable sandbox before stopping it; its uncommitted work is lost",
+                { threadId: thread.id, cause: Cause.pretty(cause) },
+              ).pipe(Effect.as(false)),
             ),
-          ),
-        );
+          )
+        )
+          drainedThreadIds.add(thread.id);
         yield* runtimes
           .stop(
             runtime,
@@ -775,6 +788,19 @@ export const make = Effect.gen(function* () {
       for (const threadId of result.value.missingThreadIds) {
         const thread = snapshot.threads.find((item) => item.id === threadId);
         if (!thread?.sandbox) continue;
+        // The command below REPLACES the whole sandbox value, so it must be
+        // built on the CURRENT projection, not on the pre-export `snapshot`.
+        // A thread the drain above exported has a fresh `lastExport` that
+        // `snapshot` predates: publishing the stale copy erased the pointer to
+        // that export moments after the container and its volume were already
+        // destroyed, and the next provision then seeded from the project's base
+        // commit instead of the user's exported work. Re-read for exactly the
+        // threads that exported; a deleted thread is invisible to the detail
+        // query, and its recorded sandbox is the only copy there is.
+        const sandbox = drainedThreadIds.has(threadId)
+          ? ((yield* getThread(thread.id).pipe(Effect.orElseSucceed(() => undefined)))?.sandbox ??
+            thread.sandbox)
+          : thread.sandbox;
         const createdAt = yield* nowIso;
         yield* engine
           .dispatch({
@@ -783,7 +809,7 @@ export const make = Effect.gen(function* () {
             threadId: thread.id,
             disposition: "missing",
             sandbox: {
-              ...thread.sandbox,
+              ...sandbox,
               lifecycle: "failed",
               failure: {
                 stage: "reconcile",
