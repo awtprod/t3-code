@@ -3,6 +3,7 @@ import {
   EventId,
   GitCommandError,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationCommand,
@@ -24,6 +25,10 @@ import * as Crypto from "effect/Crypto";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderSessionDirectory,
+  type ProviderRuntimeBinding,
+} from "../../provider/Services/ProviderSessionDirectory.ts";
 import { T3ProjectFileLoader } from "../../project/T3ProjectFileLoader.ts";
 import { SandboxManagerError, SandboxRuntimeManager } from "../../sandbox/SandboxRuntimeManager.ts";
 import type { SandboxRuntimeManagerShape } from "../../sandbox/SandboxRuntimeManager.ts";
@@ -96,6 +101,35 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/**
+ * A provider session directory holding one thread's binding in memory.
+ *
+ * Every provisioning path now reconciles the thread's resume cursor against
+ * what the provision did to the provider's conversation store, so the reactor
+ * needs a real directory to read and write -- and the tests below need to see
+ * which way it went.
+ */
+const sessionDirectory = (initial?: { readonly resumeCursor: unknown }) => {
+  const bindings = new Map<string, ProviderRuntimeBinding>();
+  if (initial !== undefined)
+    bindings.set(threadId, {
+      threadId,
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      resumeCursor: initial.resumeCursor,
+    });
+  return {
+    bindings,
+    layer: Layer.mock(ProviderSessionDirectory)({
+      getBinding: (id: ThreadId) => Effect.succeed(Option.fromNullishOr(bindings.get(id))),
+      upsert: (binding: ProviderRuntimeBinding) =>
+        Effect.sync(() => {
+          bindings.set(binding.threadId, binding);
+        }),
+    }),
+  };
+};
+
 it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
   it.effect("resolves immutable provenance and invokes the sandbox runtime", () =>
     Effect.gen(function* () {
@@ -128,6 +162,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, {
             load: () =>
@@ -228,6 +263,150 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
     }),
   );
 
+  for (const [providerStore, expectation] of [
+    // Nothing was lost: the same container and provider home are still there,
+    // so the cursor still names a real conversation.
+    ["preserved", "kept"],
+    // A fresh container, but the archive really extracted into its provider
+    // home -- the whole point of archiving the store.
+    ["restored", "kept"],
+    // A fresh container whose provider home came up empty. A cursor kept here
+    // fails every following turn with "No conversation found with session ID".
+    ["unavailable", "cleared"],
+  ] as const) {
+    it.effect(
+      `${expectation === "kept" ? "keeps" : "clears"} the resume cursor when a manual provision reports the store ${providerStore}`,
+      () =>
+        Effect.gen(function* () {
+          // This path used to ignore the store outcome entirely and keep a
+          // stale cursor, while the provider reactor cleared one whenever the
+          // store was not RESTORED -- discarding a valid cursor on every
+          // re-attach to a surviving container. Both now route through the one
+          // shared helper.
+          vi.stubEnv("T3_SANDBOX_PREVIEW_PROXY_IMAGE", `preview@sha256:${"e".repeat(64)}`);
+          const cursor = { resume: "an-existing-conversation" };
+          const directory = sessionDirectory({ resumeCursor: cursor });
+          const provisioned = yield* Deferred.make<void>();
+          const events = yield* PubSub.unbounded<OrchestrationEvent>();
+          const dispatched: OrchestrationCommand[] = [];
+          const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+            Layer.provide(NodeServices.layer),
+            Layer.provide(
+              Layer.mock(GitWorkflowService)({
+                localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+                resolveRemoteTrackingCommit: () =>
+                  Effect.succeed({
+                    commitSha: "0123456789abcdef0123456789abcdef01234567",
+                    remoteRefName: "origin/main",
+                  }),
+              }),
+            ),
+            Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+            Layer.provide(directory.layer),
+            Layer.provide(
+              Layer.succeed(T3ProjectFileLoader, {
+                load: () =>
+                  Effect.succeed(
+                    Option.some({
+                      sandbox: {
+                        image: `registry.example/t3-desktop@sha256:${"a".repeat(64)}`,
+                      },
+                    } as never),
+                  ),
+              }),
+            ),
+            Layer.provide(
+              Layer.succeed(SandboxRuntimeManager, {
+                sweepExpiredArtifacts: () => Effect.succeed(0),
+                provision: () =>
+                  Deferred.succeed(provisioned, undefined).pipe(
+                    Effect.as({
+                      sandboxId: "sandbox-manual",
+                      runtime: "podman" as const,
+                      containerName: "t3-thread-manual",
+                      services: [],
+                      providerStore,
+                    }),
+                  ),
+                reconcile: () =>
+                  Effect.succeed({
+                    activeThreadIds: [],
+                    missingThreadIds: [],
+                    orphanThreadIds: [],
+                  }),
+              } as never),
+            ),
+            Layer.provide(
+              Layer.mock(ProjectionSnapshotQuery)({
+                getSnapshot: () => Effect.succeed(snapshot),
+                getThreadDetailById: (id) =>
+                  Effect.succeed(
+                    id === threadId ? Option.some(snapshot.threads[0]!) : Option.none(),
+                  ),
+              }),
+            ),
+            Layer.provide(
+              Layer.mock(OrchestrationEngineService)({
+                dispatch: (command) =>
+                  Effect.gen(function* () {
+                    dispatched.push(command);
+                    if (command.type === "sandbox.provision")
+                      yield* PubSub.publish(events, {
+                        ...request,
+                        sequence: 2,
+                        eventId: EventId.make(`manual-provisioning-${providerStore}`),
+                        commandId: command.commandId,
+                        type: "sandbox.provisioning-started",
+                        payload: {
+                          threadId,
+                          event: {
+                            type: "sandbox.provisioning-started",
+                            threadId,
+                            occurredAt: NOW,
+                          },
+                          sandbox: {
+                            lifecycle: "provisioning",
+                            runtime: "podman",
+                            branch: command.branch!,
+                            limits: {
+                              cpuCount: 2,
+                              memoryBytes: 4_294_967_296,
+                              diskBytes: 21_474_836_480,
+                              processCount: 512,
+                              idleTimeoutSeconds: 3600,
+                              maximumLifetimeSeconds: 28_800,
+                            },
+                            desktop: { status: "unavailable" },
+                            services: [],
+                            controller: { kind: "none" },
+                            createdAt: NOW,
+                            lastActiveAt: NOW,
+                          },
+                        },
+                      });
+                    return { sequence: dispatched.length };
+                  }),
+                streamDomainEvents: Stream.concat(Stream.make(request), Stream.fromPubSub(events)),
+              }),
+            ),
+          );
+
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const reactor = yield* SandboxLifecycleReactor;
+              yield* reactor.start();
+              yield* Deferred.await(provisioned);
+              yield* reactor.drain;
+            }).pipe(Effect.provide(layer)),
+          );
+
+          expect(directory.bindings.get(threadId)?.resumeCursor).toEqual(
+            expectation === "kept" ? cursor : null,
+          );
+        }),
+    );
+  }
+
   it.effect(
     "disables sandboxing and notifies the thread instead of failing when no image is configured",
     () =>
@@ -248,6 +427,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
             }),
           ),
           Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+          Layer.provide(sessionDirectory().layer),
           Layer.provide(
             Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
           ),
@@ -340,6 +520,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
         ),
@@ -442,6 +623,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
         ),
@@ -542,6 +724,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
         ),
@@ -636,6 +819,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, {
             load: () =>
@@ -746,6 +930,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
         ),
@@ -842,6 +1027,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
             }),
           ),
           Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+          Layer.provide(sessionDirectory().layer),
           Layer.provide(
             Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
           ),
@@ -968,6 +1154,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, {
             load: () =>

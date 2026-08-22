@@ -4,7 +4,7 @@ const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const COMMIT = /^[0-9a-f]{40,64}$/i;
 const SAFE_ABSOLUTE_PATH = /^\/(?:[a-zA-Z0-9._-]+\/?)+$/;
 const SAFE_ENV_KEY = /^[A-Z_][A-Z0-9_]*$/;
-const SAFE_BRANCH = /^(?![-/.])(?!.*(?:\.\.|\/\/|@\{|[~^:?*\[\u005c]))[a-zA-Z0-9._/-]{1,200}$/;
+const SAFE_BRANCH = /^(?![-/.])(?!.*(?:\.\.|\/\/|@\{|[~^:?*[\u005c]))[a-zA-Z0-9._/-]{1,200}$/;
 const FORBIDDEN_TARGETS = ["/", "/home", "/root", "/run", "/tmp", "/etc", "/usr", "/var/run"];
 
 export class SandboxValidationError extends Error {

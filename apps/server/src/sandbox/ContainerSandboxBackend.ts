@@ -196,15 +196,22 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       if (!matches) {
         throw new SandboxRuntimeError(`existing sandbox name collision for thread ${threadId}`);
       }
-      const existing = makeReady(
-        this.runtime,
-        containerName,
-        networkName,
-        workspaceVolumeName,
-        desktopVolumeName,
-        input,
-        limits,
-      );
+      // The container -- and with it the provider home holding the
+      // conversation -- is exactly where the last generation left it. Nothing
+      // was restored because nothing was lost, so a persisted resume cursor
+      // still names a real conversation and must be kept.
+      const existing = {
+        ...makeReady(
+          this.runtime,
+          containerName,
+          networkName,
+          workspaceVolumeName,
+          desktopVolumeName,
+          input,
+          limits,
+        ),
+        providerStore: "preserved" as const,
+      };
       this.#records.set(threadId, { ready: existing, teardownTimeoutMs });
       return existing;
     }
@@ -449,8 +456,8 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         // silent: the caller decides whether to keep the thread's provider
         // resume cursor, and a cursor kept against a container whose store
         // never arrived makes every turn fail to resume. Hence
-        // `providerStoreRestored` on the result, reporting what actually
-        // happened rather than what was attempted.
+        // `providerStore` on the result, reporting what actually happened
+        // rather than what was attempted.
         const containerArchive = "/tmp/t3-provider-store.tar";
         try {
           await this.#mustRun(
@@ -647,7 +654,10 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         input,
         limits,
       ),
-      providerStoreRestored,
+      // A brand-new container: the conversation is in it only if the archive
+      // actually extracted. Anything else leaves the provider home empty, and
+      // a cursor kept against it fails every following turn to resume.
+      providerStore: providerStoreRestored ? ("restored" as const) : ("unavailable" as const),
     };
     this.#records.set(threadId, { ready, teardownTimeoutMs });
     return ready;

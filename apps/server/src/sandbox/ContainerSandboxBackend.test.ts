@@ -237,6 +237,65 @@ describe("ContainerSandboxBackend", () => {
     expect(ready.containerName).toContain("t3-thread-");
   });
 
+  it("reports the provider store disposition for each of the three provisioning outcomes", async () => {
+    // A boolean could not say this. "Not restored" conflated a fresh container
+    // whose archive never arrived with a container that SURVIVED and never
+    // needed restoring -- and the caller, deciding whether to keep the thread's
+    // provider resume cursor, threw away a perfectly valid cursor on every
+    // re-attach.
+    const withStore = input({
+      bootstrap: { ...input().bootstrap, providerStorePath: "/artifacts/thread-1.store.tar" },
+    });
+
+    const restored = await new ContainerSandboxBackend("docker", successfulExecutor()).ensureReady(
+      withStore,
+    );
+    expect(restored.providerStore).toBe("restored");
+
+    // The archive is supplied but never lands: the provider home comes up
+    // empty, exactly as for a thread with no prior export.
+    const failedExtract = await new ContainerSandboxBackend(
+      "docker",
+      successfulExecutor((command) =>
+        command.args[0] === "exec" && command.args.includes("--extract")
+          ? { exitCode: 1, stdout: "", stderr: "corrupt archive" }
+          : undefined,
+      ),
+    ).ensureReady(withStore);
+    expect(failedExtract.providerStore).toBe("unavailable");
+
+    // No store to carry across at all.
+    const noStore = await new ContainerSandboxBackend("docker", successfulExecutor()).ensureReady(
+      input(),
+    );
+    expect(noStore.providerStore).toBe("unavailable");
+
+    // A container that is already there, with its provider home intact: the
+    // conversation is where it was left, so nothing needed restoring.
+    const survivor = await new ContainerSandboxBackend(
+      "docker",
+      successfulExecutor((command) =>
+        command.args[0] === "inspect"
+          ? {
+              exitCode: 0,
+              stdout: [
+                "thread-1",
+                "project-1",
+                "true",
+                input().image,
+                "a".repeat(40),
+                "thread/thread-1",
+                "workspace",
+                "true",
+              ].join("\t"),
+              stderr: "",
+            }
+          : undefined,
+      ),
+    ).ensureReady(input());
+    expect(survivor.providerStore).toBe("preserved");
+  });
+
   it("coalesces concurrent provisioning and is idempotent once ready", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);

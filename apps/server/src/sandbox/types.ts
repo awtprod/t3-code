@@ -120,21 +120,36 @@ export type SandboxReady = {
   readonly branchName: string;
   readonly limits: SandboxResourceLimits;
   /**
-   * Whether the previously exported provider conversation store was actually
-   * unpacked into this container.
+   * What this provision did to the provider's conversation store, and thus
+   * whether the thread's persisted resume cursor still names something real.
    *
-   * `false` whenever no store was carried across AND whenever one was supplied
-   * but failed to copy or extract -- the extraction is best-effort and never
-   * fails the provision. A caller deciding whether to keep the thread's
-   * provider resume cursor has to read this rather than the recorded
-   * `storeSha256`: the artifact may have been swept, or the extraction may have
-   * failed silently, and a cursor kept against a container with no conversation
-   * in it makes every following turn fail to resume.
+   * A boolean could not express this. "Not restored" conflated the two cases
+   * that matter most: a container that SURVIVED (nothing needed restoring, and
+   * the conversation is exactly where the cursor left it) reported the same
+   * `false` as a fresh container whose archive never arrived -- so a valid
+   * cursor was thrown away on every re-attach.
    *
    * Absent from a record rebuilt by adoption, which provisioned nothing.
    */
-  readonly providerStoreRestored?: boolean;
+  readonly providerStore?: SandboxProviderStoreDisposition;
 };
+
+/**
+ * - `preserved` -- the same container and provider home are still there;
+ *   nothing was restored because nothing had been lost.
+ * - `restored` -- a fresh container, and the exported archive really was
+ *   extracted into its provider home.
+ * - `unavailable` -- a fresh container with no prior conversation in it: no
+ *   store was carried across, or one was supplied and failed to copy or
+ *   extract (which is best-effort and never fails the provision).
+ *
+ * A caller deciding whether to keep the thread's provider resume cursor reads
+ * this rather than the recorded `storeSha256`: the artifact may have been
+ * swept, or the extraction may have failed silently, and a cursor kept against
+ * a container with no conversation in it makes every following turn fail to
+ * resume.
+ */
+export type SandboxProviderStoreDisposition = "preserved" | "restored" | "unavailable";
 
 export type SandboxExecInput = {
   readonly executable: string;

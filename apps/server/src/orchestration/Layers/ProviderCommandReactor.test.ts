@@ -173,6 +173,13 @@ describe("ProviderCommandReactor", () => {
       ProviderAdapterRequestError | ProviderAdapterValidationError
     >;
     readonly sandboxImages?: "both" | "image-only" | "none";
+    /**
+     * Force the disposition the provision reports for the provider's
+     * conversation store. Defaults to the fresh-container behaviour derived
+     * from the restore below; `"preserved"` models the surviving container the
+     * backend re-attaches to instead of building a new one.
+     */
+    readonly providerStore?: "preserved" | "restored" | "unavailable";
   }) {
     const sandboxImages = input?.sandboxImages ?? "both";
     vi.stubEnv(
@@ -215,9 +222,15 @@ describe("ProviderCommandReactor", () => {
           desktopSessionId: `desktop-${request.bootstrap.threadId}`,
           desktopStreamPath: `/desktop/${request.bootstrap.threadId}`,
           services: [],
-          // Mirrors the backend: the store only comes back when the export
-          // recorded one AND the archive extracted into the new container.
-          providerStoreRestored: request.restore?.storeSha256 !== undefined,
+          // Mirrors the backend's fresh-container arms: the conversation is in
+          // the new container only when the export recorded a store AND the
+          // archive extracted. (`preserved` is the surviving-container arm and
+          // never reaches this stub, which always builds a new generation.)
+          providerStore:
+            input?.providerStore ??
+            (request.restore?.storeSha256 === undefined
+              ? ("unavailable" as const)
+              : ("restored" as const)),
         }),
     );
     const startSession = vi.fn((_: unknown, input: unknown, _executionTarget?: unknown) => {
@@ -939,6 +952,87 @@ describe("ProviderCommandReactor", () => {
     expect(harness.provisionSandbox.mock.calls.at(-1)?.[0]?.restore?.storeSha256).toBe(
       "d".repeat(64),
     );
+  });
+
+  it("keeps the resume cursor when the container survived and nothing needed restoring", async () => {
+    // The regression this covers: the reactor cleared the cursor whenever the
+    // provision had not RESTORED a store -- which is also true of a container
+    // that was still there and never lost its provider home. A perfectly valid
+    // cursor was discarded on every re-attach, and the thread lost its
+    // conversation for no reason at all.
+    const harness = await createHarness({ providerStore: "preserved" });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const resumeCursor = { resume: "still-live-session-id" };
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-reattach"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-before-reattach"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.stop",
+        commandId: CommandId.make("cmd-sandbox-stop-reattach"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.stop.complete",
+        commandId: CommandId.make("cmd-sandbox-stopped-reattach"),
+        threadId,
+        expired: false,
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.providerSessionDirectory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        resumeCursor,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-reattach"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-after-reattach"),
+          role: "user",
+          text: "back again",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.provisionSandbox.mock.calls.length === 2);
+    const binding = await harness.runEffect(harness.providerSessionDirectory.getBinding(threadId));
+    // No store was recorded by the export, so the old boolean would have
+    // cleared this -- the container never lost the conversation.
+    expect(harness.provisionSandbox.mock.calls.at(-1)?.[0]?.restore).toBeUndefined();
+    expect(Option.getOrUndefined(binding)?.resumeCursor).toEqual(resumeCursor);
   });
 
   it("never serves a cached execution target that names a torn-down container", async () => {

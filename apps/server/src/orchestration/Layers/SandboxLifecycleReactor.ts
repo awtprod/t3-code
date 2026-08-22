@@ -20,6 +20,7 @@ import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import {
   SandboxManagerError,
@@ -29,6 +30,7 @@ import {
   resolveSandboxRuntime,
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import type { SandboxAdoptionHint } from "../../sandbox/types.ts";
+import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -63,6 +65,7 @@ export const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery;
   const providers = yield* ProviderService;
+  const providerSessions = yield* ProviderSessionDirectory;
   const runtimes = yield* SandboxRuntimeManager;
   const projectFiles = yield* T3ProjectFileLoader;
   const gitWorkflow = yield* GitWorkflowService;
@@ -306,6 +309,12 @@ export const make = Effect.gen(function* () {
         ...(declaration?.services ? { services: declaration.services } : {}),
         ...(declaration?.previewPorts ? { previewPorts: declaration.previewPorts } : {}),
       });
+      // Same shared decision every other provisioning entry point makes: a
+      // container whose provider home came up without the archived
+      // conversation must not keep a cursor naming it, or every following turn
+      // dies on "No conversation found with session ID". This path used to
+      // ignore the outcome entirely and keep a stale cursor.
+      yield* reconcileProviderStoreCursor(providerSessions, thread.id, provision.providerStore);
       yield* engine.dispatch({
         type: "sandbox.provision.ready",
         commandId: yield* commandId("sandbox-manual-ready"),
@@ -498,6 +507,11 @@ export const make = Effect.gen(function* () {
         ...(declaration?.services ? { services: declaration.services } : {}),
         ...(declaration?.previewPorts ? { previewPorts: declaration.previewPorts } : {}),
       });
+      yield* reconcileProviderStoreCursor(
+        providerSessions,
+        event.payload.childThreadId,
+        provision.providerStore,
+      );
       yield* engine.dispatch({
         type: "sandbox.provision.ready",
         commandId: yield* commandId("sandbox-worker-ready"),

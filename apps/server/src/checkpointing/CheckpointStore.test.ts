@@ -314,7 +314,7 @@ describe("sandbox checkpoint boundary", () => {
         .filter((value) => value.includes("t3-checkpoint-index-"));
       expect(indexPaths.length).toBeGreaterThan(0);
       expect(
-        indexPaths.every((value) => /^\/workspace\/repo\/\.git\/t3-checkpoint-index-/.test(value)),
+        indexPaths.every((value) => value.startsWith("/workspace/repo/.git/t3-checkpoint-index-")),
       ).toBe(true);
       expect(calls.map((call) => call.input.args?.[0])).toEqual([
         "rev-parse",

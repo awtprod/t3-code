@@ -43,7 +43,6 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
-import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -79,6 +78,8 @@ import {
   resolveSandboxPreviewProxyImage,
   resolveSandboxRuntime,
 } from "../../sandbox/SandboxRuntimeManager.ts";
+import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
+import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import {
   T3ProjectFileLoader,
   layer as T3ProjectFileLoaderLive,
@@ -356,9 +357,9 @@ export const make = Effect.gen(function* () {
   const providerTurnSendClaimRepository = yield* ProviderTurnSendClaimRepository;
   const providerService = yield* ProviderService;
   const threadSandboxRuntime = yield* ThreadSandboxRuntime;
+  const providerSessionDirectory = yield* ProviderSessionDirectory;
   const sandboxRuntimeManager = yield* SandboxRuntimeManager;
   const projectFileLoader = yield* T3ProjectFileLoader;
-  const providerSessionDirectory = yield* ProviderSessionDirectory;
   // Both maps hold one tiny per-thread entry (a mutex; a target descriptor)
   // and are bounded by the number of sandbox threads this server generation
   // ever provisioned, so neither needs an eviction scheme for memory. What the
@@ -380,28 +381,6 @@ export const make = Effect.gen(function* () {
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
-  /**
-   * Forget the provider resume cursor persisted for a thread that is about to
-   * get a container it has never run in.
-   *
-   * Best-effort on purpose: if the cursor cannot be cleared the next turn
-   * fails exactly the way it does today, so a persistence hiccup here should
-   * not also fail the turn that was about to repair the thread.
-   */
-  const clearSandboxResumeCursor = (threadId: ThreadId) =>
-    Effect.gen(function* () {
-      const binding = Option.getOrUndefined(yield* providerSessionDirectory.getBinding(threadId));
-      if (binding === undefined || binding.resumeCursor == null) return;
-      yield* providerSessionDirectory.upsert({ ...binding, resumeCursor: null });
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning(
-          "provider command reactor failed to clear the resume cursor before provisioning a sandbox",
-          { threadId, cause },
-        ),
-      ),
-    );
-
   const ensureExecutionTarget = Effect.fn("ProviderCommandReactor.ensureExecutionTarget")(
     function* (
       thread: Parameters<typeof threadSandboxRuntime.ensureReady>[0],
@@ -545,7 +524,7 @@ export const make = Effect.gen(function* () {
             // manager honours `T3_SANDBOX_RUNTIME` -- so a podman deployment's
             // projection claimed docker for the whole provisioning window, and
             // a stop or delete landing in it addressed the wrong backend.
-            config: { ...(thread.sandboxConfig ?? {}), runtime },
+            config: { ...thread.sandboxConfig, runtime },
             ...(thread.sandbox === null ? { branch } : {}),
             // This reactor calls `runtimes.provision` immediately below, so it
             // takes the decider's inline path rather than asking the lifecycle
@@ -566,7 +545,7 @@ export const make = Effect.gen(function* () {
                   ? { parentThreadId: branch.parentThreadId }
                   : {}),
               },
-              config: { ...(thread.sandboxConfig ?? {}), runtime },
+              config: { ...thread.sandboxConfig, runtime },
               image,
               // Re-provisioning a settled or reaped thread: seed from the
               // bundle its teardown exported so the user comes back to their
@@ -613,10 +592,15 @@ export const make = Effect.gen(function* () {
                 }),
               ),
             );
-          // The provision knows whether the archived conversation is really in
-          // the new container. Keep the cursor only then; otherwise forget it
-          // so the next turn starts a fresh conversation cleanly.
-          if (provision.providerStoreRestored !== true) yield* clearSandboxResumeCursor(thread.id);
+          // The provision reports what it did to the conversation store --
+          // preserved it, restored it, or came up without it. The shared
+          // helper is what keeps this decision identical across every
+          // provisioning entry point.
+          yield* reconcileProviderStoreCursor(
+            providerSessionDirectory,
+            thread.id,
+            provision.providerStore,
+          );
           const readyAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
           yield* orchestrationEngine.dispatch({
             type: "sandbox.provision.ready",

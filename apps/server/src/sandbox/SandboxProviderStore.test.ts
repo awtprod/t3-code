@@ -200,7 +200,7 @@ describe("provider conversation store artifacts", () => {
       );
 
       expect(storePushed(executor)).toBeDefined();
-      expect(provisioned.providerStoreRestored).toBe(true);
+      expect(provisioned.providerStore).toBe("restored");
     }),
   );
 
@@ -237,7 +237,7 @@ describe("provider conversation store artifacts", () => {
       // The thread still comes back -- losing the conversation must not cost
       // the user their branch.
       expect(provisioned.containerName).toBeDefined();
-      expect(provisioned.providerStoreRestored).toBe(false);
+      expect(provisioned.providerStore).toBe("unavailable");
     }),
   );
 
@@ -246,7 +246,7 @@ describe("provider conversation store artifacts", () => {
       headless();
       const manager = makeSandboxRuntimeManager(makeRoot(), "linux", new FakeExecutor());
       const provisioned = yield* manager.provision(provisionInput());
-      expect(provisioned.providerStoreRestored).toBe(false);
+      expect(provisioned.providerStore).toBe("unavailable");
     }),
   );
 
