@@ -208,6 +208,10 @@ describe("ProviderCommandReactor", () => {
     // container, so a test asserting the fresh name can prove a stale cached
     // target (naming the destroyed generation) was not served.
     let provisionGeneration = 0;
+    // The manager's attempt tokens, minted from one counter across threads
+    // exactly as the real one does.
+    let provisionAttempts = 0;
+    const stopSandboxAttempt = vi.fn(() => Effect.void);
     const provisionSandbox = vi.fn(
       (request: Parameters<SandboxRuntimeManagerShape["provision"]>[0]) =>
         Effect.succeed({
@@ -231,6 +235,9 @@ describe("ProviderCommandReactor", () => {
             (request.restore?.storeSha256 === undefined
               ? ("unavailable" as const)
               : ("restored" as const)),
+          // Echoed back as the real manager does, so the reactor's readiness
+          // teardown names the attempt this provision ran under.
+          attempt: request.attempt,
         }),
     );
     const startSession = vi.fn((_: unknown, input: unknown, _executionTarget?: unknown) => {
@@ -500,6 +507,7 @@ describe("ProviderCommandReactor", () => {
               bundleSha256: "c".repeat(64),
             }),
           stop: () => Effect.void,
+          stopProvisionAttempt: stopSandboxAttempt,
           reconcile: () =>
             Effect.succeed({
               activeThreadIds: [],
@@ -511,7 +519,8 @@ describe("ProviderCommandReactor", () => {
             Effect.succeed({ cpuPercent: 0, memoryBytes: 0, diskBytes: 0, processCount: 0 }),
           recoverPreview: () => Effect.succeed(false),
           revokeCredentials: () => Effect.succeed(0),
-          authorizeProvision: () => Effect.void,
+          authorizeProvision: (threadId) =>
+            Effect.succeed({ threadId, generation: ++provisionAttempts }),
           removeThreadArtifacts: () => Effect.void,
           sweepExpiredArtifacts: () => Effect.succeed(0),
         } satisfies SandboxRuntimeManagerShape),

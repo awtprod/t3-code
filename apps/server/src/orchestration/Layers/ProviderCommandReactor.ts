@@ -535,10 +535,13 @@ export const make = Effect.gen(function* () {
           });
           // The decider accepted the `sandbox.provision` above, which is what
           // distinguishes this provision from a stale one a deletion already
-          // stopped, and readmits the thread past the manager's stop tombstone.
-          yield* sandboxRuntimeManager.authorizeProvision(thread.id);
+          // stopped. The token identifies this attempt for admission below and
+          // for the teardown that follows a refused readiness, so neither can
+          // act on a container a newer attempt owns.
+          const attempt = yield* sandboxRuntimeManager.authorizeProvision(thread.id);
           const provision = yield* sandboxRuntimeManager
             .provision({
+              attempt,
               bootstrap: {
                 threadId: thread.id,
                 projectId: thread.projectId,
@@ -627,7 +630,10 @@ export const make = Effect.gen(function* () {
                 : { desktopStreamPath: provision.desktopStreamPath }),
               createdAt: readyAt,
             }),
-            teardown: () => sandboxRuntimeManager.stop(runtime, thread.id),
+            // Scoped to the attempt rather than the thread: a stop is what
+            // refuses this readiness, and the re-provision that follows it can
+            // already have published a container of its own.
+            teardown: () => sandboxRuntimeManager.stopProvisionAttempt(runtime, provision.attempt),
           }).pipe(
             Effect.mapError(
               (cause) =>

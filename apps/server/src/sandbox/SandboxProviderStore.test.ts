@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
 import { makeSandboxRuntimeManager } from "./SandboxRuntimeManager.ts";
+import { provisionAuthorized } from "./testUtils/authorizedProvision.ts";
 import type {
   SandboxCommand,
   SandboxCommandExecutor,
@@ -142,7 +143,7 @@ describe("provider conversation store artifacts", () => {
       const root = makeRoot();
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
-      yield* manager.provision(provisionInput());
+      yield* provisionAuthorized(manager, provisionInput());
 
       const exported = yield* manager.exportBranch("docker", THREAD_ID);
 
@@ -180,7 +181,7 @@ describe("provider conversation store artifacts", () => {
       const root = makeRoot();
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
-      yield* manager.provision(provisionInput());
+      yield* provisionAuthorized(manager, provisionInput());
 
       const exported = yield* manager.exportBranch("docker", THREAD_ID);
 
@@ -203,7 +204,8 @@ describe("provider conversation store artifacts", () => {
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
 
-      const provisioned = yield* manager.provision(
+      const provisioned = yield* provisionAuthorized(
+        manager,
         provisionInput({
           restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
         }),
@@ -238,7 +240,8 @@ describe("provider conversation store artifacts", () => {
       const executor = new FailingStoreCopyExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
 
-      const provisioned = yield* manager.provision(
+      const provisioned = yield* provisionAuthorized(
+        manager,
         provisionInput({
           restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
         }),
@@ -255,7 +258,7 @@ describe("provider conversation store artifacts", () => {
     Effect.gen(function* () {
       headless();
       const manager = makeSandboxRuntimeManager(makeRoot(), "linux", new FakeExecutor());
-      const provisioned = yield* manager.provision(provisionInput());
+      const provisioned = yield* provisionAuthorized(manager, provisionInput());
       expect(provisioned.providerStore).toBe("unavailable");
     }),
   );
@@ -271,7 +274,8 @@ describe("provider conversation store artifacts", () => {
 
       // A store that does not match its digest is dropped rather than trusted:
       // the thread still comes back, the provider just starts cold.
-      yield* manager.provision(
+      yield* provisionAuthorized(
+        manager,
         provisionInput({
           restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
         }),
@@ -290,7 +294,8 @@ describe("provider conversation store artifacts", () => {
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
 
-      yield* manager.provision(
+      yield* provisionAuthorized(
+        manager,
         provisionInput({
           restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
         }),
@@ -310,7 +315,7 @@ describe("provider conversation store artifacts", () => {
 
       // `storeSha256` is optional precisely so exports written before stores
       // existed keep restoring their branch normally.
-      yield* manager.provision(provisionInput({ restore: restore() }));
+      yield* provisionAuthorized(manager, provisionInput({ restore: restore() }));
 
       expect(storePushed(executor)).toBeUndefined();
       expect(
@@ -354,7 +359,7 @@ describe("provider conversation store artifacts", () => {
       const root = makeRoot();
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
-      yield* manager.provision(provisionInput());
+      yield* provisionAuthorized(manager, provisionInput());
 
       // The deletion is issued while the export is mid-flight, and both are
       // allowed to run to completion.
@@ -383,7 +388,7 @@ describe("provider conversation store artifacts", () => {
       const root = makeRoot();
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
-      yield* manager.provision(provisionInput());
+      yield* provisionAuthorized(manager, provisionInput());
 
       yield* manager.removeThreadArtifacts(THREAD_ID);
       yield* manager.exportBranch("docker", THREAD_ID);
@@ -423,7 +428,7 @@ describe("provider conversation store artifacts", () => {
           }
         }
         const manager = makeSandboxRuntimeManager(root, "linux", new ParkingExecutor());
-        yield* manager.provision(provisionInput());
+        yield* provisionAuthorized(manager, provisionInput());
         yield* manager.removeThreadArtifacts(THREAD_ID);
 
         const exporting = yield* manager

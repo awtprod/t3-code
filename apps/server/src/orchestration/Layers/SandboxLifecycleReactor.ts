@@ -296,10 +296,12 @@ export const make = Effect.gen(function* () {
       });
       // The decider just accepted the `sandbox.provision` above, so this
       // provision is the current one rather than a stale fiber a deletion has
-      // already stopped -- which is exactly what readmits the thread past the
-      // manager's stop tombstone.
-      yield* runtimes.authorizeProvision(thread.id);
+      // already stopped. The token identifies THIS attempt: it admits the
+      // provision below, and it is what the teardown after a refused readiness
+      // names, so neither can act on a container a newer attempt owns.
+      const attempt = yield* runtimes.authorizeProvision(thread.id);
       const provision = yield* runtimes.provision({
+        attempt,
         bootstrap: {
           threadId: thread.id,
           projectId: thread.projectId,
@@ -349,10 +351,14 @@ export const make = Effect.gen(function* () {
         // `microvm` is a contract runtime with no backend behind it; the
         // manager only ever returns docker or podman, and asking it to stop a
         // runtime it cannot address would be a type error, not a teardown.
+        //
+        // Scoped to the attempt, not the thread: a stop is what refuses this
+        // readiness, and the re-provision that follows it can already have
+        // published a container of its own by the time this runs.
         teardown: () =>
           provision.runtime === "microvm"
             ? Effect.void
-            : runtimes.stop(provision.runtime, thread.id),
+            : runtimes.stopProvisionAttempt(provision.runtime, provision.attempt),
       });
       const readyThread = yield* getThread(thread.id);
       if (readyThread?.sandbox) {
@@ -509,9 +515,11 @@ export const make = Effect.gen(function* () {
         createdAt,
       });
       // Same contract as the manual path: the worker's `sandbox.provision` was
-      // accepted a few lines up, so this provision is not a stale one.
-      yield* runtimes.authorizeProvision(event.payload.childThreadId);
+      // accepted a few lines up, so this provision is not a stale one, and the
+      // token it gets back identifies this attempt to everything below.
+      const attempt = yield* runtimes.authorizeProvision(event.payload.childThreadId);
       const provision = yield* runtimes.provision({
+        attempt,
         bootstrap: {
           threadId: event.payload.childThreadId,
           projectId: parent.projectId,
@@ -561,10 +569,12 @@ export const make = Effect.gen(function* () {
         // `microvm` is a contract runtime with no backend behind it; the
         // manager only ever returns docker or podman, and asking it to stop a
         // runtime it cannot address would be a type error, not a teardown.
+        //
+        // Attempt-scoped for the same reason as the manual path above.
         teardown: () =>
           provision.runtime === "microvm"
             ? Effect.void
-            : runtimes.stop(provision.runtime, event.payload.childThreadId),
+            : runtimes.stopProvisionAttempt(provision.runtime, provision.attempt),
       });
       const readyChild = yield* getThread(event.payload.childThreadId);
       if (readyChild?.sandbox) {

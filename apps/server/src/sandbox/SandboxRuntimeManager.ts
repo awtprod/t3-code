@@ -142,6 +142,47 @@ export function redeemSandboxProviderEnvironment(
   return redeemed;
 }
 
+/**
+ * One thread's provision attempt: the authorization `authorizeProvision`
+ * issues, and the identity everything that attempt goes on to do is decided
+ * against.
+ *
+ * What this replaced was a per-thread BOOLEAN stop tombstone -- set by `stop`,
+ * cleared by `authorizeProvision` -- and a boolean cannot tell two attempts
+ * apart. Three separate defects were the same defect:
+ *
+ * - A stop invalidated provision A; provision B was then authorized, which
+ *   cleared the thread's one tombstone; and A -- still queued, holding no lock
+ *   because it had not reached the manager yet -- was admitted under B's
+ *   authorization and built a container for a thread nothing would ever stop
+ *   again.
+ * - Readiness was not attempt-scoped either, so A's refused
+ *   `sandbox.provision.ready` tore down the container B had just published,
+ *   leaving the projection saying `ready` over a sandbox that no longer
+ *   existed.
+ * - The tombstone set had to be capped and evicted, and the entry a queued
+ *   provision depends on is exactly the one with no lifecycle lock to spare it
+ *   from eviction -- so the cap put the first leak straight back.
+ *
+ * A per-thread authorization dissolves all three at once. Admission compares
+ * tokens instead of consulting a flag, so a stale attempt is refused however
+ * long it queued and whatever else has happened since; teardown names the
+ * attempt that owns the container, so it can only ever destroy its own; and
+ * refusing anyone who cannot present the current token means "stopped" needs
+ * no tombstone at all -- the manager holds one entry per LIVE thread, which is
+ * O(threads) and needs no cap and no eviction.
+ *
+ * `generation` is unique across the manager, not per thread: entries are
+ * dropped when a thread stops, and a per-thread counter would restart at 1 and
+ * hand a re-authorized thread a number a token still in flight already holds.
+ *
+ * Opaque to callers, who only ever pass it back.
+ */
+export type SandboxProvisionAttempt = {
+  readonly threadId: string;
+  readonly generation: number;
+};
+
 export type ManagedSandboxReady = SandboxReady & {
   /** Absent when the deployment runs headless (`T3_SANDBOX_DESKTOP=disabled`). */
   readonly desktopSessionId?: string;
@@ -150,6 +191,16 @@ export type ManagedSandboxReady = SandboxReady & {
     readonly name: string;
     readonly internalPorts: ReadonlyArray<number>;
   }>;
+  /**
+   * The attempt that built this sandbox, echoed back so the caller's readiness
+   * teardown names it rather than "whatever this thread has now".
+   *
+   * Carried on the provision result rather than through a channel of its own:
+   * the caller already passes this value from `provision` to the readiness
+   * dispatch, and a second channel would be one more thing that can disagree
+   * with it.
+   */
+  readonly attempt: SandboxProvisionAttempt;
 };
 
 export interface SandboxRuntimeManagerShape {
@@ -159,22 +210,50 @@ export interface SandboxRuntimeManagerShape {
     input: SandboxExecInput,
   ) => Effect.Effect<SandboxCommandResult, SandboxManagerError>;
   /**
-   * Clears the thread's stop tombstone, readmitting it to `provision`.
+   * Opens a provision attempt for the thread and returns the token that
+   * identifies it.
    *
    * Called once the decider has ACCEPTED a `sandbox.provision` for the thread
    * and immediately before provisioning it. The manager cannot tell a
    * legitimate re-provision of a stopped thread from a stale provision that
    * was already in flight when a deletion stopped the thread -- both arrive as
    * a bare `provision` call -- so the caller, which has just had the one
-   * authority on the lifecycle accept its command, says so.
+   * authority on the lifecycle accept its command, says so, and the token it
+   * gets back is what distinguishes ITS provision from every other one.
    *
-   * Omitting it is safe in the sense that nothing is created behind a stop; it
-   * costs the thread its next provision, which fails and is retried.
+   * The token issued here is the thread's authorization until the next
+   * `authorizeProvision` or `stop` replaces it.
    */
-  readonly authorizeProvision: (threadId: string) => Effect.Effect<void>;
+  readonly authorizeProvision: (threadId: string) => Effect.Effect<SandboxProvisionAttempt>;
+  /**
+   * `attempt` is the token `authorizeProvision` returned for this provision,
+   * and admission is decided on nothing else: a `stop` or a newer
+   * `authorizeProvision` invalidates it, and this provision is then refused no
+   * matter how long it sat queued before reaching the manager.
+   */
   readonly provision: (
-    input: SandboxProvisionInput & { services?: ReadonlyArray<ThreadServiceDeclaration> },
+    input: SandboxProvisionInput & {
+      services?: ReadonlyArray<ThreadServiceDeclaration>;
+      attempt: SandboxProvisionAttempt;
+    },
   ) => Effect.Effect<ManagedSandboxReady, SandboxManagerError>;
+  /**
+   * Tear down the sandbox an attempt published, and only that one.
+   *
+   * For the caller whose `sandbox.provision.ready` the decider refused: the
+   * containers it built have to go, but a plain `stop` would destroy whatever
+   * the thread has NOW, which after a stop and a re-provision is a newer
+   * attempt's container -- leaving the projection saying `ready` over a
+   * sandbox that no longer exists. So this runs the teardown only while the
+   * attempt is still the thread's current authorization, and does nothing
+   * otherwise: anything the attempt left behind in that case was already
+   * destroyed by the stop that superseded it, or belongs to a thread whose own
+   * teardown and reconcile pass will account for it.
+   */
+  readonly stopProvisionAttempt: (
+    runtime: "docker" | "podman",
+    attempt: SandboxProvisionAttempt,
+  ) => Effect.Effect<void, SandboxManagerError>;
   /**
    * `hint` lets export and teardown reach a sandbox this manager generation
    * never provisioned -- a server restart empties the backend's per-thread
@@ -334,9 +413,8 @@ export const makeSandboxRuntimeManager = (
         );
     });
   /**
-   * Threads whose sandbox has been stopped, so a provision that was already on
-   * its way when the stop landed refuses instead of building a container for a
-   * thread nothing will ever stop again.
+   * The provision attempt each thread is currently authorized for, and with it
+   * the identity of whatever sandbox that thread has.
    *
    * The lock above only orders operations that have already ENTERED this
    * manager, and a provision spends real time getting here: the reactor
@@ -348,39 +426,34 @@ export const makeSandboxRuntimeManager = (
    * reference to them. Ordering was never the missing piece; the provision has
    * to be TOLD that a stop went past it.
    *
-   * Same shape as the backend's `#stopping` tombstone, which a provision
-   * consults before publishing its record -- lifted to the level where the
-   * whole lifecycle is visible, and outliving the stop rather than being
-   * dropped the moment it returns, because the provision it has to stop may
-   * not have started yet.
+   * This was a per-thread boolean tombstone. It could say that a stop had gone
+   * past SOMETHING, never past WHICH provision, and `SandboxProvisionAttempt`
+   * records the three defects that followed from exactly that. Holding the
+   * thread's current authorization instead answers the question the tombstone
+   * could not, and answers it for admission and for teardown alike.
    *
-   * Cleared by `authorizeProvision`, which a caller invokes only once the
-   * decider has ACCEPTED a `sandbox.provision` for the thread -- proof from
-   * the one authority that knows the lifecycle that this provision is not the
-   * stale one. Coming back to a stopped or expired thread therefore provisions
-   * normally: its `sandbox.provision` is accepted, the tombstone is cleared,
-   * and the provision that follows sees nothing.
+   * No cap and no eviction, unlike `deletedThreadArtifacts` below. A tombstone
+   * had to be kept for every thread ever stopped, and the entry a queued
+   * provision depends on is precisely the one holding no lifecycle lock to
+   * spare it from eviction -- so bounding the set reintroduced the leak it
+   * existed to prevent. Here a thread's entry is DELETED when it stops,
+   * because refusing everyone who cannot present the current token already
+   * refuses the stale provision: the absence of an entry and a superseded
+   * entry are the same answer. What is left is one entry per live thread.
    *
-   * Bounded like `deletedThreadArtifacts` below, and for the same reason:
-   * evicting an entry a provision is still racing puts the leak straight back,
-   * so a thread with lifecycle work in flight is never a victim, and neither
-   * is the thread being tombstoned right now -- which reaches here before
-   * taking its own lock, so its lock entry cannot be relied on.
+   * `attempts` is a single counter across every thread, not one per thread:
+   * entries are deleted, and a per-thread counter restarting at 1 would hand a
+   * re-authorized thread a generation a token still in flight already holds.
    */
-  const stoppedThreadSandboxes = new Set<string>();
-  const STOPPED_SANDBOX_TOMBSTONES = 4096;
-  const tombstoneStoppedSandbox = (threadId: string) => {
-    stoppedThreadSandboxes.add(threadId);
-    if (stoppedThreadSandboxes.size <= STOPPED_SANDBOX_TOMBSTONES) return;
-    for (const candidate of stoppedThreadSandboxes) {
-      if (stoppedThreadSandboxes.size <= STOPPED_SANDBOX_TOMBSTONES) break;
-      // Oldest first, but never one a provision or stop could still be racing,
-      // and never the thread being tombstoned right now -- it is marked before
-      // queueing for its own lock, so it has no lock entry to be spared by.
-      if (candidate === threadId || lifecycleLocks.has(candidate)) continue;
-      stoppedThreadSandboxes.delete(candidate);
-    }
+  const threadProvisionAttempts = new Map<string, number>();
+  let attempts = 0;
+  const openProvisionAttempt = (threadId: string): SandboxProvisionAttempt => {
+    attempts += 1;
+    threadProvisionAttempts.set(threadId, attempts);
+    return { threadId, generation: attempts };
   };
+  const isCurrentAttempt = (attempt: SandboxProvisionAttempt) =>
+    threadProvisionAttempts.get(attempt.threadId) === attempt.generation;
   /**
    * Threads whose artifacts have been deleted, so an export that was already
    * running when the deletion landed discards its temporaries instead of
@@ -821,22 +894,22 @@ export const makeSandboxRuntimeManager = (
     exec: Effect.fn("SandboxRuntimeManager.exec")(function* (runtime, threadId, input) {
       return yield* attempt(() => get(runtime).backend.exec(threadId, input));
     }),
-    authorizeProvision: (threadId) =>
-      Effect.sync(() => {
-        stoppedThreadSandboxes.delete(threadId);
-      }),
+    authorizeProvision: (threadId) => Effect.sync(() => openProvisionAttempt(threadId)),
     provision: (input) =>
       withLifecycleLock(
         input.bootstrap.threadId,
-        // Re-read UNDER the lock, not before it: a stop that ran while this
+        // Compared UNDER the lock, not before it: a stop that ran while this
         // provision was still queued -- or that ran to completion before it
-        // ever reached this manager -- is only visible here.
+        // ever reached this manager -- has already replaced the thread's
+        // authorization, and that is only visible here.
         Effect.suspend(() =>
-          stoppedThreadSandboxes.has(input.bootstrap.threadId)
-            ? new SandboxManagerError({
+          isCurrentAttempt(input.attempt)
+            ? provisionUnsynchronized(input).pipe(
+                Effect.map((ready) => ({ ...ready, attempt: input.attempt })),
+              )
+            : new SandboxManagerError({
                 message: `sandbox for thread ${input.bootstrap.threadId} was stopped before provisioning began`,
-              })
-            : provisionUnsynchronized(input),
+              }),
         ),
       ),
     exportBranch: (runtime, threadId, hint) =>
@@ -938,12 +1011,35 @@ export const makeSandboxRuntimeManager = (
         }),
       ),
     stop: (runtime, threadId, hint) =>
-      // Tombstoned BEFORE queueing for the lock and left in place afterwards:
-      // whichever of the two wins the lock, and whether or not this stop finds
-      // anything to tear down, a provision still on its way has to see it.
+      // The thread's authorization is dropped BEFORE queueing for the lock:
+      // whichever of the two wins it, and whether or not this stop finds
+      // anything to tear down, a provision still on its way has to arrive with
+      // a token that no longer matches anything.
       Effect.suspend(() => {
-        tombstoneStoppedSandbox(threadId);
+        threadProvisionAttempts.delete(threadId);
         return withLifecycleLock(threadId, stopUnsynchronized(runtime, threadId, hint));
+      }),
+    stopProvisionAttempt: (runtime, attempt) =>
+      // The attempt's own authorization is what says the sandbox on this
+      // thread is still the one it built. A superseded attempt tears down
+      // nothing: the stop that superseded it already destroyed what it
+      // published, and anything newer belongs to a provision this one has no
+      // claim on.
+      Effect.suspend(() => {
+        // Tested and dropped in one synchronous step, before anything can
+        // yield: an `authorizeProvision` landing between the two would have
+        // its brand-new authorization deleted by a teardown that had already
+        // decided it was not the current one.
+        if (!isCurrentAttempt(attempt))
+          return Effect.logWarning(
+            "not tearing down a refused sandbox readiness: a newer provision attempt owns this thread's sandbox",
+            { threadId: attempt.threadId },
+          );
+        threadProvisionAttempts.delete(attempt.threadId);
+        return withLifecycleLock(
+          attempt.threadId,
+          stopUnsynchronized(runtime, attempt.threadId, undefined),
+        );
       }),
     reconcile: (runtime, expectedThreadIds, adoptionHints) =>
       attempt(async () => {

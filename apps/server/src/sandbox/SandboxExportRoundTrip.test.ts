@@ -9,6 +9,7 @@ import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 
 import { makeSandboxRuntimeManager } from "./SandboxRuntimeManager.ts";
+import { provisionAuthorized } from "./testUtils/authorizedProvision.ts";
 import type { SandboxCommand, SandboxCommandExecutor, SandboxCommandResult } from "./types.ts";
 
 const PREVIEW_IMAGE = `preview@sha256:${"a".repeat(64)}`;
@@ -189,7 +190,7 @@ describe("sandbox export round trip", () => {
 
       const first = new GitBackedExecutor();
       const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
-      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      yield* provisionAuthorized(manager, provisionInput(source.path, source.baseCommit));
 
       // A commit the user made, plus work they had not committed.
       NodeFS.writeFileSync(
@@ -213,7 +214,7 @@ describe("sandbox export round trip", () => {
       // A fresh manager and container: the thread was torn down and comes back
       // on the next turn, seeded from the artifact set alone.
       const second = new GitBackedExecutor();
-      yield* makeSandboxRuntimeManager(artifacts, "linux", second).provision({
+      yield* provisionAuthorized(makeSandboxRuntimeManager(artifacts, "linux", second), {
         ...provisionInput(source.path, source.baseCommit),
         restore: {
           artifactId: exported.artifactId,
@@ -260,7 +261,7 @@ describe("sandbox export round trip", () => {
 
       const first = new GitBackedExecutor();
       const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
-      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      yield* provisionAuthorized(manager, provisionInput(source.path, source.baseCommit));
       NodeFS.writeFileSync(
         NodePath.join(first.repository, "tracked.txt"),
         "first line\ncommitted only\n",
@@ -273,7 +274,7 @@ describe("sandbox export round trip", () => {
       expect(exported.snapshotCommit).toBeUndefined();
 
       const second = new GitBackedExecutor();
-      yield* makeSandboxRuntimeManager(artifacts, "linux", second).provision({
+      yield* provisionAuthorized(makeSandboxRuntimeManager(artifacts, "linux", second), {
         ...provisionInput(source.path, source.baseCommit),
         restore: {
           artifactId: exported.artifactId,
@@ -304,7 +305,7 @@ describe("sandbox export round trip", () => {
 
       const first = new GitBackedExecutor();
       const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
-      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      yield* provisionAuthorized(manager, provisionInput(source.path, source.baseCommit));
       NodeFS.writeFileSync(NodePath.join(first.repository, "notes.md"), "temporary note\n", "utf8");
       expect((yield* manager.exportBranch("docker", THREAD_ID)).snapshotCommit).toBeDefined();
 
@@ -313,7 +314,7 @@ describe("sandbox export round trip", () => {
       expect(exported.snapshotCommit).toBeUndefined();
 
       const second = new GitBackedExecutor();
-      yield* makeSandboxRuntimeManager(artifacts, "linux", second).provision({
+      yield* provisionAuthorized(makeSandboxRuntimeManager(artifacts, "linux", second), {
         ...provisionInput(source.path, source.baseCommit),
         restore: {
           artifactId: exported.artifactId,
@@ -345,7 +346,7 @@ describe("sandbox export round trip", () => {
 
       const first = new GitBackedExecutor();
       const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
-      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      yield* provisionAuthorized(manager, provisionInput(source.path, source.baseCommit));
       NodeFS.writeFileSync(
         NodePath.join(first.repository, "stale.md"),
         "work the user later deleted\n",
@@ -368,7 +369,7 @@ describe("sandbox export round trip", () => {
       expect(exported.snapshotCommit).toBeUndefined();
 
       const second = new GitBackedExecutor();
-      yield* makeSandboxRuntimeManager(artifacts, "linux", second).provision({
+      yield* provisionAuthorized(makeSandboxRuntimeManager(artifacts, "linux", second), {
         ...provisionInput(source.path, source.baseCommit),
         restore: {
           artifactId: exported.artifactId,
@@ -406,7 +407,7 @@ describe("sandbox export round trip", () => {
 
       const first = new GitBackedExecutor();
       const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
-      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      yield* provisionAuthorized(manager, provisionInput(source.path, source.baseCommit));
       NodeFS.appendFileSync(
         NodePath.join(first.repository, "tracked.txt"),
         "work the log says exists\n",
@@ -434,8 +435,9 @@ describe("sandbox export round trip", () => {
         .digest("hex");
 
       const second = new GitBackedExecutor();
-      const failure = yield* makeSandboxRuntimeManager(artifacts, "linux", second)
-        .provision({
+      const failure = yield* provisionAuthorized(
+        makeSandboxRuntimeManager(artifacts, "linux", second),
+        {
           ...provisionInput(source.path, source.baseCommit),
           restore: {
             artifactId: exported.artifactId,
@@ -444,8 +446,8 @@ describe("sandbox export round trip", () => {
             branchName: `thread/${THREAD_ID}`,
             snapshotCommit: exported.snapshotCommit!,
           },
-        })
-        .pipe(Effect.flip);
+        },
+      ).pipe(Effect.flip);
 
       // Named, so the operator can find the commit in the artifact themselves
       // rather than being told only that something went wrong.
@@ -466,7 +468,7 @@ describe("sandbox export round trip", () => {
 
       const first = new GitBackedExecutor();
       const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
-      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      yield* provisionAuthorized(manager, provisionInput(source.path, source.baseCommit));
       NodeFS.writeFileSync(
         NodePath.join(first.repository, "scratch.md"),
         "untracked work the log says exists\n",
@@ -486,8 +488,9 @@ describe("sandbox export round trip", () => {
         }
       }
       const second = new BrokenRefListingExecutor();
-      const failure = yield* makeSandboxRuntimeManager(artifacts, "linux", second)
-        .provision({
+      const failure = yield* provisionAuthorized(
+        makeSandboxRuntimeManager(artifacts, "linux", second),
+        {
           ...provisionInput(source.path, source.baseCommit),
           restore: {
             artifactId: exported.artifactId,
@@ -496,8 +499,8 @@ describe("sandbox export round trip", () => {
             branchName: `thread/${THREAD_ID}`,
             snapshotCommit: exported.snapshotCommit!,
           },
-        })
-        .pipe(Effect.flip);
+        },
+      ).pipe(Effect.flip);
 
       expect(failure.message).toContain(exported.snapshotCommit!);
       expect(failure.message).toContain("working-tree snapshot");
@@ -524,7 +527,7 @@ describe("sandbox export round trip", () => {
 
       const executor = new GitBackedExecutor();
       const manager = makeSandboxRuntimeManager(artifacts, "linux", executor);
-      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      yield* provisionAuthorized(manager, provisionInput(source.path, source.baseCommit));
       NodeFS.writeFileSync(
         NodePath.join(executor.repository, "secret.txt"),
         "credential the user deleted\n",
@@ -598,7 +601,7 @@ describe("sandbox export round trip", () => {
       }
       const executor = new BrokenCommitTreeExecutor();
       const manager = makeSandboxRuntimeManager(artifacts, "linux", executor);
-      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      yield* provisionAuthorized(manager, provisionInput(source.path, source.baseCommit));
       NodeFS.appendFileSync(
         NodePath.join(executor.repository, "tracked.txt"),
         "work that must not be silently dropped\n",

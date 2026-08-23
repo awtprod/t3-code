@@ -23,6 +23,14 @@ import * as Effect from "effect/Effect";
  * logged rather than propagated -- it must not replace the error that says why
  * the thread is not ready.
  *
+ * `teardown` must name the PROVISION ATTEMPT whose readiness was refused, not
+ * the thread -- `SandboxRuntimeManagerShape.stopProvisionAttempt` is what
+ * callers pass. A refused readiness means a stop landed mid-provision, and a
+ * stop is exactly what a re-provision follows: a teardown that destroyed
+ * "whatever this thread has now" would destroy the container the NEXT attempt
+ * had already published and accepted, leaving the projection reporting `ready`
+ * over a sandbox that no longer exists.
+ *
  * Interruption is deliberately excluded: a shutdown leaves the containers for
  * the next reconcile pass to adopt or reap, and tearing them down here would
  * destroy a live thread's workspace volume on every server restart.
@@ -31,8 +39,9 @@ export const dispatchProvisionReadyOrTearDown = <A, E, R, E2, R2>(input: {
   readonly threadId: ThreadId;
   readonly dispatch: Effect.Effect<A, E, R>;
   /**
-   * A thunk, so the accepted path -- which is every provision that is not
-   * racing a stop -- never builds the teardown at all.
+   * Tears down the sandbox THIS attempt published, and nothing else. A thunk,
+   * so the accepted path -- which is every provision that is not racing a stop
+   * -- never builds it at all.
    */
   readonly teardown: () => Effect.Effect<unknown, E2, R2>;
 }): Effect.Effect<A, E, R | R2> =>

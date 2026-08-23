@@ -18,6 +18,7 @@ import {
 } from "./SandboxCredentialProxy.ts";
 import { inImageProviderCommand, sandboxProviderInvocation } from "./SandboxProviderProcess.ts";
 import { makeSandboxRuntimeManager, resolveSandboxRuntime } from "./SandboxRuntimeManager.ts";
+import { provisionAuthorized } from "./testUtils/authorizedProvision.ts";
 import type {
   SandboxCommand,
   SandboxCommandExecutor,
@@ -125,7 +126,7 @@ describe("headless sandbox provisioning", () => {
       delete process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE;
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
-      const ready = yield* manager.provision(provisionInput());
+      const ready = yield* provisionAuthorized(manager, provisionInput());
 
       // Headless readiness carries no desktop identifiers at all.
       expect(ready.desktopSessionId).toBeUndefined();
@@ -156,7 +157,7 @@ describe("runtime selection", () => {
       // Callers validate the runtime but pass `config` through verbatim, and no
       // client populates `sandboxConfig.runtime` -- so the deployment default has
       // to survive all the way to the executed binary, not just the validation.
-      yield* manager.provision(provisionInput());
+      yield* provisionAuthorized(manager, provisionInput());
 
       expect(executor.commands.length).toBeGreaterThan(0);
       expect([...new Set(executor.commands.map((command) => command.executable))]).toEqual([
@@ -178,7 +179,8 @@ describe("local repository seeding", () => {
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(artifactRoot, "linux", executor);
       try {
-        yield* manager.provision(
+        yield* provisionAuthorized(
+          manager,
           provisionInput({
             bootstrap: {
               threadId: "thread-local-seed",
@@ -280,7 +282,8 @@ describe("restoring a re-provisioned sandbox", () => {
       const { artifactRoot, bundle, sha256 } = seedArtifact();
       const executor = new FakeExecutor();
       try {
-        yield* makeSandboxRuntimeManager(artifactRoot, "linux", executor).provision(
+        yield* provisionAuthorized(
+          makeSandboxRuntimeManager(artifactRoot, "linux", executor),
           restoreInput(sha256),
         );
 
@@ -322,7 +325,8 @@ describe("restoring a re-provisioned sandbox", () => {
         // A tampered or truncated artifact must not fail the provision: losing
         // the previous session's commits is bad, refusing to give the user a
         // sandbox at all is worse.
-        yield* makeSandboxRuntimeManager(artifactRoot, "linux", executor).provision(
+        yield* provisionAuthorized(
+          makeSandboxRuntimeManager(artifactRoot, "linux", executor),
           restoreInput("b".repeat(64)),
         );
 
