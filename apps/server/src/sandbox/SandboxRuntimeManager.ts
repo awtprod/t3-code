@@ -88,6 +88,11 @@ export function resolveSandboxDesktopMode(): "enabled" | "disabled" {
     : "enabled";
 }
 
+/** Preview routing is unnecessary only for a headless thread with no declared preview ports. */
+export function sandboxPreviewProxyRequired(previewPorts?: ReadonlyArray<number>): boolean {
+  return resolveSandboxDesktopMode() === "enabled" || (previewPorts?.length ?? 0) > 0;
+}
+
 /**
  * Ceiling on an archived provider conversation store, in bytes.
  *
@@ -609,11 +614,12 @@ export const makeSandboxRuntimeManager = (
   const provisionUnsynchronized = Effect.fn("SandboxRuntimeManager.provision")(function* (
     input: Parameters<SandboxRuntimeManagerShape["provision"]>[0],
   ) {
+    const previewRequired = sandboxPreviewProxyRequired(input.previewPorts);
     const previewImage = resolveSandboxPreviewProxyImage();
-    if (!previewImage)
+    if (previewRequired && !previewImage)
       return yield* new SandboxManagerError({
         message:
-          "T3_SANDBOX_PREVIEW_PROXY_IMAGE is required for the internal desktop signaling sidecar",
+          "T3_SANDBOX_PREVIEW_PROXY_IMAGE is required when desktop streaming or preview ports are enabled",
       });
     // Per-thread config wins, then the deployment default. Callers validate the
     // runtime before dispatching but pass `config` through verbatim, so the
@@ -777,9 +783,28 @@ export const makeSandboxRuntimeManager = (
     );
     desktopGateway.setServiceCredentialGrants(input.bootstrap.threadId, serviceGrants);
     managed.services.redactCredentials(input.bootstrap.threadId);
-    yield* attempt(() =>
-      managed.previews.start(input.bootstrap.threadId, ready.networkName, previewImage),
-    ).pipe(
+    const credentialImage = resolveSandboxCredentialProxyImage();
+    yield* attempt(async () => {
+      const starts: Array<Promise<void>> = [];
+      if (previewRequired && previewImage !== undefined)
+        starts.push(
+          managed.previews.start(input.bootstrap.threadId, ready.networkName, previewImage),
+        );
+      if (credentialImage !== undefined)
+        starts.push(
+          managed.credentials.start(
+            input.bootstrap.threadId,
+            ready.networkName,
+            credentialImage,
+            input.egressProxyImage !== undefined || input.egressProxyUrl !== undefined,
+          ),
+        );
+      const results = await Promise.allSettled(starts);
+      const failure = results.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failure !== undefined) throw failure.reason;
+    }).pipe(
       Effect.tapError(() =>
         Effect.promise(async () => {
           // Service status and credential grants are already registered on
@@ -793,29 +818,7 @@ export const makeSandboxRuntimeManager = (
         }),
       ),
     );
-    desktopGateway.setPreviewProxy(input.bootstrap.threadId, managed.previews);
-    const credentialImage = resolveSandboxCredentialProxyImage();
-    if (credentialImage !== undefined) {
-      yield* attempt(() =>
-        managed.credentials.start(
-          input.bootstrap.threadId,
-          ready.networkName,
-          credentialImage,
-          input.egressProxyImage !== undefined || input.egressProxyUrl !== undefined,
-        ),
-      ).pipe(
-        Effect.tapError(() =>
-          Effect.promise(async () => {
-            desktopGateway.removeThread(input.bootstrap.threadId);
-            await managed.credentials.stop(input.bootstrap.threadId);
-            await managed.previews.stop(input.bootstrap.threadId);
-            await managed.services.stop(input.bootstrap.threadId);
-            teardownHooks.delete(input.bootstrap.threadId);
-            await managed.backend.stop(input.bootstrap.threadId).catch(() => undefined);
-          }),
-        ),
-      );
-    }
+    if (previewRequired) desktopGateway.setPreviewProxy(input.bootstrap.threadId, managed.previews);
     for (const port of input.previewPorts ?? []) {
       desktopGateway.registerPreviewRoute({
         routeId: `${NodeCrypto.createHash("sha256").update(`${input.bootstrap.threadId}\0${port}`).digest("hex").slice(0, 24)}`,

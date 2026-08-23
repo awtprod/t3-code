@@ -6,6 +6,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import { SandboxId, ThreadId } from "@t3tools/contracts";
 import { ContainerSandboxBackend } from "./ContainerSandboxBackend.ts";
 import {
@@ -119,7 +120,7 @@ afterEach(() => {
 });
 
 describe("headless sandbox provisioning", () => {
-  it.effect("skips the desktop runtime while still starting the preview sidecar", () =>
+  it.effect("skips both desktop and unused preview runtimes", () =>
     Effect.gen(function* () {
       process.env.T3_SANDBOX_DESKTOP = "disabled";
       process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
@@ -136,12 +137,76 @@ describe("headless sandbox provisioning", () => {
       expect(
         flattened.some((line) => /tmux|startxfce4|chromium|t3-desktop-webrtc/.test(line)),
       ).toBe(false);
-      // ...but the preview sidecar is unaffected by the desktop gate.
+      // No declared preview port means the bridge would have no reachable
+      // route, so headless provisioning does not pay to start it.
+      expect(
+        executor.commands.some(
+          (command) => command.args[0] === "run" && command.args.includes("t3-preview-bridge"),
+        ),
+      ).toBe(false);
+    }),
+  );
+
+  it.effect("keeps the preview sidecar when a headless thread declares a preview port", () =>
+    Effect.gen(function* () {
+      process.env.T3_SANDBOX_DESKTOP = "disabled";
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      delete process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE;
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
+      yield* provisionAuthorized(manager, provisionInput({ previewPorts: [3000] }));
+
       expect(
         executor.commands.some(
           (command) => command.args[0] === "run" && command.args.includes("t3-preview-bridge"),
         ),
       ).toBe(true);
+    }),
+  );
+
+  it.effect("starts preview and credential sidecars concurrently", () =>
+    Effect.gen(function* () {
+      process.env.T3_SANDBOX_DESKTOP = "disabled";
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE = PREVIEW_IMAGE;
+      let reachedPreview = () => {};
+      const atPreview = new Promise<void>((resolve) => {
+        reachedPreview = resolve;
+      });
+      let reachedCredential = () => {};
+      const atCredential = new Promise<void>((resolve) => {
+        reachedCredential = resolve;
+      });
+      let releaseSidecars = () => {};
+      const sidecarsReleased = new Promise<void>((resolve) => {
+        releaseSidecars = resolve;
+      });
+      class ParkingExecutor extends FakeExecutor {
+        override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+          const name = command.args[command.args.indexOf("--name") + 1] ?? "";
+          if (command.args[0] === "run" && name.startsWith("t3-preview-")) {
+            reachedPreview();
+            await sidecarsReleased;
+          }
+          if (command.args[0] === "run" && name.startsWith("t3-cred-")) {
+            reachedCredential();
+            await sidecarsReleased;
+          }
+          return super.run(command);
+        }
+      }
+      const executor = new ParkingExecutor();
+      const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
+      const provision = yield* provisionAuthorized(
+        manager,
+        provisionInput({ previewPorts: [3000], egressProxyUrl: "https://proxy.example.test" }),
+      ).pipe(Effect.forkScoped);
+
+      yield* Effect.promise(() => Promise.all([atPreview, atCredential])).pipe(
+        Effect.timeout("2 seconds"),
+      );
+      releaseSidecars();
+      yield* Fiber.join(provision);
     }),
   );
 });
