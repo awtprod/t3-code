@@ -345,11 +345,12 @@ if wants_step 2; then
   # Read from the extracted bundle rather than from /usr/local: identical
   # contents, and reading the source keeps the record independent of whatever
   # the copy actually produced.
+  #
+  # The temporary is passed IN and removed by the caller rather than owned
+  # here, and this function deliberately installs no `trap ... RETURN` of its
+  # own: bash RETURN traps DO NOT STACK. See `install_podman_static`.
   write_podman_manifest() {
-    local bundle_root="$1" manifest="$2" tmp relative absolute entries=0
-    tmp="${manifest}.tmp.$$"
-    # shellcheck disable=SC2064 # expand tmp now; the trap must survive this function
-    trap "rm -f '$tmp'" RETURN
+    local bundle_root="$1" manifest="$2" tmp="$3" relative absolute entries=0
     : >"$tmp"
     chmod 0644 "$tmp"
     while IFS= read -r relative; do
@@ -385,11 +386,22 @@ if wants_step 2; then
   # A function so `trap ... RETURN` actually fires: RETURN traps only run on
   # function (or sourced-script) return, so at top level the temp dir -- ~45MB
   # once the bundle is extracted -- would leak on every run.
+  #
+  # THIS IS THE ONLY RETURN TRAP IN THIS STEP, AND IT MUST STAY THAT WAY: bash
+  # RETURN traps DO NOT STACK. A callee that sets its own REPLACES this one for
+  # good -- the caller's is gone when the callee returns, and the callee cannot
+  # save and restore it either, since `trap -p RETURN` in a callee reads back
+  # empty without `set -T` (and with `set -T` the inherited trap then fires
+  # twice). So this trap cleans up everything the step creates, including the
+  # manifest temporary `write_podman_manifest` writes through, and that
+  # function owns no trap. The ~45MB leak this guards has now been reintroduced
+  # twice, the second time purely by adding a nested trap.
   install_podman_static() {
-    local asset="$1" expected="$2" tmp actual bundle_root manifest old
+    local asset="$1" expected="$2" tmp actual bundle_root manifest manifest_tmp old
     tmp="$(mktemp -d)"
-    # shellcheck disable=SC2064 # expand tmp now; the trap must survive this function
-    trap "rm -rf '$tmp'" RETURN
+    manifest_tmp="${PODMAN_STATIC_MANIFEST_DIR}/manifest.tmp.$$"
+    # shellcheck disable=SC2064 # expand now; the trap must survive this function
+    trap "rm -rf '$tmp'; rm -f '$manifest_tmp'" RETURN
     curl --fail --silent --show-error --location --max-time 180 \
       --output "${tmp}/podman.tar.gz" \
       "https://github.com/mgoltzsche/podman-static/releases/download/${PODMAN_STATIC_VERSION}/${asset}" ||
@@ -445,7 +457,7 @@ if wants_step 2; then
     # would silently replace the ones this script manages.
     cp -r "${bundle_root}/." /usr/local/
     install -d -o root -g root -m 0755 "$PODMAN_STATIC_MANIFEST_DIR"
-    write_podman_manifest "$bundle_root" "$manifest"
+    write_podman_manifest "$bundle_root" "$manifest" "$manifest_tmp"
     # The manifest's own trailer, not `wc -l`: the trailer is a line too, and
     # the count it carries is what the completeness check compares against.
     info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local ($(awk -F'\t' '$1 == "e" { print $3 }' "$manifest") files recorded in $manifest)"
