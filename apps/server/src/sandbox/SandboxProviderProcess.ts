@@ -4,6 +4,7 @@ import type { SpawnOptions, SpawnedProcess } from "@anthropic-ai/claude-agent-sd
 import { ChildProcess as EffectChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as Effect from "effect/Effect";
 import type { SandboxExecutionTarget } from "./ThreadSandboxRuntime.ts";
+import { runtimeEnvironment } from "./NodeSandboxCommandExecutor.ts";
 import { redeemSandboxProviderEnvironment } from "./SandboxRuntimeManager.ts";
 import { threadCredentialProxyBinding } from "./SandboxCredentialProxy.ts";
 
@@ -201,9 +202,15 @@ export function sandboxProviderInvocation(
   return {
     executable: target.runtime,
     args: execArgs(target, inImageProviderCommand(command), args, cwd, forwardedEnvironment),
+    // The same non-secret allowlist provisioning uses. `PATH` and `HOME` alone
+    // located a different daemon than the one the sandbox was created on: a
+    // rootless or remote podman needs `XDG_RUNTIME_DIR` to find its user socket
+    // and `CONTAINER_HOST`/`DOCKER_HOST` to reach a remote one, so a deployment
+    // could provision a container successfully and then exec against no daemon
+    // at all. The allowlist carries no credential; the host-derived provider
+    // environment below is still stripped exactly as before.
     env: {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
+      ...runtimeEnvironment(),
       ...hostEnvironment,
     } as Record<string, string | undefined>,
   } as const;

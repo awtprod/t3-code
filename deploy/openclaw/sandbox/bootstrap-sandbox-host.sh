@@ -76,18 +76,48 @@ readonly PODMAN_STATIC_MANIFEST_DIR=/usr/local/share/podman-static
 # service user. Override for an air-gapped host with a local mirror.
 VERIFY_IMAGE="${VERIFY_IMAGE:-docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc}"
 
-# Mirrors T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled (see 50-sandbox.conf).
-# Set this before running Step 8 on a host where the backend is (or will be)
-# deployed with quotas disabled -- e.g. because rootless podman cannot
-# administer XFS project quotas here. With it set, Step 8 skips the
-# quota-create/enforcement checks and drops --storage-opt from the hardened
-# run, so verification mirrors what the backend will actually issue instead
-# of hard-failing on a known, accepted limitation.
+# Two independent quota controls, mirroring the backend exactly (see
+# ContainerSandboxBackend.ts and 50-sandbox.conf). They used to be one switch
+# here and in the backend, which left no working bounded configuration: over
+# `podman --remote` the container flag is rejected outright, and turning it off
+# also threw away the volume quotas that do work.
+#
+# T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled adds `--storage-opt size=` to the
+# hardened run. OFF by default: everything in step 8 goes through the wrapper,
+# which is `podman --remote` by construction, and remote podman rejects it.
 case "${T3_SANDBOX_CONTAINER_STORAGE_QUOTA:-}" in
-  [Dd][Ii][Ss][Aa][Bb][Ll][Ee][Dd]) STORAGE_QUOTA_DISABLED=1 ;;
-  *) STORAGE_QUOTA_DISABLED=0 ;;
+  [Ee][Nn][Aa][Bb][Ll][Ee][Dd]) CONTAINER_STORAGE_QUOTA=1 ;;
+  *) CONTAINER_STORAGE_QUOTA=0 ;;
 esac
-readonly STORAGE_QUOTA_DISABLED
+readonly CONTAINER_STORAGE_QUOTA
+# T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled drops the volume `--opt o=size=`
+# quotas and skips their create/echo-back/enforcement checks. ON by default:
+# these are the real per-thread disk bound in this deployment and they work
+# over the socket. Only disable it on a host where rootless podman cannot
+# administer XFS project quotas at all -- and accept unbounded thread disk.
+#
+# With it unset, a legacy T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled is
+# honoured as the same opt-out, exactly as the backend does. That one switch
+# used to gate BOTH controls, and the hosts documented to set it to `disabled`
+# are precisely the ones that cannot administer quotas -- reading only the new
+# variable would re-enable volume quotas underneath them at upgrade time and
+# fail every check in step 8b/8c.
+LEGACY_VOLUME_QUOTA_OPT_OUT=0
+case "${T3_SANDBOX_VOLUME_STORAGE_QUOTA:-}" in
+  [Dd][Ii][Ss][Aa][Bb][Ll][Ee][Dd]) VOLUME_STORAGE_QUOTA=0 ;;
+  "")
+    case "${T3_SANDBOX_CONTAINER_STORAGE_QUOTA:-}" in
+      [Dd][Ii][Ss][Aa][Bb][Ll][Ee][Dd])
+        VOLUME_STORAGE_QUOTA=0
+        LEGACY_VOLUME_QUOTA_OPT_OUT=1
+        ;;
+      *) VOLUME_STORAGE_QUOTA=1 ;;
+    esac
+    ;;
+  *) VOLUME_STORAGE_QUOTA=1 ;;
+esac
+readonly VOLUME_STORAGE_QUOTA
+readonly LEGACY_VOLUME_QUOTA_OPT_OUT
 
 STEPS="${STEPS:-1,2,3,4,5,6,7,8,9}"
 
@@ -218,14 +248,160 @@ if wants_step 2; then
   podman_socket_was_active=0
   podman_service_was_active=0
 
+  # Restores exactly what install_podman_static stopped. Idempotent: it clears
+  # the flags, so the success-path call and the EXIT trap cannot both act.
+  #
+  # It has to be reachable from a trap because everything between the stop and
+  # the restore runs under `set -e` -- the binary copy, the manifest write, the
+  # containers.conf drop-in, the AppArmor profile load. Any one of them failing
+  # used to exit with the host's podman socket still down, taking the running
+  # server's sandboxes with it. Called with "fatal" on the success path (a
+  # podman that will not come back is worth failing the step over) and with
+  # "warn" from the trap, where an exit is already in progress and a `die`
+  # would only mask the real error.
+  #
+  # "Fatal" covers whichever unit the host was actually running: a failed
+  # socket restart always, and a failed service restart when no socket was
+  # active -- there is then nothing left to socket-activate the daemon, so
+  # shrugging it off left the host's podman down behind an exit code of 0.
+  restore_podman_services() {
+    local severity="${1:-warn}" socket_was="$podman_socket_was_active" service_was="$podman_service_was_active"
+    podman_socket_was_active=0
+    podman_service_was_active=0
+    [ "$socket_was" = 1 ] || [ "$service_was" = 1 ] || return 0
+    info "restarting the podman socket/service stopped for the binary swap"
+    if [ "$socket_was" = 1 ]; then
+      if ! as_service_user systemctl --user start podman.socket; then
+        local message="podman.socket was active before this step and failed to restart.
+       Bring it back by hand: STEPS=6, or
+       runuser -u $SERVICE_USER -- env XDG_RUNTIME_DIR=/run/user/${SERVICE_UID} \\
+         systemctl --user start podman.socket"
+        if [ "$severity" = fatal ]; then die "$message"; else warn "$message"; fi
+      fi
+    fi
+    if [ "$service_was" = 1 ]; then
+      if ! as_service_user systemctl --user start podman.service; then
+        # "The socket will re-activate it on demand" is only true when there IS
+        # a socket. A host running podman.service WITHOUT podman.socket -- which
+        # this function records as its own case, and which the stop above tears
+        # down just the same -- has nothing left to re-spawn the daemon, so a
+        # warn-only failure exited 0 with the previously running daemon down and
+        # every sandbox on the host unreachable. Fatal in that state, exactly
+        # like the socket path above; still warn-only from the EXIT trap, where
+        # an exit is already in progress and a `die` would mask the real error.
+        local message="podman.service was active before this step and failed to restart.
+       Bring it back by hand: STEPS=6, or
+       runuser -u $SERVICE_USER -- env XDG_RUNTIME_DIR=/run/user/${SERVICE_UID} \\
+         systemctl --user start podman.service"
+        if [ "$socket_was" = 1 ]; then
+          # The socket came back above (a failure there already died or
+          # warned), so the daemon really is socket-activated and the next
+          # client request starts it.
+          warn "podman.service did not restart; the socket will re-activate it on demand"
+        elif [ "$severity" = fatal ]; then
+          die "$message"
+        else
+          warn "$message"
+        fi
+      fi
+    fi
+    info "podman socket/service restored"
+  }
+  # Armed for the whole step, before anything can stop the socket. Step 8
+  # installs its own EXIT trap later; step 2 clears this one when it ends, so
+  # the two never contend.
+  trap 'restore_podman_services warn' EXIT
+
+  # Record what each installed file IS and what it CONTAINS, tab-separated:
+  #
+  #   f<TAB><sha256><TAB><path>   regular file
+  #   l<TAB><target><TAB><path>   symlink, by its link target
+  #
+  # A bare list of paths could only ever prove existence, and both of the
+  # damage modes a same-version re-run is meant to repair -- an interrupted
+  # `cp`, a hand-truncated helper -- leave the path present.
+  #
+  # A trailer closes the file:
+  #
+  #   e<TAB><version><TAB><entry count>
+  #
+  # Without it the manifest could not vouch for ITSELF. The entries were
+  # appended one line at a time, so an interruption -- the run killed, the disk
+  # filling, the host rebooting -- left a nonempty, perfectly well-formed PREFIX
+  # of the real manifest. The completeness check validates the entries it FINDS,
+  # so a truncated manifest naming 3 of 40 files passed, and a same-version
+  # re-run then skipped repairing the 37 helpers that were never recorded and
+  # may never have been copied. The trailer is written last and its count is
+  # compared against the entries actually read back, so a manifest missing any
+  # part of itself fails the check and reinstalls.
+  #
+  # Written to a temporary beside the destination and renamed into place, so
+  # the manifest at the canonical path is either the previous complete one or
+  # this complete one and never a prefix of either. (The trailer alone would
+  # already catch a torn write; the rename means a torn write never becomes
+  # visible in the first place, and the two together also cover a manifest
+  # truncated after the fact.)
+  #
+  # Read from the extracted bundle rather than from /usr/local: identical
+  # contents, and reading the source keeps the record independent of whatever
+  # the copy actually produced.
+  #
+  # The temporary is passed IN and removed by the caller rather than owned
+  # here, and this function deliberately installs no `trap ... RETURN` of its
+  # own: bash RETURN traps DO NOT STACK. See `install_podman_static`.
+  write_podman_manifest() {
+    local bundle_root="$1" manifest="$2" tmp="$3" relative absolute entries=0
+    : >"$tmp"
+    chmod 0644 "$tmp"
+    while IFS= read -r relative; do
+      absolute="/usr/local${relative#.}"
+      if [ -h "${bundle_root}/${relative#./}" ]; then
+        printf 'l\t%s\t%s\n' "$(readlink "${bundle_root}/${relative#./}")" "$absolute"
+      else
+        printf 'f\t%s\t%s\n' \
+          "$(sha256sum "${bundle_root}/${relative#./}" | cut -d' ' -f1)" "$absolute"
+      fi
+      entries=$((entries + 1))
+    done < <(cd "$bundle_root" && find . \( -type f -o -type l \) | sort) >>"$tmp"
+    printf 'e\t%s\t%s\n' "$PODMAN_STATIC_VERSION" "$entries" >>"$tmp"
+    # Flushed before the rename: a rename is atomic in the directory, but it
+    # can still publish a name whose data has not reached the disk, which a
+    # power loss turns back into the truncated manifest this guards against.
+    sync "$tmp" 2>/dev/null || sync
+    mv -f "$tmp" "$manifest"
+  }
+
+  # The path from a manifest line, tolerating the pre-digest format (a bare
+  # path per line) so an upgrade can still remove what an older run installed.
+  # The `e` trailer names no file, so it yields nothing and the removal loop
+  # skips it.
+  manifest_entry_path() {
+    case "$1" in
+      e$'\t'*) : ;;
+      [fl]$'\t'*) printf '%s' "${1#*$'\t'*$'\t'}" ;;
+      *) printf '%s' "$1" ;;
+    esac
+  }
+
   # A function so `trap ... RETURN` actually fires: RETURN traps only run on
   # function (or sourced-script) return, so at top level the temp dir -- ~45MB
   # once the bundle is extracted -- would leak on every run.
+  #
+  # THIS IS THE ONLY RETURN TRAP IN THIS STEP, AND IT MUST STAY THAT WAY: bash
+  # RETURN traps DO NOT STACK. A callee that sets its own REPLACES this one for
+  # good -- the caller's is gone when the callee returns, and the callee cannot
+  # save and restore it either, since `trap -p RETURN` in a callee reads back
+  # empty without `set -T` (and with `set -T` the inherited trap then fires
+  # twice). So this trap cleans up everything the step creates, including the
+  # manifest temporary `write_podman_manifest` writes through, and that
+  # function owns no trap. The ~45MB leak this guards has now been reintroduced
+  # twice, the second time purely by adding a nested trap.
   install_podman_static() {
-    local asset="$1" expected="$2" tmp actual bundle_root manifest old
+    local asset="$1" expected="$2" tmp actual bundle_root manifest manifest_tmp old
     tmp="$(mktemp -d)"
-    # shellcheck disable=SC2064 # expand tmp now; the trap must survive this function
-    trap "rm -rf '$tmp'" RETURN
+    manifest_tmp="${PODMAN_STATIC_MANIFEST_DIR}/manifest.tmp.$$"
+    # shellcheck disable=SC2064 # expand now; the trap must survive this function
+    trap "rm -rf '$tmp'; rm -f '$manifest_tmp'" RETURN
     curl --fail --silent --show-error --location --max-time 180 \
       --output "${tmp}/podman.tar.gz" \
       "https://github.com/mgoltzsche/podman-static/releases/download/${PODMAN_STATIC_VERSION}/${asset}" ||
@@ -266,6 +442,8 @@ if wants_step 2; then
     manifest="${PODMAN_STATIC_MANIFEST_DIR}/manifest"
     if [ -f "$manifest" ]; then
       while IFS= read -r old; do
+        old="$(manifest_entry_path "$old")"
+        [ -n "$old" ] || continue
         case "$old" in
           /usr/local/*) rm -f "$old" ;;
           *) warn "ignoring suspicious manifest entry '$old'" ;;
@@ -279,13 +457,119 @@ if wants_step 2; then
     # would silently replace the ones this script manages.
     cp -r "${bundle_root}/." /usr/local/
     install -d -o root -g root -m 0755 "$PODMAN_STATIC_MANIFEST_DIR"
-    (cd "$bundle_root" && find . \( -type f -o -type l \) | sed 's|^\.|/usr/local|') >"$manifest"
-    info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local ($(wc -l <"$manifest") files recorded in $manifest)"
+    write_podman_manifest "$bundle_root" "$manifest" "$manifest_tmp"
+    # The manifest's own trailer, not `wc -l`: the trailer is a line too, and
+    # the count it carries is what the completeness check compares against.
+    info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local ($(awk -F'\t' '$1 == "e" { print $3 }' "$manifest") files recorded in $manifest)"
+  }
+
+  # A matching `podman --version` proves one binary, not a complete bundle.
+  # Re-running this script is the documented way to repair a partial run, but
+  # the version check alone made that impossible for the most likely damage: a
+  # helper (netavark, aardvark-dns, conmon, crun, catatonit) deleted or
+  # truncated by hand, an interrupted `cp -r` that copied podman first, or a
+  # manifest that never got written. Every one of those leaves a host whose
+  # podman reports the pinned version and cannot start a container, and a
+  # same-version re-run that says "already installed" and changes nothing.
+  #
+  # So the recorded manifest is validated too. Existence alone was not enough:
+  # an interrupted `cp` and a hand-truncated helper both leave a file that is
+  # PRESENT and unusable, which counted as complete and skipped the repair the
+  # re-run exists to perform. The manifest records what each entry is and what
+  # it contains, and every field is checked:
+  #
+  #   f<TAB><sha256><TAB><path>   regular file, verified by content digest
+  #   l<TAB><target><TAB><path>   symlink, verified by its link target
+  #
+  # Digests are the cheap complete check here: the bundle is ~150 files, and a
+  # sha256 pass over it costs a fraction of the download it avoids. Mode is not
+  # recorded -- `cp -r` reproduces it, and a mode-only drift does not produce
+  # the "reports the right version, cannot start a container" failure this
+  # guards. Any gap reinstalls the pinned bundle -- which removes what the
+  # manifest lists and rewrites it -- instead of skipping.
+  podman_install_is_complete() {
+    local manifest="${PODMAN_STATIC_MANIFEST_DIR}/manifest" kind expected entry damaged=0
+    local counted=0 recorded="" recorded_version=""
+    if [ ! -s "$manifest" ]; then
+      info "no bundle manifest at $manifest; reinstalling to record one"
+      return 1
+    fi
+    # A manifest from before digests were recorded (a bare path per line)
+    # cannot be validated, so it is treated as damage and rewritten by the
+    # reinstall rather than trusted.
+    if ! head -n1 "$manifest" | grep -q '^[fl]	'; then
+      info "bundle manifest at $manifest predates digest recording; reinstalling to record one"
+      return 1
+    fi
+    while IFS=$'\t' read -r kind expected entry; do
+      [ -n "${entry:-}" ] || continue
+      case "$kind" in
+        e)
+          # The trailer. `expected` is the bundle version, `entry` the number
+          # of file/symlink lines that precede it -- both checked after the
+          # loop, against what was actually read.
+          recorded_version="$expected"
+          recorded="$entry"
+          continue
+          ;;
+        l)
+          # -h, not -e: a dangling symlink is still the symlink the bundle
+          # shipped, and podman resolves it the same way. What matters is that
+          # it still points where the bundle pointed it.
+          if [ ! -h "$entry" ]; then
+            damaged=$((damaged + 1))
+            [ "$damaged" -gt 5 ] || warn "bundle symlink is missing or is no longer a symlink: $entry"
+          elif [ "$(readlink "$entry")" != "$expected" ]; then
+            damaged=$((damaged + 1))
+            [ "$damaged" -gt 5 ] || warn "bundle symlink points somewhere else now: $entry"
+          fi
+          ;;
+        f)
+          if [ ! -f "$entry" ]; then
+            damaged=$((damaged + 1))
+            [ "$damaged" -gt 5 ] || warn "bundle file recorded in the manifest is missing: $entry"
+          elif [ "$(sha256sum "$entry" | cut -d' ' -f1)" != "$expected" ]; then
+            damaged=$((damaged + 1))
+            [ "$damaged" -gt 5 ] || warn "bundle file does not match its recorded digest: $entry"
+          fi
+          ;;
+        *)
+          damaged=$((damaged + 1))
+          [ "$damaged" -gt 5 ] || warn "unrecognized manifest entry kind '$kind' for: $entry"
+          ;;
+      esac
+      counted=$((counted + 1))
+    done <"$manifest"
+    # The manifest has to prove it is whole before its contents mean anything.
+    # Entries were appended a line at a time, so an interrupted write left a
+    # well-formed PREFIX: every entry it named was present and correct, the
+    # check passed, and the same-version re-run skipped repairing the files the
+    # manifest never got as far as recording.
+    if [ -z "$recorded" ]; then
+      info "bundle manifest at $manifest has no completeness trailer (an interrupted write, or a manifest from before the trailer existed); reinstalling to record a whole one"
+      return 1
+    fi
+    if [ "$counted" != "$recorded" ]; then
+      info "bundle manifest at $manifest records $recorded entries but holds $counted; reinstalling to record a whole one"
+      return 1
+    fi
+    # The version the manifest was written for. `podman --version` speaks for
+    # one binary; this says which bundle the digests below belong to, so a
+    # manifest left over from another version cannot vouch for this install.
+    if [ "$recorded_version" != "$PODMAN_STATIC_VERSION" ]; then
+      info "bundle manifest at $manifest was written for $recorded_version, not $PODMAN_STATIC_VERSION; reinstalling"
+      return 1
+    fi
+    if [ "$damaged" -gt 0 ]; then
+      info "$damaged file(s) from the recorded bundle are missing or altered; reinstalling"
+      return 1
+    fi
+    return 0
   }
 
   installed_version="$(/usr/local/bin/podman --version 2>/dev/null | awk '{print $3}' || true)"
-  if [ "$installed_version" = "${PODMAN_STATIC_VERSION#v}" ]; then
-    info "podman-static ${PODMAN_STATIC_VERSION} already installed"
+  if [ "$installed_version" = "${PODMAN_STATIC_VERSION#v}" ] && podman_install_is_complete; then
+    info "podman-static ${PODMAN_STATIC_VERSION} already installed and complete"
   else
     info "installing podman-static ${PODMAN_STATIC_VERSION} (${podman_static_asset})"
     install_podman_static "$podman_static_asset" "$podman_static_sha256"
@@ -396,24 +680,8 @@ EOF
   # Restore whatever install_podman_static stopped, so STEPS=2 on its own does
   # not leave the host without its podman socket (the header promises each step
   # is independently re-runnable; a full run's step 6 would mask this).
-  if [ "$podman_socket_was_active" = 1 ] || [ "$podman_service_was_active" = 1 ]; then
-    info "restarting the podman socket/service stopped for the binary swap"
-    if [ "$podman_socket_was_active" = 1 ]; then
-      as_service_user systemctl --user start podman.socket ||
-        die "podman.socket was active before this step and failed to restart.
-       Bring it back by hand: STEPS=6, or
-       runuser -u $SERVICE_USER -- env XDG_RUNTIME_DIR=/run/user/${SERVICE_UID} \\
-         systemctl --user start podman.socket"
-    fi
-    if [ "$podman_service_was_active" = 1 ]; then
-      # Socket-activated; starting the service directly is only needed if it
-      # was running on its own. Failure is not fatal -- the socket re-spawns it
-      # on first use.
-      as_service_user systemctl --user start podman.service ||
-        warn "podman.service did not restart; the socket will re-activate it on demand"
-    fi
-    info "podman socket/service restored"
-  fi
+  restore_podman_services fatal
+  trap - EXIT
 fi
 
 # --------------------------------------------------------------------------
@@ -695,8 +963,12 @@ if wants_step 8; then
   # 20GiB disk limit. The backend compares `volume inspect` output against the
   # option string with the leading "o=" stripped, so the runtime must echo it
   # back verbatim -- not normalised, not reordered.
-  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
-    info "8b. volume quota with echo-back -- SKIPPED (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled)"
+  if [ "$VOLUME_STORAGE_QUOTA" = 0 ]; then
+    if [ "$LEGACY_VOLUME_QUOTA_OPT_OUT" = 1 ]; then
+      warn "T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled is deprecated for volume quotas;"
+      warn "set T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled instead (here and on the server)."
+    fi
+    info "8b. volume quota with echo-back -- SKIPPED (T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled)"
     as_service_user podman volume create \
       --label com.t3tools.sandbox.managed=true "$V_VOL" >/dev/null ||
       die "podman volume create (no quota) failed"
@@ -710,8 +982,9 @@ if wants_step 8; then
        If this host's rootless podman cannot administer XFS project quotas
        (confirm with: sudo xfs_quota -x -c 'report -p' $SANDBOX_MOUNT succeeding
        as real root while this fails), re-run with
-       T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled to accept that limitation
-       instead of enforcing per-thread quotas."
+       T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled to accept that limitation
+       instead of enforcing per-thread quotas -- and set the same variable on
+       the server, or every provision will fail on the same volume create."
     readback="$(as_service_user podman volume inspect --format '{{index .Options "o"}}' "$V_VOL")"
     [ "$readback" = "${V_QUOTA#o=}" ] ||
       die "volume quota was not echoed back verbatim.
@@ -726,8 +999,8 @@ if wants_step 8; then
   # The echo-back above passes even when nothing is enforced (that is exactly the
   # rootless-docker trap). The only trustworthy check is writing past the limit
   # and demanding failure. A small volume keeps this fast.
-  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
-    info "8c. quota enforcement -- SKIPPED (no quota is applied when disabled; nothing to enforce)"
+  if [ "$VOLUME_STORAGE_QUOTA" = 0 ]; then
+    info "8c. quota enforcement -- SKIPPED (no volume quota is applied when disabled; nothing to enforce)"
   else
     info "8c. quota enforcement (writing past the limit must fail)"
     V_SMALL="t3-quota-${V_SUFFIX}"
@@ -775,23 +1048,22 @@ if wants_step 8; then
     "$VERIFY_IMAGE" sleep 300 >/dev/null || die "could not start the DNS peer container"
 
   # -- 8e. hardened run, mirroring the backend's workspace container flags ----
-  # --storage-opt size= mirrors ContainerSandboxBackend.ts (see the comment at
-  # its runArgs, ~line 299): `podman --remote` rejects `--storage-opt size=`,
-  # so deployments that talk to a user socket set
-  # T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled and the backend omits the pair.
-  # Everything in this step runs through the wrapper, which is `podman --remote`
-  # by construction, so THIS deployment is exactly that case: default to
-  # omitting the pair, same as the backend will at runtime. Export
-  # T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled to exercise the flag on a
-  # non-remote setup. Dropping it costs no disk bound: the rootfs is
-  # --read-only and every writable path is a volume under the XFS prjquota
-  # `o=size=` quotas that 8b/8c prove are enforced -- those volume-level quotas
-  # are the real disk limit in this deployment, not --storage-opt.
+  # --storage-opt size= mirrors ContainerSandboxBackend.ts: `podman --remote`
+  # rejects it, so the backend leaves it off unless
+  # T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled. Everything in this step runs
+  # through the wrapper, which is `podman --remote` by construction, so THIS
+  # deployment is exactly the case the default is for. Omitting it costs no
+  # disk bound: the rootfs is --read-only and every writable path is a volume
+  # under the XFS prjquota `o=size=` quotas that 8b/8c prove are enforced --
+  # those volume-level quotas are the real disk limit here, not --storage-opt,
+  # and they are governed by their own T3_SANDBOX_VOLUME_STORAGE_QUOTA.
   info "8e. hardened container run"
-  storage_opt_args=(--storage-opt "size=21474836480")
-  if [ "$STORAGE_QUOTA_DISABLED" = 1 ]; then
-    storage_opt_args=()
-    info "    omitting --storage-opt (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled)"
+  storage_opt_args=()
+  if [ "$CONTAINER_STORAGE_QUOTA" = 1 ]; then
+    storage_opt_args=(--storage-opt "size=21474836480")
+    info "    including --storage-opt (T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled)"
+  else
+    info "    omitting --storage-opt (rejected by podman --remote; the default)"
   fi
   as_service_user podman run --detach --name "$V_CTR" \
     --label com.t3tools.sandbox.managed=true \

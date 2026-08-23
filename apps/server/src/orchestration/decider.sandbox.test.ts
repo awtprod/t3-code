@@ -6,9 +6,11 @@ import {
   type OrchestrationEvent,
   type OrchestrationReadModel,
 } from "@t3tools/contracts";
+import { ClientOrchestrationCommand } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import { decideOrchestrationCommand } from "./decider.ts";
 
@@ -699,6 +701,134 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
         bundleSha256: "d".repeat(64),
         exportedAt: NOW,
       });
+    }),
+  );
+
+  it.effect("lets a forced stop revoke a takeover lease, but only from the server", () =>
+    Effect.gen(function* () {
+      // Deleting a thread while someone holds the desktop takeover used to
+      // leave the container running forever: the plain `sandbox.stop` the
+      // deletion reactor dispatches was refused for the lease, and nothing
+      // else ever removed the sandbox -- reconcile still counts a deleted
+      // thread as expected, so orphan removal skips it too.
+      const leased = {
+        lifecycle: "ready" as const,
+        runtime: "podman" as const,
+        branch: BRANCH,
+        limits: {
+          cpuCount: 2,
+          memoryBytes: 4_294_967_296,
+          diskBytes: 21_474_836_480,
+          processCount: 512,
+          idleTimeoutSeconds: 3600,
+          maximumLifetimeSeconds: 28800,
+        },
+        desktop: { status: "ready" as const },
+        services: [],
+        controller: {
+          kind: "human" as const,
+          leaseId: "lease-1",
+          sessionId: "viewer-1",
+          acquiredAt: NOW,
+        },
+        createdAt: NOW,
+        lastActiveAt: NOW,
+      };
+
+      const unforced = yield* Effect.exit(
+        decideOrchestrationCommand({
+          readModel: readModel(leased),
+          command: {
+            type: "sandbox.stop",
+            commandId: CommandId.make("unforced-stop"),
+            threadId: ThreadId.make("thread-1"),
+            createdAt: NOW,
+          },
+        }),
+      );
+      expect(unforced._tag).toBe("Failure");
+
+      const stopping = (yield* decideOrchestrationCommand({
+        readModel: readModel(leased),
+        command: {
+          type: "sandbox.stop",
+          commandId: CommandId.make("forced-stop"),
+          threadId: ThreadId.make("thread-1"),
+          force: true,
+          createdAt: NOW,
+        },
+      })) as Omit<Extract<OrchestrationEvent, { type: "sandbox.stopping" }>, "sequence">;
+      expect(stopping.type).toBe("sandbox.stopping");
+      expect(stopping.payload.sandbox.lifecycle).toBe("stopping");
+      // The lease is revoked with the stop; leaving it would keep the desktop
+      // gateway believing a human still drives a container that is going away.
+      expect(stopping.payload.sandbox.controller.kind).toBe("none");
+      expect(stopping.payload.event).toMatchObject({ expired: false });
+
+      // The security property, end to end: `force` is server-only, so the wire
+      // form a hostile client would send loses the flag at the client schema
+      // and the decider still refuses the stop. Without this the takeover lease
+      // stops meaning anything -- anyone with a socket could close the desktop
+      // session out from under the person using it.
+      const fromClient = yield* Schema.decodeUnknownEffect(ClientOrchestrationCommand)({
+        type: "sandbox.stop",
+        commandId: "client-forced-stop",
+        threadId: "thread-1",
+        force: true,
+        createdAt: NOW,
+      });
+      expect(Object.hasOwn(fromClient, "force")).toBe(false);
+      if (fromClient.type !== "sandbox.stop") throw new Error("expected a client stop command");
+      const clientForced = yield* Effect.exit(
+        decideOrchestrationCommand({ readModel: readModel(leased), command: fromClient }),
+      );
+      expect(clientForced._tag).toBe("Failure");
+    }),
+  );
+
+  it.effect("records the runtime the inline provision command carries", () =>
+    Effect.gen(function* () {
+      // The decider is pure, so an absent `config.runtime` can only fall back
+      // to docker -- but the runtime manager honours `T3_SANDBOX_RUNTIME`. On a
+      // podman deployment the projection therefore claimed docker for the whole
+      // provisioning window, and a stop or delete landing in that window
+      // addressed a backend that was never used. The server callers now resolve
+      // the runtime before dispatching; this pins the decider's half of that
+      // contract: whatever the command says is what gets recorded.
+      const provisioned = (yield* decideOrchestrationCommand({
+        readModel: readModel(),
+        command: {
+          type: "sandbox.provision",
+          commandId: CommandId.make("provision-podman"),
+          threadId: ThreadId.make("thread-1"),
+          config: { runtime: "podman" },
+          branch: BRANCH,
+          provisionsInline: true,
+          createdAt: NOW,
+        },
+      })) as Omit<
+        Extract<OrchestrationEvent, { type: "sandbox.provisioning-started" }>,
+        "sequence"
+      >;
+      expect(provisioned.payload.sandbox.runtime).toBe("podman");
+
+      // The fallback is still docker, so a caller that forgets to resolve keeps
+      // the old behaviour rather than producing an invalid projection.
+      const defaulted = (yield* decideOrchestrationCommand({
+        readModel: readModel(),
+        command: {
+          type: "sandbox.provision",
+          commandId: CommandId.make("provision-default"),
+          threadId: ThreadId.make("thread-1"),
+          branch: BRANCH,
+          provisionsInline: true,
+          createdAt: NOW,
+        },
+      })) as Omit<
+        Extract<OrchestrationEvent, { type: "sandbox.provisioning-started" }>,
+        "sequence"
+      >;
+      expect(defaulted.payload.sandbox.runtime).toBe("docker");
     }),
   );
 });

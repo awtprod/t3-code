@@ -6,8 +6,10 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 
 import { makeSandboxRuntimeManager } from "./SandboxRuntimeManager.ts";
+import { provisionAuthorized } from "./testUtils/authorizedProvision.ts";
 import type {
   SandboxCommand,
   SandboxCommandExecutor,
@@ -50,10 +52,19 @@ class FakeExecutor implements SandboxCommandExecutor {
         : Math.floor(20 * 1024 ** 3 * 0.9);
       return { exitCode: 0, stdout: `size=${bytes}\n`, stderr: "" };
     }
-    if (verb === "exec" && command.args.includes("rev-parse"))
+    // Same object for `rev-parse` and `write-tree`: a clean working tree, so
+    // the export writes no working-tree snapshot.
+    if (
+      verb === "exec" &&
+      (command.args.includes("rev-parse") || command.args.includes("write-tree"))
+    )
       return { exitCode: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
     if (verb === "exec" && command.args.includes("stat"))
       return { exitCode: 0, stdout: `${this.#storeBytes}\n`, stderr: "" };
+    // The post-extraction probe for a provider's own session directory: a tar
+    // that unpacked cleanly but carried no conversation answers empty here.
+    if (verb === "exec" && command.args.includes("find"))
+      return { exitCode: 0, stdout: "/thread-data/provider-home/.codex/sessions\n", stderr: "" };
     if (verb === "cp") {
       const source = command.args[1] ?? "";
       const destination = command.args[2] ?? "";
@@ -132,7 +143,7 @@ describe("provider conversation store artifacts", () => {
       const root = makeRoot();
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
-      yield* manager.provision(provisionInput());
+      yield* provisionAuthorized(manager, provisionInput());
 
       const exported = yield* manager.exportBranch("docker", THREAD_ID);
 
@@ -170,7 +181,7 @@ describe("provider conversation store artifacts", () => {
       const root = makeRoot();
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
-      yield* manager.provision(provisionInput());
+      yield* provisionAuthorized(manager, provisionInput());
 
       const exported = yield* manager.exportBranch("docker", THREAD_ID);
 
@@ -193,13 +204,62 @@ describe("provider conversation store artifacts", () => {
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
 
-      yield* manager.provision(
+      const provisioned = yield* provisionAuthorized(
+        manager,
         provisionInput({
           restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
         }),
       );
 
       expect(storePushed(executor)).toBeDefined();
+      expect(provisioned.providerStore).toBe("restored");
+    }),
+  );
+
+  it.effect("reports no restored store when the archive never reaches the container", () =>
+    Effect.gen(function* () {
+      // Whether the conversation actually landed cannot be inferred from the
+      // recorded digest: the artifact may have been swept, and the extraction
+      // is best-effort and swallows its own failures. A caller that keeps the
+      // thread's provider resume cursor on the strength of that digest points
+      // it at a container with no conversation in it, and every following turn
+      // fails to resume -- so the provision reports what actually happened.
+      headless();
+      const root = makeRoot();
+      NodeFS.writeFileSync(NodePath.join(root, `${ARTIFACT_ID}.bundle`), BUNDLE_CONTENTS, "utf8");
+      NodeFS.writeFileSync(NodePath.join(root, `${ARTIFACT_ID}.store.tar`), STORE_CONTENTS, "utf8");
+      // The copy into the container fails; everything else provisions cleanly.
+      class FailingStoreCopyExecutor extends FakeExecutor {
+        override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+          const result = await super.run(command);
+          return command.args[0] === "cp" && (command.args[1] ?? "").endsWith(".store.tar")
+            ? { exitCode: 1, stdout: "", stderr: "no such container" }
+            : result;
+        }
+      }
+      const executor = new FailingStoreCopyExecutor();
+      const manager = makeSandboxRuntimeManager(root, "linux", executor);
+
+      const provisioned = yield* provisionAuthorized(
+        manager,
+        provisionInput({
+          restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
+        }),
+      );
+
+      // The thread still comes back -- losing the conversation must not cost
+      // the user their branch.
+      expect(provisioned.containerName).toBeDefined();
+      expect(provisioned.providerStore).toBe("unavailable");
+    }),
+  );
+
+  it.effect("reports no restored store for a thread with no prior export", () =>
+    Effect.gen(function* () {
+      headless();
+      const manager = makeSandboxRuntimeManager(makeRoot(), "linux", new FakeExecutor());
+      const provisioned = yield* provisionAuthorized(manager, provisionInput());
+      expect(provisioned.providerStore).toBe("unavailable");
     }),
   );
 
@@ -214,7 +274,8 @@ describe("provider conversation store artifacts", () => {
 
       // A store that does not match its digest is dropped rather than trusted:
       // the thread still comes back, the provider just starts cold.
-      yield* manager.provision(
+      yield* provisionAuthorized(
+        manager,
         provisionInput({
           restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
         }),
@@ -233,7 +294,8 @@ describe("provider conversation store artifacts", () => {
       const executor = new FakeExecutor();
       const manager = makeSandboxRuntimeManager(root, "linux", executor);
 
-      yield* manager.provision(
+      yield* provisionAuthorized(
+        manager,
         provisionInput({
           restore: restore(NodeCrypto.createHash("sha256").update(STORE_CONTENTS).digest("hex")),
         }),
@@ -253,7 +315,7 @@ describe("provider conversation store artifacts", () => {
 
       // `storeSha256` is optional precisely so exports written before stores
       // existed keep restoring their branch normally.
-      yield* manager.provision(provisionInput({ restore: restore() }));
+      yield* provisionAuthorized(manager, provisionInput({ restore: restore() }));
 
       expect(storePushed(executor)).toBeUndefined();
       expect(
@@ -285,6 +347,108 @@ describe("provider conversation store artifacts", () => {
       // Idempotent: deleting again (nothing left) is not an error.
       yield* manager.removeThreadArtifacts(THREAD_ID);
     }),
+  );
+
+  it.effect("an export that finishes after a deletion leaves nothing behind", () =>
+    Effect.gen(function* () {
+      // Deletion removes the artifact set right after enqueuing the stop, but
+      // an export already in flight used to rename fresh canonical files into
+      // place behind it -- resurrecting a deleted thread's transcripts and
+      // commits with nothing left that would ever remove them.
+      headless();
+      const root = makeRoot();
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(root, "linux", executor);
+      yield* provisionAuthorized(manager, provisionInput());
+
+      // The deletion is issued while the export is mid-flight, and both are
+      // allowed to run to completion.
+      const [exported] = yield* Effect.all(
+        [manager.exportBranch("docker", THREAD_ID), manager.removeThreadArtifacts(THREAD_ID)],
+        { concurrency: "unbounded" },
+      );
+
+      // The export still reports what it captured -- its caller's event is
+      // about a container that is going away regardless.
+      expect(exported.bundleSha256).toBe(
+        NodeCrypto.createHash("sha256").update(BUNDLE_CONTENTS).digest("hex"),
+      );
+      // But nothing of the deleted thread is on disk, including the
+      // dot-prefixed temporaries the export writes on its way through.
+      expect(NodeFS.readdirSync(root)).toEqual([]);
+    }),
+  );
+
+  it.effect("a deleted thread's later export never republishes its artifacts", () =>
+    Effect.gen(function* () {
+      // The tombstone has to outlive the deletion call itself: a settle-driven
+      // export can be dispatched after the deletion has already swept the
+      // directory.
+      headless();
+      const root = makeRoot();
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(root, "linux", executor);
+      yield* provisionAuthorized(manager, provisionInput());
+
+      yield* manager.removeThreadArtifacts(THREAD_ID);
+      yield* manager.exportBranch("docker", THREAD_ID);
+
+      expect(NodeFS.readdirSync(root)).toEqual([]);
+    }),
+  );
+
+  it.effect("keeps a deleted thread's tombstone until its in-flight export drains", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // Tombstones were evicted FIFO at a fixed cap. A busy server that deletes
+        // enough threads while one slow export is still running dropped that
+        // thread's tombstone, and the export then republished a deleted thread's
+        // transcripts and commits -- with nothing left to ever remove them. A
+        // tombstone is now only evictable once that thread's artifact work has
+        // drained.
+        headless();
+        const root = makeRoot();
+        // Parks inside the export, holding the thread's artifact lock while the
+        // deletions below flood the tombstone set.
+        let releaseExport = () => {};
+        const exportParked = new Promise<void>((resolve) => {
+          releaseExport = resolve;
+        });
+        let reachedExport = () => {};
+        const atExport = new Promise<void>((resolve) => {
+          reachedExport = resolve;
+        });
+        class ParkingExecutor extends FakeExecutor {
+          override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+            if (command.args.includes("bundle") && command.args.includes("create")) {
+              reachedExport();
+              await exportParked;
+            }
+            return super.run(command);
+          }
+        }
+        const manager = makeSandboxRuntimeManager(root, "linux", new ParkingExecutor());
+        yield* provisionAuthorized(manager, provisionInput());
+        yield* manager.removeThreadArtifacts(THREAD_ID);
+
+        const exporting = yield* manager
+          .exportBranch("docker", THREAD_ID)
+          .pipe(Effect.orDie, Effect.forkScoped);
+        yield* Effect.promise(() => atExport);
+        // Far more deletions than the tombstone cap, all while the export above
+        // is still parked.
+        yield* Effect.forEach(
+          Array.from({ length: 5000 }, (_, index) => `flood-thread-${index}`),
+          (threadId) => manager.removeThreadArtifacts(threadId),
+          { discard: true },
+        );
+        releaseExport();
+        yield* Fiber.join(exporting);
+
+        // The export saw its tombstone and published nothing.
+        expect(NodeFS.readdirSync(root)).toEqual([]);
+      }),
+    ),
   );
 
   it.effect("tolerates artifact removal without configured artifact storage", () =>

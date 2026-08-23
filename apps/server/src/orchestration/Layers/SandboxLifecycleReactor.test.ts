@@ -3,8 +3,10 @@ import {
   EventId,
   GitCommandError,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  type SandboxBranchExport,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -19,11 +21,22 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
 
+import * as Crypto from "effect/Crypto";
+
+import { decideOrchestrationCommand } from "../decider.ts";
+import { OrchestrationCommandInvariantError } from "../Errors.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import {
+  ProviderSessionDirectory,
+  type ProviderRuntimeBinding,
+} from "../../provider/Services/ProviderSessionDirectory.ts";
 import { T3ProjectFileLoader } from "../../project/T3ProjectFileLoader.ts";
 import { SandboxManagerError, SandboxRuntimeManager } from "../../sandbox/SandboxRuntimeManager.ts";
-import type { SandboxRuntimeManagerShape } from "../../sandbox/SandboxRuntimeManager.ts";
+import type {
+  SandboxProvisionAttempt,
+  SandboxRuntimeManagerShape,
+} from "../../sandbox/SandboxRuntimeManager.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { SandboxLifecycleReactor } from "../Services/SandboxLifecycleReactor.ts";
@@ -93,6 +106,35 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+/**
+ * A provider session directory holding one thread's binding in memory.
+ *
+ * Every provisioning path now reconciles the thread's resume cursor against
+ * what the provision did to the provider's conversation store, so the reactor
+ * needs a real directory to read and write -- and the tests below need to see
+ * which way it went.
+ */
+const sessionDirectory = (initial?: { readonly resumeCursor: unknown }) => {
+  const bindings = new Map<string, ProviderRuntimeBinding>();
+  if (initial !== undefined)
+    bindings.set(threadId, {
+      threadId,
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      resumeCursor: initial.resumeCursor,
+    });
+  return {
+    bindings,
+    layer: Layer.mock(ProviderSessionDirectory)({
+      getBinding: (id: ThreadId) => Effect.succeed(Option.fromNullishOr(bindings.get(id))),
+      upsert: (binding: ProviderRuntimeBinding) =>
+        Effect.sync(() => {
+          bindings.set(binding.threadId, binding);
+        }),
+    }),
+  };
+};
+
 it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
   it.effect("resolves immutable provenance and invokes the sandbox runtime", () =>
     Effect.gen(function* () {
@@ -125,6 +167,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, {
             load: () =>
@@ -141,6 +184,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
             sweepExpiredArtifacts: () => Effect.succeed(0),
+            authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
             provision,
             reconcile: () =>
               Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
@@ -225,6 +269,299 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
     }),
   );
 
+  for (const [providerStore, expectation] of [
+    // Nothing was lost: the same container and provider home are still there,
+    // so the cursor still names a real conversation.
+    ["preserved", "kept"],
+    // A fresh container, but the archive really extracted into its provider
+    // home -- the whole point of archiving the store.
+    ["restored", "kept"],
+    // A fresh container whose provider home came up empty. A cursor kept here
+    // fails every following turn with "No conversation found with session ID".
+    ["unavailable", "cleared"],
+  ] as const) {
+    it.effect(
+      `${expectation === "kept" ? "keeps" : "clears"} the resume cursor when a manual provision reports the store ${providerStore}`,
+      () =>
+        Effect.gen(function* () {
+          // This path used to ignore the store outcome entirely and keep a
+          // stale cursor, while the provider reactor cleared one whenever the
+          // store was not RESTORED -- discarding a valid cursor on every
+          // re-attach to a surviving container. Both now route through the one
+          // shared helper.
+          vi.stubEnv("T3_SANDBOX_PREVIEW_PROXY_IMAGE", `preview@sha256:${"e".repeat(64)}`);
+          const cursor = { resume: "an-existing-conversation" };
+          const directory = sessionDirectory({ resumeCursor: cursor });
+          const provisioned = yield* Deferred.make<void>();
+          const events = yield* PubSub.unbounded<OrchestrationEvent>();
+          const dispatched: OrchestrationCommand[] = [];
+          const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+            Layer.provide(NodeServices.layer),
+            Layer.provide(
+              Layer.mock(GitWorkflowService)({
+                localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+                resolveRemoteTrackingCommit: () =>
+                  Effect.succeed({
+                    commitSha: "0123456789abcdef0123456789abcdef01234567",
+                    remoteRefName: "origin/main",
+                  }),
+              }),
+            ),
+            Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+            Layer.provide(directory.layer),
+            Layer.provide(
+              Layer.succeed(T3ProjectFileLoader, {
+                load: () =>
+                  Effect.succeed(
+                    Option.some({
+                      sandbox: {
+                        image: `registry.example/t3-desktop@sha256:${"a".repeat(64)}`,
+                      },
+                    } as never),
+                  ),
+              }),
+            ),
+            Layer.provide(
+              Layer.succeed(SandboxRuntimeManager, {
+                sweepExpiredArtifacts: () => Effect.succeed(0),
+                authorizeProvision: (threadId: string) =>
+                  Effect.succeed({ threadId, generation: 1 }),
+                provision: () =>
+                  Deferred.succeed(provisioned, undefined).pipe(
+                    Effect.as({
+                      sandboxId: "sandbox-manual",
+                      runtime: "podman" as const,
+                      containerName: "t3-thread-manual",
+                      services: [],
+                      providerStore,
+                    }),
+                  ),
+                reconcile: () =>
+                  Effect.succeed({
+                    activeThreadIds: [],
+                    missingThreadIds: [],
+                    orphanThreadIds: [],
+                  }),
+              } as never),
+            ),
+            Layer.provide(
+              Layer.mock(ProjectionSnapshotQuery)({
+                getSnapshot: () => Effect.succeed(snapshot),
+                getThreadDetailById: (id) =>
+                  Effect.succeed(
+                    id === threadId ? Option.some(snapshot.threads[0]!) : Option.none(),
+                  ),
+              }),
+            ),
+            Layer.provide(
+              Layer.mock(OrchestrationEngineService)({
+                dispatch: (command) =>
+                  Effect.gen(function* () {
+                    dispatched.push(command);
+                    if (command.type === "sandbox.provision")
+                      yield* PubSub.publish(events, {
+                        ...request,
+                        sequence: 2,
+                        eventId: EventId.make(`manual-provisioning-${providerStore}`),
+                        commandId: command.commandId,
+                        type: "sandbox.provisioning-started",
+                        payload: {
+                          threadId,
+                          event: {
+                            type: "sandbox.provisioning-started",
+                            threadId,
+                            occurredAt: NOW,
+                          },
+                          sandbox: {
+                            lifecycle: "provisioning",
+                            runtime: "podman",
+                            branch: command.branch!,
+                            limits: {
+                              cpuCount: 2,
+                              memoryBytes: 4_294_967_296,
+                              diskBytes: 21_474_836_480,
+                              processCount: 512,
+                              idleTimeoutSeconds: 3600,
+                              maximumLifetimeSeconds: 28_800,
+                            },
+                            desktop: { status: "unavailable" },
+                            services: [],
+                            controller: { kind: "none" },
+                            createdAt: NOW,
+                            lastActiveAt: NOW,
+                          },
+                        },
+                      });
+                    return { sequence: dispatched.length };
+                  }),
+                streamDomainEvents: Stream.concat(Stream.make(request), Stream.fromPubSub(events)),
+              }),
+            ),
+          );
+
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const reactor = yield* SandboxLifecycleReactor;
+              yield* reactor.start();
+              yield* Deferred.await(provisioned);
+              yield* reactor.drain;
+            }).pipe(Effect.provide(layer)),
+          );
+
+          expect(directory.bindings.get(threadId)?.resumeCursor).toEqual(
+            expectation === "kept" ? cursor : null,
+          );
+        }),
+    );
+  }
+
+  it.effect("tears down the sandbox when the decider refuses its readiness", () =>
+    Effect.gen(function* () {
+      // The other half of the pre-manager window. A deletion's stop can land
+      // between the `sandbox.provision` dispatch and the manager actually
+      // building anything: the provision then completes against a thread that
+      // is already terminal, and the decider refuses the
+      // `sandbox.provision.ready` that follows. That refusal used to be the
+      // only signal, and nothing acted on it -- this dispatch had no error
+      // handling at all -- so the container, its sidecars, its network, and its
+      // volumes stayed up with nothing left holding a reference to them.
+      vi.stubEnv("T3_SANDBOX_PREVIEW_PROXY_IMAGE", `preview@sha256:${"e".repeat(64)}`);
+      const refused = yield* Deferred.make<void>();
+      const events = yield* PubSub.unbounded<OrchestrationEvent>();
+      const dispatched: OrchestrationCommand[] = [];
+      const stopProvisionAttempt = vi.fn(
+        (_runtime: "docker" | "podman", _attempt: SandboxProvisionAttempt) =>
+          Deferred.succeed(refused, undefined).pipe(Effect.asVoid),
+      );
+      // A plain `stop` would tear down whatever the thread has NOW, which after
+      // the stop that refused this readiness is a newer attempt's container.
+      const stop = vi.fn(() => Effect.die("the refused readiness must not stop the thread"));
+      const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(
+          Layer.mock(GitWorkflowService)({
+            localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+            resolveRemoteTrackingCommit: () =>
+              Effect.succeed({
+                commitSha: "0123456789abcdef0123456789abcdef01234567",
+                remoteRefName: "origin/main",
+              }),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
+        Layer.provide(
+          Layer.succeed(T3ProjectFileLoader, {
+            load: () =>
+              Effect.succeed(
+                Option.some({
+                  sandbox: { image: `registry.example/t3-desktop@sha256:${"a".repeat(64)}` },
+                } as never),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(SandboxRuntimeManager, {
+            sweepExpiredArtifacts: () => Effect.succeed(0),
+            authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
+            provision: (input: { attempt: SandboxProvisionAttempt }) =>
+              Effect.succeed({
+                sandboxId: "sandbox-refused",
+                runtime: "podman" as const,
+                containerName: "t3-thread-refused",
+                services: [],
+                providerStore: "preserved",
+                attempt: input.attempt,
+              }),
+            stop,
+            stopProvisionAttempt,
+            reconcile: () =>
+              Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
+          } as never),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery)({
+            getSnapshot: () => Effect.succeed(snapshot),
+            getThreadDetailById: (id) =>
+              Effect.succeed(id === threadId ? Option.some(snapshot.threads[0]!) : Option.none()),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(OrchestrationEngineService)({
+            dispatch: (command) =>
+              Effect.gen(function* () {
+                dispatched.push(command);
+                // Exactly what the real decider does for a thread whose
+                // sandbox is no longer `provisioning`.
+                if (command.type === "sandbox.provision.ready")
+                  return yield* new OrchestrationCommandInvariantError({
+                    commandType: command.type,
+                    detail: `thread ${threadId} sandbox is not provisioning`,
+                  });
+                if (command.type === "sandbox.provision")
+                  yield* PubSub.publish(events, {
+                    ...request,
+                    sequence: 2,
+                    eventId: EventId.make("manual-provisioning-refused"),
+                    commandId: command.commandId,
+                    type: "sandbox.provisioning-started",
+                    payload: {
+                      threadId,
+                      event: {
+                        type: "sandbox.provisioning-started",
+                        threadId,
+                        occurredAt: NOW,
+                      },
+                      sandbox: {
+                        lifecycle: "provisioning",
+                        runtime: "podman",
+                        branch: command.branch!,
+                        limits: {
+                          cpuCount: 2,
+                          memoryBytes: 4_294_967_296,
+                          diskBytes: 21_474_836_480,
+                          processCount: 512,
+                          idleTimeoutSeconds: 3600,
+                          maximumLifetimeSeconds: 28_800,
+                        },
+                        desktop: { status: "unavailable" },
+                        services: [],
+                        controller: { kind: "none" },
+                        createdAt: NOW,
+                        lastActiveAt: NOW,
+                      },
+                    },
+                  });
+                return { sequence: dispatched.length };
+              }),
+            streamDomainEvents: Stream.concat(Stream.make(request), Stream.fromPubSub(events)),
+          }),
+        ),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* Deferred.await(refused).pipe(Effect.timeout("5 seconds"));
+          yield* reactor.drain;
+        }).pipe(Effect.provide(layer)),
+      );
+
+      // The sandbox the refused readiness would have published is torn down,
+      // against the runtime the provision actually used -- and named by the
+      // ATTEMPT that built it, so a re-provision that has already published a
+      // container of its own survives this teardown.
+      expect(stopProvisionAttempt).toHaveBeenCalledTimes(1);
+      expect(stopProvisionAttempt.mock.calls[0]?.[0]).toBe("podman");
+      expect(stopProvisionAttempt.mock.calls[0]?.[1]).toEqual({ threadId, generation: 1 });
+      expect(stop).not.toHaveBeenCalled();
+      // ...and the refusal still fails the lifecycle event rather than being
+      // swallowed, so the thread is reported rather than left looking ready.
+      expect(dispatched.map((command) => command.type)).toContain("sandbox.operation.fail");
+    }),
+  );
+
   it.effect(
     "disables sandboxing and notifies the thread instead of failing when no image is configured",
     () =>
@@ -245,12 +582,14 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
             }),
           ),
           Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+          Layer.provide(sessionDirectory().layer),
           Layer.provide(
             Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
           ),
           Layer.provide(
             Layer.succeed(SandboxRuntimeManager, {
               sweepExpiredArtifacts: () => Effect.succeed(0),
+              authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
               provision: () => Effect.die("runtime must not run without an image"),
               reconcile: () =>
                 Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
@@ -337,12 +676,14 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
             sweepExpiredArtifacts: () => Effect.succeed(0),
+            authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
             exportBranch: () =>
               Effect.succeed({
                 commit: "b".repeat(40),
@@ -439,12 +780,14 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
             sweepExpiredArtifacts: () => Effect.succeed(0),
+            authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
             stop: () => Effect.die("no container exists for an unprovisioned sandbox"),
             exportBranch: () => Effect.die("nothing to export without a container"),
           } as never),
@@ -539,12 +882,14 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
             sweepExpiredArtifacts: () => Effect.succeed(0),
+            authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
             exportBranch: () =>
               Effect.succeed({
                 commit: "b".repeat(40),
@@ -633,6 +978,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, {
             load: () =>
@@ -649,6 +995,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
             sweepExpiredArtifacts: () => Effect.succeed(0),
+            authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
             provision: () => Effect.die("provisioning is not reached on this path"),
             reconcile: () =>
               Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
@@ -743,12 +1090,14 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }),
         ),
         Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
         Layer.provide(
           Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
         ),
         Layer.provide(
           Layer.succeed(SandboxRuntimeManager, {
             sweepExpiredArtifacts: () => Effect.succeed(0),
+            authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
             stop: (_runtime: string, id: string) =>
               Effect.sync(() => {
                 stopped.push(id);
@@ -839,6 +1188,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
             }),
           ),
           Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+          Layer.provide(sessionDirectory().layer),
           Layer.provide(
             Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
           ),
@@ -896,5 +1246,440 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           }).pipe(Effect.provide(layer)),
         );
       }),
+  );
+
+  it.effect("provisions a spawned worker exactly once, through the inline path", () =>
+    Effect.gen(function* () {
+      // The worker spawn dispatched `sandbox.provision` without a branch and
+      // without `provisionsInline`, then provisioned inline anyway. The decider
+      // read that as a request rather than an inline claim: it emitted
+      // `sandbox.provision-requested` -- which THIS reactor consumes -- so the
+      // worker was provisioned a second time, and the inline
+      // `sandbox.provision.ready` that followed was rejected because the
+      // sandbox had never entered `provisioning`. The dispatch runs through the
+      // real decider here so the assertion is about the event actually emitted,
+      // not about the fields the reactor happens to set.
+      vi.stubEnv("T3_SANDBOX_PREVIEW_PROXY_IMAGE", `preview@sha256:${"e".repeat(64)}`);
+      // No per-thread runtime in the spawn payload, so the deployment default
+      // has to be resolved before dispatch -- the decider is pure and would
+      // otherwise record docker on a podman host for the whole provisioning
+      // window, sending any stop or delete in it to the wrong backend.
+      vi.stubEnv("T3_SANDBOX_RUNTIME", "podman");
+      const childThreadId = ThreadId.make("thread-worker");
+      const inheritedCommit = "1".repeat(40);
+      const ran = yield* Deferred.make<void>();
+      const events = yield* PubSub.unbounded<OrchestrationEvent>();
+      const dispatched: OrchestrationCommand[] = [];
+      const decidedTypes: string[] = [];
+      const crypto = yield* Crypto.Crypto;
+      const childThread = {
+        ...snapshot.threads[0]!,
+        id: childThreadId,
+        title: "Worker",
+        sandbox: null,
+      };
+      const workerReadModel: OrchestrationReadModel = {
+        ...snapshot,
+        threads: [snapshot.threads[0]!, childThread],
+      };
+      const provision = vi.fn((_input: Parameters<SandboxRuntimeManagerShape["provision"]>[0]) =>
+        Effect.succeed({
+          sandboxId: "sandbox-worker",
+          runtime: "podman" as const,
+          containerName: "t3-thread-worker",
+          services: [],
+        }),
+      );
+      const spawnRequest: OrchestrationEvent = {
+        ...request,
+        eventId: EventId.make("worker-spawn-request"),
+        type: "sandbox.worker-spawn-requested",
+        payload: {
+          parentThreadId: threadId,
+          childThreadId,
+          task: "ship the worker",
+          inheritedCommit,
+          branchName: `t3/thread/${childThreadId}`,
+        },
+      };
+      const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(
+          Layer.mock(GitWorkflowService)({
+            localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+            resolveRemoteTrackingCommit: () =>
+              Effect.succeed({
+                commitSha: "0123456789abcdef0123456789abcdef01234567",
+                remoteRefName: "origin/main",
+              }),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+        Layer.provide(sessionDirectory().layer),
+        Layer.provide(
+          Layer.succeed(T3ProjectFileLoader, {
+            load: () =>
+              Effect.succeed(
+                Option.some({
+                  sandbox: {
+                    image: `registry.example/t3-desktop@sha256:${"a".repeat(64)}`,
+                  },
+                } as never),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(SandboxRuntimeManager, {
+            sweepExpiredArtifacts: () => Effect.succeed(0),
+            authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
+            provision,
+            reconcile: () =>
+              Effect.succeed({ activeThreadIds: [], missingThreadIds: [], orphanThreadIds: [] }),
+          } as never),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery)({
+            getSnapshot: () => Effect.succeed(workerReadModel),
+            getThreadDetailById: (id) =>
+              Effect.succeed(
+                id === threadId
+                  ? Option.some(snapshot.threads[0]!)
+                  : id === childThreadId
+                    ? Option.some(childThread)
+                    : Option.none(),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(OrchestrationEngineService)({
+            dispatch: (command) =>
+              Effect.gen(function* () {
+                dispatched.push(command);
+                if (command.type === "thread.turn.start") yield* Deferred.succeed(ran, undefined);
+                if (command.type !== "sandbox.provision") return { sequence: dispatched.length };
+                // Run the real decider so the emitted event -- and the reactor's
+                // reaction to it -- is the thing under test.
+                const decided = yield* decideOrchestrationCommand({
+                  readModel: workerReadModel,
+                  command,
+                }).pipe(Effect.provideService(Crypto.Crypto, crypto), Effect.orDie);
+                for (const base of Array.isArray(decided) ? decided : [decided]) {
+                  decidedTypes.push(base.type);
+                  yield* PubSub.publish(events, {
+                    ...base,
+                    sequence: dispatched.length,
+                  } as OrchestrationEvent);
+                }
+                return { sequence: dispatched.length };
+              }),
+            streamDomainEvents: Stream.concat(Stream.make(spawnRequest), Stream.fromPubSub(events)),
+          }),
+        ),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* Deferred.await(ran).pipe(Effect.timeout("10 seconds"));
+          yield* reactor.drain;
+        }).pipe(Effect.provide(layer)),
+      );
+
+      // The inline path, not the request path: `sandbox.provision-requested`
+      // here is what re-enters this reactor and provisions a second container.
+      expect(decidedTypes).toEqual(["sandbox.provisioning-started"]);
+      expect(provision).toHaveBeenCalledTimes(1);
+      expect(dispatched.filter((command) => command.type === "sandbox.provision")).toHaveLength(1);
+      const provisionCommand = dispatched.find((command) => command.type === "sandbox.provision");
+      if (provisionCommand?.type !== "sandbox.provision")
+        throw new Error("expected a provision command");
+      expect(provisionCommand.provisionsInline).toBe(true);
+      // The resolved deployment runtime, so the projection matches the
+      // container that is actually being created.
+      expect(provisionCommand.config?.runtime).toBe("podman");
+      expect(provision.mock.calls[0]?.[0]).toMatchObject({ config: { runtime: "podman" } });
+      expect(provisionCommand.branch).toMatchObject({
+        branchName: `t3/thread/${childThreadId}`,
+        baseCommit: inheritedCommit,
+        parentThreadId: threadId,
+      });
+      // The inline readiness is accepted rather than rejected for "sandbox is
+      // not provisioning", so the worker reaches a running turn.
+      expect(dispatched.map((command) => command.type)).toContain("sandbox.provision.ready");
+    }),
+  );
+
+  /**
+   * Layer for the reconcile tests below, over a thread whose container survived
+   * a restart but which this manager generation cannot drive.
+   */
+  const unresumableLayer = (options: {
+    readonly calls: string[];
+    readonly dispatched: OrchestrationCommand[];
+    readonly exportBranch: SandboxRuntimeManagerShape["exportBranch"];
+    readonly stop: SandboxRuntimeManagerShape["stop"];
+    /** `lastExport` the thread carries before this reconcile pass runs. */
+    readonly priorExport?: SandboxBranchExport;
+  }) => {
+    // Mutable, because the projection is: a `sandbox.branch-export.result`
+    // dispatched partway through the reconcile writes a fresh `lastExport`
+    // that everything read AFTER it must see. A frozen fixture cannot tell a
+    // reactor that re-reads the projection apart from one that reuses the
+    // snapshot it captured before the export.
+    let sandboxThread: OrchestrationReadModel["threads"][number] = {
+      ...snapshot.threads[0]!,
+      sandbox: {
+        lifecycle: "ready" as const,
+        runtime: "podman" as const,
+        branch: { branchName: `t3/thread/${threadId}`, baseCommit: "a".repeat(40) },
+        limits: {
+          cpuCount: 2,
+          memoryBytes: 4_294_967_296,
+          diskBytes: 21_474_836_480,
+          processCount: 512,
+          idleTimeoutSeconds: 3600,
+          maximumLifetimeSeconds: 28_800,
+        },
+        desktop: { status: "unavailable" as const },
+        services: [],
+        controller: { kind: "none" as const },
+        createdAt: NOW,
+        lastActiveAt: NOW,
+        ...(options.priorExport === undefined ? {} : { lastExport: options.priorExport }),
+      },
+    };
+    return Layer.effect(SandboxLifecycleReactor, make).pipe(
+      Layer.provide(NodeServices.layer),
+      Layer.provide(
+        Layer.mock(GitWorkflowService)({
+          localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
+        }),
+      ),
+      Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+      Layer.provide(sessionDirectory().layer),
+      Layer.provide(
+        Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
+      ),
+      Layer.provide(
+        Layer.succeed(SandboxRuntimeManager, {
+          sweepExpiredArtifacts: () => Effect.succeed(0),
+          authorizeProvision: (threadId: string) => Effect.succeed({ threadId, generation: 1 }),
+          sampleUsage: () => Effect.fail(new SandboxManagerError({ message: "no container" })),
+          exportBranch: options.exportBranch,
+          stop: options.stop,
+          // Reported as missing too, deliberately: a caller that ignores the
+          // distinction still fails the thread and lets it re-provision. The
+          // reconcile pass asks each runtime in turn, and only the one this
+          // thread was provisioned on knows about its container.
+          reconcile: (runtime: "docker" | "podman") =>
+            Effect.succeed({
+              activeThreadIds: [],
+              missingThreadIds: runtime === "podman" ? [threadId] : [],
+              unresumableThreadIds: runtime === "podman" ? [threadId] : [],
+              orphanThreadIds: [],
+              removedRuntimeRefs: [],
+            }),
+        } as never),
+      ),
+      Layer.provide(
+        Layer.mock(ProjectionSnapshotQuery)({
+          getSnapshot: () =>
+            Effect.succeed({ ...snapshot, threads: [sandboxThread] } as typeof snapshot),
+          getThreadDetailById: (id) =>
+            Effect.succeed(id === threadId ? Option.some(sandboxThread) : Option.none()),
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(OrchestrationEngineService)({
+          dispatch: (command) =>
+            Effect.sync(() => {
+              options.dispatched.push(command);
+              // Stands in for the decider's own write: a successful export
+              // records its artifact on the thread's projected sandbox, which
+              // is precisely the state a later command in the same pass has to
+              // be built on top of.
+              if (command.type === "sandbox.branch-export.result") {
+                sandboxThread = {
+                  ...sandboxThread,
+                  sandbox: {
+                    ...sandboxThread.sandbox,
+                    lastExport: {
+                      branchName: command.branchName,
+                      headCommit: command.headCommit,
+                      artifactId: command.artifactId,
+                      bundleSha256: command.bundleSha256,
+                      exportedAt: command.createdAt,
+                    },
+                  },
+                } as OrchestrationReadModel["threads"][number];
+              }
+              return { sequence: options.dispatched.length };
+            }),
+          streamDomainEvents: Stream.empty,
+        }),
+      ),
+    );
+  };
+
+  it.effect("exports an unresumable sandbox before stopping it", () =>
+    Effect.gen(function* () {
+      // Reconcile used to ignore `unresumableThreadIds` entirely. The thread
+      // was failed and left free to re-provision while its container kept
+      // RUNNING: the next provision could collide with the surviving sidecars,
+      // and its unwind deleted a workspace volume whose commits had never been
+      // exported. Order matters as much as the fact -- the export is what
+      // saves the work, and the stop destroys the volume.
+      const calls: string[] = [];
+      const dispatched: OrchestrationCommand[] = [];
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+        }).pipe(
+          Effect.provide(
+            unresumableLayer({
+              calls,
+              dispatched,
+              exportBranch: () =>
+                Effect.sync(() => {
+                  calls.push("export");
+                  return {
+                    commit: "b".repeat(40),
+                    patch: "",
+                    artifactId: "c".repeat(64),
+                    bundleSha256: "d".repeat(64),
+                  };
+                }) as never,
+              stop: () =>
+                Effect.sync(() => {
+                  calls.push("stop");
+                }) as never,
+            }),
+          ),
+        ),
+      );
+
+      expect(calls).toEqual(["export", "stop"]);
+      // The export result is published, so the re-provision seeds from it.
+      expect(dispatched.map((command) => command.type)).toContain("sandbox.branch-export.result");
+      // ...and the thread is still failed, so it is free to re-provision.
+      const missing = dispatched.find((command) => command.type === "sandbox.reconcile.result");
+      if (missing?.type !== "sandbox.reconcile.result")
+        throw new Error("expected a reconcile result command");
+      expect(missing.disposition).toBe("missing");
+    }),
+  );
+
+  it.effect("keeps the fresh export on the reconcile result that follows the drain", () =>
+    Effect.gen(function* () {
+      // The drain exports the thread's work, which writes a NEW `lastExport`
+      // into the projection. The `missing` result dispatched immediately
+      // afterwards REPLACES the whole sandbox value -- and it used to be built
+      // from the snapshot captured before the export, so it erased the pointer
+      // to that export moments after the container and its volume had already
+      // been destroyed. The next provision then seeded from the project's base
+      // commit and the user's exported work was unreachable: silent data loss
+      // caused by the very code path that exists to save the work.
+      const calls: string[] = [];
+      const dispatched: OrchestrationCommand[] = [];
+      const stale = {
+        branchName: `t3/thread/${threadId}`,
+        headCommit: "1".repeat(40),
+        artifactId: "2".repeat(64),
+        bundleSha256: "3".repeat(64),
+        exportedAt: NOW,
+      };
+      const fresh = {
+        commit: "b".repeat(40),
+        patch: "",
+        artifactId: "c".repeat(64),
+        bundleSha256: "d".repeat(64),
+      };
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+        }).pipe(
+          Effect.provide(
+            unresumableLayer({
+              calls,
+              dispatched,
+              priorExport: stale,
+              exportBranch: () =>
+                Effect.sync(() => {
+                  calls.push("export");
+                  return fresh;
+                }) as never,
+              stop: () =>
+                Effect.sync(() => {
+                  calls.push("stop");
+                }) as never,
+            }),
+          ),
+        ),
+      );
+
+      expect(calls).toEqual(["export", "stop"]);
+      const missing = dispatched.find((command) => command.type === "sandbox.reconcile.result");
+      if (missing?.type !== "sandbox.reconcile.result")
+        throw new Error("expected a reconcile result command");
+      // The artifact the drain just wrote, not the one the thread carried into
+      // this pass -- that older bundle predates everything the export saved.
+      expect(missing.sandbox.lastExport?.artifactId).toBe(fresh.artifactId);
+      expect(missing.sandbox.lastExport?.artifactId).not.toBe(stale.artifactId);
+      expect(missing.sandbox.lastExport?.headCommit).toBe(fresh.commit);
+      // ...and the rest of the reconcile result is unchanged: the thread is
+      // still failed, so it is free to re-provision from that fresh export.
+      expect(missing.disposition).toBe("missing");
+      expect(missing.sandbox.lifecycle).toBe("failed");
+    }),
+  );
+
+  it.effect("still stops an unresumable sandbox whose export fails", () =>
+    Effect.gen(function* () {
+      // A container nothing can drive must not keep running just because its
+      // work could not be saved -- that is the outcome this exists to prevent.
+      const calls: string[] = [];
+      const dispatched: OrchestrationCommand[] = [];
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const reactor = yield* SandboxLifecycleReactor;
+          yield* reactor.start();
+          yield* reactor.drain;
+        }).pipe(
+          Effect.provide(
+            unresumableLayer({
+              calls,
+              dispatched,
+              exportBranch: () =>
+                Effect.sync(() => {
+                  calls.push("export");
+                }).pipe(
+                  Effect.andThen(
+                    Effect.fail(new SandboxManagerError({ message: "bundle verify failed" })),
+                  ),
+                ) as never,
+              stop: () =>
+                Effect.sync(() => {
+                  calls.push("stop");
+                }) as never,
+            }),
+          ),
+        ),
+      );
+
+      expect(calls).toEqual(["export", "stop"]);
+      // Nothing was saved, so nothing is published for a re-provision to seed
+      // from -- the failure is reported in the logs, not silently swallowed.
+      expect(dispatched.map((command) => command.type)).not.toContain(
+        "sandbox.branch-export.result",
+      );
+    }),
   );
 });

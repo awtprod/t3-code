@@ -56,6 +56,18 @@ export type SandboxBootstrap = {
    */
   readonly restoreCommit?: string;
   /**
+   * Commit the export recorded its working-tree snapshot at, carried from the
+   * event log rather than read out of the bundle.
+   *
+   * The restore refuses to unpack a snapshot that does not match: the ref in
+   * the bundle is named by its own commit, so a ref naming anything else is a
+   * bundle that was truncated, rewritten, or built by a different export, and
+   * unpacking its tree would overwrite the user's checkout with someone
+   * else's. Absent when the export's tree was clean and for bundles written
+   * before snapshots existed -- both correctly restore to the exported head.
+   */
+  readonly restoreSnapshotCommit?: string;
+  /**
    * Manager-generated verified tar of a previously exported provider
    * conversation store, extracted over the container's provider home before
    * any provider can spawn.
@@ -88,6 +100,17 @@ export type SandboxRestoreSource = {
    * but leaves the provider without prior context.
    */
   readonly storeSha256?: string;
+  /**
+   * Commit the export pinned its working-tree snapshot at, when the tree was
+   * dirty.
+   *
+   * Restore requires the bundle's snapshot ref to resolve to exactly this
+   * commit before it will unpack that tree over the checked-out branch: the
+   * ref is named by its own commit, so a mismatch means the bundle was
+   * truncated, rewritten, or assembled from a different export. Absent when
+   * the tree was clean, and for exports written before snapshots existed.
+   */
+  readonly snapshotCommit?: string;
 };
 
 export type SandboxProvisionInput = {
@@ -119,7 +142,37 @@ export type SandboxReady = {
   readonly egressNetworkName?: string;
   readonly branchName: string;
   readonly limits: SandboxResourceLimits;
+  /**
+   * What this provision did to the provider's conversation store, and thus
+   * whether the thread's persisted resume cursor still names something real.
+   *
+   * A boolean could not express this. "Not restored" conflated the two cases
+   * that matter most: a container that SURVIVED (nothing needed restoring, and
+   * the conversation is exactly where the cursor left it) reported the same
+   * `false` as a fresh container whose archive never arrived -- so a valid
+   * cursor was thrown away on every re-attach.
+   *
+   * Absent from a record rebuilt by adoption, which provisioned nothing.
+   */
+  readonly providerStore?: SandboxProviderStoreDisposition;
 };
+
+/**
+ * - `preserved` -- the same container and provider home are still there;
+ *   nothing was restored because nothing had been lost.
+ * - `restored` -- a fresh container, and the exported archive really was
+ *   extracted into its provider home.
+ * - `unavailable` -- a fresh container with no prior conversation in it: no
+ *   store was carried across, or one was supplied and failed to copy or
+ *   extract (which is best-effort and never fails the provision).
+ *
+ * A caller deciding whether to keep the thread's provider resume cursor reads
+ * this rather than the recorded `storeSha256`: the artifact may have been
+ * swept, or the extraction may have failed silently, and a cursor kept against
+ * a container with no conversation in it makes every following turn fail to
+ * resume.
+ */
+export type SandboxProviderStoreDisposition = "preserved" | "restored" | "unavailable";
 
 export type SandboxExecInput = {
   readonly executable: string;
@@ -160,6 +213,18 @@ export type SandboxAdoptionHint = {
 export type SandboxExport = {
   readonly commit: string;
   readonly patch: string;
+  /**
+   * Commit pinned under `refs/t3/export-snapshot` in the exported bundle,
+   * capturing the working tree -- dirty tracked files and untracked ones --
+   * at export time.
+   *
+   * Absent when the working tree was clean, and when the snapshot could not be
+   * written (the branch still exports; the export never fails over a
+   * snapshot). A restore that finds the ref in the bundle unpacks it over the
+   * checked-out head commit, which is what stops an automatic settle from
+   * destroying uncommitted work.
+   */
+  readonly snapshotCommit?: string;
 };
 export type SandboxArtifactExport = SandboxExport & {
   readonly artifactId: string;
@@ -192,8 +257,29 @@ export type SandboxReconcileInput = {
 };
 
 export type SandboxReconcileResult = {
+  /**
+   * Threads whose sandbox this manager generation provisioned and can still
+   * drive: `exec`, checkpointing, and provider spawn all work against them.
+   */
   readonly activeThreadIds: ReadonlyArray<string>;
   readonly missingThreadIds: ReadonlyArray<string>;
+  /**
+   * Threads whose container survived a restart and proved its identity by
+   * label signature, but which this manager generation cannot drive: adoption
+   * grants export and teardown only, never `exec`, so nothing can run in them.
+   *
+   * These are reported in `missingThreadIds` as well, deliberately. A caller
+   * that does nothing special still fails the thread and lets it
+   * re-provision -- the fail-closed outcome -- instead of leaving a projection
+   * that says `ready` while every operation throws "not ready". A caller that
+   * reads this list can do better: the container is intact and addressable
+   * with an adoption hint, so stopping it exports the thread's work first and
+   * the re-provision restores from that export.
+   *
+   * Optional so a stub reconcile that reports nothing unresumable can stay
+   * silent; absent means none.
+   */
+  readonly unresumableThreadIds?: ReadonlyArray<string>;
   readonly orphanThreadIds: ReadonlyArray<string>;
   readonly removedRuntimeRefs: ReadonlyArray<string>;
 };
@@ -203,6 +289,19 @@ export interface ThreadSandboxBackend {
   readonly ensureReady: (input: SandboxProvisionInput) => Promise<SandboxReady>;
   readonly exec: (threadId: string, input: SandboxExecInput) => Promise<SandboxCommandResult>;
   readonly exportBranch: (threadId: string, hint?: SandboxAdoptionHint) => Promise<SandboxExport>;
+  /**
+   * `snapshotCommit` is the one the preceding `exportBranch` returned. The
+   * bundle names that ref explicitly, so what an export ships never depends on
+   * an earlier export's refs having been cleaned up.
+   */
+  readonly exportBundle: (
+    threadId: string,
+    destination: string,
+    options?: {
+      readonly snapshotCommit?: string;
+      readonly hint?: SandboxAdoptionHint;
+    },
+  ) => Promise<void>;
   readonly sampleUsage: (threadId: string) => Promise<SandboxUsageSample>;
   readonly stop: (
     threadId: string,

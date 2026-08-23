@@ -8,7 +8,7 @@ export const REQUIRED_CAPABILITY_META_KEY = "t3.requiredCapability";
 
 export const requireCapability = <T extends Tool.Any>(tool: T, capability: McpCapability): T =>
   tool.annotate(Tool.Meta, {
-    ...(Context.getOrUndefined(tool.annotations, Tool.Meta) ?? {}),
+    ...Context.getOrUndefined(tool.annotations, Tool.Meta),
     [REQUIRED_CAPABILITY_META_KEY]: capability,
   }) as T;
 

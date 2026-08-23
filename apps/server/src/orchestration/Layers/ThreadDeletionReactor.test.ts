@@ -17,8 +17,11 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Crypto from "effect/Crypto";
 import * as Stream from "effect/Stream";
 import { describe } from "vite-plus/test";
+
+import { decideOrchestrationCommand } from "../decider.ts";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import {
@@ -194,6 +197,54 @@ it.layer(NodeServices.layer)("thread deletion sandbox cleanup", (it) => {
       // Artifact removal still runs for every deleted thread: a stopped
       // sandbox's export is exactly the artifact that must not survive.
       expect(artifactRemovals).toEqual(["thread-none", "thread-stopped", "thread-expired"]);
+    }),
+  );
+  it.effect("stops the sandbox of a deleted thread even under a human takeover lease", () =>
+    Effect.gen(function* () {
+      // Deleting a thread while somebody held the desktop takeover left the
+      // container running forever: the decider refuses a plain `sandbox.stop`
+      // for the lease, nothing ever resumes a deleted thread to release it,
+      // and reconcile still counts the deleted thread as expected -- so orphan
+      // removal skips its container too. Deletion has to revoke the lease.
+      const leased = thread(
+        "thread-leased",
+        sandbox({
+          controller: {
+            kind: "human",
+            leaseId: "lease-1",
+            sessionId: "viewer-1",
+            acquiredAt: NOW,
+          },
+        }),
+      );
+      const { dispatched } = yield* runReactor([leased]);
+
+      expect(dispatched.map((command) => [command.type, threadIdOf(command)])).toEqual([
+        ["sandbox.stop", "thread-leased"],
+      ]);
+      const stop = dispatched[0];
+      if (stop?.type !== "sandbox.stop") throw new Error("expected a sandbox stop command");
+      expect(stop.force).toBe(true);
+
+      // The command the reactor built, run through the real decider against a
+      // read model that still holds the lease: this is what used to be
+      // rejected, and it must now move the sandbox to `stopping`.
+      const decided = yield* decideOrchestrationCommand({
+        readModel: {
+          snapshotSequence: 0,
+          projects: [],
+          threads: [leased],
+          updatedAt: NOW,
+        },
+        command: stop,
+      }).pipe(Effect.provideService(Crypto.Crypto, yield* Crypto.Crypto));
+      const stopping = decided as Omit<
+        Extract<OrchestrationEvent, { type: "sandbox.stopping" }>,
+        "sequence"
+      >;
+      expect(stopping.type).toBe("sandbox.stopping");
+      expect(stopping.payload.sandbox.lifecycle).toBe("stopping");
+      expect(stopping.payload.sandbox.controller.kind).toBe("none");
     }),
   );
 });

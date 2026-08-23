@@ -4,7 +4,7 @@ const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const COMMIT = /^[0-9a-f]{40,64}$/i;
 const SAFE_ABSOLUTE_PATH = /^\/(?:[a-zA-Z0-9._-]+\/?)+$/;
 const SAFE_ENV_KEY = /^[A-Z_][A-Z0-9_]*$/;
-const SAFE_BRANCH = /^(?![-/.])(?!.*(?:\.\.|\/\/|@\{|[~^:?*\[\u005c]))[a-zA-Z0-9._/-]{1,200}$/;
+const SAFE_BRANCH = /^(?![-/.])(?!.*(?:\.\.|\/\/|@\{|[~^:?*[\u005c]))[a-zA-Z0-9._/-]{1,200}$/;
 const FORBIDDEN_TARGETS = ["/", "/home", "/root", "/run", "/tmp", "/etc", "/usr", "/var/run"];
 
 export class SandboxValidationError extends Error {
@@ -18,18 +18,26 @@ export function sanitizeId(value: string, field: string): string {
   return value;
 }
 
+/**
+ * Shape check for a branch name that is about to land on a git command line.
+ *
+ * Shared rather than re-inlined: the provision path validates the bootstrap's
+ * branch, and the export path names the same branch as a bundle refspec from a
+ * record that may have been rebuilt by adoption rather than provisioned here.
+ * Two copies of this rule would drift.
+ */
+export function validateBranchName(branchName: string): void {
+  if (!SAFE_BRANCH.test(branchName) || branchName.endsWith("/") || branchName.endsWith(".lock")) {
+    throw new SandboxValidationError("branchName is unsafe");
+  }
+}
+
 export function validateBootstrap(input: SandboxBootstrap): void {
   sanitizeId(input.threadId, "threadId");
   sanitizeId(input.projectId, "projectId");
   if (!COMMIT.test(input.baseCommit))
     throw new SandboxValidationError("baseCommit must be an immutable full commit hash");
-  if (
-    !SAFE_BRANCH.test(input.branchName) ||
-    input.branchName.endsWith("/") ||
-    input.branchName.endsWith(".lock")
-  ) {
-    throw new SandboxValidationError("branchName is unsafe");
-  }
+  validateBranchName(input.branchName);
   if (input.repositoryBundlePath === undefined) {
     let url: URL;
     try {

@@ -20,14 +20,18 @@ import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import {
   SandboxManagerError,
   SandboxRuntimeManager,
   resolveSandboxImage,
   resolveSandboxPreviewProxyImage,
+  resolveSandboxRuntime,
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import type { SandboxAdoptionHint } from "../../sandbox/types.ts";
+import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
+import { dispatchProvisionReadyOrTearDown } from "../../sandbox/provisionReadyDispatch.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -62,6 +66,7 @@ export const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery;
   const providers = yield* ProviderService;
+  const providerSessions = yield* ProviderSessionDirectory;
   const runtimes = yield* SandboxRuntimeManager;
   const projectFiles = yield* T3ProjectFileLoader;
   const gitWorkflow = yield* GitWorkflowService;
@@ -69,6 +74,28 @@ export const make = Effect.gen(function* () {
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((id) => CommandId.make(`server:${tag}:${id}`)));
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+  /**
+   * The config to record on an inline provision, with the runtime resolved.
+   *
+   * The decider is pure and defaults an absent `config.runtime` to `"docker"`,
+   * while the runtime manager honours `T3_SANDBOX_RUNTIME`. On a podman
+   * deployment the projection therefore claimed docker for the whole
+   * provisioning window, and a stop or delete landing in it addressed a backend
+   * that was never used. Resolving here -- rather than teaching the decider
+   * about env vars -- keeps the projection matching what actually runs.
+   */
+  const resolvedConfig = Effect.fn("SandboxLifecycleReactor.resolvedConfig")(function* <
+    Config extends { readonly runtime?: "docker" | "podman" | "microvm" },
+  >(config: Config) {
+    if (config.runtime !== undefined) return config;
+    const runtime = resolveSandboxRuntime();
+    if (runtime !== "docker" && runtime !== "podman")
+      return yield* new SandboxManagerError({
+        message: `unsupported sandbox runtime: ${runtime}`,
+      });
+    return { ...config, runtime };
+  });
 
   const dispatchAndAwaitProjection = Effect.fn(
     "SandboxLifecycleReactor.dispatchAndAwaitProjection",
@@ -139,6 +166,10 @@ export const make = Effect.gen(function* () {
       artifactId: result.artifactId,
       bundleSha256: result.bundleSha256,
       ...(result.storeSha256 === undefined ? {} : { storeSha256: result.storeSha256 }),
+      // Recorded in the event log, not just in the manifest beside the bundle:
+      // restore holds the bundle's snapshot ref to exactly this commit, and a
+      // manifest is written by whoever wrote the bundle it sits next to.
+      ...(result.snapshotCommit === undefined ? {} : { snapshotCommit: result.snapshotCommit }),
     });
   });
 
@@ -249,7 +280,7 @@ export const make = Effect.gen(function* () {
             baseCommit: base.commitSha,
           };
         }));
-      const config = event.payload.config ?? thread.sandboxConfig ?? {};
+      const config = yield* resolvedConfig(event.payload.config ?? thread.sandboxConfig ?? {});
       const createdAt = yield* nowIso;
       const provisionCommandId = yield* commandId("sandbox-manual-provision");
       yield* dispatchAndAwaitProjection({
@@ -263,7 +294,14 @@ export const make = Effect.gen(function* () {
         provisionsInline: true,
         createdAt,
       });
+      // The decider just accepted the `sandbox.provision` above, so this
+      // provision is the current one rather than a stale fiber a deletion has
+      // already stopped. The token identifies THIS attempt: it admits the
+      // provision below, and it is what the teardown after a refused readiness
+      // names, so neither can act on a container a newer attempt owns.
+      const attempt = yield* runtimes.authorizeProvision(thread.id);
       const provision = yield* runtimes.provision({
+        attempt,
         bootstrap: {
           threadId: thread.id,
           projectId: thread.projectId,
@@ -283,20 +321,44 @@ export const make = Effect.gen(function* () {
         ...(declaration?.services ? { services: declaration.services } : {}),
         ...(declaration?.previewPorts ? { previewPorts: declaration.previewPorts } : {}),
       });
-      yield* engine.dispatch({
-        type: "sandbox.provision.ready",
-        commandId: yield* commandId("sandbox-manual-ready"),
+      // Same shared decision every other provisioning entry point makes: a
+      // container whose provider home came up without the archived
+      // conversation must not keep a cursor naming it, or every following turn
+      // dies on "No conversation found with session ID". This path used to
+      // ignore the outcome entirely and keep a stale cursor.
+      yield* reconcileProviderStoreCursor(providerSessions, thread.id, provision.providerStore);
+      // A refused readiness means the thread stopped being provisionable while
+      // this provision ran -- a stop or a deletion landed in the window before
+      // the manager was even entered. The containers it created have to go with
+      // it, or they outlive the thread with nothing left to reference them.
+      yield* dispatchProvisionReadyOrTearDown({
         threadId: thread.id,
-        sandboxId: SandboxId.make(provision.sandboxId),
-        runtime: provision.runtime,
-        runtimeRef: provision.containerName,
-        ...(provision.desktopSessionId === undefined
-          ? {}
-          : { desktopSessionId: provision.desktopSessionId }),
-        ...(provision.desktopStreamPath === undefined
-          ? {}
-          : { desktopStreamPath: provision.desktopStreamPath }),
-        createdAt: yield* nowIso,
+        dispatch: engine.dispatch({
+          type: "sandbox.provision.ready",
+          commandId: yield* commandId("sandbox-manual-ready"),
+          threadId: thread.id,
+          sandboxId: SandboxId.make(provision.sandboxId),
+          runtime: provision.runtime,
+          runtimeRef: provision.containerName,
+          ...(provision.desktopSessionId === undefined
+            ? {}
+            : { desktopSessionId: provision.desktopSessionId }),
+          ...(provision.desktopStreamPath === undefined
+            ? {}
+            : { desktopStreamPath: provision.desktopStreamPath }),
+          createdAt: yield* nowIso,
+        }),
+        // `microvm` is a contract runtime with no backend behind it; the
+        // manager only ever returns docker or podman, and asking it to stop a
+        // runtime it cannot address would be a type error, not a teardown.
+        //
+        // Scoped to the attempt, not the thread: a stop is what refuses this
+        // readiness, and the re-provision that follows it can already have
+        // published a container of its own by the time this runs.
+        teardown: () =>
+          provision.runtime === "microvm"
+            ? Effect.void
+            : runtimes.stopProvisionAttempt(provision.runtime, provision.attempt),
       });
       const readyThread = yield* getThread(thread.id);
       if (readyThread?.sandbox) {
@@ -411,6 +473,16 @@ export const make = Effect.gen(function* () {
           .pipe(Effect.ignore);
         return;
       }
+      const workerConfig = yield* resolvedConfig(event.payload.config ?? {});
+      const workerBranch = {
+        branchName: event.payload.branchName,
+        baseCommit: event.payload.inheritedCommit,
+        parentThreadId: event.payload.parentThreadId,
+        inheritedCommit: event.payload.inheritedCommit,
+        ...(event.payload.inheritedPatch
+          ? { inheritedPatchSha256: event.payload.inheritedPatch.sha256 }
+          : {}),
+      };
       yield* engine.dispatch({
         type: "thread.create",
         commandId: yield* commandId("sandbox-worker-create"),
@@ -425,25 +497,29 @@ export const make = Effect.gen(function* () {
         branch: null,
         worktreePath: null,
         sandboxConfig: event.payload.config,
-        sandboxBranch: {
-          branchName: event.payload.branchName,
-          baseCommit: event.payload.inheritedCommit,
-          parentThreadId: event.payload.parentThreadId,
-          inheritedCommit: event.payload.inheritedCommit,
-          ...(event.payload.inheritedPatch
-            ? { inheritedPatchSha256: event.payload.inheritedPatch.sha256 }
-            : {}),
-        },
+        sandboxBranch: workerBranch,
         createdAt,
       });
-      yield* engine.dispatch({
+      yield* dispatchAndAwaitProjection({
         type: "sandbox.provision",
         commandId: yield* commandId("sandbox-worker-provision"),
         threadId: event.payload.childThreadId,
-        config: event.payload.config ?? {},
+        config: workerConfig,
+        branch: workerBranch,
+        // Same contract as the manual path above: this handler provisions
+        // inline on the next line, so the decider must drive the sandbox to
+        // `provisioning` rather than emit `sandbox.provision-requested` --
+        // which this very reactor consumes, and would have provisioned the
+        // worker a second time.
+        provisionsInline: true,
         createdAt,
       });
+      // Same contract as the manual path: the worker's `sandbox.provision` was
+      // accepted a few lines up, so this provision is not a stale one, and the
+      // token it gets back identifies this attempt to everything below.
+      const attempt = yield* runtimes.authorizeProvision(event.payload.childThreadId);
       const provision = yield* runtimes.provision({
+        attempt,
         bootstrap: {
           threadId: event.payload.childThreadId,
           projectId: parent.projectId,
@@ -455,7 +531,7 @@ export const make = Effect.gen(function* () {
             ? { inheritedPatch: inheritedPatch.content }
             : {}),
         },
-        config: event.payload.config ?? {},
+        config: workerConfig,
         image,
         ...(process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE?.trim()
           ? { egressProxyImage: process.env.T3_SANDBOX_EGRESS_PROXY_IMAGE.trim() }
@@ -466,20 +542,39 @@ export const make = Effect.gen(function* () {
         ...(declaration?.services ? { services: declaration.services } : {}),
         ...(declaration?.previewPorts ? { previewPorts: declaration.previewPorts } : {}),
       });
-      yield* engine.dispatch({
-        type: "sandbox.provision.ready",
-        commandId: yield* commandId("sandbox-worker-ready"),
+      yield* reconcileProviderStoreCursor(
+        providerSessions,
+        event.payload.childThreadId,
+        provision.providerStore,
+      );
+      // Same contract as the manual path above: a worker whose readiness the
+      // decider refuses has a container that nothing will ever stop again.
+      yield* dispatchProvisionReadyOrTearDown({
         threadId: event.payload.childThreadId,
-        sandboxId: SandboxId.make(provision.sandboxId),
-        runtime: provision.runtime,
-        runtimeRef: provision.containerName,
-        ...(provision.desktopSessionId === undefined
-          ? {}
-          : { desktopSessionId: provision.desktopSessionId }),
-        ...(provision.desktopStreamPath === undefined
-          ? {}
-          : { desktopStreamPath: provision.desktopStreamPath }),
-        createdAt: yield* nowIso,
+        dispatch: engine.dispatch({
+          type: "sandbox.provision.ready",
+          commandId: yield* commandId("sandbox-worker-ready"),
+          threadId: event.payload.childThreadId,
+          sandboxId: SandboxId.make(provision.sandboxId),
+          runtime: provision.runtime,
+          runtimeRef: provision.containerName,
+          ...(provision.desktopSessionId === undefined
+            ? {}
+            : { desktopSessionId: provision.desktopSessionId }),
+          ...(provision.desktopStreamPath === undefined
+            ? {}
+            : { desktopStreamPath: provision.desktopStreamPath }),
+          createdAt: yield* nowIso,
+        }),
+        // `microvm` is a contract runtime with no backend behind it; the
+        // manager only ever returns docker or podman, and asking it to stop a
+        // runtime it cannot address would be a type error, not a teardown.
+        //
+        // Attempt-scoped for the same reason as the manual path above.
+        teardown: () =>
+          provision.runtime === "microvm"
+            ? Effect.void
+            : runtimes.stopProvisionAttempt(provision.runtime, provision.attempt),
       });
       const readyChild = yield* getThread(event.payload.childThreadId);
       if (readyChild?.sandbox) {
@@ -681,9 +776,76 @@ export const make = Effect.gen(function* () {
             .pipe(Effect.ignore);
         }
       }
+      // A container that survived a restart and proved its identity, but that
+      // this manager generation cannot drive. It is reported as missing too,
+      // so the loop below fails its thread and lets it re-provision -- but
+      // doing only that leaves the container RUNNING under a `failed`
+      // projection: the workload keeps burning the host, the next provision
+      // can collide with the surviving sidecars, and its unwind deletes the
+      // workspace volume with the user's commits still in it.
+      //
+      // So it is drained here first, before anything marks the thread failed.
+      // Export strictly before stop: the export is what saves the work, and a
+      // stop runs the teardown and destroys the volume. A failed export must
+      // still be followed by the stop -- leaving the container running is the
+      // outcome this exists to prevent -- but it is reported rather than
+      // swallowed, because it means the thread is about to re-provision from
+      // its previous export or from the base commit.
+
+      /**
+       * Threads whose work this pass exported.
+       *
+       * Their projected sandbox now carries a `lastExport` written by the
+       * export's own command -- something `snapshot`, read at the top of this
+       * function and therefore from before the export, cannot know about.
+       */
+      const drainedThreadIds = new Set<string>();
+      for (const threadId of result.value.unresumableThreadIds ?? []) {
+        const thread = snapshot.threads.find((item) => item.id === threadId);
+        if (thread?.sandbox == null) continue;
+        if (
+          yield* exportBranch(thread.id).pipe(
+            Effect.as(true),
+            Effect.catchCause((cause) =>
+              Effect.logWarning(
+                "could not export an unresumable sandbox before stopping it; its uncommitted work is lost",
+                { threadId: thread.id, cause: Cause.pretty(cause) },
+              ).pipe(Effect.as(false)),
+            ),
+          )
+        )
+          drainedThreadIds.add(thread.id);
+        yield* runtimes
+          .stop(
+            runtime,
+            thread.id,
+            yield* adoptionHint(thread).pipe(Effect.orElseSucceed(() => undefined)),
+          )
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("could not stop an unresumable sandbox", {
+                threadId: thread.id,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+          );
+      }
       for (const threadId of result.value.missingThreadIds) {
         const thread = snapshot.threads.find((item) => item.id === threadId);
         if (!thread?.sandbox) continue;
+        // The command below REPLACES the whole sandbox value, so it must be
+        // built on the CURRENT projection, not on the pre-export `snapshot`.
+        // A thread the drain above exported has a fresh `lastExport` that
+        // `snapshot` predates: publishing the stale copy erased the pointer to
+        // that export moments after the container and its volume were already
+        // destroyed, and the next provision then seeded from the project's base
+        // commit instead of the user's exported work. Re-read for exactly the
+        // threads that exported; a deleted thread is invisible to the detail
+        // query, and its recorded sandbox is the only copy there is.
+        const sandbox = drainedThreadIds.has(threadId)
+          ? ((yield* getThread(thread.id).pipe(Effect.orElseSucceed(() => undefined)))?.sandbox ??
+            thread.sandbox)
+          : thread.sandbox;
         const createdAt = yield* nowIso;
         yield* engine
           .dispatch({
@@ -692,7 +854,7 @@ export const make = Effect.gen(function* () {
             threadId: thread.id,
             disposition: "missing",
             sandbox: {
-              ...thread.sandbox,
+              ...sandbox,
               lifecycle: "failed",
               failure: {
                 stage: "reconcile",

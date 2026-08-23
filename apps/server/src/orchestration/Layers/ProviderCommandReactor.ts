@@ -43,7 +43,6 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
-import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -79,6 +78,9 @@ import {
   resolveSandboxPreviewProxyImage,
   resolveSandboxRuntime,
 } from "../../sandbox/SandboxRuntimeManager.ts";
+import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
+import { dispatchProvisionReadyOrTearDown } from "../../sandbox/provisionReadyDispatch.ts";
+import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import {
   T3ProjectFileLoader,
   layer as T3ProjectFileLoaderLive,
@@ -356,9 +358,9 @@ export const make = Effect.gen(function* () {
   const providerTurnSendClaimRepository = yield* ProviderTurnSendClaimRepository;
   const providerService = yield* ProviderService;
   const threadSandboxRuntime = yield* ThreadSandboxRuntime;
+  const providerSessionDirectory = yield* ProviderSessionDirectory;
   const sandboxRuntimeManager = yield* SandboxRuntimeManager;
   const projectFileLoader = yield* T3ProjectFileLoader;
-  const providerSessionDirectory = yield* ProviderSessionDirectory;
   // Both maps hold one tiny per-thread entry (a mutex; a target descriptor)
   // and are bounded by the number of sandbox threads this server generation
   // ever provisioned, so neither needs an eviction scheme for memory. What the
@@ -380,28 +382,6 @@ export const make = Effect.gen(function* () {
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
-  /**
-   * Forget the provider resume cursor persisted for a thread that is about to
-   * get a container it has never run in.
-   *
-   * Best-effort on purpose: if the cursor cannot be cleared the next turn
-   * fails exactly the way it does today, so a persistence hiccup here should
-   * not also fail the turn that was about to repair the thread.
-   */
-  const clearSandboxResumeCursor = (threadId: ThreadId) =>
-    Effect.gen(function* () {
-      const binding = Option.getOrUndefined(yield* providerSessionDirectory.getBinding(threadId));
-      if (binding === undefined || binding.resumeCursor == null) return;
-      yield* providerSessionDirectory.upsert({ ...binding, resumeCursor: null });
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning(
-          "provider command reactor failed to clear the resume cursor before provisioning a sandbox",
-          { threadId, cause },
-        ),
-      ),
-    );
-
   const ensureExecutionTarget = Effect.fn("ProviderCommandReactor.ensureExecutionTarget")(
     function* (
       thread: Parameters<typeof threadSandboxRuntime.ensureReady>[0],
@@ -529,13 +509,23 @@ export const make = Effect.gen(function* () {
           // transcripts are keyed by, so the cursor resolves again and the
           // thread comes back with its context. Clearing it there would throw
           // away the conversation the export went out of its way to save.
-          if (thread.sandbox?.lastExport?.storeSha256 === undefined)
-            yield* clearSandboxResumeCursor(thread.id);
+          // Deferred until after the provision below reports what it actually
+          // restored. Deciding here from `lastExport.storeSha256` alone was
+          // wrong in the case that matters: the artifact may have been swept,
+          // or the copy/extract may have failed (it is best-effort), and the
+          // thread then came back to a clean container while the host kept a
+          // cursor naming a conversation that no longer exists -- every
+          // following turn dying on "No conversation found with session ID".
           yield* orchestrationEngine.dispatch({
             type: "sandbox.provision",
             commandId: yield* serverCommandId("sandbox-provision"),
             threadId: thread.id,
-            config: thread.sandboxConfig ?? {},
+            // The RESOLVED runtime, not the raw config. The decider is pure and
+            // defaults an absent `config.runtime` to docker, while the runtime
+            // manager honours `T3_SANDBOX_RUNTIME` -- so a podman deployment's
+            // projection claimed docker for the whole provisioning window, and
+            // a stop or delete landing in it addressed the wrong backend.
+            config: { ...thread.sandboxConfig, runtime },
             ...(thread.sandbox === null ? { branch } : {}),
             // This reactor calls `runtimes.provision` immediately below, so it
             // takes the decider's inline path rather than asking the lifecycle
@@ -543,8 +533,15 @@ export const make = Effect.gen(function* () {
             provisionsInline: true,
             createdAt: occurredAt,
           });
+          // The decider accepted the `sandbox.provision` above, which is what
+          // distinguishes this provision from a stale one a deletion already
+          // stopped. The token identifies this attempt for admission below and
+          // for the teardown that follows a refused readiness, so neither can
+          // act on a container a newer attempt owns.
+          const attempt = yield* sandboxRuntimeManager.authorizeProvision(thread.id);
           const provision = yield* sandboxRuntimeManager
             .provision({
+              attempt,
               bootstrap: {
                 threadId: thread.id,
                 projectId: thread.projectId,
@@ -556,7 +553,7 @@ export const make = Effect.gen(function* () {
                   ? { parentThreadId: branch.parentThreadId }
                   : {}),
               },
-              config: thread.sandboxConfig ?? {},
+              config: { ...thread.sandboxConfig, runtime },
               image,
               // Re-provisioning a settled or reaped thread: seed from the
               // bundle its teardown exported so the user comes back to their
@@ -603,22 +600,51 @@ export const make = Effect.gen(function* () {
                 }),
               ),
             );
+          // The provision reports what it did to the conversation store --
+          // preserved it, restored it, or came up without it. The shared
+          // helper is what keeps this decision identical across every
+          // provisioning entry point.
+          yield* reconcileProviderStoreCursor(
+            providerSessionDirectory,
+            thread.id,
+            provision.providerStore,
+          );
           const readyAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
-          yield* orchestrationEngine.dispatch({
-            type: "sandbox.provision.ready",
-            commandId: yield* serverCommandId("sandbox-ready"),
+          // A refused readiness means the thread is no longer provisionable --
+          // a stop or a deletion landed while this provision was running -- so
+          // the containers it just created have to go with it.
+          yield* dispatchProvisionReadyOrTearDown({
             threadId: thread.id,
-            sandboxId: SandboxId.make(provision.sandboxId),
-            runtime: provision.runtime,
-            runtimeRef: provision.containerName,
-            ...(provision.desktopSessionId === undefined
-              ? {}
-              : { desktopSessionId: provision.desktopSessionId }),
-            ...(provision.desktopStreamPath === undefined
-              ? {}
-              : { desktopStreamPath: provision.desktopStreamPath }),
-            createdAt: readyAt,
-          });
+            dispatch: orchestrationEngine.dispatch({
+              type: "sandbox.provision.ready",
+              commandId: yield* serverCommandId("sandbox-ready"),
+              threadId: thread.id,
+              sandboxId: SandboxId.make(provision.sandboxId),
+              runtime: provision.runtime,
+              runtimeRef: provision.containerName,
+              ...(provision.desktopSessionId === undefined
+                ? {}
+                : { desktopSessionId: provision.desktopSessionId }),
+              ...(provision.desktopStreamPath === undefined
+                ? {}
+                : { desktopStreamPath: provision.desktopStreamPath }),
+              createdAt: readyAt,
+            }),
+            // Scoped to the attempt rather than the thread: a stop is what
+            // refuses this readiness, and the re-provision that follows it can
+            // already have published a container of its own.
+            teardown: () => sandboxRuntimeManager.stopProvisionAttempt(runtime, provision.attempt),
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: "sandbox",
+                  method: "sandbox.provision.ready",
+                  detail: cause instanceof Error ? cause.message : String(cause),
+                  cause,
+                }),
+            ),
+          );
           const readyThread = Option.getOrUndefined(
             yield* projectionSnapshotQuery.getThreadDetailById(thread.id),
           );

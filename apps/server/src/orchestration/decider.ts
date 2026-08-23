@@ -2032,7 +2032,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           `thread ${command.threadId} sandbox is already terminal`,
         );
       }
-      if (current.controller.kind === "human" && command.type !== "sandbox.expire") {
+      // A takeover means a person is at the desktop, so an ordinary stop is
+      // refused rather than closing their session out from under them.
+      // Expiry overrides that because the lifetime cap is not negotiable, and
+      // a forced stop overrides it because the only caller that sets `force`
+      // is thread deletion: the thread is gone, so nothing will ever resume it
+      // or release the lease, and reconcile keeps counting the deleted thread
+      // as expected -- without this the container runs forever. `force` is
+      // server-only; see `ClientSandboxStopCommand`.
+      const forced = command.type === "sandbox.stop" && command.force === true;
+      if (current.controller.kind === "human" && command.type !== "sandbox.expire" && !forced) {
         return yield* sandboxInvariant(
           command.type,
           `thread ${command.threadId} sandbox has an active takeover lease`,
@@ -2122,6 +2131,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         // and the event, and writing `storeSha256: undefined` would fail the
         // schema instead of meaning "no store".
         ...(command.storeSha256 === undefined ? {} : { storeSha256: command.storeSha256 }),
+        ...(command.snapshotCommit === undefined ? {} : { snapshotCommit: command.snapshotCommit }),
       };
       return yield* sandboxTransition(command.threadId, command.commandId, event.type, event, {
         ...current,
@@ -2131,6 +2141,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           artifactId: command.artifactId,
           bundleSha256: command.bundleSha256,
           ...(command.storeSha256 === undefined ? {} : { storeSha256: command.storeSha256 }),
+          ...(command.snapshotCommit === undefined
+            ? {}
+            : { snapshotCommit: command.snapshotCommit }),
           exportedAt: command.createdAt,
         },
         lastActiveAt: command.createdAt,

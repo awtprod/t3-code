@@ -56,13 +56,86 @@ function successfulExecutor(
         : Math.floor(20 * 1024 ** 3 * 0.9);
       return { exitCode: 0, stdout: `size=${bytes}\n`, stderr: "" };
     }
-    if (command.args[0] === "exec" && command.args.includes("rev-parse"))
+    // `rev-parse HEAD`, `rev-parse HEAD^{tree}`, and `write-tree` all answer
+    // the same object here: a freshly provisioned container has a clean
+    // working tree, so the export writes no snapshot. A test that wants a
+    // dirty tree overrides `write-tree`.
+    if (
+      command.args[0] === "exec" &&
+      (command.args.includes("rev-parse") || command.args.includes("write-tree"))
+    )
       return { exitCode: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
+    // The post-extraction probe for a provider's own session directory. An
+    // archive that unpacked cleanly but carried no conversation would answer
+    // empty here, which is the case the probe exists for.
+    if (command.args[0] === "exec" && command.args.includes("find"))
+      return {
+        exitCode: 0,
+        stdout: "/thread-data/provider-home/.codex/sessions\n",
+        stderr: "",
+      };
     return { exitCode: 0, stdout: "", stderr: "" };
   });
 }
 
+/**
+ * Answers a `find` the way the container's own `find` would, against a fixed
+ * set of directories.
+ *
+ * The probe under test is entirely about WHICH directory names it asks for, so
+ * a responder that returned a canned hit would pass no matter what the argv
+ * said. This reads the `-name` predicates and the depth bounds out of the
+ * command and matches them, so a probe that stops asking for a provider's
+ * layout stops finding that provider's store.
+ */
+function findAgainst(
+  command: SandboxCommand,
+  present: ReadonlyArray<string>,
+): SandboxCommandResult {
+  const args = command.args;
+  const root = args[args.indexOf("find") + 1] ?? "";
+  const names = new Set(
+    args.flatMap((value, index) => (value === "-name" ? [args[index + 1] ?? ""] : [])),
+  );
+  const bound = (flag: string, fallback: number) => {
+    const at = args.indexOf(flag);
+    return at === -1 ? fallback : Number.parseInt(args[at + 1] ?? "", 10);
+  };
+  const minimum = bound("-mindepth", 0);
+  const maximum = bound("-maxdepth", Number.POSITIVE_INFINITY);
+  const matched = present.filter((path) => {
+    if (!path.startsWith(`${root}/`)) return false;
+    const segments = path.slice(root.length + 1).split("/");
+    if (segments.length < minimum || segments.length > maximum) return false;
+    return names.has(segments.at(-1) ?? "");
+  });
+  return { exitCode: 0, stdout: matched.map((path) => `${path}\n`).join(""), stderr: "" };
+}
+
 describe("ContainerSandboxBackend", () => {
+  it("names the opt-out when the host cannot administer project quotas", async () => {
+    // Volume quotas are on by default, and podman's own wording says what
+    // failed but not what to set -- so on a host that cannot administer XFS
+    // project quotas at all, provisioning died without ever mentioning the
+    // flag that fixes it.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "volume" && command.args[1] === "create"
+        ? {
+            exitCode: 125,
+            stdout: "",
+            stderr:
+              "Error: volume options size and inodes not supported. Filesystem does not support Project Quota",
+          }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const failure = await backend.ensureReady(input()).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(String(failure)).toContain("T3_SANDBOX_VOLUME_STORAGE_QUOTA=disabled");
+  });
+
   it("constructs a hardened, per-thread container without host bind mounts", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);
@@ -83,8 +156,6 @@ describe("ContainerSandboxBackend", () => {
         "no-new-privileges",
         "--pids-limit",
         "512",
-        "--storage-opt",
-        `size=${20 * 1024 ** 3}`,
         // Swap pinned to the memory limit: docker's default of 2x memory
         // would let the workload consume double its configured ceiling.
         "--memory",
@@ -93,6 +164,10 @@ describe("ContainerSandboxBackend", () => {
         String(4 * 1024 ** 3),
       ]),
     );
+    // `--storage-opt size=` is off unless a deployment opts in: podman
+    // --remote rejects it, and the writable-layer bound it would add is
+    // already covered by the read-only rootfs plus quota'd volumes.
+    expect(run.args).not.toContain("--storage-opt");
     expect(run.args.join(" ")).not.toContain("type=bind");
     expect(run.args.join(" ")).not.toContain("/var/run/docker.sock");
     expect(executor.commands.find((command) => command.args[0] === "network")?.args).toContain(
@@ -117,9 +192,10 @@ describe("ContainerSandboxBackend", () => {
 
   it("never archives provider credentials into an exported store", async () => {
     // The provider home holds live auth material (.credentials.json,
-    // sessions/*.key) beside the transcripts, and the archive outlives the
-    // container in a host directory. The exclusions are the security boundary,
-    // so they are asserted directly rather than assumed from the happy path.
+    // sessions/*.key, .codex/auth.json) beside the transcripts, and the archive
+    // outlives the container in a host directory. The exclusions are the
+    // security boundary, so they are asserted directly rather than assumed
+    // from the happy path.
     const executor = successfulExecutor((command) =>
       command.args[0] === "exec" && command.args.includes("stat")
         ? { exitCode: 0, stdout: "4096\n", stderr: "" }
@@ -133,11 +209,25 @@ describe("ContainerSandboxBackend", () => {
       (command) => command.args[0] === "exec" && command.args.includes("tar"),
     );
     expect(tar).toBeDefined();
-    for (const denied of [".credentials.json", "sessions", "*.key", "*token*", "*auth*"]) {
+    for (const denied of [
+      ".credentials.json",
+      "*.credentials.json",
+      // Covers private key material anywhere under the home, including inside
+      // a `sessions/` directory -- a tar exclude glob matches across `/`.
+      "*.key",
+      "*token*",
+      // Codex's ~/.codex/auth.json.
+      "*auth*",
+    ]) {
       const at = tar!.args.indexOf(denied);
       expect(at).toBeGreaterThan(0);
       expect(tar!.args[at - 1]).toBe("--exclude");
     }
+    // ...but NOT a bare `sessions`. That stripped Codex's ~/.codex/sessions
+    // transcripts -- the very conversation the archive exists to carry -- while
+    // tar still exited 0, so the thread came back with a retained cursor
+    // naming a conversation that was never in the tar.
+    expect(tar!.args).not.toContain("sessions");
     // Archived from the provider home itself, so nothing outside it -- the
     // workspace, /tmp -- can ride along.
     expect(tar!.args).toContain("/thread-data/provider-home");
@@ -210,6 +300,162 @@ describe("ContainerSandboxBackend", () => {
     );
 
     expect(ready.containerName).toContain("t3-thread-");
+  });
+
+  it("reports the provider store disposition for each of the three provisioning outcomes", async () => {
+    // A boolean could not say this. "Not restored" conflated a fresh container
+    // whose archive never arrived with a container that SURVIVED and never
+    // needed restoring -- and the caller, deciding whether to keep the thread's
+    // provider resume cursor, threw away a perfectly valid cursor on every
+    // re-attach.
+    const withStore = input({
+      bootstrap: { ...input().bootstrap, providerStorePath: "/artifacts/thread-1.store.tar" },
+    });
+
+    const restored = await new ContainerSandboxBackend("docker", successfulExecutor()).ensureReady(
+      withStore,
+    );
+    expect(restored.providerStore).toBe("restored");
+
+    // The archive is supplied but never lands: the provider home comes up
+    // empty, exactly as for a thread with no prior export.
+    const failedExtract = await new ContainerSandboxBackend(
+      "docker",
+      successfulExecutor((command) =>
+        command.args[0] === "exec" && command.args.includes("--extract")
+          ? { exitCode: 1, stdout: "", stderr: "corrupt archive" }
+          : undefined,
+      ),
+    ).ensureReady(withStore);
+    expect(failedExtract.providerStore).toBe("unavailable");
+
+    // No store to carry across at all.
+    const noStore = await new ContainerSandboxBackend("docker", successfulExecutor()).ensureReady(
+      input(),
+    );
+    expect(noStore.providerStore).toBe("unavailable");
+
+    // A container that is already there, with its provider home intact: the
+    // conversation is where it was left, so nothing needed restoring.
+    const survivor = await new ContainerSandboxBackend(
+      "docker",
+      successfulExecutor((command) =>
+        command.args[0] === "inspect"
+          ? {
+              exitCode: 0,
+              stdout: [
+                "thread-1",
+                "project-1",
+                "true",
+                input().image,
+                "a".repeat(40),
+                "thread/thread-1",
+                "workspace",
+                "true",
+              ].join("\t"),
+              stderr: "",
+            }
+          : undefined,
+      ),
+    ).ensureReady(input());
+    expect(survivor.providerStore).toBe("preserved");
+  });
+
+  it("reports a cached container's store as preserved rather than replaying the first provision", async () => {
+    // The same surviving-container case reached through the in-memory record
+    // instead of a container inspect, and it used to answer differently. A
+    // fresh container correctly records `unavailable` -- nothing was restored
+    // because there was nothing to restore -- and the cache hit handed that
+    // recorded object straight back. But by then the provider had created a
+    // conversation inside that very container, so the caller cleared a resume
+    // cursor naming a live conversation and lost it.
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const fresh = await backend.ensureReady(input());
+    expect(fresh.providerStore).toBe("unavailable");
+
+    const commandsAfterProvision = executor.commands.length;
+    const cached = await backend.ensureReady(input());
+    expect(cached.providerStore).toBe("preserved");
+    // Nothing was rebuilt to say so: the second call is still a cache hit, so
+    // it issues no runtime commands at all.
+    expect(executor.commands).toHaveLength(commandsAfterProvision);
+    // ...and every other field still describes the container that is running:
+    // `providerStore` is the one thing that had to change.
+    expect({ ...cached, providerStore: fresh.providerStore }).toEqual(fresh);
+  });
+
+  it("reports no restored store when the archive unpacked without a conversation", async () => {
+    // `tar --extract` exiting 0 only proves the archive unpacked. The archive
+    // is built with credential exclusions, and one aimed too broadly -- the
+    // bare `sessions` this list used to carry, which took Codex's
+    // ~/.codex/sessions transcripts with it -- produces a tar that extracts
+    // cleanly and restores nothing resumable. Reporting that as restored kept
+    // a cursor naming a conversation that was never in the tar, and every
+    // following turn died on "No conversation found with session ID".
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("find")
+        ? { exitCode: 0, stdout: "", stderr: "" }
+        : undefined,
+    );
+    const ready = await new ContainerSandboxBackend("docker", executor).ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    // The thread still comes back -- losing the conversation must not cost the
+    // user their branch.
+    expect(ready.containerName).toContain("t3-thread-");
+    expect(ready.providerStore).toBe("unavailable");
+  });
+
+  it("reports a restored store for Claude's projects layout, not just Codex's sessions", async () => {
+    // Claude is one of only two providers that can run sandboxed, and it does
+    // not use Codex's `sessions` directory: a default install nests transcripts
+    // under `~/.claude/projects` (the same layout `UsageService` probes for on
+    // the host). A probe that accepted only `sessions` classified EVERY valid
+    // Claude restore as `unavailable`, which clears the thread's resume cursor
+    // -- so a Claude thread silently lost its conversation on every
+    // re-provision, with the archive sitting correctly extracted in the
+    // container.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("find")
+        ? findAgainst(command, ["/thread-data/provider-home/.claude/projects"])
+        : undefined,
+    );
+    const ready = await new ContainerSandboxBackend("docker", executor).ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    expect(ready.providerStore).toBe("restored");
+  });
+
+  it("still reports a restored store for Codex's sessions layout", async () => {
+    // The Claude layout is accepted IN ADDITION to Codex's, not instead of it.
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("find")
+        ? findAgainst(command, ["/thread-data/provider-home/.codex/sessions"])
+        : undefined,
+    );
+    const ready = await new ContainerSandboxBackend("docker", executor).ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          providerStorePath: "/artifacts/thread-1.store.tar",
+        },
+      }),
+    );
+
+    expect(ready.providerStore).toBe("restored");
   });
 
   it("coalesces concurrent provisioning and is idempotent once ready", async () => {
@@ -291,6 +537,75 @@ describe("ContainerSandboxBackend", () => {
     // refused by our own policy -- surfacing as "403 egress denied: private
     // address", which Claude Code reports as an authentication failure.
     expect(entry.slice("NO_PROXY=".length).split(",")).toContain(CREDENTIAL_PROXY_ALIAS);
+  });
+
+  it("leaves nothing running when a stop lands in the middle of a provision", async () => {
+    // A stop used to run straight past an in-flight provision: it tore down
+    // whatever existed at that instant and returned, while the container,
+    // sidecars, network, and volumes the provision created moments later
+    // survived with nothing holding a reference to them. A forced deletion
+    // looked complete while the workload was still up.
+    // The provision parks inside its setup hook -- the container, network, and
+    // both volumes exist by then and the record has not been published, which
+    // is precisely the window the stop used to run through.
+    let reachedSetupHook = () => {};
+    const atSetupHook = new Promise<void>((resolve) => {
+      reachedSetupHook = resolve;
+    });
+    let releaseSetupHook = () => {};
+    const setupHookReleased = new Promise<void>((resolve) => {
+      releaseSetupHook = resolve;
+    });
+    const respond = successfulExecutor().respond!;
+    const executor = new (class extends FakeExecutor {
+      override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+        if (command.args[0] === "exec" && command.args.includes("provision-marker")) {
+          this.commands.push(command);
+          reachedSetupHook();
+          await setupHookReleased;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return super.run(command);
+      }
+    })(respond);
+    const backend = new ContainerSandboxBackend("docker", executor);
+
+    const provisioning = backend
+      .ensureReady(input({ setup: [{ executable: "provision-marker" }] }))
+      .then(
+        (ready) => ({ ready, error: undefined }),
+        (error: unknown) => ({ ready: undefined, error }),
+      );
+    await atSetupHook;
+    // Issued while the provision is still inside the hook.
+    const stopping = backend.stop("thread-1");
+    releaseSetupHook();
+    await stopping;
+    const outcome = await provisioning;
+
+    // The provision does not hand back a sandbox the deletion already
+    // accounted for as gone.
+    expect(outcome.ready).toBeUndefined();
+    expect(String(outcome.error)).toContain("stopped while provisioning");
+    // ...and every resource it created was reclaimed.
+    const removals = executor.commands
+      .filter(
+        (command) =>
+          (command.args[0] === "rm" && command.args[1] === "--force") ||
+          ((command.args[0] === "network" || command.args[0] === "volume") &&
+            command.args[1] === "rm"),
+      )
+      .map((command) => command.args.at(-1));
+    expect(removals).toEqual(
+      expect.arrayContaining([
+        "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5",
+        "t3-net-921ca543f9cf4d28fe0b81d81cdb33b5",
+        "t3-workspace-921ca543f9cf4d28fe0b81d81cdb33b5",
+        "t3-desktop-921ca543f9cf4d28fe0b81d81cdb33b5",
+      ]),
+    );
+    // Nothing is left addressable: a later exec finds no record at all.
+    await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
   });
 
   it("cleans container, network, and workspace volume after setup failure and stop", async () => {
@@ -482,6 +797,7 @@ describe("ContainerSandboxBackend", () => {
     expect(result).toEqual({
       activeThreadIds: [],
       missingThreadIds: ["thread-1", "missing-1"],
+      unresumableThreadIds: [],
       orphanThreadIds: ["orphan-1"],
       removedRuntimeRefs: ["abcdef654321"],
     });
@@ -546,6 +862,27 @@ describe("ContainerSandboxBackend", () => {
     ).toBe(true);
   });
 
+  it("names the snapshot ref it was given rather than globbing the namespace", async () => {
+    // A dirty tree's export pins a snapshot and hands its commit to the bundle.
+    // The bundle names THAT ref: a glob over the namespace would also carry
+    // every stale ref an earlier export left behind, which is what shipped
+    // files the user had deleted whenever the cleanup failed.
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    const snapshotCommit = "d".repeat(40);
+    await backend.exportBundle("thread-1", "/tmp/thread-1.bundle", { snapshotCommit });
+    const bundled = executor.commands.find(
+      (command) => command.args.includes("bundle") && command.args.includes("create"),
+    );
+    expect(bundled?.args.slice(-3)).toEqual([
+      "/tmp/t3-thread-export.bundle",
+      "refs/heads/thread/thread-1",
+      `refs/t3/export-snapshot/${snapshotCommit}`,
+    ]);
+    expect(bundled?.args.some((argument) => argument.includes("--glob"))).toBe(false);
+  });
+
   it("exports and verifies a self-contained Git bundle before cleanup", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);
@@ -555,12 +892,28 @@ describe("ContainerSandboxBackend", () => {
       expect.arrayContaining([
         expect.objectContaining({
           executable: "docker",
-          args: expect.arrayContaining([
+          // The thread branch alone for a clean tree, which pins no snapshot.
+          // Neither `--all` nor a glob over the snapshot namespace: both put
+          // an earlier export's snapshot -- and the files the user has since
+          // deleted -- into this artifact, the glob whenever the cleanup that
+          // was supposed to have removed those refs did not run or failed.
+          // Asserted as the exact TAIL of the argv rather than a subset: a
+          // subset match cannot see an extra ref appended after the branch,
+          // which is precisely what the bug shipped.
+          args: [
+            "exec",
+            "--user",
+            "1000:1000",
+            "--",
+            "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5",
+            "git",
+            "-C",
+            "/workspace/repo",
             "bundle",
             "create",
             "/tmp/t3-thread-export.bundle",
-            "--all",
-          ]),
+            "refs/heads/thread/thread-1",
+          ],
         }),
         expect.objectContaining({
           executable: "docker",
@@ -693,7 +1046,12 @@ describe("ContainerSandboxBackend", () => {
     return new FakeExecutor((command) => {
       if (command.args[0] === "inspect" && command.args[1] === "--format")
         return { exitCode: 0, stdout: `${labels}\n`, stderr: "" };
-      if (command.args[0] === "exec" && command.args.includes("rev-parse"))
+      // Same object for `rev-parse` and `write-tree`: a clean working tree, so
+      // the export writes no working-tree snapshot.
+      if (
+        command.args[0] === "exec" &&
+        (command.args.includes("rev-parse") || command.args.includes("write-tree"))
+      )
         return { exitCode: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     });
@@ -718,9 +1076,9 @@ describe("ContainerSandboxBackend", () => {
     const executor = adoptedExecutor(ADOPTED_LABELS.replace("project-1", "project-2"));
     const backend = new ContainerSandboxBackend("docker", executor);
     await expect(backend.exportBranch("thread-1", hint())).rejects.toThrow("not ready");
-    await expect(backend.exportBundle("thread-1", "/tmp/thread-1.bundle", hint())).rejects.toThrow(
-      "not ready",
-    );
+    await expect(
+      backend.exportBundle("thread-1", "/tmp/thread-1.bundle", { hint: hint() }),
+    ).rejects.toThrow("not ready");
     // Adoption never widens to resumption: `exec` has no hint parameter at all.
     await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
     expect(executor.commands.some((command) => command.args[0] === "exec")).toBe(false);
@@ -764,11 +1122,15 @@ describe("ContainerSandboxBackend", () => {
     expect(executor.commands).toEqual([]);
   });
 
-  it("adopts a label-verified surviving container during reconcile instead of reporting it missing", async () => {
+  it("reports a label-verified survivor as unresumable rather than active", async () => {
     // A server restart empties `#records`, but the containers keep running.
-    // Reconcile used to report every one of them missing -- the reactor then
-    // failed the thread while its container kept running the workload, and
-    // `removeOrphans` skipped it because the thread was still expected.
+    // Verifying the label signature proves the container is this thread's, and
+    // is enough to export and tear it down -- but adoption is never cached, so
+    // `exec`, `runtimeRef`, and checkpointing all still throw. Reporting it
+    // active left the projection claiming `ready` for a sandbox in which
+    // nothing could run. It is reported missing (so the thread fails and
+    // re-provisions) AND unresumable (so a caller can stop it, exporting its
+    // work, instead of abandoning the container).
     const workspaceName = "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5";
     const executor = new FakeExecutor((command) => {
       if (command.args[0] === "ps")
@@ -784,12 +1146,14 @@ describe("ContainerSandboxBackend", () => {
       removeOrphans: true,
       adoptionHints: new Map([["thread-1", hint()]]),
     });
-    expect(result.activeThreadIds).toEqual(["thread-1"]);
-    expect(result.missingThreadIds).toEqual([]);
+    expect(result.activeThreadIds).toEqual([]);
+    expect(result.unresumableThreadIds).toEqual(["thread-1"]);
+    expect(result.missingThreadIds).toEqual(["thread-1"]);
+    // Verified: not removed, so its commits are still exportable with a hint.
     expect(result.removedRuntimeRefs).toEqual([]);
-    // Adoption is reconcile accounting only, never a cached record: `exec`
-    // stays fail-closed exactly as before.
+    // Adoption never widens to resumption.
     await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
+    expect(backend.runtimeRef("thread-1")).toBeUndefined();
   });
 
   it("stops an expected container whose label signature cannot be verified", async () => {
@@ -821,6 +1185,9 @@ describe("ContainerSandboxBackend", () => {
     });
     expect(result.activeThreadIds).toEqual([]);
     expect(result.missingThreadIds).toEqual(["thread-1"]);
+    // Nothing proved this container is the thread's, so it is not exportable
+    // either -- unresumable is for survivors worth stopping gracefully.
+    expect(result.unresumableThreadIds).toEqual([]);
     expect(result.removedRuntimeRefs).toEqual(["abcdef123456"]);
     expect(
       executor.commands
@@ -845,5 +1212,8 @@ describe("ContainerSandboxBackend", () => {
     });
     expect(result.activeThreadIds).toEqual(["thread-1"]);
     expect(result.missingThreadIds).toEqual([]);
+    // A record this generation holds is usable, so it is never unresumable.
+    expect(result.unresumableThreadIds).toEqual([]);
+    expect(backend.runtimeRef("thread-1")).toBe("t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5");
   });
 });

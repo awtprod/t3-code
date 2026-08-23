@@ -173,6 +173,13 @@ describe("ProviderCommandReactor", () => {
       ProviderAdapterRequestError | ProviderAdapterValidationError
     >;
     readonly sandboxImages?: "both" | "image-only" | "none";
+    /**
+     * Force the disposition the provision reports for the provider's
+     * conversation store. Defaults to the fresh-container behaviour derived
+     * from the restore below; `"preserved"` models the surviving container the
+     * backend re-attaches to instead of building a new one.
+     */
+    readonly providerStore?: "preserved" | "restored" | "unavailable";
   }) {
     const sandboxImages = input?.sandboxImages ?? "both";
     vi.stubEnv(
@@ -201,6 +208,10 @@ describe("ProviderCommandReactor", () => {
     // container, so a test asserting the fresh name can prove a stale cached
     // target (naming the destroyed generation) was not served.
     let provisionGeneration = 0;
+    // The manager's attempt tokens, minted from one counter across threads
+    // exactly as the real one does.
+    let provisionAttempts = 0;
+    const stopSandboxAttempt = vi.fn(() => Effect.void);
     const provisionSandbox = vi.fn(
       (request: Parameters<SandboxRuntimeManagerShape["provision"]>[0]) =>
         Effect.succeed({
@@ -215,6 +226,18 @@ describe("ProviderCommandReactor", () => {
           desktopSessionId: `desktop-${request.bootstrap.threadId}`,
           desktopStreamPath: `/desktop/${request.bootstrap.threadId}`,
           services: [],
+          // Mirrors the backend's fresh-container arms: the conversation is in
+          // the new container only when the export recorded a store AND the
+          // archive extracted. (`preserved` is the surviving-container arm and
+          // never reaches this stub, which always builds a new generation.)
+          providerStore:
+            input?.providerStore ??
+            (request.restore?.storeSha256 === undefined
+              ? ("unavailable" as const)
+              : ("restored" as const)),
+          // Echoed back as the real manager does, so the reactor's readiness
+          // teardown names the attempt this provision ran under.
+          attempt: request.attempt,
         }),
     );
     const startSession = vi.fn((_: unknown, input: unknown, _executionTarget?: unknown) => {
@@ -484,6 +507,7 @@ describe("ProviderCommandReactor", () => {
               bundleSha256: "c".repeat(64),
             }),
           stop: () => Effect.void,
+          stopProvisionAttempt: stopSandboxAttempt,
           reconcile: () =>
             Effect.succeed({
               activeThreadIds: [],
@@ -495,6 +519,8 @@ describe("ProviderCommandReactor", () => {
             Effect.succeed({ cpuPercent: 0, memoryBytes: 0, diskBytes: 0, processCount: 0 }),
           recoverPreview: () => Effect.succeed(false),
           revokeCredentials: () => Effect.succeed(0),
+          authorizeProvision: (threadId) =>
+            Effect.succeed({ threadId, generation: ++provisionAttempts }),
           removeThreadArtifacts: () => Effect.void,
           sweepExpiredArtifacts: () => Effect.succeed(0),
         } satisfies SandboxRuntimeManagerShape),
@@ -653,6 +679,48 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("records the deployment runtime on the provisioning projection", async () => {
+    // The decider is pure and defaults an absent `config.runtime` to docker,
+    // while the runtime manager honours `T3_SANDBOX_RUNTIME`. On a podman host
+    // the projection therefore claimed docker for the entire provisioning
+    // window, and a stop or delete landing in that window addressed a backend
+    // that was never used. The reactor already resolves the runtime to validate
+    // it, so it dispatches the resolved value.
+    vi.stubEnv("T3_SANDBOX_RUNTIME", "podman");
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-runtime"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-runtime"),
+          role: "user",
+          text: "hello podman",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.provisionSandbox.mock.calls.length === 1);
+    expect(harness.provisionSandbox.mock.calls[0]?.[0]).toMatchObject({
+      config: { runtime: "podman" },
+    });
+    const events = await harness.runEffect(Stream.runCollect(harness.engine.readEvents(0)));
+    const started = Array.from(events).find(
+      (event) => event.type === "sandbox.provisioning-started",
+    );
+    expect(started).toBeDefined();
+    if (started?.type !== "sandbox.provisioning-started")
+      throw new Error("expected a provisioning-started event");
+    expect(started.payload.sandbox.runtime).toBe("podman");
   });
 
   it("falls back to host execution when no sandbox image is configured", async () => {
@@ -894,6 +962,87 @@ describe("ProviderCommandReactor", () => {
     expect(harness.provisionSandbox.mock.calls.at(-1)?.[0]?.restore?.storeSha256).toBe(
       "d".repeat(64),
     );
+  });
+
+  it("keeps the resume cursor when the container survived and nothing needed restoring", async () => {
+    // The regression this covers: the reactor cleared the cursor whenever the
+    // provision had not RESTORED a store -- which is also true of a container
+    // that was still there and never lost its provider home. A perfectly valid
+    // cursor was discarded on every re-attach, and the thread lost its
+    // conversation for no reason at all.
+    const harness = await createHarness({ providerStore: "preserved" });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    const resumeCursor = { resume: "still-live-session-id" };
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-reattach"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-before-reattach"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.stop",
+        commandId: CommandId.make("cmd-sandbox-stop-reattach"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.stop.complete",
+        commandId: CommandId.make("cmd-sandbox-stopped-reattach"),
+        threadId,
+        expired: false,
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.providerSessionDirectory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        resumeCursor,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-reattach"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-after-reattach"),
+          role: "user",
+          text: "back again",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.provisionSandbox.mock.calls.length === 2);
+    const binding = await harness.runEffect(harness.providerSessionDirectory.getBinding(threadId));
+    // No store was recorded by the export, so the old boolean would have
+    // cleared this -- the container never lost the conversation.
+    expect(harness.provisionSandbox.mock.calls.at(-1)?.[0]?.restore).toBeUndefined();
+    expect(Option.getOrUndefined(binding)?.resumeCursor).toEqual(resumeCursor);
   });
 
   it("never serves a cached execution target that names a torn-down container", async () => {

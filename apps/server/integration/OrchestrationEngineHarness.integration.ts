@@ -407,6 +407,9 @@ export const makeOrchestrationIntegrationHarness = (
         }),
     });
     function makeSandboxRuntimeManagerLayer() {
+      // Mirrors the real manager's single manager-wide counter, so each
+      // authorization hands back a token no other attempt holds.
+      let provisionAttempts = 0;
       return Layer.succeed(SandboxRuntimeManager, {
         exec: (_runtime, _threadId, input) =>
           Effect.gen(function* () {
@@ -483,13 +486,20 @@ export const makeOrchestrationIntegrationHarness = (
             desktopSessionId: `test-${input.bootstrap.threadId}`,
             desktopStreamPath: `/desktop/test-${input.bootstrap.threadId}`,
             services: [],
+            // Echoed back exactly as the real manager does: the caller's
+            // readiness teardown is scoped to the attempt it provisioned under.
+            attempt: input.attempt,
           }),
         exportBranch: () => Effect.die("exportBranch should not be called in this test"),
         stop: () => Effect.die("stop should not be called in this test"),
+        stopProvisionAttempt: () =>
+          Effect.die("stopProvisionAttempt should not be called in this test"),
         reconcile: () => Effect.die("reconcile should not be called in this test"),
         sampleUsage: () => Effect.die("sampleUsage should not be called in this test"),
         recoverPreview: () => Effect.die("recoverPreview should not be called in this test"),
         revokeCredentials: () => Effect.succeed(0),
+        authorizeProvision: (threadId: string) =>
+          Effect.succeed({ threadId, generation: ++provisionAttempts }),
         removeThreadArtifacts: () => Effect.void,
         sweepExpiredArtifacts: () => Effect.succeed(0),
       });

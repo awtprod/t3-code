@@ -85,6 +85,26 @@ sudo /opt/command-center/current/deploy/openclaw/sandbox/bootstrap-sandbox-host.
 ```
 
 It is idempotent; re-running is the supported way to repair a partial run.
+That includes a run at the same pinned version: step 2 does not skip on
+`podman --version` alone, it also verifies every entry in the bundle manifest
+(`/usr/local/share/podman-static/manifest`). The manifest records what each
+installed file is and what it contains — a sha256 for a regular file, the link
+target for a symlink — and the check reinstalls the pinned bundle when any
+entry is missing, does not match its digest, is no longer a symlink, or points
+somewhere new. Existence alone was not enough: an interrupted copy and a
+hand-truncated helper both leave a file that is present and unusable, which
+counted as complete and skipped the repair. A helper deleted or truncated by
+hand, an interrupted copy, an absent manifest, or a manifest predating digest
+recording is therefore repaired rather than reported as "already installed".
+
+The manifest also has to vouch for itself. It closes with a trailer line —
+`e<TAB><version><TAB><entry count>` — written last, and it is renamed into place
+from a temporary rather than appended to directly. Without both, an interrupted
+write left a nonempty, well-formed _prefix_ of the real manifest: the check
+validated only the entries it found, so a manifest naming 3 of 40 files passed
+and a same-version re-run skipped repairing the other 37. A manifest with no
+trailer, a trailer whose count disagrees with the entries present, or a trailer
+naming a different bundle version all reinstall.
 Individual steps can be re-run in isolation:
 
 ```sh
@@ -118,7 +138,15 @@ mount before podman initialises it. Running `STEPS=6` alone assumes the earlier
 steps already completed; it asserts its prerequisites and refuses rather than
 proceeding. `STEPS=2` alone is safe on a live host: if it must stop the running
 podman socket to swap binaries, it records what was active and restores it
-before finishing.
+before finishing — from an EXIT trap armed before the stop, so a failure
+anywhere in between (the binary copy, the manifest write, the
+`containers.conf` drop-in, the AppArmor profile load) still brings the socket
+back rather than exiting with it down. A restore that cannot bring podman back
+fails the step rather than warning: that covers a failed `podman.socket` start,
+and — on a host that was running `podman.service` _without_ the socket — a
+failed `podman.service` start too, since there is then no socket left to
+re-activate the daemon on demand. From the EXIT trap it stays a warning, so it
+cannot mask the error that triggered the exit.
 
 ## 4. What the verification proves
 
@@ -132,7 +160,9 @@ socket, proves nothing.
   refuses to provision otherwise. Catches a socket pointing at a rootful daemon.
 - **Volume quota echo-back.** Creates a volume with `--opt o=size=…` using the
   same byte value the backend computes, then checks `volume inspect` returns the
-  option verbatim. The backend treats any difference as fatal.
+  option verbatim. The backend treats any difference as fatal. Governed by
+  `T3_SANDBOX_VOLUME_STORAGE_QUOTA` (on by default); `disabled` skips this
+  check and the enforcement check below, and must be set on the server too.
 - **Quota enforcement.** Writes 64 MiB into a volume with a 16 MiB quota and
   demands failure. This is the check that matters: the echo-back above _also
   passes on rootless docker_, where nothing is enforced. Anything less than
@@ -147,11 +177,23 @@ socket, proves nothing.
   `--user 1000:1000`, `--tmpfs /tmp`, `--cpus`, `--memory`, `--pids-limit`.
   Any one of these being unsupported fails provisioning. `--storage-opt size=`
   is deliberately **omitted** by default: `podman --remote` rejects it, so the
-  backend drops the pair on socket deployments
-  (`T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled`, see
-  `ContainerSandboxBackend.ts`), and the verification mirrors the backend
-  exactly. The XFS project quotas on the workspace volumes — proven enforced by
-  the quota checks above — are the real disk bound.
+  backend leaves it off unless `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=enabled`
+  (see `ContainerSandboxBackend.ts`), and this step reads the same variable
+  with the same default so the verification mirrors the backend exactly. The
+  XFS project quotas on the workspace volumes — proven enforced by the quota
+  checks above, and controlled separately by
+  `T3_SANDBOX_VOLUME_STORAGE_QUOTA` — are the real disk bound.
+
+  The two are separate variables on purpose. While one switch governed both,
+  there was no working bounded setting: enabling quotas made provisioning fail
+  on remote podman, and disabling them also discarded the volume quotas that
+  work over the socket. A host that set the old single switch to `disabled`
+  keeps its volume quotas off after the split: with
+  `T3_SANDBOX_VOLUME_STORAGE_QUOTA` unset, both this script and the server
+  still honour `T3_SANDBOX_CONTAINER_STORAGE_QUOTA=disabled` as also disabling
+  them, and warn to migrate. Full description in
+  [sandbox-runtime.md](./sandbox-runtime.md), section "Disk quotas".
+
 - **`exec --interactive` stdin round-trip.** Provider sessions speak their entire
   protocol over that pipe. If stdin does not survive the socket, providers hang
   with no error — the worst failure mode to debug in production. Also checks
