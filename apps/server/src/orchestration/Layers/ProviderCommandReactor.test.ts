@@ -18,6 +18,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  SandboxId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -166,6 +167,7 @@ describe("ProviderCommandReactor", () => {
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
+    readonly blockFirstThreadRead?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<
@@ -197,6 +199,8 @@ describe("ProviderCommandReactor", () => {
     const { stateDir } = deriveServerPathsSync(baseDir, undefined);
     createdStateDirs.add(stateDir);
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
+    const blockedThreadReadStarted = Effect.runSync(Deferred.make<void>());
+    const releaseBlockedThreadRead = Effect.runSync(Deferred.make<void>());
     let nextSessionIndex = 1;
     const runtimeSessions: Array<ProviderSession> = [];
     const modelSelection = input?.threadModelSelection ?? {
@@ -433,6 +437,27 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(SqlitePersistenceMemory),
     );
+    const reactorProjectionSnapshotLayer =
+      input?.blockFirstThreadRead === true
+        ? Layer.effect(
+            ProjectionSnapshotQuery,
+            Effect.gen(function* () {
+              const query = yield* ProjectionSnapshotQuery;
+              let firstRead = true;
+              return {
+                ...query,
+                getThreadDetailById: (threadId: ThreadId) => {
+                  if (!firstRead) return query.getThreadDetailById(threadId);
+                  firstRead = false;
+                  return Deferred.succeed(blockedThreadReadStarted, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseBlockedThreadRead)),
+                    Effect.andThen(query.getThreadDetailById(threadId)),
+                  );
+                },
+              } satisfies ProjectionSnapshotQuery["Service"];
+            }),
+          ).pipe(Layer.provide(projectionSnapshotLayer))
+        : projectionSnapshotLayer;
     let titleRegenerationCompletionDispatchAttempts = 0;
     const reactorOrchestrationLayer = Layer.effect(
       OrchestrationEngineService,
@@ -461,7 +486,7 @@ describe("ProviderCommandReactor", () => {
     ).pipe(Layer.provide(orchestrationLayer));
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(reactorOrchestrationLayer),
-      Layer.provideMerge(projectionSnapshotLayer),
+      Layer.provideMerge(reactorProjectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
       Layer.provideMerge(makeProviderRegistryLayer(providerSnapshots as never)),
       Layer.provideMerge(
@@ -634,6 +659,8 @@ describe("ProviderCommandReactor", () => {
       stateDir,
       drain,
       runEffect,
+      blockedThreadReadStarted,
+      releaseBlockedThreadRead,
       get titleRegenerationCompletionDispatchAttempts() {
         return titleRegenerationCompletionDispatchAttempts;
       },
@@ -682,6 +709,67 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("waits for an in-flight sandbox provision before starting the provider", async () => {
+    const harness = await createHarness({ blockFirstThreadRead: true });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-concurrent-provision"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-before-concurrent-provision"),
+          role: "user",
+          text: "wait for the sandbox",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(Deferred.await(harness.blockedThreadReadStarted));
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.provision",
+        commandId: CommandId.make("cmd-concurrent-sandbox-provision"),
+        threadId,
+        config: { runtime: "docker" },
+        provisionsInline: true,
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(Deferred.succeed(harness.releaseBlockedThreadRead, undefined));
+
+    // Let the reactor observe the turn while the projection still says
+    // provisioning. It must park rather than record a provider-start failure.
+    await harness.runEffect(
+      Effect.forEach(Array.from({ length: 100 }), () => Effect.yieldNow, { discard: true }),
+    );
+    expect(harness.startSession).not.toHaveBeenCalled();
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.provision.ready",
+        commandId: CommandId.make("cmd-sandbox-ready-after-turn"),
+        threadId,
+        sandboxId: SandboxId.make("sandbox-thread-1-recovered"),
+        runtime: "docker",
+        runtimeRef: "sandbox-thread-1-recovered",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[2]).toMatchObject({
+      kind: "sandbox",
+      runtimeRef: "sandbox-thread-1-recovered",
+    });
+    expect(harness.provisionSandbox).not.toHaveBeenCalled();
   });
 
   it("records the deployment runtime on the provisioning projection", async () => {
@@ -790,6 +878,33 @@ describe("ProviderCommandReactor", () => {
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.sandbox?.lifecycle).toBe("unprovisioned");
+  });
+
+  it("does not require a preview image for a headless thread without preview ports", async () => {
+    vi.stubEnv("T3_SANDBOX_DESKTOP", "disabled");
+    const harness = await createHarness({ sandboxImages: "image-only" });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-headless-without-preview"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-headless-without-preview"),
+          role: "user",
+          text: "headless sandbox",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    expect(harness.provisionSandbox).toHaveBeenCalledTimes(1);
+    expect(harness.startSession.mock.calls[0]?.[2]).toMatchObject({ kind: "sandbox" });
   });
 
   it("drops the resume cursor of a sandbox thread whose container was torn down", async () => {

@@ -24,6 +24,7 @@ import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
@@ -74,6 +75,7 @@ import {
 } from "../../sandbox/ThreadSandboxRuntime.ts";
 import {
   SandboxRuntimeManager,
+  sandboxPreviewProxyRequired,
   resolveSandboxImage,
   resolveSandboxPreviewProxyImage,
   resolveSandboxRuntime,
@@ -143,6 +145,7 @@ const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
+const SANDBOX_PROVISION_WAIT_TIMEOUT = Duration.minutes(10);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const MAX_REGENERATION_ATTACHMENTS = 4;
 const MAX_THREAD_TITLE_CONTEXT_CHARS = 8_000;
@@ -382,11 +385,79 @@ export const make = Effect.gen(function* () {
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
+  const awaitSandboxProvisionSettlement = Effect.fn(
+    "ProviderCommandReactor.awaitSandboxProvisionSettlement",
+  )(function* (threadId: ThreadId) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const pull = yield* Stream.toPull(
+          orchestrationEngine.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.aggregateId === threadId &&
+                [
+                  "sandbox.ready",
+                  "sandbox.failed",
+                  "sandbox.stopped",
+                  "sandbox.expired",
+                  "sandbox.reconciled",
+                  "thread.deleted",
+                ].includes(event.type),
+            ),
+          ),
+        );
+        const settledEvent = yield* pull.pipe(Effect.forkScoped);
+        // Acquire the hot-stream subscription before reading the projection.
+        // A provision that settles in between is then observed either in the
+        // snapshot or by the parked pull, never missed by both.
+        yield* Effect.yieldNow;
+        const current = Option.getOrUndefined(
+          yield* projectionSnapshotQuery.getThreadDetailById(threadId),
+        );
+        if (current === undefined) {
+          return yield* new ProviderAdapterRequestError({
+            provider: "sandbox",
+            method: "sandbox.provision",
+            detail: `Thread '${threadId}' disappeared while its sandbox was provisioning.`,
+          });
+        }
+        if (current.sandbox?.lifecycle !== "provisioning") return current;
+        yield* Fiber.join(settledEvent);
+        const settled = Option.getOrUndefined(
+          yield* projectionSnapshotQuery.getThreadDetailById(threadId),
+        );
+        if (settled === undefined) {
+          return yield* new ProviderAdapterRequestError({
+            provider: "sandbox",
+            method: "sandbox.provision",
+            detail: `Thread '${threadId}' disappeared while its sandbox was provisioning.`,
+          });
+        }
+        return settled;
+      }),
+    ).pipe(
+      Effect.timeout(SANDBOX_PROVISION_WAIT_TIMEOUT),
+      Effect.mapError((cause) =>
+        isProviderAdapterRequestError(cause)
+          ? cause
+          : new ProviderAdapterRequestError({
+              provider: "sandbox",
+              method: "sandbox.provision",
+              detail: `Sandbox for thread '${threadId}' did not finish provisioning within ${Duration.format(SANDBOX_PROVISION_WAIT_TIMEOUT)}.`,
+              cause,
+            }),
+      ),
+    );
+  });
   const ensureExecutionTarget = Effect.fn("ProviderCommandReactor.ensureExecutionTarget")(
     function* (
-      thread: Parameters<typeof threadSandboxRuntime.ensureReady>[0],
+      initialThread: Parameters<typeof threadSandboxRuntime.ensureReady>[0],
       legacyCwd: string | undefined,
     ) {
+      const thread =
+        initialThread.sandbox?.lifecycle === "provisioning"
+          ? yield* awaitSandboxProvisionSettlement(initialThread.id)
+          : initialThread;
       if (
         thread.sandbox != null &&
         thread.sandbox.lifecycle !== "unprovisioned" &&
@@ -446,7 +517,11 @@ export const make = Effect.gen(function* () {
           );
           const declaration = projectFile?.sandbox;
           const image = resolveSandboxImage(projectFile);
-          if (image === undefined || resolveSandboxPreviewProxyImage() === undefined) {
+          if (
+            image === undefined ||
+            (sandboxPreviewProxyRequired(declaration?.previewPorts) &&
+              resolveSandboxPreviewProxyImage() === undefined)
+          ) {
             if (legacyCwd === undefined) {
               return yield* new ProviderAdapterRequestError({
                 provider: "sandbox",
