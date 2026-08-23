@@ -181,6 +181,7 @@ export function sandboxProviderInvocation(
     }
     if (proxy.upstreamNames.includes("openai")) {
       proxyEnvironment.OPENAI_BASE_URL = `${proxy.baseUrl}/openai`;
+      proxyEnvironment.OPENAI_API_KEY = proxy.threadToken;
     }
     if (proxy.upstreamNames.includes("github") && proxy.git !== undefined) {
       const githubProxyUrl = `${proxy.baseUrl}/github`;
