@@ -739,7 +739,7 @@ describe("thread-scoped credential proxy", () => {
     }
   });
 
-  it("drops a host Anthropic token even when only an openai upstream is bound", async () => {
+  it("gives Codex an opaque thread token while dropping host Anthropic credentials", async () => {
     // An openai-only binding injects nothing for Anthropic, so a host token
     // would survive unless persistent keys are dropped unconditionally.
     delete process.env.T3_SANDBOX_ANTHROPIC_AUTH_TOKEN;
@@ -750,9 +750,10 @@ describe("thread-scoped credential proxy", () => {
     const sidecar = new ThreadCredentialProxySidecar("podman", new FakeExecutor());
     await sidecar.start(target.threadId, "t3-net-abc", CREDENTIAL_IMAGE, true);
     await provisionThreadCredentialProxy(target.threadId);
-    expect(threadCredentialProxyBinding(target.threadId)!.upstreamNames).toEqual(["openai"]);
+    const binding = threadCredentialProxyBinding(target.threadId)!;
+    expect(binding.upstreamNames).toEqual(["openai"]);
 
-    const invocation = sandboxProviderInvocation(target, "claude", [], undefined, {
+    const invocation = sandboxProviderInvocation(target, "codex", [], undefined, {
       ANTHROPIC_AUTH_TOKEN: SECRET,
       ANTHROPIC_API_KEY: SECRET,
     });
@@ -760,6 +761,11 @@ describe("thread-scoped credential proxy", () => {
     expect(invocation.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
     expect(invocation.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(invocation.env.OPENAI_BASE_URL).toBe(`${CREDENTIAL_PROXY_BASE_URL}/openai`);
+    expect(invocation.env.OPENAI_API_KEY).toBe(binding.threadToken);
+    expect(invocation.args).toEqual(
+      expect.arrayContaining(["--env", "OPENAI_BASE_URL", "--env", "OPENAI_API_KEY"]),
+    );
+    expect(invocation.args.join(" ")).not.toContain(binding.threadToken);
   });
 
   it("refuses to start without the egress sidecar it must chain through", async () => {
