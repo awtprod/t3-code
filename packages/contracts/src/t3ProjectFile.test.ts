@@ -87,10 +87,19 @@ describe("T3ProjectFile", () => {
         setup: [{ executable: "pnpm", args: ["install", "--frozen-lockfile"] }],
         caches: [{ digest: "c".repeat(64), target: "/cache/pnpm" }],
         previewPorts: [3000],
+        limits: {
+          cpuCount: 4,
+          memoryBytes: 12 * 1024 ** 3,
+          diskBytes: 20 * 1024 ** 3,
+          processCount: 512,
+          idleTimeoutSeconds: 3600,
+          maximumLifetimeSeconds: 28_800,
+        },
       },
     }).sandbox;
     expect(sandbox?.services?.[0]?.name).toBe("db");
     expect(sandbox?.services?.[0]?.generatedEnvironment?.[0]?.key).toBe("POSTGRES_PASSWORD");
+    expect(sandbox?.limits?.memoryBytes).toBe(12 * 1024 ** 3);
     expect(() => decode({ sandbox: { image: "desktop:latest" } })).toThrow();
     expect(() =>
       decode({ sandbox: { image: `desktop@sha256:${"a".repeat(64)}`, previewPorts: [0] } }),

@@ -447,7 +447,12 @@ export const make = Effect.gen(function* () {
           ),
         );
       const sandboxFields = {
-        sandboxConfig: create.sandboxConfig ?? {},
+        sandboxConfig: {
+          ...(projectFile?.sandbox?.limits === undefined
+            ? {}
+            : { limits: projectFile.sandbox.limits }),
+          ...create.sandboxConfig,
+        },
         sandboxBranch: {
           branchName: `t3/thread/${targetThreadId}`,
           baseCommit: base.commitSha,

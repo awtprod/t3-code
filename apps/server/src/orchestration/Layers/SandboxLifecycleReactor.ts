@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import {
   CommandId,
+  DEFAULT_SANDBOX_RESOURCE_LIMITS,
   EventId,
   MessageId,
   SandboxId,
@@ -88,13 +89,16 @@ export const make = Effect.gen(function* () {
   const resolvedConfig = Effect.fn("SandboxLifecycleReactor.resolvedConfig")(function* <
     Config extends { readonly runtime?: "docker" | "podman" | "microvm" },
   >(config: Config) {
-    if (config.runtime !== undefined) return config;
-    const runtime = resolveSandboxRuntime();
+    const runtime = config.runtime ?? resolveSandboxRuntime();
     if (runtime !== "docker" && runtime !== "podman")
       return yield* new SandboxManagerError({
         message: `unsupported sandbox runtime: ${runtime}`,
       });
-    return { ...config, runtime };
+    // The decider and runtime manager must see the same resolved limits. In
+    // particular, a re-provisioned thread may still project an older default;
+    // carrying today's default explicitly upgrades it without overriding a
+    // per-thread value.
+    return { limits: DEFAULT_SANDBOX_RESOURCE_LIMITS, ...config, runtime };
   });
 
   const dispatchAndAwaitProjection = Effect.fn(
@@ -280,7 +284,11 @@ export const make = Effect.gen(function* () {
             baseCommit: base.commitSha,
           };
         }));
-      const config = yield* resolvedConfig(event.payload.config ?? thread.sandboxConfig ?? {});
+      const config = yield* resolvedConfig({
+        ...(declaration?.limits === undefined ? {} : { limits: declaration.limits }),
+        ...thread.sandboxConfig,
+        ...event.payload.config,
+      });
       const createdAt = yield* nowIso;
       const provisionCommandId = yield* commandId("sandbox-manual-provision");
       yield* dispatchAndAwaitProjection({
@@ -475,7 +483,10 @@ export const make = Effect.gen(function* () {
           .pipe(Effect.ignore);
         return;
       }
-      const workerConfig = yield* resolvedConfig(event.payload.config ?? {});
+      const workerConfig = yield* resolvedConfig({
+        ...(declaration?.limits === undefined ? {} : { limits: declaration.limits }),
+        ...event.payload.config,
+      });
       const workerBranch = {
         branchName: event.payload.branchName,
         baseCommit: event.payload.inheritedCommit,
@@ -498,7 +509,7 @@ export const make = Effect.gen(function* () {
         interactionMode: parent.interactionMode,
         branch: null,
         worktreePath: null,
-        sandboxConfig: event.payload.config,
+        sandboxConfig: workerConfig,
         sandboxBranch: workerBranch,
         createdAt,
       });

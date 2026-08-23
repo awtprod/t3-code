@@ -53,6 +53,7 @@ describe("SandboxDesktopPanel", () => {
     expect(markup).toContain("Agent commands remain paused");
     expect(markup).toContain("thread/child");
     expect(markup).toContain("CPU 12.5%");
+    expect(markup).toContain("Memory 256 MiB / 4 GiB");
     expect(markup).toContain("Services 1/1");
     expect(markup).toContain("The desktop stream is not ready");
   });

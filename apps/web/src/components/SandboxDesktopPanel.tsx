@@ -200,7 +200,9 @@ export function SandboxDesktopPanel(props: SandboxDesktopPanelProps) {
           <span>CPU {sandbox.usage ? `${sandbox.usage.cpuPercent.toFixed(1)}%` : "—"}</span>
           <span>
             Memory{" "}
-            {sandbox.usage ? `${Math.round(sandbox.usage.memoryBytes / 1_048_576)} MiB` : "—"}
+            {sandbox.usage
+              ? `${Math.round(sandbox.usage.memoryBytes / 1_048_576)} MiB / ${Math.round(sandbox.limits.memoryBytes / 1_073_741_824)} GiB`
+              : `— / ${Math.round(sandbox.limits.memoryBytes / 1_073_741_824)} GiB`}
           </span>
           <span>
             Disk {sandbox.usage ? `${Math.round(sandbox.usage.diskBytes / 1_048_576)} MiB` : "—"}

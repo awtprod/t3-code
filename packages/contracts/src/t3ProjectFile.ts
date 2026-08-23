@@ -3,6 +3,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { ThreadEnvMode } from "./environment.ts";
 import { ProjectScriptIcon } from "./orchestration.ts";
+import { SandboxResourceLimits } from "./sandbox.ts";
 
 /** File name of the checked-in T3 project file, resolved at the workspace root. */
 export const T3_PROJECT_FILE_NAME = "t3.json";
@@ -123,6 +124,7 @@ const sandboxService = Schema.Struct({
 });
 export const T3ProjectFileSandbox = Schema.Struct({
   image: digestPinnedImage,
+  limits: Schema.optionalKey(SandboxResourceLimits),
   services: Schema.optionalKey(
     Schema.Array(sandboxService).check(Schema.isMaxLength(T3_PROJECT_FILE_MAX_SANDBOX_ITEMS)),
   ),
