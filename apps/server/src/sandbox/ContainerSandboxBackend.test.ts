@@ -838,6 +838,27 @@ describe("ContainerSandboxBackend", () => {
     ).toBe(true);
   });
 
+  it("names the snapshot ref it was given rather than globbing the namespace", async () => {
+    // A dirty tree's export pins a snapshot and hands its commit to the bundle.
+    // The bundle names THAT ref: a glob over the namespace would also carry
+    // every stale ref an earlier export left behind, which is what shipped
+    // files the user had deleted whenever the cleanup failed.
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    const snapshotCommit = "d".repeat(40);
+    await backend.exportBundle("thread-1", "/tmp/thread-1.bundle", { snapshotCommit });
+    const bundled = executor.commands.find(
+      (command) => command.args.includes("bundle") && command.args.includes("create"),
+    );
+    expect(bundled?.args.slice(-3)).toEqual([
+      "/tmp/t3-thread-export.bundle",
+      "refs/heads/thread/thread-1",
+      `refs/t3/export-snapshot/${snapshotCommit}`,
+    ]);
+    expect(bundled?.args.some((argument) => argument.includes("--glob"))).toBe(false);
+  });
+
   it("exports and verifies a self-contained Git bundle before cleanup", async () => {
     const executor = successfulExecutor();
     const backend = new ContainerSandboxBackend("docker", executor);
@@ -847,17 +868,28 @@ describe("ContainerSandboxBackend", () => {
       expect.arrayContaining([
         expect.objectContaining({
           executable: "docker",
-          // The thread branch and this export's own snapshot namespace, NOT
-          // `--all`: every ref in the repository would put an earlier export's
-          // snapshot -- and files the user has since deleted -- into this
-          // artifact.
-          args: expect.arrayContaining([
+          // The thread branch alone for a clean tree, which pins no snapshot.
+          // Neither `--all` nor a glob over the snapshot namespace: both put
+          // an earlier export's snapshot -- and the files the user has since
+          // deleted -- into this artifact, the glob whenever the cleanup that
+          // was supposed to have removed those refs did not run or failed.
+          // Asserted as the exact TAIL of the argv rather than a subset: a
+          // subset match cannot see an extra ref appended after the branch,
+          // which is precisely what the bug shipped.
+          args: [
+            "exec",
+            "--user",
+            "1000:1000",
+            "--",
+            "t3-thread-921ca543f9cf4d28fe0b81d81cdb33b5",
+            "git",
+            "-C",
+            "/workspace/repo",
             "bundle",
             "create",
             "/tmp/t3-thread-export.bundle",
             "refs/heads/thread/thread-1",
-            "--glob=refs/t3/export-snapshot/*",
-          ]),
+          ],
         }),
         expect.objectContaining({
           executable: "docker",
@@ -1020,9 +1052,9 @@ describe("ContainerSandboxBackend", () => {
     const executor = adoptedExecutor(ADOPTED_LABELS.replace("project-1", "project-2"));
     const backend = new ContainerSandboxBackend("docker", executor);
     await expect(backend.exportBranch("thread-1", hint())).rejects.toThrow("not ready");
-    await expect(backend.exportBundle("thread-1", "/tmp/thread-1.bundle", hint())).rejects.toThrow(
-      "not ready",
-    );
+    await expect(
+      backend.exportBundle("thread-1", "/tmp/thread-1.bundle", { hint: hint() }),
+    ).rejects.toThrow("not ready");
     // Adoption never widens to resumption: `exec` has no hint parameter at all.
     await expect(backend.exec("thread-1", { executable: "true" })).rejects.toThrow("not ready");
     expect(executor.commands.some((command) => command.args[0] === "exec")).toBe(false);

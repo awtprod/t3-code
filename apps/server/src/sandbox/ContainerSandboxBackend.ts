@@ -844,13 +844,11 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     env: Readonly<Record<string, string>>,
   ): Promise<string | undefined> {
     // Every snapshot ref this container still holds is from an EARLIER export
-    // and describes a working tree that no longer exists. Dropping them first
-    // is what keeps the bundle below to this export's own state: they used to
-    // accumulate and ride out in every later bundle, so a file the user
-    // deleted after one export stayed recoverable from a newer artifact that
-    // is supposed to represent current state. Before the dirty check, not
-    // after -- a clean tree writes no snapshot of its own and must still not
-    // ship someone else's.
+    // and describes a working tree that no longer exists. They are dropped so
+    // they stop showing up in the user's `git log --all`; keeping the BUNDLE
+    // to this export's own state is `exportBundle`'s job, and it does it by
+    // naming the ref written below rather than by trusting this to have
+    // succeeded.
     await this.#deleteExportSnapshotRefs(containerName, 30_000);
     const tree = (
       await this.#mustExec(
@@ -1092,7 +1090,17 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     return probed.exitCode === 0 && probed.stdout.trim().length > 0;
   }
 
-  /** Remove every snapshot ref, so none rides out in a later export bundle. */
+  /**
+   * Remove every snapshot ref left in the container.
+   *
+   * Hygiene, not correctness: `exportBundle` names the single ref its export
+   * just wrote, so a ref this misses cannot ride out in a later bundle -- it
+   * only clutters the user's `git log --all`. That is why a failed enumeration
+   * returns quietly. It was NOT true while the bundle globbed the namespace,
+   * and this silent return was then the whole of a data-retention bug: one
+   * failed `for-each-ref` and the export bundled every stale ref, along with
+   * the files the user had deleted since.
+   */
   async #deleteExportSnapshotRefs(containerName: string, timeoutMs: number): Promise<void> {
     const listed = await this.#mustExec(
       containerName,
@@ -1122,13 +1130,24 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     }
   }
 
-  /** Copy a self-contained Git bundle through the container runtime boundary
-   * and verify it before the sandbox can be deleted. */
+  /**
+   * Copy a self-contained Git bundle through the container runtime boundary
+   * and verify it before the sandbox can be deleted.
+   *
+   * `snapshotCommit` is what the `exportBranch` immediately before this one
+   * returned: the working-tree snapshot it pinned, or absent for a clean tree
+   * that pinned none. It is named in the bundle explicitly -- see below for
+   * why that, and not a glob over the snapshot namespace.
+   */
   async exportBundle(
     threadIdValue: string,
     destination: string,
-    hint?: SandboxAdoptionHint,
+    options: {
+      readonly snapshotCommit?: string;
+      readonly hint?: SandboxAdoptionHint;
+    } = {},
   ): Promise<void> {
+    const hint = options.hint;
     const threadId = sanitizeId(threadIdValue, "threadId");
     const record = await this.#resolveRecord(threadId, hint);
     if (record === undefined)
@@ -1141,7 +1160,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     const containerBundle = "/tmp/t3-thread-export.bundle";
     try {
       // Exactly what a restore reads back -- the thread branch and this
-      // export's own working-tree snapshot -- and nothing else.
+      // export's own working-tree snapshot, by name -- and nothing else.
       //
       // `--all` was a data-retention bug, not merely wasteful. Every snapshot
       // ref an earlier export left in the repository rode out in every later
@@ -1151,12 +1170,25 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       // from being UNPACKED (see `#resolveExportSnapshot`), but the deleted
       // bytes were still in the artifact on disk.
       //
-      // A glob for the snapshot namespace rather than a named ref: the ref is
-      // named by the commit it points at, this export just wrote its own, and
-      // a glob that matches nothing is not an error -- which is what a clean
-      // tree needs, since it writes no snapshot at all. Restore still holds
-      // whatever arrives to the commit the event log recorded, so pruning here
-      // relaxes nothing.
+      // Narrowing that to a GLOB over the snapshot namespace did not fix it,
+      // it just made the fix conditional on cleanup. The glob bundles whatever
+      // is in the namespace, and what is in the namespace is only this
+      // export's own snapshot if `#deleteExportSnapshotRefs` actually removed
+      // the earlier ones -- and that started with a `for-each-ref` whose
+      // failure was a silent `return`. One failed enumeration and the export
+      // went on to bundle the whole namespace: stale refs, and the deleted
+      // files reachable from them, straight into the new artifact.
+      //
+      // Naming the one ref this export just wrote takes cleanup out of the
+      // correctness path entirely -- nothing else can be in the bundle,
+      // whatever is left in the repository, so the deletions are hygiene
+      // again. It also fails LOUDLY if that ref is not there, which a glob
+      // could not: a glob matching nothing is not an error, so an export whose
+      // snapshot had gone missing shipped a bundle the restore would then
+      // refuse, having already torn the container down.
+      //
+      // A clean tree pins no snapshot and names none; restore holds whatever
+      // arrives to the commit the event log recorded either way.
       await this.#mustExec(
         record.ready.containerName,
         {
@@ -1168,7 +1200,9 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
             "create",
             containerBundle,
             `refs/heads/${record.ready.branchName}`,
-            `--glob=${EXPORT_SNAPSHOT_NAMESPACE}/*`,
+            ...(options.snapshotCommit === undefined
+              ? []
+              : [exportSnapshotRef(options.snapshotCommit)]),
           ],
         },
         120_000,

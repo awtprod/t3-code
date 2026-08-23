@@ -333,6 +333,99 @@ describe("sandbox export round trip", () => {
     }),
   );
 
+  it.effect("does not ride deleted files out when the snapshot ref listing fails", () =>
+    Effect.gen(function* () {
+      // The export deletes an earlier export's snapshot refs before writing its
+      // own, and that deletion starts with a `for-each-ref` whose failure was a
+      // silent no-op. The bundle then named the snapshot NAMESPACE with a glob,
+      // so a failed listing meant the export shipped every stale ref it had
+      // failed to remove -- and with them the files the user had deleted since
+      // that earlier export, inside an artifact that is supposed to represent
+      // current state.
+      //
+      // The bundle now names the single ref this export just wrote, so what
+      // ships never depends on the cleanup having worked at all.
+      headless();
+      const artifacts = makeDirectory("t3-sandbox-artifacts-");
+      const source = sourceRepository();
+
+      class BrokenListingExecutor extends GitBackedExecutor {
+        listingFailures = 0;
+        override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+          if (
+            command.args.includes("for-each-ref") &&
+            command.args.includes("--format=%(refname)")
+          ) {
+            this.listingFailures += 1;
+            // Recorded so the assertions below cannot pass on an executor that
+            // simply never reached the enumeration.
+            this.commands.push(command);
+            return { exitCode: 128, stdout: "", stderr: "fatal: not a git repository" };
+          }
+          return super.run(command);
+        }
+      }
+
+      const first = new BrokenListingExecutor();
+      const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
+      yield* provisionAuthorized(manager, provisionInput(source.path, source.baseCommit));
+
+      // An export with uncommitted work, which pins a snapshot ref holding it.
+      NodeFS.writeFileSync(NodePath.join(first.repository, "secret.md"), "deleted later\n", "utf8");
+      const stale = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(stale.snapshotCommit).toBeDefined();
+
+      // The user deletes that file and the thread exports again. The stale ref
+      // is still in the repository, because every deletion attempt has failed.
+      NodeFS.rmSync(NodePath.join(first.repository, "secret.md"));
+      NodeFS.writeFileSync(NodePath.join(first.repository, "kept.md"), "current work\n", "utf8");
+      const exported = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(first.listingFailures).toBeGreaterThan(0);
+      expect(exported.snapshotCommit).toBeDefined();
+      expect(exported.snapshotCommit).not.toBe(stale.snapshotCommit);
+      // The cleanup really did fail, so the earlier snapshot is still sitting
+      // in the container -- exactly the state the glob used to bundle.
+      expect(
+        NodeChildProcess.spawnSync(
+          "git",
+          ["rev-parse", "--verify", `refs/t3/export-snapshot/${stale.snapshotCommit ?? ""}`],
+          { cwd: first.repository, encoding: "utf8" },
+        ).status,
+      ).toBe(0);
+
+      const second = new GitBackedExecutor();
+      yield* provisionAuthorized(makeSandboxRuntimeManager(artifacts, "linux", second), {
+        ...provisionInput(source.path, source.baseCommit),
+        restore: {
+          artifactId: exported.artifactId,
+          bundleSha256: exported.bundleSha256,
+          headCommit: exported.commit,
+          branchName: `thread/${THREAD_ID}`,
+          ...(exported.snapshotCommit === undefined
+            ? {}
+            : { snapshotCommit: exported.snapshotCommit }),
+        },
+      });
+
+      // The current export's work restored, and the deleted file did not come
+      // back with it.
+      expect(NodeFS.readFileSync(NodePath.join(second.repository, "kept.md"), "utf8")).toBe(
+        "current work\n",
+      );
+      expect(NodeFS.existsSync(NodePath.join(second.repository, "secret.md"))).toBe(false);
+      // ...and the stale snapshot is not merely unrestored, it is not in the
+      // artifact at all: its commit does not resolve in the restored
+      // repository, so its bytes never crossed the boundary.
+      expect(
+        NodeChildProcess.spawnSync(
+          "git",
+          ["cat-file", "-e", `${stale.snapshotCommit ?? ""}^{commit}`],
+          { cwd: second.repository, encoding: "utf8" },
+        ).status,
+      ).not.toBe(0);
+    }),
+  );
+
   it.effect("refuses a snapshot ref that is not the one the export recorded", () =>
     Effect.gen(function* () {
       // The ref deletion an export performs can fail, and the snapshot used to

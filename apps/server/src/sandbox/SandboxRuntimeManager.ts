@@ -940,7 +940,16 @@ export const makeSandboxRuntimeManager = (
           const storeDestination = NodePath.resolve(artifactRoot, `${name}.store.tar`);
           try {
             const result = await get(runtime).backend.exportBranch(threadId, hint);
-            await get(runtime).backend.exportBundle(threadId, bundleTemporary, hint);
+            // The snapshot this export just pinned, named into the bundle. The
+            // bundle used to glob the snapshot namespace instead, which shipped
+            // whatever cleanup had failed to remove -- an earlier export's tree,
+            // and with it files the user has since deleted.
+            await get(runtime).backend.exportBundle(threadId, bundleTemporary, {
+              ...(result.snapshotCommit === undefined
+                ? {}
+                : { snapshotCommit: result.snapshotCommit }),
+              ...(hint === undefined ? {} : { hint }),
+            });
             const bundleSha256 = NodeCrypto.createHash("sha256")
               .update(await NodeFSP.readFile(bundleTemporary))
               .digest("hex");

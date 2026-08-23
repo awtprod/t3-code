@@ -289,6 +289,19 @@ export interface ThreadSandboxBackend {
   readonly ensureReady: (input: SandboxProvisionInput) => Promise<SandboxReady>;
   readonly exec: (threadId: string, input: SandboxExecInput) => Promise<SandboxCommandResult>;
   readonly exportBranch: (threadId: string, hint?: SandboxAdoptionHint) => Promise<SandboxExport>;
+  /**
+   * `snapshotCommit` is the one the preceding `exportBranch` returned. The
+   * bundle names that ref explicitly, so what an export ships never depends on
+   * an earlier export's refs having been cleaned up.
+   */
+  readonly exportBundle: (
+    threadId: string,
+    destination: string,
+    options?: {
+      readonly snapshotCommit?: string;
+      readonly hint?: SandboxAdoptionHint;
+    },
+  ) => Promise<void>;
   readonly sampleUsage: (threadId: string) => Promise<SandboxUsageSample>;
   readonly stop: (
     threadId: string,
