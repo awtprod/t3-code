@@ -1124,8 +1124,13 @@ export const make = Effect.gen(function* () {
       thread,
       projects: project ? [project] : [],
     });
-    const executionTarget =
+    const baseExecutionTarget =
       options?.executionTarget ?? (yield* ensureExecutionTarget(thread, legacyCwd));
+    const repositoryRemoteUrl = project?.repositoryIdentity?.locator.remoteUrl;
+    const executionTarget =
+      baseExecutionTarget.kind === "sandbox" && repositoryRemoteUrl
+        ? { ...baseExecutionTarget, repositoryRemoteUrl }
+        : baseExecutionTarget;
     const effectiveCwd =
       executionTarget.kind === "sandbox" ? executionTarget.workspaceCwd : executionTarget.cwd;
 

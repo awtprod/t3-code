@@ -21,7 +21,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
-import { it, assert, vi } from "@effect/vitest";
+import { it, assert, expect, vi } from "@effect/vitest";
 
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -48,7 +48,10 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
-import { makeProviderServiceLive } from "./ProviderService.ts";
+import {
+  makeProviderServiceLive,
+  resolveProviderInstanceGitHubIdentity,
+} from "./ProviderService.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -76,6 +79,37 @@ const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+
+it("derives the host GitHub identity from an explicit setting or provider wrapper", () => {
+  expect(
+    resolveProviderInstanceGitHubIdentity(ProviderInstanceId.make("claude-custom"), {
+      driver: CLAUDE_AGENT_DRIVER,
+      environment: [
+        {
+          name: "COMMAND_CENTER_GITHUB_IDENTITY",
+          value: "awtprod",
+          sensitive: false,
+        },
+      ],
+    }),
+  ).toBe("awtprod");
+  expect(
+    resolveProviderInstanceGitHubIdentity(ProviderInstanceId.make("claude-custom"), {
+      driver: CLAUDE_AGENT_DRIVER,
+      config: { binaryPath: "/opt/command-center/bin/claude-ccn" },
+    }),
+  ).toBe("ccn");
+  expect(
+    resolveProviderInstanceGitHubIdentity(ProviderInstanceId.make("codex-primary"), {
+      driver: CODEX_DRIVER,
+    }),
+  ).toBe("primary");
+  expect(
+    resolveProviderInstanceGitHubIdentity(ProviderInstanceId.make("codex"), {
+      driver: CODEX_DRIVER,
+    }),
+  ).toBeUndefined();
+});
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;

@@ -10,6 +10,8 @@ export type SandboxExecutionTarget = {
   readonly runtimeRef: string;
   readonly runtime: "docker" | "podman";
   readonly workspaceCwd: string;
+  /** Original repository remote used to scope sandbox Git authentication. */
+  readonly repositoryRemoteUrl?: string;
 };
 
 export type LegacyHostExecutionTarget = {
