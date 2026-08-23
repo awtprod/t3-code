@@ -673,6 +673,9 @@ describe("ProviderCommandReactor", () => {
       runtimeMode: "approval-required",
     });
     expect(harness.provisionSandbox).toHaveBeenCalledTimes(1);
+    expect(harness.provisionSandbox.mock.calls[0]?.[0]).toMatchObject({
+      bootstrap: { repositoryUrl: "/tmp/provider-project" },
+    });
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
