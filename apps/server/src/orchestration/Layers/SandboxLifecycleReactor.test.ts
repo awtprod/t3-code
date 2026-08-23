@@ -53,6 +53,15 @@ const snapshot: OrchestrationReadModel = {
       id: projectId,
       title: "Project",
       workspaceRoot: "/tmp/manual-sandbox-project",
+      repositoryIdentity: {
+        canonicalKey: "github.com/t3tools/t3code",
+        locator: {
+          source: "git-remote",
+          remoteName: "upstream",
+          remoteUrl: "https://github.com/T3Tools/t3code.git",
+        },
+        rootPath: "/tmp/manual-sandbox-project",
+      },
       defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
       scripts: [],
       createdAt: NOW,
@@ -257,6 +266,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         bootstrap: {
           threadId,
           projectId,
+          repositoryUrl: "/tmp/manual-sandbox-project",
           baseCommit: "0123456789abcdef0123456789abcdef01234567",
           branchName: `t3/thread/${threadId}`,
         },
@@ -1398,7 +1408,10 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       // The resolved deployment runtime, so the projection matches the
       // container that is actually being created.
       expect(provisionCommand.config?.runtime).toBe("podman");
-      expect(provision.mock.calls[0]?.[0]).toMatchObject({ config: { runtime: "podman" } });
+      expect(provision.mock.calls[0]?.[0]).toMatchObject({
+        bootstrap: { repositoryUrl: "/tmp/manual-sandbox-project" },
+        config: { runtime: "podman" },
+      });
       expect(provisionCommand.branch).toMatchObject({
         branchName: `t3/thread/${childThreadId}`,
         baseCommit: inheritedCommit,

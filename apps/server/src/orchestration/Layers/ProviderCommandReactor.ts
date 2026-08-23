@@ -545,8 +545,11 @@ export const make = Effect.gen(function* () {
               bootstrap: {
                 threadId: thread.id,
                 projectId: thread.projectId,
-                repositoryUrl:
-                  project.repositoryIdentity?.locator.remoteUrl ?? project.workspaceRoot,
+                // The canonical repository identity intentionally prefers an
+                // upstream remote, but this commit was resolved from the local
+                // checkout's tracked remote and may only exist in the fork.
+                // Seed from the checkout so the bundle must contain it.
+                repositoryUrl: project.workspaceRoot,
                 baseCommit: branch.baseCommit,
                 branchName: branch.branchName,
                 ...("parentThreadId" in branch && branch.parentThreadId

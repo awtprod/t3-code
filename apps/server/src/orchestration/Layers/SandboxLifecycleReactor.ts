@@ -305,7 +305,9 @@ export const make = Effect.gen(function* () {
         bootstrap: {
           threadId: thread.id,
           projectId: thread.projectId,
-          repositoryUrl: project.repositoryIdentity?.locator.remoteUrl ?? project.workspaceRoot,
+          // Repository identity can name upstream while this base commit comes
+          // from the local fork. Seed from the checkout that resolved it.
+          repositoryUrl: project.workspaceRoot,
           baseCommit: branch.baseCommit,
           branchName: branch.branchName,
         },
@@ -523,7 +525,9 @@ export const make = Effect.gen(function* () {
         bootstrap: {
           threadId: event.payload.childThreadId,
           projectId: parent.projectId,
-          repositoryUrl: project.repositoryIdentity?.locator.remoteUrl ?? project.workspaceRoot,
+          // Inherited commits can be fork-only too; the parent checkout is the
+          // authoritative source for the seed bundle.
+          repositoryUrl: project.workspaceRoot,
           baseCommit: event.payload.inheritedCommit,
           branchName: event.payload.branchName,
           parentThreadId: event.payload.parentThreadId,
