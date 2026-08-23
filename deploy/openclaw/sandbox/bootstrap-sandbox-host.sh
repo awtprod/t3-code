@@ -297,13 +297,37 @@ if wants_step 2; then
   # damage modes a same-version re-run is meant to repair -- an interrupted
   # `cp`, a hand-truncated helper -- leave the path present.
   #
+  # A trailer closes the file:
+  #
+  #   e<TAB><version><TAB><entry count>
+  #
+  # Without it the manifest could not vouch for ITSELF. The entries were
+  # appended one line at a time, so an interruption -- the run killed, the disk
+  # filling, the host rebooting -- left a nonempty, perfectly well-formed PREFIX
+  # of the real manifest. The completeness check validates the entries it FINDS,
+  # so a truncated manifest naming 3 of 40 files passed, and a same-version
+  # re-run then skipped repairing the 37 helpers that were never recorded and
+  # may never have been copied. The trailer is written last and its count is
+  # compared against the entries actually read back, so a manifest missing any
+  # part of itself fails the check and reinstalls.
+  #
+  # Written to a temporary beside the destination and renamed into place, so
+  # the manifest at the canonical path is either the previous complete one or
+  # this complete one and never a prefix of either. (The trailer alone would
+  # already catch a torn write; the rename means a torn write never becomes
+  # visible in the first place, and the two together also cover a manifest
+  # truncated after the fact.)
+  #
   # Read from the extracted bundle rather than from /usr/local: identical
   # contents, and reading the source keeps the record independent of whatever
   # the copy actually produced.
   write_podman_manifest() {
-    local bundle_root="$1" manifest="$2" relative absolute
-    : >"$manifest"
-    chmod 0644 "$manifest"
+    local bundle_root="$1" manifest="$2" tmp relative absolute entries=0
+    tmp="${manifest}.tmp.$$"
+    # shellcheck disable=SC2064 # expand tmp now; the trap must survive this function
+    trap "rm -f '$tmp'" RETURN
+    : >"$tmp"
+    chmod 0644 "$tmp"
     while IFS= read -r relative; do
       absolute="/usr/local${relative#.}"
       if [ -h "${bundle_root}/${relative#./}" ]; then
@@ -312,13 +336,23 @@ if wants_step 2; then
         printf 'f\t%s\t%s\n' \
           "$(sha256sum "${bundle_root}/${relative#./}" | cut -d' ' -f1)" "$absolute"
       fi
-    done < <(cd "$bundle_root" && find . \( -type f -o -type l \) | sort) >>"$manifest"
+      entries=$((entries + 1))
+    done < <(cd "$bundle_root" && find . \( -type f -o -type l \) | sort) >>"$tmp"
+    printf 'e\t%s\t%s\n' "$PODMAN_STATIC_VERSION" "$entries" >>"$tmp"
+    # Flushed before the rename: a rename is atomic in the directory, but it
+    # can still publish a name whose data has not reached the disk, which a
+    # power loss turns back into the truncated manifest this guards against.
+    sync "$tmp" 2>/dev/null || sync
+    mv -f "$tmp" "$manifest"
   }
 
   # The path from a manifest line, tolerating the pre-digest format (a bare
   # path per line) so an upgrade can still remove what an older run installed.
+  # The `e` trailer names no file, so it yields nothing and the removal loop
+  # skips it.
   manifest_entry_path() {
     case "$1" in
+      e$'\t'*) : ;;
       [fl]$'\t'*) printf '%s' "${1#*$'\t'*$'\t'}" ;;
       *) printf '%s' "$1" ;;
     esac
@@ -388,7 +422,9 @@ if wants_step 2; then
     cp -r "${bundle_root}/." /usr/local/
     install -d -o root -g root -m 0755 "$PODMAN_STATIC_MANIFEST_DIR"
     write_podman_manifest "$bundle_root" "$manifest"
-    info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local ($(wc -l <"$manifest") files recorded in $manifest)"
+    # The manifest's own trailer, not `wc -l`: the trailer is a line too, and
+    # the count it carries is what the completeness check compares against.
+    info "installed podman-static ${PODMAN_STATIC_VERSION} into /usr/local ($(awk -F'\t' '$1 == "e" { print $3 }' "$manifest") files recorded in $manifest)"
   }
 
   # A matching `podman --version` proves one binary, not a complete bundle.
@@ -417,6 +453,7 @@ if wants_step 2; then
   # manifest lists and rewrites it -- instead of skipping.
   podman_install_is_complete() {
     local manifest="${PODMAN_STATIC_MANIFEST_DIR}/manifest" kind expected entry damaged=0
+    local counted=0 recorded="" recorded_version=""
     if [ ! -s "$manifest" ]; then
       info "no bundle manifest at $manifest; reinstalling to record one"
       return 1
@@ -431,6 +468,14 @@ if wants_step 2; then
     while IFS=$'\t' read -r kind expected entry; do
       [ -n "${entry:-}" ] || continue
       case "$kind" in
+        e)
+          # The trailer. `expected` is the bundle version, `entry` the number
+          # of file/symlink lines that precede it -- both checked after the
+          # loop, against what was actually read.
+          recorded_version="$expected"
+          recorded="$entry"
+          continue
+          ;;
         l)
           # -h, not -e: a dangling symlink is still the symlink the bundle
           # shipped, and podman resolves it the same way. What matters is that
@@ -457,7 +502,28 @@ if wants_step 2; then
           [ "$damaged" -gt 5 ] || warn "unrecognized manifest entry kind '$kind' for: $entry"
           ;;
       esac
+      counted=$((counted + 1))
     done <"$manifest"
+    # The manifest has to prove it is whole before its contents mean anything.
+    # Entries were appended a line at a time, so an interrupted write left a
+    # well-formed PREFIX: every entry it named was present and correct, the
+    # check passed, and the same-version re-run skipped repairing the files the
+    # manifest never got as far as recording.
+    if [ -z "$recorded" ]; then
+      info "bundle manifest at $manifest has no completeness trailer (an interrupted write, or a manifest from before the trailer existed); reinstalling to record a whole one"
+      return 1
+    fi
+    if [ "$counted" != "$recorded" ]; then
+      info "bundle manifest at $manifest records $recorded entries but holds $counted; reinstalling to record a whole one"
+      return 1
+    fi
+    # The version the manifest was written for. `podman --version` speaks for
+    # one binary; this says which bundle the digests below belong to, so a
+    # manifest left over from another version cannot vouch for this install.
+    if [ "$recorded_version" != "$PODMAN_STATIC_VERSION" ]; then
+      info "bundle manifest at $manifest was written for $recorded_version, not $PODMAN_STATIC_VERSION; reinstalling"
+      return 1
+    fi
     if [ "$damaged" -gt 0 ]; then
       info "$damaged file(s) from the recorded bundle are missing or altered; reinstalling"
       return 1

@@ -96,6 +96,15 @@ hand-truncated helper both leave a file that is present and unusable, which
 counted as complete and skipped the repair. A helper deleted or truncated by
 hand, an interrupted copy, an absent manifest, or a manifest predating digest
 recording is therefore repaired rather than reported as "already installed".
+
+The manifest also has to vouch for itself. It closes with a trailer line —
+`e<TAB><version><TAB><entry count>` — written last, and it is renamed into place
+from a temporary rather than appended to directly. Without both, an interrupted
+write left a nonempty, well-formed _prefix_ of the real manifest: the check
+validated only the entries it found, so a manifest naming 3 of 40 files passed
+and a same-version re-run skipped repairing the other 37. A manifest with no
+trailer, a trailer whose count disagrees with the entries present, or a trailer
+naming a different bundle version all reinstall.
 Individual steps can be re-run in isolation:
 
 ```sh
