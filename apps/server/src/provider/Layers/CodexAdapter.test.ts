@@ -17,6 +17,7 @@ import {
   type ProviderTurnTargetIdentity,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
+  SandboxId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -40,6 +41,11 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
 import { clearMcpProviderSession, setMcpProviderSession } from "../../mcp/McpProviderSession.ts";
+import {
+  bindSandboxProviderTarget,
+  makeSandboxProviderBindingOwner,
+  unbindSandboxProviderTarget,
+} from "../../sandbox/SandboxProviderProcess.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -385,6 +391,56 @@ validationLayer("CodexAdapterLive validation", (it) => {
       NodeAssert.match(runtimeOptions?.environment?.PATH ?? "", /provider-bin/u);
       NodeAssert.equal("OPENAI_API_KEY" in (runtimeOptions?.environment ?? {}), false);
     }),
+  );
+  it.effect("hands a sandboxed Codex only the host subscription access token", () =>
+    Effect.gen(function* () {
+      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "codex-sandbox-home-"));
+      NodeFS.writeFileSync(
+        NodePath.join(home, "auth.json"),
+        '{"auth_mode":"chatgpt","tokens":{"access_token":"access-test-only","account_id":"account-test-only","id_token":"id-must-stay-on-host","refresh_token":"refresh-must-stay-on-host"}}',
+        { mode: 0o600 },
+      );
+      const threadId = asThreadId("thread-sandbox-subscription");
+      const owner = makeSandboxProviderBindingOwner();
+      bindSandboxProviderTarget(
+        {
+          kind: "sandbox",
+          threadId,
+          sandboxId: SandboxId.make("sandbox-subscription"),
+          runtimeRef: "t3-thread-sandbox-subscription",
+          runtime: "podman",
+          workspaceCwd: "/workspace/repo",
+        },
+        owner,
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          unbindSandboxProviderTarget(threadId, owner);
+          NodeFS.rmSync(home, { recursive: true, force: true });
+        }),
+      );
+
+      const runtimeFactory = makeRuntimeFactory();
+      const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+        makeRuntime: runtimeFactory.factory,
+        commandCenterSourceHomePath: home,
+      });
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const external = runtimeFactory.lastRuntime?.options.externalChatgptAuth;
+      NodeAssert.deepStrictEqual(external?.initial, {
+        accessToken: "access-test-only",
+        chatgptAccountId: "account-test-only",
+      });
+      NodeAssert.deepStrictEqual(Object.keys(external?.initial ?? {}).sort(), [
+        "accessToken",
+        "chatgptAccountId",
+      ]);
+    }).pipe(Effect.scoped),
   );
   it.effect("delivers scoped MCP auth only to the parent behind the scrubbed helper", () =>
     Effect.gen(function* () {

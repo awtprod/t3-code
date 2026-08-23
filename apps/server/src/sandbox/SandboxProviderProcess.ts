@@ -144,6 +144,7 @@ export function sandboxProviderInvocation(
   args: ReadonlyArray<string>,
   cwd: string | undefined,
   env: Readonly<Record<string, string | undefined>>,
+  options?: { readonly externalChatgptAuth?: boolean },
 ) {
   void cwd;
   const allowedEnvironment = Object.fromEntries(
@@ -152,6 +153,15 @@ export function sandboxProviderInvocation(
         entry[1] !== undefined && PROVIDER_ENV_ALLOWLIST.test(entry[0]),
     ),
   );
+  if (options?.externalChatgptAuth === true) {
+    // External ChatGPT auth is delivered over the app-server protocol. An API
+    // proxy base URL or key would select the API-key backend instead and make
+    // the subscription token appear invalid.
+    delete allowedEnvironment.OPENAI_BASE_URL;
+    delete allowedEnvironment.OPENAI_API_KEY;
+    delete allowedEnvironment.CODEX_API_KEY;
+    delete allowedEnvironment.CODEX_TOKEN;
+  }
   // A bound proxy makes every persistent credential redundant: the sidecar holds
   // the real secret, so they are all dropped here regardless of which upstreams
   // are configured. An openai-only binding must still not leak a host Anthropic
@@ -179,7 +189,7 @@ export function sandboxProviderInvocation(
       proxyEnvironment.ANTHROPIC_BASE_URL = `${proxy.baseUrl}/anthropic`;
       proxyEnvironment.ANTHROPIC_AUTH_TOKEN = proxy.threadToken;
     }
-    if (proxy.upstreamNames.includes("openai")) {
+    if (options?.externalChatgptAuth !== true && proxy.upstreamNames.includes("openai")) {
       proxyEnvironment.OPENAI_BASE_URL = `${proxy.baseUrl}/openai`;
       proxyEnvironment.OPENAI_API_KEY = proxy.threadToken;
     }
@@ -235,6 +245,7 @@ export function sandboxProviderInvocation(
 export function makeSandboxChildProcessSpawner(
   target: SandboxExecutionTarget,
   hostSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+  options?: { readonly externalChatgptAuth?: boolean },
 ): ChildProcessSpawner.ChildProcessSpawner["Service"] {
   return ChildProcessSpawner.make((command) => {
     if (command._tag !== "StandardCommand") {
@@ -248,6 +259,7 @@ export function makeSandboxChildProcessSpawner(
       command.args,
       command.options.cwd,
       command.options.env ?? {},
+      options,
     );
     return hostSpawner.spawn(
       EffectChildProcess.make(invocation.executable, invocation.args, {

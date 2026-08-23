@@ -768,6 +768,27 @@ describe("thread-scoped credential proxy", () => {
     expect(invocation.args.join(" ")).not.toContain(binding.threadToken);
   });
 
+  it("does not override external ChatGPT subscription auth with the API-key proxy", async () => {
+    process.env.T3_SANDBOX_OPENAI_API_KEY = SECRET;
+    const sidecar = new ThreadCredentialProxySidecar("podman", new FakeExecutor());
+    await sidecar.start(target.threadId, "t3-net-abc", CREDENTIAL_IMAGE, true);
+    await provisionThreadCredentialProxy(target.threadId);
+
+    const invocation = sandboxProviderInvocation(
+      target,
+      "codex",
+      [],
+      undefined,
+      { OPENAI_BASE_URL: "https://host-api.example.test" },
+      { externalChatgptAuth: true },
+    );
+
+    expect(invocation.env.OPENAI_API_KEY).toBeUndefined();
+    expect(invocation.env.OPENAI_BASE_URL).toBeUndefined();
+    expect(invocation.args).not.toContain("OPENAI_API_KEY");
+    expect(invocation.args).not.toContain("OPENAI_BASE_URL");
+  });
+
   it("refuses to start without the egress sidecar it must chain through", async () => {
     const executor = new FakeExecutor();
     await expect(

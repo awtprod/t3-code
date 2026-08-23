@@ -172,11 +172,28 @@ export interface CodexSessionRuntimeOptions {
   readonly commandCenterPlatform?: NodeJS.Platform;
   readonly windowsSandboxMode?: "elevated";
   /**
+   * ChatGPT subscription auth supplied by the trusted host to a sandboxed
+   * app-server. Only the access token crosses the container boundary; refresh
+   * and ID tokens remain in the provider identity's host auth.json.
+   */
+  readonly externalChatgptAuth?: {
+    readonly initial: CodexExternalChatgptAuth;
+    readonly refresh: () => Effect.Effect<
+      CodexExternalChatgptAuth,
+      CodexErrors.CodexAppServerRequestError
+    >;
+  };
+  /**
    * Grant read-only sandbox escalations without prompting. Only ever applies to
    * requests classified read-only by `classifyCodexPermissionRequest`; writes,
    * sandbox denials, and network enables always prompt.
    */
   readonly autoApproveReadOnlyPermissions?: boolean;
+}
+
+export interface CodexExternalChatgptAuth {
+  readonly accessToken: string;
+  readonly chatgptAccountId: string;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -1442,6 +1459,10 @@ export const makeCodexSessionRuntime = (
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
     const mcpCatalogReloadedRef = yield* Ref.make(false);
+    const externalChatgptAuthConfig = options.externalChatgptAuth;
+    const externalChatgptAuthRef = externalChatgptAuthConfig
+      ? yield* Ref.make(externalChatgptAuthConfig.initial)
+      : undefined;
     // Records the single terminal lifecycle emit (`session/exited` from a process
     // exit XOR `session/closed` from a graceful close). Distinct from
     // `closedRef`, which guards the one-time close() *cleanup* (scope + queues):
@@ -2326,6 +2347,37 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
+    if (externalChatgptAuthConfig !== undefined && externalChatgptAuthRef !== undefined) {
+      yield* client.handleServerRequest("account/chatgptAuthTokens/refresh", (payload) =>
+        Effect.gen(function* () {
+          const current = yield* Ref.get(externalChatgptAuthRef);
+          if (
+            payload.previousAccountId !== undefined &&
+            payload.previousAccountId !== null &&
+            payload.previousAccountId !== current.chatgptAccountId
+          ) {
+            return yield* CodexErrors.CodexAppServerRequestError.internalError(
+              "Codex refused to refresh sandbox authentication for a different ChatGPT account.",
+            );
+          }
+
+          const refreshed = yield* externalChatgptAuthConfig.refresh();
+          if (refreshed.chatgptAccountId !== current.chatgptAccountId) {
+            return yield* CodexErrors.CodexAppServerRequestError.internalError(
+              "Codex refused to switch ChatGPT accounts while refreshing a sandbox session.",
+            );
+          }
+          if (refreshed.accessToken === current.accessToken) {
+            return yield* CodexErrors.CodexAppServerRequestError.internalError(
+              "The host Codex subscription token has not been refreshed. Sign in again with this Codex identity.",
+            );
+          }
+          yield* Ref.set(externalChatgptAuthRef, refreshed);
+          return refreshed satisfies EffectCodexSchema.ChatgptAuthTokensRefreshResponse;
+        }),
+      );
+    }
+
     yield* client.handleUnknownServerRequest((method) =>
       Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
     );
@@ -2447,6 +2499,15 @@ export const makeCodexSessionRuntime = (
       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
+
+      if (externalChatgptAuthRef !== undefined) {
+        const externalChatgptAuth = yield* Ref.get(externalChatgptAuthRef);
+        yield* client.request("account/login/start", {
+          type: "chatgptAuthTokens",
+          accessToken: externalChatgptAuth.accessToken,
+          chatgptAccountId: externalChatgptAuth.chatgptAccountId,
+        });
+      }
 
       if (hasConfiguredMcpServer(options.appServerArgs)) {
         yield* client.request("config/mcpServer/reload", undefined).pipe(
