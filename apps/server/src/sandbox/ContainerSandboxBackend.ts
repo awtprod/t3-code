@@ -977,9 +977,22 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
    * The ref is additionally required to resolve to the SHA in its own name
    * (see `exportSnapshotRef`), so a ref cannot claim to be a commit it is not.
    *
-   * Anything left in the namespace that is not restored is deleted: it is a
-   * transport detail, and leaving it behind would put it in this sandbox's own
-   * next export bundle and in the user's `git log --all`.
+   * A recorded snapshot that cannot be resolved -- the fetch dropped it, the
+   * bundle never carried it, `for-each-ref` itself failed -- THROWS rather
+   * than returning `undefined`. Both outcomes used to be the same
+   * `undefined`, so a restore whose event log says "there was uncommitted
+   * work" quietly provisioned a clean checkout of the branch head and the
+   * dirty and untracked files were gone with nothing said. Failing here costs
+   * a provision; degrading costs the work. Nothing in the namespace is deleted
+   * on that path either: the ref is the only copy of that tree inside this
+   * container, provisioning tears the container down anyway, and a delete
+   * running blind after a listing that just failed is how the evidence for the
+   * next diagnosis disappears.
+   *
+   * Anything left in the namespace that is not restored is deleted, on the
+   * `expected === undefined` path where nothing is owed: it is a transport
+   * detail, and leaving it behind would put it in this sandbox's own next
+   * export bundle and in the user's `git log --all`.
    */
   async #resolveExportSnapshot(
     containerName: string,
@@ -1001,18 +1014,26 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       },
       timeoutMs,
     );
-    if (listed.exitCode !== 0) return undefined;
     if (expected !== undefined) {
-      for (const line of listed.stdout.split("\n")) {
-        const [refname, objectname] = line.trim().split("\t");
-        if (refname === undefined || objectname === undefined) continue;
-        if (refname !== exportSnapshotRef(objectname)) continue;
-        if (objectname !== expected) continue;
-        return objectname;
-      }
+      if (listed.exitCode === 0)
+        for (const line of listed.stdout.split("\n")) {
+          const [refname, objectname] = line.trim().split("\t");
+          if (refname === undefined || objectname === undefined) continue;
+          if (refname !== exportSnapshotRef(objectname)) continue;
+          if (objectname !== expected) continue;
+          return objectname;
+        }
+      throw new SandboxRuntimeError(
+        `sandbox restore could not resolve the working-tree snapshot ${expected} its export recorded; refusing to provision a clean checkout that would silently drop the uncommitted work: ${
+          listed.exitCode === 0
+            ? "no ref in the restored bundle names that commit"
+            : "listing the snapshot refs failed"
+        }`,
+        listed.stderr,
+      );
     }
-    // Either the export recorded no snapshot, or nothing in the bundle is the
-    // one it recorded. Drop the lot rather than let it ride out again.
+    // The export recorded no snapshot, so anything sitting in the namespace is
+    // an older export's. Drop the lot rather than let it ride out again.
     await this.#deleteExportSnapshotRefs(containerName, timeoutMs);
     return undefined;
   }

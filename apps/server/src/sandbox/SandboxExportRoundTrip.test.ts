@@ -2,6 +2,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { afterEach } from "vite-plus/test";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -388,6 +389,118 @@ describe("sandbox export round trip", () => {
           encoding: "utf8",
         }).stdout,
       ).toBe("");
+    }),
+  );
+
+  it.effect("fails the restore when the recorded snapshot is not in the bundle", () =>
+    Effect.gen(function* () {
+      // The mirror of the export-side failure, and it was silent: a restore
+      // whose event log records a snapshot commit, against a bundle that no
+      // longer carries it (a truncated or rewritten artifact, a fetch that
+      // dropped the ref), resolved to `undefined` -- indistinguishable from a
+      // clean export -- and provisioned the branch head alone. The dirty and
+      // untracked work the log says exists was gone, with nothing said.
+      headless();
+      const artifacts = makeDirectory("t3-sandbox-artifacts-");
+      const source = sourceRepository();
+
+      const first = new GitBackedExecutor();
+      const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
+      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      NodeFS.appendFileSync(
+        NodePath.join(first.repository, "tracked.txt"),
+        "work the log says exists\n",
+        "utf8",
+      );
+      const exported = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(exported.snapshotCommit).toBeDefined();
+
+      // Rewrite the published artifact as a branch-only bundle, exactly what a
+      // truncated or re-written one looks like from the restore side, and hand
+      // over its real digest so the restore gets past the integrity check and
+      // reaches the snapshot resolution this covers.
+      const bundle = NodePath.join(artifacts, `${exported.artifactId}.bundle`);
+      const rebuild = makeDirectory("t3-sandbox-rebundle-");
+      git(rebuild, "init", "--quiet", "--bare", ".");
+      git(
+        rebuild,
+        "fetch",
+        bundle,
+        `refs/heads/thread/${THREAD_ID}:refs/heads/thread/${THREAD_ID}`,
+      );
+      git(rebuild, "bundle", "create", bundle, `refs/heads/thread/${THREAD_ID}`);
+      const rewrittenSha256 = NodeCrypto.createHash("sha256")
+        .update(NodeFS.readFileSync(bundle))
+        .digest("hex");
+
+      const second = new GitBackedExecutor();
+      const failure = yield* makeSandboxRuntimeManager(artifacts, "linux", second)
+        .provision({
+          ...provisionInput(source.path, source.baseCommit),
+          restore: {
+            artifactId: exported.artifactId,
+            bundleSha256: rewrittenSha256,
+            headCommit: exported.commit,
+            branchName: `thread/${THREAD_ID}`,
+            snapshotCommit: exported.snapshotCommit!,
+          },
+        })
+        .pipe(Effect.flip);
+
+      // Named, so the operator can find the commit in the artifact themselves
+      // rather than being told only that something went wrong.
+      expect(failure.message).toContain(exported.snapshotCommit!);
+      expect(failure.message).toContain("working-tree snapshot");
+    }),
+  );
+
+  it.effect("fails the restore when the snapshot refs cannot be listed", () =>
+    Effect.gen(function* () {
+      // The same silent degradation by the other route: the ref listing itself
+      // failing returned `undefined` too, so a broken container was
+      // indistinguishable from an export that had nothing uncommitted, and the
+      // provision continued from the branch head.
+      headless();
+      const artifacts = makeDirectory("t3-sandbox-artifacts-");
+      const source = sourceRepository();
+
+      const first = new GitBackedExecutor();
+      const manager = makeSandboxRuntimeManager(artifacts, "linux", first);
+      yield* manager.provision(provisionInput(source.path, source.baseCommit));
+      NodeFS.writeFileSync(
+        NodePath.join(first.repository, "scratch.md"),
+        "untracked work the log says exists\n",
+        "utf8",
+      );
+      const exported = yield* manager.exportBranch("docker", THREAD_ID);
+      expect(exported.snapshotCommit).toBeDefined();
+
+      // Only the resolution listing, which is the one asking for object names;
+      // the plain `%(refname)` listing the deletion helper runs is untouched.
+      class BrokenRefListingExecutor extends GitBackedExecutor {
+        override async run(command: SandboxCommand): Promise<SandboxCommandResult> {
+          return command.args.includes("for-each-ref") &&
+            command.args.some((value) => value.includes("%(objectname)"))
+            ? { exitCode: 128, stdout: "", stderr: "fatal: not a git repository" }
+            : super.run(command);
+        }
+      }
+      const second = new BrokenRefListingExecutor();
+      const failure = yield* makeSandboxRuntimeManager(artifacts, "linux", second)
+        .provision({
+          ...provisionInput(source.path, source.baseCommit),
+          restore: {
+            artifactId: exported.artifactId,
+            bundleSha256: exported.bundleSha256,
+            headCommit: exported.commit,
+            branchName: `thread/${THREAD_ID}`,
+            snapshotCommit: exported.snapshotCommit!,
+          },
+        })
+        .pipe(Effect.flip);
+
+      expect(failure.message).toContain(exported.snapshotCommit!);
+      expect(failure.message).toContain("working-tree snapshot");
     }),
   );
 
