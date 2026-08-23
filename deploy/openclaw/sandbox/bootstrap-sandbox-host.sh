@@ -256,9 +256,14 @@ if wants_step 2; then
   # containers.conf drop-in, the AppArmor profile load. Any one of them failing
   # used to exit with the host's podman socket still down, taking the running
   # server's sandboxes with it. Called with "fatal" on the success path (a
-  # socket that will not come back is worth failing the step over) and with
+  # podman that will not come back is worth failing the step over) and with
   # "warn" from the trap, where an exit is already in progress and a `die`
   # would only mask the real error.
+  #
+  # "Fatal" covers whichever unit the host was actually running: a failed
+  # socket restart always, and a failed service restart when no socket was
+  # active -- there is then nothing left to socket-activate the daemon, so
+  # shrugging it off left the host's podman down behind an exit code of 0.
   restore_podman_services() {
     local severity="${1:-warn}" socket_was="$podman_socket_was_active" service_was="$podman_service_was_active"
     podman_socket_was_active=0
@@ -275,11 +280,30 @@ if wants_step 2; then
       fi
     fi
     if [ "$service_was" = 1 ]; then
-      # Socket-activated; starting the service directly is only needed if it
-      # was running on its own. Failure is not fatal -- the socket re-spawns it
-      # on first use.
-      as_service_user systemctl --user start podman.service ||
-        warn "podman.service did not restart; the socket will re-activate it on demand"
+      if ! as_service_user systemctl --user start podman.service; then
+        # "The socket will re-activate it on demand" is only true when there IS
+        # a socket. A host running podman.service WITHOUT podman.socket -- which
+        # this function records as its own case, and which the stop above tears
+        # down just the same -- has nothing left to re-spawn the daemon, so a
+        # warn-only failure exited 0 with the previously running daemon down and
+        # every sandbox on the host unreachable. Fatal in that state, exactly
+        # like the socket path above; still warn-only from the EXIT trap, where
+        # an exit is already in progress and a `die` would mask the real error.
+        local message="podman.service was active before this step and failed to restart.
+       Bring it back by hand: STEPS=6, or
+       runuser -u $SERVICE_USER -- env XDG_RUNTIME_DIR=/run/user/${SERVICE_UID} \\
+         systemctl --user start podman.service"
+        if [ "$socket_was" = 1 ]; then
+          # The socket came back above (a failure there already died or
+          # warned), so the daemon really is socket-activated and the next
+          # client request starts it.
+          warn "podman.service did not restart; the socket will re-activate it on demand"
+        elif [ "$severity" = fatal ]; then
+          die "$message"
+        else
+          warn "$message"
+        fi
+      fi
     fi
     info "podman socket/service restored"
   }

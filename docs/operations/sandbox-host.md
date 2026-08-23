@@ -141,7 +141,12 @@ podman socket to swap binaries, it records what was active and restores it
 before finishing — from an EXIT trap armed before the stop, so a failure
 anywhere in between (the binary copy, the manifest write, the
 `containers.conf` drop-in, the AppArmor profile load) still brings the socket
-back rather than exiting with it down.
+back rather than exiting with it down. A restore that cannot bring podman back
+fails the step rather than warning: that covers a failed `podman.socket` start,
+and — on a host that was running `podman.service` _without_ the socket — a
+failed `podman.service` start too, since there is then no socket left to
+re-activate the daemon on demand. From the EXIT trap it stays a warning, so it
+cannot mask the error that triggered the exit.
 
 ## 4. What the verification proves
 
