@@ -284,6 +284,13 @@ that check rejects. The supported path is the credential proxy sidecar, which
 holds the secret and injects it per request so the token never enters the
 container.
 
+Codex with an existing ChatGPT subscription is the exception to the API-key
+setup below. Keep that provider identity signed in with `codex login`; when a
+sandboxed Codex session starts, Command Center hands its app-server only the
+current access token and ChatGPT account ID. The host `auth.json`, refresh
+token, and ID token never enter the container. No
+`T3_SANDBOX_OPENAI_API_KEY` is needed for this mode.
+
 Two consequences to plan for:
 
 - **The credential proxy makes egress mandatory.** `ThreadCredentialProxySidecar.start()`

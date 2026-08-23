@@ -86,6 +86,7 @@ import {
   makeSandboxChildProcessSpawner,
   sandboxProviderTarget,
 } from "../../sandbox/SandboxProviderProcess.ts";
+import { readSandboxCodexChatgptAuth } from "../../sandbox/SandboxCodexAuth.ts";
 import { describeCodexPermissionRequest } from "../security/CodexPermissionEscalation.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
@@ -2078,6 +2079,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? path.join(path.resolve(userHome), ".codex")
             : path.resolve(expandHomePath("~/.codex"));
         })();
+        const loadSandboxChatgptAuth = () =>
+          readSandboxCodexChatgptAuth(sourceCodexHome).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          );
+        const sandboxChatgptAuth = sandboxTarget
+          ? yield* loadSandboxChatgptAuth().pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: cause.issue,
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
         const commandCenterHome = commandCenterThread
           ? yield* prepareCommandCenterCodexHome({
               stateDir: serverConfig.stateDir,
@@ -2189,6 +2208,30 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : commandCenterThread
               ? { commandCenterPlatform: hostPlatform }
               : {}),
+          ...(sandboxChatgptAuth
+            ? {
+                externalChatgptAuth: {
+                  initial: sandboxChatgptAuth,
+                  refresh: () =>
+                    loadSandboxChatgptAuth().pipe(
+                      Effect.mapError(() =>
+                        CodexErrors.CodexAppServerRequestError.internalError(
+                          "Command Center could not reload host Codex subscription authentication.",
+                        ),
+                      ),
+                      Effect.flatMap((refreshed) =>
+                        refreshed === undefined
+                          ? Effect.fail(
+                              CodexErrors.CodexAppServerRequestError.internalError(
+                                "Host Codex subscription authentication is no longer available.",
+                              ),
+                            )
+                          : Effect.succeed(refreshed),
+                      ),
+                    ),
+                },
+              }
+            : {}),
           ...(appServerArgs.length > 0 ? { appServerArgs } : {}),
         };
         const turnRequestCorrelation: CodexTurnRequestCorrelation = {
@@ -2213,7 +2256,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             Effect.provideService(
               ChildProcessSpawner.ChildProcessSpawner,
               sandboxTarget
-                ? makeSandboxChildProcessSpawner(sandboxTarget, childProcessSpawner)
+                ? makeSandboxChildProcessSpawner(sandboxTarget, childProcessSpawner, {
+                    externalChatgptAuth: attemptInput.externalChatgptAuth !== undefined,
+                  })
                 : childProcessSpawner,
             ),
             Effect.provideService(Crypto.Crypto, crypto),

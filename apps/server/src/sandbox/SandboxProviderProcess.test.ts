@@ -86,6 +86,27 @@ describe("SandboxProviderProcess", () => {
     ).toThrow("thread-scoped credential proxy");
   });
 
+  it("drops API credentials when external ChatGPT auth is selected", () => {
+    const invocation = sandboxProviderInvocation(
+      target,
+      "codex",
+      [],
+      undefined,
+      {
+        OPENAI_API_KEY: "host-api-key",
+        CODEX_API_KEY: "host-codex-key",
+        CODEX_TOKEN: "host-codex-token",
+        OPENAI_BASE_URL: "https://api-host.example.test",
+      },
+      { externalChatgptAuth: true },
+    );
+
+    expect(invocation.env.OPENAI_API_KEY).toBeUndefined();
+    expect(invocation.env.CODEX_API_KEY).toBeUndefined();
+    expect(invocation.env.CODEX_TOKEN).toBeUndefined();
+    expect(invocation.env.OPENAI_BASE_URL).toBeUndefined();
+  });
+
   it("ignores arbitrary cwd and host environment while fixing sandbox HOME", () => {
     const invocation = sandboxProviderInvocation(target, "codex", [], "/host/escape", {
       SSH_AUTH_SOCK: "/host/agent.sock",
