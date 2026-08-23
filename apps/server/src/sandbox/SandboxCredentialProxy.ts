@@ -1,5 +1,9 @@
 import type { SandboxCommand, SandboxCommandExecutor } from "./types.ts";
+import { parseGitHubRepositoryNameWithOwnerFromRemoteUrl } from "@t3tools/shared/git";
+// @effect-diagnostics nodeBuiltinImport:off - resolves the host's identity-scoped gh login once per provider session.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
+import * as NodeUtil from "node:util";
 
 /**
  * Thread-scoped credential proxy.
@@ -45,7 +49,19 @@ export type ThreadCredentialProxyBinding = {
   readonly baseUrl: string;
   readonly threadToken: string;
   readonly upstreamNames: ReadonlyArray<string>;
+  readonly git?: {
+    readonly identity: string;
+    readonly repositoryRemoteUrl: string;
+    readonly rewriteUrls: ReadonlyArray<string>;
+  };
 };
+
+export type ThreadCredentialProxyOptions = {
+  readonly githubIdentity?: string;
+  readonly repositoryRemoteUrl?: string;
+};
+
+type GitHubTokenResolver = (identity: string) => Promise<string | undefined>;
 
 const bindings = new Map<string, ThreadCredentialProxyBinding>();
 const sidecars = new Map<string, { runtime: ThreadCredentialProxySidecar }>();
@@ -145,6 +161,91 @@ export class SandboxCredentialProxyError extends Error {
   override readonly name = "SandboxCredentialProxyError";
 }
 
+const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
+
+async function resolveHostGitHubToken(identity: string): Promise<string | undefined> {
+  try {
+    const result = await execFile("gh", ["auth", "token", "--hostname", "github.com"], {
+      env: {
+        PATH: process.env.PATH ?? "/opt/command-center/bin:/usr/local/bin:/usr/bin:/bin",
+        COMMAND_CENTER_GITHUB_IDENTITY: identity,
+        COMMAND_CENTER_GITHUB_PROVISIONING_IDENTITY: identity,
+      },
+      timeout: 10_000,
+      maxBuffer: 32 * 1024,
+    });
+    const token = result.stdout.trim();
+    return token.length > 0 && token.length <= 16 * 1024 ? token : undefined;
+  } catch {
+    // GitHub access is optional. A missing/revoked host login must not prevent
+    // the model provider itself from starting.
+    return undefined;
+  }
+}
+
+function githubRewriteUrls(
+  repositoryRemoteUrl: string,
+  repositoryNameWithOwner: string,
+): ReadonlyArray<string> {
+  return [
+    repositoryRemoteUrl.trim(),
+    `https://github.com/${repositoryNameWithOwner}.git`,
+    `https://github.com/${repositoryNameWithOwner}`,
+    `git@github.com:${repositoryNameWithOwner}.git`,
+    `git@github.com:${repositoryNameWithOwner}`,
+    `ssh://git@github.com/${repositoryNameWithOwner}.git`,
+    `ssh://git@github.com/${repositoryNameWithOwner}`,
+  ].filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+}
+
+async function resolveGitHubCredentialUpstream(
+  options: ThreadCredentialProxyOptions,
+  tokenResolver: GitHubTokenResolver,
+): Promise<
+  | {
+      readonly upstream: SandboxCredentialUpstream;
+      readonly git: NonNullable<ThreadCredentialProxyBinding["git"]>;
+    }
+  | undefined
+> {
+  const identity = options.githubIdentity?.trim();
+  const repositoryRemoteUrl = options.repositoryRemoteUrl?.trim();
+  if (!identity || !/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(identity) || !repositoryRemoteUrl) {
+    return undefined;
+  }
+  const repositoryNameWithOwner =
+    parseGitHubRepositoryNameWithOwnerFromRemoteUrl(repositoryRemoteUrl);
+  if (repositoryNameWithOwner === null) return undefined;
+  const [owner, repository, ...extraSegments] = repositoryNameWithOwner.split("/");
+  if (
+    extraSegments.length > 0 ||
+    !owner ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/i.test(owner) ||
+    !repository ||
+    repository === "." ||
+    repository === ".." ||
+    !/^[a-z0-9._-]{1,100}$/i.test(repository)
+  ) {
+    return undefined;
+  }
+  const token = await tokenResolver(identity);
+  if (token === undefined) return undefined;
+  const basicCredential = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
+  return {
+    upstream: {
+      name: "github",
+      baseUrl: `https://github.com/${repositoryNameWithOwner}.git`,
+      inject: [{ header: "authorization", value: `Basic ${basicCredential}` }],
+      stripRequestHeaders: ["authorization"],
+    },
+    git: {
+      identity,
+      repositoryRemoteUrl,
+      rewriteUrls: githubRewriteUrls(repositoryRemoteUrl, repositoryNameWithOwner),
+    },
+  };
+}
+
 /**
  * Resolves credentials, pushes the document into the running sidecar, and binds
  * the thread so the provider spawn boundary can inject proxy env.
@@ -154,22 +255,42 @@ export class SandboxCredentialProxyError extends Error {
  * Called on every session start, so a rotated token is picked up by the next
  * session without any extra plumbing.
  */
-export async function provisionThreadCredentialProxy(threadId: string): Promise<void> {
+export async function provisionThreadCredentialProxy(
+  threadId: string,
+  options: ThreadCredentialProxyOptions = {},
+  tokenResolver: GitHubTokenResolver = resolveHostGitHubToken,
+): Promise<void> {
   const sidecar = sidecars.get(threadId);
   if (sidecar === undefined) return;
-  const upstreams = resolveSandboxCredentialUpstreams();
+  const existing = bindings.get(threadId);
+  const effectiveOptions =
+    options.githubIdentity === undefined && options.repositoryRemoteUrl === undefined
+      ? {
+          ...(existing?.git?.identity === undefined
+            ? {}
+            : { githubIdentity: existing.git.identity }),
+          ...(existing?.git?.repositoryRemoteUrl === undefined
+            ? {}
+            : { repositoryRemoteUrl: existing.git.repositoryRemoteUrl }),
+        }
+      : options;
+  const github = await resolveGitHubCredentialUpstream(effectiveOptions, tokenResolver);
+  const upstreams = [
+    ...resolveSandboxCredentialUpstreams(),
+    ...(github === undefined ? [] : [github.upstream]),
+  ];
   if (upstreams.length === 0) {
     throw new SandboxCredentialProxyError(
       "no thread-scoped provider credential is configured; mint one with `claude setup-token` and supply it as T3_SANDBOX_ANTHROPIC_AUTH_TOKEN (or set T3_SANDBOX_OPENAI_API_KEY for Codex)",
     );
   }
-  const existing = bindings.get(threadId);
   const threadToken = existing?.threadToken ?? NodeCrypto.randomBytes(32).toString("base64url");
   await sidecar.runtime.push(threadId, { threadToken, upstreams });
   bindThreadCredentialProxy(threadId, {
     baseUrl: CREDENTIAL_PROXY_BASE_URL,
     threadToken,
     upstreamNames: upstreams.map((upstream) => upstream.name),
+    ...(github === undefined ? {} : { git: github.git }),
   });
 }
 

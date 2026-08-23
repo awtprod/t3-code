@@ -182,6 +182,21 @@ export function sandboxProviderInvocation(
     if (proxy.upstreamNames.includes("openai")) {
       proxyEnvironment.OPENAI_BASE_URL = `${proxy.baseUrl}/openai`;
     }
+    if (proxy.upstreamNames.includes("github") && proxy.git !== undefined) {
+      const githubProxyUrl = `${proxy.baseUrl}/github`;
+      const gitConfig: ReadonlyArray<readonly [string, string]> = [
+        ...proxy.git.rewriteUrls.map(
+          (remoteUrl) => [`url.${githubProxyUrl}.insteadOf`, remoteUrl] as const,
+        ),
+        [`http.${githubProxyUrl}.extraHeader`, `Authorization: Bearer ${proxy.threadToken}`],
+      ];
+      proxyEnvironment.GIT_CONFIG_COUNT = String(gitConfig.length);
+      gitConfig.forEach(([key, value], index) => {
+        proxyEnvironment[`GIT_CONFIG_KEY_${index}`] = key;
+        proxyEnvironment[`GIT_CONFIG_VALUE_${index}`] = value;
+      });
+      proxyEnvironment.GIT_TERMINAL_PROMPT = "0";
+    }
   }
   const requestedEnvironment = {
     ...SANDBOX_PROVIDER_ENV,

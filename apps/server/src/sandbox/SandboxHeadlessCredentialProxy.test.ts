@@ -605,6 +605,124 @@ describe("thread-scoped credential proxy", () => {
     expect(invocation.args.join(" ")).not.toContain(document.threadToken);
   });
 
+  it("gives Git an opaque credential scoped to the thread repository", async () => {
+    process.env.T3_SANDBOX_ANTHROPIC_AUTH_TOKEN = SECRET;
+    const githubToken = "github-token-that-must-stay-in-the-sidecar";
+    const executor = new FakeExecutor();
+    const sidecar = new ThreadCredentialProxySidecar("podman", executor);
+    await sidecar.start(target.threadId, "t3-net-abc", CREDENTIAL_IMAGE, true);
+    await provisionThreadCredentialProxy(
+      target.threadId,
+      {
+        githubIdentity: "awtprod",
+        repositoryRemoteUrl: "git@github.com:awtprod/t3-code.git",
+      },
+      async (identity) => {
+        expect(identity).toBe("awtprod");
+        return githubToken;
+      },
+    );
+
+    const push = executor.commands.find(
+      (command) => command.args[0] === "exec" && command.stdin !== undefined,
+    )!;
+    const document = JSON.parse(push.stdin!);
+    expect(document.upstreams).toEqual(
+      expect.arrayContaining([
+        {
+          name: "github",
+          baseUrl: "https://github.com/awtprod/t3-code.git",
+          inject: [
+            {
+              header: "authorization",
+              value: `Basic ${Buffer.from(`x-access-token:${githubToken}`).toString("base64")}`,
+            },
+          ],
+          stripRequestHeaders: ["authorization"],
+        },
+      ]),
+    );
+    expect(push.args.join(" ")).not.toContain(githubToken);
+
+    const invocation = sandboxProviderInvocation(target, "claude", [], undefined, {});
+    expect(JSON.stringify(invocation)).not.toContain(githubToken);
+    expect(invocation.env.GIT_TERMINAL_PROMPT).toBe("0");
+    const gitConfig = Array.from(
+      { length: Number(invocation.env.GIT_CONFIG_COUNT) },
+      (_, index) => [
+        invocation.env[`GIT_CONFIG_KEY_${index}`],
+        invocation.env[`GIT_CONFIG_VALUE_${index}`],
+      ],
+    );
+    expect(gitConfig).toContainEqual([
+      `url.${CREDENTIAL_PROXY_BASE_URL}/github.insteadOf`,
+      "git@github.com:awtprod/t3-code.git",
+    ]);
+    expect(gitConfig).toContainEqual([
+      `http.${CREDENTIAL_PROXY_BASE_URL}/github.extraHeader`,
+      `Authorization: Bearer ${document.threadToken}`,
+    ]);
+    expect(invocation.args.join(" ")).not.toContain(document.threadToken);
+    expect(invocation.args).toEqual(
+      expect.arrayContaining(["--env", "GIT_CONFIG_COUNT", "--env", "GIT_TERMINAL_PROMPT"]),
+    );
+  });
+
+  it("does not broaden GitHub access for a non-GitHub repository", async () => {
+    process.env.T3_SANDBOX_ANTHROPIC_AUTH_TOKEN = SECRET;
+    const sidecar = new ThreadCredentialProxySidecar("podman", new FakeExecutor());
+    await sidecar.start(target.threadId, "t3-net-abc", CREDENTIAL_IMAGE, true);
+    let tokenRead = false;
+    await provisionThreadCredentialProxy(
+      target.threadId,
+      {
+        githubIdentity: "awtprod",
+        repositoryRemoteUrl: "https://gitlab.example.test/awtprod/t3-code.git",
+      },
+      async () => {
+        tokenRead = true;
+        return "should-not-be-read";
+      },
+    );
+    expect(tokenRead).toBe(false);
+    expect(threadCredentialProxyBinding(target.threadId)?.upstreamNames).toEqual(["anthropic"]);
+  });
+
+  it("rejects malformed GitHub repository identities before reading a token", async () => {
+    process.env.T3_SANDBOX_ANTHROPIC_AUTH_TOKEN = SECRET;
+    const sidecar = new ThreadCredentialProxySidecar("podman", new FakeExecutor());
+    await sidecar.start(target.threadId, "t3-net-abc", CREDENTIAL_IMAGE, true);
+    let tokenRead = false;
+    await provisionThreadCredentialProxy(
+      target.threadId,
+      {
+        githubIdentity: "awtprod",
+        repositoryRemoteUrl: "https://github.com/../another-repository.git",
+      },
+      async () => {
+        tokenRead = true;
+        return "should-not-be-read";
+      },
+    );
+    expect(tokenRead).toBe(false);
+    expect(threadCredentialProxyBinding(target.threadId)?.upstreamNames).toEqual(["anthropic"]);
+  });
+
+  it("still starts the model provider when the host GitHub login is unavailable", async () => {
+    process.env.T3_SANDBOX_ANTHROPIC_AUTH_TOKEN = SECRET;
+    const sidecar = new ThreadCredentialProxySidecar("podman", new FakeExecutor());
+    await sidecar.start(target.threadId, "t3-net-abc", CREDENTIAL_IMAGE, true);
+    await provisionThreadCredentialProxy(
+      target.threadId,
+      {
+        githubIdentity: "awtprod",
+        repositoryRemoteUrl: "https://github.com/awtprod/t3-code.git",
+      },
+      async () => undefined,
+    );
+    expect(threadCredentialProxyBinding(target.threadId)?.upstreamNames).toEqual(["anthropic"]);
+  });
+
   it("keeps the secret out of the workspace exec when no proxy is bound", () => {
     // The unbound path has no deletion step, so containment rests entirely on
     // the fail-closed throw. Nothing is returned to leak.

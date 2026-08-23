@@ -21,6 +21,7 @@ import {
   ProviderStopSessionInput,
   ProjectId,
   type ProviderInstanceId,
+  type ProviderInstanceConfig,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
@@ -75,6 +76,33 @@ import {
 } from "../../sandbox/SandboxCredentialProxy.ts";
 import { commandCenterProviderIsolationIssue } from "../security/CommandCenterProviderIsolation.ts";
 const isModelSelection = Schema.is(ModelSelection);
+
+export function resolveProviderInstanceGitHubIdentity(
+  instanceId: ProviderInstanceId,
+  instance: ProviderInstanceConfig | undefined,
+): string | undefined {
+  const configured = instance?.environment?.find(
+    (variable) =>
+      variable.name === "COMMAND_CENTER_GITHUB_IDENTITY" && variable.valueRedacted !== true,
+  )?.value;
+  if (configured && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(configured.trim())) {
+    return configured.trim();
+  }
+  const config = instance?.config;
+  const binaryPath =
+    typeof config === "object" && config !== null && "binaryPath" in config
+      ? (config as { readonly binaryPath?: unknown }).binaryPath
+      : undefined;
+  const candidates = [
+    typeof binaryPath === "string" ? binaryPath.split("/").pop() : undefined,
+    instanceId,
+  ];
+  for (const candidate of candidates) {
+    const identity = /-([a-z0-9][a-z0-9_-]{0,63})$/i.exec(candidate ?? "")?.[1];
+    if (identity) return identity;
+  }
+  return undefined;
+}
 
 /**
  * Hook for tests that want to override the canonical event logger pulled
@@ -764,8 +792,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           // CLI starts. The secret goes over `podman exec` stdin and is bound
           // to the thread here; the workspace container only ever learns the
           // proxy URL and an opaque per-thread token.
+          const githubIdentity = yield* serverSettings.getSettings.pipe(
+            Effect.map((settings) =>
+              resolveProviderInstanceGitHubIdentity(
+                resolvedInstanceId,
+                settings.providerInstances[resolvedInstanceId],
+              ),
+            ),
+            Effect.orElseSucceed(() => undefined),
+          );
           const credentialFailure = yield* Effect.promise(() =>
-            provisionThreadCredentialProxy(threadId).then(
+            provisionThreadCredentialProxy(threadId, {
+              ...(githubIdentity === undefined ? {} : { githubIdentity }),
+              ...(executionTarget.repositoryRemoteUrl === undefined
+                ? {}
+                : { repositoryRemoteUrl: executionTarget.repositoryRemoteUrl }),
+            }).then(
               () => undefined,
               (cause: unknown) => (cause instanceof Error ? cause.message : String(cause)),
             ),
