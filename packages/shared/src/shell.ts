@@ -71,6 +71,19 @@ function escapeWindowsShellArg(arg: string): string {
 }
 
 /**
+ * Escapes the executable for `cmd.exe` shell mode. Unlike an argument, the
+ * command must NOT be wrapped in quotes: cmd strips the outer quote pair added
+ * by Node's `shell: true` handling, then treats any remaining `^"` as a literal
+ * quote character rather than a grouping delimiter. Quoting here would leave
+ * cmd searching for a program whose name literally starts with `"`. Escaping
+ * the meta characters alone is enough, since an escaped space does not split
+ * the token. Mirrors cross-spawn's `escapeCommand`.
+ */
+function escapeWindowsShellCommand(command: string): string {
+  return command.replace(WINDOWS_SHELL_META_CHARS, "^$1");
+}
+
+/**
  * Escapes arguments for shell-mode spawns: applies {@link escapeWindowsShellArg}
  * when the platform is `win32` (where `shell: true` routes through `cmd.exe`)
  * and returns the arguments untouched everywhere else.
@@ -657,7 +670,7 @@ export const resolveSpawnCommand = Effect.fn("shell.resolveSpawnCommand")(functi
   }
 
   return {
-    command: escapeWindowsShellArg(resolvedCommand),
+    command: escapeWindowsShellCommand(resolvedCommand),
     args: sanitizeShellModeArgsForPlatform(args, platform),
     shell: true,
   };
