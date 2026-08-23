@@ -511,6 +511,7 @@ describe("ProviderCommandReactor", () => {
             Effect.succeed({ cpuPercent: 0, memoryBytes: 0, diskBytes: 0, processCount: 0 }),
           recoverPreview: () => Effect.succeed(false),
           revokeCredentials: () => Effect.succeed(0),
+          authorizeProvision: () => Effect.void,
           removeThreadArtifacts: () => Effect.void,
           sweepExpiredArtifacts: () => Effect.succeed(0),
         } satisfies SandboxRuntimeManagerShape),

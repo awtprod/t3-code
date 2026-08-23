@@ -31,6 +31,7 @@ import {
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import type { SandboxAdoptionHint } from "../../sandbox/types.ts";
 import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
+import { dispatchProvisionReadyOrTearDown } from "../../sandbox/provisionReadyDispatch.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -293,6 +294,11 @@ export const make = Effect.gen(function* () {
         provisionsInline: true,
         createdAt,
       });
+      // The decider just accepted the `sandbox.provision` above, so this
+      // provision is the current one rather than a stale fiber a deletion has
+      // already stopped -- which is exactly what readmits the thread past the
+      // manager's stop tombstone.
+      yield* runtimes.authorizeProvision(thread.id);
       const provision = yield* runtimes.provision({
         bootstrap: {
           threadId: thread.id,
@@ -319,20 +325,34 @@ export const make = Effect.gen(function* () {
       // dies on "No conversation found with session ID". This path used to
       // ignore the outcome entirely and keep a stale cursor.
       yield* reconcileProviderStoreCursor(providerSessions, thread.id, provision.providerStore);
-      yield* engine.dispatch({
-        type: "sandbox.provision.ready",
-        commandId: yield* commandId("sandbox-manual-ready"),
+      // A refused readiness means the thread stopped being provisionable while
+      // this provision ran -- a stop or a deletion landed in the window before
+      // the manager was even entered. The containers it created have to go with
+      // it, or they outlive the thread with nothing left to reference them.
+      yield* dispatchProvisionReadyOrTearDown({
         threadId: thread.id,
-        sandboxId: SandboxId.make(provision.sandboxId),
-        runtime: provision.runtime,
-        runtimeRef: provision.containerName,
-        ...(provision.desktopSessionId === undefined
-          ? {}
-          : { desktopSessionId: provision.desktopSessionId }),
-        ...(provision.desktopStreamPath === undefined
-          ? {}
-          : { desktopStreamPath: provision.desktopStreamPath }),
-        createdAt: yield* nowIso,
+        dispatch: engine.dispatch({
+          type: "sandbox.provision.ready",
+          commandId: yield* commandId("sandbox-manual-ready"),
+          threadId: thread.id,
+          sandboxId: SandboxId.make(provision.sandboxId),
+          runtime: provision.runtime,
+          runtimeRef: provision.containerName,
+          ...(provision.desktopSessionId === undefined
+            ? {}
+            : { desktopSessionId: provision.desktopSessionId }),
+          ...(provision.desktopStreamPath === undefined
+            ? {}
+            : { desktopStreamPath: provision.desktopStreamPath }),
+          createdAt: yield* nowIso,
+        }),
+        // `microvm` is a contract runtime with no backend behind it; the
+        // manager only ever returns docker or podman, and asking it to stop a
+        // runtime it cannot address would be a type error, not a teardown.
+        teardown: () =>
+          provision.runtime === "microvm"
+            ? Effect.void
+            : runtimes.stop(provision.runtime, thread.id),
       });
       const readyThread = yield* getThread(thread.id);
       if (readyThread?.sandbox) {
@@ -488,6 +508,9 @@ export const make = Effect.gen(function* () {
         provisionsInline: true,
         createdAt,
       });
+      // Same contract as the manual path: the worker's `sandbox.provision` was
+      // accepted a few lines up, so this provision is not a stale one.
+      yield* runtimes.authorizeProvision(event.payload.childThreadId);
       const provision = yield* runtimes.provision({
         bootstrap: {
           threadId: event.payload.childThreadId,
@@ -516,20 +539,32 @@ export const make = Effect.gen(function* () {
         event.payload.childThreadId,
         provision.providerStore,
       );
-      yield* engine.dispatch({
-        type: "sandbox.provision.ready",
-        commandId: yield* commandId("sandbox-worker-ready"),
+      // Same contract as the manual path above: a worker whose readiness the
+      // decider refuses has a container that nothing will ever stop again.
+      yield* dispatchProvisionReadyOrTearDown({
         threadId: event.payload.childThreadId,
-        sandboxId: SandboxId.make(provision.sandboxId),
-        runtime: provision.runtime,
-        runtimeRef: provision.containerName,
-        ...(provision.desktopSessionId === undefined
-          ? {}
-          : { desktopSessionId: provision.desktopSessionId }),
-        ...(provision.desktopStreamPath === undefined
-          ? {}
-          : { desktopStreamPath: provision.desktopStreamPath }),
-        createdAt: yield* nowIso,
+        dispatch: engine.dispatch({
+          type: "sandbox.provision.ready",
+          commandId: yield* commandId("sandbox-worker-ready"),
+          threadId: event.payload.childThreadId,
+          sandboxId: SandboxId.make(provision.sandboxId),
+          runtime: provision.runtime,
+          runtimeRef: provision.containerName,
+          ...(provision.desktopSessionId === undefined
+            ? {}
+            : { desktopSessionId: provision.desktopSessionId }),
+          ...(provision.desktopStreamPath === undefined
+            ? {}
+            : { desktopStreamPath: provision.desktopStreamPath }),
+          createdAt: yield* nowIso,
+        }),
+        // `microvm` is a contract runtime with no backend behind it; the
+        // manager only ever returns docker or podman, and asking it to stop a
+        // runtime it cannot address would be a type error, not a teardown.
+        teardown: () =>
+          provision.runtime === "microvm"
+            ? Effect.void
+            : runtimes.stop(provision.runtime, event.payload.childThreadId),
       });
       const readyChild = yield* getThread(event.payload.childThreadId);
       if (readyChild?.sandbox) {

@@ -79,6 +79,7 @@ import {
   resolveSandboxRuntime,
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
+import { dispatchProvisionReadyOrTearDown } from "../../sandbox/provisionReadyDispatch.ts";
 import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import {
   T3ProjectFileLoader,
@@ -532,6 +533,10 @@ export const make = Effect.gen(function* () {
             provisionsInline: true,
             createdAt: occurredAt,
           });
+          // The decider accepted the `sandbox.provision` above, which is what
+          // distinguishes this provision from a stale one a deletion already
+          // stopped, and readmits the thread past the manager's stop tombstone.
+          yield* sandboxRuntimeManager.authorizeProvision(thread.id);
           const provision = yield* sandboxRuntimeManager
             .provision({
               bootstrap: {
@@ -602,21 +607,38 @@ export const make = Effect.gen(function* () {
             provision.providerStore,
           );
           const readyAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
-          yield* orchestrationEngine.dispatch({
-            type: "sandbox.provision.ready",
-            commandId: yield* serverCommandId("sandbox-ready"),
+          // A refused readiness means the thread is no longer provisionable --
+          // a stop or a deletion landed while this provision was running -- so
+          // the containers it just created have to go with it.
+          yield* dispatchProvisionReadyOrTearDown({
             threadId: thread.id,
-            sandboxId: SandboxId.make(provision.sandboxId),
-            runtime: provision.runtime,
-            runtimeRef: provision.containerName,
-            ...(provision.desktopSessionId === undefined
-              ? {}
-              : { desktopSessionId: provision.desktopSessionId }),
-            ...(provision.desktopStreamPath === undefined
-              ? {}
-              : { desktopStreamPath: provision.desktopStreamPath }),
-            createdAt: readyAt,
-          });
+            dispatch: orchestrationEngine.dispatch({
+              type: "sandbox.provision.ready",
+              commandId: yield* serverCommandId("sandbox-ready"),
+              threadId: thread.id,
+              sandboxId: SandboxId.make(provision.sandboxId),
+              runtime: provision.runtime,
+              runtimeRef: provision.containerName,
+              ...(provision.desktopSessionId === undefined
+                ? {}
+                : { desktopSessionId: provision.desktopSessionId }),
+              ...(provision.desktopStreamPath === undefined
+                ? {}
+                : { desktopStreamPath: provision.desktopStreamPath }),
+              createdAt: readyAt,
+            }),
+            teardown: () => sandboxRuntimeManager.stop(runtime, thread.id),
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: "sandbox",
+                  method: "sandbox.provision.ready",
+                  detail: cause instanceof Error ? cause.message : String(cause),
+                  cause,
+                }),
+            ),
+          );
           const readyThread = Option.getOrUndefined(
             yield* projectionSnapshotQuery.getThreadDetailById(thread.id),
           );

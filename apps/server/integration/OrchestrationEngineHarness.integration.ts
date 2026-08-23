@@ -490,6 +490,7 @@ export const makeOrchestrationIntegrationHarness = (
         sampleUsage: () => Effect.die("sampleUsage should not be called in this test"),
         recoverPreview: () => Effect.die("recoverPreview should not be called in this test"),
         revokeCredentials: () => Effect.succeed(0),
+        authorizeProvision: () => Effect.void,
         removeThreadArtifacts: () => Effect.void,
         sweepExpiredArtifacts: () => Effect.succeed(0),
       });

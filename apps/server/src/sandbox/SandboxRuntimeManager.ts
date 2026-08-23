@@ -158,6 +158,20 @@ export interface SandboxRuntimeManagerShape {
     threadId: string,
     input: SandboxExecInput,
   ) => Effect.Effect<SandboxCommandResult, SandboxManagerError>;
+  /**
+   * Clears the thread's stop tombstone, readmitting it to `provision`.
+   *
+   * Called once the decider has ACCEPTED a `sandbox.provision` for the thread
+   * and immediately before provisioning it. The manager cannot tell a
+   * legitimate re-provision of a stopped thread from a stale provision that
+   * was already in flight when a deletion stopped the thread -- both arrive as
+   * a bare `provision` call -- so the caller, which has just had the one
+   * authority on the lifecycle accept its command, says so.
+   *
+   * Omitting it is safe in the sense that nothing is created behind a stop; it
+   * costs the thread its next provision, which fails and is retried.
+   */
+  readonly authorizeProvision: (threadId: string) => Effect.Effect<void>;
   readonly provision: (
     input: SandboxProvisionInput & { services?: ReadonlyArray<ThreadServiceDeclaration> },
   ) => Effect.Effect<ManagedSandboxReady, SandboxManagerError>;
@@ -319,6 +333,54 @@ export const makeSandboxRuntimeManager = (
           ),
         );
     });
+  /**
+   * Threads whose sandbox has been stopped, so a provision that was already on
+   * its way when the stop landed refuses instead of building a container for a
+   * thread nothing will ever stop again.
+   *
+   * The lock above only orders operations that have already ENTERED this
+   * manager, and a provision spends real time getting here: the reactor
+   * dispatches `sandbox.provision`, loads the project file, and derives the
+   * branch first. A deletion issued in that window took the lock uncontended,
+   * found no record, reported "nothing to do", and returned -- and the
+   * provision then ran against a thread that was already terminal, creating a
+   * container, sidecars, a network, and volumes with nothing left holding a
+   * reference to them. Ordering was never the missing piece; the provision has
+   * to be TOLD that a stop went past it.
+   *
+   * Same shape as the backend's `#stopping` tombstone, which a provision
+   * consults before publishing its record -- lifted to the level where the
+   * whole lifecycle is visible, and outliving the stop rather than being
+   * dropped the moment it returns, because the provision it has to stop may
+   * not have started yet.
+   *
+   * Cleared by `authorizeProvision`, which a caller invokes only once the
+   * decider has ACCEPTED a `sandbox.provision` for the thread -- proof from
+   * the one authority that knows the lifecycle that this provision is not the
+   * stale one. Coming back to a stopped or expired thread therefore provisions
+   * normally: its `sandbox.provision` is accepted, the tombstone is cleared,
+   * and the provision that follows sees nothing.
+   *
+   * Bounded like `deletedThreadArtifacts` below, and for the same reason:
+   * evicting an entry a provision is still racing puts the leak straight back,
+   * so a thread with lifecycle work in flight is never a victim, and neither
+   * is the thread being tombstoned right now -- which reaches here before
+   * taking its own lock, so its lock entry cannot be relied on.
+   */
+  const stoppedThreadSandboxes = new Set<string>();
+  const STOPPED_SANDBOX_TOMBSTONES = 4096;
+  const tombstoneStoppedSandbox = (threadId: string) => {
+    stoppedThreadSandboxes.add(threadId);
+    if (stoppedThreadSandboxes.size <= STOPPED_SANDBOX_TOMBSTONES) return;
+    for (const candidate of stoppedThreadSandboxes) {
+      if (stoppedThreadSandboxes.size <= STOPPED_SANDBOX_TOMBSTONES) break;
+      // Oldest first, but never one a provision or stop could still be racing,
+      // and never the thread being tombstoned right now -- it is marked before
+      // queueing for its own lock, so it has no lock entry to be spared by.
+      if (candidate === threadId || lifecycleLocks.has(candidate)) continue;
+      stoppedThreadSandboxes.delete(candidate);
+    }
+  };
   /**
    * Threads whose artifacts have been deleted, so an export that was already
    * running when the deletion landed discards its temporaries instead of
@@ -759,8 +821,24 @@ export const makeSandboxRuntimeManager = (
     exec: Effect.fn("SandboxRuntimeManager.exec")(function* (runtime, threadId, input) {
       return yield* attempt(() => get(runtime).backend.exec(threadId, input));
     }),
+    authorizeProvision: (threadId) =>
+      Effect.sync(() => {
+        stoppedThreadSandboxes.delete(threadId);
+      }),
     provision: (input) =>
-      withLifecycleLock(input.bootstrap.threadId, provisionUnsynchronized(input)),
+      withLifecycleLock(
+        input.bootstrap.threadId,
+        // Re-read UNDER the lock, not before it: a stop that ran while this
+        // provision was still queued -- or that ran to completion before it
+        // ever reached this manager -- is only visible here.
+        Effect.suspend(() =>
+          stoppedThreadSandboxes.has(input.bootstrap.threadId)
+            ? new SandboxManagerError({
+                message: `sandbox for thread ${input.bootstrap.threadId} was stopped before provisioning began`,
+              })
+            : provisionUnsynchronized(input),
+        ),
+      ),
     exportBranch: (runtime, threadId, hint) =>
       // Under the per-thread artifact lock so an export and a thread deletion
       // cannot interleave their filesystem work.
@@ -860,7 +938,13 @@ export const makeSandboxRuntimeManager = (
         }),
       ),
     stop: (runtime, threadId, hint) =>
-      withLifecycleLock(threadId, stopUnsynchronized(runtime, threadId, hint)),
+      // Tombstoned BEFORE queueing for the lock and left in place afterwards:
+      // whichever of the two wins the lock, and whether or not this stop finds
+      // anything to tear down, a provision still on its way has to see it.
+      Effect.suspend(() => {
+        tombstoneStoppedSandbox(threadId);
+        return withLifecycleLock(threadId, stopUnsynchronized(runtime, threadId, hint));
+      }),
     reconcile: (runtime, expectedThreadIds, adoptionHints) =>
       attempt(async () => {
         const managed = get(runtime);

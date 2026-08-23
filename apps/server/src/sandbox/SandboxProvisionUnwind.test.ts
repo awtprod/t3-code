@@ -280,6 +280,78 @@ describe("stop against an in-flight provision", () => {
     }),
   );
 
+  it.effect("refuses a provision dispatched before a stop that ran to completion first", () =>
+    Effect.gen(function* () {
+      // The window the lock cannot see. `sandbox.provision` is dispatched, and
+      // before the reactor gets as far as calling this manager the deletion's
+      // stop runs end to end: it takes the lock UNCONTENDED, finds no record,
+      // reports "nothing to do", and returns. The provision then arrived at an
+      // empty lock and built a container, sidecars, a network, and volumes for
+      // a thread that was already terminal -- and the `sandbox.provision.ready`
+      // that followed was rejected, so nothing ever tore them down.
+      //
+      // Serializing the two was never enough: the stop has to leave a mark the
+      // provision reads once it finally gets here.
+      process.env.T3_SANDBOX_DESKTOP = "disabled";
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      delete process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE;
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
+
+      // The stop completes BEFORE the provision is even issued -- no
+      // interleaving to arrange, which is the whole point.
+      yield* manager.stop("docker", THREAD_ID);
+      const failure = yield* manager
+        .provision(
+          provisionInput({
+            previewPorts: [3000],
+            services: [
+              {
+                name: "database",
+                image: `postgres@sha256:${"c".repeat(64)}`,
+                generatedEnvironment: [{ key: "POSTGRES_PASSWORD", kind: "password" }],
+              },
+            ],
+          }),
+        )
+        .pipe(Effect.flip);
+
+      expect(failure._tag).toBe("SandboxManagerError");
+      expect(failure.message).toContain("was stopped before provisioning began");
+      // Nothing was created at all: the refusal happens before the first
+      // container command, so there is nothing left to leak.
+      expect(created(executor)).toEqual([]);
+      const status = desktopGateway.status(THREAD_ID);
+      expect(status.previewRoutes).toEqual([]);
+      expect(status.serviceCredentialGrants).toEqual([]);
+      expect(status.services).toEqual([]);
+    }),
+  );
+
+  it.effect("provisions a stopped thread again once the decider has authorized it", () =>
+    Effect.gen(function* () {
+      // The tombstone above must not turn "stopped" into a one-way door.
+      // Settling a thread, hitting Stop, or being reaped by the idle sweep all
+      // stop the sandbox, and coming back to the thread has to provision a
+      // fresh one. The decider is the authority that tells those apart -- it
+      // accepts `sandbox.provision` from a stopped lifecycle -- so a caller
+      // whose command was accepted clears the mark before provisioning.
+      process.env.T3_SANDBOX_DESKTOP = "disabled";
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      delete process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE;
+      const executor = new FakeExecutor();
+      const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
+
+      yield* manager.provision(provisionInput());
+      yield* manager.stop("docker", THREAD_ID);
+      yield* manager.authorizeProvision(THREAD_ID);
+      const ready = yield* manager.provision(provisionInput());
+
+      expect(ready.containerName).toBe(CONTAINER_NAME);
+      expect(created(executor)).toContain(CONTAINER_NAME);
+    }),
+  );
+
   it.effect("stops a thread that has no provision in flight", () =>
     Effect.gen(function* () {
       // The lock must not require a provision to exist: a stop for a thread
@@ -295,7 +367,11 @@ describe("stop against an in-flight provision", () => {
       yield* manager.stop("docker", THREAD_ID);
 
       // A second stop, after a real provision, still tears the container down:
-      // the lock is released rather than stranded by the no-op above.
+      // the lock is released rather than stranded by the no-op above. The
+      // provision is authorized first, exactly as every production caller does
+      // once the decider has accepted its `sandbox.provision` -- the no-op stop
+      // above still leaves the thread's stop tombstone behind.
+      yield* manager.authorizeProvision(THREAD_ID);
       yield* manager.provision(provisionInput());
       yield* manager.stop("docker", THREAD_ID);
       expect(forcedRemovals(executor)).toContain(CONTAINER_NAME);
