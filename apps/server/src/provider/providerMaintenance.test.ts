@@ -177,7 +177,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
       currentVersion: "2.1.110",
       latestVersion: "2.1.117",
       updateCommand:
-        "npm install -g --allow-scripts=@example/native-package-tool @example/native-package-tool@latest",
+        "npm install -g --dangerously-allow-all-scripts @example/native-package-tool@latest",
       canUpdate: true,
       message: "Install the update now or review provider settings.",
     });
@@ -313,6 +313,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     expect(
       packageToolUpdate.resolve({
         binaryPath: "/opt/homebrew/bin/package-tool",
+        platform: "darwin",
         env: {
           PATH: "",
         },
@@ -344,15 +345,9 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
       provider: driver("packageTool"),
       packageName: "@example/package-tool",
       update: {
-        command:
-          "npm install -g --allow-scripts=@example/package-tool @example/package-tool@latest",
+        command: "npm install -g --dangerously-allow-all-scripts @example/package-tool@latest",
         executable: "npm",
-        args: [
-          "install",
-          "-g",
-          "--allow-scripts=@example/package-tool",
-          "@example/package-tool@latest",
-        ],
+        args: ["install", "-g", "--dangerously-allow-all-scripts", "@example/package-tool@latest"],
         lockKey: "npm-global",
       },
     });
@@ -436,6 +431,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     expect(
       nativePackageToolUpdate.resolve({
         binaryPath: "/opt/homebrew/bin/native-package-tool",
+        platform: "darwin",
         env: {
           PATH: "",
         },
@@ -459,6 +455,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     expect(
       scopedPackageToolUpdate.resolve({
         binaryPath: "/opt/homebrew/bin/scoped-package-tool",
+        platform: "darwin",
         env: {
           PATH: "",
         },
@@ -476,6 +473,79 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         lockKey: "homebrew",
       },
     });
+  });
+
+  // Regression: a natively-installed provider resolves to a real path owned by
+  // no package manager. Guessing npm there hands the user an `npm install -g`
+  // that exits 0 while the binary on PATH keeps its old version, so the update
+  // reports "still outdated" forever.
+  it("does not guess npm for a bare command that resolves to a native install", () => {
+    expect(
+      packageToolUpdate.resolve({
+        binaryPath: "package-tool",
+        resolvedCommandPath:
+          "C:\\Users\\tester\\AppData\\Local\\Programs\\package-tool\\bin\\package-tool.exe",
+        realCommandPath:
+          "C:\\Users\\tester\\AppData\\Local\\Programs\\package-tool\\bin\\package-tool.exe",
+        platform: "win32",
+      }),
+    ).toEqual({
+      provider: driver("packageTool"),
+      packageName: "@example/package-tool",
+      update: null,
+    });
+  });
+
+  it("still assumes npm for a bare command that resolves nowhere", () => {
+    expect(
+      packageToolUpdate.resolve({
+        binaryPath: "package-tool",
+        resolvedCommandPath: null,
+        platform: "win32",
+      }).update,
+    ).toMatchObject({ executable: "npm", lockKey: "npm-global" });
+  });
+
+  // Regression: /usr/local/bin is Homebrew's Intel prefix on macOS but the plain
+  // system bin directory on Linux, so a real binary there used to resolve to
+  // `brew upgrade` on machines with no brew installed.
+  it("does not offer Homebrew updates for /usr/local/bin binaries off macOS", () => {
+    expect(
+      packageToolUpdate.resolve({
+        binaryPath: "/usr/local/bin/package-tool",
+        resolvedCommandPath: "/usr/local/bin/package-tool",
+        realCommandPath: "/usr/local/bin/package-tool",
+        platform: "linux",
+      }),
+    ).toEqual({
+      provider: driver("packageTool"),
+      packageName: "@example/package-tool",
+      update: null,
+    });
+  });
+
+  it("still offers Homebrew updates for /usr/local/bin binaries on macOS", () => {
+    expect(
+      packageToolUpdate.resolve({
+        binaryPath: "/usr/local/bin/package-tool",
+        resolvedCommandPath: "/usr/local/bin/package-tool",
+        realCommandPath: "/usr/local/bin/package-tool",
+        platform: "darwin",
+      }).update,
+    ).toMatchObject({ command: "brew upgrade package-tool", lockKey: "homebrew" });
+  });
+
+  // A Cellar path is an unambiguous Homebrew marker, so it stays platform
+  // independent; only the bare bin prefixes are gated on macOS.
+  it("treats a Cellar path as Homebrew regardless of platform", () => {
+    expect(
+      packageToolUpdate.resolve({
+        binaryPath: "/opt/homebrew/bin/package-tool",
+        resolvedCommandPath: "/opt/homebrew/bin/package-tool",
+        realCommandPath: "/opt/homebrew/Cellar/package-tool/1.0/bin/package-tool",
+        platform: "linux",
+      }).update,
+    ).toMatchObject({ command: "brew upgrade package-tool", lockKey: "homebrew" });
   });
 
   it.effect("keeps npm updates for binaries symlinked into npm's global node_modules tree", () =>
@@ -509,15 +579,14 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         provider: driver("packageTool"),
         packageName: "@example/package-tool",
         update: {
-          command:
-            "npm install -g --allow-scripts=@example/package-tool @example/package-tool@latest",
+          command: "npm install -g --dangerously-allow-all-scripts @example/package-tool@latest",
 
           executable: "npm",
 
           args: [
             "install",
             "-g",
-            "--allow-scripts=@example/package-tool",
+            "--dangerously-allow-all-scripts",
             "@example/package-tool@latest",
           ],
 
@@ -574,7 +643,10 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
     }),
   );
 
-  it("allows the package's own install scripts in npm global updates", () => {
+  // npm 12 blocks install scripts by default and exits 0 anyway, and its
+  // per-package allowlist cannot reach transitive native deps (kimi-code's
+  // node-pty), so global updates opt out of the policy wholesale.
+  it("allows every install script in npm global updates", () => {
     const claudeUpdate = makePackageManagedProviderMaintenanceResolver({
       provider: driver("claudeAgent"),
       npmPackageName: "@anthropic-ai/claude-code",
@@ -591,15 +663,14 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
       provider: driver("claudeAgent"),
       packageName: "@anthropic-ai/claude-code",
       update: {
-        command:
-          "npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code@latest",
+        command: "npm install -g --dangerously-allow-all-scripts @anthropic-ai/claude-code@latest",
 
         executable: "npm",
 
         args: [
           "install",
           "-g",
-          "--allow-scripts=@anthropic-ai/claude-code",
+          "--dangerously-allow-all-scripts",
           "@anthropic-ai/claude-code@latest",
         ],
 

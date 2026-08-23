@@ -399,12 +399,36 @@ effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
       expect(command.shell).toBe(true);
       expect(command.command).not.toContain(" & ");
       expect(command.command).toContain("^&");
+      expect(command.command).toBe("C:\\Program^ Files\\npm^ ^&^ tools\\vp.cmd");
       expect(command.args).toEqual([
         '^"run^"',
         '^"value^ ^&^ calc^"',
         '^"^%PATH^%^"',
         '^"quote\\^"value^"',
       ]);
+    }),
+  );
+
+  // Regression: quoting the executable made cmd.exe treat the escaped quotes as
+  // literal characters in the program name, so every `.cmd` shim spawn (npm
+  // above all, which drives one-click provider updates) failed to launch.
+  it.effect("does not wrap the Windows shim executable in escaped quotes", () =>
+    Effect.gen(function* () {
+      const command = yield* resolveSpawnCommand(
+        "npm",
+        ["install", "-g", "@moonshot-ai/kimi-code@latest"],
+        { env: { PATH: "", PATHEXT: ".COM;.EXE;.BAT;.CMD" } },
+      ).pipe(
+        Effect.provideService(HostProcessPlatform, "win32"),
+        Effect.provideService(
+          SpawnExecutableResolution,
+          () => "C:\\Users\\tester\\AppData\\Roaming\\npm\\npm.cmd",
+        ),
+      );
+
+      expect(command.shell).toBe(true);
+      expect(command.command).toBe("C:\\Users\\tester\\AppData\\Roaming\\npm\\npm.cmd");
+      expect(command.command).not.toContain('"');
     }),
   );
 

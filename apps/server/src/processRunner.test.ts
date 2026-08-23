@@ -170,7 +170,9 @@ describe("runProcess", () => {
   it.effect("resolves and escapes Windows command shims before spawning", () => {
     const spawner = makeSpawner((command) =>
       Effect.sync(() => {
-        expect(command.command).toBe('^"C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd^"');
+        // The executable is meta-char escaped but never quoted; cmd.exe would
+        // read escaped quotes as part of the program name and fail to find it.
+        expect(command.command).toBe("C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd");
         expect(command.args).toEqual([
           '^"repos^"',
           '^"pr^"',

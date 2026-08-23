@@ -3,6 +3,7 @@ import {
   type ServerProvider,
   type ServerProviderVersionAdvisory,
 } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Config from "effect/Config";
@@ -55,6 +56,7 @@ export interface ProviderMaintenanceCapabilityResolutionOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly resolvedCommandPath?: string | null;
   readonly realCommandPath?: string | null;
+  readonly platform?: NodeJS.Platform | undefined;
 }
 
 export interface ProviderMaintenanceCapabilitiesResolver {
@@ -137,15 +139,19 @@ function makeNpmGlobalProviderMaintenanceCapabilities(
     provider: definition.provider,
     packageName: definition.npmPackageName,
     updateExecutable: "npm",
-    // npm 12 blocks install scripts by default (empty allow-scripts allowlist)
-    // and still exits 0, so a package whose postinstall finishes the install
-    // (claude copies its native binary over a placeholder stub) is left broken
-    // while the update reports success. Allow this one package's scripts.
-    // Older npm warns about the unknown config and continues.
+    // npm 12 blocks install scripts by default and still exits 0, so a package
+    // whose postinstall finishes the install (claude copies its native binary
+    // over a placeholder stub) is left broken while the update reports success.
+    // A per-package `--allow-scripts=<name>` allowlist cannot fix this: it
+    // covers only the named package, never the transitive dependencies that
+    // also build native bindings (kimi-code's node-pty), and npm accepts no
+    // wildcard. Allow every script for this one install instead - the user
+    // explicitly asked to install this CLI, which then runs as them anyway.
+    // Older npm ignores the unknown flag and continues.
     updateArgs: [
       "install",
       "-g",
-      `--allow-scripts=${definition.npmPackageName}`,
+      "--dangerously-allow-all-scripts",
       `${definition.npmPackageName}@latest`,
     ],
     updateLockKey: "npm-global",
@@ -262,17 +268,32 @@ function isNpmGlobalCommandPath(commandPath: string): boolean {
   );
 }
 
-function isHomebrewCommandPath(commandPath: string): boolean {
+// Cellar and Caskroom only ever appear under a Homebrew prefix, so they identify
+// a Homebrew install on any platform. The bare bin prefixes do not:
+// `/usr/local/bin` is the ordinary system bin directory on Linux (and npm's
+// default global prefix), so trusting it everywhere pointed one-click updates at
+// a `brew` that is usually not installed. Treat those two as Homebrew on macOS
+// only; elsewhere an unrecognized absolute path falls through to manual-only,
+// which is honest rather than broken.
+function isHomebrewCommandPath(
+  commandPath: string,
+  platform: NodeJS.Platform | undefined,
+): boolean {
   const normalized = normalizeCommandPath(commandPath);
-  return (
+  if (
     normalized.includes("/opt/homebrew/cellar/") ||
     normalized.includes("/usr/local/cellar/") ||
     normalized.includes("/homebrew/cellar/") ||
     normalized.includes("/opt/homebrew/caskroom/") ||
     normalized.includes("/usr/local/caskroom/") ||
-    normalized.includes("/homebrew/caskroom/") ||
-    normalized.startsWith("/opt/homebrew/bin/") ||
-    normalized.startsWith("/usr/local/bin/")
+    normalized.includes("/homebrew/caskroom/")
+  ) {
+    return true;
+  }
+
+  return (
+    platform === "darwin" &&
+    (normalized.startsWith("/opt/homebrew/bin/") || normalized.startsWith("/usr/local/bin/"))
   );
 }
 
@@ -316,11 +337,24 @@ export function resolvePackageManagedProviderMaintenance(
     if (commandPaths.some(isNpmGlobalCommandPath)) {
       return makeNpmGlobalProviderMaintenanceCapabilities(definition);
     }
-    if (commandPaths.some(isHomebrewCommandPath)) {
+    if (commandPaths.some((commandPath) => isHomebrewCommandPath(commandPath, options?.platform))) {
       return makeHomebrewProviderMaintenanceCapabilities(definition);
     }
+
+    // The command resolved to a real location owned by no package manager we
+    // recognize - a standalone/native installer, or a hand-placed binary. Do
+    // not fall through to the npm guess below: `npm install -g` would install a
+    // second copy somewhere else, exit 0, and leave the binary on PATH at its
+    // old version, so the update reports success while nothing changed. Offer
+    // manual instructions instead of a command that cannot work.
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      packageName: definition.npmPackageName,
+    });
   }
 
+  // No resolved location at all, so there is no evidence either way; a bare
+  // command name is most often a global npm install.
   if (!hasPathSeparator(binaryPath)) {
     return makeNpmGlobalProviderMaintenanceCapabilities(definition);
   }
@@ -362,9 +396,10 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
   resolver: ProviderMaintenanceCapabilitiesResolver,
   options?: Omit<ProviderMaintenanceCapabilityResolutionOptions, "realCommandPath">,
 ) {
+  const platform = options?.platform ?? (yield* HostProcessPlatform);
   const binaryPath = nonEmptyString(options?.binaryPath);
   if (!binaryPath) {
-    return resolver.resolve(options);
+    return resolver.resolve({ ...options, platform });
   }
 
   const env = options?.env ?? (yield* readCommandLookupEnv);
@@ -373,7 +408,7 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
       Effect.catchTag("CommandResolutionError", () => Effect.succeed(null)),
     )) ?? (hasPathSeparator(binaryPath) ? binaryPath : null);
   if (!resolvedCommandPath) {
-    return resolver.resolve(options);
+    return resolver.resolve({ ...options, platform });
   }
 
   const fileSystem = yield* FileSystem.FileSystem;
@@ -382,6 +417,7 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
     .pipe(Effect.orElseSucceed(() => resolvedCommandPath));
   return resolver.resolve({
     ...options,
+    platform,
     env,
     resolvedCommandPath,
     realCommandPath,
