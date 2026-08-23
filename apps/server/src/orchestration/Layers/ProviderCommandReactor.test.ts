@@ -802,7 +802,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.provisionSandbox.mock.calls.length === 1);
     expect(harness.provisionSandbox.mock.calls[0]?.[0]).toMatchObject({
-      config: { runtime: "podman" },
+      config: { runtime: "podman", limits: DEFAULT_SANDBOX_RESOURCE_LIMITS },
     });
     const events = await harness.runEffect(Stream.runCollect(harness.engine.readEvents(0)));
     const started = Array.from(events).find(
@@ -812,6 +812,7 @@ describe("ProviderCommandReactor", () => {
     if (started?.type !== "sandbox.provisioning-started")
       throw new Error("expected a provisioning-started event");
     expect(started.payload.sandbox.runtime).toBe("podman");
+    expect(started.payload.sandbox.limits).toEqual(DEFAULT_SANDBOX_RESOURCE_LIMITS);
   });
 
   it("falls back to host execution when no sandbox image is configured", async () => {

@@ -1,6 +1,7 @@
 import {
   type ChatAttachment,
   CommandId,
+  DEFAULT_SANDBOX_RESOURCE_LIMITS,
   EventId,
   type MessageId,
   type ModelSelection,
@@ -533,15 +534,25 @@ export const make = Effect.gen(function* () {
             return { kind: "legacy-host", cwd: legacyCwd } as const;
           }
           // Per-thread config wins, then the deployment default, then docker.
-          const runtime = thread.sandboxConfig?.runtime ?? resolveSandboxRuntime();
-          if (runtime !== "docker" && runtime !== "podman") {
+          const resolvedRuntime = thread.sandboxConfig?.runtime ?? resolveSandboxRuntime();
+          if (resolvedRuntime !== "docker" && resolvedRuntime !== "podman") {
             return yield* new ProviderAdapterRequestError({
               provider: "sandbox",
               method: "sandbox.provision",
-              detail: `Sandbox runtime '${runtime}' is not available in v1.`,
+              detail: `Sandbox runtime '${resolvedRuntime}' is not available in v1.`,
             });
           }
+          const runtime: "docker" | "podman" = resolvedRuntime;
           const occurredAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+          // Resolve defaults before dispatch so the projection records the
+          // limits the backend will actually apply. This also upgrades a
+          // stopped sandbox created under an older default when it is next
+          // provisioned, while an explicit per-thread limit still wins.
+          const sandboxConfig = {
+            limits: declaration?.limits ?? DEFAULT_SANDBOX_RESOURCE_LIMITS,
+            ...thread.sandboxConfig,
+            runtime,
+          };
           const branch =
             thread.sandbox?.branch ??
             (yield* Effect.gen(function* () {
@@ -600,7 +611,7 @@ export const make = Effect.gen(function* () {
             // manager honours `T3_SANDBOX_RUNTIME` -- so a podman deployment's
             // projection claimed docker for the whole provisioning window, and
             // a stop or delete landing in it addressed the wrong backend.
-            config: { ...thread.sandboxConfig, runtime },
+            config: sandboxConfig,
             ...(thread.sandbox === null ? { branch } : {}),
             // This reactor calls `runtimes.provision` immediately below, so it
             // takes the decider's inline path rather than asking the lifecycle
@@ -631,7 +642,7 @@ export const make = Effect.gen(function* () {
                   ? { parentThreadId: branch.parentThreadId }
                   : {}),
               },
-              config: { ...thread.sandboxConfig, runtime },
+              config: sandboxConfig,
               image,
               // Re-provisioning a settled or reaped thread: seed from the
               // bundle its teardown exported so the user comes back to their

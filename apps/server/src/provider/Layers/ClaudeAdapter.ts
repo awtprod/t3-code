@@ -380,6 +380,27 @@ function isClaudeInterruptedCause(cause: Cause.Cause<ProviderAdapterProcessError
   );
 }
 
+const CLAUDE_SANDBOX_EXIT_137 = /Claude Code process exited with code 137/u;
+
+/**
+ * Podman reports a sandboxed process killed by SIGKILL as exit 137. In this
+ * path the overwhelmingly common cause is the workspace cgroup reaching its
+ * memory ceiling; keep the wording probabilistic because an operator can also
+ * send SIGKILL deliberately.
+ */
+function isLikelyClaudeSandboxMemoryKill(
+  threadId: ThreadId,
+  cause: Cause.Cause<ProviderAdapterProcessError>,
+): boolean {
+  if (sandboxProviderTarget(threadId) === undefined) return false;
+  return cause.reasons.some(
+    (reason) =>
+      Cause.isFailReason(reason) &&
+      reason.error.cause instanceof Error &&
+      CLAUDE_SANDBOX_EXIT_137.test(reason.error.cause.message),
+  );
+}
+
 function resultErrorsText(result: SDKResultMessage): string {
   return "errors" in result && Array.isArray(result.errors)
     ? result.errors.join(" ").toLowerCase()
@@ -3640,7 +3661,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const failures = exit.cause.reasons.flatMap((reason) =>
           Cause.isFailReason(reason) ? [reason.error] : [],
         );
-        const message = failures[0]?.detail ?? "Claude runtime stream failed.";
+        const message = isLikelyClaudeSandboxMemoryKill(context.session.threadId, exit.cause)
+          ? "Claude was killed inside the sandbox (exit 137), most likely because it exceeded the sandbox memory limit."
+          : (failures[0]?.detail ?? "Claude runtime stream failed.");
         // The emitted event stays structural on purpose -- a cause chain can
         // carry credential material and runtime events are persisted and
         // broadcast to every client. The operator still needs the cause to

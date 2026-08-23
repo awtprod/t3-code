@@ -58,7 +58,7 @@ export type SandboxResourceLimits = typeof SandboxResourceLimits.Type;
 
 export const DEFAULT_SANDBOX_RESOURCE_LIMITS: SandboxResourceLimits = {
   cpuCount: 2,
-  memoryBytes: 4 * 1024 ** 3,
+  memoryBytes: 8 * 1024 ** 3,
   diskBytes: 20 * 1024 ** 3,
   processCount: 512,
   idleTimeoutSeconds: 60 * 60,

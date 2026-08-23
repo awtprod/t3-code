@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_SANDBOX_RESOURCE_LIMITS,
   EventId,
   GitCommandError,
   ProjectId,
@@ -1312,6 +1313,10 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           branchName: `t3/thread/${childThreadId}`,
         },
       };
+      const projectLimits = {
+        ...DEFAULT_SANDBOX_RESOURCE_LIMITS,
+        memoryBytes: 12 * 1024 ** 3,
+      };
       const layer = Layer.effect(SandboxLifecycleReactor, make).pipe(
         Layer.provide(NodeServices.layer),
         Layer.provide(
@@ -1333,6 +1338,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
                 Option.some({
                   sandbox: {
                     image: `registry.example/t3-desktop@sha256:${"a".repeat(64)}`,
+                    limits: projectLimits,
                   },
                 } as never),
               ),
@@ -1408,9 +1414,10 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       // The resolved deployment runtime, so the projection matches the
       // container that is actually being created.
       expect(provisionCommand.config?.runtime).toBe("podman");
+      expect(provisionCommand.config?.limits).toEqual(projectLimits);
       expect(provision.mock.calls[0]?.[0]).toMatchObject({
         bootstrap: { repositoryUrl: "/tmp/manual-sandbox-project" },
-        config: { runtime: "podman" },
+        config: { runtime: "podman", limits: projectLimits },
       });
       expect(provisionCommand.branch).toMatchObject({
         branchName: `t3/thread/${childThreadId}`,

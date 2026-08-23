@@ -17,6 +17,7 @@ import {
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
+  SandboxId,
   type RuntimeMode,
   ThreadId,
   ProviderInstanceId,
@@ -35,6 +36,11 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import {
+  bindSandboxProviderTarget,
+  makeSandboxProviderBindingOwner,
+  unbindSandboxProviderTarget,
+} from "../../sandbox/SandboxProviderProcess.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
@@ -2027,6 +2033,68 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(completed.payload.errorMessage, "Claude runtime stream failed.");
       }
     }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("surfaces exit 137 as a likely sandbox memory-limit failure", () => {
+    const harness = makeHarness();
+    const owner = makeSandboxProviderBindingOwner();
+    return Effect.gen(function* () {
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          bindSandboxProviderTarget(
+            {
+              kind: "sandbox",
+              threadId: THREAD_ID,
+              sandboxId: SandboxId.make("sandbox-claude-oom"),
+              runtimeRef: "sandbox-claude-oom",
+              runtime: "podman",
+              workspaceCwd: "/workspace/repo",
+            },
+            owner,
+          ),
+        ),
+        () => Effect.sync(() => unbindSandboxProviderTarget(THREAD_ID, owner)),
+      );
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "large-context request",
+        attachments: [],
+      });
+
+      harness.query.fail(new Error("Claude Code process exited with code 137"));
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      runtimeEventsFiber.interruptUnsafe();
+
+      const expected =
+        "Claude was killed inside the sandbox (exit 137), most likely because it exceeded the sandbox memory limit.";
+      const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
+      assert.equal(runtimeError?.type, "runtime.error");
+      if (runtimeError?.type === "runtime.error")
+        assert.equal(runtimeError.payload.message, expected);
+      const completed = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.type, "turn.completed");
+      if (completed?.type === "turn.completed")
+        assert.equal(completed.payload.errorMessage, expected);
+    }).pipe(
+      Effect.scoped,
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );

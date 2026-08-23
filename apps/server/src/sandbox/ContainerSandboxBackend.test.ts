@@ -159,9 +159,9 @@ describe("ContainerSandboxBackend", () => {
         // Swap pinned to the memory limit: docker's default of 2x memory
         // would let the workload consume double its configured ceiling.
         "--memory",
-        String(4 * 1024 ** 3),
+        String(8 * 1024 ** 3),
         "--memory-swap",
-        String(4 * 1024 ** 3),
+        String(8 * 1024 ** 3),
       ]),
     );
     // `--storage-opt size=` is off unless a deployment opts in: podman
