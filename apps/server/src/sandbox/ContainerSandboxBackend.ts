@@ -207,7 +207,29 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
   async ensureReady(input: SandboxProvisionInput): Promise<SandboxReady> {
     const threadId = sanitizeId(input.bootstrap.threadId, "threadId");
     const ready = this.#records.get(threadId)?.ready;
-    if (ready !== undefined) return Promise.resolve(ready);
+    // A cache hit is the surviving-container case, and it has to report the
+    // surviving-container disposition -- the same `preserved` the label-matched
+    // reuse path below returns, for the same reason.
+    //
+    // Returning the recorded object verbatim reported whatever the ORIGINAL
+    // provision did. A fresh container records `unavailable`, which is correct
+    // at the time: nothing was restored because there was nothing to restore.
+    // The provider then creates a conversation inside that container, a
+    // re-provision hits this cache, and `unavailable` came back out -- so
+    // `reconcileProviderStoreCursor` cleared a resume cursor that named a live
+    // conversation, and it was lost.
+    //
+    // Only this field is recomputed, and the audit says why: every other field
+    // on the record either derives from the thread and project ids
+    // (`sandboxId`, and the container, network, and volume names), is fixed for
+    // the backend (`runtime`), or describes the container that is still running
+    // (`branchName`, `limits`, and the egress proxy names -- all taken from the
+    // input the container was BUILT from). A re-provision arriving with a
+    // different branch or different limits does not change what is running, so
+    // reporting the built values is right, not stale. `providerStore` is the
+    // only field that describes what a provision ATTEMPT did rather than what
+    // the container is, which is exactly why it cannot be replayed.
+    if (ready !== undefined) return Promise.resolve({ ...ready, providerStore: "preserved" });
     const pending = this.#provisioning.get(threadId);
     if (pending !== undefined) return pending;
     const provision = this.#provision(input).finally(() => this.#provisioning.delete(threadId));

@@ -361,6 +361,30 @@ describe("ContainerSandboxBackend", () => {
     expect(survivor.providerStore).toBe("preserved");
   });
 
+  it("reports a cached container's store as preserved rather than replaying the first provision", async () => {
+    // The same surviving-container case reached through the in-memory record
+    // instead of a container inspect, and it used to answer differently. A
+    // fresh container correctly records `unavailable` -- nothing was restored
+    // because there was nothing to restore -- and the cache hit handed that
+    // recorded object straight back. But by then the provider had created a
+    // conversation inside that very container, so the caller cleared a resume
+    // cursor naming a live conversation and lost it.
+    const executor = successfulExecutor();
+    const backend = new ContainerSandboxBackend("docker", executor);
+    const fresh = await backend.ensureReady(input());
+    expect(fresh.providerStore).toBe("unavailable");
+
+    const commandsAfterProvision = executor.commands.length;
+    const cached = await backend.ensureReady(input());
+    expect(cached.providerStore).toBe("preserved");
+    // Nothing was rebuilt to say so: the second call is still a cache hit, so
+    // it issues no runtime commands at all.
+    expect(executor.commands).toHaveLength(commandsAfterProvision);
+    // ...and every other field still describes the container that is running:
+    // `providerStore` is the one thing that had to change.
+    expect({ ...cached, providerStore: fresh.providerStore }).toEqual(fresh);
+  });
+
   it("reports no restored store when the archive unpacked without a conversation", async () => {
     // `tar --extract` exiting 0 only proves the archive unpacked. The archive
     // is built with credential exclusions, and one aimed too broadly -- the
