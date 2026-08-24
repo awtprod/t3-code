@@ -64,7 +64,7 @@ class FakeExecutor implements SandboxCommandExecutor {
     // The post-extraction probe for a provider's own session directory: a tar
     // that unpacked cleanly but carried no conversation answers empty here.
     if (verb === "exec" && command.args.includes("find"))
-      return { exitCode: 0, stdout: "/thread-data/provider-home/.codex/sessions\n", stderr: "" };
+      return { exitCode: 0, stdout: "/thread-data/provider-home/.codex/sessions\0", stderr: "" };
     if (verb === "cp") {
       const source = command.args[1] ?? "";
       const destination = command.args[2] ?? "";
