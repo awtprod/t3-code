@@ -101,13 +101,15 @@ const EXPORT_SNAPSHOT_IDENTITY = {
   GIT_COMMITTER_EMAIL: "sandbox-export@example.test",
 } as const;
 /**
- * Paths excluded from the archived provider store, relative to `PROVIDER_HOME`.
+ * Paths excluded from the archived provider transcripts, relative to
+ * `PROVIDER_HOME`.
  *
- * The provider home holds live auth material next to the transcripts, and an
- * exported archive lands in a host directory that outlives the container.
- * Excluding at archive time means a credential is never written into the tar in
- * the first place -- so every pattern here is load-bearing, and each is listed
- * with what it is for:
+ * Only the transcript directories named by `PROVIDER_STORE_DIRECTORIES` are
+ * archived. They can still contain live auth material beside transcripts, and
+ * the exported archive lands in a host directory that outlives the container.
+ * Excluding at archive time means a credential is never written into the tar
+ * in the first place -- so every pattern here is load-bearing, and each is
+ * listed with what it is for:
  *
  * - `.credentials.json` / `*.credentials.json` -- Claude Code's OAuth store,
  *   at `~/.claude/.credentials.json` and its per-profile variants.
@@ -1106,6 +1108,25 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
    * Claude, one of the two providers that can run sandboxed at all.
    */
   async #providerStorePopulated(containerName: string, timeoutMs: number): Promise<boolean> {
+    return (await this.#providerStorePaths(containerName, timeoutMs)).length > 0;
+  }
+
+  /**
+   * Resumable transcript directories beneath the provider home, relative to
+   * that home.
+   *
+   * The provider home is not itself the conversation store. Modern Codex homes
+   * also contain package caches, logs, attachments, worktrees, and state
+   * databases; archiving all of it can fill the container's bounded `/tmp`
+   * before the post-write size check, or exceed the host artifact ceiling. The
+   * caller then drops the archive and the next provision starts a fresh Codex
+   * thread. Discovering the two known transcript layouts first keeps the
+   * archive bounded by the conversation we actually need to resume.
+   *
+   * `find -print0` and the validation below keep a provider-controlled path
+   * from becoming a tar option or escaping `PROVIDER_HOME`.
+   */
+  async #providerStorePaths(containerName: string, timeoutMs: number): Promise<string[]> {
     const probed = await this.#mustExec(
       containerName,
       {
@@ -1123,12 +1144,32 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
             index === 0 ? ["-name", name] : ["-o", "-name", name],
           ),
           ")",
+          "-print0",
         ],
         allowNonZeroExit: true,
       },
       timeoutMs,
     );
-    return probed.exitCode === 0 && probed.stdout.trim().length > 0;
+    if (probed.exitCode !== 0) return [];
+    const prefix = `${PROVIDER_HOME}/`;
+    const paths = probed.stdout
+      .split("\0")
+      .filter((path) => path.length > 0)
+      .flatMap((path) => {
+        if (!path.startsWith(prefix)) return [];
+        const relative = path.slice(prefix.length);
+        const segments = relative.split("/");
+        const basename = segments.at(-1);
+        if (
+          segments.length < 1 ||
+          segments.length > 2 ||
+          segments.some((segment) => segment.length === 0 || segment === "." || segment === "..") ||
+          !PROVIDER_STORE_DIRECTORIES.some((name) => name === basename)
+        )
+          return [];
+        return [relative];
+      });
+    return [...new Set(paths)].sort();
   }
 
   /**
@@ -1303,6 +1344,8 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       throw new SandboxRuntimeError(`sandbox for thread ${threadId} is not ready`);
     if (!destination.startsWith("/") || destination.includes("\0"))
       throw new SandboxRuntimeError("store destination must be an absolute host path");
+    const storePaths = await this.#providerStorePaths(record.ready.containerName, 30_000);
+    if (storePaths.length === 0) return undefined;
     const containerArchive = "/tmp/t3-provider-store.tar";
     try {
       const archived = await this.#mustExec(
@@ -1316,7 +1359,10 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
             "--directory",
             PROVIDER_HOME,
             ...PROVIDER_STORE_EXCLUDES.flatMap((pattern) => ["--exclude", pattern]),
-            ".",
+            // End tar option parsing before provider-controlled directory
+            // names, even though #providerStorePaths also validates them.
+            "--",
+            ...storePaths,
           ],
           // An empty or absent provider home is the ordinary first-turn case,
           // not a failure worth failing the export over.
