@@ -123,6 +123,14 @@ function toNonEmptyProviderInput(value: string | undefined): string | undefined 
   return normalized && normalized.length > 0 ? normalized : undefined;
 }
 
+function readCodexResumeCursorThreadId(cursor: unknown): string | undefined {
+  if (typeof cursor !== "object" || cursor === null || !("threadId" in cursor)) {
+    return undefined;
+  }
+  const threadId = cursor.threadId;
+  return typeof threadId === "string" && threadId.trim().length > 0 ? threadId : undefined;
+}
+
 function mapProviderSessionStatusToOrchestrationStatus(
   status: "connecting" | "ready" | "running" | "error" | "closed",
 ): OrchestrationSession["status"] {
@@ -1295,12 +1303,15 @@ export const make = Effect.gen(function* () {
     const bindingAfterProvision = Option.getOrUndefined(
       yield* providerSessionDirectory.getBinding(threadId),
     );
+    const requestedCodexThreadId = readCodexResumeCursorThreadId(
+      bindingAfterProvision?.resumeCursor,
+    );
+    const startedSession = yield* startProviderSession(undefined);
+    const startedCodexThreadId = readCodexResumeCursorThreadId(startedSession.resumeCursor);
     const shouldRecoverConversation =
       executionTarget.kind === "sandbox" &&
       preferredProvider === "codex" &&
-      (bindingAfterProvision?.resumeCursor === null ||
-        bindingAfterProvision?.resumeCursor === undefined);
-    const startedSession = yield* startProviderSession(undefined);
+      (requestedCodexThreadId === undefined || startedCodexThreadId !== requestedCodexThreadId);
     yield* bindSessionToThread(startedSession);
     return { shouldRecoverConversation } as const;
   });

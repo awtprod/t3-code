@@ -969,7 +969,7 @@ describe("ProviderCommandReactor", () => {
         threadId,
         provider: ProviderDriverKind.make("codex"),
         providerInstanceId: ProviderInstanceId.make("codex"),
-        resumeCursor: { resume: "dead-session-id" },
+        resumeCursor: { threadId: "dead-session-id" },
       }),
     );
 
@@ -1006,10 +1006,17 @@ describe("ProviderCommandReactor", () => {
     // are keyed by, so the cursor names something real again. Clearing it here
     // would discard the conversation the export just went out of its way to
     // save.
-    const harness = await createHarness();
+    const resumeCursor = { threadId: "restorable-session-id" };
+    let sessionStartCount = 0;
+    const harness = await createHarness({
+      startSessionEffect: (session) =>
+        Effect.sync(() => {
+          sessionStartCount += 1;
+          return sessionStartCount === 2 ? { ...session, resumeCursor } : session;
+        }),
+    });
     const now = "2026-01-01T00:00:00.000Z";
     const threadId = ThreadId.make("thread-1");
-    const resumeCursor = { resume: "restorable-session-id" };
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -1112,6 +1119,109 @@ describe("ProviderCommandReactor", () => {
     );
   });
 
+  it("recovers the transcript when Codex falls back despite a restored store", async () => {
+    let sessionStartCount = 0;
+    const harness = await createHarness({
+      startSessionEffect: (session) =>
+        Effect.sync(() => {
+          sessionStartCount += 1;
+          return sessionStartCount === 2
+            ? { ...session, resumeCursor: { threadId: "fresh-codex-thread" } }
+            : session;
+        }),
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-resume-fallback"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-before-resume-fallback"),
+          role: "user",
+          text: "remember pineapple",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-provider-stop-before-resume-fallback"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.branch-export.result",
+        commandId: CommandId.make("cmd-sandbox-export-before-resume-fallback"),
+        threadId,
+        branchName: "t3/thread/thread-1",
+        headCommit: "a".repeat(40),
+        artifactId: "b".repeat(64),
+        bundleSha256: "c".repeat(64),
+        storeSha256: "d".repeat(64),
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.stop",
+        commandId: CommandId.make("cmd-sandbox-stop-before-resume-fallback"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "sandbox.stop.complete",
+        commandId: CommandId.make("cmd-sandbox-stopped-before-resume-fallback"),
+        threadId,
+        expired: false,
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.providerSessionDirectory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        resumeCursor: { threadId: "stale-codex-thread" },
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-resume-fallback"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-after-resume-fallback"),
+          role: "user",
+          text: "what word?",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    const recoveredInput = harness.sendTurn.mock.calls[1]?.[0] as { input?: string } | undefined;
+    expect(recoveredInput?.input).toContain("[Command Center conversation recovery]");
+    expect(recoveredInput?.input).toContain("USER:\nremember pineapple");
+    expect(recoveredInput?.input).toContain("CURRENT USER MESSAGE:\nwhat word?");
+  });
+
   it("keeps the resume cursor when the container survived and nothing needed restoring", async () => {
     // The regression this covers: the reactor cleared the cursor whenever the
     // provision had not RESTORED a store -- which is also true of a container
@@ -1121,7 +1231,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness({ providerStore: "preserved" });
     const now = "2026-01-01T00:00:00.000Z";
     const threadId = ThreadId.make("thread-1");
-    const resumeCursor = { resume: "still-live-session-id" };
+    const resumeCursor = { threadId: "still-live-session-id" };
 
     await harness.runEffect(
       harness.engine.dispatch({

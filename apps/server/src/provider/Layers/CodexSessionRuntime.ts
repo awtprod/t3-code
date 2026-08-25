@@ -601,9 +601,12 @@ export function isRecoverableThreadResumeError(error: unknown): boolean {
   return RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS.some((snippet) => message.includes(snippet));
 }
 
-type CodexThreadOpenResponse =
+type CodexThreadOpenResponse = (
   | typeof CodexThreadStartResponseWithPermissionProfile.Type
-  | typeof CodexThreadResumeResponseWithPermissionProfile.Type;
+  | typeof CodexThreadResumeResponseWithPermissionProfile.Type
+) & {
+  readonly resumeFellBack: boolean;
+};
 
 type CodexThreadOpenMethod = "thread/start" | "thread/resume";
 
@@ -1030,13 +1033,16 @@ export const openCodexThread = (input: {
     );
 
   if (resumeThreadId === undefined) {
-    return request("thread/start", startParams);
+    return request("thread/start", startParams).pipe(
+      Effect.map((response) => ({ ...response, resumeFellBack: false })),
+    );
   }
 
   return request("thread/resume", {
     threadId: resumeThreadId,
     ...startParams,
   }).pipe(
+    Effect.map((response) => ({ ...response, resumeFellBack: false })),
     Effect.catchIf(isRecoverableThreadResumeError, (error) =>
       Effect.logWarning("codex app-server thread resume fell back to fresh start", {
         threadId: input.threadId,
@@ -1044,7 +1050,10 @@ export const openCodexThread = (input: {
         resumeThreadId,
         recoverable: true,
         cause: error,
-      }).pipe(Effect.andThen(request("thread/start", startParams))),
+      }).pipe(
+        Effect.andThen(request("thread/start", startParams)),
+        Effect.map((response) => ({ ...response, resumeFellBack: true })),
+      ),
     ),
   );
 };
@@ -2566,6 +2575,18 @@ export const makeCodexSessionRuntime = (
         updatedAt: yield* nowIso,
       } satisfies ProviderSession;
       yield* Ref.set(sessionRef, session);
+      if (opened.resumeFellBack) {
+        yield* emitEvent({
+          kind: "session",
+          threadId: options.threadId,
+          method: "session/resume-fallback",
+          message: "Codex could not resume its native conversation and started a fresh one.",
+          payload: {
+            requestedThreadId: readResumeCursorThreadId(options.resumeCursor),
+            providerThreadId,
+          },
+        });
+      }
       yield* emitSessionEvent("session/ready", "Codex App Server session ready.");
       return session;
     });
