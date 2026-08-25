@@ -932,6 +932,16 @@ describe("ProviderCommandReactor", () => {
       }),
     );
     await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-provider-stop-before-teardown"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -981,8 +991,13 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.provisionSandbox.mock.calls.length === 2);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
     const binding = await harness.runEffect(harness.providerSessionDirectory.getBinding(threadId));
     expect(Option.getOrUndefined(binding)?.resumeCursor).toBeNull();
+    const recoveredInput = harness.sendTurn.mock.calls[1]?.[0] as { input?: string } | undefined;
+    expect(recoveredInput?.input).toContain("[Command Center conversation recovery]");
+    expect(recoveredInput?.input).toContain("USER:\nhello");
+    expect(recoveredInput?.input).toContain("CURRENT USER MESSAGE:\nback again");
   });
 
   it("keeps the resume cursor when the teardown archived the provider store", async () => {
@@ -1013,6 +1028,16 @@ describe("ProviderCommandReactor", () => {
       }),
     );
     await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-provider-stop-before-store-export"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
 
     // The export a teardown performs, carrying a store -- dispatched rather
     // than mocked so the digest travels the real command -> event -> thread
@@ -1075,11 +1100,15 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.provisionSandbox.mock.calls.length === 2);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
     const binding = await harness.runEffect(harness.providerSessionDirectory.getBinding(threadId));
     expect(Option.getOrUndefined(binding)?.resumeCursor).toEqual(resumeCursor);
     // ...and the store the cursor depends on is actually requested back.
     expect(harness.provisionSandbox.mock.calls.at(-1)?.[0]?.restore?.storeSha256).toBe(
       "d".repeat(64),
+    );
+    expect((harness.sendTurn.mock.calls[1]?.[0] as { input?: string } | undefined)?.input).toBe(
+      "back again",
     );
   });
 

@@ -153,6 +153,8 @@ const MAX_THREAD_TITLE_CONTEXT_CHARS = 8_000;
 const MAX_FIRST_USER_TITLE_CONTEXT_CHARS = 2_000;
 const THREAD_TITLE_CONTEXT_TRUNCATION_MARKER = "[Earlier content truncated]\n\n";
 const FIRST_USER_CONTEXT_TRUNCATION_MARKER = "\n[First user message truncated]";
+const COLD_START_CONTEXT_HEADER = `[Command Center conversation recovery]
+The provider-native conversation could not be resumed. Continue from the persisted transcript below, preserving established work and prior user instructions. The final CURRENT USER MESSAGE is the newest request.`;
 
 type ThreadTitleMessage = {
   readonly role: "user" | "assistant" | "system";
@@ -266,6 +268,24 @@ function formatThreadTitleContext(messages: ReadonlyArray<ThreadTitleMessage>): 
       ),
     ],
   };
+}
+
+function recoverProviderInputFromThread(input: {
+  readonly messages: ReadonlyArray<
+    ThreadTitleMessage & { readonly id: MessageId; readonly streaming: boolean }
+  >;
+  readonly currentMessageId: MessageId;
+  readonly currentMessageText: string | undefined;
+}): string | undefined {
+  const priorMessages = input.messages.filter(
+    (message) => message.id !== input.currentMessageId && !message.streaming,
+  );
+  const history = formatThreadTitleContext(priorMessages).message.trim();
+  if (history.length === 0) {
+    return input.currentMessageText;
+  }
+  const currentMessage = input.currentMessageText ?? "[Attachment-only message]";
+  return `${COLD_START_CONTEXT_HEADER}\n\n${history}\n\nCURRENT USER MESSAGE:\n${currentMessage}`;
 }
 
 export function providerErrorLabel(value: string | undefined): string {
@@ -1227,7 +1247,7 @@ export const make = Effect.gen(function* () {
         !shouldRestartForModelChange &&
         !shouldRestartForOptionChange
       ) {
-        return existingSessionThreadId;
+        return { shouldRecoverConversation: false } as const;
       }
 
       const resumeCursor = shouldRestartForModelChange
@@ -1265,16 +1285,29 @@ export const make = Effect.gen(function* () {
         cwd: restartedSession.cwd,
       });
       yield* bindSessionToThread(restartedSession);
-      return restartedSession.threadId;
+      return { shouldRecoverConversation: false } as const;
     }
 
+    // Provisioning reconciles the provider-store disposition before this read.
+    // A missing cursor here means the replacement Codex process cannot possibly
+    // recover its native conversation, so the first prompt must carry the
+    // persisted Command Center transcript instead of arriving context-free.
+    const bindingAfterProvision = Option.getOrUndefined(
+      yield* providerSessionDirectory.getBinding(threadId),
+    );
+    const shouldRecoverConversation =
+      executionTarget.kind === "sandbox" &&
+      preferredProvider === "codex" &&
+      (bindingAfterProvision?.resumeCursor === null ||
+        bindingAfterProvision?.resumeCursor === undefined);
     const startedSession = yield* startProviderSession(undefined);
     yield* bindSessionToThread(startedSession);
-    return startedSession.threadId;
+    return { shouldRecoverConversation } as const;
   });
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly messageId: MessageId;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -1297,7 +1330,7 @@ export const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
-    yield* ensureSessionForThread(input.threadId, input.createdAt, {
+    const sessionStart = yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       pendingTurnStart: true,
       ...(input.executionTarget !== undefined ? { executionTarget: input.executionTarget } : {}),
@@ -1306,6 +1339,21 @@ export const make = Effect.gen(function* () {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
+    const providerInput = sessionStart.shouldRecoverConversation
+      ? recoverProviderInputFromThread({
+          messages: thread.messages,
+          currentMessageId: input.messageId,
+          currentMessageText: normalizedInput,
+        })
+      : normalizedInput;
+    if (sessionStart.shouldRecoverConversation && providerInput !== normalizedInput) {
+      yield* Effect.logInfo("provider command reactor seeded a fresh Codex conversation", {
+        threadId: input.threadId,
+        recoveredMessageCount: thread.messages.filter(
+          (message) => message.id !== input.messageId && !message.streaming,
+        ).length,
+      });
+    }
     const normalizedAttachments = input.attachments ?? [];
     const activeSession = yield* providerService
       .listSessions()
@@ -1337,7 +1385,7 @@ export const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
-      ...(normalizedInput ? { input: normalizedInput } : {}),
+      ...(providerInput ? { input: providerInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
@@ -2547,6 +2595,7 @@ export const make = Effect.gen(function* () {
 
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      messageId: event.payload.messageId,
       messageText: message.text,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
