@@ -36,11 +36,87 @@ import {
 // observed while halving the window a user spends watching a false spinner.
 // Worst case to recovery is threshold + sweep interval.
 const DEFAULT_STALL_THRESHOLD_MS = 10 * 60 * 1000;
+// A provider can be silent while a command is legitimately still running: Codex
+// emits the command's start and completion, but no heartbeat between them. Give
+// persisted in-flight tool work a longer (still bounded) window so a dependency
+// install or build is not mistaken for a dead provider.
+const DEFAULT_ACTIVE_WORK_STALL_THRESHOLD_MS = 30 * 60 * 1000;
 const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export interface StalledTurnWatchdogLiveOptions {
   readonly stallThresholdMs?: number;
+  readonly activeWorkStallThresholdMs?: number;
   readonly sweepIntervalMs?: number;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function toolLifecycleIdentity(activity: {
+  readonly summary: string;
+  readonly payload: unknown;
+}): string | null {
+  const payload = asRecord(activity.payload);
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item);
+  const explicitId =
+    asNonEmptyString(payload?.providerItemId) ??
+    asNonEmptyString(payload?.hookId) ??
+    asNonEmptyString(data?.toolCallId) ??
+    asNonEmptyString(data?.toolUseId) ??
+    asNonEmptyString(item?.id) ??
+    asNonEmptyString(data?.id);
+  if (explicitId !== null) {
+    return `id:${explicitId}`;
+  }
+
+  const itemType = asNonEmptyString(payload?.itemType) ?? "";
+  const label = activity.summary
+    .replace(/\s+(?:started|updated|complete|completed)\s*$/iu, "")
+    .trim();
+  const detail = asNonEmptyString(payload?.detail) ?? "";
+  return itemType.length > 0 || label.length > 0 || detail.length > 0
+    ? [itemType, label, detail].join("\x1f")
+    : null;
+}
+
+function hasInFlightProviderWork(
+  activities: ReadonlyArray<{
+    readonly kind: string;
+    readonly summary: string;
+    readonly payload: unknown;
+    readonly turnId: string | null;
+  }>,
+  turnId: string,
+): boolean {
+  const active = new Set<string>();
+  let anonymousActive = false;
+
+  for (const activity of activities) {
+    if (activity.turnId !== turnId) continue;
+    const isStarted = activity.kind === "tool.started" || activity.kind === "hook.started";
+    const isUpdated = activity.kind === "tool.updated";
+    const isCompleted = activity.kind === "tool.completed" || activity.kind === "hook.completed";
+    if (!isStarted && !isUpdated && !isCompleted) continue;
+
+    const identity = toolLifecycleIdentity(activity);
+    if (identity === null) {
+      anonymousActive = !isCompleted;
+    } else if (isCompleted) {
+      active.delete(identity);
+    } else {
+      active.add(identity);
+    }
+  }
+
+  return active.size > 0 || anonymousActive;
 }
 
 const makeStalledTurnWatchdog = (options?: StalledTurnWatchdogLiveOptions) =>
@@ -51,8 +127,11 @@ const makeStalledTurnWatchdog = (options?: StalledTurnWatchdogLiveOptions) =>
     const crypto = yield* Crypto.Crypto;
 
     const stallThresholdMs = Math.max(1, options?.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS);
+    const activeWorkStallThresholdMs = Math.max(
+      stallThresholdMs,
+      options?.activeWorkStallThresholdMs ?? DEFAULT_ACTIVE_WORK_STALL_THRESHOLD_MS,
+    );
     const sweepIntervalMs = Math.max(1, options?.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
-    const stallMinutes = Math.max(1, Math.round(stallThresholdMs / 60_000));
 
     const serverCommandId = (tag: string) =>
       crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
@@ -96,12 +175,47 @@ const makeStalledTurnWatchdog = (options?: StalledTurnWatchdogLiveOptions) =>
           continue;
         }
 
-        const silentDurationMs = now - updatedAtMs;
+        let silentDurationMs = now - updatedAtMs;
         if (silentDurationMs < stallThresholdMs) {
           continue;
         }
 
+        const detail = yield* projectionSnapshotQuery.getThreadDetailSnapshot(thread.id, {
+          turnLimit: 1,
+        });
+        if (detail._tag === "None") {
+          continue;
+        }
+        const currentThread = detail.value.thread;
+        if (
+          currentThread.session?.status !== "running" ||
+          currentThread.session.activeTurnId !== session.activeTurnId ||
+          currentThread.latestTurn?.state !== "running" ||
+          currentThread.latestTurn.turnId !== session.activeTurnId
+        ) {
+          continue;
+        }
+        const currentUpdatedAtMs = Date.parse(currentThread.updatedAt);
+        if (Number.isNaN(currentUpdatedAtMs)) {
+          continue;
+        }
+        silentDurationMs = now - currentUpdatedAtMs;
+        if (silentDurationMs < stallThresholdMs) {
+          continue;
+        }
+        const hasActiveWork = hasInFlightProviderWork(
+          currentThread.activities,
+          session.activeTurnId,
+        );
+        const effectiveStallThresholdMs = hasActiveWork
+          ? activeWorkStallThresholdMs
+          : stallThresholdMs;
+        if (silentDurationMs < effectiveStallThresholdMs) {
+          continue;
+        }
+
         const activeTurnId = session.activeTurnId;
+        const stallMinutes = Math.max(1, Math.round(effectiveStallThresholdMs / 60_000));
         const nowIso = DateTime.formatIso(yield* DateTime.now);
 
         // 1. Append a visible reason to the thread so the auto-fail is explained
@@ -125,7 +239,7 @@ const makeStalledTurnWatchdog = (options?: StalledTurnWatchdogLiveOptions) =>
                 `while the turn was running. The watchdog failed the turn and interrupted ` +
                 `the provider so the thread can be resumed.`,
               silentDurationMs,
-              stallThresholdMs,
+              stallThresholdMs: effectiveStallThresholdMs,
             },
             turnId: activeTurnId,
             createdAt: nowIso,
@@ -187,7 +301,7 @@ const makeStalledTurnWatchdog = (options?: StalledTurnWatchdogLiveOptions) =>
           threadId: thread.id,
           turnId: activeTurnId,
           silentDurationMs,
-          stallThresholdMs,
+          stallThresholdMs: effectiveStallThresholdMs,
         });
         failedCount += 1;
       }
@@ -220,6 +334,7 @@ const makeStalledTurnWatchdog = (options?: StalledTurnWatchdogLiveOptions) =>
 
         yield* Effect.logInfo("stalled-turn.watchdog.started", {
           stallThresholdMs,
+          activeWorkStallThresholdMs,
           sweepIntervalMs,
         });
       });

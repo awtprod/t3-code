@@ -2962,6 +2962,7 @@ describe("ProviderRuntimeIngestion", () => {
         : undefined;
     expect(toolUpdate?.kind).toBe("tool.updated");
     expect(toolUpdatePayload?.itemType).toBe("command_execution");
+    expect(toolUpdatePayload?.providerItemId).toBe("item-p1-tool");
     expect(toolUpdatePayload?.status).toBe("in_progress");
 
     const warning = thread.activities.find(

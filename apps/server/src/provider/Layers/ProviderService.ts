@@ -1026,7 +1026,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ? yield* resolveRoutableSession({
                 threadId: input.threadId,
                 operation: "ProviderService.interruptTurn",
-                allowRecovery: true,
+                // Interrupting a missing runtime must not resurrect it merely to
+                // stop it. Besides doing unnecessary work, recovery can target a
+                // stale sandbox-only cwd after that sandbox has been torn down.
+                allowRecovery: false,
               })
             : Option.getOrUndefined(
                 yield* resolveTargetedInterruptSession({
@@ -1034,7 +1037,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                   target: input.target,
                 }),
               );
-        if (routed === undefined) {
+        if (routed === undefined || !routed.isActive) {
           return;
         }
         metricProvider = routed.adapter.provider;

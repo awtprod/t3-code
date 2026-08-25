@@ -1,12 +1,14 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ProjectId,
+  EventId,
   ThreadId,
   TurnId,
   ProviderInstanceId,
   type OrchestrationLatestTurn,
   type OrchestrationSession,
   type OrchestrationShellSnapshot,
+  type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -15,6 +17,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -145,6 +148,8 @@ describe("StalledTurnWatchdog", () => {
   function createHarness(input: {
     readonly snapshot: OrchestrationShellSnapshot;
     readonly stallThresholdMs?: number;
+    readonly activeWorkStallThresholdMs?: number;
+    readonly activities?: ReadonlyArray<OrchestrationThreadActivity>;
     readonly interruptTurnImplementation?: ProviderServiceShape["interruptTurn"];
     // When true, build the layer with no options at all so the assertions
     // exercise the production defaults rather than injected test values.
@@ -185,6 +190,7 @@ describe("StalledTurnWatchdog", () => {
         : {
             // Large sweep interval so exactly one sweep runs during the test window.
             stallThresholdMs: input.stallThresholdMs ?? 1_000,
+            activeWorkStallThresholdMs: input.activeWorkStallThresholdMs ?? 30_000,
             sweepIntervalMs: 60_000,
           },
     ).pipe(
@@ -212,7 +218,24 @@ describe("StalledTurnWatchdog", () => {
           getFullThreadDiffContext: () => Effect.die("unused"),
           getThreadShellById: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.die("unused"),
-          getThreadDetailSnapshot: () => Effect.die("unused"),
+          getThreadDetailSnapshot: (threadId) => {
+            const shell = input.snapshot.threads.find((thread) => thread.id === threadId);
+            return Effect.succeed(
+              shell === undefined
+                ? Option.none()
+                : Option.some({
+                    snapshotSequence: input.snapshot.snapshotSequence,
+                    thread: {
+                      ...shell,
+                      deletedAt: null,
+                      messages: [],
+                      proposedPlans: [],
+                      activities: input.activities ?? [],
+                      checkpoints: [],
+                    },
+                  }),
+            );
+          },
           searchThreads: () => Effect.succeed({ matches: [] }),
         }),
       ),
@@ -406,6 +429,135 @@ describe("StalledTurnWatchdog", () => {
     if (activity?.type === "thread.activity.append") {
       // Message is rendered from the threshold, so it also pins the 10m value.
       expect(activity.activity.summary).toContain("10m");
+    }
+  });
+
+  it("allows a silent in-flight command up to the active-work threshold", async () => {
+    const threadId = ThreadId.make("thread-watchdog-active-command");
+    const turnId = TurnId.make("turn-watchdog-active-command");
+    const startedAt = DateTime.formatIso(DateTime.subtract(DateTime.nowUnsafe(), { minutes: 11 }));
+    const harness = createHarness({
+      useProductionDefaults: true,
+      snapshot: makeShellSnapshot([
+        makeShell({
+          id: threadId,
+          session: makeRunningSession(threadId, turnId),
+          latestTurn: makeRunningTurn(turnId),
+          updatedAt: startedAt,
+        }),
+      ]),
+      activities: [
+        {
+          id: EventId.make("evt-command-started"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "Ran command started",
+          payload: {
+            itemType: "command_execution",
+            data: { item: { id: "command-1" } },
+          },
+          turnId,
+          createdAt: startedAt,
+        },
+      ],
+    });
+
+    await startWatchdog();
+    await Effect.runPromise(drainFibers);
+
+    expect(harness.interruptTurn).not.toHaveBeenCalled();
+    expect(harness.dispatched).toHaveLength(0);
+  });
+
+  it("uses the normal threshold after an identified command completes", async () => {
+    const threadId = ThreadId.make("thread-watchdog-completed-command");
+    const turnId = TurnId.make("turn-watchdog-completed-command");
+    const startedAt = DateTime.formatIso(DateTime.subtract(DateTime.nowUnsafe(), { minutes: 11 }));
+    const baseActivity = {
+      tone: "tool" as const,
+      payload: {
+        itemType: "command_execution",
+        providerItemId: "command-completed",
+      },
+      turnId,
+      createdAt: startedAt,
+    };
+    const harness = createHarness({
+      useProductionDefaults: true,
+      snapshot: makeShellSnapshot([
+        makeShell({
+          id: threadId,
+          session: makeRunningSession(threadId, turnId),
+          latestTurn: makeRunningTurn(turnId),
+          updatedAt: startedAt,
+        }),
+      ]),
+      activities: [
+        {
+          ...baseActivity,
+          id: EventId.make("evt-command-lifecycle-started"),
+          kind: "tool.started",
+          summary: "Ran command started",
+        },
+        {
+          ...baseActivity,
+          id: EventId.make("evt-command-lifecycle-completed"),
+          kind: "tool.completed",
+          summary: "Ran command",
+        },
+      ],
+    });
+
+    await startWatchdog();
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+
+    const activity = harness.dispatched.find(
+      (command) => command.type === "thread.activity.append",
+    );
+    if (activity?.type === "thread.activity.append") {
+      expect(activity.activity.summary).toContain("10m");
+    }
+  });
+
+  it("still auto-fails in-flight work after the longer bound", async () => {
+    const threadId = ThreadId.make("thread-watchdog-active-command-over-bound");
+    const turnId = TurnId.make("turn-watchdog-active-command-over-bound");
+    const startedAt = DateTime.formatIso(DateTime.subtract(DateTime.nowUnsafe(), { minutes: 31 }));
+    const harness = createHarness({
+      useProductionDefaults: true,
+      snapshot: makeShellSnapshot([
+        makeShell({
+          id: threadId,
+          session: makeRunningSession(threadId, turnId),
+          latestTurn: makeRunningTurn(turnId),
+          updatedAt: startedAt,
+        }),
+      ]),
+      activities: [
+        {
+          id: EventId.make("evt-command-started-over-bound"),
+          tone: "tool",
+          kind: "tool.started",
+          summary: "Ran command started",
+          payload: {
+            itemType: "command_execution",
+            data: { item: { id: "command-2" } },
+          },
+          turnId,
+          createdAt: startedAt,
+        },
+      ],
+    });
+
+    await startWatchdog();
+    await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
+
+    expect(harness.dispatched.some((command) => command.type === "thread.session.set")).toBe(true);
+    const activity = harness.dispatched.find(
+      (command) => command.type === "thread.activity.append",
+    );
+    if (activity?.type === "thread.activity.append") {
+      expect(activity.activity.summary).toContain("30m");
     }
   });
 

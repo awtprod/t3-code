@@ -1346,6 +1346,33 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("does not recover an inactive runtime merely to interrupt it", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-untargeted-interrupt-inactive");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-untargeted-interrupt-inactive",
+        runtimeMode: "full-access",
+      });
+
+      // Simulate a runtime that disappeared while its persisted binding remains.
+      yield* routing.codex.stopSession(threadId);
+      routing.codex.startSession.mockClear();
+      routing.codex.interruptTurn.mockClear();
+
+      yield* provider.interruptTurn({
+        threadId,
+        turnId: asTurnId("turn-untargeted-interrupt-inactive"),
+      });
+
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.equal(routing.codex.interruptTurn.mock.calls.length, 0);
+    }),
+  );
+
   it.effect("appends attachment file paths to the turn input text", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
