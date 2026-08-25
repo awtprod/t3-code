@@ -1194,6 +1194,21 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "session/resume-fallback") {
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "runtime.warning",
+        payload: {
+          message:
+            event.message ??
+            "Codex could not resume its native conversation and started a fresh one.",
+          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
   if (event.method === "session/ready") {
     return [
       {

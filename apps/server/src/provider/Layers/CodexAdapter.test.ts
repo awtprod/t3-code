@@ -2088,6 +2088,46 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps a native resume fallback to a visible runtime warning", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-resume-fallback"),
+        kind: "session",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "session/resume-fallback",
+        message: "Codex could not resume its native conversation and started a fresh one.",
+        payload: {
+          requestedThreadId: "stale-thread",
+          providerThreadId: "fresh-thread",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
+        return;
+      }
+      NodeAssert.equal(
+        firstEvent.value.payload.message,
+        "Codex could not resume its native conversation and started a fresh one.",
+      );
+      NodeAssert.deepStrictEqual(firstEvent.value.payload.detail, {
+        requestedThreadId: "stale-thread",
+        providerThreadId: "fresh-thread",
+      });
+    }),
+  );
+
   it.effect("maps process stderr notifications to runtime.warning", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

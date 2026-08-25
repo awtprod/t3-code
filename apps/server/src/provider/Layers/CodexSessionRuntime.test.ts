@@ -672,10 +672,31 @@ describe("openCodexThread", () => {
       });
 
       NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.equal(opened.resumeFellBack, true);
       NodeAssert.deepStrictEqual(
         calls.map((call) => call.method),
         ["thread/resume", "thread/start"],
       );
+    }),
+  );
+
+  it.effect("marks a successful native resume as preserved", () =>
+    Effect.gen(function* () {
+      const resumed = makeThreadOpenResponse("resumed-thread");
+      const opened = yield* openCodexThread({
+        client: {
+          request: () => Effect.succeed(resumed),
+        },
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "resumed-thread",
+      });
+
+      NodeAssert.equal(opened.thread.id, "resumed-thread");
+      NodeAssert.equal(opened.resumeFellBack, false);
     }),
   );
 
