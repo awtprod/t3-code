@@ -168,6 +168,7 @@ export class SandboxRuntimeError extends Error {
 type RecordEntry = {
   ready: SandboxReady;
   teardownTimeoutMs: number;
+  egressConfigured: boolean;
   /**
    * Rebuilt from the projection rather than provisioned by this manager
    * generation. Teardown hooks cannot run against an adopted record -- the hook
@@ -202,6 +203,15 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
 
   runtimeRef(threadIdValue: string): string | undefined {
     return this.#records.get(sanitizeId(threadIdValue, "threadId"))?.ready.containerName;
+  }
+
+  credentialProxyTarget(
+    threadIdValue: string,
+  ): { readonly networkName: string; readonly egressConfigured: boolean } | undefined {
+    const record = this.#records.get(sanitizeId(threadIdValue, "threadId"));
+    return record === undefined
+      ? undefined
+      : { networkName: record.ready.networkName, egressConfigured: record.egressConfigured };
   }
 
   async ensureReady(input: SandboxProvisionInput): Promise<SandboxReady> {
@@ -293,7 +303,12 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         ),
         providerStore: "preserved" as const,
       };
-      this.#records.set(threadId, { ready: existing, teardownTimeoutMs });
+      this.#records.set(threadId, {
+        ready: existing,
+        teardownTimeoutMs,
+        egressConfigured:
+          input.egressProxyImage !== undefined || input.egressProxyUrl !== undefined,
+      });
       return existing;
     }
 
@@ -772,7 +787,11 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       // a cursor kept against it fails every following turn to resume.
       providerStore: providerStoreRestored ? ("restored" as const) : ("unavailable" as const),
     };
-    this.#records.set(threadId, { ready, teardownTimeoutMs });
+    this.#records.set(threadId, {
+      ready,
+      teardownTimeoutMs,
+      egressConfigured: input.egressProxyImage !== undefined || input.egressProxyUrl !== undefined,
+    });
     return ready;
   }
 
@@ -1749,6 +1768,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         limits: DEFAULT_SANDBOX_RESOURCE_LIMITS,
       },
       teardownTimeoutMs: hint.teardownTimeoutMs ?? boundedTimeout(undefined, 120),
+      egressConfigured: false,
       adopted: true,
     };
   }

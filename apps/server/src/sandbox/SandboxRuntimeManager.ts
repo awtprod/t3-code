@@ -811,6 +811,7 @@ export const makeSandboxRuntimeManager = (
           // the gateway at this point; a failed provision must not leave
           // them readable against a container that is being destroyed.
           desktopGateway.removeThread(input.bootstrap.threadId);
+          await managed.credentials.stop(input.bootstrap.threadId);
           await managed.previews.stop(input.bootstrap.threadId);
           await managed.services.stop(input.bootstrap.threadId);
           teardownHooks.delete(input.bootstrap.threadId);
@@ -1062,8 +1063,19 @@ export const makeSandboxRuntimeManager = (
           ...(adoptionHints === undefined ? {} : { adoptionHints }),
         });
         const headless = resolveSandboxDesktopMode() === "disabled";
+        const credentialImage = resolveSandboxCredentialProxyImage();
         for (const threadId of result.activeThreadIds) {
-          await managed.credentials.recover(threadId);
+          const credentialsRecovered = await managed.credentials.recover(threadId, credentialImage);
+          if (!credentialsRecovered && credentialImage !== undefined) {
+            const target = managed.backend.credentialProxyTarget(threadId);
+            if (target !== undefined)
+              await managed.credentials.start(
+                threadId,
+                target.networkName,
+                credentialImage,
+                target.egressConfigured,
+              );
+          }
           // Headless threads have no desktop to recover, and marking them as
           // capability failures would report a desktop that was never started.
           if (headless) {

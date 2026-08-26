@@ -208,6 +208,11 @@ export function sandboxProviderInvocation(
       });
       proxyEnvironment.GIT_TERMINAL_PROMPT = "0";
     }
+    if (proxy.upstreamNames.includes("github-pr") && proxy.git !== undefined) {
+      proxyEnvironment.T3_GITHUB_PR_BASE_URL = `${proxy.baseUrl}/github-pr`;
+      proxyEnvironment.T3_GITHUB_PR_TOKEN = proxy.threadToken;
+      proxyEnvironment.T3_GITHUB_REPOSITORY = proxy.git.repositoryNameWithOwner;
+    }
   }
   const requestedEnvironment = {
     ...SANDBOX_PROVIDER_ENV,
