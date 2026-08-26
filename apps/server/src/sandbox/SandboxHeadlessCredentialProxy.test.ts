@@ -30,6 +30,7 @@ import type {
 const SECRET = "sk-ant-oat01-test-only-not-a-real-token";
 const PREVIEW_IMAGE = `preview@sha256:${"a".repeat(64)}`;
 const CREDENTIAL_IMAGE = `credential@sha256:${"c".repeat(64)}`;
+const NEXT_CREDENTIAL_IMAGE = `credential@sha256:${"d".repeat(64)}`;
 const SANDBOX_IMAGE = `sandbox@sha256:${"b".repeat(64)}`;
 
 class FakeExecutor implements SandboxCommandExecutor {
@@ -207,6 +208,115 @@ describe("headless sandbox provisioning", () => {
       );
       releaseSidecars();
       yield* Fiber.join(provision);
+    }),
+  );
+
+  it.effect("stops a credential sidecar when its concurrent preview start fails", () =>
+    Effect.gen(function* () {
+      process.env.T3_SANDBOX_DESKTOP = "disabled";
+      process.env.T3_SANDBOX_PREVIEW_PROXY_IMAGE = PREVIEW_IMAGE;
+      process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE = CREDENTIAL_IMAGE;
+      const executor = new FakeExecutor((command) => {
+        const name = command.args[command.args.indexOf("--name") + 1] ?? "";
+        if (command.args[0] === "run" && name.startsWith("t3-preview-"))
+          return { exitCode: 1, stdout: "", stderr: "preview failed" };
+        return defaultRespond(command);
+      });
+      const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
+
+      const failure = yield* provisionAuthorized(
+        manager,
+        provisionInput({ previewPorts: [3000], egressProxyUrl: "https://proxy.example.test" }),
+      ).pipe(Effect.flip);
+
+      expect(failure._tag).toBe("SandboxManagerError");
+      expect(
+        executor.commands.some(
+          (command) =>
+            command.args[0] === "rm" &&
+            command.args[1] === "--force" &&
+            command.args.at(-1)?.startsWith("t3-cred-"),
+        ),
+      ).toBe(true);
+      yield* Effect.promise(() => provisionThreadCredentialProxy("thread-headless"));
+      expect(threadCredentialProxyBinding("thread-headless")).toBeUndefined();
+    }),
+  );
+});
+
+describe("credential sidecar recovery", () => {
+  it("rejects and removes a running sidecar built from an older image", async () => {
+    const oldImage = `credential@sha256:${"d".repeat(64)}`;
+    const executor = new FakeExecutor((command) =>
+      command.args[0] === "inspect"
+        ? { exitCode: 0, stdout: `true ${oldImage}\n`, stderr: "" }
+        : defaultRespond(command),
+    );
+    const sidecar = new ThreadCredentialProxySidecar("podman", executor);
+
+    expect(await sidecar.recover(target.threadId, CREDENTIAL_IMAGE)).toBe(false);
+    expect(
+      executor.commands.some(
+        (command) => command.args[0] === "rm" && command.args.at(-1)?.startsWith("t3-cred-"),
+      ),
+    ).toBe(true);
+  });
+
+  it("recovers a running sidecar only when its image matches exactly", async () => {
+    const executor = new FakeExecutor((command) =>
+      command.args[0] === "inspect"
+        ? { exitCode: 0, stdout: `true ${CREDENTIAL_IMAGE}\n`, stderr: "" }
+        : defaultRespond(command),
+    );
+    const sidecar = new ThreadCredentialProxySidecar("podman", executor);
+
+    expect(await sidecar.recover(target.threadId, CREDENTIAL_IMAGE)).toBe(true);
+    expect(executor.commands.some((command) => command.args[0] === "rm")).toBe(false);
+  });
+
+  it.effect("replaces an old sidecar on an active sandbox network during reconcile", () =>
+    Effect.gen(function* () {
+      process.env.T3_SANDBOX_DESKTOP = "disabled";
+      process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE = CREDENTIAL_IMAGE;
+      process.env.T3_SANDBOX_ANTHROPIC_AUTH_TOKEN = SECRET;
+      let reconciling = false;
+      const executor = new FakeExecutor((command) => {
+        if (reconciling && command.args[0] === "ps" && command.args.includes("status=running"))
+          return {
+            exitCode: 0,
+            stdout: `${"a".repeat(12)}\tthread-headless\tproject-1\n`,
+            stderr: "",
+          };
+        if (
+          reconciling &&
+          command.args[0] === "inspect" &&
+          command.args.includes("{{.State.Running}} {{.Config.Image}}")
+        )
+          return { exitCode: 0, stdout: `true ${CREDENTIAL_IMAGE}\n`, stderr: "" };
+        return defaultRespond(command);
+      });
+      const manager = makeSandboxRuntimeManager(undefined, "linux", executor);
+      yield* provisionAuthorized(
+        manager,
+        provisionInput({ egressProxyUrl: "https://proxy.example.test" }),
+      );
+
+      process.env.T3_SANDBOX_CREDENTIAL_PROXY_IMAGE = NEXT_CREDENTIAL_IMAGE;
+      reconciling = true;
+      const result = yield* manager.reconcile("docker", new Set(["thread-headless"]));
+
+      expect(result.activeThreadIds).toEqual(["thread-headless"]);
+      const removed = executor.commands.findIndex(
+        (command) => command.args[0] === "rm" && command.args.at(-1)?.startsWith("t3-cred-"),
+      );
+      const replaced = executor.commands.findIndex(
+        (command) => command.args[0] === "run" && command.args.includes(NEXT_CREDENTIAL_IMAGE),
+      );
+      expect(removed).toBeGreaterThanOrEqual(0);
+      expect(replaced).toBeGreaterThan(removed);
+
+      yield* Effect.promise(() => provisionThreadCredentialProxy("thread-headless"));
+      expect(threadCredentialProxyBinding("thread-headless")?.upstreamNames).toContain("anthropic");
     }),
   );
 });
@@ -639,6 +749,21 @@ describe("thread-scoped credential proxy", () => {
             },
           ],
           stripRequestHeaders: ["authorization"],
+          policy: {
+            kind: "git-receive-pack",
+            protectedRefs: ["refs/heads/main"],
+          },
+        },
+        {
+          name: "github-pr",
+          baseUrl: "https://api.github.com/repos/awtprod/t3-code",
+          inject: [{ header: "authorization", value: `Bearer ${githubToken}` }],
+          stripRequestHeaders: ["authorization"],
+          policy: {
+            kind: "github-pull-requests",
+            repositoryNameWithOwner: "awtprod/t3-code",
+            protectedBaseBranches: ["main"],
+          },
         },
       ]),
     );
@@ -647,6 +772,9 @@ describe("thread-scoped credential proxy", () => {
     const invocation = sandboxProviderInvocation(target, "claude", [], undefined, {});
     expect(JSON.stringify(invocation)).not.toContain(githubToken);
     expect(invocation.env.GIT_TERMINAL_PROMPT).toBe("0");
+    expect(invocation.env.T3_GITHUB_PR_BASE_URL).toBe(`${CREDENTIAL_PROXY_BASE_URL}/github-pr`);
+    expect(invocation.env.T3_GITHUB_PR_TOKEN).toBe(document.threadToken);
+    expect(invocation.env.T3_GITHUB_REPOSITORY).toBe("awtprod/t3-code");
     const gitConfig = Array.from(
       { length: Number(invocation.env.GIT_CONFIG_COUNT) },
       (_, index) => [
@@ -664,7 +792,18 @@ describe("thread-scoped credential proxy", () => {
     ]);
     expect(invocation.args.join(" ")).not.toContain(document.threadToken);
     expect(invocation.args).toEqual(
-      expect.arrayContaining(["--env", "GIT_CONFIG_COUNT", "--env", "GIT_TERMINAL_PROMPT"]),
+      expect.arrayContaining([
+        "--env",
+        "GIT_CONFIG_COUNT",
+        "--env",
+        "GIT_TERMINAL_PROMPT",
+        "--env",
+        "T3_GITHUB_PR_BASE_URL",
+        "--env",
+        "T3_GITHUB_PR_TOKEN",
+        "--env",
+        "T3_GITHUB_REPOSITORY",
+      ]),
     );
   });
 

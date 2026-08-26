@@ -79,7 +79,7 @@ mkdir -p "${context_dir}/bin"
 printf 'building sandbox-bridge bundles\n' >&2
 (cd "${repo_root}/packages/sandbox-bridge" && node build.ts >&2)
 
-for binary in t3-preview-bridge t3-egress-proxy t3-credential-proxy; do
+for binary in t3-preview-bridge t3-egress-proxy t3-credential-proxy gh; do
   if [ ! -f "${bundle_dir}/${binary}.mjs" ]; then
     printf 'missing bundle: %s/%s.mjs\n' "${bundle_dir}" "${binary}" >&2
     exit 4

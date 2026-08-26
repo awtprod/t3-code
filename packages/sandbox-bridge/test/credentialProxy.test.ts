@@ -81,11 +81,25 @@ const REAL_SECRET = "sk-ant-not-a-real-secret";
 
 /** Records every request the upstream saw so header handling can be asserted. */
 const startUpstream = async () => {
-  const seen: Array<{ headers: NodeHttp.IncomingHttpHeaders; url: string }> = [];
+  const seen: Array<{
+    body: string;
+    headers: NodeHttp.IncomingHttpHeaders;
+    method: string;
+    url: string;
+  }> = [];
   const server = NodeHttp.createServer((request, response) => {
-    seen.push({ headers: request.headers, url: request.url ?? "" });
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: true, path: request.url }));
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      seen.push({
+        body: Buffer.concat(chunks).toString("utf8"),
+        headers: request.headers,
+        method: request.method ?? "",
+        url: request.url ?? "",
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true, path: request.url }));
+    });
   });
   servers.push(server);
   const port = await listen(server);
@@ -142,6 +156,26 @@ describe("t3-credential-proxy configuration lifecycle", () => {
     });
     expect(afterConfig.status).toBe(200);
     expect(JSON.parse(afterConfig.body)).toEqual({ ok: true, path: "/v1/messages" });
+  });
+
+  it("rejects a legacy GitHub upstream that has no ref authorization policy", async () => {
+    const { configPath } = await makeConfigDir();
+    const upstream = await startUpstream();
+    await writeConfigWithBase(configPath, `${"http:"}//127.0.0.1:${upstream.port}`, {
+      upstreams: [
+        {
+          name: "github",
+          baseUrl: `${"http:"}//127.0.0.1:${upstream.port}/acme/repository.git`,
+          inject: [{ header: "authorization", value: "Basic legacy-token" }],
+        },
+      ],
+    });
+    const proxy = await startProxy(configPath);
+    const answer = await call(proxy.port, "/github/info/refs?service=git-receive-pack", {
+      authorization: `Bearer ${THREAD_TOKEN}`,
+    });
+    expect(answer.status).toBe(503);
+    expect(upstream.seen).toHaveLength(0);
   });
 });
 
@@ -241,6 +275,260 @@ describe("t3-credential-proxy authorization and routing", () => {
     });
     expect(answer.status).toBe(200);
     expect(upstream.seen.at(-1)!.url).toBe("/");
+  });
+});
+
+const pktLine = (payload: string) => {
+  const body = Buffer.from(payload);
+  const length = (body.length + 4).toString(16).padStart(4, "0");
+  return Buffer.concat([Buffer.from(length), body]);
+};
+
+const receivePackBody = (...refs: ReadonlyArray<string>) => {
+  const zero = "0".repeat(40);
+  const one = "1".repeat(40);
+  return receivePackUpdates(...refs.map((ref) => ({ oldId: zero, newId: one, ref })));
+};
+
+const receivePackUpdates = (
+  ...updates: ReadonlyArray<{
+    readonly oldId: string;
+    readonly newId: string;
+    readonly ref: string;
+  }>
+) => {
+  const commands = updates.map((update, index) =>
+    pktLine(`${update.oldId} ${update.newId} ${update.ref}${index === 0 ? "\0report-status" : ""}`),
+  );
+  return Buffer.concat([...commands, Buffer.from("0000PACK")]);
+};
+
+describe("t3-credential-proxy Git ref authorization", () => {
+  const ready = async () => {
+    const { configPath } = await makeConfigDir();
+    const upstream = await startUpstream();
+    await writeConfigWithBase(configPath, `${"http:"}//127.0.0.1:${upstream.port}`, {
+      upstreams: [
+        {
+          name: "github",
+          baseUrl: `${"http:"}//127.0.0.1:${upstream.port}/acme/repository.git`,
+          inject: [{ header: "authorization", value: "Basic host-github-token" }],
+          stripRequestHeaders: ["authorization"],
+          policy: { kind: "git-receive-pack", protectedRefs: ["refs/heads/main"] },
+        },
+      ],
+    });
+    const proxy = await startProxy(configPath);
+    return { proxy, upstream };
+  };
+
+  it("forwards an ordinary feature-branch push after inspecting its command prelude", async () => {
+    const { proxy, upstream } = await ready();
+    const body = receivePackBody("refs/heads/feature/sandbox-prs");
+    const answer = await call(
+      proxy.port,
+      "/github/git-receive-pack",
+      {
+        authorization: `Bearer ${THREAD_TOKEN}`,
+        "content-type": "application/x-git-receive-pack-request",
+      },
+      body.toString("binary"),
+    );
+    expect(answer.status).toBe(200);
+    expect(upstream.seen).toHaveLength(1);
+    expect(upstream.seen[0]?.url).toBe("/acme/repository.git/git-receive-pack");
+    expect(Buffer.from(upstream.seen[0]!.body, "binary").equals(body)).toBe(true);
+  });
+
+  const zero = "0".repeat(40);
+  const one = "1".repeat(40);
+  const two = "2".repeat(40);
+
+  it.each([
+    ["main creation", receivePackUpdates({ oldId: zero, newId: one, ref: "refs/heads/main" })],
+    ["main update", receivePackUpdates({ oldId: one, newId: two, ref: "refs/heads/main" })],
+    ["main deletion", receivePackUpdates({ oldId: one, newId: zero, ref: "refs/heads/main" })],
+    [
+      "main hidden behind an allowed first command",
+      receivePackUpdates(
+        { oldId: zero, newId: one, ref: "refs/heads/feature/ok" },
+        { oldId: one, newId: two, ref: "refs/heads/main" },
+      ),
+    ],
+  ])("rejects %s without contacting GitHub", async (_label, body) => {
+    const { proxy, upstream } = await ready();
+    const answer = await call(
+      proxy.port,
+      "/github/git-receive-pack",
+      {
+        authorization: `Bearer ${THREAD_TOKEN}`,
+        "content-type": "application/x-git-receive-pack-request",
+      },
+      body.toString("binary"),
+    );
+    expect(answer.status).toBe(403);
+    expect(answer.body).toContain("refs/heads/main");
+    expect(upstream.seen).toHaveLength(0);
+  });
+
+  it.each(["/github/%67it-receive-pack", "/github/git-receive-pack?alternate=true"])(
+    "rejects non-canonical write path %s",
+    async (path) => {
+      const { proxy, upstream } = await ready();
+      const answer = await call(
+        proxy.port,
+        path,
+        { authorization: `Bearer ${THREAD_TOKEN}` },
+        receivePackBody("refs/heads/main").toString("binary"),
+      );
+      expect(answer.status).toBe(403);
+      expect(upstream.seen).toHaveLength(0);
+    },
+  );
+
+  it("rejects malformed receive-pack commands fail-closed", async () => {
+    const { proxy, upstream } = await ready();
+    const answer = await call(
+      proxy.port,
+      "/github/git-receive-pack",
+      { authorization: `Bearer ${THREAD_TOKEN}` },
+      Buffer.concat([pktLine("not a ref command"), Buffer.from("0000")]).toString("binary"),
+    );
+    expect(answer.status).toBe(403);
+    expect(upstream.seen).toHaveLength(0);
+  });
+});
+
+describe("t3-credential-proxy pull request authorization", () => {
+  const ready = async (baseBranch: string = "dev") => {
+    const { configPath } = await makeConfigDir();
+    const seen: Array<{ readonly body: string; readonly method: string; readonly url: string }> =
+      [];
+    const headSha = "a".repeat(40);
+    const upstream = NodeHttp.createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        const url = request.url ?? "";
+        seen.push({ body, method: request.method ?? "", url });
+        response.setHeader("content-type", "application/json");
+        if (request.method === "GET" && url === "/repos/acme/repository/pulls/7") {
+          response.end(
+            JSON.stringify({
+              base: { ref: baseBranch, repo: { full_name: "acme/repository" } },
+              head: { sha: headSha },
+            }),
+          );
+          return;
+        }
+        response.statusCode = request.method === "PUT" ? 200 : 201;
+        response.end(JSON.stringify({ html_url: "https://github.com/acme/repository/pull/7" }));
+      });
+    });
+    servers.push(upstream);
+    const upstreamPort = await listen(upstream);
+    await writeConfigWithBase(configPath, `${"http:"}//127.0.0.1:${upstreamPort}`, {
+      upstreams: [
+        {
+          name: "github-pr",
+          baseUrl: `${"http:"}//127.0.0.1:${upstreamPort}/repos/acme/repository`,
+          inject: [{ header: "authorization", value: "Bearer host-github-token" }],
+          stripRequestHeaders: ["authorization"],
+          policy: {
+            kind: "github-pull-requests",
+            repositoryNameWithOwner: "acme/repository",
+            protectedBaseBranches: ["main"],
+          },
+        },
+      ],
+    });
+    return { proxy: await startProxy(configPath), seen, headSha };
+  };
+
+  it("creates a pull request targeting a non-main branch", async () => {
+    const { proxy, seen } = await ready();
+    const answer = await call(
+      proxy.port,
+      "/github-pr/create",
+      { authorization: `Bearer ${THREAD_TOKEN}`, "content-type": "application/json" },
+      JSON.stringify({
+        base: "dev",
+        head: "feature/pr",
+        title: "Sandbox PR",
+        body: "",
+        draft: false,
+      }),
+    );
+    expect(answer.status).toBe(201);
+    expect(seen).toEqual([
+      {
+        body: JSON.stringify({
+          base: "dev",
+          head: "feature/pr",
+          title: "Sandbox PR",
+          body: "",
+          draft: false,
+        }),
+        method: "POST",
+        url: "/repos/acme/repository/pulls",
+      },
+    ]);
+  });
+
+  it("allows creation targeting main for the human-gated deployment PR", async () => {
+    const { proxy, seen } = await ready();
+    const answer = await call(
+      proxy.port,
+      "/github-pr/create",
+      { authorization: `Bearer ${THREAD_TOKEN}`, "content-type": "application/json" },
+      JSON.stringify({ base: "main", head: "feature/pr", title: "Sandbox PR", body: "" }),
+    );
+    expect(answer.status).toBe(201);
+    expect(seen).toEqual([
+      {
+        body: JSON.stringify({
+          base: "main",
+          head: "feature/pr",
+          title: "Sandbox PR",
+          body: "",
+          draft: false,
+        }),
+        method: "POST",
+        url: "/repos/acme/repository/pulls",
+      },
+    ]);
+  });
+
+  it("merges the inspected non-main PR through GitHub's guarded PR endpoint", async () => {
+    const { proxy, seen, headSha } = await ready("dev");
+    const answer = await call(
+      proxy.port,
+      "/github-pr/merge",
+      { authorization: `Bearer ${THREAD_TOKEN}`, "content-type": "application/json" },
+      JSON.stringify({ number: 7 }),
+    );
+    expect(answer.status).toBe(200);
+    expect(seen).toEqual([
+      { body: "", method: "GET", url: "/repos/acme/repository/pulls/7" },
+      {
+        body: JSON.stringify({ sha: headSha, merge_method: "merge" }),
+        method: "PUT",
+        url: "/repos/acme/repository/pulls/7/merge",
+      },
+    ]);
+  });
+
+  it("rejects a merge targeting main after the authorization read", async () => {
+    const { proxy, seen } = await ready("main");
+    const answer = await call(
+      proxy.port,
+      "/github-pr/merge",
+      { authorization: `Bearer ${THREAD_TOKEN}`, "content-type": "application/json" },
+      JSON.stringify({ number: 7 }),
+    );
+    expect(answer.status).toBe(403);
+    expect(seen).toEqual([{ body: "", method: "GET", url: "/repos/acme/repository/pulls/7" }]);
   });
 });
 

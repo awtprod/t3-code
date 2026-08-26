@@ -8,7 +8,7 @@ import * as NodeURL from "node:url";
 /**
  * Bundles each sandbox binary into a single self-contained `.mjs` so the
  * container image needs no node_modules. Output names match the binaries the
- * server invokes: t3-preview-bridge, t3-egress-proxy, t3-credential-proxy.
+ * server invokes plus the constrained `gh` shim in the workspace image.
  */
 const root = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const outDir = NodePath.join(root, "dist");
@@ -17,6 +17,7 @@ const BINARIES = [
   { entry: "src/bin/preview-bridge.ts", out: "t3-preview-bridge.mjs" },
   { entry: "src/bin/egress-proxy.ts", out: "t3-egress-proxy.mjs" },
   { entry: "src/bin/credential-proxy.ts", out: "t3-credential-proxy.mjs" },
+  { entry: "src/bin/github-pr.ts", out: "gh.mjs" },
 ] as const;
 
 await NodeFSP.rm(outDir, { recursive: true, force: true });

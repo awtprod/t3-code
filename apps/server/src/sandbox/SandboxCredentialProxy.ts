@@ -37,6 +37,16 @@ export type SandboxCredentialUpstream = {
   readonly baseUrl: string;
   readonly inject: ReadonlyArray<{ readonly header: string; readonly value: string }>;
   readonly stripRequestHeaders: ReadonlyArray<string>;
+  readonly policy?:
+    | {
+        readonly kind: "git-receive-pack";
+        readonly protectedRefs: ReadonlyArray<string>;
+      }
+    | {
+        readonly kind: "github-pull-requests";
+        readonly repositoryNameWithOwner: string;
+        readonly protectedBaseBranches: ReadonlyArray<string>;
+      };
 };
 
 export type SandboxCredentialDocument = {
@@ -51,6 +61,7 @@ export type ThreadCredentialProxyBinding = {
   readonly upstreamNames: ReadonlyArray<string>;
   readonly git?: {
     readonly identity: string;
+    readonly repositoryNameWithOwner: string;
     readonly repositoryRemoteUrl: string;
     readonly rewriteUrls: ReadonlyArray<string>;
   };
@@ -203,7 +214,7 @@ async function resolveGitHubCredentialUpstream(
   tokenResolver: GitHubTokenResolver,
 ): Promise<
   | {
-      readonly upstream: SandboxCredentialUpstream;
+      readonly upstreams: ReadonlyArray<SandboxCredentialUpstream>;
       readonly git: NonNullable<ThreadCredentialProxyBinding["git"]>;
     }
   | undefined
@@ -232,14 +243,32 @@ async function resolveGitHubCredentialUpstream(
   if (token === undefined) return undefined;
   const basicCredential = Buffer.from(`x-access-token:${token}`, "utf8").toString("base64");
   return {
-    upstream: {
-      name: "github",
-      baseUrl: `https://github.com/${repositoryNameWithOwner}.git`,
-      inject: [{ header: "authorization", value: `Basic ${basicCredential}` }],
-      stripRequestHeaders: ["authorization"],
-    },
+    upstreams: [
+      {
+        name: "github",
+        baseUrl: `https://github.com/${repositoryNameWithOwner}.git`,
+        inject: [{ header: "authorization", value: `Basic ${basicCredential}` }],
+        stripRequestHeaders: ["authorization"],
+        policy: {
+          kind: "git-receive-pack",
+          protectedRefs: ["refs/heads/main"],
+        },
+      },
+      {
+        name: "github-pr",
+        baseUrl: `https://api.github.com/repos/${repositoryNameWithOwner}`,
+        inject: [{ header: "authorization", value: `Bearer ${token}` }],
+        stripRequestHeaders: ["authorization"],
+        policy: {
+          kind: "github-pull-requests",
+          repositoryNameWithOwner,
+          protectedBaseBranches: ["main"],
+        },
+      },
+    ],
     git: {
       identity,
+      repositoryNameWithOwner,
       repositoryRemoteUrl,
       rewriteUrls: githubRewriteUrls(repositoryRemoteUrl, repositoryNameWithOwner),
     },
@@ -277,7 +306,7 @@ export async function provisionThreadCredentialProxy(
   const github = await resolveGitHubCredentialUpstream(effectiveOptions, tokenResolver);
   const upstreams = [
     ...resolveSandboxCredentialUpstreams(),
-    ...(github === undefined ? [] : [github.upstream]),
+    ...(github === undefined ? [] : github.upstreams),
   ];
   if (upstreams.length === 0) {
     throw new SandboxCredentialProxyError(
@@ -418,14 +447,30 @@ export class ThreadCredentialProxySidecar {
       .catch(() => undefined);
   }
 
-  async recover(threadId: string) {
+  async recover(threadId: string, expectedImage: string | undefined) {
     const name = credentialContainerName(threadId);
     const result = await this.#executor.run({
       executable: this.#runtime,
-      args: ["inspect", "--format", "{{.State.Running}}", name],
+      args: ["inspect", "--format", "{{.State.Running}} {{.Config.Image}}", name],
       timeoutMs: 10_000,
     });
-    if (result.exitCode !== 0 || result.stdout.trim() !== "true") return false;
+    const [running, image, ...extra] = result.stdout.trim().split(/\s+/);
+    if (
+      result.exitCode !== 0 ||
+      running !== "true" ||
+      image === undefined ||
+      extra.length > 0 ||
+      expectedImage === undefined ||
+      image !== expectedImage
+    ) {
+      unregisterThreadCredentialProxySidecar(threadId);
+      this.#containers.delete(threadId);
+      if (result.exitCode === 0)
+        await this.#executor
+          .run({ executable: this.#runtime, args: ["rm", "--force", name], timeoutMs: 30_000 })
+          .catch(() => undefined);
+      return false;
+    }
     this.#containers.set(threadId, name);
     registerThreadCredentialProxySidecar(threadId, this);
     return true;

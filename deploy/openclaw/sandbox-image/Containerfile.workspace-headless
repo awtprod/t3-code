@@ -53,7 +53,8 @@ RUN npm install --global --omit=dev --no-audit --no-fund \
 # `cdp-automation` and `signal` are run with `podman exec` against whichever
 # container holds the route. Shipping it here keeps both paths on one build.
 COPY bin/t3-preview-bridge.mjs /usr/local/bin/t3-preview-bridge
-RUN chmod 0555 /usr/local/bin/t3-preview-bridge \
+COPY bin/gh.mjs /usr/local/bin/gh
+RUN chmod 0555 /usr/local/bin/t3-preview-bridge /usr/local/bin/gh \
  && /usr/local/bin/t3-preview-bridge --help >/dev/null
 
 # uid/gid 1000 matches the --user the server passes. Both mount points must
