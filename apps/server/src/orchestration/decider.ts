@@ -2032,6 +2032,19 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           `thread ${command.threadId} sandbox is already terminal`,
         );
       }
+      // The expiry reactor reads sessions before dispatching. A turn can start
+      // between those two operations, so reject the stale automatic expiry at
+      // the serialized command boundary. Manual and forced stops remain user-
+      // directed interrupts and are deliberately unaffected.
+      if (
+        command.type === "sandbox.expire" &&
+        (thread.session?.status === "starting" || thread.session?.status === "running")
+      ) {
+        return yield* sandboxInvariant(
+          command.type,
+          `thread ${command.threadId} has an active provider session`,
+        );
+      }
       // A takeover means a person is at the desktop, so an ordinary stop is
       // refused rather than closing their session out from under them.
       // Expiry overrides that because the lifetime cap is not negotiable, and

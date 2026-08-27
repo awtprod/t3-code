@@ -3,6 +3,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationEvent,
   type OrchestrationReadModel,
 } from "@t3tools/contracts";
@@ -417,6 +418,76 @@ it.layer(NodeServices.layer)("sandbox decider", (it) => {
       })) as Omit<Extract<OrchestrationEvent, { type: "sandbox.stopped" }>, "sequence">;
       expect(completed.type).toBe("sandbox.stopped");
       expect(completed.payload.sandbox.lifecycle).toBe("stopped");
+    }),
+  );
+
+  it.effect("refuses automatic expiry while a provider turn is active", () =>
+    Effect.gen(function* () {
+      const ready = {
+        lifecycle: "ready" as const,
+        sandboxId: "sandbox-1" as never,
+        runtime: "podman" as const,
+        runtimeRef: "container-1",
+        branch: BRANCH,
+        limits: {
+          cpuCount: 2,
+          memoryBytes: 4_294_967_296,
+          diskBytes: 21_474_836_480,
+          processCount: 512,
+          idleTimeoutSeconds: 3600,
+          maximumLifetimeSeconds: 28800,
+        },
+        desktop: { status: "unavailable" as const },
+        services: [],
+        controller: { kind: "none" as const },
+        createdAt: NOW,
+        lastActiveAt: NOW,
+      };
+      const base = readModel(ready);
+      const active = {
+        ...base,
+        threads: [
+          {
+            ...base.threads[0]!,
+            session: {
+              threadId: ThreadId.make("thread-1"),
+              status: "running" as const,
+              providerName: "claudeAgent" as const,
+              runtimeMode: "full-access" as const,
+              activeTurnId: TurnId.make("turn-1"),
+              lastError: null,
+              updatedAt: NOW,
+            },
+          },
+        ],
+      };
+
+      const error = yield* Effect.flip(
+        decideOrchestrationCommand({
+          readModel: active,
+          command: {
+            type: "sandbox.expire",
+            commandId: CommandId.make("expire"),
+            threadId: ThreadId.make("thread-1"),
+            createdAt: NOW,
+          },
+        }),
+      );
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+      if (error._tag !== "OrchestrationCommandInvariantError")
+        throw new Error("expected an orchestration invariant error");
+      expect(error.detail).toContain("active provider session");
+
+      const manualStop = (yield* decideOrchestrationCommand({
+        readModel: active,
+        command: {
+          type: "sandbox.stop",
+          commandId: CommandId.make("stop"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+        },
+      })) as Omit<Extract<OrchestrationEvent, { type: "sandbox.stopping" }>, "sequence">;
+      expect(manualStop.type).toBe("sandbox.stopping");
     }),
   );
 

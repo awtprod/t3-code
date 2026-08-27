@@ -6,6 +6,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type SandboxBranchExport,
   type OrchestrationCommand,
   type OrchestrationEvent,
@@ -1154,8 +1155,9 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         // not -- and a failing sweep must not stall the rest of the pass.
         const swept = yield* Deferred.make<ReadonlySet<string>>();
         const continued = yield* Deferred.make<void>();
+        const expired = yield* Deferred.make<void>();
         const dispatched: OrchestrationCommand[] = [];
-        const OLD = "2026-08-15T00:00:00.000Z";
+        const OLD = "1960-01-01T00:00:00.000Z";
         const sandboxOf = (lifecycle: "ready" | "stopped") => ({
           lifecycle,
           runtime: "podman" as const,
@@ -1175,6 +1177,16 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           lastActiveAt: OLD,
         });
         const activeThread = { ...snapshot.threads[0]!, sandbox: sandboxOf("ready") };
+        const backgroundThread = {
+          ...snapshot.threads[0]!,
+          id: ThreadId.make("thread-background"),
+          sandbox: sandboxOf("ready"),
+        };
+        const expiredThread = {
+          ...snapshot.threads[0]!,
+          id: ThreadId.make("thread-expired"),
+          sandbox: sandboxOf("ready"),
+        };
         const stoppedThread = {
           ...snapshot.threads[0]!,
           id: ThreadId.make("thread-stopped"),
@@ -1187,7 +1199,32 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
               localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
             }),
           ),
-          Layer.provide(Layer.mock(ProviderService)({ listSessions: () => Effect.succeed([]) })),
+          Layer.provide(
+            Layer.mock(ProviderService)({
+              listSessions: () =>
+                Effect.succeed([
+                  {
+                    provider: ProviderDriverKind.make("claudeAgent"),
+                    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+                    status: "running" as const,
+                    runtimeMode: "full-access" as const,
+                    threadId,
+                    activeTurnId: TurnId.make("turn-active"),
+                    createdAt: NOW,
+                    updatedAt: NOW,
+                  },
+                  {
+                    provider: ProviderDriverKind.make("claudeAgent"),
+                    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+                    status: "ready" as const,
+                    runtimeMode: "full-access" as const,
+                    threadId: backgroundThread.id,
+                    createdAt: NOW,
+                    updatedAt: NOW,
+                  },
+                ]),
+            }),
+          ),
           Layer.provide(sessionDirectory().layer),
           Layer.provide(
             Layer.succeed(T3ProjectFileLoader, { load: () => Effect.succeed(Option.none()) }),
@@ -1215,7 +1252,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
               getSnapshot: () =>
                 Effect.succeed({
                   ...snapshot,
-                  threads: [activeThread, stoppedThread],
+                  threads: [activeThread, backgroundThread, expiredThread, stoppedThread],
                 } as typeof snapshot),
               getThreadDetailById: () => Effect.succeed(Option.none()),
             }),
@@ -1225,6 +1262,8 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
               dispatch: (command) =>
                 Effect.gen(function* () {
                   dispatched.push(command);
+                  if (command.type === "sandbox.expire" && command.threadId === expiredThread.id)
+                    yield* Deferred.succeed(expired, undefined);
                   return { sequence: dispatched.length };
                 }),
               streamDomainEvents: Stream.empty,
@@ -1238,13 +1277,19 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
             yield* reactor.start();
             const protectedIds = yield* Deferred.await(swept).pipe(Effect.timeout("5 seconds"));
             // The ready thread is shielded; the stopped one is fair game.
-            expect([...protectedIds]).toEqual([threadId]);
+            expect([...protectedIds]).toEqual([threadId, backgroundThread.id, expiredThread.id]);
             // The pass reached per-thread work after the sweep failed: the
             // failure was logged and contained, not propagated.
             yield* Deferred.await(continued).pipe(Effect.timeout("5 seconds"));
+            yield* Deferred.await(expired).pipe(Effect.timeout("5 seconds"));
             yield* reactor.drain;
           }).pipe(Effect.provide(layer)),
         );
+
+        const expiryTargets = dispatched
+          .filter((command) => command.type === "sandbox.expire")
+          .map((command) => command.threadId);
+        expect(expiryTargets).toEqual([expiredThread.id]);
       }),
   );
 
