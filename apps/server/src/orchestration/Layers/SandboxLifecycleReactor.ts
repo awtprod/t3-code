@@ -922,6 +922,11 @@ export const make = Effect.gen(function* () {
             .pipe(Effect.ignore);
         }
       }
+      // A live provider session may own an active turn or background work that
+      // intentionally outlives its turn. The provider-session reaper already
+      // distinguishes that work from an abandoned idle session; once it stops
+      // the latter, the next expiry pass can enforce the elapsed lifetime.
+      if (activeSessions.has(thread.id)) continue;
       const idleAt =
         DateTime.toEpochMillis(DateTime.makeUnsafe(activeAt)) +
         sandbox.limits.idleTimeoutSeconds * 1000;
