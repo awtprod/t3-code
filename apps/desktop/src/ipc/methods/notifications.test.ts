@@ -1,6 +1,5 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
-import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -72,7 +71,10 @@ describe("notifications.showNotification", () => {
     Effect.gen(function* () {
       const sends: Array<{ readonly channel: string; readonly args: readonly unknown[] }> = [];
       const revealed = { count: 0 };
-      const activationSent = yield* Deferred.make<void>();
+      let signalActivation!: () => void;
+      const activationSent = new Promise<void>((resolve) => {
+        signalActivation = resolve;
+      });
       const activateRef: { current: (() => void) | null } = { current: null };
 
       yield* showNotification
@@ -91,14 +93,14 @@ describe("notifications.showNotification", () => {
               },
               sends,
               revealed,
-              onSend: () => Effect.runFork(Deferred.succeed(activationSent, undefined)),
+              onSend: signalActivation,
             }),
           ),
         );
 
       activateRef.current?.();
       // The activation runs on its own promise outside this fiber.
-      yield* Deferred.await(activationSent);
+      yield* Effect.promise(() => activationSent);
 
       assert.equal(revealed.count, 1);
       assert.deepEqual(sends, [
