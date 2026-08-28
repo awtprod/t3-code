@@ -424,6 +424,44 @@ function isMissingGitCwdError(error: GitCommandError): boolean {
 function isNonRepositoryGitStderr(stderr: string): boolean {
   return stderr.toLowerCase().includes("not a git repository");
 }
+
+/**
+ * Git could not use `cwd` as a workspace at all — the directory is missing,
+ * unreadable, or not a directory — so it failed before reaching any repository.
+ *
+ * Treated like "not a repository" rather than like a Git error. The distinction
+ * that matters to callers is not *why* the workspace is unusable but whether a
+ * status is knowable: in both cases it is not, and in neither case does
+ * retrying or failing the caller's operation produce one. Escalating instead
+ * aborted whole provider turns for a thread pointed at a directory the server
+ * user cannot traverse (e.g. a repo under another user's `$HOME`), because the
+ * status read sits upstream of the send and its error propagated out.
+ *
+ * Deliberately narrow: only failures to enter the workspace are absorbed.
+ * A real Git fault inside a readable repository — a corrupt index, a bad
+ * object, a config error — still surfaces, because those are actionable and
+ * reporting them as "no repository here" would hide real damage.
+ */
+function isUnusableGitCwdStderr(stderr: string): boolean {
+  const normalized = stderr.toLowerCase();
+  return (
+    normalized.includes("cannot change to") ||
+    (normalized.includes("permission denied") &&
+      (normalized.includes("cannot open") || normalized.includes("cannot access"))) ||
+    normalized.includes("no such file or directory") ||
+    normalized.includes("not a directory")
+  );
+}
+
+/**
+ * The workspace yields no Git status and never will on this call: either it is
+ * not a repository, or Git could not enter it. Callers that can render an empty
+ * status use this to degrade instead of failing.
+ */
+function isUnavailableRepositoryGitStderr(stderr: string): boolean {
+  return isNonRepositoryGitStderr(stderr) || isUnusableGitCwdStderr(stderr);
+}
+
 function isUnbornHeadStderr(stderr: string): boolean {
   const normalized = stderr.toLowerCase();
   return (
@@ -1040,7 +1078,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     );
     if (commonDirResult.exitCode !== 0) {
       const stderr = commonDirResult.stderr.trim();
-      if (isNonRepositoryGitStderr(stderr)) {
+      if (isUnavailableRepositoryGitStderr(stderr)) {
         return null;
       }
       return yield* new GitCommandError({
@@ -1497,7 +1535,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     }
     let branch: string | null;
     if (branchResult.exitCode !== 0) {
-      if (isNonRepositoryGitStderr(branchResult.stderr)) {
+      if (isUnavailableRepositoryGitStderr(branchResult.stderr)) {
         return NON_REPOSITORY_REMOTE_STATUS_DETAILS;
       }
       if (!isUnbornHeadStderr(branchResult.stderr)) {
@@ -1593,7 +1631,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     }
 
     if (statusResult.exitCode !== 0) {
-      if (isNonRepositoryGitStderr(statusResult.stderr)) {
+      if (isUnavailableRepositoryGitStderr(statusResult.stderr)) {
         return NON_REPOSITORY_STATUS_DETAILS;
       }
       return yield* new GitCommandError({
