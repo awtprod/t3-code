@@ -175,6 +175,8 @@ describe("ProviderCommandReactor", () => {
       ProviderAdapterRequestError | ProviderAdapterValidationError
     >;
     readonly sandboxImages?: "both" | "image-only" | "none";
+    readonly projectRepository?: "git" | "unknown";
+    readonly threadSandboxBranch?: "configured" | "missing";
     /**
      * Force the disposition the provision reports for the provider's
      * conversation store. Defaults to the fresh-container behaviour derived
@@ -494,10 +496,10 @@ describe("ProviderCommandReactor", () => {
           renameBranch,
           localStatus: () =>
             Effect.succeed({
-              isRepo: true,
+              isRepo: input?.projectRepository !== "unknown",
               hasPrimaryRemote: true,
               isDefaultRef: true,
-              refName: "main",
+              refName: input?.projectRepository === "unknown" ? null : "main",
               hasWorkingTreeChanges: false,
               workingTree: { files: [], insertions: 0, deletions: 0 },
             }),
@@ -594,7 +596,14 @@ describe("ProviderCommandReactor", () => {
         branch: null,
         worktreePath: null,
         sandboxConfig: {},
-        sandboxBranch: { branchName: "t3/thread/thread-1", baseCommit: "a".repeat(40) },
+        ...(input?.threadSandboxBranch === "missing"
+          ? {}
+          : {
+              sandboxBranch: {
+                branchName: "t3/thread/thread-1",
+                baseCommit: "a".repeat(40),
+              },
+            }),
         createdAt: now,
       }),
     );
@@ -710,6 +719,64 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
+
+  effectIt.effect("surfaces sandbox repository detection failures on the thread", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          projectRepository: "unknown",
+          threadSandboxBranch: "missing",
+        }),
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-missing-repository"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-missing-repository"),
+          role: "user",
+          text: "start in this repository",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+
+      yield* Effect.promise(() =>
+        waitFor(async () => {
+          const thread = (await harness.readModel()).threads.find(
+            (entry) => entry.id === ThreadId.make("thread-1"),
+          );
+          return (
+            thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+            false
+          );
+        }),
+      );
+
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(harness.provisionSandbox).not.toHaveBeenCalled();
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(thread?.session).toMatchObject({
+        status: "error",
+        lastError: "Isolated threads require a Git repository with a selected branch.",
+      });
+      expect(
+        thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
+      ).toMatchObject({
+        tone: "error",
+        payload: {
+          detail: "Isolated threads require a Git repository with a selected branch.",
+        },
+      });
+    }),
+  );
 
   it("waits for an in-flight sandbox provision before starting the provider", async () => {
     const harness = await createHarness({ blockFirstThreadRead: true });

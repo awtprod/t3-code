@@ -16,8 +16,13 @@ const processOutput = (stdout: string): VcsProcess.VcsProcessOutput => ({
   stderrTruncated: false,
 });
 
-const normalizeGitArgs = (args: ReadonlyArray<string>): ReadonlyArray<string> =>
-  args[0] === "-C" && args.length >= 2 ? args.slice(2) : args;
+const normalizeGitArgs = (args: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const afterSafeDirectory =
+    args[0] === "-c" && args[1]?.startsWith("safe.directory=") ? args.slice(2) : args;
+  return afterSafeDirectory[0] === "-C" && afterSafeDirectory.length >= 2
+    ? afterSafeDirectory.slice(2)
+    : afterSafeDirectory;
+};
 
 describe("VcsDriverRegistry", () => {
   it.effect("routes directly by VCS driver kind for non-repository workflows", () => {
@@ -57,9 +62,7 @@ describe("VcsDriverRegistry", () => {
           run: (input) =>
             Effect.sync(() => {
               calls.push(input);
-              const normalizedArgs =
-                input.args[0] === "-C" && input.args.length >= 2 ? input.args.slice(2) : input.args;
-              const command = normalizedArgs.join(" ");
+              const command = normalizeGitArgs(input.args).join(" ");
               if (command === "rev-parse --is-inside-work-tree") {
                 return processOutput("true\n");
               }
