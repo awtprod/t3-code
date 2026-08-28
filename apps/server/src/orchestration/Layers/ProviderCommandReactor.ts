@@ -1297,7 +1297,7 @@ export const make = Effect.gen(function* () {
     }
 
     // Provisioning reconciles the provider-store disposition before this read.
-    // A missing cursor here means the replacement Codex process cannot possibly
+    // A missing cursor here means the replacement provider process cannot
     // recover its native conversation, so the first prompt must carry the
     // persisted Command Center transcript instead of arriving context-free.
     const bindingAfterProvision = Option.getOrUndefined(
@@ -1310,8 +1310,9 @@ export const make = Effect.gen(function* () {
     const startedCodexThreadId = readCodexResumeCursorThreadId(startedSession.resumeCursor);
     const shouldRecoverConversation =
       executionTarget.kind === "sandbox" &&
-      preferredProvider === "codex" &&
-      (requestedCodexThreadId === undefined || startedCodexThreadId !== requestedCodexThreadId);
+      (bindingAfterProvision?.resumeCursor === null ||
+        bindingAfterProvision?.resumeCursor === undefined ||
+        (preferredProvider === "codex" && startedCodexThreadId !== requestedCodexThreadId));
     yield* bindSessionToThread(startedSession);
     return { shouldRecoverConversation } as const;
   });
@@ -1358,7 +1359,7 @@ export const make = Effect.gen(function* () {
         })
       : normalizedInput;
     if (sessionStart.shouldRecoverConversation && providerInput !== normalizedInput) {
-      yield* Effect.logInfo("provider command reactor seeded a fresh Codex conversation", {
+      yield* Effect.logInfo("provider command reactor seeded a fresh sandbox conversation", {
         threadId: input.threadId,
         recoveredMessageCount: thread.messages.filter(
           (message) => message.id !== input.messageId && !message.streaming,

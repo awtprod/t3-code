@@ -1222,6 +1222,75 @@ describe("ProviderCommandReactor", () => {
     expect(recoveredInput?.input).toContain("CURRENT USER MESSAGE:\nwhat word?");
   });
 
+  it("recovers the transcript when a Claude sandbox has no resume cursor", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-4-6",
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-claude-cold-start"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-before-claude-cold-start"),
+          role: "user",
+          text: "remember pineapple",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-provider-stop-before-claude-cold-start"),
+        threadId,
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await harness.runEffect(
+      harness.providerSessionDirectory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        resumeCursor: null,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-after-claude-cold-start"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-after-claude-cold-start"),
+          role: "user",
+          text: "what word?",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    const recoveredInput = harness.sendTurn.mock.calls[1]?.[0] as { input?: string } | undefined;
+    expect(recoveredInput?.input).toContain("[Command Center conversation recovery]");
+    expect(recoveredInput?.input).toContain("USER:\nremember pineapple");
+    expect(recoveredInput?.input).toContain("CURRENT USER MESSAGE:\nwhat word?");
+  });
+
   it("keeps the resume cursor when the container survived and nothing needed restoring", async () => {
     // The regression this covers: the reactor cleared the cursor whenever the
     // provision had not RESTORED a store -- which is also true of a container
