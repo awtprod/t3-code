@@ -1,4 +1,5 @@
 import type { SandboxBootstrap, SandboxCache, SandboxExecInput, SandboxHook } from "./types.ts";
+import { asSandboxGitRemoteUrl } from "./SandboxGitIdentity.ts";
 
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const COMMIT = /^[0-9a-f]{40,64}$/i;
@@ -53,6 +54,17 @@ export function validateBootstrap(input: SandboxBootstrap): void {
     input.repositoryBundlePath.includes("..")
   ) {
     throw new SandboxValidationError("repository bundle path is invalid");
+  }
+  if (input.repositoryRemoteUrl !== undefined) {
+    if (asSandboxGitRemoteUrl(input.repositoryRemoteUrl) === undefined) {
+      throw new SandboxValidationError("repositoryRemoteUrl must be a supported Git remote URL");
+    }
+  }
+  if (
+    input.repositoryPushRemoteUrl !== undefined &&
+    asSandboxGitRemoteUrl(input.repositoryPushRemoteUrl) === undefined
+  ) {
+    throw new SandboxValidationError("repositoryPushRemoteUrl must be a supported Git remote URL");
   }
   // Server-generated, but it lands on a git command line as a refspec, so it
   // gets the same shape check as every other value that does.

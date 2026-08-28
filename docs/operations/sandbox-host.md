@@ -405,8 +405,9 @@ Edit `/etc/systemd/system/command-center.service.d/50-sandbox.conf` and uncommen
 - `EnvironmentFile=-/etc/command-center/sandbox-credentials.env` — the token from
   section 5b. Safe to uncomment before the file exists (the `-` prefix keeps the
   unit starting).
-- Optionally `T3_SANDBOX_ARTIFACT_DIR`, `T3_SANDBOX_DESKTOP=disabled`,
-  `T3_SANDBOX_GIT_USER_NAME`, `T3_SANDBOX_GIT_USER_EMAIL`.
+- Optionally `T3_SANDBOX_ARTIFACT_DIR`, `T3_SANDBOX_DESKTOP=disabled`, and
+  `T3_SANDBOX_GIT_USER_NAME` plus `T3_SANDBOX_GIT_USER_EMAIL` to override the
+  stable `Command Center <commandcenter@example.com>` sandbox commit identity.
 
 The minimum working set is **five `Environment=` lines plus the credential
 file**, not two. Uncommenting only the two images produces a host where every

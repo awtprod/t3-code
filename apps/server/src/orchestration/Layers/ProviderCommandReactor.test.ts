@@ -502,7 +502,13 @@ describe("ProviderCommandReactor", () => {
               workingTree: { files: [], insertions: 0, deletions: 0 },
             }),
           resolveRemoteTrackingCommit: () =>
-            Effect.succeed({ commitSha: "a".repeat(40), remoteRefName: "origin/main" }),
+            Effect.succeed({
+              commitSha: "a".repeat(40),
+              remoteRefName: "origin/main",
+              remoteName: "origin",
+              remoteUrl: "https://github.com/T3Tools/t3code.git",
+              remotePushUrl: "https://github.com/T3Tools/t3code.git",
+            }),
         } satisfies Partial<GitWorkflowService.GitWorkflowService["Service"]>),
       ),
       Layer.provideMerge(

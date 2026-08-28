@@ -1579,6 +1579,9 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
 
         const driver = yield* GitVcsDriver.GitVcsDriver;
         yield* driver.fetchRemote({ cwd, remoteName: "origin" });
+        const pushRemote = yield* makeTmpDir("git-push-remote-");
+        yield* git(pushRemote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "set-url", "--push", "origin", pushRemote]);
 
         const resolvedBase = yield* driver.resolveRemoteTrackingCommit({
           cwd,
@@ -1594,6 +1597,9 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.deepEqual(resolvedBase, {
           commitSha: remoteHead,
           remoteRefName: `origin/${initialBranch}`,
+          remoteName: "origin",
+          remoteUrl: remote,
+          remotePushUrl: pushRemote,
         });
         assert.deepEqual(explicitlyResolvedBase, resolvedBase);
         assert.equal(yield* git(cwd, ["rev-parse", initialBranch]), beforeFetch);

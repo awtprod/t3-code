@@ -337,28 +337,48 @@ describe("ContainerSandboxBackend", () => {
 
     // A container that is already there, with its provider home intact: the
     // conversation is where it was left, so nothing needed restoring.
-    const survivor = await new ContainerSandboxBackend(
-      "docker",
-      successfulExecutor((command) =>
-        command.args[0] === "inspect"
-          ? {
-              exitCode: 0,
-              stdout: [
-                "thread-1",
-                "project-1",
-                "true",
-                input().image,
-                "a".repeat(40),
-                "thread/thread-1",
-                "workspace",
-                "true",
-              ].join("\t"),
-              stderr: "",
-            }
-          : undefined,
-      ),
-    ).ensureReady(input());
+    const survivorExecutor = successfulExecutor((command) =>
+      command.args[0] === "inspect"
+        ? {
+            exitCode: 0,
+            stdout: [
+              "thread-1",
+              "project-1",
+              "true",
+              input().image,
+              "a".repeat(40),
+              "thread/thread-1",
+              "workspace",
+              "true",
+            ].join("\t"),
+            stderr: "",
+          }
+        : undefined,
+    );
+    const survivor = await new ContainerSandboxBackend("docker", survivorExecutor).ensureReady(
+      input({
+        bootstrap: {
+          ...input().bootstrap,
+          repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle",
+          repositoryBundleRef: "refs/t3-sandbox-seed/test",
+          repositoryRemoteUrl: "https://example.test/repository.git",
+        },
+      }),
+    );
     expect(survivor.providerStore).toBe("preserved");
+    expect(
+      survivorExecutor.commands.some(
+        (command) =>
+          command.args.includes("config") &&
+          command.args.includes("remote.origin.url") &&
+          command.args.includes("https://example.test/repository.git"),
+      ),
+    ).toBe(true);
+    expect(
+      survivorExecutor.commands.some(
+        (command) => command.args.includes("config") && command.args.includes("user.email"),
+      ),
+    ).toBe(true);
   });
 
   it("reports a cached container's store as preserved rather than replaying the first provision", async () => {
@@ -377,9 +397,11 @@ describe("ContainerSandboxBackend", () => {
     const commandsAfterProvision = executor.commands.length;
     const cached = await backend.ensureReady(input());
     expect(cached.providerStore).toBe("preserved");
-    // Nothing was rebuilt to say so: the second call is still a cache hit, so
-    // it issues no runtime commands at all.
-    expect(executor.commands).toHaveLength(commandsAfterProvision);
+    const repairCommands = executor.commands.slice(commandsAfterProvision);
+    // Nothing was rebuilt: a cache hit only idempotently repairs Git metadata.
+    expect(repairCommands.every((command) => command.args[0] === "exec")).toBe(true);
+    expect(repairCommands.every((command) => command.args.includes("config"))).toBe(true);
+    expect(repairCommands.some((command) => command.args.includes("user.email"))).toBe(true);
     // ...and every other field still describes the container that is running:
     // `providerStore` is the one thing that had to change.
     expect({ ...cached, providerStore: fresh.providerStore }).toEqual(fresh);
@@ -759,6 +781,30 @@ describe("ContainerSandboxBackend", () => {
       backend.ensureReady(input({ bootstrap: { ...input().bootstrap, threadId: "../other" } })),
     ).rejects.toThrow("unsafe");
     await expect(
+      backend.ensureReady(
+        input({
+          bootstrap: {
+            ...input().bootstrap,
+            repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle",
+            repositoryBundleRef: "refs/t3-sandbox-seed/test",
+            repositoryRemoteUrl: "file:///etc/passwd",
+          },
+        }),
+      ),
+    ).rejects.toThrow("supported Git remote URL");
+    await expect(
+      backend.ensureReady(
+        input({
+          bootstrap: {
+            ...input().bootstrap,
+            repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle",
+            repositoryBundleRef: "refs/t3-sandbox-seed/test",
+            repositoryPushRemoteUrl: "file:///etc/passwd",
+          },
+        }),
+      ),
+    ).rejects.toThrow("supported Git remote URL");
+    await expect(
       backend.ensureReady(input({ caches: [{ digest: "d".repeat(64), target: "/etc/ssh" }] })),
     ).rejects.toThrow("protected path");
     await expect(backend.ensureReady(input({ image: "sandbox:latest" }))).rejects.toThrow(
@@ -951,6 +997,8 @@ describe("ContainerSandboxBackend", () => {
       ...base,
       bootstrap: {
         ...base.bootstrap,
+        repositoryRemoteUrl: "https://example.test/repository.git",
+        repositoryPushRemoteUrl: "ssh://git@example.test/repository.git",
         repositoryBundlePath: "/var/lib/t3/seeds/seed.bundle",
         repositoryBundleRef: bundleRef,
       },
@@ -971,6 +1019,38 @@ describe("ContainerSandboxBackend", () => {
           command.args.includes("fetch") &&
           command.args.includes(containerBundle) &&
           command.args.includes(`${bundleRef}:${bundleRef}`),
+      ),
+    ).toBe(true);
+    expect(
+      executor.commands.some(
+        (command) =>
+          command.args.includes("config") &&
+          command.args.includes("remote.origin.pushurl") &&
+          command.args.includes("ssh://git@example.test/repository.git"),
+      ),
+    ).toBe(true);
+    expect(
+      executor.commands.some(
+        (command) =>
+          command.args.includes("config") &&
+          command.args.includes("branch.thread/thread-1.remote") &&
+          command.args.includes("origin"),
+      ),
+    ).toBe(true);
+    expect(
+      executor.commands.some(
+        (command) =>
+          command.args.includes("config") &&
+          command.args.includes("branch.thread/thread-1.merge") &&
+          command.args.includes("refs/heads/thread/thread-1"),
+      ),
+    ).toBe(true);
+    expect(
+      executor.commands.some(
+        (command) =>
+          command.args.includes("config") &&
+          command.args.includes("remote.origin.url") &&
+          command.args.includes("https://example.test/repository.git"),
       ),
     ).toBe(true);
     // Nothing verifies the bundle beforehand: there is no repository to verify

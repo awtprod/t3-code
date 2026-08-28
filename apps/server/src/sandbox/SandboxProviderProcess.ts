@@ -7,6 +7,7 @@ import type { SandboxExecutionTarget } from "./ThreadSandboxRuntime.ts";
 import { runtimeEnvironment } from "./NodeSandboxCommandExecutor.ts";
 import { redeemSandboxProviderEnvironment } from "./SandboxRuntimeManager.ts";
 import { threadCredentialProxyBinding } from "./SandboxCredentialProxy.ts";
+import { resolveSandboxGitIdentity } from "./SandboxGitIdentity.ts";
 
 export type SandboxProviderBindingOwner = symbol;
 type SandboxProviderBinding = {
@@ -195,10 +196,16 @@ export function sandboxProviderInvocation(
     }
     if (proxy.upstreamNames.includes("github") && proxy.git !== undefined) {
       const githubProxyUrl = `${proxy.baseUrl}/github`;
+      const gitIdentity = resolveSandboxGitIdentity();
       const gitConfig: ReadonlyArray<readonly [string, string]> = [
         ...proxy.git.rewriteUrls.map(
           (remoteUrl) => [`url.${githubProxyUrl}.insteadOf`, remoteUrl] as const,
         ),
+        ["remote.origin.url", proxy.git.repositoryRemoteUrl],
+        ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        ["push.autoSetupRemote", "true"],
+        ["user.name", gitIdentity.name],
+        ["user.email", gitIdentity.email],
         [`http.${githubProxyUrl}.extraHeader`, `Authorization: Bearer ${proxy.threadToken}`],
       ];
       proxyEnvironment.GIT_CONFIG_COUNT = String(gitConfig.length);

@@ -174,6 +174,9 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
               Effect.succeed({
                 commitSha: "0123456789abcdef0123456789abcdef01234567",
                 remoteRefName: "origin/main",
+                remoteName: "origin",
+                remoteUrl: "https://github.com/contributor/t3code.git",
+                remotePushUrl: "https://github.com/contributor/t3code.git",
               }),
           }),
         ),
@@ -269,6 +272,9 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
           threadId,
           projectId,
           repositoryUrl: "/tmp/manual-sandbox-project",
+          // The project identity above is canonical upstream; pushes belong to
+          // the tracked contributor fork returned by Git.
+          repositoryRemoteUrl: "https://github.com/contributor/t3code.git",
           baseCommit: "0123456789abcdef0123456789abcdef01234567",
           branchName: `t3/thread/${threadId}`,
         },
@@ -316,6 +322,9 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
                   Effect.succeed({
                     commitSha: "0123456789abcdef0123456789abcdef01234567",
                     remoteRefName: "origin/main",
+                    remoteName: "origin",
+                    remoteUrl: "https://github.com/T3Tools/t3code.git",
+                    remotePushUrl: "https://github.com/T3Tools/t3code.git",
                   }),
               }),
             ),
@@ -457,6 +466,9 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
               Effect.succeed({
                 commitSha: "0123456789abcdef0123456789abcdef01234567",
                 remoteRefName: "origin/main",
+                remoteName: "origin",
+                remoteUrl: "https://github.com/T3Tools/t3code.git",
+                remotePushUrl: "https://github.com/T3Tools/t3code.git",
               }),
           }),
         ),
@@ -590,6 +602,9 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
                 Effect.succeed({
                   commitSha: "0123456789abcdef0123456789abcdef01234567",
                   remoteRefName: "origin/main",
+                  remoteName: "origin",
+                  remoteUrl: "https://github.com/T3Tools/t3code.git",
+                  remotePushUrl: "https://github.com/T3Tools/t3code.git",
                 }),
             }),
           ),
@@ -1371,6 +1386,9 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
               Effect.succeed({
                 commitSha: "0123456789abcdef0123456789abcdef01234567",
                 remoteRefName: "origin/main",
+                remoteName: "origin",
+                remoteUrl: "https://github.com/T3Tools/t3code.git",
+                remotePushUrl: "https://github.com/T3Tools/t3code.git",
               }),
           }),
         ),

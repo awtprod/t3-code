@@ -32,6 +32,7 @@ import {
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import type { SandboxAdoptionHint } from "../../sandbox/types.ts";
 import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
+import { asSandboxGitRemoteUrl } from "../../sandbox/SandboxGitIdentity.ts";
 import { dispatchProvisionReadyOrTearDown } from "../../sandbox/provisionReadyDispatch.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -75,6 +76,20 @@ export const make = Effect.gen(function* () {
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((id) => CommandId.make(`server:${tag}:${id}`)));
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+  const resolveTracking = Effect.fn("SandboxLifecycleReactor.resolveTracking")(function* (
+    cwd: string,
+  ) {
+    const local = yield* gitWorkflow.localStatus({ cwd });
+    if (!local.isRepo || local.refName === null)
+      return yield* new SandboxManagerError({
+        message: "Isolated threads require a Git repository with a selected branch.",
+      });
+    return yield* gitWorkflow.resolveRemoteTrackingCommit({
+      cwd,
+      refName: local.refName,
+      fallbackRemoteName: "origin",
+    });
+  });
 
   /**
    * The config to record on an inline provision, with the runtime resolved.
@@ -265,25 +280,21 @@ export const make = Effect.gen(function* () {
           .pipe(Effect.ignore);
         return;
       }
-      const branch =
-        thread.sandbox?.branch ??
-        thread.sandboxBranch ??
-        (yield* Effect.gen(function* () {
-          const local = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
-          if (!local.isRepo || local.refName === null)
-            return yield* new SandboxManagerError({
-              message: "Isolated threads require a Git repository with a selected branch.",
-            });
-          const base = yield* gitWorkflow.resolveRemoteTrackingCommit({
-            cwd: project.workspaceRoot,
-            refName: local.refName,
-            fallbackRemoteName: "origin",
-          });
-          return {
-            branchName: `t3/thread/${thread.id}`,
-            baseCommit: base.commitSha,
-          };
-        }));
+      const recordedBranch = thread.sandbox?.branch ?? thread.sandboxBranch;
+      const tracking =
+        recordedBranch === null || recordedBranch === undefined
+          ? yield* resolveTracking(project.workspaceRoot)
+          : Option.getOrUndefined(
+              yield* resolveTracking(project.workspaceRoot).pipe(Effect.option),
+            );
+      const branch = recordedBranch ?? {
+        branchName: `t3/thread/${thread.id}`,
+        baseCommit: tracking!.commitSha,
+      };
+      const repositoryRemoteUrl =
+        asSandboxGitRemoteUrl(tracking?.remoteUrl) ??
+        asSandboxGitRemoteUrl(tracking?.remotePushUrl);
+      const repositoryPushRemoteUrl = asSandboxGitRemoteUrl(tracking?.remotePushUrl);
       const config = yield* resolvedConfig({
         ...(declaration?.limits === undefined ? {} : { limits: declaration.limits }),
         ...thread.sandboxConfig,
@@ -316,6 +327,10 @@ export const make = Effect.gen(function* () {
           // Repository identity can name upstream while this base commit comes
           // from the local fork. Seed from the checkout that resolved it.
           repositoryUrl: project.workspaceRoot,
+          ...(repositoryRemoteUrl ? { repositoryRemoteUrl } : {}),
+          ...(repositoryPushRemoteUrl && repositoryPushRemoteUrl !== repositoryRemoteUrl
+            ? { repositoryPushRemoteUrl }
+            : {}),
           baseCommit: branch.baseCommit,
           branchName: branch.branchName,
         },
@@ -531,6 +546,13 @@ export const make = Effect.gen(function* () {
       // accepted a few lines up, so this provision is not a stale one, and the
       // token it gets back identifies this attempt to everything below.
       const attempt = yield* runtimes.authorizeProvision(event.payload.childThreadId);
+      const tracking = Option.getOrUndefined(
+        yield* resolveTracking(project.workspaceRoot).pipe(Effect.option),
+      );
+      const repositoryRemoteUrl =
+        asSandboxGitRemoteUrl(tracking?.remoteUrl) ??
+        asSandboxGitRemoteUrl(tracking?.remotePushUrl);
+      const repositoryPushRemoteUrl = asSandboxGitRemoteUrl(tracking?.remotePushUrl);
       const provision = yield* runtimes.provision({
         attempt,
         bootstrap: {
@@ -539,6 +561,10 @@ export const make = Effect.gen(function* () {
           // Inherited commits can be fork-only too; the parent checkout is the
           // authoritative source for the seed bundle.
           repositoryUrl: project.workspaceRoot,
+          ...(repositoryRemoteUrl ? { repositoryRemoteUrl } : {}),
+          ...(repositoryPushRemoteUrl && repositoryPushRemoteUrl !== repositoryRemoteUrl
+            ? { repositoryPushRemoteUrl }
+            : {}),
           baseCommit: event.payload.inheritedCommit,
           branchName: event.payload.branchName,
           parentThreadId: event.payload.parentThreadId,
