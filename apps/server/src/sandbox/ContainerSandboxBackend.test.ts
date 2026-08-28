@@ -71,7 +71,7 @@ function successfulExecutor(
     if (command.args[0] === "exec" && command.args.includes("find"))
       return {
         exitCode: 0,
-        stdout: "/thread-data/provider-home/.codex/sessions\n",
+        stdout: "/thread-data/provider-home/.codex/sessions\0",
         stderr: "",
       };
     return { exitCode: 0, stdout: "", stderr: "" };
@@ -109,7 +109,7 @@ function findAgainst(
     if (segments.length < minimum || segments.length > maximum) return false;
     return names.has(segments.at(-1) ?? "");
   });
-  return { exitCode: 0, stdout: matched.map((path) => `${path}\n`).join(""), stderr: "" };
+  return { exitCode: 0, stdout: matched.map((path) => `${path}\0`).join(""), stderr: "" };
 }
 
 describe("ContainerSandboxBackend", () => {
@@ -231,6 +231,58 @@ describe("ContainerSandboxBackend", () => {
     // Archived from the provider home itself, so nothing outside it -- the
     // workspace, /tmp -- can ride along.
     expect(tar!.args).toContain("/thread-data/provider-home");
+    // The home itself is intentionally not archived. Codex also writes large
+    // package, log, attachment, worktree, and state data there; tarring all of
+    // it made the store overflow /tmp or the 50 MB artifact ceiling, after
+    // which teardown silently discarded the conversation.
+    const operands = tar!.args.slice(tar!.args.lastIndexOf("--") + 1);
+    expect(operands).toEqual([".codex/sessions"]);
+    expect(operands).not.toContain(".");
+  });
+
+  it("archives every provider transcript layout and nothing else from the provider home", async () => {
+    const executor = successfulExecutor((command) => {
+      if (command.args[0] === "exec" && command.args.includes("find"))
+        return findAgainst(command, [
+          "/thread-data/provider-home/.codex/sessions",
+          "/thread-data/provider-home/.claude/projects",
+          "/thread-data/provider-home/.codex/packages",
+          "/thread-data/provider-home/.codex/log",
+        ]);
+      if (command.args[0] === "exec" && command.args.includes("stat"))
+        return { exitCode: 0, stdout: "4096\n", stderr: "" };
+      return undefined;
+    });
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+    await backend.exportProviderStore("thread-1", "/artifacts/store.tar", 50 * 1024 * 1024);
+
+    const tar = executor.commands.find(
+      (command) => command.args[0] === "exec" && command.args.includes("tar"),
+    )!;
+    expect(tar.args.slice(tar.args.lastIndexOf("--") + 1)).toEqual([
+      ".claude/projects",
+      ".codex/sessions",
+    ]);
+  });
+
+  it("does not create an archive when the provider has no resumable transcript", async () => {
+    const executor = successfulExecutor((command) =>
+      command.args[0] === "exec" && command.args.includes("find")
+        ? { exitCode: 0, stdout: "", stderr: "" }
+        : undefined,
+    );
+    const backend = new ContainerSandboxBackend("docker", executor);
+    await backend.ensureReady(input());
+
+    expect(
+      await backend.exportProviderStore("thread-1", "/artifacts/store.tar", 50 * 1024 * 1024),
+    ).toBeUndefined();
+    expect(
+      executor.commands.some(
+        (command) => command.args[0] === "exec" && command.args.includes("tar"),
+      ),
+    ).toBe(false);
   });
 
   it("skips a provider store larger than the ceiling instead of copying it out", async () => {
