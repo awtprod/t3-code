@@ -33,6 +33,10 @@ export type SandboxBootstrap = {
   readonly threadId: string;
   readonly projectId: string;
   readonly repositoryUrl: string;
+  /** Real Git remote restored after a local checkout is transferred by bundle. */
+  readonly repositoryRemoteUrl?: string;
+  /** Effective push URL when it differs from the fetch URL. */
+  readonly repositoryPushRemoteUrl?: string;
   readonly baseCommit: string;
   readonly branchName: string;
   readonly parentThreadId?: string;

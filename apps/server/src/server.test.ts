@@ -7442,6 +7442,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               return {
                 commitSha: fetchedOriginCommit,
                 remoteRefName: "origin/main",
+                remoteName: "origin",
+                remoteUrl: "https://github.com/T3Tools/t3code.git",
+                remotePushUrl: "https://github.com/T3Tools/t3code.git",
               };
             }),
         );
@@ -7612,6 +7615,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             Effect.succeed({
               commitSha: "0123456789abcdef0123456789abcdef01234567",
               remoteRefName: "origin/main",
+              remoteName: "origin",
+              remoteUrl: "https://github.com/T3Tools/t3code.git",
+              remotePushUrl: "https://github.com/T3Tools/t3code.git",
             }),
         );
         const createWorktree = vi.fn(
@@ -7822,7 +7828,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
         const resolveRemoteTrackingCommit = vi.fn(
           (_: Parameters<GitVcsDriver.GitVcsDriver["Service"]["resolveRemoteTrackingCommit"]>[0]) =>
-            Effect.succeed({ commitSha: "deadbeef", remoteRefName: "refs/remotes/origin/main" }),
+            Effect.succeed({
+              commitSha: "deadbeef",
+              remoteRefName: "refs/remotes/origin/main",
+              remoteName: "origin",
+              remoteUrl: "https://github.com/T3Tools/t3code.git",
+              remotePushUrl: "https://github.com/T3Tools/t3code.git",
+            }),
         );
 
         yield* buildAppUnderTest({

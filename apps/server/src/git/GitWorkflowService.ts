@@ -78,7 +78,13 @@ export class GitWorkflowService extends Context.Service<
       readonly refName: string;
       readonly fallbackRemoteName: string;
     }) => Effect.Effect<
-      { readonly commitSha: string; readonly remoteRefName: string },
+      {
+        readonly commitSha: string;
+        readonly remoteRefName: string;
+        readonly remoteName: string;
+        readonly remoteUrl: string;
+        readonly remotePushUrl: string;
+      },
       GitCommandError
     >;
     readonly removeWorktree: (

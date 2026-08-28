@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - test creates a real scratch directory for the seed bundle.
 import { describe, expect, it } from "@effect/vitest";
 import { afterEach } from "vite-plus/test";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
@@ -10,6 +11,7 @@ import * as Fiber from "effect/Fiber";
 import { SandboxId, ThreadId } from "@t3tools/contracts";
 import { ContainerSandboxBackend } from "./ContainerSandboxBackend.ts";
 import {
+  bindThreadCredentialProxy,
   provisionThreadCredentialProxy,
   resolveSandboxCredentialUpstreams,
   ThreadCredentialProxySidecar,
@@ -26,6 +28,18 @@ import type {
   SandboxCommandResult,
   SandboxProvisionInput,
 } from "./types.ts";
+
+function runGit(cwd: string, args: ReadonlyArray<string>, env = process.env): string {
+  const result = NodeChildProcess.spawnSync("git", args, {
+    cwd,
+    env,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
+  }
+  return result.stdout.trim();
+}
 
 const SECRET = "sk-ant-oat01-test-only-not-a-real-token";
 const PREVIEW_IMAGE = `preview@sha256:${"a".repeat(64)}`;
@@ -425,6 +439,7 @@ describe("restoring a re-provisioned sandbox", () => {
         threadId: "thread-restore",
         projectId: "project-1",
         repositoryUrl: "https://example.test/repository.git",
+        repositoryRemoteUrl: "https://example.test/repository.git",
         baseCommit: "a".repeat(40),
         branchName: BRANCH,
       },
@@ -484,6 +499,13 @@ describe("restoring a re-provisioned sandbox", () => {
         expect(git).toContain(`git -C /workspace/repo checkout --detach ${HEAD_COMMIT}`);
         // ...and `-C`, because that same bundle already carries the branch.
         expect(git).toContain(`git -C /workspace/repo switch -C ${BRANCH}`);
+        expect(git).toContain(
+          "git -C /workspace/repo config remote.origin.url https://example.test/repository.git",
+        );
+        expect(git).toContain(`git -C /workspace/repo config branch.${BRANCH}.remote origin`);
+        expect(git).toContain(
+          `git -C /workspace/repo config branch.${BRANCH}.merge refs/heads/${BRANCH}`,
+        );
         expect(git.some((line) => line.startsWith("git clone"))).toBe(false);
       } finally {
         NodeFS.rmSync(artifactRoot, { recursive: true, force: true });
@@ -643,12 +665,18 @@ describe("container run flags", () => {
     );
   });
 
-  it("leaves git unconfigured unless both identity variables are present", async () => {
+  it("uses a stable git identity unless both deployment overrides are present", async () => {
     process.env.T3_SANDBOX_GIT_USER_NAME = "Sandbox Bot";
     delete process.env.T3_SANDBOX_GIT_USER_EMAIL;
     const executor = new FakeExecutor();
     await new ContainerSandboxBackend("podman", executor).ensureReady(provisionInput());
-    expect(executor.commands.some((command) => command.args.includes("config"))).toBe(false);
+    const gitCommands = executor.commands
+      .filter((command) => command.args[0] === "exec" && command.args.includes("git"))
+      .map((command) => command.args.slice(command.args.indexOf("git")).join(" "));
+    expect(gitCommands).toContain("git -C /workspace/repo config user.name Command Center");
+    expect(gitCommands).toContain(
+      "git -C /workspace/repo config user.email commandcenter@example.com",
+    );
   });
 });
 
@@ -790,6 +818,14 @@ describe("thread-scoped credential proxy", () => {
       `http.${CREDENTIAL_PROXY_BASE_URL}/github.extraHeader`,
       `Authorization: Bearer ${document.threadToken}`,
     ]);
+    expect(gitConfig).toContainEqual(["remote.origin.url", "git@github.com:awtprod/t3-code.git"]);
+    expect(gitConfig).toContainEqual([
+      "remote.origin.fetch",
+      "+refs/heads/*:refs/remotes/origin/*",
+    ]);
+    expect(gitConfig).toContainEqual(["push.autoSetupRemote", "true"]);
+    expect(gitConfig).toContainEqual(["user.name", "Command Center"]);
+    expect(gitConfig).toContainEqual(["user.email", "commandcenter@example.com"]);
     expect(invocation.args.join(" ")).not.toContain(document.threadToken);
     expect(invocation.args).toEqual(
       expect.arrayContaining([
@@ -805,6 +841,50 @@ describe("thread-scoped credential proxy", () => {
         "T3_GITHUB_REPOSITORY",
       ]),
     );
+  });
+
+  it("commits and pushes a fresh sandbox branch through its injected origin", () => {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sandbox-git-push-"));
+    const remote = NodePath.join(root, "remote.git");
+    const repository = NodePath.join(root, "repository");
+    try {
+      NodeFS.mkdirSync(repository);
+      runGit(root, ["init", "--bare", remote]);
+      runGit(repository, ["init"]);
+      runGit(repository, ["remote", "add", "origin", remote]);
+      bindThreadCredentialProxy(target.threadId, {
+        baseUrl: CREDENTIAL_PROXY_BASE_URL,
+        threadToken: "opaque-thread-token",
+        upstreamNames: ["github"],
+        git: {
+          identity: "awtprod",
+          repositoryNameWithOwner: "awtprod/t3-code",
+          repositoryRemoteUrl: remote,
+          rewriteUrls: [],
+        },
+      });
+      const invocation = sandboxProviderInvocation(target, "codex", [], undefined, {});
+      const gitEnvironment = { ...process.env, ...invocation.env };
+
+      runGit(repository, ["switch", "-c", "t3/thread/push-test"], gitEnvironment);
+      NodeFS.writeFileSync(NodePath.join(repository, "proof.txt"), "sandbox push proof\n");
+      runGit(repository, ["add", "proof.txt"], gitEnvironment);
+      runGit(repository, ["commit", "-m", "Prove sandbox push"], gitEnvironment);
+      runGit(repository, ["push"], gitEnvironment);
+
+      expect(runGit(repository, ["remote", "get-url", "origin"], gitEnvironment)).toBe(remote);
+      expect(runGit(repository, ["rev-parse", "--abbrev-ref", "@{upstream}"], gitEnvironment)).toBe(
+        "origin/t3/thread/push-test",
+      );
+      expect(runGit(repository, ["log", "-1", "--format=%an <%ae>"], gitEnvironment)).toBe(
+        "Command Center <commandcenter@example.com>",
+      );
+      expect(runGit(remote, ["rev-parse", "refs/heads/t3/thread/push-test"])).toMatch(
+        /^[0-9a-f]{40,64}$/,
+      );
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("does not broaden GitHub access for a non-GitHub repository", async () => {

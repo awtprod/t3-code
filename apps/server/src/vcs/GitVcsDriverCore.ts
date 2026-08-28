@@ -2935,13 +2935,24 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       );
       const remoteRefName =
         parsedRemoteRef?.remoteRef ?? `${input.fallbackRemoteName}/${input.refName}`;
+      const remoteName = parsedRemoteRef?.remoteName ?? input.fallbackRemoteName;
       const commitSha = yield* runGitStdout("GitVcsDriver.resolveRemoteTrackingCommit", input.cwd, [
         "rev-parse",
         "--verify",
         `refs/remotes/${remoteRefName}^{commit}`,
       ]).pipe(Effect.map((stdout) => stdout.trim()));
+      const remoteUrl = yield* runGitStdout(
+        "GitVcsDriver.resolveRemoteTrackingCommit.remoteUrl",
+        input.cwd,
+        ["remote", "get-url", remoteName],
+      ).pipe(Effect.map((stdout) => stdout.trim()));
+      const remotePushUrl = yield* runGitStdout(
+        "GitVcsDriver.resolveRemoteTrackingCommit.remotePushUrl",
+        input.cwd,
+        ["remote", "get-url", "--push", remoteName],
+      ).pipe(Effect.map((stdout) => stdout.trim()));
 
-      return { commitSha, remoteRefName };
+      return { commitSha, remoteRefName, remoteName, remoteUrl, remotePushUrl };
     });
 
   const fetchRemoteBranch: GitVcsDriver.GitVcsDriver["Service"]["fetchRemoteBranch"] = Effect.fn(

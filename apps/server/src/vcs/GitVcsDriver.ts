@@ -212,6 +212,10 @@ export interface GitResolveRemoteTrackingCommitInput {
 export interface GitResolveRemoteTrackingCommitResult {
   commitSha: string;
   remoteRefName: string;
+  remoteName: string;
+  remoteUrl: string;
+  /** Effective push URL, preserving a configured remote.pushurl. */
+  remotePushUrl: string;
 }
 
 export interface GitSetBranchUpstreamInput {

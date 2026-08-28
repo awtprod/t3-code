@@ -25,6 +25,7 @@ import {
   validateHook,
 } from "./validation.ts";
 import { CREDENTIAL_PROXY_ALIAS } from "./SandboxCredentialProxy.ts";
+import { resolveSandboxGitIdentity } from "./SandboxGitIdentity.ts";
 import * as Effect from "effect/Effect";
 import * as NodeCrypto from "node:crypto";
 
@@ -90,9 +91,8 @@ const EXPORT_SNAPSHOT_NAMESPACE = "refs/t3/export-snapshot";
 const exportSnapshotRef = (commit: string) => `${EXPORT_SNAPSHOT_NAMESPACE}/${commit}`;
 /**
  * Identity for the snapshot commit. It is a container for a tree, never a
- * commit the user authored, and the sandbox's own `user.name`/`user.email` are
- * optional (`T3_SANDBOX_GIT_USER_*`), so `commit-tree` gets an explicit one
- * rather than failing on a repository with no identity configured.
+ * commit the user authored, so `commit-tree` gets an explicit export identity
+ * rather than attributing the snapshot to the sandbox's ordinary commit identity.
  */
 const EXPORT_SNAPSHOT_IDENTITY = {
   GIT_AUTHOR_NAME: "T3 Sandbox Export",
@@ -215,6 +215,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
   }
 
   async ensureReady(input: SandboxProvisionInput): Promise<SandboxReady> {
+    validateBootstrap(input.bootstrap);
     const threadId = sanitizeId(input.bootstrap.threadId, "threadId");
     const ready = this.#records.get(threadId)?.ready;
     // A cache hit is the surviving-container case, and it has to report the
@@ -239,7 +240,14 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
     // reporting the built values is right, not stale. `providerStore` is the
     // only field that describes what a provision ATTEMPT did rather than what
     // the container is, which is exactly why it cannot be replayed.
-    if (ready !== undefined) return Promise.resolve({ ...ready, providerStore: "preserved" });
+    if (ready !== undefined) {
+      await this.#configureGitRepository(
+        ready.containerName,
+        input.bootstrap,
+        boundedTimeout(input.config?.setupTimeoutSeconds, 300),
+      );
+      return { ...ready, providerStore: "preserved" };
+    }
     const pending = this.#provisioning.get(threadId);
     if (pending !== undefined) return pending;
     const provision = this.#provision(input).finally(() => this.#provisioning.delete(threadId));
@@ -303,6 +311,7 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         ),
         providerStore: "preserved" as const,
       };
+      await this.#configureGitRepository(containerName, input.bootstrap, setupTimeoutMs);
       this.#records.set(threadId, {
         ready: existing,
         teardownTimeoutMs,
@@ -716,21 +725,9 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
         },
         setupTimeoutMs,
       );
+      await this.#configureGitRepository(containerName, input.bootstrap, setupTimeoutMs);
       if (restoreSnapshot !== undefined)
         await this.#restoreExportSnapshot(containerName, restoreSnapshot, setupTimeoutMs);
-      const gitIdentity = sandboxGitIdentity();
-      if (gitIdentity !== undefined) {
-        for (const [key, value] of [
-          ["user.name", gitIdentity.name],
-          ["user.email", gitIdentity.email],
-        ] as const) {
-          await this.#mustExec(
-            containerName,
-            { executable: "git", args: ["-C", "/workspace/repo", "config", key, value] },
-            setupTimeoutMs,
-          );
-        }
-      }
       if (input.bootstrap.inheritedPatch !== undefined) {
         await this.#mustExec(
           containerName,
@@ -806,6 +803,44 @@ export class ContainerSandboxBackend implements ThreadSandboxBackend {
       input,
       Math.min(input.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS, MAX_HOOK_TIMEOUT_MS),
     );
+  }
+
+  /** Repair both new repositories and containers created before Git metadata was seeded. */
+  async #configureGitRepository(
+    containerName: string,
+    bootstrap: SandboxProvisionInput["bootstrap"],
+    timeoutMs: number,
+  ): Promise<void> {
+    const hasOrigin =
+      bootstrap.repositoryBundlePath === undefined ||
+      bootstrap.repositoryRemoteUrl !== undefined ||
+      bootstrap.repositoryPushRemoteUrl !== undefined;
+    const gitIdentity = resolveSandboxGitIdentity();
+    const config: Array<readonly [string, string]> = [
+      ["user.name", gitIdentity.name],
+      ["user.email", gitIdentity.email],
+      ["push.autoSetupRemote", "true"],
+    ];
+    const originUrl = bootstrap.repositoryRemoteUrl ?? bootstrap.repositoryPushRemoteUrl;
+    if (originUrl !== undefined) config.push(["remote.origin.url", originUrl]);
+    if (
+      bootstrap.repositoryPushRemoteUrl !== undefined &&
+      bootstrap.repositoryPushRemoteUrl !== originUrl
+    )
+      config.push(["remote.origin.pushurl", bootstrap.repositoryPushRemoteUrl]);
+    if (hasOrigin)
+      config.push(
+        ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        [`branch.${bootstrap.branchName}.remote`, "origin"],
+        [`branch.${bootstrap.branchName}.merge`, `refs/heads/${bootstrap.branchName}`],
+      );
+    for (const [key, value] of config) {
+      await this.#mustExec(
+        containerName,
+        { executable: "git", args: ["-C", "/workspace/repo", "config", key, value] },
+        timeoutMs,
+      );
+    }
   }
 
   async exportBranch(threadIdValue: string, hint?: SandboxAdoptionHint): Promise<SandboxExport> {
@@ -2032,17 +2067,6 @@ function volumeStorageQuotaEnabled(): boolean {
     );
   }
   return false;
-}
-
-/**
- * Git identity for in-sandbox commits, applied locally to the cloned repo.
- * A fresh clone inherits no identity and the container has no global config,
- * so without this every `git commit` inside the sandbox fails.
- */
-function sandboxGitIdentity(): { readonly name: string; readonly email: string } | undefined {
-  const name = process.env.T3_SANDBOX_GIT_USER_NAME?.trim();
-  const email = process.env.T3_SANDBOX_GIT_USER_EMAIL?.trim();
-  return name && email ? { name, email } : undefined;
 }
 
 function boundedTimeout(seconds: number | undefined, fallback: number): number {

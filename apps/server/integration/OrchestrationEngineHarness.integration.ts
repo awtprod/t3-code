@@ -384,7 +384,13 @@ export const makeOrchestrationIntegrationHarness = (
           workingTree: { files: [], insertions: 0, deletions: 0 },
         }),
       resolveRemoteTrackingCommit: () =>
-        Effect.succeed({ commitSha: baseCommit, remoteRefName: "main" }),
+        Effect.succeed({
+          commitSha: baseCommit,
+          remoteRefName: "origin/main",
+          remoteName: "origin",
+          remoteUrl: "https://github.com/T3Tools/t3code.git",
+          remotePushUrl: "https://github.com/T3Tools/t3code.git",
+        }),
       renameBranch: (input: {
         readonly cwd: string;
         readonly oldBranch: string;

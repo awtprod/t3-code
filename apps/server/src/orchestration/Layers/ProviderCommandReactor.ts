@@ -82,6 +82,7 @@ import {
   resolveSandboxRuntime,
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
+import { asSandboxGitRemoteUrl } from "../../sandbox/SandboxGitIdentity.ts";
 import { dispatchProvisionReadyOrTearDown } from "../../sandbox/provisionReadyDispatch.ts";
 import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import {
@@ -553,34 +554,45 @@ export const make = Effect.gen(function* () {
             ...thread.sandboxConfig,
             runtime,
           };
-          const branch =
-            thread.sandbox?.branch ??
-            (yield* Effect.gen(function* () {
-              const local = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
-              if (!local.isRepo || local.refName === null)
-                return yield* new ProviderAdapterRequestError({
-                  provider: "sandbox",
-                  method: "sandbox.provision",
-                  detail: "Isolated threads require a Git repository with a selected branch.",
-                });
-              const base = yield* gitWorkflow.resolveRemoteTrackingCommit({
-                cwd: project.workspaceRoot,
-                refName: local.refName,
-                fallbackRemoteName: "origin",
+          const resolveTracking = Effect.gen(function* () {
+            const local = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
+            if (!local.isRepo || local.refName === null)
+              return yield* new ProviderAdapterRequestError({
+                provider: "sandbox",
+                method: "sandbox.provision",
+                detail: "Isolated threads require a Git repository with a selected branch.",
               });
-              return { branchName: `t3/thread/${thread.id}`, baseCommit: base.commitSha };
-            }).pipe(
-              Effect.mapError((cause) =>
-                isProviderAdapterRequestError(cause)
-                  ? cause
-                  : new ProviderAdapterRequestError({
-                      provider: "sandbox",
-                      method: "sandbox.provision",
-                      detail: cause instanceof Error ? cause.message : String(cause),
-                      cause,
-                    }),
-              ),
-            ));
+            const base = yield* gitWorkflow.resolveRemoteTrackingCommit({
+              cwd: project.workspaceRoot,
+              refName: local.refName,
+              fallbackRemoteName: "origin",
+            });
+            return base;
+          }).pipe(
+            Effect.mapError((cause) =>
+              isProviderAdapterRequestError(cause)
+                ? cause
+                : new ProviderAdapterRequestError({
+                    provider: "sandbox",
+                    method: "sandbox.provision",
+                    detail: cause instanceof Error ? cause.message : String(cause),
+                    cause,
+                  }),
+            ),
+          );
+          const tracking =
+            thread.sandbox?.branch === undefined
+              ? yield* resolveTracking
+              : Option.getOrUndefined(yield* resolveTracking.pipe(Effect.option));
+          const branch = thread.sandbox?.branch ?? {
+            branchName: `t3/thread/${thread.id}`,
+            baseCommit: tracking!.commitSha,
+          };
+          const repositoryRemoteUrl =
+            asSandboxGitRemoteUrl(tracking?.remoteUrl) ??
+            asSandboxGitRemoteUrl(tracking?.remotePushUrl);
+          const repositoryPushRemoteUrl = asSandboxGitRemoteUrl(tracking?.remotePushUrl);
+          const credentialRemoteUrl = repositoryPushRemoteUrl ?? repositoryRemoteUrl;
           // The provider CLI keeps its conversation store inside the
           // container, so whatever conversation a persisted resume cursor
           // names does not exist in the one about to be created -- the turn
@@ -636,6 +648,10 @@ export const make = Effect.gen(function* () {
                 // checkout's tracked remote and may only exist in the fork.
                 // Seed from the checkout so the bundle must contain it.
                 repositoryUrl: project.workspaceRoot,
+                ...(repositoryRemoteUrl ? { repositoryRemoteUrl } : {}),
+                ...(repositoryPushRemoteUrl && repositoryPushRemoteUrl !== repositoryRemoteUrl
+                  ? { repositoryPushRemoteUrl }
+                  : {}),
                 baseCommit: branch.baseCommit,
                 branchName: branch.branchName,
                 ...("parentThreadId" in branch && branch.parentThreadId
@@ -764,6 +780,7 @@ export const make = Effect.gen(function* () {
             runtimeRef: provision.containerName,
             runtime,
             workspaceCwd: "/workspace/repo",
+            ...(credentialRemoteUrl ? { repositoryRemoteUrl: credentialRemoteUrl } : {}),
           } as const;
           provisionedTargets.set(thread.id, target);
           return target;
@@ -1126,7 +1143,28 @@ export const make = Effect.gen(function* () {
     });
     const baseExecutionTarget =
       options?.executionTarget ?? (yield* ensureExecutionTarget(thread, legacyCwd));
-    const repositoryRemoteUrl = project?.repositoryIdentity?.locator.remoteUrl;
+    const hostTracking =
+      baseExecutionTarget.kind === "sandbox" &&
+      baseExecutionTarget.repositoryRemoteUrl === undefined &&
+      project !== undefined
+        ? Option.getOrUndefined(
+            yield* Effect.gen(function* () {
+              const local = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
+              if (!local.isRepo || local.refName === null) return undefined;
+              return yield* gitWorkflow.resolveRemoteTrackingCommit({
+                cwd: project.workspaceRoot,
+                refName: local.refName,
+                fallbackRemoteName: "origin",
+              });
+            }).pipe(Effect.option),
+          )
+        : undefined;
+    const repositoryRemoteUrl =
+      baseExecutionTarget.kind === "sandbox"
+        ? (baseExecutionTarget.repositoryRemoteUrl ??
+          asSandboxGitRemoteUrl(hostTracking?.remotePushUrl) ??
+          asSandboxGitRemoteUrl(hostTracking?.remoteUrl))
+        : undefined;
     const executionTarget =
       baseExecutionTarget.kind === "sandbox" && repositoryRemoteUrl
         ? { ...baseExecutionTarget, repositoryRemoteUrl }
