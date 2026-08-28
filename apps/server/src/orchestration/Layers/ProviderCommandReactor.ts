@@ -2501,49 +2501,6 @@ export const make = Effect.gen(function* () {
       return;
     }
 
-    const project = yield* resolveProject(thread.projectId);
-    const legacyCwd = resolveThreadWorkspaceCwd({
-      thread,
-      projects: project ? [project] : [],
-    });
-    const executionTarget = yield* ensureExecutionTarget(thread, legacyCwd);
-    // Provisioning can take long enough for a stop or a replacement request to
-    // land. Re-check before any cwd-dependent or provider side effect.
-    const postReadyClaim = yield* readTurnStartClaim;
-    if (postReadyClaim.supersededBySameMessage || postReadyClaim.interruptedAfter) {
-      return;
-    }
-    const isFirstUserMessageTurn =
-      thread.messages.filter((entry) => entry.role === "user").length === 1;
-    if (isFirstUserMessageTurn) {
-      // Title generation runs a text-generation CLI on the HOST, so it needs a
-      // host path -- not the execution target's cwd, which for a sandboxed
-      // thread is the in-container `/workspace/repo` and makes the spawn die
-      // with ENOENT on every first turn of an isolated thread. The branch-name
-      // generation below already uses the host worktree for the same reason.
-      const generationCwd = legacyCwd ?? process.cwd();
-      const generationInput = {
-        messageText: message.text,
-        ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
-      };
-
-      yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
-        threadId: event.payload.threadId,
-        branch: thread.branch,
-        worktreePath: thread.worktreePath,
-        ...generationInput,
-      }).pipe(Effect.forkScoped);
-
-      if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
-        yield* maybeGenerateThreadTitleForFirstTurn({
-          threadId: event.payload.threadId,
-          cwd: generationCwd,
-          ...generationInput,
-        }).pipe(Effect.forkScoped);
-      }
-    }
-
     const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
@@ -2583,6 +2540,55 @@ export const make = Effect.gen(function* () {
         ),
       );
 
+    const project = yield* resolveProject(thread.projectId);
+    const legacyCwd = resolveThreadWorkspaceCwd({
+      thread,
+      projects: project ? [project] : [],
+    });
+    const executionTarget = yield* ensureExecutionTarget(thread, legacyCwd).pipe(
+      Effect.map(Option.some),
+      Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
+    );
+    if (Option.isNone(executionTarget)) {
+      return;
+    }
+    // Provisioning can take long enough for a stop or a replacement request to
+    // land. Re-check before any cwd-dependent or provider side effect.
+    const postReadyClaim = yield* readTurnStartClaim;
+    if (postReadyClaim.supersededBySameMessage || postReadyClaim.interruptedAfter) {
+      return;
+    }
+    const isFirstUserMessageTurn =
+      thread.messages.filter((entry) => entry.role === "user").length === 1;
+    if (isFirstUserMessageTurn) {
+      // Title generation runs a text-generation CLI on the HOST, so it needs a
+      // host path -- not the execution target's cwd, which for a sandboxed
+      // thread is the in-container `/workspace/repo` and makes the spawn die
+      // with ENOENT on every first turn of an isolated thread. The branch-name
+      // generation below already uses the host worktree for the same reason.
+      const generationCwd = legacyCwd ?? process.cwd();
+      const generationInput = {
+        messageText: message.text,
+        ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+        ...(event.payload.titleSeed !== undefined ? { titleSeed: event.payload.titleSeed } : {}),
+      };
+
+      yield* maybeGenerateAndRenameWorktreeBranchForFirstTurn({
+        threadId: event.payload.threadId,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        ...generationInput,
+      }).pipe(Effect.forkScoped);
+
+      if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
+        yield* maybeGenerateThreadTitleForFirstTurn({
+          threadId: event.payload.threadId,
+          cwd: generationCwd,
+          ...generationInput,
+        }).pipe(Effect.forkScoped);
+      }
+    }
+
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       messageText: message.text,
@@ -2592,7 +2598,7 @@ export const make = Effect.gen(function* () {
         : {}),
       interactionMode: event.payload.interactionMode,
       createdAt: event.payload.createdAt,
-      executionTarget,
+      executionTarget: executionTarget.value,
       turnRequestSequence: event.sequence,
     }).pipe(
       Effect.map(Option.some),
