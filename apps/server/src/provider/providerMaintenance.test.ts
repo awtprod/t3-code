@@ -12,6 +12,7 @@ import { HttpClient } from "effect/unstable/http";
 import {
   createProviderVersionAdvisory,
   enrichProviderSnapshotWithVersionAdvisory,
+  makeManualOnlyProviderMaintenanceCapabilities,
   makePackageManagedProviderMaintenanceResolver,
   makeProviderMaintenanceCapabilities,
   makeStaticProviderMaintenanceResolver,
@@ -180,6 +181,28 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
         "npm install -g --allow-scripts=@example/native-package-tool @example/native-package-tool@latest",
       canUpdate: true,
       message: "Install the update now or review provider settings.",
+    });
+  });
+
+  it("marks manual-only providers behind latest without implying a one-click update", () => {
+    expect(
+      createProviderVersionAdvisory({
+        driver: driver("packageTool"),
+        currentVersion: "2.1.110",
+        latestVersion: "2.1.117",
+        maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
+          provider: driver("packageTool"),
+          packageName: "@example/package-tool",
+        }),
+      }),
+    ).toMatchObject({
+      status: "behind_latest",
+      currentVersion: "2.1.110",
+      latestVersion: "2.1.117",
+      updateCommand: null,
+      canUpdate: false,
+      message:
+        "A newer version is available, but this provider's CLI is managed outside Command Center and can't be updated here.",
     });
   });
 

@@ -31,6 +31,7 @@ describe("CommandCenterProviderIsolation", () => {
 
   it("admits native interactive chats while keeping unattended runs Linux-only", () => {
     NodeAssert.equal(commandCenterExecutionClass("cc:interactive:run-1"), "interactive");
+    NodeAssert.equal(commandCenterExecutionClass("cc:router:run-1"), "router");
     NodeAssert.equal(commandCenterExecutionClass("cc:automation:run-1"), "automation");
     NodeAssert.equal(commandCenterExecutionClass("cc:run-1"), "legacy");
     NodeAssert.equal(commandCenterExecutionClass("thread-1"), undefined);
@@ -44,6 +45,7 @@ describe("CommandCenterProviderIsolation", () => {
       commandCenterProviderPlatformIssue("win32", "cc:interactive:run-1"),
       undefined,
     );
+    NodeAssert.equal(commandCenterProviderPlatformIssue("darwin", "cc:router:run-1"), undefined);
     NodeAssert.match(
       commandCenterProviderPlatformIssue("darwin", "cc:automation:run-1") ?? "",
       /requires a verified Linux host/u,
@@ -55,6 +57,14 @@ describe("CommandCenterProviderIsolation", () => {
   });
 
   it("fails closed for unverified providers and full-access sessions", () => {
+    NodeAssert.match(
+      commandCenterProviderIsolationIssue({
+        threadId: "cc:router:run-1",
+        provider: "codex",
+        runtimeMode: "auto-accept-edits",
+      }) ?? "",
+      /permanently read-only/u,
+    );
     NodeAssert.match(
       commandCenterProviderIsolationIssue({
         threadId: "cc:run-1",

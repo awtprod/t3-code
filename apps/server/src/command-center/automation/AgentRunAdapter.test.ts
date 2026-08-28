@@ -153,6 +153,44 @@ it("derives one child command key across executor retry attempts", () => {
   );
 });
 
+it.effect("refuses router-only child models and filters them from worker availability", () => {
+  const seenProviders: Array<ReadonlyArray<ProviderAvailability>> = [];
+  const adapter = makeAutomationAgentRunAdapter({
+    providerAvailability: Effect.succeed([
+      ...providers,
+      {
+        providerId: ProviderId.make("codex-router"),
+        healthy: true,
+        priority: 1,
+        modelIds: [ModelId.make("gpt-5.6-sol")],
+        defaultModelId: ModelId.make("gpt-5.6-sol"),
+        capabilities: ["cc.runs.start"],
+      },
+    ]),
+    submitCommand: (command, available) => {
+      seenProviders.push(available);
+      return Effect.succeed(submissionResult(command));
+    },
+    linkParent: () => Effect.void,
+    authorizeRun: () => Effect.void,
+  });
+
+  return Effect.gen(function* () {
+    const explicit = yield* adapter(
+      request({ providerId: undefined, modelId: "gpt-5.6-sol" }),
+    ).pipe(Effect.flip);
+    expect(explicit.retryable).toBe(false);
+    expect(explicit.message).toContain("Router-only models");
+    expect(seenProviders).toHaveLength(0);
+
+    yield* adapter(request({ providerId: undefined, modelId: undefined }));
+    expect(seenProviders).toHaveLength(1);
+    expect(seenProviders[0]?.map((provider) => String(provider.providerId))).toEqual([
+      "codex-primary",
+    ]);
+  });
+});
+
 it.effect("rejects a routed result that escapes the requested Space before linking", () => {
   let linked = false;
   const adapter = makeAutomationAgentRunAdapter({

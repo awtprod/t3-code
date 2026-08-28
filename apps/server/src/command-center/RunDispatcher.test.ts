@@ -378,6 +378,55 @@ it.effect("marks automation child threads as unattended before provider dispatch
   }),
 );
 
+it.effect("dispatches top-level Sol as a read-only router without a worktree", () =>
+  Effect.gen(function* () {
+    const solRoute = decodeRoute({
+      ...readyRoute,
+      modelId: "gpt-5.6-sol",
+      capabilities: ["cc.items.read", "cc.items.write", "cc.memory.propose", "cc.runs.start"],
+    });
+    const fixture = makeFixture(solRoute);
+    let dispatchedCommand: ClientOrchestrationCommand | undefined;
+
+    const result = yield* fixture.dispatcher.dispatch({
+      runId,
+      dispatchCommand: fixture.dispatch((command) =>
+        Effect.sync(() => {
+          dispatchedCommand = command;
+        }),
+      ),
+    });
+
+    expect(result.threadId).toBe(ThreadId.make("cc:router:thread-example"));
+    expect(fixture.read().registeredScope?.capabilities).toEqual(
+      new Set(["cc.items.read", "cc.runs.start"]),
+    );
+    expect(dispatchedCommand?.type).toBe("thread.turn.start");
+    if (dispatchedCommand?.type !== "thread.turn.start") return;
+    expect(dispatchedCommand.runtimeMode).toBe("approval-required");
+    expect(dispatchedCommand.bootstrap?.createThread?.runtimeMode).toBe("approval-required");
+    expect(dispatchedCommand.bootstrap?.prepareWorktree).toBeUndefined();
+    expect(dispatchedCommand.message.text).toContain("Command Center router role");
+  }),
+);
+
+it.effect("classifies a top-level Fable Run as a router thread", () =>
+  Effect.gen(function* () {
+    const fableRoute = decodeRoute({ ...readyRoute, modelId: "claude-fable-5" });
+    const fixture = makeFixture(fableRoute);
+
+    const result = yield* fixture.dispatcher.dispatch({
+      runId,
+      dispatchCommand: fixture.dispatch(),
+    });
+
+    expect(result.threadId).toBe(ThreadId.make("cc:router:thread-example"));
+    expect(fixture.read().registeredScope?.capabilities).toEqual(
+      new Set(["cc.items.read", "cc.runs.start"]),
+    );
+  }),
+);
+
 it.effect("refuses pre-ack dispatch and recovery without changing the admitted Run", () =>
   Effect.gen(function* () {
     const fixture = makeFixture(readyRoute, { executionAuthorized: false });

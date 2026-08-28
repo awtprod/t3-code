@@ -27,6 +27,7 @@ import {
   shouldNavigateAfterProjectRemoval,
   shouldClearThreadSelectionOnMouseDown,
   sortLogicalProjectsForSidebar,
+  sortLegacySidebarThreads,
   sortSettledThreadsForSidebar,
   sortSettledThreadsForSidebarV2,
   pinOrderKeyBetween,
@@ -781,6 +782,178 @@ describe("sortThreadsForSidebar", () => {
     ]);
 
     expect(sorted.map((thread) => thread.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("sortLegacySidebarThreads", () => {
+  const legacyThread = (input: {
+    id: string;
+    createdAt?: string;
+    updatedAt?: string;
+    latestUserMessageAt?: string | null;
+    completedAt?: string | null;
+    sessionStatus?: "starting" | "running" | "ready" | "error" | null;
+    hasPendingApprovals?: boolean;
+    hasPendingUserInput?: boolean;
+    hasActionableProposedPlan?: boolean;
+    interactionMode?: "default" | "plan";
+    backgroundLiveness?: "working" | "monitoring" | null;
+  }) => ({
+    id: input.id,
+    createdAt: input.createdAt ?? "2026-03-09T09:00:00.000Z",
+    updatedAt: input.updatedAt ?? "2026-03-09T09:00:00.000Z",
+    latestUserMessageAt: input.latestUserMessageAt ?? null,
+    latestTurn:
+      input.completedAt === undefined
+        ? makeLatestTurn()
+        : makeLatestTurn({ completedAt: input.completedAt }),
+    session:
+      input.sessionStatus === null || input.sessionStatus === undefined
+        ? null
+        : ({ status: input.sessionStatus } as never),
+    hasPendingApprovals: input.hasPendingApprovals ?? false,
+    hasPendingUserInput: input.hasPendingUserInput ?? false,
+    hasActionableProposedPlan: input.hasActionableProposedPlan ?? false,
+    interactionMode: input.interactionMode ?? "default",
+    backgroundLiveness: input.backgroundLiveness ?? null,
+  });
+
+  it("places actionable threads before newer completed threads", () => {
+    const ordered = sortLegacySidebarThreads(
+      [
+        legacyThread({ id: "finished", completedAt: "2026-03-09T14:00:00.000Z" }),
+        legacyThread({ id: "working", sessionStatus: "running" }),
+      ],
+      "updated_at",
+    );
+
+    expect(ordered.map((thread) => thread.id)).toEqual(["working", "finished"]);
+  });
+
+  it("keeps every attention and background-work variant in the active block", () => {
+    const ordered = sortLegacySidebarThreads(
+      [
+        legacyThread({ id: "finished", completedAt: "2026-03-09T20:00:00.000Z" }),
+        legacyThread({
+          id: "working",
+          sessionStatus: "running",
+          updatedAt: "2026-03-09T15:00:00.000Z",
+        }),
+        legacyThread({
+          id: "approval",
+          hasPendingApprovals: true,
+          updatedAt: "2026-03-09T14:00:00.000Z",
+        }),
+        legacyThread({
+          id: "input",
+          hasPendingUserInput: true,
+          updatedAt: "2026-03-09T13:00:00.000Z",
+        }),
+        legacyThread({
+          id: "error",
+          sessionStatus: "error",
+          updatedAt: "2026-03-09T12:00:00.000Z",
+        }),
+        legacyThread({
+          id: "plan",
+          interactionMode: "plan",
+          hasActionableProposedPlan: true,
+          updatedAt: "2026-03-09T11:00:00.000Z",
+        }),
+        legacyThread({
+          id: "background",
+          backgroundLiveness: "working",
+          updatedAt: "2026-03-09T10:00:00.000Z",
+        }),
+      ],
+      "updated_at",
+    );
+
+    expect(ordered.map((thread) => thread.id)).toEqual([
+      "working",
+      "approval",
+      "input",
+      "error",
+      "plan",
+      "background",
+      "finished",
+    ]);
+  });
+
+  it("orders finished threads by their latest completion time", () => {
+    const ordered = sortLegacySidebarThreads(
+      [
+        legacyThread({ id: "older", completedAt: "2026-03-09T10:00:00.000Z" }),
+        legacyThread({ id: "newer", completedAt: "2026-03-09T12:00:00.000Z" }),
+      ],
+      "created_at",
+    );
+
+    expect(ordered.map((thread) => thread.id)).toEqual(["newer", "older"]);
+  });
+
+  it("uses the selected sort setting within the active block", () => {
+    const threads = [
+      legacyThread({
+        id: "new-message",
+        createdAt: "2026-03-09T08:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T12:00:00.000Z",
+        completedAt: null,
+      }),
+      legacyThread({
+        id: "newer-created",
+        createdAt: "2026-03-09T11:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:00:00.000Z",
+        completedAt: null,
+      }),
+    ];
+
+    expect(sortLegacySidebarThreads(threads, "updated_at").map((thread) => thread.id)).toEqual([
+      "new-message",
+      "newer-created",
+    ]);
+    expect(sortLegacySidebarThreads(threads, "created_at").map((thread) => thread.id)).toEqual([
+      "newer-created",
+      "new-message",
+    ]);
+  });
+
+  it("uses deterministic fallbacks for malformed completion timestamps", () => {
+    const ordered = sortLegacySidebarThreads(
+      [
+        legacyThread({
+          id: "updated",
+          completedAt: "not-a-date",
+          updatedAt: "2026-03-09T12:00:00.000Z",
+        }),
+        legacyThread({
+          id: "created",
+          completedAt: "not-a-date",
+          updatedAt: "not-a-date",
+          createdAt: "2026-03-09T11:00:00.000Z",
+        }),
+        legacyThread({
+          id: "a-invalid",
+          completedAt: "not-a-date",
+          updatedAt: "not-a-date",
+          createdAt: "not-a-date",
+        }),
+        legacyThread({
+          id: "b-invalid",
+          completedAt: "not-a-date",
+          updatedAt: "not-a-date",
+          createdAt: "not-a-date",
+        }),
+      ],
+      "updated_at",
+    );
+
+    expect(ordered.map((thread) => thread.id)).toEqual([
+      "updated",
+      "created",
+      "a-invalid",
+      "b-invalid",
+    ]);
   });
 });
 

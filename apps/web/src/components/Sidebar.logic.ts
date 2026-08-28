@@ -558,6 +558,61 @@ export function sortThreadsForSidebar<
 // alias pair above for why this stays separate rather than shared.
 export const sortThreadsForSidebarV2 = sortThreadsForSidebar;
 
+type LegacySidebarThreadSortInput = ThreadSortInput &
+  Pick<
+    SidebarThreadSummary,
+    | "backgroundLiveness"
+    | "hasActionableProposedPlan"
+    | "hasPendingApprovals"
+    | "hasPendingUserInput"
+    | "interactionMode"
+    | "latestTurn"
+    | "session"
+  >;
+
+function isLegacySidebarThreadActive(thread: LegacySidebarThreadSortInput): boolean {
+  // A thread without a cleanly completed latest turn is still work in
+  // progress, even while the session projection is catching up.
+  if (!isLatestTurnSettled(thread.latestTurn, thread.session)) return true;
+  if (thread.hasPendingApprovals || thread.hasPendingUserInput) return true;
+  if (
+    thread.session?.status === "starting" ||
+    thread.session?.status === "running" ||
+    thread.session?.status === "error"
+  ) {
+    return true;
+  }
+  if (thread.backgroundLiveness === "working" || thread.backgroundLiveness === "monitoring") {
+    return true;
+  }
+  return thread.interactionMode === "plan" && thread.hasActionableProposedPlan;
+}
+
+/**
+ * The legacy sidebar is an action queue followed by history. Keep the user's
+ * sort preference within the action queue, but always put completed work
+ * below it and order that history by when its latest turn completed.
+ */
+export function sortLegacySidebarThreads<
+  T extends LegacySidebarThreadSortInput & { readonly id: string },
+>(threads: readonly T[], sortOrder: SidebarThreadSortOrder): T[] {
+  const active: T[] = [];
+  const finished: T[] = [];
+  for (const thread of threads) {
+    (isLegacySidebarThreadActive(thread) ? active : finished).push(thread);
+  }
+
+  const finishedAtMs = (thread: T) =>
+    firstValidTimestampMs(thread.latestTurn?.completedAt, thread.updatedAt, thread.createdAt);
+
+  return [
+    ...sortThreads(active, sortOrder),
+    ...finished.toSorted(
+      (left, right) => finishedAtMs(right) - finishedAtMs(left) || left.id.localeCompare(right.id),
+    ),
+  ];
+}
+
 // Pinned-reorder key math and the keyed sort live in client-runtime
 // (state/thread-sort) so web and mobile compute identical pinned orders.
 export {

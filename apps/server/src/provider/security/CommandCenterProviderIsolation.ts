@@ -17,8 +17,9 @@ import { trustedHostExecutablePath, unsafeHostGitConfigKey } from "../../vcs/Hos
 export const COMMAND_CENTER_THREAD_ID_PREFIX = "cc:";
 export const COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX = "cc:interactive:";
 export const COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX = "cc:automation:";
+export const COMMAND_CENTER_ROUTER_THREAD_ID_PREFIX = "cc:router:";
 
-export type CommandCenterExecutionClass = "interactive" | "automation" | "legacy";
+export type CommandCenterExecutionClass = "router" | "interactive" | "automation" | "legacy";
 
 export const COMMAND_CENTER_CODEX_READ_PERMISSION_PROFILE = "command-center-isolated-read-v1";
 export const COMMAND_CENTER_CODEX_WRITE_PERMISSION_PROFILE = "command-center-isolated-write-v1";
@@ -267,6 +268,7 @@ export function commandCenterExecutionClass(
   threadId: ThreadId | string,
 ): CommandCenterExecutionClass | undefined {
   const value = String(threadId);
+  if (value.startsWith(COMMAND_CENTER_ROUTER_THREAD_ID_PREFIX)) return "router";
   if (value.startsWith(COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX)) return "interactive";
   if (value.startsWith(COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX)) return "automation";
   return value.startsWith(COMMAND_CENTER_THREAD_ID_PREFIX) ? "legacy" : undefined;
@@ -279,7 +281,8 @@ export function commandCenterProviderPlatformIssue(
   if (platform === "linux") return undefined;
   if (
     (platform === "darwin" || platform === "win32") &&
-    commandCenterExecutionClass(threadId) === "interactive"
+    (commandCenterExecutionClass(threadId) === "interactive" ||
+      commandCenterExecutionClass(threadId) === "router")
   ) {
     return undefined;
   }
@@ -295,6 +298,12 @@ export function commandCenterProviderIsolationIssue(input: {
   readonly runtimeMode: RuntimeMode;
 }): string | undefined {
   if (!isCommandCenterThreadId(input.threadId)) return undefined;
+  if (
+    commandCenterExecutionClass(input.threadId) === "router" &&
+    input.runtimeMode !== "approval-required"
+  ) {
+    return "Command Center router threads are permanently read-only.";
+  }
   if (String(input.provider) !== "codex" && String(input.provider) !== "kimi") {
     return "Command Center runs require Codex or a verified native Kimi provider because the selected provider does not expose a host-filesystem isolation profile.";
   }

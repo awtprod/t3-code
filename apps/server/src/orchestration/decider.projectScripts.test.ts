@@ -372,7 +372,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
         sequence: 2,
         eventId: asEventId("evt-thread-create"),
         aggregateKind: "thread",
-        aggregateId: ThreadId.make("thread-1"),
+        aggregateId: ThreadId.make("cc:router:thread-1"),
         type: "thread.created",
         occurredAt: now,
         commandId: CommandId.make("cmd-thread-create"),
@@ -380,7 +380,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
         correlationId: CommandId.make("cmd-thread-create"),
         metadata: {},
         payload: {
-          threadId: ThreadId.make("thread-1"),
+          threadId: ThreadId.make("cc:router:thread-1"),
           projectId: asProjectId("project-1"),
           title: "Thread",
           modelSelection: {
@@ -388,7 +388,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
             model: "gpt-5-codex",
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "full-access",
+          runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
           createdAt: now,
@@ -400,7 +400,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
         command: {
           type: "thread.runtime-mode.set",
           commandId: CommandId.make("cmd-runtime-mode-set"),
-          threadId: ThreadId.make("thread-1"),
+          threadId: ThreadId.make("cc:router:thread-1"),
           runtimeMode: "approval-required",
           createdAt: now,
         },
@@ -414,9 +414,76 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
       expect(singleResult).toMatchObject({
         type: "thread.runtime-mode-set",
         payload: {
-          threadId: ThreadId.make("thread-1"),
+          threadId: ThreadId.make("cc:router:thread-1"),
           runtimeMode: "approval-required",
         },
+      });
+
+      const failure = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("cmd-router-runtime-mode-set"),
+          threadId: ThreadId.make("cc:router:thread-1"),
+          runtimeMode: "auto-accept-edits",
+          createdAt: now,
+        },
+        readModel,
+      }).pipe(Effect.flip);
+      expect(failure.detail).toContain("permanently read-only");
+
+      const writableCreate = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.create",
+          commandId: CommandId.make("cmd-router-writable-create"),
+          threadId: ThreadId.make("cc:router:thread-2"),
+          projectId: asProjectId("project-1"),
+          title: "Router",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "auto-accept-edits",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+        },
+        readModel,
+      }).pipe(Effect.flip);
+      expect(writableCreate.detail).toContain("permanently read-only");
+
+      // Switching the router thread to another model does not shed the
+      // read-only class: the turn inherits the thread's runtime mode.
+      const modelSwitchTurn = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-router-model-switch-turn"),
+          threadId: ThreadId.make("cc:router:thread-1"),
+          message: {
+            messageId: asMessageId("message-router-switch"),
+            role: "user",
+            text: "continue as a worker",
+            attachments: [],
+          },
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("codex"),
+            "gpt-5.3-codex",
+            [],
+          ),
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "auto-accept-edits",
+          createdAt: now,
+        },
+        readModel,
+      });
+      const modelSwitchEvents = Array.isArray(modelSwitchTurn)
+        ? modelSwitchTurn
+        : [modelSwitchTurn];
+      const switchedTurnStart = modelSwitchEvents.find(
+        (event) => event.type === "thread.turn-start-requested",
+      );
+      expect(switchedTurnStart?.payload).toMatchObject({
+        runtimeMode: "approval-required",
       });
     }),
   );

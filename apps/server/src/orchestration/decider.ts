@@ -13,6 +13,7 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import type * as PlatformError from "effect/PlatformError";
 
+import { commandCenterExecutionClass } from "../provider/security/CommandCenterProviderIsolation.ts";
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
   listThreadsByProjectId,
@@ -385,6 +386,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        commandCenterExecutionClass(command.threadId) === "router" &&
+        command.runtimeMode !== "approval-required"
+      ) {
+        return yield* sandboxInvariant(
+          command.type,
+          "Command Center router threads are permanently read-only.",
+        );
+      }
       const sandbox =
         command.sandbox ??
         (command.sandboxBranch
@@ -940,6 +950,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        commandCenterExecutionClass(command.threadId) === "router" &&
+        command.runtimeMode !== "approval-required"
+      ) {
+        return yield* sandboxInvariant(
+          command.type,
+          "Command Center router threads are permanently read-only.",
+        );
+      }
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({

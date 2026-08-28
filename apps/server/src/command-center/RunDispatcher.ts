@@ -7,8 +7,10 @@ import type {
   SpacePolicy,
 } from "@command-center/core";
 import {
+  isRouterOnlyModel,
   RepositoryBinding as RepositoryBindingSchema,
   RouteDecision as RouteDecisionSchema,
+  routerCapabilityScope,
   SpacePolicy as SpacePolicySchema,
 } from "@command-center/core";
 import {
@@ -51,6 +53,7 @@ import { makeRunLifecyclePersistence } from "./RunLifecycle.ts";
 import {
   COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX,
   COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX,
+  COMMAND_CENTER_ROUTER_THREAD_ID_PREFIX,
 } from "../provider/security/CommandCenterProviderIsolation.ts";
 
 export {
@@ -866,6 +869,8 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
         let claimedByThisAttempt = false;
         const execute = Effect.gen(function* () {
           const { space, modelSelection } = yield* validateAuthorizedRoute(deps, run, route);
+          const routerExecution =
+            run.parentRunId === null && isRouterOnlyModel(modelSelection.model);
           const priorContext =
             deps.loadPriorContext === undefined ? [] : yield* deps.loadPriorContext(run);
           const now = yield* deps.now;
@@ -878,7 +883,7 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
             dispatchCommand: input.dispatchCommand,
           });
           const worktreeBase =
-            route.repositoryId === null
+            routerExecution || route.repositoryId === null
               ? undefined
               : yield* deps.resolveWorktreeBase(run.id, project);
           const attachments = yield* Effect.try({
@@ -893,8 +898,9 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
                     cause,
                   ),
           });
-          const threadPrefix =
-            run.parentRunId === null
+          const threadPrefix = routerExecution
+            ? COMMAND_CENTER_ROUTER_THREAD_ID_PREFIX
+            : run.parentRunId === null
               ? COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX
               : COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX;
           const threadId = ThreadId.make(`${threadPrefix}${yield* deps.randomUUID}`);
@@ -923,7 +929,9 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
           }
           claimedByThisAttempt = true;
 
-          const capabilities = new Set<CapabilityName>(route.capabilities);
+          const capabilities = new Set<CapabilityName>(
+            routerExecution ? routerCapabilityScope(route.capabilities) : route.capabilities,
+          );
           const scopeRegistered = yield* deps.registerScope(threadId, {
             capabilities,
             spaceId: run.spaceId,
@@ -939,7 +947,7 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
           }
 
           const runtimeMode =
-            route.repositoryId === null
+            routerExecution || route.repositoryId === null
               ? ("approval-required" as const)
               : ("auto-accept-edits" as const);
           const command: ClientOrchestrationCommand = {
@@ -954,7 +962,7 @@ export const makeWithDependencies = (deps: DispatcherDependencies): RunDispatche
                 route,
                 commandText: run.command.text,
                 priorContext,
-                routerRole: run.parentRunId === null,
+                routerRole: routerExecution,
               }),
               attachments,
             },

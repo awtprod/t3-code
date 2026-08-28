@@ -7,7 +7,10 @@ import {
   ProjectId,
   ProviderId,
   RepositoryId,
+  ROUTER_ONLY_CHILD_MODEL_ERROR,
   SpaceId,
+  isRouterOnlyModel,
+  workerProviderAvailability,
   type ProviderAvailability,
   type RunStatus,
 } from "@command-center/core";
@@ -167,6 +170,9 @@ export function makeAutomationAgentRunAdapter(
     request: AutomationAgentRunRequest,
   ) {
     const commandId = automationAgentCommandId(request);
+    if (isRouterOnlyModel(request.modelId)) {
+      return yield* Effect.fail(permanentFailure(ROUTER_ONLY_CHILD_MODEL_ERROR));
+    }
     const command: CommandCenterCommandSubmitInput = {
       commandId: CommandId.make(commandId),
       text: request.text,
@@ -180,7 +186,7 @@ export function makeAutomationAgentRunAdapter(
         : { providerId: ProviderId.make(request.providerId) }),
       ...(request.modelId === undefined ? {} : { modelId: ModelId.make(request.modelId) }),
     };
-    const providers = yield* dependencies.providerAvailability;
+    const providers = workerProviderAvailability(yield* dependencies.providerAvailability);
     const result = yield* dependencies.submitCommand(command, providers);
     const invalidScope = validateSubmittedScope(request, result);
     if (invalidScope !== undefined) return yield* Effect.fail(invalidScope);

@@ -15,10 +15,13 @@ import {
   type Run as RunType,
   Run,
   RunId,
+  ROUTER_ONLY_CHILD_MODEL_ERROR,
   Space,
   type Space as SpaceType,
   normalizeSpaceAlias,
+  isRouterOnlyModel,
   resolveRoute,
+  workerProviderAvailability,
 } from "@command-center/core";
 import {
   CommandCenterError,
@@ -2507,11 +2510,20 @@ export const layer = Layer.effect(
       input,
       providers,
       source,
-    ) =>
-      sql
+    ) => {
+      if (isRouterOnlyModel(input.modelId)) {
+        return Effect.fail(
+          new CommandCenterError({
+            reason: "validation",
+            message: ROUTER_ONLY_CHILD_MODEL_ERROR,
+          }),
+        );
+      }
+      const workerProviders = workerProviderAvailability(providers);
+      return sql
         .withTransaction(
           Effect.gen(function* () {
-            const result = yield* submitCommand(input, providers);
+            const result = yield* submitCommand(input, workerProviders);
             yield* bindMcpChildRun({
               runId: result.run.id,
               spaceId: source.spaceId,
@@ -2530,6 +2542,7 @@ export const layer = Layer.effect(
               : persistenceError("Could not submit the authenticated MCP child Run.", cause),
           ),
         );
+    };
 
     const createItem = Effect.fn("CommandCenter.createItem")(
       function* (input: CommandCenterItemCreateInput) {

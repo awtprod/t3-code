@@ -17,6 +17,8 @@ import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 const LATEST_VERSION_CACHE_TTL_MS = 60 * 60 * 1_000;
 const LATEST_VERSION_TIMEOUT_MS = 4_000;
 const PROVIDER_UPDATE_ACTION_TOAST_MESSAGE = "Install the update now or review provider settings.";
+const PROVIDER_UPDATE_MANAGED_EXTERNALLY_MESSAGE =
+  "A newer version is available, but this provider's CLI is managed outside Command Center and can't be updated here.";
 
 const compactEnv = (input: Record<string, Option.Option<string>>): NodeJS.ProcessEnv =>
   Object.fromEntries(
@@ -391,6 +393,7 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
 function deriveVersionAdvisory(input: {
   readonly currentVersion: string | null;
   readonly latestVersion: string | null;
+  readonly canUpdate: boolean;
 }): Pick<ServerProviderVersionAdvisory, "status" | "message"> {
   if (!input.currentVersion) {
     return { status: "unknown", message: null };
@@ -401,7 +404,9 @@ function deriveVersionAdvisory(input: {
   if (compareSemverVersions(input.currentVersion, input.latestVersion) < 0) {
     return {
       status: "behind_latest",
-      message: PROVIDER_UPDATE_ACTION_TOAST_MESSAGE,
+      message: input.canUpdate
+        ? PROVIDER_UPDATE_ACTION_TOAST_MESSAGE
+        : PROVIDER_UPDATE_MANAGED_EXTERNALLY_MESSAGE,
     };
   }
   return { status: "current", message: null };
@@ -417,9 +422,11 @@ export function createProviderVersionAdvisory(input: {
   const capabilities =
     input.maintenanceCapabilities ?? makeManualProviderMaintenanceCapabilities(input.driver);
   const latestVersion = input.latestVersion ?? null;
+  const canUpdate = capabilities.update !== null;
   const advisory = deriveVersionAdvisory({
     currentVersion: input.currentVersion,
     latestVersion,
+    canUpdate,
   });
 
   return {
@@ -427,7 +434,7 @@ export function createProviderVersionAdvisory(input: {
     currentVersion: input.currentVersion,
     latestVersion,
     updateCommand: capabilities.update?.command ?? null,
-    canUpdate: capabilities.update !== null,
+    canUpdate,
     checkedAt: input.checkedAt ?? null,
     message: advisory.message,
   };

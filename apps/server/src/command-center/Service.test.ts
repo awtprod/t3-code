@@ -495,6 +495,87 @@ it.effect("rejects MCP child linkage across credential-bound Space and repositor
   ),
 );
 
+it.effect("keeps MCP child Runs off router-only models and fails closed without workers", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    const parent = yield* service.submitCommand(
+      decodeCommand({
+        commandId: "command-mcp-router-parent",
+        text: "Start work on the Example Studio app",
+        spaceId: studioSpace.id,
+        repositoryId: "sample-mobile-app",
+      }),
+      providers,
+    );
+    yield* sql`
+      UPDATE command_center_runs
+      SET state = 'running', project_id = 'router-project', thread_id = 'router-source-thread',
+        execution_authorized_at = ${fixtureTimestamp}
+      WHERE id = ${parent.run.id}
+    `;
+    const source = {
+      spaceId: studioSpace.id,
+      repositoryId: "sample-mobile-app",
+      threadId: "router-source-thread",
+      providerSessionId: "router-session",
+      providerInstanceId: "router-provider",
+    } as const;
+
+    const explicitRouter = yield* service
+      .submitMcpChildCommand(
+        decodeCommand({
+          commandId: "command-mcp-router-explicit-child",
+          text: "Fix the sample application test",
+          spaceId: studioSpace.id,
+          repositoryId: "sample-mobile-app",
+          modelId: "gpt-5.6-sol",
+        }),
+        providers,
+        source,
+      )
+      .pipe(Effect.flip);
+    expect(explicitRouter.reason).toBe("validation");
+    expect(explicitRouter.message).toContain("Router-only models");
+
+    // A pool whose only healthy models are router-only fails closed instead of
+    // silently running the child in a router model.
+    const routerOnlyPool = [provider("provider-router", ["gpt-5.6-sol", "claude-fable-5"], 10)];
+    const failedClosed = yield* service.submitMcpChildCommand(
+      decodeCommand({
+        commandId: "command-mcp-router-empty-pool-child",
+        text: "Fix the sample application test",
+        spaceId: studioSpace.id,
+        repositoryId: "sample-mobile-app",
+      }),
+      routerOnlyPool,
+      source,
+    );
+    expect(failedClosed.route.status).toBe("blocked");
+    expect(failedClosed.run.status).toBe("failed");
+    expect(failedClosed.route.reasons).toContain("No healthy compatible provider is available");
+
+    // With a mixed pool the automatic route skips router-only models and lands
+    // on the next healthy worker candidate.
+    const mixedPool = [
+      provider("provider-router", ["gpt-5.6-sol"], 10),
+      provider("provider-worker", ["model-worker"], 20),
+    ];
+    const routed = yield* service.submitMcpChildCommand(
+      decodeCommand({
+        commandId: "command-mcp-router-fallback-child",
+        text: "Fix the sample application test",
+        spaceId: studioSpace.id,
+        repositoryId: "sample-mobile-app",
+      }),
+      mixedPool,
+      source,
+    );
+    expect(routed.route.modelId).toBe("model-worker");
+    expect(routed.route.providerId).toBe("provider-worker");
+  }).pipe(Effect.provide(makeTestLayer())),
+);
+
 it.effect("binds an approval-gated MCP child before approval grants execution authority", () =>
   Effect.gen(function* () {
     const service = yield* CommandCenterService;

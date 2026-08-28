@@ -64,6 +64,37 @@ it.effect("denies automation runs without the exact scoped capability", () => {
   });
 });
 
+it.effect("lets a router credential read and start Runs but denies every direct write", () => {
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: ThreadId.make("cc:router:thread-1"),
+    providerSessionId: "provider-session-router",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    capabilities: new Set(["cc.items.read", "cc.memory.read", "cc.runs.start"]),
+    issuedAt: 1,
+  };
+
+  return Effect.gen(function* () {
+    yield* McpInvocationContext.requireCommandCenterCapability("cc.items.read");
+    yield* McpInvocationContext.requireCommandCenterCapability("cc.memory.read");
+    yield* McpInvocationContext.requireCommandCenterCapability("cc.runs.start");
+    for (const capability of [
+      "cc.items.write",
+      "cc.memory.propose",
+      "cc.automations.write",
+      "cc.automations.run",
+      "cc.sales.write",
+      "cc.connections.google.gmail.drafts.create",
+    ] as const) {
+      const error = yield* McpInvocationContext.requireCommandCenterCapability(capability).pipe(
+        Effect.flip,
+      );
+      expect(error).toBeInstanceOf(CommandCenterMcpCapabilityUnavailableError);
+      expect(error).toMatchObject({ capability });
+    }
+  }).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, invocation));
+});
+
 it.effect("does not let a Gmail-only credential cross into Calendar or Drive", () => {
   const invocation: McpInvocationContext.McpInvocationScope = {
     environmentId: EnvironmentId.make("environment-1"),
