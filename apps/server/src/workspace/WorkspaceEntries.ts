@@ -78,6 +78,9 @@ export const WorkspaceEntriesError = Schema.Union([
   WorkspacePaths.WorkspaceRootCreateFailedError,
   WorkspacePaths.WorkspaceRootStatFailedError,
   WorkspacePaths.WorkspaceRootNotDirectoryError,
+  // Not reachable from here today -- these call sites do not request the
+  // usability probe -- but the shared normalize signature can surface it.
+  WorkspacePaths.WorkspaceRootUnusableError,
   WorkspaceSearchIndex.WorkspaceSearchIndexCreateFailed,
   WorkspaceSearchIndex.WorkspaceSearchIndexScanTimedOut,
   WorkspaceSearchIndex.WorkspaceSearchIndexSearchFailed,
@@ -195,6 +198,10 @@ export const make = Effect.gen(function* () {
       const parentPath = endsWithSeparator ? resolvedInputPath : path.dirname(resolvedInputPath);
       const prefix = endsWithSeparator ? "" : path.basename(resolvedInputPath);
 
+      // A directory we may not read is reported, not silently rendered as
+      // empty. Presenting "no entries" for an unreadable directory invites the
+      // operator to pick a path the server cannot use, and hides the permission
+      // problem until it resurfaces as an unrelated failure much later.
       const dirents = yield* Effect.tryPromise({
         try: () => NodeFSP.readdir(parentPath, { withFileTypes: true }),
         catch: (cause) =>
@@ -204,15 +211,7 @@ export const make = Effect.gen(function* () {
             parentPath,
             cause,
           }),
-      }).pipe(
-        Effect.catchIf(
-          (error) => {
-            const code = (error.cause as NodeJS.ErrnoException | undefined)?.code;
-            return code === "EACCES" || code === "EPERM";
-          },
-          () => Effect.succeed([]),
-        ),
-      );
+      });
 
       const showHidden = endsWithSeparator || prefix.startsWith(".");
       const lowerPrefix = prefix.toLowerCase();
