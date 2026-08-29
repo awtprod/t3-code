@@ -43,6 +43,43 @@ const makeNonRepositoryHandle = () =>
     getOutputFd: () => Stream.empty,
   });
 
+// A stand-in for a directory owned by another account. The literal path is
+// arbitrary — only Git's refusal text drives the classifier — so it stays a
+// portable placeholder rather than a real home directory.
+const UNREADABLE_CWD = "/workspace-owned-by-another-user/repo";
+
+const makeUnreadableCwdHandle = (
+  stderr = `fatal: cannot change to '${UNREADABLE_CWD}': Permission denied`,
+) =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(128)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.empty,
+    stderr: Stream.encodeText(Stream.make(stderr)),
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
+const makeFailingHandle = (stderr: string) =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(128)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.empty,
+    stderr: Stream.encodeText(Stream.make(stderr)),
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
 const makeSuccessfulHandle = (stdout: string) =>
   ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(1),
@@ -176,6 +213,70 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
     ]);
   }).pipe(Effect.provide(layer));
 });
+
+const makeStubbedDriverLayer = (handle: () => ChildProcessSpawner.ChildProcessHandle) => {
+  const spawner = ChildProcessSpawner.make(() => Effect.sync(handle));
+  return GitVcsDriver.layer.pipe(
+    Layer.provide(ServerConfigLayer),
+    Layer.provideMerge(
+      Layer.merge(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      ),
+    ),
+  );
+};
+
+// A thread pointed at a directory the server user cannot traverse (a repo under
+// another user's $HOME) used to abort the whole provider turn: the status read
+// runs upstream of the send, and its error propagated out of turn start. An
+// unusable workspace is indistinguishable from a missing one as far as status
+// is concerned, so it degrades to an empty status instead.
+it.effect("reports an empty status when Git cannot enter the workspace", () =>
+  Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    const cwd = UNREADABLE_CWD;
+
+    const local = yield* driver.statusDetailsLocal(cwd);
+    assert.equal(local.isRepo, false);
+    assert.equal(local.branch, null);
+    assert.equal(local.hasWorkingTreeChanges, false);
+
+    const remote = yield* driver.statusDetailsRemote(cwd, { refreshUpstream: false });
+    assert.equal(remote.isRepo, false);
+    assert.equal(remote.branch, null);
+  }).pipe(Effect.provide(makeStubbedDriverLayer(() => makeUnreadableCwdHandle()))),
+);
+
+it.effect("reports an empty status when the workspace directory is missing", () =>
+  Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    const status = yield* driver.statusDetailsLocal("/gone");
+    assert.equal(status.isRepo, false);
+  }).pipe(
+    Effect.provide(
+      makeStubbedDriverLayer(() =>
+        makeUnreadableCwdHandle("fatal: cannot change to '/gone': No such file or directory"),
+      ),
+    ),
+  ),
+);
+
+// The absorbing path must stay narrow: a fault inside a readable repository is
+// actionable, and reporting it as "no repository here" would hide real damage.
+it.effect("still fails when Git faults inside a readable repository", () =>
+  Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    const error = yield* Effect.flip(driver.statusDetailsLocal("/repo"));
+    assert.equal(error._tag, "GitCommandError");
+  }).pipe(
+    Effect.provide(
+      makeStubbedDriverLayer(() =>
+        makeFailingHandle("error: bad index file sha1 signature\nfatal: index file corrupt"),
+      ),
+    ),
+  ),
+);
 
 it.effect("invalidates origin remote cache when a driver mutation adds origin", () =>
   Effect.gen(function* () {

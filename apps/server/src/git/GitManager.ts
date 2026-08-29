@@ -141,6 +141,29 @@ function isNotGitRepositoryError(error: GitCommandError): boolean {
   return error.message.toLowerCase().includes("not a git repository");
 }
 
+/**
+ * No status is obtainable for this workspace: it is not a repository, or Git
+ * could not enter it (missing, unreadable, or not a directory).
+ *
+ * The driver already absorbs both cases where it can see stderr; this guards
+ * the paths that only see a surfaced `GitCommandError`, whose message carries
+ * the driver's `detail` rather than Git's own text. Kept in step with
+ * `isUnavailableRepositoryGitStderr` in GitVcsDriverCore.
+ */
+function isRepositoryUnavailableError(error: GitCommandError): boolean {
+  if (isNotGitRepositoryError(error)) {
+    return true;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("cannot change to") ||
+    message.includes("no such file or directory") ||
+    message.includes("not a directory") ||
+    (message.includes("permission denied") &&
+      (message.includes("cannot open") || message.includes("cannot access")))
+  );
+}
+
 interface OpenPrInfo {
   number: number;
   title: string;
@@ -867,7 +890,9 @@ export const make = Effect.gen(function* () {
     const details = yield* gitCore
       .statusDetailsLocal(cwd)
       .pipe(
-        Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(nonRepositoryStatusDetails)),
+        Effect.catchIf(isRepositoryUnavailableError, () =>
+          Effect.succeed(nonRepositoryStatusDetails),
+        ),
       );
     const hostingProvider = details.isRepo
       ? yield* resolveHostingProvider(cwd, details.branch)
@@ -1079,7 +1104,7 @@ export const make = Effect.gen(function* () {
   ) {
     const details = yield* gitCore
       .statusDetailsRemote(cwd, options)
-      .pipe(Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(null)));
+      .pipe(Effect.catchIf(isRepositoryUnavailableError, () => Effect.succeed(null)));
     if (details === null || !details.isRepo) {
       return null;
     }
