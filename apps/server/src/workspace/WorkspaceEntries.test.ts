@@ -718,7 +718,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
       }),
     );
 
-    it.effect("returns an empty listing when the OS denies directory access", () =>
+    it.effect("reports denied directory access instead of listing it as empty", () =>
       Effect.gen(function* () {
         const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
         const cwd = yield* makeTempDir({ prefix: "t3code-workspace-browse-eacces-" });
@@ -726,10 +726,14 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         const denied = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
         vi.mocked(NodeFSP.readdir).mockRejectedValueOnce(denied);
 
-        const result = yield* workspaceEntries.browse({
-          partialPath: yield* appendSeparator(cwd),
-        });
-        expect(result).toEqual({ parentPath: cwd, entries: [] });
+        const error = yield* workspaceEntries
+          .browse({ partialPath: yield* appendSeparator(cwd) })
+          .pipe(Effect.flip);
+
+        // An empty listing here would invite the operator to select a directory
+        // this process cannot read; the permission failure has to be visible.
+        expect(error._tag).toBe("WorkspaceEntriesReadDirectoryError");
+        expect(error.message).toContain(cwd);
       }),
     );
   });

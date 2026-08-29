@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 
 const TestLayer = Layer.empty.pipe(
@@ -44,6 +45,91 @@ it.layer(TestLayer)("WorkspacePathsLive", (it) => {
         const resolved = yield* workspacePaths.normalizeWorkspaceRoot(cwd);
 
         expect(resolved).toBe(cwd);
+      }),
+    );
+
+    it.effect("accepts a usable directory when verifyUsable is set", () =>
+      Effect.gen(function* () {
+        const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+        const cwd = yield* makeTempDir();
+
+        const resolved = yield* workspacePaths.normalizeWorkspaceRoot(cwd, {
+          verifyUsable: true,
+        });
+
+        expect(resolved).toBe(cwd);
+      }),
+    );
+
+    it.effect("accepts a usable directory that is not a repository", () =>
+      Effect.gen(function* () {
+        // An empty directory is a legitimate place to start a project, so the
+        // probe must reject unusable directories only -- never non-repositories.
+        const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+        const cwd = yield* makeTempDir();
+        yield* writeTextFile(cwd, "notes.txt", "not a repo");
+
+        const resolved = yield* workspacePaths.normalizeWorkspaceRoot(cwd, {
+          verifyUsable: true,
+        });
+
+        expect(resolved).toBe(cwd);
+      }),
+    );
+
+    it.effect("rejects a directory this process cannot read", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const cwd = yield* makeTempDir();
+        const workspacePaths = yield* WorkspacePaths.make.pipe(
+          Effect.provide(VcsProcess.layer),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fileSystem,
+            readDirectory: (path) =>
+              Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "readDirectory",
+                  pathOrDescriptor: String(path),
+                  description: "Test PermissionDenied readDirectory failure.",
+                }),
+              ),
+          }),
+        );
+
+        const error = yield* workspacePaths
+          .normalizeWorkspaceRoot(cwd, { verifyUsable: true })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspacePaths.WorkspaceRootUnusableError);
+        expect(error).toMatchObject({ reason: "not-readable" });
+        expect(error.message).toContain("Workspace root is not usable by this server:");
+      }),
+    );
+
+    it.effect("skips the probe unless verifyUsable is requested", () =>
+      Effect.gen(function* () {
+        // Directory browsing calls this on every keystroke, so the default path
+        // must never reach the filesystem probe or spawn Git.
+        const fileSystem = yield* FileSystem.FileSystem;
+        const cwd = yield* makeTempDir();
+        let readDirectoryCalls = 0;
+        const workspacePaths = yield* WorkspacePaths.make.pipe(
+          Effect.provide(VcsProcess.layer),
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fileSystem,
+            readDirectory: (path, options) => {
+              readDirectoryCalls += 1;
+              return fileSystem.readDirectory(path, options);
+            },
+          }),
+        );
+
+        const resolved = yield* workspacePaths.normalizeWorkspaceRoot(cwd);
+
+        expect(resolved).toBe(cwd);
+        expect(readDirectoryCalls).toBe(0);
       }),
     );
 
@@ -97,6 +183,7 @@ it.layer(TestLayer)("WorkspacePathsLive", (it) => {
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const workspacePaths = yield* WorkspacePaths.make.pipe(
+          Effect.provide(VcsProcess.layer),
           Effect.provideService(FileSystem.FileSystem, {
             ...fileSystem,
             stat: (path) =>
@@ -131,6 +218,7 @@ it.layer(TestLayer)("WorkspacePathsLive", (it) => {
         const fileSystem = yield* FileSystem.FileSystem;
         let statCalls = 0;
         const workspacePaths = yield* WorkspacePaths.make.pipe(
+          Effect.provide(VcsProcess.layer),
           Effect.provideService(FileSystem.FileSystem, {
             ...fileSystem,
             stat: (path) => {

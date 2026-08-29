@@ -224,6 +224,12 @@ function projectEntriesFailureContext(error: WorkspaceEntries.WorkspaceEntriesEr
         failure: "workspace_root_not_directory",
         normalizedCwd: error.normalizedWorkspaceRoot,
       };
+    case "WorkspaceRootUnusableError":
+      return {
+        failure: "workspace_root_unusable",
+        normalizedCwd: error.normalizedWorkspaceRoot,
+        detail: error.detail,
+      };
     case "WorkspaceSearchIndexCreateFailed":
       return {
         failure: "search_index_create_failed",

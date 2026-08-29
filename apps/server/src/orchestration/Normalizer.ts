@@ -52,8 +52,11 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
     const serverConfig = yield* ServerConfig;
     const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
 
+    // Both paths commit to a workspace root, so both pay for the usability
+    // probe. Getting this wrong is otherwise invisible until a provider turn
+    // fails much later with an error that points nowhere near the cause.
     const normalizeProjectWorkspaceRoot = (workspaceRoot: string) =>
-      workspacePaths.normalizeWorkspaceRoot(workspaceRoot).pipe(
+      workspacePaths.normalizeWorkspaceRoot(workspaceRoot, { verifyUsable: true }).pipe(
         Effect.mapError(
           (cause) =>
             new OrchestrationDispatchCommandError({
@@ -69,6 +72,7 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       workspacePaths
         .normalizeWorkspaceRoot(workspaceRoot, {
           createIfMissing: createIfMissing === true,
+          verifyUsable: true,
         })
         .pipe(
           Effect.mapError(
