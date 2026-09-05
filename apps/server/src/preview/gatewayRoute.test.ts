@@ -2,7 +2,11 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 
-import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  EnvironmentId,
+} from "@t3tools/contracts";
 import {
   PREVIEW_GATEWAY_PORT_PARAM,
   PREVIEW_GATEWAY_REDIRECT_PARAM,
@@ -26,6 +30,7 @@ import {
 import * as Cookies from "effect/unstable/http/Cookies";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -208,6 +213,14 @@ const buildGatewayUnderTest = Effect.fnUntraced(function* (options?: {
     FetchHttpClient.layer,
   ).pipe(
     Layer.provideMerge(ServerSecretStore.layer),
+    // Upstream scopes session credentials to the environment, so the store now
+    // reads the environment identity. The gateway never boots a real
+    // ServerEnvironment, so pin a fixed id for the test.
+    Layer.provideMerge(
+      Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("preview-gateway-test")),
+      }),
+    ),
     Layer.provideMerge(ServerConfig.layer(config)),
   );
 

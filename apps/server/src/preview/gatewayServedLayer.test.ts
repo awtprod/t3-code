@@ -20,6 +20,7 @@ import * as NodeHttp from "node:http";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { EnvironmentId } from "@t3tools/contracts";
 import { PREVIEW_GATEWAY_SELECT_PATH } from "@t3tools/shared/previewGateway";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -34,6 +35,7 @@ import {
 } from "effect/unstable/http";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -111,6 +113,13 @@ const buildBothRoutersUnderTest = Effect.fnUntraced(function* () {
     FetchHttpClient.layer,
   ).pipe(
     Layer.provideMerge(ServerSecretStore.layer),
+    // Upstream scopes session credentials to the environment; this served-layer
+    // test never boots a real ServerEnvironment, so pin a fixed id.
+    Layer.provideMerge(
+      Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("preview-gateway-served-test")),
+      }),
+    ),
     Layer.provideMerge(ServerConfig.layer(config)),
   );
 

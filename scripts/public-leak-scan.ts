@@ -37,6 +37,7 @@ const stagedOnly = args.has("--staged");
 const baseline = loadBaseline();
 const paths = stagedOnly ? stagedPaths() : publicChangePaths();
 const denylist = loadDenylist();
+const upstreamRefs = upstreamSyncRefs();
 const findings: PublicLeakFinding[] = [];
 
 for (const relativePath of paths) {
@@ -49,6 +50,18 @@ for (const relativePath of paths) {
   );
   const candidate = readCandidate(relativePath);
   if (candidate._tag === "Missing") continue;
+  // Unmodified upstream content: the path scan above still applied in full, so
+  // only the generic content heuristics are skipped here. The denylist keeps
+  // running, so an operator identifier can never ride in on an upstream file.
+  if (!isVendoredPublicReference && candidate._tag !== "Oversized") {
+    if (isUpstreamVerbatim(relativePath)) {
+      const text = candidate.bytes.includes(0)
+        ? extractPublicBinaryMetadata(candidate.bytes)
+        : candidate.bytes.toString("utf8");
+      findings.push(...scanPrivateDenylistText({ path: relativePath, text, denylist }));
+      continue;
+    }
+  }
   // `.repos/` contains immutable public upstream repositories used as integration fixtures. Their
   // own examples intentionally include private-network and credential-shaped test values, so the
   // generic heuristics are not meaningful there. Keep scanning their paths and printable content
@@ -93,14 +106,19 @@ for (const relativePath of paths) {
     );
     continue;
   }
+  const text = bytes.toString("utf8");
   findings.push(
-    ...scanPublicAddedText({
-      path: relativePath,
-      text: bytes.toString("utf8"),
-      patch: candidatePatch(relativePath, bytes),
-      denylist,
-      denylistOnly: GENERATED_LOCKFILES.has(relativePath),
-    }),
+    ...dropUpstreamVerbatimLines(
+      relativePath,
+      text,
+      scanPublicAddedText({
+        path: relativePath,
+        text,
+        patch: candidatePatch(relativePath, bytes),
+        denylist,
+        denylistOnly: GENERATED_LOCKFILES.has(relativePath),
+      }),
+    ),
   );
 }
 
@@ -124,6 +142,131 @@ if (uniqueFindings.length > 0) {
   console.log(
     `Public repository safety check passed (${paths.length} current file(s), ${history.revisionCount} historical revision(s) scanned).`,
   );
+}
+
+/**
+ * Commits on the public-upstream side of an in-progress or just-recorded sync.
+ *
+ * During `git merge` that is `MERGE_HEAD`; once the merge is committed it is
+ * whichever parent does not descend from the pinned baseline (the fork side
+ * always does). Empty outside a sync, which makes every check below a no-op.
+ */
+function upstreamSyncRefs(): readonly string[] {
+  const refs = new Set<string>();
+  const mergeHead = tryGit(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).trim();
+  if (mergeHead.length > 0) refs.add(mergeHead);
+  // Every merge recorded since the baseline, not just HEAD's own parents: a
+  // pull request is built as a synthetic merge of the branch into its base, so
+  // the sync merge sits inside that history rather than at the tip.
+  const mergeCommits = tryGit(["rev-list", "--merges", `${baseline}..HEAD`])
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+  for (const commit of ["HEAD", ...mergeCommits]) {
+    const parents = tryGit(["show", "-s", "--format=%P", commit])
+      .trim()
+      .split(/\s+/u)
+      .filter(Boolean);
+    for (const parent of parents) {
+      if (!isAncestor(baseline, parent)) refs.add(parent);
+    }
+  }
+  return [...refs];
+}
+
+/**
+ * Whether this path's content is byte-identical to the upstream side of the sync.
+ *
+ * Upstream is a public repository: its own fixtures and comments carry example
+ * home paths and hostnames that the generic heuristics flag, and re-flagging
+ * them says nothing about Command Center's private boundary. This is the same
+ * reasoning `.repos/` already encodes, narrowed to content the fork has not
+ * touched — anything the fork authored or edited keeps the full scan.
+ */
+function isUpstreamVerbatim(relativePath: string): boolean {
+  return upstreamRefs.some(
+    (ref) =>
+      tryGitStatus([
+        "diff",
+        "--quiet",
+        ...(stagedOnly ? ["--cached"] : []),
+        ref,
+        "--",
+        relativePath,
+      ]) === 0,
+  );
+}
+
+/**
+ * Drop findings that sit on a line the fork never wrote.
+ *
+ * A merge result is a mix: the file is not byte-identical to upstream, yet most
+ * of its lines are upstream's verbatim. Flagging those says nothing about
+ * Command Center's private boundary, and they cannot be "fixed" — the rules
+ * reject the absolute-path shape itself, so renaming the account in an upstream
+ * fixture still trips them. Lines the fork authored or edited keep the full
+ * scan, and denylist findings are never dropped.
+ */
+function dropUpstreamVerbatimLines(
+  relativePath: string,
+  text: string,
+  candidateFindings: readonly PublicLeakFinding[],
+): readonly PublicLeakFinding[] {
+  if (candidateFindings.length === 0 || upstreamRefs.length === 0) return candidateFindings;
+  const upstreamLines = new Set<string>();
+  for (const ref of upstreamRefs) {
+    const upstreamText = tryGit(["show", `${ref}:${relativePath}`]);
+    if (upstreamText.length === 0) continue;
+    for (const line of upstreamText.split("\n")) upstreamLines.add(line);
+  }
+  if (upstreamLines.size === 0) return candidateFindings;
+  const lines = text.split("\n");
+  return candidateFindings.filter((finding) => {
+    if (finding.rule === "private-denylist") return true;
+    const line = lines[finding.line - 1];
+    return line === undefined || !upstreamLines.has(line);
+  });
+}
+
+/** Blob-identity form of {@link isUpstreamVerbatim} for a historical revision. */
+function isUpstreamVerbatimBlob(commit: string, relativePath: string): boolean {
+  const candidate = tryGit([
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    `${commit}:${relativePath}`,
+  ]).trim();
+  if (candidate.length === 0) return false;
+  return upstreamRefs.some(
+    (ref) =>
+      tryGit(["rev-parse", "--verify", "--quiet", `${ref}:${relativePath}`]).trim() === candidate,
+  );
+}
+
+function tryGit(args: readonly string[]): string {
+  try {
+    return NodeChildProcess.execFileSync("git", [...args], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 1024 * 1024 * 1024,
+    });
+  } catch {
+    return "";
+  }
+}
+
+function tryGitStatus(args: readonly string[]): number {
+  try {
+    NodeChildProcess.execFileSync("git", [...args], {
+      cwd: repoRoot,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return 0;
+  } catch (cause) {
+    const status = (cause as { readonly status?: number }).status;
+    return typeof status === "number" ? status : 1;
+  }
 }
 
 function publicChangePaths() {
@@ -235,6 +378,20 @@ function scanHistoricalRevisions() {
         continue;
       }
       const bytes = gitBytes(["cat-file", "blob", object]);
+      // Same rule as the current-file loop: an upstream blob the fork never
+      // touched is scanned for paths and denylisted identifiers only.
+      if (!isVendoredPublicReference && isUpstreamVerbatimBlob(commit, relativePath)) {
+        const text = bytes.includes(0)
+          ? extractPublicBinaryMetadata(bytes)
+          : bytes.toString("utf8");
+        historicalFindings.push(
+          ...scanPrivateDenylistText({ path: relativePath, text, denylist }).map((finding) => ({
+            ...finding,
+            revision,
+          })),
+        );
+        continue;
+      }
       if (isVendoredPublicReference) {
         const text = bytes.includes(0)
           ? extractPublicBinaryMetadata(bytes)
@@ -280,15 +437,20 @@ function scanHistoricalRevisions() {
         "--",
         relativePath,
       ]);
+      const historicalText = bytes.toString("utf8");
       historicalFindings.push(
-        ...scanPublicAddedText({
-          path: relativePath,
-          text: bytes.toString("utf8"),
-          patch,
-          denylist,
-          revision,
-          denylistOnly: GENERATED_LOCKFILES.has(relativePath),
-        }),
+        ...dropUpstreamVerbatimLines(
+          relativePath,
+          historicalText,
+          scanPublicAddedText({
+            path: relativePath,
+            text: historicalText,
+            patch,
+            denylist,
+            revision,
+            denylistOnly: GENERATED_LOCKFILES.has(relativePath),
+          }),
+        ),
       );
     }
   }
