@@ -152,17 +152,26 @@ if (uniqueFindings.length > 0) {
  * always does). Empty outside a sync, which makes every check below a no-op.
  */
 function upstreamSyncRefs(): readonly string[] {
-  const refs: string[] = [];
+  const refs = new Set<string>();
   const mergeHead = tryGit(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).trim();
-  if (mergeHead.length > 0) refs.push(mergeHead);
-  const parents = tryGit(["show", "-s", "--format=%P", "HEAD"])
+  if (mergeHead.length > 0) refs.add(mergeHead);
+  // Every merge recorded since the baseline, not just HEAD's own parents: a
+  // pull request is built as a synthetic merge of the branch into its base, so
+  // the sync merge sits inside that history rather than at the tip.
+  const mergeCommits = tryGit(["rev-list", "--merges", `${baseline}..HEAD`])
     .trim()
-    .split(/\s+/u)
+    .split("\n")
     .filter(Boolean);
-  for (const parent of parents) {
-    if (!isAncestor(baseline, parent)) refs.push(parent);
+  for (const commit of ["HEAD", ...mergeCommits]) {
+    const parents = tryGit(["show", "-s", "--format=%P", commit])
+      .trim()
+      .split(/\s+/u)
+      .filter(Boolean);
+    for (const parent of parents) {
+      if (!isAncestor(baseline, parent)) refs.add(parent);
+    }
   }
-  return refs;
+  return [...refs];
 }
 
 /**
@@ -428,15 +437,20 @@ function scanHistoricalRevisions() {
         "--",
         relativePath,
       ]);
+      const historicalText = bytes.toString("utf8");
       historicalFindings.push(
-        ...scanPublicAddedText({
-          path: relativePath,
-          text: bytes.toString("utf8"),
-          patch,
-          denylist,
-          revision,
-          denylistOnly: GENERATED_LOCKFILES.has(relativePath),
-        }),
+        ...dropUpstreamVerbatimLines(
+          relativePath,
+          historicalText,
+          scanPublicAddedText({
+            path: relativePath,
+            text: historicalText,
+            patch,
+            denylist,
+            revision,
+            denylistOnly: GENERATED_LOCKFILES.has(relativePath),
+          }),
+        ),
       );
     }
   }
