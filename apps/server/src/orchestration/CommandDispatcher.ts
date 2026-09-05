@@ -26,6 +26,10 @@ import {
   resolveSandboxImage,
   resolveSandboxPreviewProxyImage,
 } from "../sandbox/SandboxRuntimeManager.ts";
+import {
+  resolveSandboxGitBase,
+  SandboxGitBaseUnavailableError,
+} from "../sandbox/sandboxGitBase.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { normalizeDispatchCommand } from "./Normalizer.ts";
@@ -424,28 +428,16 @@ export const make = Effect.gen(function* () {
         resolveSandboxPreviewProxyImage() === undefined
       )
         return resolvedCommand;
-      const local = yield* gitWorkflow
-        .localStatus({ cwd: project.workspaceRoot })
-        .pipe(
-          Effect.mapError((cause) =>
-            toDispatchCommandError(cause, "Failed to inspect sandbox Git base"),
-          ),
-        );
-      if (!local.isRepo || local.refName === null)
-        return yield* new OrchestrationDispatchCommandError({
-          message: "Isolated threads require a Git repository with a selected branch.",
-        });
-      const base = yield* gitWorkflow
-        .resolveRemoteTrackingCommit({
-          cwd: project.workspaceRoot,
-          refName: local.refName,
-          fallbackRemoteName: "origin",
-        })
-        .pipe(
-          Effect.mapError((cause) =>
-            toDispatchCommandError(cause, "Failed to resolve immutable sandbox Git base"),
-          ),
-        );
+      const base = yield* resolveSandboxGitBase({
+        gitWorkflow,
+        cwd: project.workspaceRoot,
+      }).pipe(
+        Effect.mapError((cause) =>
+          cause instanceof SandboxGitBaseUnavailableError
+            ? new OrchestrationDispatchCommandError({ message: cause.message })
+            : toDispatchCommandError(cause, "Failed to resolve the sandbox Git base"),
+        ),
+      );
       const sandboxFields = {
         sandboxConfig: {
           ...(projectFile?.sandbox?.limits === undefined
