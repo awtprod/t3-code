@@ -612,6 +612,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         false,
         undefined,
         undefined,
+        false,
         true,
       );
       const winWithoutWslPrebuild = yield* createBuildConfig(
@@ -622,6 +623,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         false,
         undefined,
         undefined,
+        false,
         false,
       );
       const remoteOnlyWin = yield* createBuildConfig(
