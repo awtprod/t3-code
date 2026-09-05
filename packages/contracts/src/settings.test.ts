@@ -2,20 +2,54 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import { ProjectId } from "./baseSchemas.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
   ClientSettingsPatch,
+  ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
+  defaultEnabledForDriver,
+  resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
+const encodeClientSettings = Schema.encodeSync(ClientSettingsSchema);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
+const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+describe("ClaudeSettings auto-compaction", () => {
+  it("uses Claude's default threshold when no override is configured", () => {
+    expect(decodeClaudeSettings({}).autoCompactWindow).toBe("");
+  });
+
+  it.each(["100000", "300000", "1000000"])(
+    "accepts a supported auto-compaction threshold: %s",
+    (value) => {
+      expect(decodeClaudeSettings({ autoCompactWindow: value }).autoCompactWindow).toBe(value);
+    },
+  );
+
+  it.each(["99999", "1000001", "300k", "invalid"])(
+    "rejects an unsupported auto-compaction threshold: %s",
+    (value) => {
+      expect(() => decodeClaudeSettings({ autoCompactWindow: value })).toThrow();
+    },
+  );
+
+  it("rejects an unsupported threshold at the settings patch boundary", () => {
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300k" } } }),
+    ).toThrow();
+    expect(
+      decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300000" } } }),
+    ).toBeDefined();
+  });
+});
 
 describe("ClientSettings word wrap", () => {
   it("defaults word wrap on", () => {
@@ -34,6 +68,51 @@ describe("ClientSettings word wrap", () => {
   });
 });
 
+describe("ClientSettings quit confirmation", () => {
+  it("defaults to hold", () => {
+    expect(decodeClientSettings({}).confirmQuit).toBe("hold");
+  });
+
+  it.each(["direct", "hold", "double-click"] as const)("accepts the %s mode", (mode) => {
+    expect(decodeClientSettings({ confirmQuit: mode }).confirmQuit).toBe(mode);
+    expect(decodeClientSettingsPatch({ confirmQuit: mode }).confirmQuit).toBe(mode);
+  });
+
+  it.each([
+    [true, "hold"],
+    [false, "direct"],
+  ] as const)("migrates the legacy %s value to %s", (legacyValue, mode) => {
+    const settings = decodeClientSettings({ confirmQuit: legacyValue });
+
+    expect(settings.confirmQuit).toBe(mode);
+    expect(encodeClientSettings(settings).confirmQuit).toBe(mode);
+  });
+
+  it("rejects legacy booleans at the patch boundary", () => {
+    expect(() => decodeClientSettingsPatch({ confirmQuit: true })).toThrow();
+  });
+});
+
+describe("ClientSettings browser recording frame rate", () => {
+  it("defaults to 30 fps", () => {
+    expect(decodeClientSettings({}).browserRecordingFrameRate).toBe(30);
+  });
+
+  it.each([30, 60])("accepts a supported frame rate: %s", (frameRate) => {
+    expect(
+      decodeClientSettings({ browserRecordingFrameRate: frameRate }).browserRecordingFrameRate,
+    ).toBe(frameRate);
+    expect(
+      decodeClientSettingsPatch({ browserRecordingFrameRate: frameRate }).browserRecordingFrameRate,
+    ).toBe(frameRate);
+  });
+
+  it.each([24, 59, 120])("rejects an unsupported frame rate: %s", (frameRate) => {
+    expect(() => decodeClientSettings({ browserRecordingFrameRate: frameRate })).toThrow();
+    expect(() => decodeClientSettingsPatch({ browserRecordingFrameRate: frameRate })).toThrow();
+  });
+});
+
 describe("ClientSettings glass opacity", () => {
   it("defaults to a readable translucent surface", () => {
     expect(decodeClientSettings({}).glassOpacity).toBe(80);
@@ -47,6 +126,22 @@ describe("ClientSettings glass opacity", () => {
   it.each([40, 75, 100])("accepts a glass opacity within the supported range: %s", (value) => {
     expect(decodeClientSettings({ glassOpacity: value }).glassOpacity).toBe(value);
     expect(decodeClientSettingsPatch({ glassOpacity: value }).glassOpacity).toBe(value);
+  });
+});
+
+describe("ClientSettings appearance contrast", () => {
+  it("defaults to the theme's original contrast", () => {
+    expect(decodeClientSettings({}).appearanceContrast).toBe(100);
+  });
+
+  it.each([49, 201, 92.5])("rejects an invalid appearance contrast: %s", (value) => {
+    expect(() => decodeClientSettings({ appearanceContrast: value })).toThrow();
+    expect(() => decodeClientSettingsPatch({ appearanceContrast: value })).toThrow();
+  });
+
+  it.each([50, 100, 150, 200])("accepts an appearance contrast in range: %s", (value) => {
+    expect(decodeClientSettings({ appearanceContrast: value }).appearanceContrast).toBe(value);
+    expect(decodeClientSettingsPatch({ appearanceContrast: value }).appearanceContrast).toBe(value);
   });
 });
 
@@ -69,11 +164,8 @@ describe("ClientSettings environment identification", () => {
 });
 
 describe("ClientSettings sidebar", () => {
-  it("defaults to the current sidebar with automatic merge and inactivity settling", () => {
-    const settings = decodeClientSettings({});
-    expect(settings.legacySidebarEnabled).toBe(false);
-    expect(settings.sidebarAutoSettleAfterDays).toBe(3);
-    expect(settings.sidebarAutoSettleOnMerge).toBe(true);
+  it("defaults to the current sidebar", () => {
+    expect(decodeClientSettings({}).legacySidebarEnabled).toBe(false);
   });
 
   it("preserves an explicit legacy sidebar opt-in", () => {
@@ -83,32 +175,45 @@ describe("ClientSettings sidebar", () => {
     );
   });
 
-  it("allows auto-settle by inactivity to be disabled", () => {
-    expect(
-      decodeClientSettings({ sidebarAutoSettleAfterDays: null }).sidebarAutoSettleAfterDays,
-    ).toBeNull();
+  it("keeps unpin confirmation opt-in and patchable", () => {
+    expect(decodeClientSettings({}).confirmThreadUnpin).toBe(false);
+    expect(decodeClientSettingsPatch({ confirmThreadUnpin: true }).confirmThreadUnpin).toBe(true);
+    expect(() => decodeClientSettingsPatch({ confirmThreadUnpin: "yes" })).toThrow();
+  });
+});
+
+describe("ServerSettings thread settlement", () => {
+  it("defaults merge settlement on and inactivity settlement to three days", () => {
+    const settings = decodeServerSettings({});
+    expect(settings.sidebarAutoSettleAfterDays).toBe(3);
+    expect(settings.sidebarAutoSettleOnMerge).toBe(true);
   });
 
-  it("allows auto-settle on merge to be disabled", () => {
-    expect(decodeClientSettings({ sidebarAutoSettleOnMerge: false }).sidebarAutoSettleOnMerge).toBe(
-      false,
-    );
+  it("allows both automatic rules to be disabled", () => {
     expect(
-      decodeClientSettingsPatch({ sidebarAutoSettleOnMerge: false }).sidebarAutoSettleOnMerge,
-    ).toBe(false);
+      decodeServerSettings({
+        sidebarAutoSettleAfterDays: null,
+        sidebarAutoSettleOnMerge: false,
+      }),
+    ).toMatchObject({ sidebarAutoSettleAfterDays: null, sidebarAutoSettleOnMerge: false });
+    expect(
+      decodeServerSettingsPatch({
+        sidebarAutoSettleAfterDays: null,
+        sidebarAutoSettleOnMerge: false,
+      }),
+    ).toMatchObject({ sidebarAutoSettleAfterDays: null, sidebarAutoSettleOnMerge: false });
   });
 
   it.each([-1, 0, 91])("rejects an auto-settle threshold outside 1..90: %s", (value) => {
-    expect(() => decodeClientSettings({ sidebarAutoSettleAfterDays: value })).toThrow();
-    expect(() => decodeClientSettingsPatch({ sidebarAutoSettleAfterDays: value })).toThrow();
+    expect(() => decodeServerSettings({ sidebarAutoSettleAfterDays: value })).toThrow();
+    expect(() => decodeServerSettingsPatch({ sidebarAutoSettleAfterDays: value })).toThrow();
   });
 });
 
 describe("ClientSettings sidebar v2", () => {
-  it("defaults the beta off with a three-day auto-settle threshold", () => {
+  it("defaults the beta off", () => {
     const settings = decodeClientSettings({});
     expect(settings.sidebarV2Enabled).toBe(false);
-    expect(settings.sidebarAutoSettleAfterDays).toBe(3);
   });
 
   it("treats settings written before the beta had a per-channel default as unconfigured", () => {
@@ -198,6 +303,61 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
         providerInstances: { "1bad": { driver: "codex" } },
       }),
     ).toThrow();
+  });
+});
+
+describe("provider enabled defaults", () => {
+  it("enables only the stable bindings by default", () => {
+    const decoded = decodeServerSettings({});
+    expect(decoded.providers.codex.enabled).toBe(true);
+    expect(decoded.providers.claudeAgent.enabled).toBe(true);
+    expect(decoded.providers.cursor.enabled).toBe(false);
+    expect(decoded.providers.grok.enabled).toBe(false);
+    expect(decoded.providers.opencode.enabled).toBe(false);
+  });
+
+  it("derives per-driver defaults from the settings schemas", () => {
+    expect(defaultEnabledForDriver(ProviderDriverKind.make("codex"))).toBe(true);
+    expect(defaultEnabledForDriver(ProviderDriverKind.make("cursor"))).toBe(false);
+    expect(defaultEnabledForDriver(ProviderDriverKind.make("grok"))).toBe(false);
+    // Unknown fork drivers stay enabled; their own build decides otherwise.
+    expect(defaultEnabledForDriver(ProviderDriverKind.make("ollama"))).toBe(true);
+  });
+
+  it("keeps Cursor enabled when an existing user explicitly opted in", () => {
+    const cursor = ProviderDriverKind.make("cursor");
+    const cursorId = ProviderInstanceId.make("cursor");
+    const decoded = decodeServerSettings({
+      providers: { cursor: { enabled: true } },
+      providerInstances: {
+        [cursorId]: { driver: cursor, enabled: true, config: {} },
+      },
+    });
+
+    expect(decoded.providers.cursor.enabled).toBe(true);
+    expect(resolveProviderInstanceEnabled(decoded.providerInstances[cursorId]!)).toBe(true);
+  });
+
+  it("resolves instance enabled state with explicit false winning", () => {
+    const grok = ProviderDriverKind.make("grok");
+    const codex = ProviderDriverKind.make("codex");
+    // No flags anywhere: driver default applies.
+    expect(resolveProviderInstanceEnabled({ driver: grok, config: {} })).toBe(false);
+    expect(resolveProviderInstanceEnabled({ driver: codex, config: {} })).toBe(true);
+    // Envelope flag wins over the driver default.
+    expect(resolveProviderInstanceEnabled({ driver: grok, enabled: true, config: {} })).toBe(true);
+    expect(resolveProviderInstanceEnabled({ driver: codex, enabled: false, config: {} })).toBe(
+      false,
+    );
+    // Legacy in-config flag fills in when the envelope is silent.
+    expect(resolveProviderInstanceEnabled({ driver: grok, config: { enabled: true } })).toBe(true);
+    // Conflicting flags: the explicit false wins, whichever side it is on.
+    expect(
+      resolveProviderInstanceEnabled({ driver: grok, enabled: true, config: { enabled: false } }),
+    ).toBe(false);
+    expect(
+      resolveProviderInstanceEnabled({ driver: codex, enabled: false, config: { enabled: true } }),
+    ).toBe(false);
   });
 });
 

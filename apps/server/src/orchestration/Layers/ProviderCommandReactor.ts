@@ -26,6 +26,7 @@ import * as Duration from "effect/Duration";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
@@ -115,7 +116,8 @@ type ProviderIntentEvent = Extract<
       | "thread.turn-interrupt-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
-      | "thread.session-stop-requested";
+      | "thread.session-stop-requested"
+      | "thread.settled";
   }
 >;
 
@@ -325,13 +327,15 @@ function isUnknownPendingApprovalRequestError(cause: Cause.Cause<ProviderService
     const detail = error.detail.toLowerCase();
     return (
       detail.includes("unknown pending approval request") ||
-      detail.includes("unknown pending permission request")
+      detail.includes("unknown pending permission request") ||
+      detail.includes("unknown pending codex approval request")
     );
   }
-  const message = Cause.pretty(cause);
+  const message = Cause.pretty(cause).toLowerCase();
   return (
     message.includes("unknown pending approval request") ||
-    message.includes("unknown pending permission request")
+    message.includes("unknown pending permission request") ||
+    message.includes("unknown pending codex approval request")
   );
 }
 
@@ -409,6 +413,7 @@ export const make = Effect.gen(function* () {
   >();
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
+  const fileSystem = yield* FileSystem.FileSystem;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
@@ -992,9 +997,55 @@ export const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
+  /**
+   * Recreates a thread's worktree from its branch when the directory has
+   * disappeared. Provider sessions resume into the persisted cwd, so a missing
+   * worktree makes every later turn fail as a bogus "session not found".
+   * Best-effort: on failure the turn proceeds and reports the real error.
+   */
+  const ensureThreadWorktree = Effect.fnUntraced(function* (thread: {
+    readonly id: ThreadId;
+    readonly projectId: ProjectId;
+    readonly branch: string | null;
+    readonly worktreePath: string | null;
+  }) {
+    const { worktreePath, branch } = thread;
+    if (!worktreePath || !branch) {
+      return;
+    }
+    const exists = yield* fileSystem.exists(worktreePath).pipe(Effect.orElseSucceed(() => true));
+    if (exists) {
+      return;
+    }
+    const project = yield* resolveProject(thread.projectId);
+    if (!project) {
+      return;
+    }
+    const cwd = project.workspaceRoot;
+    yield* Effect.logWarning("provider command reactor recreating missing worktree", {
+      threadId: thread.id,
+      worktreePath,
+      branch,
+    });
+    // A directory deleted without `git worktree remove` leaves an admin entry
+    // that makes `git worktree add` refuse the path; prune clears it.
+    yield* gitWorkflow.pruneWorktrees({ cwd }).pipe(
+      Effect.andThen(gitWorkflow.createWorktree({ cwd, refName: branch, path: worktreePath })),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider command reactor failed to recreate worktree", {
+              threadId: thread.id,
+              worktreePath,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    );
+  });
+
   const resolveThread = Effect.fnUntraced(function* (threadId: ThreadId) {
     return yield* projectionSnapshotQuery
-      .getThreadDetailById(threadId)
+      .getThreadDetailById(threadId, { activityKinds: [] })
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
@@ -1519,12 +1570,19 @@ export const make = Effect.gen(function* () {
         const { textGenerationModelSelection: modelSelection } =
           yield* serverSettingsService.getSettings;
 
-        const generated = yield* textGeneration.generateThreadTitle({
-          cwd: input.cwd,
-          message: input.messageText,
-          ...(attachments.length > 0 ? { attachments } : {}),
-          modelSelection,
-        });
+        const generated = yield* textGeneration
+          .generateThreadTitle({
+            cwd: input.cwd,
+            message: input.messageText,
+            ...(attachments.length > 0 ? { attachments } : {}),
+            modelSelection,
+          })
+          .pipe(
+            Effect.retry({
+              times: 2,
+              schedule: Schedule.exponential("2 seconds"),
+            }),
+          );
         if (!generated) return;
 
         const thread = yield* resolveThread(input.threadId);
@@ -1841,49 +1899,68 @@ export const make = Effect.gen(function* () {
       Effect.retry({ times: 1, schedule: Schedule.exponential(100) }),
       Effect.as<InterruptTurnEscalationOutcome>({ _tag: "interrupted" }),
       Effect.catchCause((interruptCause) =>
-        Effect.logWarning(
-          "provider command reactor escalating an undeliverable interrupt to a session stop",
-          {
-            ...input.logContext,
-            threadId: input.threadId,
-            turnId: input.turnId,
-            cause: Cause.pretty(interruptCause),
-          },
-        ).pipe(
-          Effect.flatMap(() => serverCommandId(input.escalationTag)),
-          Effect.flatMap((commandId) =>
-            orchestrationEngine.dispatch({
-              type: "thread.session.stop",
-              commandId,
-              threadId: input.threadId,
-              canceledThroughSequence: NonNegativeInt.make(input.canceledThroughSequence),
-              createdAt: input.createdAt,
-            }),
-          ),
-          Effect.as<InterruptTurnEscalationOutcome>({
-            _tag: "escalation-dispatched",
-            interruptCause,
-          }),
-          // Dispatch failure must not replace the interrupt failure — the
-          // caller reports the original operation the user asked for — but it
-          // also must not disappear. Losing this log makes an escalation that
-          // never entered the event log indistinguishable from one that was
-          // accepted and later failed in its own handler.
-          Effect.catchCause((escalationCause) =>
-            Effect.logError("provider command reactor failed to dispatch escalated session stop", {
+        Effect.gen(function* () {
+          // The interrupt can fail against a session that settled on its own
+          // while the retries ran. Widening to a session stop then tears down a
+          // session that is ready for the next turn — the opposite of what the
+          // user asked for. Re-read first and treat an already-settled session
+          // as the interrupt having achieved its purpose.
+          const latestThread = yield* resolveThread(input.threadId);
+          const latestSession = latestThread?.session;
+          if (
+            !latestSession ||
+            latestSession.status === "ready" ||
+            latestSession.status === "stopped"
+          ) {
+            return { _tag: "interrupted" } as InterruptTurnEscalationOutcome;
+          }
+          return yield* Effect.logWarning(
+            "provider command reactor escalating an undeliverable interrupt to a session stop",
+            {
               ...input.logContext,
               threadId: input.threadId,
               turnId: input.turnId,
-              cause: Cause.pretty(escalationCause),
-              originalInterruptCause: Cause.pretty(interruptCause),
-            }).pipe(
-              Effect.as<InterruptTurnEscalationOutcome>({
-                _tag: "failed",
-                interruptCause,
+              cause: Cause.pretty(interruptCause),
+            },
+          ).pipe(
+            Effect.flatMap(() => serverCommandId(input.escalationTag)),
+            Effect.flatMap((commandId) =>
+              orchestrationEngine.dispatch({
+                type: "thread.session.stop",
+                commandId,
+                threadId: input.threadId,
+                canceledThroughSequence: NonNegativeInt.make(input.canceledThroughSequence),
+                createdAt: input.createdAt,
               }),
             ),
-          ),
-        ),
+            Effect.as<InterruptTurnEscalationOutcome>({
+              _tag: "escalation-dispatched",
+              interruptCause,
+            }),
+            // Dispatch failure must not replace the interrupt failure — the
+            // caller reports the original operation the user asked for — but it
+            // also must not disappear. Losing this log makes an escalation that
+            // never entered the event log indistinguishable from one that was
+            // accepted and later failed in its own handler.
+            Effect.catchCause((escalationCause) =>
+              Effect.logError(
+                "provider command reactor failed to dispatch escalated session stop",
+                {
+                  ...input.logContext,
+                  threadId: input.threadId,
+                  turnId: input.turnId,
+                  cause: Cause.pretty(escalationCause),
+                  originalInterruptCause: Cause.pretty(interruptCause),
+                },
+              ).pipe(
+                Effect.as<InterruptTurnEscalationOutcome>({
+                  _tag: "failed",
+                  interruptCause,
+                }),
+              ),
+            ),
+          );
+        }),
       ),
     );
 
@@ -2561,6 +2638,11 @@ export const make = Effect.gen(function* () {
       return;
     }
 
+    // Provider sessions resume into the persisted cwd, so a worktree deleted
+    // out from under the thread has to be recreated before anything that
+    // depends on it (title/branch generation, execution-target resolution).
+    yield* ensureThreadWorktree(thread);
+
     const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
@@ -2814,8 +2896,8 @@ export const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
-    const hasSession = thread.session && thread.session.status !== "stopped";
-    if (!hasSession) {
+    const session = thread.session;
+    if (!session || session.status === "stopped") {
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.interrupt.failed",
@@ -2825,6 +2907,76 @@ export const make = Effect.gen(function* () {
         createdAt: event.payload.createdAt,
       });
     }
+
+    const recoverInterruptFailure = (cause: Cause.Cause<unknown>) => {
+      if (Cause.hasInterruptsOnly(cause)) {
+        return Effect.interrupt;
+      }
+
+      const detail = formatFailureDetail(cause);
+      return Effect.gen(function* () {
+        const latestThread = yield* resolveThread(event.payload.threadId);
+        const latestSession = latestThread?.session;
+        if (
+          !latestSession ||
+          latestSession.status === "stopped" ||
+          latestSession.status === "ready" ||
+          (event.payload.turnId !== undefined &&
+            latestSession.activeTurnId !== null &&
+            latestSession.activeTurnId !== event.payload.turnId)
+        ) {
+          return;
+        }
+
+        yield* providerService.stopSession({ threadId: event.payload.threadId }).pipe(
+          Effect.catchCause((stopCause) => {
+            if (Cause.hasInterruptsOnly(stopCause)) {
+              return Effect.interrupt;
+            }
+            return Effect.logWarning(
+              "provider command reactor failed to stop session after interrupt failure",
+              {
+                threadId: event.payload.threadId,
+                cause: Cause.pretty(stopCause),
+                originalCause: Cause.pretty(cause),
+              },
+            );
+          }),
+        );
+        const stoppedThread = yield* resolveThread(event.payload.threadId);
+        const stoppedSession = stoppedThread?.session;
+        if (
+          !stoppedSession ||
+          stoppedSession.status === "stopped" ||
+          stoppedSession.status === "ready" ||
+          (event.payload.turnId !== undefined &&
+            stoppedSession.activeTurnId !== null &&
+            stoppedSession.activeTurnId !== event.payload.turnId)
+        ) {
+          return;
+        }
+
+        yield* setThreadSession({
+          threadId: event.payload.threadId,
+          session: {
+            ...stoppedSession,
+            status: "stopped",
+            activeTurnId: null,
+            lastError: detail,
+            updatedAt: event.payload.createdAt,
+          },
+          createdAt: event.payload.createdAt,
+        });
+        yield* appendProviderFailureActivity({
+          threadId: event.payload.threadId,
+          kind: "provider.turn.interrupt.failed",
+          summary: "Provider turn interrupt failed",
+          detail,
+          turnId: event.payload.turnId ?? null,
+          createdAt: event.payload.createdAt,
+        });
+      });
+    };
 
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
     //
@@ -2854,16 +3006,13 @@ export const make = Effect.gen(function* () {
           turnId: event.payload.turnId ?? null,
           cause: Cause.pretty(cause),
         }).pipe(
-          Effect.flatMap(() =>
-            appendProviderFailureActivity({
-              threadId: event.payload.threadId,
-              kind: "provider.turn.interrupt.failed",
-              summary: "Provider turn interrupt failed",
-              detail: `The turn was marked stopped but the provider could not be told: ${formatFailureDetail(cause)}`,
-              turnId: event.payload.turnId ?? null,
-              createdAt: event.payload.createdAt,
-            }),
-          ),
+          // Upstream's recovery, run after the escalation ladder rather than
+          // instead of it: it re-reads the session and only acts while the turn
+          // is still live, so an escalated `thread.session.stop` that already
+          // settled the thread makes this a no-op. When the ladder failed
+          // outright it is what stops the provider session, records the error on
+          // the projection, and appends the interrupt-failure activity.
+          Effect.flatMap(() => recoverInterruptFailure(cause)),
           // Last line of defence. If reporting also fails there is nothing
           // further to try, and failing this handler over a log entry would
           // only requeue an interrupt that already ran its whole ladder.
@@ -3317,6 +3466,24 @@ export const make = Effect.gen(function* () {
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
         return;
+      case "thread.settled": {
+        const thread = yield* projectionSnapshotQuery.getThreadShellById(event.payload.threadId);
+        if (
+          Option.isNone(thread) ||
+          thread.value.session == null ||
+          thread.value.session.status === "stopped"
+        ) {
+          return;
+        }
+        yield* orchestrationEngine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make(`session-stop-for-settle:${event.commandId ?? event.eventId}`),
+          threadId: event.payload.threadId,
+          createdAt: event.occurredAt,
+          onlyIfSettled: true,
+        });
+        return;
+      }
     }
   });
 
@@ -3355,7 +3522,8 @@ export const make = Effect.gen(function* () {
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
-        event.type === "thread.session-stop-requested"
+        event.type === "thread.session-stop-requested" ||
+        event.type === "thread.settled"
       ) {
         return yield* worker.enqueue(event);
       }

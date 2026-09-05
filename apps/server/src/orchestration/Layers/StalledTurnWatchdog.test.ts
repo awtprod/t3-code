@@ -176,6 +176,7 @@ describe("StalledTurnWatchdog", () => {
       getCapabilities: () => unsupported(),
       getInstanceInfo: () => unsupported(),
       rollbackConversation: () => unsupported(),
+      uploadFeedback: () => unsupported(),
       streamEvents: Stream.empty,
     };
 

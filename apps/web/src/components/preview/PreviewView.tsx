@@ -43,7 +43,7 @@ import {
   commitBrowserViewportChange,
   subscribeBrowserViewportChange,
 } from "~/browser/browserViewportActions";
-import { resolveResponsiveBrowserViewportSize } from "~/browser/browserViewportLayout";
+import { browserResponsiveViewportForToggle, useBrowserDefaults } from "~/browser/browserDefaults";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
 import { PreviewUnreachable } from "./PreviewUnreachable";
 import { revealInFileExplorerLabel } from "./fileExplorerLabel";
@@ -51,12 +51,12 @@ import { shouldShowPreviewEmptyState } from "./previewEmptyStateLogic";
 import { BrowserSurfaceSlot } from "~/browser/BrowserSurfaceSlot";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
 import { WebPreviewFrame } from "~/browser/WebPreviewFrame";
-import { useLoadingProgress } from "./useLoadingProgress";
 import { usePreviewSession } from "./usePreviewSession";
 import { ZoomIndicator } from "./ZoomIndicator";
 import { AgentBrowserCursor } from "./AgentBrowserCursor";
 import {
   findActiveBrowserRecordingRuntimeTabId,
+  isBrowserRecordingStartCancelledError,
   startBrowserRecording,
   stopBrowserRecording,
   useActiveBrowserRecordingTabIds,
@@ -145,8 +145,8 @@ export function PreviewView({
   const isUnreachable = navStatus._tag === "LoadFailed";
   const showEmptyState = shouldShowPreviewEmptyState(snapshot);
   const controller = desktopOverlay?.controller ?? "none";
-  const loadProgress = useLoadingProgress(loading);
   const viewport = snapshot?.viewport ?? FILL_PREVIEW_VIEWPORT;
+  const browserDefaults = useBrowserDefaults();
   const panelRect = useBrowserSurfaceStore((state) =>
     runtimeTabId ? (state.byTabId[runtimeTabId]?.rect ?? null) : null,
   );
@@ -267,12 +267,14 @@ export function PreviewView({
       return;
     }
 
-    const responsiveSize = panelRect
-      ? resolveResponsiveBrowserViewportSize(panelRect, desktopOverlay?.zoomFactor)
-      : { width: 1024, height: 768 };
-    void commitBrowserViewportChange(runtimeTabId, { _tag: "freeform", ...responsiveSize }).catch(
-      () => undefined,
-    );
+    void commitBrowserViewportChange(
+      runtimeTabId,
+      browserResponsiveViewportForToggle({
+        defaults: browserDefaults,
+        panelRect,
+        zoomFactor: desktopOverlay?.zoomFactor,
+      }),
+    ).catch(() => undefined);
   };
 
   useEffect(() => {
@@ -415,10 +417,12 @@ export function PreviewView({
       }
       if (record) {
         void startBrowserRecording(runtimeTabId, threadRef, tabId).catch((error) => {
+          const description = error instanceof Error ? error.message : "An error occurred.";
+          if (isBrowserRecordingStartCancelledError(error)) return;
           toastManager.add({
             type: "error",
             title: "Unable to start recording",
-            description: error instanceof Error ? error.message : "An error occurred.",
+            description,
           });
         });
         return;
@@ -676,7 +680,6 @@ export function PreviewView({
       <PreviewChromeRow
         url={url}
         loading={loading}
-        loadProgress={loadProgress}
         canGoBack={canGoBack}
         canGoForward={canGoForward}
         refreshDisabled={refreshDisabled}
