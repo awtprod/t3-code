@@ -28,6 +28,7 @@ import {
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+const isCodexAppServerProtocolParseError = Schema.is(CodexErrors.CodexAppServerProtocolParseError);
 
 describe("Command Center native sandbox admission", () => {
   it.effect("skips Windows setup when Codex reports the sandbox ready", () =>
@@ -642,6 +643,63 @@ describe("isRecoverableThreadResumeError", () => {
 });
 
 describe("openCodexThread", () => {
+  for (const kind of [
+    "started",
+    "interacted",
+    "interrupted",
+    "completed",
+    "unknown",
+    null,
+    undefined,
+  ]) {
+    it.effect(`validates resumed subagent activity kind ${String(kind)}`, () =>
+      Effect.gen(function* () {
+        const calls: string[] = [];
+        const response = makeThreadOpenResponse("resumed-thread");
+        const activity = {
+          type: "subAgentActivity",
+          id: "activity-1",
+          agentThreadId: "child-thread",
+          agentPath: "/agents/child",
+          ...(kind === undefined ? {} : { kind }),
+        };
+        const resume = openCodexThread({
+          client: {
+            request: (method) => {
+              calls.push(method);
+              return Effect.succeed({
+                ...response,
+                thread: {
+                  ...response.thread,
+                  turns: [{ id: "turn-1", status: "completed", items: [activity] }],
+                },
+              });
+            },
+          },
+          threadId: ThreadId.make("thread-1"),
+          runtimeMode: "full-access",
+          cwd: "/tmp/project",
+          requestedModel: "gpt-5.3-codex",
+          serviceTier: undefined,
+          resumeThreadId: "resumed-thread",
+        });
+
+        if (kind === "unknown" || kind === null || kind === undefined) {
+          const error = yield* resume.pipe(Effect.flip);
+          NodeAssert.ok(isCodexAppServerProtocolParseError(error));
+          NodeAssert.equal(error.operation, "decode-response-payload");
+          NodeAssert.equal(error.method, "thread/resume");
+        } else {
+          const opened = yield* resume;
+          NodeAssert.equal(opened.thread.id, "resumed-thread");
+          NodeAssert.equal(opened.resumeFellBack, false);
+          NodeAssert.deepStrictEqual(opened.thread.turns[0]?.items, [activity]);
+        }
+        NodeAssert.deepStrictEqual(calls, ["thread/resume"]);
+      }),
+    );
+  }
+
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
       const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
