@@ -184,7 +184,9 @@ export const make = Effect.gen(function* () {
       .run({
         command,
         args:
-          protectedExecutable?.name === "git" ? hardenedHostGitArguments(input.args) : input.args,
+          protectedExecutable?.name === "git"
+            ? hardenedHostGitArguments(input.args, { safeDirectory: input.cwd })
+            : input.args,
         cwd: input.cwd,
         ...(input.spawnCwd !== undefined ? { spawnCwd: input.spawnCwd } : {}),
         ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),

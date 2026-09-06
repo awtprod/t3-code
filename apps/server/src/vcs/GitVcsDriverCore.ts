@@ -782,14 +782,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         );
         const child = yield* commandSpawner
           .spawn(
-            ChildProcess.make(gitExecutable, hardenedHostGitArguments(commandInput.args), {
-              cwd: commandInput.cwd,
-              env: hardenedHostGitEnvironment([input.env, trace2Monitor.env], {
-                allowIndexFile: input.operation.startsWith("GitVcsDriver.checkpoints."),
-                writableRoots,
-              }),
-              extendEnv: false,
-            }),
+            ChildProcess.make(
+              gitExecutable,
+              hardenedHostGitArguments(commandInput.args, { safeDirectory: commandInput.cwd }),
+              {
+                cwd: commandInput.cwd,
+                env: hardenedHostGitEnvironment([input.env, trace2Monitor.env], {
+                  allowIndexFile: input.operation.startsWith("GitVcsDriver.checkpoints."),
+                  writableRoots,
+                }),
+                extendEnv: false,
+              },
+            ),
           )
           .pipe(
             Effect.mapError(
