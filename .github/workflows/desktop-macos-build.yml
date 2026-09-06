@@ -1,0 +1,167 @@
+name: Desktop macOS Build
+
+# On-demand full desktop build for macOS. Produces the standard (non-remote-only)
+# Command Center app: a bundled local backend plus the "Desktop execution" /
+# primary-backend controls. Unsigned; intended for installing on your own Macs.
+#
+# Runs on GitHub-hosted macOS runners so it does not depend on the Blacksmith
+# pool that release.yml uses. Artifacts stay attached to the workflow run; no
+# release or tag is created.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "CPU architecture to build"
+        required: false
+        default: arm64
+        type: choice
+        options:
+          - arm64
+          - x64
+          - both
+      version:
+        description: "Version to stamp into the app (defaults to apps/server/package.json)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Resolve build matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      archs: ${{ steps.plan.outputs.archs }}
+    steps:
+      - id: plan
+        shell: bash
+        env:
+          ARCH_INPUT: ${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+          case "$ARCH_INPUT" in
+            both) archs='["arm64","x64"]' ;;
+            arm64|x64) archs="[\"$ARCH_INPUT\"]" ;;
+            *) echo "Unsupported arch input: $ARCH_INPUT" >&2; exit 1 ;;
+          esac
+          echo "archs=$archs" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build macOS ${{ matrix.arch }}
+    needs: plan
+    runs-on: macos-26
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.plan.outputs.archs) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+
+      - id: version
+        name: Align package versions
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${VERSION_INPUT#v}"
+          if [[ -z "$version" ]]; then
+            version="$(node -p "require('./apps/server/package.json').version")"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version: $version" >&2
+            exit 1
+          fi
+          node scripts/update-release-package-versions.ts "$version"
+          # Public T3 Connect identifiers, same as official builds. Not secrets.
+          cp .env.example .env
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - id: build
+        name: Build unsigned macOS DMG
+        shell: bash
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          vp run dist:desktop:artifact \
+            --platform mac \
+            --target dmg \
+            --arch "$BUILD_ARCH" \
+            --build-version "$BUILD_VERSION" \
+            --verbose
+
+          shopt -s nullglob
+          dmg_files=(release/*.dmg)
+          if (( ${#dmg_files[@]} != 1 )); then
+            printf 'Expected one DMG, found %s.\n' "${#dmg_files[@]}" >&2
+            exit 1
+          fi
+          dmg_name="$(basename "${dmg_files[0]}")"
+          if [[ "$dmg_name" == Command-Center-Remote-* ]]; then
+            echo "Built the remote-only variant by mistake: $dmg_name" >&2
+            exit 1
+          fi
+          echo "dmg_name=$dmg_name" >> "$GITHUB_OUTPUT"
+          shasum -a 256 release/*.dmg | tee release/SHA256SUMS.txt
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: command-center-macos-${{ matrix.arch }}
+          path: |
+            release/*.dmg
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summary
+        shell: bash
+        env:
+          DMG_NAME: ${{ steps.build.outputs.dmg_name }}
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            echo "### macOS ${{ matrix.arch }} build"
+            echo
+            echo "- Artifact: \`command-center-macos-${{ matrix.arch }}\`"
+            echo "- File: \`$DMG_NAME\`"
+            echo "- Version: \`$BUILD_VERSION\`"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo
+            echo "Unsigned build. Before first open:"
+            echo
+            echo '```sh'
+            echo "xattr -d com.apple.quarantine ~/Downloads/$DMG_NAME"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
