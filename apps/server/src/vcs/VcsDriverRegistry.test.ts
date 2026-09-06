@@ -17,11 +17,7 @@ const processOutput = (stdout: string): VcsProcess.VcsProcessOutput => ({
 });
 
 const normalizeGitArgs = (args: ReadonlyArray<string>): ReadonlyArray<string> => {
-  const afterSafeDirectory =
-    args[0] === "-c" && args[1]?.startsWith("safe.directory=") ? args.slice(2) : args;
-  return afterSafeDirectory[0] === "-C" && afterSafeDirectory.length >= 2
-    ? afterSafeDirectory.slice(2)
-    : afterSafeDirectory;
+  return args[0] === "-C" && args.length >= 2 ? args.slice(2) : args;
 };
 
 describe("VcsDriverRegistry", () => {

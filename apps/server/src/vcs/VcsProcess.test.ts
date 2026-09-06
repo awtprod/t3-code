@@ -96,7 +96,12 @@ describe("VcsProcess.run", () => {
         extendEnv: false,
       });
 
-      expect(calls[0]?.args).toEqual([...HOST_GIT_HARDENED_CONFIG_ARGS, ...baseInput.args]);
+      expect(calls[0]?.args).toEqual([
+        ...HOST_GIT_HARDENED_CONFIG_ARGS,
+        "-c",
+        `safe.directory=${baseInput.cwd}`,
+        ...baseInput.args,
+      ]);
       expect(calls[0]?.extendEnv).toBe(false);
       expect(calls[0]?.env).not.toHaveProperty("GIT_CONFIG_COUNT");
       expect(calls[0]?.env).not.toHaveProperty("GIT_DIR");

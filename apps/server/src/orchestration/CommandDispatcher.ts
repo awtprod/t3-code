@@ -312,24 +312,16 @@ export const make = Effect.gen(function* () {
         }
 
         if (bootstrap?.prepareWorktree) {
-          let worktreeBaseRef = bootstrap.prepareWorktree.baseBranch;
-          if (bootstrap.prepareWorktree.startFromOrigin) {
-            yield* gitWorkflow.fetchRemote({
-              cwd: bootstrap.prepareWorktree.projectCwd,
-              remoteName: "origin",
-            });
-            const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
-              cwd: bootstrap.prepareWorktree.projectCwd,
-              refName: bootstrap.prepareWorktree.baseBranch,
-              fallbackRemoteName: "origin",
-            });
-            worktreeBaseRef = resolvedRemoteBase.commitSha;
-          }
+          const prepareWorktree = bootstrap.prepareWorktree;
+          const worktreeBaseRef = yield* GitWorkflowService.resolveWorktreeBaseRef(
+            gitWorkflow,
+            prepareWorktree,
+          );
           const worktree = yield* gitWorkflow.createWorktree({
-            cwd: bootstrap.prepareWorktree.projectCwd,
+            cwd: prepareWorktree.projectCwd,
             refName: worktreeBaseRef,
-            newRefName: bootstrap.prepareWorktree.branch,
-            baseRefName: bootstrap.prepareWorktree.baseBranch,
+            newRefName: prepareWorktree.branch,
+            baseRefName: prepareWorktree.baseBranch,
             path: null,
           });
           targetWorktreePath = worktree.worktree.path;
