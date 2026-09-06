@@ -556,10 +556,15 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
     );
 
     for (const [definitionName, definitionSchema] of Object.entries(parsed.definitions ?? {})) {
+      // Codex 0.153.4 persists completed subagent activity; the pinned protocol predates it.
+      const compatibleDefinition =
+        definitionName === "SubAgentActivityKind"
+          ? { type: "string", enum: ["started", "interacted", "interrupted", "completed"] }
+          : definitionSchema;
       aggregateSchemas[localDefinitionNames.get(definitionName)!] = stripNullDefaults(
         normalizeNullableTypes(
           rewriteExternalRefs(
-            definitionSchema,
+            compatibleDefinition,
             localDefinitionNames,
             file.namespace,
             exportNameByQualifiedName,
