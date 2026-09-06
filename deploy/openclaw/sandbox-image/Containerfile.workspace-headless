@@ -36,9 +36,9 @@ RUN apt-get update \
 # Provider CLIs are pinned to the same versions the host installs
 # (deploy/openclaw/install-provider-clis.sh) so a thread behaves identically
 # inside and outside the sandbox. Bump both files together.
-ARG CLAUDE_CODE_VERSION=2.1.228
-ARG CODEX_VERSION=0.147.0
-ARG KIMI_CODE_VERSION=0.34.0
+ARG CLAUDE_CODE_VERSION=2.1.261
+ARG CODEX_VERSION=0.153.4
+ARG KIMI_CODE_VERSION=0.41.0
 RUN npm install --global --omit=dev --no-audit --no-fund \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
