@@ -7,8 +7,14 @@ name: Desktop macOS Build
 # Runs on GitHub-hosted macOS runners so it does not depend on the Blacksmith
 # pool that release.yml uses. Artifacts stay attached to the workflow run; no
 # release or tag is created.
+#
+# Also runs on pull requests that change this file, which both self-tests the
+# workflow and registers it with GitHub so it can be dispatched before merge.
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/desktop-macos-build.yml
   workflow_dispatch:
     inputs:
       arch:
@@ -46,7 +52,9 @@ jobs:
           ARCH_INPUT: ${{ inputs.arch }}
         run: |
           set -euo pipefail
-          case "$ARCH_INPUT" in
+          # pull_request runs have no inputs; build both so the self-test covers
+          # every architecture the workflow can be asked for.
+          case "${ARCH_INPUT:-both}" in
             both) archs='["arm64","x64"]' ;;
             arm64|x64) archs="[\"$ARCH_INPUT\"]" ;;
             *) echo "Unsupported arch input: $ARCH_INPUT" >&2; exit 1 ;;
