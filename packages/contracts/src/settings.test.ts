@@ -278,8 +278,8 @@ describe("ServerSettings.databaseConnections", () => {
       databaseConnections: {
         [projectId]: {
           provider: "supabase",
-          workspaceRoot: "/work/ccn-web-app",
-          projectRef: "nppgkgsugggafefdenuw",
+          workspaceRoot: "/work/web-app",
+          projectRef: "prodrefabcdefghijklm",
           readOnly: true,
           accessToken: "",
           accessTokenRedacted: true,
@@ -290,10 +290,10 @@ describe("ServerSettings.databaseConnections", () => {
     expect(decoded.databaseConnections[projectId as string as DatabaseConnectionId]).toEqual({
       provider: "supabase",
       projectId,
-      workspaceRoot: "/work/ccn-web-app",
+      workspaceRoot: "/work/web-app",
       label: "",
       isDefault: true,
-      projectRef: "nppgkgsugggafefdenuw",
+      projectRef: "prodrefabcdefghijklm",
       readOnly: true,
       accessToken: "",
       accessTokenRedacted: true,

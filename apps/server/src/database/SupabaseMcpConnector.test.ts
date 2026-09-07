@@ -24,7 +24,7 @@ const staging = {
   workspaceRoot: "/work/repository",
   label: "staging",
   isDefault: true,
-  projectRef: "wgbouvlzujbsbeokyzgs",
+  projectRef: "stagingrefabcdefghij",
   readOnly: true,
   accessToken: "sbp-secret-staging",
   accessTokenRedacted: true,
@@ -33,7 +33,7 @@ const prod = {
   ...staging,
   label: "prod",
   isDefault: false,
-  projectRef: "nppgkgsugggafefdenuw",
+  projectRef: "prodrefabcdefghijklm",
   readOnly: false,
   accessToken: "sbp-secret-prod",
 };
@@ -79,7 +79,7 @@ it("selects by label or project ref, falls back to the default, and reports ambi
   expect(
     selectSupabaseConnection(connections, {
       projectId: projectA,
-      database: "nppgkgsugggafefdenuw",
+      database: "prodrefabcdefghijklm",
     }),
   ).toMatchObject({ _tag: "resolved", resolved: { connectionId: prodId } });
   expect(selectSupabaseConnection(connections, { projectId: projectA })).toMatchObject({
@@ -107,7 +107,7 @@ it("selects by label or project ref, falls back to the default, and reports ambi
 it("builds a project-scoped read-only Supabase MCP URL", () => {
   const url = buildSupabaseMcpUrl(staging);
   expect(url.origin + url.pathname).toBe("https://mcp.supabase.com/mcp");
-  expect(url.searchParams.get("project_ref")).toBe("wgbouvlzujbsbeokyzgs");
+  expect(url.searchParams.get("project_ref")).toBe("stagingrefabcdefghij");
   expect(url.searchParams.get("read_only")).toBe("true");
   expect(url.searchParams.get("features")).toBe("database,debugging,development");
   expect(url.toString()).not.toContain("sbp-secret");
@@ -147,7 +147,7 @@ it.effect("proxies the named database's tools without returning the access token
     expect(defaulted).toMatchObject({
       connectionId: stagingId,
       database: "staging",
-      projectRef: "wgbouvlzujbsbeokyzgs",
+      projectRef: "stagingrefabcdefghij",
       readOnly: true,
     });
     expect(named).toMatchObject({ connectionId: prodId, database: "prod", readOnly: false });
