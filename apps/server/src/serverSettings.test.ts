@@ -6,6 +6,7 @@ import {
   ProjectId,
   ServerSettings,
   ServerSettingsPatch,
+  DatabaseConnectionId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, it } from "@effect/vitest";
@@ -703,12 +704,16 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const serverConfig = yield* ServerConfig.ServerConfig;
         const fileSystem = yield* FileSystem.FileSystem;
         const projectId = ProjectId.make("project-database");
+        const connectionId = DatabaseConnectionId.make("conn-database");
 
         const next = yield* serverSettings.updateSettings({
           databaseConnections: {
-            [projectId]: {
+            [connectionId]: {
               provider: "supabase",
+              projectId,
               workspaceRoot: "/work/project-database",
+              label: "prod",
+              isDefault: true,
               projectRef: "abcdefghijk",
               readOnly: true,
               accessToken: "sbp-database-secret",
@@ -716,10 +721,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           },
         });
 
-        assert.equal(next.databaseConnections[projectId]?.accessToken, "sbp-database-secret");
-        assert.isTrue(next.databaseConnections[projectId]?.accessTokenRedacted);
+        assert.equal(next.databaseConnections[connectionId]?.accessToken, "sbp-database-secret");
+        assert.isTrue(next.databaseConnections[connectionId]?.accessTokenRedacted);
         assert.equal(
-          ServerSettingsModule.redactServerSettingsForClient(next).databaseConnections[projectId]
+          ServerSettingsModule.redactServerSettingsForClient(next).databaseConnections[connectionId]
             ?.accessToken,
           "",
         );
@@ -727,7 +732,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
         assert.notInclude(raw, "sbp-database-secret");
         // @effect-diagnostics-next-line preferSchemaOverJson:off
-        assert.deepInclude(JSON.parse(raw).databaseConnections[projectId], {
+        assert.deepInclude(JSON.parse(raw).databaseConnections[connectionId], {
+          projectId,
+          label: "prod",
           projectRef: "abcdefghijk",
           accessToken: "",
           accessTokenRedacted: true,
@@ -735,9 +742,12 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
         const roundTripped = yield* serverSettings.updateSettings({
           databaseConnections: {
-            [projectId]: {
+            [connectionId]: {
               provider: "supabase",
+              projectId,
               workspaceRoot: "/work/project-database",
+              label: "prod",
+              isDefault: true,
               projectRef: "abcdefghijk",
               readOnly: false,
               accessToken: "",
@@ -746,10 +756,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           },
         });
         assert.equal(
-          roundTripped.databaseConnections[projectId]?.accessToken,
+          roundTripped.databaseConnections[connectionId]?.accessToken,
           "sbp-database-secret",
         );
-        assert.isFalse(roundTripped.databaseConnections[projectId]?.readOnly);
+        assert.isFalse(roundTripped.databaseConnections[connectionId]?.readOnly);
       }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 });

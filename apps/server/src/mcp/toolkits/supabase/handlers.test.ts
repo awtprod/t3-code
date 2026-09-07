@@ -15,6 +15,7 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
   const calls: Array<{
     readonly projectId: ProjectId | undefined;
     readonly cwd: string | undefined;
+    readonly database: string | undefined;
     readonly tool: SupabaseMcpConnector.SupabaseRemoteToolName;
     readonly arguments: Readonly<Record<string, unknown>>;
   }> = [];
@@ -23,10 +24,13 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
       calls.push({
         projectId: input.projectId,
         cwd: input.cwd,
+        database: input.database,
         tool: input.tool,
         arguments: input.arguments,
       });
       return Effect.succeed({
+        connectionId: "conn-a",
+        database: input.database ?? "supabase-a",
         projectRef: "supabase-a",
         readOnly: true,
         result: { content: [{ type: "text", text: "ok" }] },
@@ -60,26 +64,48 @@ it.effect("routes a Supabase tool through the credential-bound project scope", (
 
   return Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
-    const result = yield* server
-      .callTool({
-        name: "supabase_list_tables",
-        arguments: { schemas: ["public"] },
-      })
-      .pipe(
+    const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
         Effect.provideService(McpSchema.McpServerClient, client),
       );
+    const result = yield* provide(
+      server.callTool({
+        name: "supabase_list_tables",
+        arguments: { schemas: ["public"] },
+      }),
+    );
+    // The `database` selector picks the connection server-side and must never
+    // reach Supabase, whose tools do not accept it.
+    const named = yield* provide(
+      server.callTool({
+        name: "supabase_list_tables",
+        arguments: { schemas: ["public"], database: "prod" },
+      }),
+    );
 
     expect(result.isError).toBe(false);
     expect(result.structuredContent).toMatchObject({
+      connectionId: "conn-a",
+      database: "supabase-a",
       projectRef: "supabase-a",
       readOnly: true,
       result: { truncated: false, omittedCount: 0 },
     });
+    expect(named.isError).toBe(false);
+    expect(named.structuredContent).toMatchObject({ database: "prod" });
     expect(calls).toEqual([
       {
         projectId: "project-a",
         cwd: "/work/project-a-worktree",
+        database: undefined,
+        tool: "list_tables",
+        arguments: { schemas: ["public"] },
+      },
+      {
+        projectId: "project-a",
+        cwd: "/work/project-a-worktree",
+        database: "prod",
         tool: "list_tables",
         arguments: { schemas: ["public"] },
       },

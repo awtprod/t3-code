@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   DatabaseToolError,
+  databaseConnectionDisplayName,
   type ProjectId,
   type ServerSettings,
   type ServerSettingsError,
@@ -28,7 +29,7 @@ export type SupabaseRemoteToolName =
   | "generate_typescript_types";
 
 export interface ResolvedSupabaseConnection {
-  readonly projectId: string;
+  readonly connectionId: string;
   readonly connection: SupabaseDatabaseConnection;
 }
 
@@ -53,31 +54,102 @@ function pathContains(root: string, candidate: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !NodePath.isAbsolute(relative));
 }
 
-export function resolveSupabaseConnectionForCwd(
-  connections: ServerSettings["databaseConnections"],
-  cwd: string,
-): ResolvedSupabaseConnection | undefined {
-  return Object.entries(connections)
-    .filter(([, connection]) => pathContains(connection.workspaceRoot, cwd))
-    .sort(
-      ([, left], [, right]) =>
-        NodePath.resolve(right.workspaceRoot).length - NodePath.resolve(left.workspaceRoot).length,
-    )
-    .map(([projectId, connection]) => ({ projectId, connection }))[0];
+function entries(connections: ServerSettings["databaseConnections"]) {
+  return Object.entries(connections).map(
+    ([connectionId, connection]): ResolvedSupabaseConnection => ({ connectionId, connection }),
+  );
 }
 
+/**
+ * Every connection a thread may use: those bound to its project, or, when the
+ * thread has no project, those whose workspace root contains its directory.
+ * The cwd fallback keeps only the deepest matching workspace so a nested
+ * project's databases shadow its parent's.
+ */
+export function resolveSupabaseConnectionsForScope(
+  connections: ServerSettings["databaseConnections"],
+  input: { readonly projectId?: ProjectId; readonly cwd?: string },
+): ReadonlyArray<ResolvedSupabaseConnection> {
+  if (input.projectId !== undefined) {
+    const byProject = entries(connections).filter(
+      (entry) => entry.connection.projectId === input.projectId,
+    );
+    if (byProject.length > 0) return byProject;
+  }
+  if (input.cwd === undefined) return [];
+  const cwd = input.cwd;
+  const containing = entries(connections).filter((entry) =>
+    pathContains(entry.connection.workspaceRoot, cwd),
+  );
+  if (containing.length === 0) return [];
+  const deepest = Math.max(
+    ...containing.map((entry) => NodePath.resolve(entry.connection.workspaceRoot).length),
+  );
+  return containing.filter(
+    (entry) => NodePath.resolve(entry.connection.workspaceRoot).length === deepest,
+  );
+}
+
+export type SupabaseConnectionSelection =
+  | { readonly _tag: "resolved"; readonly resolved: ResolvedSupabaseConnection }
+  | { readonly _tag: "none" }
+  | {
+      readonly _tag: "ambiguous";
+      readonly candidates: ReadonlyArray<ResolvedSupabaseConnection>;
+    }
+  | {
+      readonly _tag: "unknown";
+      readonly database: string;
+      readonly candidates: ReadonlyArray<ResolvedSupabaseConnection>;
+    };
+
+/**
+ * Pick one connection for a tool call. `database` matches a connection's label
+ * or project ref (case-insensitive) among the thread's candidates. Without it,
+ * a single candidate or the project's default wins; several candidates with no
+ * default is ambiguous and the caller must name one.
+ */
+export function selectSupabaseConnection(
+  connections: ServerSettings["databaseConnections"],
+  input: { readonly projectId?: ProjectId; readonly cwd?: string; readonly database?: string },
+): SupabaseConnectionSelection {
+  const candidates = resolveSupabaseConnectionsForScope(connections, input);
+  if (candidates.length === 0) return { _tag: "none" };
+  const requested = input.database?.trim().toLowerCase() ?? "";
+  if (requested.length > 0) {
+    const match =
+      candidates.find((entry) => entry.connection.label.toLowerCase() === requested) ??
+      candidates.find((entry) => entry.connection.projectRef.toLowerCase() === requested) ??
+      candidates.find((entry) => entry.connectionId.toLowerCase() === requested);
+    return match === undefined
+      ? { _tag: "unknown", database: input.database!.trim(), candidates }
+      : { _tag: "resolved", resolved: match };
+  }
+  if (candidates.length === 1) return { _tag: "resolved", resolved: candidates[0]! };
+  const fallback = candidates.find((entry) => entry.connection.isDefault);
+  return fallback === undefined
+    ? { _tag: "ambiguous", candidates }
+    : { _tag: "resolved", resolved: fallback };
+}
+
+/** Backwards-compatible single-connection lookup used by capability issuance. */
 export function resolveSupabaseConnection(
   connections: ServerSettings["databaseConnections"],
   input: { readonly projectId?: ProjectId; readonly cwd?: string },
 ): ResolvedSupabaseConnection | undefined {
-  if (input.projectId !== undefined) {
-    const connection = connections[input.projectId];
-    if (connection !== undefined) return { projectId: input.projectId, connection };
-  }
-  return input.cwd === undefined
-    ? undefined
-    : resolveSupabaseConnectionForCwd(connections, input.cwd);
+  const selection = selectSupabaseConnection(connections, input);
+  return selection._tag === "resolved" ? selection.resolved : undefined;
 }
+
+const describeCandidates = (candidates: ReadonlyArray<ResolvedSupabaseConnection>): string =>
+  candidates
+    .map((entry) => {
+      const name = databaseConnectionDisplayName(entry.connection);
+      const access = entry.connection.readOnly ? "read-only" : "write";
+      const suffix = entry.connection.isDefault ? ", default" : "";
+      return `"${name}" (${entry.connection.projectRef}, ${access}${suffix})`;
+    })
+    .join(", ");
 
 const defaultRemoteCall: SupabaseRemoteCall = async ({ connection, tool, arguments: args }) => {
   const client = new Client({
@@ -105,6 +177,8 @@ export interface SupabaseMcpConnectorShape {
   readonly callTool: (input: {
     readonly projectId?: ProjectId;
     readonly cwd?: string;
+    /** Label or project ref of the database to use when the project has several. */
+    readonly database?: string;
     readonly tool: SupabaseRemoteToolName;
     readonly arguments: Readonly<Record<string, unknown>>;
   }) => Effect.Effect<SupabaseToolProxyResult, DatabaseToolError>;
@@ -126,14 +200,26 @@ export function makeSupabaseMcpConnector(input: {
             }),
         ),
       );
-      const resolved = resolveSupabaseConnection(settings.databaseConnections, request);
-      if (!resolved) {
+      const selection = selectSupabaseConnection(settings.databaseConnections, request);
+      if (selection._tag === "none") {
         return yield* new DatabaseToolError({
           reason: "not-configured",
           message: "This thread's project is not connected to a Supabase project.",
         });
       }
-      const { connection } = resolved;
+      if (selection._tag === "ambiguous") {
+        return yield* new DatabaseToolError({
+          reason: "ambiguous",
+          message: `This project has several Supabase databases and no default. Pass database=<name> with one of: ${describeCandidates(selection.candidates)}.`,
+        });
+      }
+      if (selection._tag === "unknown") {
+        return yield* new DatabaseToolError({
+          reason: "not-configured",
+          message: `No Supabase database named "${selection.database}" is connected to this project. Available: ${describeCandidates(selection.candidates)}.`,
+        });
+      }
+      const { connectionId, connection } = selection.resolved;
       if (connection.accessToken.length === 0) {
         return yield* new DatabaseToolError({
           reason: "credential-missing",
@@ -143,7 +229,7 @@ export function makeSupabaseMcpConnector(input: {
       if (connection.readOnly && request.tool === "apply_migration") {
         return yield* new DatabaseToolError({
           reason: "read-only",
-          message: "This Supabase connection is read-only. Enable write access in Settings first.",
+          message: `The "${databaseConnectionDisplayName(connection)}" Supabase connection is read-only. Enable write access in Settings first.`,
         });
       }
 
@@ -162,6 +248,8 @@ export function makeSupabaseMcpConnector(input: {
           }),
       });
       return {
+        connectionId,
+        database: databaseConnectionDisplayName(connection),
         projectRef: connection.projectRef,
         readOnly: connection.readOnly,
         result,
