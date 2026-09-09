@@ -432,7 +432,7 @@ const gitCommand = (
   process.run({
     operation,
     command: "git",
-    args: ["-c", `safe.directory=${cwd}`, "-C", cwd, ...args],
+    args: ["-C", cwd, ...args],
     cwd,
     spawnCwd: globalThis.process.cwd(),
     ...(options?.stdin !== undefined ? { stdin: options.stdin } : {}),

@@ -227,12 +227,11 @@ export const make = Effect.gen(function* () {
   /**
    * Prove this process can actually work in `normalizedWorkspaceRoot`.
    *
-   * Two cheaper checks were measured against real directories and both are
-   * unsound, which is why this spawns Git:
+   * Cheaper filesystem-only checks are unsound, which is why this spawns Git:
    *
    *   - Comparing the directory's owner against our uid gives false positives.
-   *     A service-owned repo the operator has legitimately exempted via
-   *     `safe.directory` works perfectly despite the uid mismatch.
+   *     The Git process boundary trusts this exact workspace for the command,
+   *     so an ACL-accessible repo works despite the uid mismatch.
    *   - Checking read access to `.git/*` gives false negatives. Git refuses
    *     untrusted directories even when every file in them is readable.
    *
@@ -294,10 +293,9 @@ export const make = Effect.gen(function* () {
       if (probe !== null && probe.exitCode !== 0 && isGitOwnershipRefusal(probe.stderr)) {
         return yield* failUnusable(
           "git-untrusted",
-          "Git refuses to operate here because the directory is owned by a different user. " +
-            "Note that a 'safe.directory' exception will not help: this server runs Git with " +
-            "global and system configuration disabled, so those exceptions are never read. " +
-            "Use a directory owned by the account this server runs as.",
+          "Git still refuses to operate here after the server trusted this exact workspace " +
+            "for the command. Check that the selected path is the repository root and is " +
+            "accessible to the account this server runs as.",
         );
       }
     },

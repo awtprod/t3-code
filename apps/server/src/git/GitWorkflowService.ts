@@ -104,6 +104,48 @@ export class GitWorkflowService extends Context.Service<
   }
 >()("@awtprod/command-center/git/GitWorkflowService") {}
 
+export const resolveWorktreeBaseRef = Effect.fn("GitWorkflowService.resolveWorktreeBaseRef")(
+  function* (
+    git: Pick<
+      GitWorkflowService["Service"],
+      "remoteExists" | "fetchRemote" | "resolveRemoteTrackingCommit"
+    >,
+    input: {
+      readonly projectCwd: string;
+      readonly baseBranch: string;
+      readonly startFromOrigin?: boolean | undefined;
+    },
+  ) {
+    if (!input.startFromOrigin) return input.baseBranch;
+
+    return yield* Effect.gen(function* () {
+      const hasOrigin = yield* git.remoteExists({
+        cwd: input.projectCwd,
+        remoteName: "origin",
+      });
+      if (!hasOrigin) return input.baseBranch;
+      yield* git.fetchRemote({ cwd: input.projectCwd, remoteName: "origin" });
+      const remoteBase = yield* git.resolveRemoteTrackingCommit({
+        cwd: input.projectCwd,
+        refName: input.baseBranch,
+        fallbackRemoteName: "origin",
+      });
+      return remoteBase.commitSha;
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning(
+          "failed to refresh origin while preparing worktree; using local base branch",
+          {
+            cwd: input.projectCwd,
+            baseBranch: input.baseBranch,
+            detail: error.message,
+          },
+        ).pipe(Effect.as(input.baseBranch)),
+      ),
+    );
+  },
+);
+
 function nonRepositoryLocalStatus(): VcsStatusLocalResult {
   return {
     isRepo: false,
