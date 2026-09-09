@@ -175,7 +175,7 @@ describe("ProviderCommandReactor", () => {
       ProviderAdapterRequestError | ProviderAdapterValidationError
     >;
     readonly sandboxImages?: "both" | "image-only" | "none";
-    readonly projectRepository?: "git" | "unknown";
+    readonly projectRepository?: "git" | "unknown" | "detached";
     readonly threadSandboxBranch?: "configured" | "missing";
     /**
      * Force the disposition the provision reports for the provider's
@@ -497,9 +497,12 @@ describe("ProviderCommandReactor", () => {
           localStatus: () =>
             Effect.succeed({
               isRepo: input?.projectRepository !== "unknown",
-              hasPrimaryRemote: true,
+              hasPrimaryRemote: input?.projectRepository !== "detached",
               isDefaultRef: true,
-              refName: input?.projectRepository === "unknown" ? null : "main",
+              refName:
+                input?.projectRepository === "unknown" || input?.projectRepository === "detached"
+                  ? null
+                  : "main",
               hasWorkingTreeChanges: false,
               workingTree: { files: [], insertions: 0, deletions: 0 },
             }),
@@ -511,6 +514,7 @@ describe("ProviderCommandReactor", () => {
               remoteUrl: "https://github.com/T3Tools/t3code.git",
               remotePushUrl: "https://github.com/T3Tools/t3code.git",
             }),
+          resolveCommit: () => Effect.succeed({ commitSha: "f".repeat(40) }),
         } satisfies Partial<GitWorkflowService.GitWorkflowService["Service"]>),
       ),
       Layer.provideMerge(
@@ -771,16 +775,57 @@ describe("ProviderCommandReactor", () => {
       expect(harness.sendTurn).not.toHaveBeenCalled();
       expect(thread?.session).toMatchObject({
         status: "error",
-        lastError: "Isolated threads require a Git repository with a selected branch.",
+        lastError: expect.stringContaining(
+          "Isolated threads need Git history in '/tmp/provider-project'",
+        ),
       });
       expect(
         thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
       ).toMatchObject({
         tone: "error",
         payload: {
-          detail: "Isolated threads require a Git repository with a selected branch.",
+          detail: expect.stringContaining("Run 'git init' and make a first commit"),
         },
       });
+    }),
+  );
+
+  effectIt.effect("seeds a sandbox from the local HEAD when the checkout has no branch", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          projectRepository: "detached",
+          threadSandboxBranch: "missing",
+        }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-detached-head"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-detached-head"),
+          role: "user",
+          text: "start on a detached checkout",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      yield* Effect.promise(() => waitFor(() => harness.provisionSandbox.mock.calls.length === 1));
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+
+      const bootstrap = harness.provisionSandbox.mock.calls[0]?.[0]?.bootstrap;
+      expect(bootstrap).toMatchObject({
+        repositoryUrl: "/tmp/provider-project",
+        baseCommit: "f".repeat(40),
+      });
+      // No upstream resolved, so the sandbox gets no push identity rather than
+      // inheriting one the base commit was never on.
+      expect(bootstrap).not.toHaveProperty("repositoryRemoteUrl");
+      expect(bootstrap).not.toHaveProperty("repositoryPushRemoteUrl");
     }),
   );
 

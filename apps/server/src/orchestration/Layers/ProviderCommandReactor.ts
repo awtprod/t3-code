@@ -83,6 +83,7 @@ import {
 } from "../../sandbox/SandboxRuntimeManager.ts";
 import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
 import { asSandboxGitRemoteUrl } from "../../sandbox/SandboxGitIdentity.ts";
+import { resolveSandboxGitBase } from "../../sandbox/sandboxGitBase.ts";
 import { dispatchProvisionReadyOrTearDown } from "../../sandbox/provisionReadyDispatch.ts";
 import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessionDirectory.ts";
 import {
@@ -582,20 +583,9 @@ export const make = Effect.gen(function* () {
             ...thread.sandboxConfig,
             runtime,
           };
-          const resolveTracking = Effect.gen(function* () {
-            const local = yield* gitWorkflow.localStatus({ cwd: project.workspaceRoot });
-            if (!local.isRepo || local.refName === null)
-              return yield* new ProviderAdapterRequestError({
-                provider: "sandbox",
-                method: "sandbox.provision",
-                detail: "Isolated threads require a Git repository with a selected branch.",
-              });
-            const base = yield* gitWorkflow.resolveRemoteTrackingCommit({
-              cwd: project.workspaceRoot,
-              refName: local.refName,
-              fallbackRemoteName: "origin",
-            });
-            return base;
+          const resolveTracking = resolveSandboxGitBase({
+            gitWorkflow,
+            cwd: project.workspaceRoot,
           }).pipe(
             Effect.mapError((cause) =>
               isProviderAdapterRequestError(cause)
