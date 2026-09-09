@@ -278,32 +278,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-  /**
-   * Attach the `t3-code` MCP server to the session that is about to start.
-   *
-   * This is the only place a credential is minted, so withholding one here is
-   * what disables agent browser access everywhere: every adapter already
-   * treats a missing session as "no MCP server", and the `/mcp` endpoint
-   * accepts nothing but tokens issued from this path.
-   */
-  /**
-   * Deny on an unreadable settings file rather than letting the read failure
-   * escape: adding `ServerSettingsError` to `ProviderServiceError` would widen
-   * a union every caller handles, for a branch that only decides whether one
-   * optional toolset is attached. Denying is the safe direction — an explicit
-   * "off" silently becoming "on" would violate the user's stated choice,
-   * whereas the reverse costs an agent one toolset and is visible immediately.
-   */
-  const agentBrowserAccessEnabled = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.enableAgentBrowserAccess),
-    Effect.catch((cause) =>
-      Effect.logWarning(
-        "Could not read server settings; withholding agent browser access for this session.",
-        { cause },
-      ).pipe(Effect.as(false)),
-    ),
-  );
-
   const prepareMcpSession = (
     threadId: ThreadId,
     providerInstanceId: ProviderInstanceId,
@@ -311,7 +285,28 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     cwd?: string,
   ) =>
     Effect.gen(function* () {
-      if (!(yield* agentBrowserAccessEnabled)) {
+      // This is the only place a provider credential is minted. Read browser
+      // and database settings together so a failed read cannot accidentally
+      // grant either toolset.
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning(
+            "Could not read server settings; withholding MCP tools for this session.",
+            { cause },
+          ).pipe(Effect.as(undefined)),
+        ),
+      );
+      const databases =
+        settings === undefined
+          ? []
+          : resolveSupabaseConnectionsForScope(settings.databaseConnections, {
+              ...(projectId === undefined ? {} : { projectId }),
+              ...(cwd === undefined ? {} : { cwd }),
+            });
+      if (
+        settings === undefined ||
+        (!settings.enableAgentBrowserAccess && databases.length === 0)
+      ) {
         // Revoke as well as clear. Every other prepare path reaches
         // `issueActiveMcpCredential`, which revokes the thread first, so
         // skipping it here would leave a previously issued bearer token valid
@@ -322,22 +317,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId));
         return undefined;
       }
-      // Command Center: scope the Supabase database tools on the MCP server to
-      // the connection configured for this project/cwd, if any.
-      const databases = yield* serverSettings.getSettings.pipe(
-        Effect.map((settings) =>
-          resolveSupabaseConnectionsForScope(settings.databaseConnections, {
-            ...(projectId === undefined ? {} : { projectId }),
-            ...(cwd === undefined ? {} : { cwd }),
-          }),
-        ),
-        Effect.orElseSucceed((): ReadonlyArray<never> => []),
-      );
       const credential = yield* issueMcpCredential({
         threadId,
         providerInstanceId,
         ...(projectId === undefined ? {} : { projectId }),
         ...(cwd === undefined ? {} : { cwd }),
+        capabilities: new Set(settings.enableAgentBrowserAccess ? ["preview"] : []),
         // The credential covers every database the thread can reach; the
         // connector still enforces read-only per connection at call time.
         ...(databases.length === 0

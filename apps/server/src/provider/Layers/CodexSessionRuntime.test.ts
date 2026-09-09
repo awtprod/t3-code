@@ -297,6 +297,25 @@ describe("buildTurnStartParams", () => {
     NodeAssert.ok(settings?.developer_instructions?.includes(`as ${DEFAULT_MODEL} with medium`));
   });
 
+  it.effect("omits preview instructions from database-only plan and default turns", () =>
+    Effect.gen(function* () {
+      for (const interactionMode of ["plan", "default"] as const) {
+        const params = yield* buildTurnStartParams({
+          threadId: "provider-thread-database-only",
+          runtimeMode: "full-access",
+          prompt: "Use the database tools",
+          interactionMode,
+          browserToolsAvailable: false,
+        });
+
+        const instructions = params.collaborationMode?.settings.developer_instructions ?? "";
+        NodeAssert.match(instructions, /<collaboration_mode>/);
+        NodeAssert.doesNotMatch(instructions, /preview_status/);
+        NodeAssert.doesNotMatch(instructions, /preview_open/);
+      }
+    }),
+  );
+
   it.effect("routes approvals to the auto reviewer in auto mode", () =>
     Effect.gen(function* () {
       const params = yield* buildTurnStartParams({

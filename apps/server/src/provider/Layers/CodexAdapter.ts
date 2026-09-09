@@ -2268,6 +2268,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 },
               }
             : {}),
+          ...(mcpSession
+            ? {
+                browserToolsAvailable: mcpSession.capabilities?.has("preview") ?? true,
+              }
+            : {}),
           ...(appServerArgs.length > 0 ? { appServerArgs } : {}),
         };
         const turnRequestCorrelation: CodexTurnRequestCorrelation = {

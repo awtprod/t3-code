@@ -35,8 +35,10 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
@@ -255,6 +257,112 @@ function makeRuntimeFactory(input?: {
   };
 }
 
+const TestCodexRpcRequest = Schema.Struct({
+  id: Schema.optionalKey(Schema.Union([Schema.Number, Schema.String])),
+  method: Schema.String,
+  params: Schema.optionalKey(Schema.Unknown),
+});
+const decodeTestCodexRpcRequest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(TestCodexRpcRequest),
+);
+const encodeTestCodexRpcResponse = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+
+const makeCodexAppServerSpawner = Effect.fn("makeCodexAppServerSpawner")(function* () {
+  const requests: Array<typeof TestCodexRpcRequest.Type> = [];
+  const stdout = yield* Queue.unbounded<Uint8Array>();
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let inputBuffer = "";
+
+  const stdin = Sink.forEach((chunk: Uint8Array) =>
+    Effect.gen(function* () {
+      inputBuffer += decoder.decode(chunk, { stream: true });
+      const lines = inputBuffer.split("\n");
+      inputBuffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (line.trim().length === 0) continue;
+        const request = decodeTestCodexRpcRequest(line);
+        requests.push(request);
+        if (request.id === undefined) continue;
+
+        const result = (() => {
+          switch (request.method) {
+            case "initialize":
+              return {
+                userAgent: "mock-codex-app-server",
+                codexHome: process.cwd(),
+                platformFamily: "unix",
+                platformOs: "linux",
+              };
+            case "config/mcpServer/reload":
+              return {};
+            case "thread/resume":
+              return {
+                cwd: process.cwd(),
+                model: "gpt-5.3-codex",
+                modelProvider: "openai",
+                approvalPolicy: "never",
+                approvalsReviewer: "user",
+                sandbox: { type: "readOnly" },
+                thread: {
+                  id: "provider-thread-resumed",
+                  cliVersion: "0.0.0-test",
+                  createdAt: 1_776_470_400,
+                  cwd: process.cwd(),
+                  ephemeral: false,
+                  modelProvider: "openai",
+                  preview: "",
+                  sessionId: "session-test",
+                  updatedAt: 1_776_470_400,
+                  source: "cli",
+                  turns: [],
+                  status: { type: "idle" },
+                },
+              };
+            case "turn/start":
+              return {
+                turn: {
+                  id: `turn-${String(requests.length)}`,
+                  items: [],
+                  status: "inProgress",
+                },
+              };
+            default:
+              return undefined;
+          }
+        })();
+        const response =
+          result === undefined
+            ? {
+                id: request.id,
+                error: { code: -32601, message: `Unhandled request: ${request.method}` },
+              }
+            : { id: request.id, result };
+        yield* Queue.offer(stdout, encoder.encode(`${encodeTestCodexRpcResponse(response)}\n`));
+      }
+    }),
+  );
+  const handle = ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.never,
+    isRunning: Effect.succeed(true),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin,
+    stdout: Stream.fromQueue(stdout),
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
+  return {
+    requests,
+    spawner: ChildProcessSpawner.make(() => Effect.succeed(handle)),
+  };
+});
+
 function makeScopedRuntimeFactory(options?: { readonly failConstruction?: boolean }) {
   const runtimes: Array<FakeCodexRuntime> = [];
   const releasedThreadIds: Array<ThreadId> = [];
@@ -381,6 +489,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
         provider: ProviderDriverKind.make("codex"),
         threadId: asThreadId("cc:thread-isolated"),
         runtimeMode: "auto-accept-edits",
+        cwd: validationSourceHomePath,
       });
 
       const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
@@ -469,6 +578,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
           provider: ProviderDriverKind.make("codex"),
           threadId,
           runtimeMode: "approval-required",
+          cwd: validationSourceHomePath,
         })
         .pipe(Effect.ensuring(Effect.sync(() => clearMcpProviderSession(threadId))));
 
@@ -482,6 +592,110 @@ validationLayer("CodexAdapterLive validation", (it) => {
       NodeAssert.ok(scopedIndex > resetIndex);
       NodeAssert.equal(runtimeOptions?.environment?.T3_MCP_BEARER_TOKEN, "scoped-test-token");
       NodeAssert.equal("OPENAI_API_KEY" in (runtimeOptions?.environment ?? {}), false);
+    }),
+  );
+  it.effect("preserves preview availability for legacy and preview MCP sessions", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      for (const fixture of [
+        { name: "legacy", capabilities: undefined },
+        { name: "preview", capabilities: new Set(["preview"] as const) },
+      ]) {
+        validationRuntimeFactory.factory.mockClear();
+        const threadId = asThreadId(`thread-${fixture.name}-mcp-capabilities`);
+        setMcpProviderSession({
+          environmentId: EnvironmentId.make("environment-test"),
+          threadId,
+          providerSessionId: `provider-session-${fixture.name}`,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          endpoint: `http://127.0.0.1:3773/api/mcp/session-${fixture.name}`,
+          authorizationHeader: `Bearer ${fixture.name}-test-token`,
+          ...(fixture.capabilities ? { capabilities: fixture.capabilities } : {}),
+        });
+
+        yield* adapter
+          .startSession({
+            provider: ProviderDriverKind.make("codex"),
+            threadId,
+            runtimeMode: "approval-required",
+          })
+          .pipe(Effect.ensuring(Effect.sync(() => clearMcpProviderSession(threadId))));
+
+        const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+        NodeAssert.equal(runtimeOptions?.browserToolsAvailable, true);
+      }
+    }),
+  );
+  it.effect("omits preview instructions through resumed database-only runtimes", () =>
+    Effect.gen(function* () {
+      const mockAppServer = yield* makeCodexAppServerSpawner();
+      const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+        commandCenterSourceHomePath: validationSourceHomePath,
+      }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, mockAppServer.spawner),
+      );
+      const threadId = asThreadId("thread-database-only-mcp");
+      setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-test"),
+        threadId,
+        providerSessionId: "provider-session-database-only",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:3773/api/mcp/session-database-only",
+        authorizationHeader: "Bearer database-only-test-token",
+        capabilities: new Set(["database.read"]),
+      });
+      yield* Effect.addFinalizer(() =>
+        adapter
+          .stopAll()
+          .pipe(
+            Effect.ignore,
+            Effect.ensuring(Effect.sync(() => clearMcpProviderSession(threadId))),
+          ),
+      );
+
+      const session = yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "approval-required",
+        resumeCursor: { threadId: "provider-thread-resumed" },
+      });
+      NodeAssert.deepStrictEqual(session.resumeCursor, {
+        threadId: "provider-thread-resumed",
+      });
+
+      for (const interactionMode of ["plan", "default"] as const) {
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Use the database tools",
+          attachments: [],
+          interactionMode,
+        });
+      }
+
+      NodeAssert.equal(
+        mockAppServer.requests.filter((request) => request.method === "config/mcpServer/reload")
+          .length,
+        1,
+      );
+      NodeAssert.equal(
+        mockAppServer.requests.filter((request) => request.method === "thread/resume").length,
+        1,
+      );
+      const turnRequests = mockAppServer.requests.filter(
+        (request) => request.method === "turn/start",
+      );
+      NodeAssert.equal(turnRequests.length, 2);
+      for (const request of turnRequests) {
+        const params = request.params as {
+          readonly collaborationMode?: {
+            readonly settings?: { readonly developer_instructions?: string };
+          };
+        };
+        const instructions = params.collaborationMode?.settings?.developer_instructions ?? "";
+        NodeAssert.match(instructions, /<collaboration_mode>/u);
+        NodeAssert.doesNotMatch(instructions, /preview_status/u);
+        NodeAssert.doesNotMatch(instructions, /preview_open/u);
+      }
     }),
   );
   it.effect("maps codex model options before starting a session", () =>
@@ -516,7 +730,9 @@ it.effect("fails closed when elevated Windows Command Center isolation cannot be
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "cc-windows-fallback-"));
   const runtimePath = NodePath.join(tempDir, "codex.exe");
   const sourceHomePath = NodePath.join(tempDir, "codex-home");
+  const workspacePath = NodePath.join(tempDir, "workspace");
   NodeFS.mkdirSync(sourceHomePath, { recursive: true });
+  NodeFS.mkdirSync(workspacePath, { recursive: true });
   NodeFS.writeFileSync(NodePath.join(sourceHomePath, "auth.json"), '{"token":"test-only"}\n');
   NodeFS.writeFileSync(runtimePath, Uint8Array.from([0x4d, 0x5a, 0x00, 0x00]));
 
@@ -554,6 +770,7 @@ it.effect("fails closed when elevated Windows Command Center isolation cannot be
         provider: ProviderDriverKind.make("codex"),
         threadId,
         runtimeMode: "approval-required",
+        cwd: workspacePath,
       })
       .pipe(Effect.result);
 

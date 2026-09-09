@@ -227,6 +227,11 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  /**
+   * Whether this session's MCP credential exposes the preview tools. When
+   * absent, MCP presence preserves the behavior of legacy callers.
+   */
+  readonly browserToolsAvailable?: boolean;
   readonly permissionProfile?: string;
   readonly commandCenterPlatform?: NodeJS.Platform;
   readonly windowsSandboxMode?: "elevated";
@@ -3156,10 +3161,11 @@ export const makeCodexSessionRuntime = (
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
             ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
-            // Derived from the session's own MCP configuration rather than the
-            // setting, so the prompt describes the tools this turn actually
-            // has even if the setting changed after the session started.
-            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+            // The adapter snapshots the credential's actual preview capability
+            // for this session. Legacy callers only supplied MCP arguments, so
+            // retain their prior behavior when the capability is absent.
+            browserToolsAvailable:
+              options.browserToolsAvailable ?? hasConfiguredMcpServer(options.appServerArgs),
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(

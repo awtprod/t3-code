@@ -15,10 +15,13 @@ import type {
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
+  DatabaseConnectionId,
   EventId,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionStartInput,
+  ServerSettingsError,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -60,6 +63,7 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ProviderSessionRuntime from "../../persistence/ProviderSessionRuntime.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
@@ -2615,11 +2619,22 @@ validation.layer("ProviderServiceLive validation", (it) => {
 });
 
 describe("agent browser access", () => {
-  const revokedThreads: Array<ThreadId> = [];
+  type TestSettings = NonNullable<Parameters<typeof ServerSettings.layerTest>[0]>;
+  interface SessionPreparation {
+    readonly threadId: ThreadId;
+    readonly enableAgentBrowserAccess?: boolean;
+    readonly projectId?: ProjectId;
+    readonly cwd?: string;
+  }
 
-  const startSessionWith = (enableAgentBrowserAccess: boolean, threadId: ThreadId) =>
+  const startSessionsWith = (
+    settings: TestSettings,
+    starts: ReadonlyArray<SessionPreparation>,
+    settingsReadFails = false,
+  ) =>
     Effect.gen(function* () {
-      const issued: Array<ThreadId> = [];
+      const issued: Array<McpSessionRegistry.McpCredentialRequest> = [];
+      const revoked: Array<ThreadId> = [];
       const codex = makeFakeCodexAdapter();
       const providerAdapterLayer = Layer.succeed(
         ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -2631,17 +2646,36 @@ describe("agent browser access", () => {
       const directoryLayer = ProviderSessionDirectoryLive.pipe(
         Layer.provide(runtimeRepositoryLayer),
       );
+      const baseServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest(settings);
+      const serverSettingsLayer = settingsReadFails
+        ? Layer.effect(
+            ServerSettings.ServerSettingsService,
+            Effect.gen(function* () {
+              const service = yield* ServerSettings.ServerSettingsService;
+              return ServerSettings.ServerSettingsService.of({
+                ...service,
+                getSettings: Effect.fail(
+                  new ServerSettingsError({
+                    settingsPath: "/test/settings.json",
+                    operation: "read-file",
+                    cause: new Error("settings unavailable"),
+                  }),
+                ),
+              });
+            }),
+          ).pipe(Layer.provide(baseServerSettingsLayer))
+        : baseServerSettingsLayer;
       const providerLayer = makeProviderServiceLive({
         issueMcpCredential: (request) =>
           Effect.sync(() => {
-            issued.push(request.threadId);
+            issued.push(request);
             return undefined;
           }),
-        revokeMcpCredential: (revoked) => Effect.sync(() => void revokedThreads.push(revoked)),
+        revokeMcpCredential: (threadId) => Effect.sync(() => void revoked.push(threadId)),
       }).pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
-        Layer.provide(ServerSettings.ServerSettingsService.layerTest({ enableAgentBrowserAccess })),
+        Layer.provideMerge(serverSettingsLayer),
         Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
@@ -2654,39 +2688,137 @@ describe("agent browser access", () => {
 
       yield* Effect.gen(function* () {
         const provider = yield* ProviderService.ProviderService;
-        return yield* provider.startSession(threadId, {
-          provider: CODEX_DRIVER,
-          providerInstanceId: codexInstanceId,
-          threadId,
-          runtimeMode: "full-access",
-        });
+        const serverSettings = yield* ServerSettings.ServerSettingsService;
+        for (const start of starts) {
+          if (start.enableAgentBrowserAccess !== undefined) {
+            yield* serverSettings.updateSettings({
+              enableAgentBrowserAccess: start.enableAgentBrowserAccess,
+            });
+          }
+          yield* provider.startSession(start.threadId, {
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId: start.threadId,
+            runtimeMode: "full-access",
+            ...(start.projectId === undefined ? {} : { projectId: start.projectId }),
+            ...(start.cwd === undefined ? {} : { cwd: start.cwd }),
+          });
+        }
       }).pipe(Effect.provide(providerLayer));
 
-      return issued;
+      return { issued, revoked };
     });
+
+  const databaseConnection = (projectId: ProjectId, readOnly: boolean, workspaceRoot: string) => ({
+    provider: "supabase" as const,
+    projectId,
+    workspaceRoot,
+    label: "primary",
+    isDefault: true,
+    projectRef: "projectrefabcdefghij",
+    readOnly,
+    accessToken: "sbp-test-only",
+  });
 
   // Credential issuance is the observable that matters: it is the only place a
   // credential is minted, and `/mcp` accepts nothing else, so withholding it is
   // what actually denies every provider and external MCP client.
   it.effect("requests no MCP credential when agent browser access is off", () =>
     Effect.gen(function* () {
-      const issued = yield* startSessionWith(false, asThreadId("thread-browser-off"));
+      const result = yield* startSessionsWith({ enableAgentBrowserAccess: false }, [
+        { threadId: asThreadId("thread-browser-off") },
+      ]);
 
-      assert.deepEqual(issued, []);
+      assert.deepEqual(result.issued, []);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("revokes an already-issued credential when access is off", () =>
+  it.effect("fails closed when browser and database settings cannot be read", () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project-settings-failure");
+      const threadId = asThreadId("thread-settings-failure");
+      const result = yield* startSessionsWith(
+        {
+          enableAgentBrowserAccess: true,
+          databaseConnections: {
+            [DatabaseConnectionId.make("connection-settings-failure")]: databaseConnection(
+              projectId,
+              false,
+              "/work/settings-failure",
+            ),
+          },
+        },
+        [{ threadId, projectId }],
+        true,
+      );
+
+      assert.deepEqual(result.issued, []);
+      assert.deepEqual(result.revoked, [threadId]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("issues database-only access for a read-only project database", () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project-database-read");
+      const result = yield* startSessionsWith(
+        {
+          enableAgentBrowserAccess: false,
+          databaseConnections: {
+            [DatabaseConnectionId.make("connection-read")]: databaseConnection(
+              projectId,
+              true,
+              "/work/read",
+            ),
+          },
+        },
+        [{ threadId: asThreadId("thread-database-read"), projectId, cwd: "/elsewhere" }],
+      );
+
+      assert.equal(result.issued.length, 1);
+      assert.deepEqual([...(result.issued[0]?.capabilities ?? [])], []);
+      assert.equal(result.issued[0]?.databaseAccess, "read");
+      assert.equal(result.issued[0]?.projectId, projectId);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("issues database-only write access for a database resolved by cwd", () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project-database-write");
+      const result = yield* startSessionsWith(
+        {
+          enableAgentBrowserAccess: false,
+          databaseConnections: {
+            [DatabaseConnectionId.make("connection-write")]: databaseConnection(
+              projectId,
+              false,
+              "/work/write",
+            ),
+          },
+        },
+        [{ threadId: asThreadId("thread-database-write"), cwd: "/work/write/packages/app" }],
+      );
+
+      assert.equal(result.issued.length, 1);
+      assert.deepEqual([...(result.issued[0]?.capabilities ?? [])], []);
+      assert.equal(result.issued[0]?.databaseAccess, "write");
+      assert.equal(result.issued[0]?.cwd, "/work/write/packages/app");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("revokes an already-issued preview credential when re-prepared with access off", () =>
     Effect.gen(function* () {
       const threadId = asThreadId("thread-browser-revoke");
-      revokedThreads.length = 0;
-
-      yield* startSessionWith(false, threadId);
+      const result = yield* startSessionsWith({ enableAgentBrowserAccess: true }, [
+        { threadId },
+        { threadId, enableAgentBrowserAccess: false },
+      ]);
 
       // Clearing the in-memory map is not enough: a token issued before the
       // toggle flipped stays valid against `/mcp` for its whole liveness
       // window, and later turns refresh it.
-      assert.deepEqual(revokedThreads, [threadId]);
+      assert.equal(result.issued.length, 1);
+      assert.deepEqual([...(result.issued[0]?.capabilities ?? [])], ["preview"]);
+      assert.deepEqual(result.revoked, [threadId]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -2694,9 +2826,11 @@ describe("agent browser access", () => {
     Effect.gen(function* () {
       const threadId = asThreadId("thread-browser-on");
 
-      const issued = yield* startSessionWith(true, threadId);
+      const result = yield* startSessionsWith({ enableAgentBrowserAccess: true }, [{ threadId }]);
 
-      assert.deepEqual(issued, [threadId]);
+      assert.equal(result.issued.length, 1);
+      assert.deepEqual([...(result.issued[0]?.capabilities ?? [])], ["preview"]);
+      assert.equal(result.issued[0]?.databaseAccess, undefined);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

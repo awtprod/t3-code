@@ -27,11 +27,18 @@ const GENERATED_LOCKFILES = new Set([
   "yarn.lock",
 ]);
 const VENDORED_PUBLIC_REFERENCE_PREFIX = ".repos/";
+const REVIEWED_PUBLIC_UPSTREAM_COMMITS = [
+  // Canonical pingdotgg/t3code tag v0.0.38, verified through the GitHub API on 2026-09-09.
+  "c0995d2eaf8ec787b3318ed1169ae266ed1529f8",
+  // Earlier merged pingdotgg/t3code upstream commit, reviewed as public on 2026-09-09.
+  "27732293373fbb081a966b437ae022afe77db16b",
+] as const;
 
 const args = new Set(process.argv.slice(2));
 const repoRoot = NodeChildProcess.execFileSync("git", ["rev-parse", "--show-toplevel"], {
   cwd: process.cwd(),
   encoding: "utf8",
+  stdio: ["ignore", "pipe", "pipe"],
 }).trim();
 const stagedOnly = args.has("--staged");
 const baseline = loadBaseline();
@@ -54,7 +61,7 @@ for (const relativePath of paths) {
   // only the generic content heuristics are skipped here. The denylist keeps
   // running, so an operator identifier can never ride in on an upstream file.
   if (!isVendoredPublicReference && candidate._tag !== "Oversized") {
-    if (isUpstreamVerbatim(relativePath)) {
+    if (isUpstreamVerbatim(relativePath, candidate.bytes)) {
       const text = candidate.bytes.includes(0)
         ? extractPublicBinaryMetadata(candidate.bytes)
         : candidate.bytes.toString("utf8");
@@ -144,34 +151,11 @@ if (uniqueFindings.length > 0) {
   );
 }
 
-/**
- * Commits on the public-upstream side of an in-progress or just-recorded sync.
- *
- * During `git merge` that is `MERGE_HEAD`; once the merge is committed it is
- * whichever parent does not descend from the pinned baseline (the fork side
- * always does). Empty outside a sync, which makes every check below a no-op.
- */
+/** Exact reviewed public-upstream commits available in this clone. */
 function upstreamSyncRefs(): readonly string[] {
-  const refs = new Set<string>();
-  const mergeHead = tryGit(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).trim();
-  if (mergeHead.length > 0) refs.add(mergeHead);
-  // Every merge recorded since the baseline, not just HEAD's own parents: a
-  // pull request is built as a synthetic merge of the branch into its base, so
-  // the sync merge sits inside that history rather than at the tip.
-  const mergeCommits = tryGit(["rev-list", "--merges", `${baseline}..HEAD`])
-    .trim()
-    .split("\n")
-    .filter(Boolean);
-  for (const commit of ["HEAD", ...mergeCommits]) {
-    const parents = tryGit(["show", "-s", "--format=%P", commit])
-      .trim()
-      .split(/\s+/u)
-      .filter(Boolean);
-    for (const parent of parents) {
-      if (!isAncestor(baseline, parent)) refs.add(parent);
-    }
-  }
-  return [...refs];
+  return REVIEWED_PUBLIC_UPSTREAM_COMMITS.filter(
+    (commit) => tryGitStatus(["cat-file", "-e", `${commit}^{commit}`]) === 0,
+  );
 }
 
 /**
@@ -183,18 +167,13 @@ function upstreamSyncRefs(): readonly string[] {
  * reasoning `.repos/` already encodes, narrowed to content the fork has not
  * touched — anything the fork authored or edited keeps the full scan.
  */
-function isUpstreamVerbatim(relativePath: string): boolean {
-  return upstreamRefs.some(
-    (ref) =>
-      tryGitStatus([
-        "diff",
-        "--quiet",
-        ...(stagedOnly ? ["--cached"] : []),
-        ref,
-        "--",
-        relativePath,
-      ]) === 0,
-  );
+function isUpstreamVerbatim(relativePath: string, candidateBytes: Buffer): boolean {
+  return upstreamRefs.some((ref) => {
+    const object = `${ref}:${relativePath}`;
+    if (tryGit(["cat-file", "-t", object]).trim() !== "blob") return false;
+    if (Number(tryGit(["cat-file", "-s", object]).trim()) !== candidateBytes.length) return false;
+    return gitBytes(["cat-file", "blob", object]).equals(candidateBytes);
+  });
 }
 
 /**
@@ -502,6 +481,7 @@ function git(commandArgs: readonly string[]) {
   return NodeChildProcess.execFileSync("git", commandArgs, {
     cwd: repoRoot,
     encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 10 * 1024 * 1024,
   });
 }
@@ -509,6 +489,7 @@ function git(commandArgs: readonly string[]) {
 function gitBytes(commandArgs: readonly string[]) {
   return NodeChildProcess.execFileSync("git", commandArgs, {
     cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 10 * 1024 * 1024,
   });
 }
