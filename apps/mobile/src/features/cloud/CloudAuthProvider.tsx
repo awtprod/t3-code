@@ -94,7 +94,6 @@ function CloudAuthBridge(props: { readonly children: ReactNode }) {
       accountId: string | null,
     ) => {
       const removal = await removeRelayEnvironments(accountId);
-      if (removal._tag !== "Success") throw squashAtomCommandFailure(removal);
       const cleanup = [
         resetManagedRelayTokenCache(),
         ...(previous
@@ -111,6 +110,7 @@ function CloudAuthBridge(props: { readonly children: ReactNode }) {
       for (const result of results) {
         reportAtomCommandResult(result, { label: "cloud account cleanup" });
       }
+      if (removal._tag !== "Success") throw squashAtomCommandFailure(removal);
     };
     const queueAccountCleanup = (previous: typeof previousTokenProviderRef.current) => {
       const previousTransition = accountTransitionRef.current ?? Promise.resolve();

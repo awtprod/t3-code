@@ -21,7 +21,9 @@ const ATTACHMENT_ID_PATTERN = new RegExp(
   "i",
 );
 
-export const PENDING_ATTACHMENT_THREAD_SEGMENT = "pending";
+// Final thread segments strip leading underscores, keeping temporary IDs disjoint
+// while legacy `pending` and `_pending` final files remain valid.
+export const PENDING_ATTACHMENT_THREAD_SEGMENT = "__pending";
 export const PENDING_ATTACHMENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const PARTIAL_UPLOAD_MAX_AGE_MS = 60 * 60 * 1000;
 
@@ -37,7 +39,7 @@ export function toSafeThreadAttachmentSegment(threadId: string): string | null {
   if (segment.length === 0) {
     return null;
   }
-  return segment === PENDING_ATTACHMENT_THREAD_SEGMENT ? "_pending" : segment;
+  return segment;
 }
 
 export function attachmentFileExtension(fileName: string): string {

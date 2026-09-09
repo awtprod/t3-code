@@ -132,7 +132,11 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
 
   const commands: string[] = [];
   const timeouts = new Map<string, unknown>();
-  const control: { failCommand: string | undefined } = { failCommand: undefined };
+  const control: {
+    failCommand: string | undefined;
+    failureCode: number;
+    failureStderr: string;
+  } = { failCommand: undefined, failureCode: 1, failureStderr: "" };
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
       Effect.sync(() => {
@@ -141,8 +145,10 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
         timeouts.set(command, input.timeout);
         return {
           stdout: input.args[1] === "--version" ? "t3 v1.2.3\n" : "",
-          stderr: "",
-          code: ChildProcessSpawner.ExitCode(command === control.failCommand ? 1 : 0),
+          stderr: command === control.failCommand ? control.failureStderr : "",
+          code: ChildProcessSpawner.ExitCode(
+            command === control.failCommand ? control.failureCode : 0,
+          ),
           timedOut: false,
           stdoutTruncated: false,
           stderrTruncated: false,
@@ -385,9 +391,42 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       const { service, control } = yield* makeHarness("darwin");
       yield* service.install;
       control.failCommand = "launchctl bootout --wait gui/501/com.t3tools.t3code.service";
+      control.failureCode = 3;
+      control.failureStderr = "Boot-out failed: 3: No such process";
 
       yield* service.install;
       expect((yield* service.status).current).toBe(true);
+    }),
+  );
+
+  it.effect("preserves the launch agent when uninstall cannot stop it", () =>
+    Effect.gen(function* () {
+      const { service, control } = yield* makeHarness("darwin");
+      yield* service.install;
+      control.failCommand = "launchctl bootout --wait gui/501/com.t3tools.t3code.service";
+      control.failureCode = 1;
+      control.failureStderr = "Boot-out failed: 1: Operation not permitted";
+
+      const failure = yield* service.uninstall.pipe(Effect.flip);
+
+      expect(failure._tag).toBe("BootServiceCommandError");
+      expect((yield* service.status).installed).toBe(true);
+    }),
+  );
+
+  it.effect("does not rewrite an installed launch agent when bootout really fails", () =>
+    Effect.gen(function* () {
+      const { service, fs, control } = yield* makeHarness("darwin");
+      const plan = yield* service.install;
+      const before = yield* fs.readFileString(plan.unitPath);
+      control.failCommand = "launchctl bootout --wait gui/501/com.t3tools.t3code.service";
+      control.failureCode = 1;
+      control.failureStderr = "Boot-out failed: 1: Operation not permitted";
+
+      const failure = yield* service.install.pipe(Effect.flip);
+
+      expect(failure._tag).toBe("BootServiceCommandError");
+      expect(yield* fs.readFileString(plan.unitPath)).toBe(before);
     }),
   );
 

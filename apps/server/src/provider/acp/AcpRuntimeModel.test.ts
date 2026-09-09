@@ -779,6 +779,32 @@ describe("AcpRuntimeModel", () => {
       expect(decision).toEqual({ emit: true, skippedSinceEmit: 0 });
     });
 
+    it("emits metadata-only updates immediately", () => {
+      const previous: AcpToolCallState = {
+        toolCallId: "tool-1",
+        title: "Reading file",
+        detail: "same",
+        status: "inProgress",
+        data: { toolCallId: "tool-1" },
+      };
+      const next: AcpToolCallState = {
+        ...previous,
+        data: {
+          ...previous.data,
+          locations: [{ path: "src/index.ts", line: 12 }],
+        },
+      };
+
+      expect(
+        decideToolCallUpdateEmission({
+          previous,
+          next,
+          lastEmittedDetailLength: 4,
+          skippedSinceEmit: 0,
+        }),
+      ).toEqual({ emit: true, skippedSinceEmit: 0 });
+    });
+
     it("coalesces small deltas but forces an emission after the coalesce limit", () => {
       let lastEmittedDetailLength: number | undefined = 0;
       let skippedSinceEmit = 0;

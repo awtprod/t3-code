@@ -124,6 +124,28 @@ describe("runAttachmentUploadCycle", () => {
     });
     expect(removeCalls).toEqual([]);
   });
+
+  it("returns a transfer failure when transport setup throws synchronously", async () => {
+    const error = new Error("transport setup failed");
+    const result = await runAttachmentUploadCycle({
+      registry,
+      createUploadUrl: makeCreateUploadUrl("pending-setup-failed"),
+      remove,
+      environmentId,
+      upload: uploadInput,
+      resolveUploadUrl: () => "https://environment.test/upload",
+      transport: () => {
+        throw error;
+      },
+    });
+
+    expect(result).toEqual({
+      status: "failed",
+      step: "transfer",
+      attachmentId: "pending-setup-failed",
+      error,
+    });
+  });
 });
 
 describe("verifyPersistedAttachmentUpload", () => {

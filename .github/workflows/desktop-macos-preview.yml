@@ -150,17 +150,22 @@ jobs:
 
           tag="desktop-preview"
 
-          # True while the PR is open and still carries the preview label.
-          preview_eligible() {
-            [[ "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+          preview_eligibility() {
+            local snapshot
+            if ! snapshot="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
               --json state,labels \
-              --jq '.state + " " + (.labels | map(.name) | contains(["preview:mac"]) | tostring)')" == "OPEN true" ]]
+              --jq '.state + " " + (.labels | map(.name) | contains(["preview:mac"]) | tostring)')"; then
+              echo "Could not verify current PR preview eligibility." >&2
+              return 1
+            fi
+            [[ "$snapshot" == "OPEN true" ]] && printf 'true\n' || printf 'false\n'
           }
 
           # The build ran for many minutes. If the PR closed or lost the label
           # meanwhile, cleanup already ran in its own concurrency group, so
           # publishing now would resurrect a deleted download.
-          if ! preview_eligible; then
+          eligibility="$(preview_eligibility)"
+          if [[ "$eligibility" != "true" ]]; then
             echo "PR closed or preview label removed while building. Skipping publish."
             exit 0
           fi
@@ -179,41 +184,50 @@ jobs:
             exit 1
           fi
 
-          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # "|| true" tolerates a concurrent publish job creating the
-            # release between the check and the create.
+          repo_owner="${GITHUB_REPOSITORY%%/*}"
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          release_id="$(gh api graphql \
+            -f query='query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){release(tagName:$tag){id}}}' \
+            -F owner="$repo_owner" -F name="$repo_name" -F tag="$tag" \
+            --jq '.data.repository.release.id // empty')"
+          if [[ -z "$release_id" ]]; then
             gh release create "$tag" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$DEFAULT_BRANCH" \
               --prerelease \
               --title "Desktop preview builds" \
               --notes "Rolling unsigned desktop builds from pull requests with a preview label. Each download is removed when its pull request closes or loses the label. Install stable builds from the latest release instead." \
-              || true
+              || gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
           fi
 
-          # Keep one DMG per PR: drop this PR's older builds first. The
+          # Upload the replacement before deleting older builds, so users do
+          # not lose the only valid download if an upload fails.
+          gh release upload "$tag" "$dmg_path" --repo "$GITHUB_REPOSITORY" --clobber
+
+          # Keep one DMG per PR: drop this PR's older builds. The
           # trailing dot keeps -pr.12. from matching -pr.123. builds.
+          uploaded_name="$(basename "$dmg_path")"
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
             | { grep -F -- "-pr.${PR_NUMBER}." || true; } \
             | while read -r asset; do
+                [[ "$asset" == "$uploaded_name" ]] && continue
                 gh release delete-asset "$tag" "$asset" --repo "$GITHUB_REPOSITORY" --yes \
                   || echo "Asset $asset was already removed by a concurrent run."
               done
-
-          gh release upload "$tag" "$dmg_path" --repo "$GITHUB_REPOSITORY" --clobber
 
           # Re-check after uploading. A cleanup run that started during the
           # upload listed assets before ours existed, so it cannot delete it.
           # Whichever writer acts last sees the final PR state; if the preview
           # became ineligible, delete what we just uploaded.
-          if ! preview_eligible; then
-            gh release delete-asset "$tag" "$(basename "$dmg_path")" --repo "$GITHUB_REPOSITORY" --yes \
+          eligibility="$(preview_eligibility)"
+          if [[ "$eligibility" != "true" ]]; then
+            gh release delete-asset "$tag" "$uploaded_name" --repo "$GITHUB_REPOSITORY" --yes \
               || echo "Asset was already removed by a concurrent run."
             echo "PR closed or preview label removed during upload. Removed the download."
             exit 0
           fi
 
-          echo "download_url=https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/$(basename "$dmg_path")" >> "$GITHUB_OUTPUT"
+          echo "download_url=https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${uploaded_name}" >> "$GITHUB_OUTPUT"
 
       - name: Comment download link
         if: steps.upload.outputs.download_url != ''
@@ -287,7 +301,7 @@ jobs:
     name: Remove preview download
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      ((github.event.action == 'closed' && contains(github.event.pull_request.labels.*.name, 'preview:mac')) ||
+      (github.event.action == 'closed' ||
       (github.event.action == 'unlabeled' && github.event.label.name == 'preview:mac'))
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -309,9 +323,19 @@ jobs:
           # A stale cleanup must not delete a download that became valid
           # again. If the PR is open and labeled once more, the next publish
           # owns this PR's assets and replaces them itself.
-          if [[ "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --json state,labels \
-            --jq '.state + " " + (.labels | map(.name) | contains(["preview:mac"]) | tostring)')" == "OPEN true" ]]; then
+          preview_eligibility() {
+            local snapshot
+            if ! snapshot="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+              --json state,labels \
+              --jq '.state + " " + (.labels | map(.name) | contains(["preview:mac"]) | tostring)')"; then
+              echo "Could not verify current PR preview eligibility." >&2
+              return 1
+            fi
+            [[ "$snapshot" == "OPEN true" ]] && printf 'true\n' || printf 'false\n'
+          }
+
+          eligibility="$(preview_eligibility)"
+          if [[ "$eligibility" == "true" ]]; then
             echo "PR is open and labeled again. Skipping cleanup."
             echo "removed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -319,7 +343,13 @@ jobs:
 
           echo "removed=true" >> "$GITHUB_OUTPUT"
 
-          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          repo_owner="${GITHUB_REPOSITORY%%/*}"
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          release_id="$(gh api graphql \
+            -f query='query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){release(tagName:$tag){id}}}' \
+            -F owner="$repo_owner" -F name="$repo_name" -F tag="$tag" \
+            --jq '.data.repository.release.id // empty')"
+          if [[ -z "$release_id" ]]; then
             echo "No preview release exists. Nothing to clean up."
             exit 0
           fi

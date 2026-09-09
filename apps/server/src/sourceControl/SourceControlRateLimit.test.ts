@@ -120,3 +120,17 @@ it.effect("keeps a fresh provider reset from an older request", () =>
     assert.equal((yield* Effect.flip(limits.check(github))).retryAt, 61_000);
   }).pipe(Effect.provide(SourceControlRateLimit.layer)),
 );
+
+it.effect("starts a new fallback pause when a stale request is rate-limited after expiry", () =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(0);
+    const limits = yield* SourceControlRateLimit.SourceControlRateLimit;
+    const staleLease = yield* limits.check(github);
+    yield* limits.recordRateLimit({ ...github, lease: staleLease });
+
+    yield* TestClock.adjust("31 seconds");
+    yield* limits.recordRateLimit({ ...github, lease: staleLease });
+
+    assert.equal((yield* Effect.flip(limits.check(github))).retryAt, 91_000);
+  }).pipe(Effect.provide(SourceControlRateLimit.layer)),
+);

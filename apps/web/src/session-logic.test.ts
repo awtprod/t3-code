@@ -847,6 +847,36 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("keeps adjacent same-title tool calls separate when their details differ", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "first-read",
+        kind: "tool.updated",
+        summary: "Read file",
+        turnId: "turn-1",
+        payload: {
+          toolCallId: "call-1",
+          title: "Read file",
+          itemType: "dynamic_tool_call",
+          detail: "/workspace/first.ts",
+        },
+      }),
+      makeActivity({
+        id: "second-read",
+        kind: "tool.completed",
+        summary: "Read file completed",
+        turnId: "turn-1",
+        payload: {
+          title: "Read file",
+          itemType: "dynamic_tool_call",
+          detail: "/workspace/second.ts",
+        },
+      }),
+    ]);
+
+    expect(entries.map((entry) => entry.id)).toEqual(["first-read", "second-read"]);
+  });
+
   it("keeps the latest task progress without emitting plan-update log entries", () => {
     const activities = [
       makeActivity({ id: "before", kind: "tool.completed", summary: "Read files", sequence: 0 }),

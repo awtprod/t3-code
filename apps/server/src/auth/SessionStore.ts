@@ -398,15 +398,14 @@ export class SessionStore extends Context.Service<
     readonly revokeAllExcept: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<number, SessionCredentialInternalError>;
-    readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
-    readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
-    readonly recordClientConnection: (
+    readonly markConnected: (
       sessionId: AuthSessionId,
-      client: {
+      client?: {
         readonly surface?: ClientSurface | undefined;
         readonly appVersion?: string | undefined;
       },
     ) => Effect.Effect<void, never>;
+    readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
   }
 >()("@awtprod/command-center/auth/SessionStore") {}
 
@@ -525,7 +524,7 @@ export const make = Effect.gen(function* () {
       );
     });
 
-  const markConnected: SessionStore["Service"]["markConnected"] = (sessionId) =>
+  const markConnected: SessionStore["Service"]["markConnected"] = (sessionId, client = {}) =>
     Ref.modify(connectedSessionsRef, (current) => {
       const next = new Map(current);
       const wasDisconnected = !next.has(sessionId);
@@ -533,14 +532,24 @@ export const make = Effect.gen(function* () {
       return [wasDisconnected, next] as const;
     }).pipe(
       Effect.flatMap((wasDisconnected) =>
-        wasDisconnected
-          ? DateTime.now.pipe(
-              Effect.flatMap((lastConnectedAt) =>
-                authSessions.setLastConnectedAt({
-                  sessionId,
-                  lastConnectedAt,
-                }),
-              ),
+        wasDisconnected || client.surface !== undefined || client.appVersion !== undefined
+          ? Effect.flatMap(
+              wasDisconnected ? DateTime.now : Effect.succeed(null),
+              (lastConnectedAt) =>
+                authSessions
+                  .setConnection({
+                    sessionId,
+                    lastConnectedAt,
+                    surface: client.surface ?? null,
+                    appVersion: client.appVersion ?? null,
+                  })
+                  .pipe(
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning("Failed to persist connected-session auth update.").pipe(
+                        Effect.annotateLogs({ sessionId, cause }),
+                      ),
+                    ),
+                  ),
             )
           : Effect.void,
       ),
@@ -558,28 +567,6 @@ export const make = Effect.gen(function* () {
       ),
       Effect.withSpan("SessionStore.markConnected"),
     );
-
-  // Best-effort: connection metadata must never block or fail a connect.
-  const recordClientConnection: SessionStore["Service"]["recordClientConnection"] = (
-    sessionId,
-    client,
-  ) =>
-    client.surface === undefined && client.appVersion === undefined
-      ? Effect.void
-      : authSessions
-          .setClientConnection({
-            sessionId,
-            surface: client.surface ?? null,
-            appVersion: client.appVersion ?? null,
-          })
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Failed to record session client connection metadata.").pipe(
-                Effect.annotateLogs({ sessionId, cause }),
-              ),
-            ),
-            Effect.withSpan("SessionStore.recordClientConnection"),
-          );
 
   const markDisconnected: SessionStore["Service"]["markDisconnected"] = (sessionId) =>
     Ref.update(connectedSessionsRef, (current) => {
@@ -950,7 +937,6 @@ export const make = Effect.gen(function* () {
     revokeAllExcept,
     markConnected,
     markDisconnected,
-    recordClientConnection,
   });
 });
 

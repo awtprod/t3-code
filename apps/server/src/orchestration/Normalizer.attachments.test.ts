@@ -13,6 +13,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import { PENDING_ATTACHMENT_THREAD_SEGMENT } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
@@ -23,6 +24,7 @@ const testLayer = Layer.mergeAll(
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
 const attachmentUuid = "00000000-0000-4000-8000-0000000000aa";
+const pendingAttachmentId = `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${attachmentUuid}`;
 
 function turnStartCommand(input: {
   readonly threadId?: string;
@@ -77,12 +79,12 @@ describe("normalizeDispatchCommand attachments", () => {
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const bytes = Buffer.from("pixels");
-      const pendingPath = NodePath.join(config.attachmentsDir, `pending-${attachmentUuid}.png`);
+      const pendingPath = NodePath.join(config.attachmentsDir, `${pendingAttachmentId}.png`);
       NodeFS.writeFileSync(pendingPath, bytes);
 
       const normalized = yield* normalizeDispatchCommand(
         turnStartCommand({
-          attachments: [{ id: `pending-${attachmentUuid}`, sizeBytes: bytes.byteLength }],
+          attachments: [{ id: pendingAttachmentId, sizeBytes: bytes.byteLength }],
         }),
       );
       if (normalized.type !== "thread.turn.start") {
@@ -106,7 +108,7 @@ describe("normalizeDispatchCommand attachments", () => {
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       NodeFS.writeFileSync(
-        NodePath.join(config.attachmentsDir, `pending-${attachmentUuid}.png`),
+        NodePath.join(config.attachmentsDir, `${pendingAttachmentId}.png`),
         Buffer.from("pixels"),
       );
 
@@ -114,7 +116,7 @@ describe("normalizeDispatchCommand attachments", () => {
         turnStartCommand({
           attachments: [
             { dataUrl: "data:image/png;base64,cGl4ZWxz", sizeBytes: 6 },
-            { id: `pending-${attachmentUuid}`, sizeBytes: 6 },
+            { id: pendingAttachmentId, sizeBytes: 6 },
           ],
         }),
       );
@@ -130,7 +132,7 @@ describe("normalizeDispatchCommand attachments", () => {
   it.effect("claims uploaded documents without changing their original extension", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
-      const pendingId = `pending-${attachmentUuid}-pdf`;
+      const pendingId = `${pendingAttachmentId}-pdf`;
       const pendingPath = NodePath.join(config.attachmentsDir, `${pendingId}.pdf`);
       NodeFS.writeFileSync(pendingPath, Buffer.from("report"));
 
@@ -171,13 +173,13 @@ describe("normalizeDispatchCommand attachments", () => {
       const config = yield* ServerConfig.ServerConfig;
       const bytes = Buffer.from("pixels");
       NodeFS.writeFileSync(
-        NodePath.join(config.attachmentsDir, `pending-${attachmentUuid}.png`),
+        NodePath.join(config.attachmentsDir, `${pendingAttachmentId}.png`),
         bytes,
       );
 
       const first = yield* normalizeDispatchCommand(
         turnStartCommand({
-          attachments: [{ id: `pending-${attachmentUuid}`, sizeBytes: bytes.byteLength }],
+          attachments: [{ id: pendingAttachmentId, sizeBytes: bytes.byteLength }],
         }),
       );
       if (first.type !== "thread.turn.start") {
@@ -190,7 +192,7 @@ describe("normalizeDispatchCommand attachments", () => {
       const retried = yield* normalizeDispatchCommand(
         turnStartCommand({
           threadId: "thread-retry",
-          attachments: [{ id: `pending-${attachmentUuid}`, sizeBytes: bytes.byteLength }],
+          attachments: [{ id: pendingAttachmentId, sizeBytes: bytes.byteLength }],
         }),
       );
       if (retried.type !== "thread.turn.start") {
@@ -203,12 +205,12 @@ describe("normalizeDispatchCommand attachments", () => {
   it.effect("removes failed attachment claims without deleting their pending uploads", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
-      const pendingPath = NodePath.join(config.attachmentsDir, `pending-${attachmentUuid}.png`);
+      const pendingPath = NodePath.join(config.attachmentsDir, `${pendingAttachmentId}.png`);
       NodeFS.writeFileSync(pendingPath, Buffer.from("pixels"));
       const command = turnStartCommand({
         attachments: [
           { dataUrl: "data:image/png;base64,cGl4ZWxz", sizeBytes: 6 },
-          { id: `pending-${attachmentUuid}`, sizeBytes: 6 },
+          { id: pendingAttachmentId, sizeBytes: 6 },
         ],
       });
       const normalized = yield* normalizeDispatchCommand(command);
@@ -235,10 +237,10 @@ describe("normalizeDispatchCommand attachments", () => {
   it.effect("removes a failed claimed copy after its pending original was removed", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
-      const pendingPath = NodePath.join(config.attachmentsDir, `pending-${attachmentUuid}.png`);
+      const pendingPath = NodePath.join(config.attachmentsDir, `${pendingAttachmentId}.png`);
       NodeFS.writeFileSync(pendingPath, Buffer.from("pixels"));
       const command = turnStartCommand({
-        attachments: [{ id: `pending-${attachmentUuid}`, sizeBytes: 6 }],
+        attachments: [{ id: pendingAttachmentId, sizeBytes: 6 }],
       });
       const normalized = yield* normalizeDispatchCommand(command);
       if (normalized.type !== "thread.turn.start") {
@@ -260,10 +262,10 @@ describe("normalizeDispatchCommand attachments", () => {
   it.effect("keeps concurrent claims independent when one dispatch fails", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
-      const pendingPath = NodePath.join(config.attachmentsDir, `pending-${attachmentUuid}.png`);
+      const pendingPath = NodePath.join(config.attachmentsDir, `${pendingAttachmentId}.png`);
       NodeFS.writeFileSync(pendingPath, Buffer.from("pixels"));
       const command = turnStartCommand({
-        attachments: [{ id: `pending-${attachmentUuid}`, sizeBytes: 6 }],
+        attachments: [{ id: pendingAttachmentId, sizeBytes: 6 }],
       });
 
       const [failed, succeeded] = yield* Effect.all(
@@ -295,7 +297,7 @@ describe("normalizeDispatchCommand attachments", () => {
   it.effect("removes earlier claimed copies when a later attachment cannot be normalized", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
-      const pendingId = `pending-${attachmentUuid}`;
+      const pendingId = pendingAttachmentId;
       const pendingPath = NodePath.join(config.attachmentsDir, `${pendingId}.png`);
       NodeFS.writeFileSync(pendingPath, Buffer.from("pixels"));
 
@@ -304,7 +306,7 @@ describe("normalizeDispatchCommand attachments", () => {
           attachments: [
             { id: pendingId, sizeBytes: 6 },
             {
-              id: "pending-00000000-0000-4000-8000-0000000000ff",
+              id: `${PENDING_ATTACHMENT_THREAD_SEGMENT}-00000000-0000-4000-8000-0000000000ff`,
               sizeBytes: 6,
             },
           ],
@@ -320,14 +322,12 @@ describe("normalizeDispatchCommand attachments", () => {
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       NodeFS.writeFileSync(
-        NodePath.join(config.attachmentsDir, `pending-${attachmentUuid}.png`),
+        NodePath.join(config.attachmentsDir, `${pendingAttachmentId}.png`),
         Buffer.from("pixels"),
       );
 
       const wrongSize = yield* normalizeDispatchCommand(
-        turnStartCommand({
-          attachments: [{ id: `pending-${attachmentUuid}`, sizeBytes: 999 }],
-        }),
+        turnStartCommand({ attachments: [{ id: pendingAttachmentId, sizeBytes: 999 }] }),
       ).pipe(Effect.flip);
       expect(wrongSize.message).toContain("size");
 
@@ -339,7 +339,7 @@ describe("normalizeDispatchCommand attachments", () => {
       expect(wrongThread.message).toContain("pending upload");
 
       const mismatchedTypeCommand = turnStartCommand({
-        attachments: [{ id: `pending-${attachmentUuid}`, sizeBytes: 6 }],
+        attachments: [{ id: pendingAttachmentId, sizeBytes: 6 }],
       });
       if (mismatchedTypeCommand.type !== "thread.turn.start") {
         throw new Error("Expected a thread.turn.start command.");

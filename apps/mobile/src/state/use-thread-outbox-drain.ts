@@ -107,6 +107,27 @@ function settingsCommandId(message: QueuedThreadMessage, setting: string): Comma
   return CommandId.make(`${message.commandId}:${setting}`);
 }
 
+export function resolveQueuedMessageDispatchStep(input: {
+  readonly deliveryAction: ReturnType<typeof resolveThreadOutboxDeliveryAction>;
+  readonly queuedMessage: QueuedThreadMessage;
+  readonly serverConfig: { readonly maxFileUploadBytes: number | undefined } | null;
+}) {
+  if (
+    input.deliveryAction === "send" &&
+    input.queuedMessage.creation !== undefined &&
+    !isQueuedThreadCreationSendable(input.queuedMessage)
+  ) {
+    return { step: "wait" } as const;
+  }
+  return resolveThreadOutboxDispatchStep({
+    deliveryAction: input.deliveryAction,
+    fileAttachments: input.queuedMessage.attachments.filter(
+      (attachment) => attachment.type === "file",
+    ),
+    serverConfig: input.serverConfig,
+  });
+}
+
 /**
  * Uploads a queued message's attachments and persists the uploaded ids back
  * onto the queued message. The revision-checked update means an edit accepted
@@ -278,15 +299,30 @@ export async function recoverEditedCreationAfterDelivery(
   }
   const draftKey = scopedThreadKey(kept.environmentId, kept.threadId);
   try {
+    await waitForComposerDraftsLoaded();
+    const originalDraft = getComposerDraftSnapshot(draftKey);
+    let mergedDraft: ComposerDraft;
     // Merge before removing: the draft's reference keeps the removal sweep
     // from deleting the attachment files. allowOverflow mirrors the
     // send-failure restore; the send path refuses over-cap drafts, so the
     // state stays recoverable.
-    await mergeComposerDraftContent(draftKey, { text: kept.text, attachments: [] });
+    try {
+      await mergeComposerDraftContent(draftKey, {
+        text: kept.text,
+        attachments: [],
+        sourceShareId: `thread-outbox:${kept.messageId}:${keptRevision}`,
+      });
+    } finally {
+      // The merge publishes before its persistence await, so capture the
+      // result even when persistence fails. A retry for this same revision is
+      // then idempotent through the receipt above.
+      mergedDraft = getComposerDraftSnapshot(draftKey);
+    }
     if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[kept.messageId]) {
       return true;
     }
     if (threadOutboxRevision(kept.messageId) !== keptRevision) {
+      await undoComposerDraftMerge(draftKey, originalDraft, mergedDraft);
       return false;
     }
     const existingAttachmentIds = new Set(
@@ -961,16 +997,13 @@ export function useThreadOutboxDrain(): void {
         environmentConnected: environment?.connectionState === "connected",
         threadBusy: thread?.session?.status === "running" || thread?.session?.status === "starting",
       });
-      // The delivery action resolves first; the file-capability gate applies
-      // only to a message that will send. Gating earlier would restore a
-      // creation whose startTurn already made the thread as a duplicate draft
-      // instead of removing it.
+      // Incomplete creations wait before file capability is considered. For
+      // all other messages the capability gate applies only to a send, so a
+      // creation whose startTurn already made the thread still gets removed.
       const serverConfig = serverConfigs.get(nextQueuedMessage.environmentId);
-      const dispatchStep = resolveThreadOutboxDispatchStep({
+      const dispatchStep = resolveQueuedMessageDispatchStep({
         deliveryAction,
-        fileAttachments: nextQueuedMessage.attachments.filter(
-          (attachment) => attachment.type === "file",
-        ),
+        queuedMessage: nextQueuedMessage,
         serverConfig: serverConfig
           ? {
               maxFileUploadBytes:
@@ -1020,9 +1053,6 @@ export function useThreadOutboxDrain(): void {
       // An incomplete pending task (e.g. worktree mode without a branch) stays
       // queued until the user finishes it in the editor.
       if (deliveryAction === "send" && creation !== undefined) {
-        if (!isQueuedThreadCreationSendable(nextQueuedMessage)) {
-          continue;
-        }
         if (creationProjectCwd === null && shellStatus !== "live") {
           continue;
         }

@@ -11,7 +11,7 @@ export function resolveThreadReferenceCopyTarget(input: {
   readonly linkedPullRequestUrl?: string | null;
   readonly detectedPullRequestUrl?: string | null;
 }): ThreadReferenceCopyTarget {
-  const pullRequestUrl = input.linkedPullRequestUrl ?? input.detectedPullRequestUrl;
+  const pullRequestUrl = input.linkedPullRequestUrl || input.detectedPullRequestUrl;
   return pullRequestUrl
     ? {
         kind: "pull-request",

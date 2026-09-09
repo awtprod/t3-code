@@ -43,6 +43,7 @@ import {
   readThemeFileGuarded,
 } from "../environmentTheme.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
+import { withServerSettingsFileLock } from "../serverSettingsFileLock.ts";
 import { baseDirFlag } from "./config.ts";
 
 /** Settings files outlive the build that reads them, so the object is carried
@@ -219,67 +220,30 @@ const readSettingsObject = Effect.fn(function* (settingsPath: string) {
   return { raw, settings };
 });
 
-/**
- * A running server owns this file too, and its write path is an in-process
- * semaphore that cannot serialize against another process. So the document is
- * re-read immediately before the rename and the whole edit is retried when it
- * moved underneath us, which is what turns "last writer wins" into "last
- * writer merges", and an edit that keeps losing the race fails loudly rather
- * than overwriting. A write landing inside the remaining rename window is
- * still possible; the server's own watcher reconciles the file either way.
- */
-const CONCURRENT_WRITE_ATTEMPTS = 5;
-
-const writeDefaultTheme = Effect.fn(function* (input: {
+const writeDefaultThemeUnlocked = Effect.fn(function* (input: {
   readonly settingsPath: string;
   readonly themeId: string;
 }) {
-  const fs = yield* FileSystem.FileSystem;
-
-  for (let attempt = 1; ; attempt++) {
-    const { raw, settings } = yield* readSettingsObject(input.settingsPath);
-    const setAt = DateTime.formatIso(yield* DateTime.now);
-    const next =
-      input.themeId.length > 0
-        ? // The timestamp is the set-generation: it lets clients apply a re-set
-          // of the same value they already applied once.
-          { ...settings, defaultTheme: input.themeId, defaultThemeSetAt: setAt }
-        : // Clearing removes the keys rather than storing empty strings, so the
-          // file reads the same as one that never set a theme.
-          Object.fromEntries(
-            Object.entries(settings).filter(
-              ([key]) => key !== "defaultTheme" && key !== "defaultThemeSetAt",
-            ),
-          );
-
-    const contents = yield* encodeSettingsJson(next);
-    const current = yield* fs
-      .readFileString(input.settingsPath)
-      .pipe(Effect.orElseSucceed(() => ""));
-    if (current !== raw) {
-      // Falling through here would overwrite whatever landed in between, which
-      // is exactly the loss this loop exists to prevent.
-      if (attempt >= CONCURRENT_WRITE_ATTEMPTS) {
-        return yield* Effect.fail(
-          new ThemeSettingsBusyError({
-            settingsPath: input.settingsPath,
-            attempts: CONCURRENT_WRITE_ATTEMPTS,
-          }),
+  const { settings } = yield* readSettingsObject(input.settingsPath);
+  const setAt = DateTime.formatIso(yield* DateTime.now);
+  const next =
+    input.themeId.length > 0
+      ? { ...settings, defaultTheme: input.themeId, defaultThemeSetAt: setAt }
+      : Object.fromEntries(
+          Object.entries(settings).filter(
+            ([key]) => key !== "defaultTheme" && key !== "defaultThemeSetAt",
+          ),
         );
-      }
-      continue;
-    }
 
-    yield* writeFileStringAtomically({
-      filePath: input.settingsPath,
-      contents: `${contents}\n`,
-    }).pipe(
-      Effect.mapError(
-        (cause) => new ThemeSettingsWriteError({ settingsPath: input.settingsPath, cause }),
-      ),
-    );
-    return;
-  }
+  const contents = yield* encodeSettingsJson(next);
+  yield* writeFileStringAtomically({
+    filePath: input.settingsPath,
+    contents: `${contents}\n`,
+  }).pipe(
+    Effect.mapError(
+      (cause) => new ThemeSettingsWriteError({ settingsPath: input.settingsPath, cause }),
+    ),
+  );
 });
 
 /** Publishes a theme file into the environment's themes directory and returns
@@ -353,6 +317,20 @@ const publishThemeFile = Effect.fn(function* (input: {
 
   const publishFailure = (cause: unknown) =>
     new ThemePublishError({ themesDir: input.themesDir, cause });
+
+  yield* Effect.try({
+    try: () => {
+      try {
+        const destination = NodeFS.lstatSync(destinationPath);
+        if (!destination.isFile() && !destination.isSymbolicLink()) {
+          throw new Error(`Unsupported theme destination type at ${destinationPath}`);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    },
+    catch: publishFailure,
+  });
 
   // Staged in full before anything moves, so the commit below is two adjacent
   // renames with no I/O between them. The staging entry is created O_EXCL
@@ -497,41 +475,45 @@ const themeSetCommand = Command.make("set", {
         target.startsWith("~");
       const targetIsFile =
         looksLikePath && (yield* fs.exists(target).pipe(Effect.orElseSucceed(() => false)));
-      let themeId: string;
-      let revertPublish: Effect.Effect<void> = Effect.void;
-      let cleanupPublish: Effect.Effect<void> = Effect.void;
-      if (targetIsFile) {
-        // Settings are preflighted before publishing, so a settings file the
-        // set step cannot read or parse fails the command before it mutates
-        // the themes directory.
-        yield* readSettingsObject(paths.settingsPath);
-        const published = yield* publishThemeFile({
-          themesDir: paths.themesDir,
-          filePath: target,
-          explicitId: flags.id,
-        });
-        themeId = published.themeId;
-        revertPublish = published.revert;
-        cleanupPublish = published.cleanup;
-      } else if (looksLikePath) {
+      if (looksLikePath && !targetIsFile) {
         return yield* Effect.fail(new ThemeFileUnreadableError({ filePath: target }));
-      } else if (isEnvironmentThemeId(target)) {
-        const known = yield* resolvableThemeIds(paths.themesDir);
-        if (!known.includes(target)) {
-          return yield* Effect.fail(new ThemeIdUnknownError({ themeId: target, known }));
-        }
-        themeId = target;
-      } else {
+      }
+      if (!targetIsFile && !isEnvironmentThemeId(target)) {
         return yield* Effect.fail(new ThemeIdInvalidError({ themeId: target }));
       }
 
-      // set means set: if the default cannot be written, the publish that
-      // rode along with it is undone rather than left as a side effect of a
-      // command that reported failure.
-      yield* writeDefaultTheme({ settingsPath: paths.settingsPath, themeId }).pipe(
-        Effect.onError(() => revertPublish),
+      const themeId = yield* withServerSettingsFileLock(
+        paths.settingsPath,
+        Effect.gen(function* () {
+          let selectedThemeId: string;
+          let revertPublish: Effect.Effect<void> = Effect.void;
+          let cleanupPublish: Effect.Effect<void> = Effect.void;
+          if (targetIsFile) {
+            yield* readSettingsObject(paths.settingsPath);
+            const published = yield* publishThemeFile({
+              themesDir: paths.themesDir,
+              filePath: target,
+              explicitId: flags.id,
+            });
+            selectedThemeId = published.themeId;
+            revertPublish = published.revert;
+            cleanupPublish = published.cleanup;
+          } else {
+            const known = yield* resolvableThemeIds(paths.themesDir);
+            if (!known.includes(target)) {
+              return yield* Effect.fail(new ThemeIdUnknownError({ themeId: target, known }));
+            }
+            selectedThemeId = target;
+          }
+
+          yield* writeDefaultThemeUnlocked({
+            settingsPath: paths.settingsPath,
+            themeId: selectedThemeId,
+          }).pipe(Effect.onError(() => revertPublish));
+          yield* cleanupPublish;
+          return selectedThemeId;
+        }),
       );
-      yield* cleanupPublish;
       yield* Console.log(
         targetIsFile
           ? `Published ${target} as "${themeId}" and set it as the environment theme.\n`
@@ -546,7 +528,10 @@ const themeClearCommand = Command.make("clear", { baseDir: baseDirFlag }).pipe(
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const paths = yield* resolveThemePaths(flags.baseDir);
-      yield* writeDefaultTheme({ settingsPath: paths.settingsPath, themeId: "" });
+      yield* withServerSettingsFileLock(
+        paths.settingsPath,
+        writeDefaultThemeUnlocked({ settingsPath: paths.settingsPath, themeId: "" }),
+      );
       yield* Console.log(`Environment theme cleared in ${paths.settingsPath}.\n`);
     }),
   ),

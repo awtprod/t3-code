@@ -108,17 +108,16 @@ export const make = Effect.gen(function* () {
       const key = normalizedKey(input);
       const previous = current.get(key);
       if (previous !== undefined && previous.generation > input.lease) {
-        if (previous.retryAt <= now && (input.retryAt === undefined || input.retryAt <= now)) {
-          return current;
+        if (previous.retryAt > now || (input.retryAt !== undefined && input.retryAt > now)) {
+          const retryAt =
+            input.retryAt !== undefined && input.retryAt > previous.retryAt
+              ? input.retryAt
+              : previous.retryAt;
+          if (retryAt === previous.retryAt) return current;
+          const next = new Map(current);
+          next.set(key, { ...previous, retryAt });
+          return next;
         }
-        const retryAt =
-          input.retryAt !== undefined && input.retryAt > previous.retryAt
-            ? input.retryAt
-            : previous.retryAt;
-        if (retryAt === previous.retryAt) return current;
-        const next = new Map(current);
-        next.set(key, { ...previous, retryAt });
-        return next;
       }
 
       const attempt = (previous?.attempt ?? 0) + 1;

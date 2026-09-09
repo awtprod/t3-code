@@ -551,6 +551,25 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     }),
   );
 
+  it.effect("terminates when a detached request handler defects", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const defect = new Error("request handler defect");
+      const terminated = yield* Deferred.make<CodexError.CodexAppServerError>();
+      yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        onRequest: () => Effect.die(defect),
+        onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+      });
+
+      yield* Queue.offer(input, encodeJsonl({ id: 7, method: "x/approval" }));
+
+      const error = yield* Deferred.await(terminated);
+      assert.instanceOf(error, CodexError.CodexAppServerTransportError);
+      assert.strictEqual(error.cause, defect);
+    }),
+  );
+
   it.effect("rejects outgoing messages after an approval response cannot be encoded", () =>
     Effect.gen(function* () {
       const { stdio: baseStdio, input } = yield* makeInMemoryStdio();

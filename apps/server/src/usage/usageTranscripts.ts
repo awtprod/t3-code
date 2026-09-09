@@ -423,7 +423,7 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
     }
   }
 
-  if (modelEntries.length === 0) {
+  if (modelEntries.every(({ totals }) => totalTokens(grokTotalsToUsage(totals)) === 0)) {
     if (totalTokens(grokTotalsToUsage(topLevel)) === 0) return [];
     return [
       {

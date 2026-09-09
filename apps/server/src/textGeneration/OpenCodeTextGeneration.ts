@@ -196,7 +196,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     }
 
     const fileParts = OpenCodeRuntime.toOpenCodeFileParts({
-      attachments: input.attachments?.filter((attachment) => attachment.type === "image"),
+      attachments: input.attachments,
       resolveAttachmentPath: (attachment) =>
         resolveAttachmentPath({ attachmentsDir: serverConfig.attachmentsDir, attachment }),
     });

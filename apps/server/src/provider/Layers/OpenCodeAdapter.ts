@@ -244,6 +244,9 @@ type OpenCodeRoutedRequestEvent = OpenCodeAskedRequestEvent | OpenCodeTerminalRe
 
 interface OpenCodeRequestRelationRetry {
   warned: boolean;
+  readonly askedEvent?: OpenCodeAskedRequestEvent;
+  readonly askedRaw?: unknown;
+  terminalEvent?: OpenCodeTerminalRequestEvent;
   fiber?: Fiber.Fiber<void, never>;
 }
 
@@ -1209,6 +1212,13 @@ export function makeOpenCodeAdapter(
         deleteContextIfCurrent(context);
         return;
       }
+      if (
+        context.promptAdmission !== promptAdmission ||
+        context.activeTurnId !== promptAdmission.turnId ||
+        context.promptGeneration !== promptAdmission.generation
+      ) {
+        return;
+      }
       context.promptAdmission = undefined;
       context.activeTurnId = undefined;
       context.activeAgent = undefined;
@@ -1685,6 +1695,8 @@ export function makeOpenCodeAdapter(
             decision: mapPermissionDecision(event.properties.reply),
           },
         });
+        context.pendingPermissions.delete(requestId);
+        context.resolvedRequestIds.add(requestId);
         return;
       }
 
@@ -1708,6 +1720,8 @@ export function makeOpenCodeAdapter(
         type: "user-input.resolved",
         payload: { answers },
       });
+      context.pendingQuestions.delete(requestId);
+      context.resolvedRequestIds.add(requestId);
     });
 
     const scheduleRequestRelationRetry = Effect.fn("scheduleRequestRelationRetry")(function* (
@@ -1723,7 +1737,12 @@ export function makeOpenCodeAdapter(
       if (isAskedEvent && context.resolvedRequestIds.has(requestId)) {
         return;
       }
-      const retry: OpenCodeRequestRelationRetry = { warned: false };
+      let retry: OpenCodeRequestRelationRetry;
+      if (event.type === "permission.asked" || event.type === "question.asked") {
+        retry = { warned: false, askedEvent: event, askedRaw: raw };
+      } else {
+        retry = { warned: false, terminalEvent: event };
+      }
       context.requestRelationRetries.set(requestId, retry);
       const run = Effect.gen(function* () {
         let retryCount = 0;
@@ -1743,10 +1762,17 @@ export function makeOpenCodeAdapter(
           if (relation.type === "known") {
             context.requestRelationRetries.delete(requestId);
             if (relation.related) {
-              if (isAskedEvent) {
-                yield* emitPendingOpenCodeRequest(context, event, raw);
-              } else {
-                yield* emitTerminalOpenCodeRequest(context, event);
+              if (retry.askedEvent) {
+                yield* emitPendingOpenCodeRequest(
+                  context,
+                  retry.askedEvent,
+                  retry.askedRaw ?? retry.askedEvent,
+                );
+                if (retry.terminalEvent) {
+                  yield* emitTerminalOpenCodeRequest(context, retry.terminalEvent);
+                }
+              } else if (retry.terminalEvent) {
+                yield* emitTerminalOpenCodeRequest(context, retry.terminalEvent);
               }
             }
             return;
@@ -1916,14 +1942,19 @@ export function makeOpenCodeAdapter(
         }
         return;
       }
-      const terminalRequestId =
+      const terminalRequestEvent =
         event.type === "permission.replied" ||
         event.type === "question.replied" ||
         event.type === "question.rejected"
-          ? event.properties.requestID
+          ? event
           : undefined;
-      if (terminalRequestId !== undefined) {
-        yield* resolvePendingOpenCodeRequest(context, terminalRequestId);
+      const terminalRequestId = terminalRequestEvent?.properties.requestID;
+      if (terminalRequestEvent !== undefined) {
+        const retry = context.requestRelationRetries.get(terminalRequestEvent.properties.requestID);
+        if (retry?.askedEvent) {
+          retry.terminalEvent ??= terminalRequestEvent;
+          return;
+        }
       }
       if (event.type === "session.created" || event.type === "session.updated") {
         const session = event.properties.info;
@@ -1966,6 +1997,10 @@ export function makeOpenCodeAdapter(
         (context.relatedSessionIds.has(payloadSessionId) || isKnownPendingTerminalEvent);
       if (!isParentEvent && !isChildRequestEvent) {
         return;
+      }
+
+      if (terminalRequestId !== undefined) {
+        yield* resolvePendingOpenCodeRequest(context, terminalRequestId);
       }
 
       const turnId = context.activeTurnId;
@@ -2152,7 +2187,6 @@ export function makeOpenCodeAdapter(
         }
 
         case "permission.replied": {
-          context.pendingPermissions.delete(event.properties.requestID);
           yield* emitTerminalOpenCodeRequest(context, event);
           break;
         }
@@ -2164,12 +2198,10 @@ export function makeOpenCodeAdapter(
 
         case "question.replied": {
           yield* emitTerminalOpenCodeRequest(context, event);
-          context.pendingQuestions.delete(event.properties.requestID);
           break;
         }
 
         case "question.rejected": {
-          context.pendingQuestions.delete(event.properties.requestID);
           yield* emitTerminalOpenCodeRequest(context, event);
           break;
         }

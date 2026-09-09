@@ -62,6 +62,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { detectPrTemplate } from "../sourceControl/PrTemplateDetection.ts";
 import type { ChangeRequest } from "@t3tools/contracts";
+import { readFileGuarded } from "../environmentTheme.ts";
 
 export interface GitActionProgressReporter {
   readonly publish: (event: GitActionProgressEvent) => Effect.Effect<void, never>;
@@ -124,7 +125,10 @@ const PR_LOOKUP_CACHE_TTL = Duration.minutes(2);
 const PR_LOOKUP_FAILURE_BASE_TTL = Duration.seconds(20);
 const PR_LOOKUP_FAILURE_MAX_TTL = Duration.minutes(15);
 const PR_LOOKUP_CACHE_CAPACITY = 2_048;
+const MAX_REPOSITORY_INSTRUCTION_BYTES = 20_000;
 const isSourceControlProviderError = Schema.is(SourceControlProviderError);
+
+type RepositoryInstructionFile = "AGENTS.md" | "CLAUDE.md";
 
 /**
  * How long a failed PR lookup is cached, given the number of consecutive
@@ -643,19 +647,14 @@ export const make = Effect.gen(function* () {
 
   const sourceControlProvider = (cwd: string) => sourceControlProviders.resolve({ cwd });
   const serverSettingsService = yield* ServerSettings.ServerSettingsService;
-  const readRepositoryInstructions = (cwd: string, fileName: string) =>
-    Effect.gen(function* () {
-      const root = yield* fileSystem.realPath(cwd);
-      const instructionPath = yield* fileSystem.realPath(path.join(root, fileName));
-      if (!instructionPath.startsWith(`${root}${path.sep}`)) {
-        return "";
-      }
-      const info = yield* fileSystem.stat(instructionPath);
-      if (info.type !== "File" || info.size > FileSystem.Size(20_000)) {
-        return "";
-      }
-      return (yield* fileSystem.readFileString(instructionPath)).trim();
-    }).pipe(Effect.orElseSucceed(() => ""));
+  const readRepositoryInstructions = (root: string | null, fileName: RepositoryInstructionFile) => {
+    if (root === null) return "";
+    // Only direct, regular root files are instructions. Symlinked entries are
+    // ignored even when their target remains inside the repository.
+    return (
+      readFileGuarded(path.join(root, fileName), MAX_REPOSITORY_INSTRUCTION_BYTES)?.trim() ?? ""
+    );
+  };
 
   const readRecentCommitSubjects = (cwd: string) =>
     gitCore
@@ -690,7 +689,8 @@ export const make = Effect.gen(function* () {
           );
         case "repo_conventions": {
           const subjects = yield* readRecentCommitSubjects(cwd);
-          const agentInstructions = yield* readRepositoryInstructions(cwd, "AGENTS.md");
+          const root = yield* fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => null));
+          const agentInstructions = readRepositoryInstructions(root, "AGENTS.md");
           const isClaudeWriter =
             settings.modelSelection.instanceId === "claudeAgent" ||
             (yield* providerRegistry.getProviders).some(
@@ -699,7 +699,7 @@ export const make = Effect.gen(function* () {
                 provider.driver === "claudeAgent",
             );
           const claudeInstructions = isClaudeWriter
-            ? yield* readRepositoryInstructions(cwd, "CLAUDE.md")
+            ? readRepositoryInstructions(root, "CLAUDE.md")
             : "";
           const examples = [
             ...(subjects.length > 0

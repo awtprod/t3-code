@@ -158,6 +158,20 @@ describe("project file query refresh", () => {
     }
   });
 
+  it("remembers a handled mutation when switching away from and back to a resource", () => {
+    const refresh = vi.fn();
+    const render = (resourceKey: string) => {
+      reactHooks.beginRender();
+      useWorkspaceMutationRefresh({ mutationId: "mutation-1", refresh, resourceKey });
+    };
+
+    render("file:/repo/a.ts");
+    render("file:/repo/b.ts");
+    render("file:/repo/a.ts");
+
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
   it("does not issue a file read for a disabled image preview", async () => {
     const requests: Array<ReturnType<typeof deferred<ProjectReadFileResult>>> = [];
     const readAtom = Atom.make(

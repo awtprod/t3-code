@@ -119,6 +119,9 @@ describe("submitCodexFeedback", () => {
     });
 
     expect(states.at(-1)).toEqual({ ...submission, status: "interrupted" });
+    expect(codexFeedbackMessage(states.at(-1)!, "assistant").text).toBe(
+      "Feedback upload was interrupted.",
+    );
   });
 
   it("lets another feedback submission finish while the first remains in flight", async () => {

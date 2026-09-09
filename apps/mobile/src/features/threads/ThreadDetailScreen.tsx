@@ -466,7 +466,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       threadKey: selectedThreadKey,
       visible: showWorkingControl,
     };
-    if ((!threadChanged && !visibilityChanged) || (threadChanged && !showWorkingControl)) {
+    if (!threadChanged && !visibilityChanged) {
       return;
     }
     // LegendList applies the larger inset but does not re-anchor short
@@ -601,9 +601,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     }
 
     setSubmittedMessageId(messageId);
-    setAnchorMessageId(
+    setAnchorMessageId((currentAnchorMessageId) =>
       resolveThreadFeedSubmissionAnchor({
-        currentAnchorMessageId: anchorMessageId,
+        currentAnchorMessageId,
         submittedMessageId: messageId,
         hasStartedTurn: props.selectedThread.latestTurn !== null,
         hasUserMessage,
@@ -613,7 +613,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     composerEditorRef.current?.blur();
     return messageId;
   }, [
-    anchorMessageId,
     props.onSendMessage,
     props.selectedThread.latestTurn,
     props.selectedThreadQueueCount,

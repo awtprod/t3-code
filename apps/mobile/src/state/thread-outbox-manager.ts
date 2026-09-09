@@ -159,12 +159,17 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
   // payload it just persisted is then overwritten with the winning payload
   // inside this mutation, so a crash before the winner's own serialized write
   // cannot leave stale state on disk.
-  const update = (message: QueuedThreadMessage, expectedRevision?: number): Promise<boolean> =>
-    serialize(async () => {
+  const update = (message: QueuedThreadMessage, expectedRevision?: number): Promise<boolean> => {
+    const currentRevision = revisions.get(message.messageId) ?? 0;
+    if (expectedRevision !== undefined && currentRevision !== expectedRevision) {
+      return serialize(async () => false);
+    }
+    const reservedRevision = currentRevision + 1;
+    revisions.set(message.messageId, reservedRevision);
+    return serialize(async () => {
       const staleOrMissing = (): boolean =>
         !currentMessages().some((candidate) => candidate.messageId === message.messageId) ||
-        (expectedRevision !== undefined &&
-          (revisions.get(message.messageId) ?? 0) !== expectedRevision);
+        (revisions.get(message.messageId) ?? 0) !== reservedRevision;
       if (staleOrMissing()) {
         return false;
       }
@@ -193,13 +198,13 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
         }
         return false;
       }
-      bumpRevision(message.messageId);
       setMessages([
         ...currentMessages().filter((candidate) => candidate.messageId !== message.messageId),
         message,
       ]);
       return true;
     });
+  };
 
   // `expectedRevision` makes the removal a compare-and-set too: an edit
   // accepted after the caller decided to remove (restore-to-composer reads

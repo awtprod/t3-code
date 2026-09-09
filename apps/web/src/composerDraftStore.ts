@@ -3297,7 +3297,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 existing.images.length + existing.files.length + accepted.length >=
                 PROVIDER_SEND_TURN_MAX_ATTACHMENTS
               ) {
-                break;
+                continue;
               }
               accepted.push(file);
               knownIds.add(file.id);

@@ -329,11 +329,14 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                 Effect.ensuring(
                   Ref.update(activeRequestHandlers, (count) => Math.max(0, count - 1)),
                 ),
-                Effect.catch((error) =>
-                  handleTermination(() => Effect.succeed(error)).pipe(
-                    Effect.forkIn(protocolScope),
-                    Effect.asVoid,
-                  ),
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.void
+                    : handleTermination(() =>
+                        Effect.succeed(
+                          normalizeIncomingError(Cause.squash(cause), "read-input-stream"),
+                        ),
+                      ).pipe(Effect.forkIn(protocolScope), Effect.asVoid),
                 ),
                 Effect.forkIn(requestHandlerScope, { startImmediately: true }),
                 Effect.asVoid,

@@ -17,7 +17,7 @@ const script = JSON.parse(NodeFS.readFileSync(process.env.T3_CODEX_COLLAB_SCRIPT
 
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let turnStartCount = 0;
-let activeTurn;
+const serverRequestTurns = new Map();
 
 const rl = NodeReadline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
@@ -33,13 +33,15 @@ rl.on("line", (line) => {
       `${process.env.T3_CODEX_COLLAB_SCRIPT}.responses`,
       `${JSON.stringify({ id, result: message.result, error: message.error })}\n`,
     );
-    if (script.completeTurnOnServerResponse && activeTurn) {
+    const originatingTurn = serverRequestTurns.get(id);
+    serverRequestTurns.delete(id);
+    if (script.completeTurnOnServerResponse && originatingTurn) {
       write({
         jsonrpc: "2.0",
         method: "turn/completed",
         params: {
           threadId: script.rootThreadId,
-          turn: { ...activeTurn, status: "completed" },
+          turn: { ...originatingTurn, status: "completed" },
         },
       });
     }
@@ -114,7 +116,6 @@ rl.on("line", (line) => {
     const turn = turnId
       ? { ...fixture.responses.turnStart.turn, id: turnId }
       : fixture.responses.turnStart.turn;
-    activeTurn = turn;
     turnStartCount += 1;
     write({ id, result: { ...fixture.responses.turnStart, turn } });
     const rootThreadId = script.rootThreadId;
@@ -129,6 +130,7 @@ rl.on("line", (line) => {
       write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
     }
     for (const request of script.serverRequests ?? []) {
+      serverRequestTurns.set(request.id, turn);
       write({ jsonrpc: "2.0", id: request.id, method: request.method, params: request.params });
     }
     if (script.holdTurnOpen !== true) {

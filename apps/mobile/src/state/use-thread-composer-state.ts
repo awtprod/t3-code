@@ -216,12 +216,14 @@ export function useThreadComposerState() {
       return null;
     }
 
+    const modelSelection = draft.modelSelection ?? thread.modelSelection;
     const provider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
-      (entry) => entry.instanceId === thread.modelSelection.instanceId,
+      (entry) => entry.instanceId === modelSelection.instanceId,
     );
     const feedbackCommand =
       attachments.length === 0 &&
-      (provider?.driver === "codex" || thread.session?.providerName === "codex")
+      (provider?.driver === "codex" ||
+        (draft.modelSelection === undefined && thread.session?.providerName === "codex"))
         ? parseCodexFeedbackCommand(text)
         : null;
     if (feedbackCommand) {
@@ -294,7 +296,7 @@ export function useThreadComposerState() {
       commandId: CommandId.make(metadata.commandId),
       text,
       attachments,
-      modelSelection: draft.modelSelection ?? thread.modelSelection,
+      modelSelection,
       runtimeMode: draft.runtimeMode ?? thread.runtimeMode,
       interactionMode: draft.interactionMode ?? thread.interactionMode,
       routingMode: draft.routingMode ?? thread.routingMode ?? "manual",

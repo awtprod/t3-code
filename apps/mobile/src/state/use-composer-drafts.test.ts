@@ -57,6 +57,10 @@ const composerDraftFileMocks = vi.hoisted(() => {
 
       create() {}
 
+      delete() {
+        document = "";
+      }
+
       moveSync() {}
 
       async text() {
@@ -132,8 +136,10 @@ import {
   type ComposerDraft,
   flushComposerDrafts,
   getComposerDraftSnapshot,
+  mergeComposerDraftContent,
   mergeComposerDraftContentState,
   releaseUnusedComposerAttachmentFiles,
+  removeDeliveredCloudQueuedMessage,
   removeComposerDraftsForEnvironment,
   resetComposerDraftsLoadState,
   retainComposerAttachmentFileForPreview,
@@ -445,6 +451,192 @@ describe("mobile composer drafts", () => {
     );
     expect(persisted.drafts[key]?.attachments).toEqual([file]);
     expect(persisted.cloudDrafts.accountId).toBe("account-a");
+  });
+
+  it("does not resurrect an earlier acknowledged item during a later awaited restore enqueue", async () => {
+    composerDraftFileMocks.setDocument({ schemaVersion: 1, drafts: {} });
+    await waitForComposerDraftsLoaded();
+    const acknowledged = {
+      environmentId: EnvironmentId.make("cloud-environment"),
+      threadId: ThreadId.make("thread-race"),
+      messageId: MessageId.make("queued-race"),
+      commandId: CommandId.make("command-race"),
+      text: "Already delivered",
+      attachments: [],
+      createdAt: "2026-09-09T12:00:00.000Z",
+    };
+    const pending = {
+      ...acknowledged,
+      threadId: ThreadId.make("thread-pending"),
+      messageId: MessageId.make("queued-pending"),
+      commandId: CommandId.make("command-pending"),
+      text: "Still pending",
+    };
+    appAtomRegistry.set(composerCloudDraftsAtom, {
+      accountId: null,
+      signedOut: {
+        "account-a": {
+          drafts: {
+            "pending-task:queued-race": { text: acknowledged.text, attachments: [] },
+          },
+          queuedMessages: [acknowledged, pending],
+        },
+      },
+    });
+    const load = vi.spyOn(threadOutboxManager, "load").mockResolvedValue(true);
+    const originalEnqueue = threadOutboxManager.enqueue.bind(threadOutboxManager);
+    const enqueueStarted = Promise.withResolvers<void>();
+    const releaseEnqueue = Promise.withResolvers<void>();
+    const enqueue = vi
+      .spyOn(threadOutboxManager, "enqueue")
+      .mockImplementationOnce(async (item) => {
+        await originalEnqueue(item);
+      })
+      .mockImplementationOnce(async (item) => {
+        await originalEnqueue(item);
+        enqueueStarted.resolve();
+        await releaseEnqueue.promise;
+      });
+    onTestFinished(() => {
+      load.mockRestore();
+      enqueue.mockRestore();
+    });
+
+    const restore = restoreCloudComposerDrafts("account-a");
+    await enqueueStarted.promise;
+    await removeDeliveredCloudQueuedMessage(acknowledged);
+    releaseEnqueue.resolve();
+    await restore;
+
+    expect(
+      Object.values(appAtomRegistry.get(threadOutboxManager.queuedMessagesByThreadKeyAtom)).flat(),
+    ).toEqual([pending]);
+    expect(getComposerDraftSnapshot("pending-task:queued-race")).toEqual({
+      text: "",
+      attachments: [],
+    });
+  });
+
+  it("keeps a newer queued revision when delivery cleanup races an awaited restore enqueue", async () => {
+    composerDraftFileMocks.setDocument({ schemaVersion: 1, drafts: {} });
+    await waitForComposerDraftsLoaded();
+    const message = {
+      environmentId: EnvironmentId.make("cloud-environment"),
+      threadId: ThreadId.make("thread-edited-race"),
+      messageId: MessageId.make("queued-edited-race"),
+      commandId: CommandId.make("command-edited-race"),
+      text: "Delivered payload",
+      attachments: [],
+      createdAt: "2026-09-09T12:00:00.000Z",
+    };
+    appAtomRegistry.set(composerCloudDraftsAtom, {
+      accountId: null,
+      signedOut: {
+        "account-a": { drafts: {}, queuedMessages: [message] },
+      },
+    });
+    const load = vi.spyOn(threadOutboxManager, "load").mockResolvedValue(true);
+    const originalEnqueue = threadOutboxManager.enqueue.bind(threadOutboxManager);
+    const enqueueStarted = Promise.withResolvers<void>();
+    const releaseEnqueue = Promise.withResolvers<void>();
+    const enqueue = vi
+      .spyOn(threadOutboxManager, "enqueue")
+      .mockImplementationOnce(async (item) => {
+        await originalEnqueue(item);
+        enqueueStarted.resolve();
+        await releaseEnqueue.promise;
+      });
+    onTestFinished(() => {
+      load.mockRestore();
+      enqueue.mockRestore();
+    });
+
+    const restore = restoreCloudComposerDrafts("account-a");
+    await enqueueStarted.promise;
+    await removeDeliveredCloudQueuedMessage(message);
+    const edited = { ...message, text: "Edited while restore was waiting" };
+    await threadOutboxManager.update(edited);
+    releaseEnqueue.resolve();
+    await restore;
+
+    expect(
+      Object.values(appAtomRegistry.get(threadOutboxManager.queuedMessagesByThreadKeyAtom)).flat(),
+    ).toEqual([edited]);
+  });
+
+  it("preserves live composer and other-account archive updates during restoration", async () => {
+    composerDraftFileMocks.setDocument({ schemaVersion: 1, drafts: {} });
+    await waitForComposerDraftsLoaded();
+    const accountBMessage = {
+      environmentId: EnvironmentId.make("cloud-environment-b"),
+      threadId: ThreadId.make("thread-b"),
+      messageId: MessageId.make("queued-b"),
+      commandId: CommandId.make("command-b"),
+      text: "Delivered for B",
+      attachments: [],
+      createdAt: "2026-09-09T12:00:00.000Z",
+    };
+    const archivedAttachment = {
+      id: "archived-image",
+      type: "image" as const,
+      name: "archived.png",
+      mimeType: "image/png",
+      sizeBytes: 3,
+      dataUrl: "data:image/png;base64,YWJj",
+      previewUri: "file:///archived.png",
+    };
+    const currentAttachment = { ...archivedAttachment, id: "current-image" };
+    const draftKey = "new-task:cloud-environment-a:project-a";
+    appAtomRegistry.set(composerCloudDraftsAtom, {
+      accountId: null,
+      signedOut: {
+        "account-a": {
+          drafts: {
+            [draftKey]: {
+              text: "Archived content",
+              attachments: [archivedAttachment],
+              importedShareIds: ["archived-share"],
+            },
+          },
+          queuedMessages: [],
+        },
+        "account-b": { drafts: {}, queuedMessages: [accountBMessage] },
+      },
+    });
+    const loadStarted = Promise.withResolvers<void>();
+    const releaseLoad = Promise.withResolvers<void>();
+    const load = vi.spyOn(threadOutboxManager, "load").mockImplementationOnce(async () => {
+      loadStarted.resolve();
+      await releaseLoad.promise;
+      return true;
+    });
+    onTestFinished(() => load.mockRestore());
+
+    const restore = restoreCloudComposerDrafts("account-a");
+    await loadStarted.promise;
+    appAtomRegistry.set(composerDraftsAtom, {
+      [draftKey]: {
+        text: "Current content",
+        attachments: [currentAttachment],
+        importedShareIds: ["current-share"],
+      },
+    });
+    await removeDeliveredCloudQueuedMessage(accountBMessage);
+    releaseLoad.resolve();
+    await restore;
+
+    const restored = getComposerDraftSnapshot(draftKey);
+    expect(restored.text).toContain("Current content");
+    expect(restored.text).toContain("Archived content");
+    expect(restored.attachments).toEqual([currentAttachment, archivedAttachment]);
+    expect(restored.importedShareIds).toEqual(["current-share", "archived-share"]);
+    expect(appAtomRegistry.get(composerCloudDraftsAtom).signedOut).toEqual({
+      "account-b": { drafts: {}, queuedMessages: [] },
+    });
+    expect(
+      decodePersistedComposerState(JSON.parse(composerDraftFileMocks.getDocument())).cloudDrafts
+        .signedOut,
+    ).toEqual({ "account-b": { drafts: {}, queuedMessages: [] } });
   });
 
   it("fails sign-out preservation before cleanup if a durable backup cannot be written", async () => {
@@ -908,7 +1100,8 @@ describe("mobile composer drafts", () => {
     ).toThrow();
   });
 
-  it("keeps share-import receipts on otherwise contentless new-task drafts", () => {
+  it("keeps share-import receipts on otherwise contentless new-task drafts across persistence", async () => {
+    const draftKey = "new-task:environment-1:project-1";
     const receiptDraft: ComposerDraft = {
       text: "",
       attachments: [],
@@ -921,7 +1114,7 @@ describe("mobile composer drafts", () => {
       decodePersistedComposerState({
         schemaVersion: 1,
         drafts: {
-          "new-task:environment-1:project-1": {
+          [draftKey]: {
             ...receiptDraft,
             modelSelection: {
               instanceId: "codex",
@@ -941,9 +1134,20 @@ describe("mobile composer drafts", () => {
     expect(
       decodePersistedComposerState({
         schemaVersion: 1,
-        drafts: { "new-task:environment-1:project-1": receiptDraft },
+        drafts: { [draftKey]: receiptDraft },
       }).drafts,
-    ).toEqual({ "new-task:environment-1:project-1": receiptDraft });
+    ).toEqual({ [draftKey]: receiptDraft });
+
+    composerDraftFileMocks.setDocument({ schemaVersion: 1, drafts: {} });
+    await mergeComposerDraftContent(draftKey, {
+      text: "",
+      attachments: [],
+      sourceShareId: "share-1",
+    });
+    appAtomRegistry.set(composerDraftsAtom, {});
+    resetComposerDraftsLoadState();
+    await waitForComposerDraftsLoaded();
+    expect(getComposerDraftSnapshot(draftKey)).toEqual(receiptDraft);
   });
 
   it("hydrates the global sticky model selection", () => {
@@ -1420,7 +1624,7 @@ describe("mobile composer drafts", () => {
     expect(undoComposerDraftMergeState({ [draftKey]: edited }, draftKey, snapshot, merged)).toEqual(
       {
         [draftKey]: {
-          text: "typed EDITED before",
+          text: "typed EDITED before\n\nqueued text",
           attachments: [],
           runtimeMode: "approval-required",
           interactionMode: "plan",
@@ -1462,7 +1666,7 @@ describe("mobile composer drafts", () => {
     expect(undoComposerDraftMergeState({ [draftKey]: edited }, draftKey, snapshot, merged)).toEqual(
       {
         [draftKey]: {
-          text: "typed EDITED before",
+          text: "typed EDITED before\n\nqueued text",
           attachments: [keptAttachment, userAttachment],
         },
       },
@@ -1503,6 +1707,31 @@ describe("mobile composer drafts", () => {
     expect(rolledBack[draftKey]?.text).toBe("typed before\n\nuser follow-up");
     const retried = mergeComposerDraftContentState(rolledBack, draftKey, content);
     expect(retried[draftKey]?.text.match(/queued text/g)).toHaveLength(1);
+  });
+
+  it("does not truncate rewritten text that happens to end with the imported suffix", () => {
+    const draftKey = "environment-1:thread-1";
+    const snapshot: ComposerDraft = { text: "old", attachments: [] };
+    const merged: ComposerDraft = {
+      text: "oldbar",
+      attachments: [],
+      importedShareIds: ["share-1"],
+    };
+    const rewritten: ComposerDraft = {
+      text: "foobar",
+      attachments: [],
+      importedShareIds: ["share-1", "share-2"],
+    };
+
+    expect(
+      undoComposerDraftMergeState({ [draftKey]: rewritten }, draftKey, snapshot, merged),
+    ).toEqual({
+      [draftKey]: {
+        text: "foobar",
+        attachments: [],
+        importedShareIds: ["share-2"],
+      },
+    });
   });
 
   it("spares a file re-owned between the sweep's scan and its deletion", async () => {

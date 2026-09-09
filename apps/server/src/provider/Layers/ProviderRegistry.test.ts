@@ -719,6 +719,40 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         );
       });
 
+      it("retains OpenCode metadata omitted by a partial failed refresh", () => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make("opencode"),
+          driver: ProviderDriverKind.make("opencode"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-07-17T00:00:00.000Z",
+          version: "1.0.0",
+          models: [],
+          slashCommands: [
+            { name: "review", description: "Review changes" },
+            { name: "test", description: "Run tests" },
+          ],
+          skills: [
+            { name: "review", path: "/skills/review", enabled: true },
+            { name: "test", path: "/skills/test", enabled: true },
+          ],
+        } as const satisfies ServerProvider;
+        const refreshedProvider = {
+          ...previousProvider,
+          status: "error",
+          checkedAt: "2026-07-17T00:01:00.000Z",
+          slashCommands: [previousProvider.slashCommands[0]],
+          skills: [previousProvider.skills[0]],
+          message: "Failed to refresh OpenCode metadata.",
+        } satisfies ServerProvider;
+
+        const merged = mergeProviderSnapshot(previousProvider, refreshedProvider);
+        assert.deepStrictEqual(merged.slashCommands, previousProvider.slashCommands);
+        assert.deepStrictEqual(merged.skills, previousProvider.skills);
+      });
+
       it("classifies pending, logout, uninstall, and reconnect OpenCode inventories", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("opencode"),

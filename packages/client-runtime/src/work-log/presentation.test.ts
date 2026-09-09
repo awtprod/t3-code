@@ -50,6 +50,23 @@ describe("resolveViewedImageAsset", () => {
     });
   });
 
+  it("keeps workspace files under similarly named directories as workspace files", () => {
+    expect(
+      resolveViewedImageAsset("/workspace/dev/attachments/logo.png", {
+        threadId,
+        workspaceRoot: "/workspace",
+      }),
+    ).toEqual({
+      resource: {
+        _tag: "workspace-file",
+        threadId,
+        path: "/workspace/dev/attachments/logo.png",
+      },
+      alt: "logo.png",
+      srcFragment: "",
+    });
+  });
+
   it("normalizes workspace image sources", () => {
     expect(
       resolveViewedImageAsset("screens/logo.svg?v=2#mark", {

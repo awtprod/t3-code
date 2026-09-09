@@ -307,7 +307,9 @@ async function writePersistedComposerState(
     const file = await getComposerDraftsFile();
     operation = "encode";
     const nonEmptyDrafts = Object.fromEntries(
-      Object.entries(drafts).filter(([, draft]) => !isEmptyDraft(draft)),
+      Object.entries(drafts).filter(
+        ([, draft]) => !isEmptyDraft(draft) || (draft.importedShareIds?.length ?? 0) > 0,
+      ),
     );
     const document = {
       schemaVersion: COMPOSER_DRAFTS_SCHEMA_VERSION,
@@ -752,45 +754,80 @@ export async function removeDeliveredCloudQueuedMessage(
 /** Restores only this account, before its connections can deliver queued turns. */
 export async function restoreCloudComposerDrafts(accountId: string): Promise<void> {
   await waitForComposerDraftsLoaded();
-  const cloud = appAtomRegistry.get(composerCloudDraftsAtom);
-  const saved = cloud.signedOut[accountId];
+  const saved = appAtomRegistry.get(composerCloudDraftsAtom).signedOut[accountId];
   if (saved) {
     if (!(await threadOutboxManager.load())) throw new Error("Could not restore queued messages.");
+    const restoredMessages: Array<{
+      readonly message: QueuedThreadMessage;
+      readonly revision: number;
+    }> = [];
     for (const message of saved.queuedMessages) {
+      const archived = appAtomRegistry
+        .get(composerCloudDraftsAtom)
+        .signedOut[accountId]?.queuedMessages.find(
+          (candidate) => candidate.messageId === message.messageId,
+        );
+      if (!archived) continue;
       const alreadyQueued = Object.values(
         appAtomRegistry.get(threadOutboxManager.queuedMessagesByThreadKeyAtom),
       )
         .flat()
-        .some((current) => current.messageId === message.messageId);
-      if (!alreadyQueued) await threadOutboxManager.enqueue(message);
+        .some((current) => current.messageId === archived.messageId);
+      if (alreadyQueued) continue;
+      const enqueue = threadOutboxManager.enqueue(archived);
+      const restoredRevision = threadOutboxManager.revisionOf(archived.messageId);
+      await enqueue;
+      restoredMessages.push({ message: archived, revision: restoredRevision });
     }
-    updateComposerDrafts((current) => {
-      const restored = { ...current };
-      for (const [key, draft] of Object.entries(saved.drafts)) {
-        const existing = current[key];
-        const attachmentIds = new Set(existing?.attachments.map((attachment) => attachment.id));
-        restored[key] = existing
-          ? {
-              ...draft,
-              ...existing,
-              text: mergeComposerDraftText(existing.text, draft.text),
-              // A concurrent import must not lose files, even above the send limit.
-              attachments: [
-                ...existing.attachments,
-                ...draft.attachments.filter((attachment) => !attachmentIds.has(attachment.id)),
-              ],
-              importedShareIds: [
-                ...new Set([
-                  ...(existing.importedShareIds ?? []),
-                  ...(draft.importedShareIds ?? []),
-                ]),
-              ],
-            }
-          : draft;
+    // Reconcile after every enqueue has settled: cleanup for an earlier item
+    // can run while a later enqueue waits. Each awaited removal is followed
+    // by another fresh archive read, and its revision guard preserves edits.
+    while (restoredMessages.length > 0) {
+      const archivedMessageIds = new Set(
+        appAtomRegistry
+          .get(composerCloudDraftsAtom)
+          .signedOut[accountId]?.queuedMessages.map((message) => message.messageId) ?? [],
+      );
+      const removedIndex = restoredMessages.findIndex(
+        ({ message }) => !archivedMessageIds.has(message.messageId),
+      );
+      if (removedIndex === -1) break;
+      const [removed] = restoredMessages.splice(removedIndex, 1);
+      if (removed) {
+        await threadOutboxManager.remove(removed.message, removed.revision);
       }
-      return restored;
-    });
+    }
+    const liveSaved = appAtomRegistry.get(composerCloudDraftsAtom).signedOut[accountId];
+    if (liveSaved) {
+      updateComposerDrafts((current) => {
+        const restored = { ...current };
+        for (const [key, draft] of Object.entries(liveSaved.drafts)) {
+          const existing = current[key];
+          const attachmentIds = new Set(existing?.attachments.map((attachment) => attachment.id));
+          restored[key] = existing
+            ? {
+                ...draft,
+                ...existing,
+                text: mergeComposerDraftText(existing.text, draft.text),
+                // A concurrent import must not lose files, even above the send limit.
+                attachments: [
+                  ...existing.attachments,
+                  ...draft.attachments.filter((attachment) => !attachmentIds.has(attachment.id)),
+                ],
+                importedShareIds: [
+                  ...new Set([
+                    ...(existing.importedShareIds ?? []),
+                    ...(draft.importedShareIds ?? []),
+                  ]),
+                ],
+              }
+            : draft;
+        }
+        return restored;
+      });
+    }
   }
+  const cloud = appAtomRegistry.get(composerCloudDraftsAtom);
   const signedOut = { ...cloud.signedOut };
   delete signedOut[accountId];
   appAtomRegistry.set(composerCloudDraftsAtom, { accountId, signedOut });
@@ -1256,15 +1293,20 @@ export function undoComposerDraftMergeState(
   const text =
     insertedText.length > 0 && existing.text.startsWith(merged.text)
       ? snapshot.text + existing.text.slice(merged.text.length)
-      : insertedText.length > 0 && existing.text.endsWith(insertedText)
-        ? existing.text.slice(0, existing.text.length - insertedText.length)
-        : existing.text;
+      : existing.text;
+  const insertedShareIds = new Set(
+    (merged.importedShareIds ?? []).filter((id) => !(snapshot.importedShareIds ?? []).includes(id)),
+  );
+  const importedShareIds = existing.importedShareIds?.filter((id) => !insertedShareIds.has(id));
   const draft = {
     ...existing,
     text,
     attachments: existing.attachments.filter(
       (attachment) => !insertedAttachmentIds.has(attachment.id),
     ),
+    ...(importedShareIds === undefined || importedShareIds.length === 0
+      ? { importedShareIds: undefined }
+      : { importedShareIds }),
     modelSelection: undoSetting("modelSelection"),
     runtimeMode: undoSetting("runtimeMode"),
     interactionMode: undoSetting("interactionMode"),

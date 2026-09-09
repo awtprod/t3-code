@@ -332,7 +332,11 @@ export function NewTaskDraftScreen(props: {
     (isIncomingShareTransferPending && !isProjectPickerReturnActive) ||
     isCancellingShareImport ||
     flow.submitting;
-  usePreventRemove(preventRemove, () => undefined);
+  usePreventRemove(preventRemove, ({ data }) => {
+    if (flow.submitting) {
+      setSubmitNavigationAction(data.action);
+    }
+  });
   useEffect(() => {
     if (preventRemove || submitNavigationAction === null) {
       return;

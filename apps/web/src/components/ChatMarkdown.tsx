@@ -1139,11 +1139,12 @@ const CHAT_MARKDOWN_IMAGE_SIZE_CLASS_NAME = cn(
   CHAT_MARKDOWN_IMAGE_BOUNDS_CLASS_NAME,
 );
 
-function markdownImageCopy(alt: string, src: string, title: string | undefined): string {
+export function markdownImageCopy(alt: string, src: string, title: string | undefined): string {
   const escapedAlt = alt.replaceAll("\\", "\\\\").replaceAll("[", "\\[").replaceAll("]", "\\]");
   const titleSuffix =
     title === undefined ? "" : ` "${title.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
-  return `![${escapedAlt}](${src}${titleSuffix})`;
+  const escapedSrc = src.replaceAll("\\", "\\\\").replaceAll("<", "\\<").replaceAll(">", "\\>");
+  return `![${escapedAlt}](<${escapedSrc}>${titleSuffix})`;
 }
 
 function authoredImageSizeStyle(

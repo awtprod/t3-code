@@ -1380,7 +1380,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     // Only promote session plan.md writes while plan mode is
                     // active — avoids treating unrelated plan files as proposals.
                     // Fresh stamp: must not share eventId with the tool lifecycle event.
-                    if (ctx.planModeActive) {
+                    if (ctx.planModeActive && event.toolCall.status === "completed") {
                       const planMarkdown = extractGrokPlanMarkdownFromToolCallData(
                         event.toolCall.data,
                         grokPlanPathHost,

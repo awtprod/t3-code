@@ -605,6 +605,7 @@ function shouldCollapseToolLifecycleEntries(
     previous.toolCallId !== undefined &&
     next.toolCallId === undefined &&
     previous.itemType === next.itemType &&
+    (previous.detail?.trim() ?? "") === (next.detail?.trim() ?? "") &&
     normalizeCompactToolLabel(previous.toolTitle ?? previous.label) ===
       normalizeCompactToolLabel(next.toolTitle ?? next.label)
   );

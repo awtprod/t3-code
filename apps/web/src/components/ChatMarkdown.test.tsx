@@ -32,8 +32,17 @@ import ChatMarkdown, {
   canUseMarkdownFileShellActions,
   hasMarkdownFilePrimaryAction,
   orderedListGutterStyle,
+  markdownImageCopy,
   shouldUseMarkdownFileBrowserPrimaryAction,
 } from "./ChatMarkdown";
+
+describe("markdownImageCopy", () => {
+  it("wraps image paths with spaces and parentheses in an angle destination", () => {
+    expect(markdownImageCopy("Preview", "screenshots/my image (1).png", undefined)).toBe(
+      "![Preview](<screenshots/my image (1).png>)",
+    );
+  });
+});
 
 describe("canUseMarkdownFileShellActions", () => {
   const environmentId = EnvironmentId.make("environment-1");

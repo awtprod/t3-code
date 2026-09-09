@@ -429,11 +429,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
 
   const handleBlur = useCallback(() => {
     setIsFocused(false);
-    if (!settingsSheetPresentation.isActive) {
-      onExpandedChange?.(false);
-    }
     onEditorFocusChange?.(false);
-  }, [onEditorFocusChange, onExpandedChange, settingsSheetPresentation.isActive]);
+  }, [onEditorFocusChange]);
   const { onSendMessage } = props;
 
   const handleSend = useCallback(async () => {

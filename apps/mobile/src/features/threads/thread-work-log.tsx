@@ -389,7 +389,9 @@ export function ThreadWorkLog(props: {
                             }
                             size={14}
                             weight="medium"
-                            tintColor={iconIsDestructive ? "#e11d48" : props.iconSubtleColor}
+                            tintColor={
+                              iconIsDestructive || failed ? "#e11d48" : props.iconSubtleColor
+                            }
                             type="monochrome"
                           />
                         ) : null}
@@ -397,7 +399,8 @@ export function ThreadWorkLog(props: {
                       <Text
                         className={cn(
                           "min-w-0 flex-1 text-sm text-foreground-muted",
-                          iconIsDestructive && "font-t3-medium text-adaptive-rose-600-400",
+                          (iconIsDestructive || failed) &&
+                            "font-t3-medium text-adaptive-rose-600-400",
                         )}
                         numberOfLines={1}
                       >

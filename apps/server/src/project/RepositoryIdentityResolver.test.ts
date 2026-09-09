@@ -93,14 +93,17 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       run: (input) =>
         Effect.sync(() => {
           calls.push(input.args);
-          const rootLookup = input.args.includes("rev-parse");
+          const rootLookup = input.args.includes("--show-toplevel");
+          const bareLookup = input.args.includes("--is-bare-repository");
           const failed = rootLookup && rootAttempts++ === 0;
           return {
-            stdout: rootLookup
-              ? failed
-                ? ""
-                : "/repo\n"
-              : "origin\tgit@github.com:T3Tools/t3code.git (fetch)\n",
+            stdout: bareLookup
+              ? "false\n"
+              : rootLookup
+                ? failed
+                  ? ""
+                  : "/repo\n"
+                : "origin\tgit@github.com:T3Tools/t3code.git (fetch)\n",
             stderr: failed ? "temporary Git failure" : "",
             code: ChildProcessSpawner.ExitCode(failed ? 1 : 0),
             timedOut: false,
@@ -124,6 +127,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       expect(recovered?.rootPath).toBe("/repo");
       expect(calls.map(withoutHardenedConfig)).toEqual([
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
+        ["-C", "/repo/packages/web", "rev-parse", "--is-bare-repository"],
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
         ["-C", "/repo", "remote", "-v"],
       ]);
@@ -153,6 +157,24 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       expect(identity?.provider).toBe("github");
       expect(identity?.owner).toBe("t3tools");
       expect(identity?.name).toBe("t3code");
+    }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
+  );
+
+  it.effect("resolves remotes for bare repositories", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-repository-identity-bare-test-",
+      });
+
+      yield* git(cwd, ["init", "--bare"]);
+      yield* git(cwd, ["remote", "add", "origin", "git@github.com:T3Tools/t3code.git"]);
+
+      const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+      const identity = yield* resolver.resolve(cwd);
+
+      expect(identity?.canonicalKey).toBe("github.com/t3tools/t3code");
+      expect(identity?.rootPath).toBe(cwd);
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 

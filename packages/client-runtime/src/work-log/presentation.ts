@@ -106,7 +106,7 @@ export interface ViewedImageAsset {
 
 const ABSOLUTE_IMAGE_SOURCE_PATTERN = /^(?:file:|[\\/]|[a-z]:[\\/])/i;
 const T3_ATTACHMENT_IMAGE_PATH_PATTERN =
-  /(?:^|[\\/])(?:dev|userdata)[\\/]attachments[\\/]([a-z0-9_-]{1,128})\.[a-z0-9]{1,10}$/i;
+  /(?:^|[\\/])(?:dev|userdata)[\\/]attachments[\\/]([a-z0-9_]+(?:-[a-z0-9_]+)*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-[a-z0-9]{1,10})?)\.[a-z0-9]{1,10}$/i;
 
 export function resolveViewedImageAsset(
   source: string,

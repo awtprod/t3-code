@@ -517,6 +517,31 @@ describe("composerDraftStore file attachments", () => {
     expect(files?.some(composerFileNeedsReattach)).toBe(false);
   });
 
+  it("still replaces a later reattachment marker when the draft is full", () => {
+    const store = useComposerDraftStore.getState();
+    store.addImages(
+      threadRef,
+      Array.from({ length: PROVIDER_SEND_TURN_MAX_ATTACHMENTS - 1 }, (_, index) =>
+        makeImage({
+          id: `image-${index}`,
+          name: `image-${index}.png`,
+          previewUrl: `blob:image-${index}`,
+        }),
+      ),
+    );
+    const marker: ComposerFileAttachment = { ...makeFile("file-marker"), file: null };
+    store.addFiles(threadRef, [marker]);
+
+    store.addFiles(threadRef, [
+      { ...makeFile("file-overflow"), name: "other.pdf" },
+      makeFile("file-repicked"),
+    ]);
+
+    const files = store.getComposerDraft(threadRef)?.files;
+    expect(files?.map((file) => file.id)).toEqual(["file-repicked"]);
+    expect(files?.some(composerFileNeedsReattach)).toBe(false);
+  });
+
   it("replaces a legacy video marker after its MIME type is normalized", () => {
     const store = useComposerDraftStore.getState();
     const marker: ComposerFileAttachment = {

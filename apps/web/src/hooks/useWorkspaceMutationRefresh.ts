@@ -2,6 +2,7 @@ import type { OrchestrationThreadActivity } from "@t3tools/contracts";
 import { useEffect, useRef } from "react";
 
 const WORKSPACE_MUTATION_ITEM_TYPES = new Set(["command_execution", "file_change"]);
+const MAX_TRACKED_WORKSPACE_RESOURCES = 128;
 
 function activityPayload(activity: OrchestrationThreadActivity): Record<string, unknown> | null {
   return activity.payload !== null && typeof activity.payload === "object"
@@ -53,13 +54,20 @@ export function useWorkspaceMutationRefresh(input: {
   readonly resourceKey: string;
 }): void {
   const { enabled = true, mutationId, refresh, resourceKey } = input;
-  const handledTokenRef = useRef<string | null>(null);
+  const handledMutationsByResourceRef = useRef(new Map<string, string>());
 
   useEffect(() => {
-    if (!enabled) return;
-    const token = workspaceMutationRefreshToken(resourceKey, mutationId);
-    if (token === null || token === handledTokenRef.current) return;
-    handledTokenRef.current = token;
+    if (!enabled || mutationId === null) return;
+    if (handledMutationsByResourceRef.current.get(resourceKey) === mutationId) return;
+    if (
+      !handledMutationsByResourceRef.current.has(resourceKey) &&
+      handledMutationsByResourceRef.current.size >= MAX_TRACKED_WORKSPACE_RESOURCES
+    ) {
+      const oldestResource = handledMutationsByResourceRef.current.keys().next().value;
+      if (oldestResource !== undefined)
+        handledMutationsByResourceRef.current.delete(oldestResource);
+    }
+    handledMutationsByResourceRef.current.set(resourceKey, mutationId);
     refresh();
   }, [enabled, mutationId, refresh, resourceKey]);
 }

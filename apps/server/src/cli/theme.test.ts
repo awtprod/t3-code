@@ -6,18 +6,27 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as NetService from "@t3tools/shared/Net";
-import { assert, describe, it } from "@effect/vitest";
+import { assert, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as PlatformError from "effect/PlatformError";
 import * as TestConsole from "effect/testing/TestConsole";
+import * as TestClock from "effect/testing/TestClock";
 import { Command } from "effect/unstable/cli";
 
 import { cli } from "../bin.ts";
 
-const runCli = (args: ReadonlyArray<string>) =>
-  Command.runWith(cli, { version: "0.0.0" })(args).pipe(
-    Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer, TestConsole.layer)),
-  );
+const runCli = (args: ReadonlyArray<string>, fileSystem?: FileSystem.FileSystem) => {
+  const program = Command.runWith(cli, { version: "0.0.0" })(args);
+  return (
+    fileSystem === undefined
+      ? program
+      : program.pipe(Effect.provideService(FileSystem.FileSystem, fileSystem))
+  ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NetService.layer, TestConsole.layer)));
+};
 
 const makeBaseDir = () => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-theme-cli-"));
 
@@ -41,7 +50,7 @@ const writeSettings = (baseDir: string, settings: Record<string, unknown>) => {
   NodeFS.writeFileSync(settingsPathFor(baseDir), `${JSON.stringify(settings, null, 2)}\n`);
 };
 
-describe("t3 theme", () => {
+it.layer(NodeServices.layer)("t3 theme", (it) => {
   it.effect("writes a default theme when no settings file exists yet", () =>
     Effect.gen(function* () {
       const baseDir = makeBaseDir();
@@ -156,11 +165,9 @@ describe("t3 theme", () => {
     }),
   );
 
-  // set means set: a publish that rode along with a failed default write is
-  // rolled back rather than left mutating the environment's theme set. The
-  // userdata directory is made read-only while themes stays writable, so the
-  // failure lands after the publish -- the case the rollback exists for.
-  it.effect("rolls back a publish when the default cannot be written", () =>
+  // The adjacent lock must be acquired before publication, so an unwritable
+  // settings directory cannot leave even a transient theme behind.
+  it.effect("publishes nothing when the settings lock cannot be opened", () =>
     Effect.gen(function* () {
       const baseDir = makeBaseDir();
       writeSettings(baseDir, {});
@@ -175,7 +182,7 @@ describe("t3 theme", () => {
         const failure = yield* runCli(["theme", "set", themeFile, "--base-dir", baseDir]).pipe(
           Effect.flip,
         );
-        assert.include(String(failure), "Could not write");
+        assert.include(String(failure), "Could not open the settings-file lock");
         assert.equal(NodeFS.existsSync(NodePath.join(themesDir, "nightfall.json")), false);
       } finally {
         NodeFS.chmodSync(userdataDir, 0o755);
@@ -250,6 +257,35 @@ describe("t3 theme", () => {
     }),
   );
 
+  it.effect("rejects a directory destination before creating staging entries", () =>
+    Effect.gen(function* () {
+      const baseDir = makeBaseDir();
+      writeSettings(baseDir, { enableProviderUpdateChecks: false });
+      const themesDir = NodePath.join(baseDir, "userdata", "themes");
+      const destination = NodePath.join(themesDir, "nightfall.json");
+      NodeFS.mkdirSync(destination, { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(destination, "precious.txt"), "original");
+      const themeFile = NodePath.join(baseDir, "nightfall.json");
+      NodeFS.writeFileSync(themeFile, NIGHTFALL_THEME_JSON);
+
+      const failure = yield* runCli(["theme", "set", themeFile, "--base-dir", baseDir]).pipe(
+        Effect.flip,
+      );
+
+      assert.include(String(failure), "Could not publish");
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(destination, "precious.txt"), "utf8"),
+        "original",
+      );
+      assert.equal(readSettings(baseDir).enableProviderUpdateChecks, false);
+      assert.equal(Object.hasOwn(readSettings(baseDir), "defaultTheme"), false);
+      assert.deepEqual(
+        NodeFS.readdirSync(themesDir).filter((entry) => entry !== "nightfall.json"),
+        [],
+      );
+    }),
+  );
+
   it.effect("restores the previous theme when a re-publish fails to set", () =>
     Effect.gen(function* () {
       const baseDir = makeBaseDir();
@@ -272,6 +308,80 @@ describe("t3 theme", () => {
         NodeFS.chmodSync(userdataDir, 0o755);
       }
     }),
+  );
+
+  it.effect("serializes another publish until a failed publish restores its backup", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = makeBaseDir();
+        writeSettings(baseDir, {});
+        const themesDir = NodePath.join(baseDir, "userdata", "themes");
+        NodeFS.mkdirSync(themesDir, { recursive: true });
+        const destination = NodePath.join(themesDir, "nightfall.json");
+        const original = NIGHTFALL_THEME_JSON.replace("Nightfall", "Original");
+        const firstContents = NIGHTFALL_THEME_JSON.replace("Nightfall", "First");
+        const secondContents = NIGHTFALL_THEME_JSON.replace("Nightfall", "Second");
+        NodeFS.writeFileSync(destination, original);
+        const firstSource = NodePath.join(baseDir, "first.json");
+        const secondSource = NodePath.join(baseDir, "second.json");
+        NodeFS.writeFileSync(firstSource, firstContents);
+        NodeFS.writeFileSync(secondSource, secondContents);
+
+        const firstWriteReached = yield* Deferred.make<void>();
+        const failFirstWrite = yield* Deferred.make<void>();
+        let settingsRenames = 0;
+        const controlledFs: FileSystem.FileSystem = {
+          ...fs,
+          rename: (oldPath, newPath) =>
+            newPath !== settingsPathFor(baseDir)
+              ? fs.rename(oldPath, newPath)
+              : Effect.suspend(() => {
+                  settingsRenames++;
+                  if (settingsRenames !== 1) return fs.rename(oldPath, newPath);
+                  return Deferred.succeed(firstWriteReached, undefined).pipe(
+                    Effect.andThen(Deferred.await(failFirstWrite)),
+                    Effect.andThen(
+                      Effect.fail(
+                        PlatformError.systemError({
+                          _tag: "PermissionDenied",
+                          module: "FileSystem",
+                          method: "rename",
+                          pathOrDescriptor: newPath,
+                          description: "injected settings commit failure",
+                        }),
+                      ),
+                    ),
+                  );
+                }),
+        };
+
+        const first = yield* runCli(
+          ["theme", "set", "--id", "nightfall", firstSource, "--base-dir", baseDir],
+          controlledFs,
+        ).pipe(Effect.flip, Effect.forkScoped);
+        yield* Deferred.await(firstWriteReached);
+        assert.equal(NodeFS.readFileSync(destination, "utf8"), firstContents);
+
+        const second = yield* runCli(
+          ["theme", "set", "--id", "nightfall", secondSource, "--base-dir", baseDir],
+          controlledFs,
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        assert.isUndefined(second.pollUnsafe());
+        assert.equal(NodeFS.readFileSync(destination, "utf8"), firstContents);
+
+        yield* Deferred.succeed(failFirstWrite, undefined);
+        yield* Fiber.join(first);
+        assert.equal(NodeFS.readFileSync(destination, "utf8"), original);
+
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("25 millis");
+        yield* Fiber.join(second);
+        assert.equal(NodeFS.readFileSync(destination, "utf8"), secondContents);
+        assert.equal(readSettings(baseDir).defaultTheme, "nightfall");
+      }),
+    ),
   );
 
   // A typo'd id written as the theme would silently never resolve anywhere;

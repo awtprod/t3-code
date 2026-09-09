@@ -89,14 +89,15 @@ export class EnvironmentThemeService extends Context.Service<
 >()("@awtprod/command-center/environmentTheme/EnvironmentThemeService") {}
 
 /**
- * Reads a theme file through one opened handle, so every check binds to the
+ * Reads a file through one opened handle, so every check binds to the
  * file actually read rather than to a path that may have been swapped since:
  * O_NOFOLLOW rejects a symlink outright (a symlinked themes directory stays
  * usable, a symlinked file inside it does not), O_NONBLOCK keeps a FIFO from
- * blocking the open, and the fstat type and size gate examines the open
- * descriptor. Returns null for anything that is not a small regular file.
+ * blocking the open, and the descriptor/path identity check covers platforms
+ * where O_NOFOLLOW is ineffective. Returns null for anything that is not the
+ * same small regular file at open and validation time.
  */
-export const readThemeFileGuarded = (filePath: string, maxBytes: number): string | null => {
+export const readFileGuarded = (filePath: string, maxBytes: number): string | null => {
   let fd: number;
   try {
     fd = NodeFS.openSync(
@@ -109,6 +110,15 @@ export const readThemeFileGuarded = (filePath: string, maxBytes: number): string
   try {
     const info = NodeFS.fstatSync(fd);
     if (!info.isFile() || info.size > maxBytes) return null;
+    const pathInfo = NodeFS.lstatSync(filePath);
+    if (
+      pathInfo.isSymbolicLink() ||
+      !pathInfo.isFile() ||
+      pathInfo.dev !== info.dev ||
+      pathInfo.ino !== info.ino
+    ) {
+      return null;
+    }
     const contents = Buffer.alloc(info.size);
     let offset = 0;
     while (offset < contents.length) {
@@ -123,6 +133,9 @@ export const readThemeFileGuarded = (filePath: string, maxBytes: number): string
     NodeFS.closeSync(fd);
   }
 };
+
+/** Compatibility name used by the theme service and CLI. */
+export const readThemeFileGuarded = readFileGuarded;
 
 /**
  * Every theme the directory actually publishes. A file that is missing,

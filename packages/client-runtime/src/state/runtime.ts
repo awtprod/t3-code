@@ -347,10 +347,11 @@ export async function executeAtomQuery<A, E>(
       yield* AtomRegistry.mount(registry, atom);
       if (options.refresh) {
         yield* Effect.sync(() => {
-          // Only a settled value can be a leftover from an earlier read; a
-          // computation that mounting just started is already fresh.
+          // Initial means mounting just started this execution. Any existing
+          // state, including a waiting stale-while-revalidate result, predates
+          // this explicit verification request and must be replaced.
           const current = registry.get(atom);
-          if (current._tag !== "Initial" && !current.waiting) {
+          if (current._tag !== "Initial") {
             registry.refresh(atom);
           }
         });

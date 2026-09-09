@@ -29,6 +29,19 @@ describe("resolveThreadReferenceCopyTarget", () => {
     });
   });
 
+  it("uses a detected pull request when the linked URL is empty", () => {
+    expect(
+      resolveThreadReferenceCopyTarget({
+        threadId: "thread-1",
+        linkedPullRequestUrl: "",
+        detectedPullRequestUrl: "https://github.com/t3/pr/13",
+      }),
+    ).toMatchObject({
+      kind: "pull-request",
+      value: "https://github.com/t3/pr/13",
+    });
+  });
+
   it("falls back to the thread ID", () => {
     expect(resolveThreadReferenceCopyTarget({ threadId: "thread-1" })).toEqual({
       kind: "thread",

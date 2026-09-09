@@ -1147,6 +1147,50 @@ describe("buildThreadFeed", () => {
       live: false,
     });
   });
+
+  it("keeps adjacent same-title tool calls separate when their details differ", () => {
+    const turnId = TurnId.make("turn-distinct-tools");
+    const thread = makeThread({
+      id: ThreadId.make("thread-distinct-tools"),
+      projectId: ProjectId.make("project-1"),
+      title: "Distinct tools",
+      activities: [
+        makeActivity({
+          id: EventId.make("first-read"),
+          kind: "tool.updated",
+          tone: "tool",
+          summary: "Read file",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          turnId,
+          payload: {
+            toolCallId: "call-1",
+            title: "Read file",
+            itemType: "dynamic_tool_call",
+            detail: "/workspace/first.ts",
+          },
+        }),
+        makeActivity({
+          id: EventId.make("second-read"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Read file completed",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId,
+          payload: {
+            title: "Read file",
+            itemType: "dynamic_tool_call",
+            detail: "/workspace/second.ts",
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread)[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (group?.type === "activity-group") {
+      expect(group.activities.map((entry) => entry.id)).toEqual(["first-read", "second-read"]);
+    }
+  });
 });
 
 describe("quiet timeline: nested agents", () => {

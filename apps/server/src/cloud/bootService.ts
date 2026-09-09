@@ -160,12 +160,8 @@ export interface BootServiceStep {
   readonly step: string;
   readonly command: string;
   readonly args: ReadonlyArray<string>;
-  /**
-   * Non-zero exit is logged and ignored. Reserved for steps whose common
-   * failures (not loaded, already enabled) leave a state a later strict step
-   * either tolerates or fails loudly on.
-   */
-  readonly optional?: boolean;
+  /** Which narrowly expected non-zero result may be treated as success. */
+  readonly toleratedFailure?: "any" | "launchd-not-loaded";
   /** Override the ProcessRunner default (60s) for steps that block longer. */
   readonly timeout?: Duration.Input;
 }
@@ -280,8 +276,9 @@ export function launchdManager(input: {
   );
   const domainTarget = `gui/${input.uid}`;
   const serviceTarget = `${domainTarget}/${BOOT_SERVICE_LAUNCHD_LABEL}`;
-  // bootout/enable are optional: they fail on not-loaded states that are fine
-  // to proceed from. The strict `bootstrap` runs last and is also the start:
+  // A not-loaded bootout is fine to proceed from. Other stop failures remain
+  // fatal so repair cannot rewrite a still-loaded job. The strict `bootstrap`
+  // runs last and is also the start:
   // loading a RunAtLoad/KeepAlive plist starts the job, so a separate
   // kickstart would kill and restart a server it just booted. A lingering job
   // that survived bootout, or a gui domain with nobody logged in at the
@@ -304,7 +301,7 @@ export function launchdManager(input: {
         step: "stopping the installed launch agent",
         command: "launchctl",
         args: ["bootout", "--wait", serviceTarget],
-        optional: true,
+        toleratedFailure: "launchd-not-loaded",
         timeout: STOP_STEP_TIMEOUT,
       },
     ],
@@ -314,7 +311,7 @@ export function launchdManager(input: {
         step: "enabling the launch agent",
         command: "launchctl",
         args: ["enable", serviceTarget],
-        optional: true,
+        toleratedFailure: "any",
       },
       // Start last. No administrative state write occurs after this succeeds.
       {
@@ -332,14 +329,14 @@ export function launchdManager(input: {
     ],
     // No `launchctl disable` here: a persisted override would sabotage a
     // later reinstall. Removing the plist is what stops the next login load.
-    // A bootout that fails for a reason other than "not loaded" leaves the
-    // job running until logout; the failure is in the boot-service log.
+    // A bootout that fails for a reason other than "not loaded" must preserve
+    // the plist and fail uninstall rather than reporting a still-running job removed.
     deactivate: [
       {
         step: "stopping the service",
         command: "launchctl",
         args: ["bootout", "--wait", serviceTarget],
-        optional: true,
+        toleratedFailure: "launchd-not-loaded",
         timeout: STOP_STEP_TIMEOUT,
       },
     ],
@@ -525,12 +522,20 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     step: string,
     command: string,
     args: ReadonlyArray<string>,
-    options?: { readonly timeout?: Duration.Input },
+    options?: {
+      readonly timeout?: Duration.Input;
+      readonly toleratedFailure?: BootServiceStep["toleratedFailure"];
+    },
   ) {
     return yield* runner.run({ command, args, timeout: options?.timeout }).pipe(
       Effect.mapError((cause) => new BootServiceCommandError({ step, cause })),
       Effect.filterOrFail(
-        (result) => result.code === 0,
+        (result) =>
+          result.code === 0 ||
+          options?.toleratedFailure === "any" ||
+          (options?.toleratedFailure === "launchd-not-loaded" &&
+            Number(result.code) === 3 &&
+            /(?:no such process|could not find service)/i.test(result.stderr)),
         (result) =>
           new BootServiceCommandError({
             step,
@@ -560,11 +565,16 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
           entry.step,
           entry.command,
           entry.args,
-          entry.timeout === undefined ? undefined : { timeout: entry.timeout },
+          entry.timeout === undefined && entry.toleratedFailure === undefined
+            ? undefined
+            : {
+                ...(entry.timeout === undefined ? {} : { timeout: entry.timeout }),
+                ...(entry.toleratedFailure === undefined
+                  ? {}
+                  : { toleratedFailure: entry.toleratedFailure }),
+              },
         );
-        // runStep's tapError already appends the failure to the log, so an
-        // ignored optional step still leaves a trace.
-        return entry.optional === true ? run.pipe(Effect.ignore) : run.pipe(Effect.asVoid);
+        return run.pipe(Effect.asVoid);
       },
       { discard: true },
     );

@@ -888,6 +888,39 @@ describe("thread outbox", () => {
     registry.dispose();
   });
 
+  it("clears an update requested before the environment clear", async () => {
+    const registry = AtomRegistry.make();
+    const stored = new Map<MessageId, QueuedThreadMessage>();
+    const manager = createThreadOutboxManager({
+      registry,
+      storage: {
+        load: async () => [...stored.values()],
+        write: async (message) => {
+          stored.set(message.messageId, message);
+        },
+        remove: async (message) => {
+          stored.delete(message.messageId);
+        },
+      },
+    });
+    const message = queuedMessage({
+      environmentId: "environment-clear",
+      messageId: "message-updated-before-clear",
+      createdAt: "2026-06-08T10:00:01.000Z",
+    });
+    const updated = { ...message, text: "updated" };
+
+    await manager.enqueue(message);
+    const updating = manager.update(updated, manager.revisionOf(message.messageId));
+    const clearing = manager.clearEnvironment(message.environmentId);
+
+    await expect(updating).resolves.toBe(true);
+    await expect(clearing).resolves.toEqual([updated]);
+    expect(registry.get(manager.queuedMessagesByThreadKeyAtom)).toEqual({});
+    expect(stored.has(message.messageId)).toBe(false);
+    registry.dispose();
+  });
+
   it("removes an already-created pending task before the file-capability gate runs", () => {
     // The creation's startTurn already made the thread, so the resolver wants
     // the queued message removed. A missing server config (or missing file

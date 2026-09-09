@@ -25,6 +25,7 @@ import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -1839,10 +1840,9 @@ export const make = Effect.gen(function* () {
    * UI showing a live session — trading a turn that ignores stop for a thread
    * that lies about it.
    *
-   * The original interrupt cause is always re-raised, escalated or not: the
-   * user asked to stop one turn and either got no stop at all or lost the whole
-   * session instead, and both are outcomes the caller has to report. A failed
-   * escalation is logged here and deliberately does not replace that cause.
+   * An accepted escalation is handled by its queued session-stop event. Only a
+   * failed escalation leaves the caller responsible for recovery and reporting;
+   * its failure is logged here without replacing the original interrupt cause.
    */
   type InterruptTurnEscalationOutcome =
     | { readonly _tag: "interrupted" }
@@ -1895,14 +1895,32 @@ export const make = Effect.gen(function* () {
           // session that is ready for the next turn — the opposite of what the
           // user asked for. Re-read first and treat an already-settled session
           // as the interrupt having achieved its purpose.
-          const latestThread = yield* resolveThread(input.threadId);
-          const latestSession = latestThread?.session;
-          if (
-            !latestSession ||
-            latestSession.status === "ready" ||
-            latestSession.status === "stopped"
-          ) {
-            return { _tag: "interrupted" } as InterruptTurnEscalationOutcome;
+          const latestThreadRead = yield* resolveThread(input.threadId).pipe(
+            Effect.map((thread) => ({ _tag: "resolved" as const, thread })),
+            Effect.catchCause((lookupCause) => {
+              if (Cause.hasInterruptsOnly(lookupCause)) {
+                return Effect.failCause(lookupCause);
+              }
+              return Effect.logWarning(
+                "provider command reactor could not verify session state before interrupt escalation",
+                {
+                  ...input.logContext,
+                  threadId: input.threadId,
+                  turnId: input.turnId,
+                  cause: Cause.pretty(lookupCause),
+                },
+              ).pipe(Effect.as({ _tag: "unavailable" as const }));
+            }),
+          );
+          if (latestThreadRead._tag === "resolved") {
+            const latestSession = latestThreadRead.thread?.session;
+            if (
+              !latestSession ||
+              latestSession.status === "ready" ||
+              latestSession.status === "stopped"
+            ) {
+              return { _tag: "interrupted" } as InterruptTurnEscalationOutcome;
+            }
           }
           return yield* Effect.logWarning(
             "provider command reactor escalating an undeliverable interrupt to a session stop",
@@ -1954,16 +1972,17 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  // Ordinary user/fence callers intentionally retain the historical contract:
-  // even a successfully dispatched widening reports the original interrupt
-  // failure. Ledger reconciliation uses the observed outcome above because it
-  // must durably retire rows after either kind of successful action.
+  // Ordinary user/fence callers only recover after the whole ladder fails. An
+  // accepted widening is queued behind the current serial handler, so treating
+  // it as a failure here would race its handler with a direct fallback stop.
+  // Ledger reconciliation uses the observed outcome above because it must
+  // durably retire rows after either kind of successful action.
   const interruptTurnOrEscalateToSessionStop = (
     input: Parameters<typeof interruptTurnAndObserveEscalation>[0],
   ) =>
     interruptTurnAndObserveEscalation(input).pipe(
       Effect.flatMap((outcome) =>
-        outcome._tag === "interrupted" ? Effect.void : Effect.failCause(outcome.interruptCause),
+        outcome._tag === "failed" ? Effect.failCause(outcome.interruptCause) : Effect.void,
       ),
     );
 
@@ -2918,21 +2937,45 @@ export const make = Effect.gen(function* () {
           return;
         }
 
-        yield* providerService.stopSession({ threadId: event.payload.threadId }).pipe(
-          Effect.catchCause((stopCause) => {
-            if (Cause.hasInterruptsOnly(stopCause)) {
-              return Effect.interrupt;
-            }
-            return Effect.logWarning(
-              "provider command reactor failed to stop session after interrupt failure",
-              {
-                threadId: event.payload.threadId,
-                cause: Cause.pretty(stopCause),
-                originalCause: Cause.pretty(cause),
-              },
-            );
-          }),
+        const stopExit = yield* Effect.exit(
+          providerService.stopSession({ threadId: event.payload.threadId }),
         );
+        if (Exit.isFailure(stopExit)) {
+          const stopCause = stopExit.cause;
+          if (Cause.hasInterruptsOnly(stopCause)) {
+            return yield* Effect.failCause(stopCause);
+          }
+          yield* Effect.logWarning(
+            "provider command reactor failed to stop session after interrupt failure",
+            {
+              threadId: event.payload.threadId,
+              cause: Cause.pretty(stopCause),
+              originalCause: Cause.pretty(cause),
+            },
+          );
+          yield* appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.interrupt.failed",
+            summary: "Provider turn interrupt failed",
+            detail: `${detail} The fallback session stop also failed: ${formatFailureDetail(stopCause)}`,
+            turnId: event.payload.turnId ?? null,
+            createdAt: event.payload.createdAt,
+          }).pipe(
+            Effect.catchCause((appendCause) =>
+              Cause.hasInterruptsOnly(appendCause)
+                ? Effect.failCause(appendCause)
+                : Effect.logError(
+                    "provider command reactor failed to report a fallback session stop failure",
+                    {
+                      threadId: event.payload.threadId,
+                      cause: Cause.pretty(appendCause),
+                      originalStopCause: Cause.pretty(stopCause),
+                    },
+                  ),
+            ),
+          );
+          return;
+        }
         const stoppedThread = yield* resolveThread(event.payload.threadId);
         const stoppedSession = stoppedThread?.session;
         if (
@@ -3007,11 +3050,16 @@ export const make = Effect.gen(function* () {
           // further to try, and failing this handler over a log entry would
           // only requeue an interrupt that already ran its whole ladder.
           Effect.catchCause((appendCause) =>
-            Effect.logError("provider command reactor failed to report an undelivered interrupt", {
-              threadId: event.payload.threadId,
-              turnId: event.payload.turnId ?? null,
-              cause: Cause.pretty(appendCause),
-            }),
+            Cause.hasInterruptsOnly(appendCause)
+              ? Effect.failCause(appendCause)
+              : Effect.logError(
+                  "provider command reactor failed to report an undelivered interrupt",
+                  {
+                    threadId: event.payload.threadId,
+                    turnId: event.payload.turnId ?? null,
+                    cause: Cause.pretty(appendCause),
+                  },
+                ),
           ),
         ),
       ),

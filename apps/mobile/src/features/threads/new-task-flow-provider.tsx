@@ -549,7 +549,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const appendAttachments = useCallback(
     (nextAttachments: ReadonlyArray<DraftComposerAttachment>): number => {
       if (!selectedProjectDraftKey) {
-        return 0;
+        return nextAttachments.length;
       }
       return appendComposerDraftAttachments(selectedProjectDraftKey, nextAttachments);
     },

@@ -15,6 +15,10 @@ describe("videoMimeType", () => {
     );
   });
 
+  it("does not override an explicit non-video MIME type from the filename", () => {
+    expect(videoMimeType({ name: "document.mp4", mimeType: "application/pdf" })).toBeNull();
+  });
+
   it.each(["README", "report.pdf", "file.constructor", "file.__proto__"])(
     "does not mistake %s for a video",
     (name) => {

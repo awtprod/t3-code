@@ -233,7 +233,7 @@ const advanceIdleClock = Effect.gen(function* () {
 });
 
 it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
-  it.effect("excludes generic files from thread title generation", () =>
+  it.effect("passes supported files through for thread title generation", () =>
     withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
       Effect.gen(function* () {
         runtimeMock.state.promptResult = {
@@ -267,6 +267,7 @@ it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
         expect(runtimeMock.state.promptParts[0]).toEqual([
           expect.objectContaining({ type: "text" }),
           expect.objectContaining({ type: "file", filename: "screenshot.png" }),
+          expect.objectContaining({ type: "file", filename: "report.pdf" }),
         ]);
       }),
     ),

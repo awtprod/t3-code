@@ -225,8 +225,15 @@ export function classifyModels(
   manifest: ModelManifestData,
   driverKind: ProviderDriverKind,
 ): ReadonlyArray<ServerProviderModel> {
+  if (manifest.currentModels[driverKind] === undefined && !manifest.providers?.[driverKind]) {
+    return models;
+  }
   return models.map((model) => {
     if (model.isCustom) return model;
+    const catalogClassifiesModel = manifest.providers?.[driverKind]?.models.some(
+      (entry) => entry.slug === model.slug,
+    );
+    if (manifest.currentModels[driverKind] === undefined && !catalogClassifiesModel) return model;
     if (isLegacyModel(manifest, driverKind, model.slug)) {
       return model.isLegacy ? model : { ...model, isLegacy: true };
     }
@@ -306,10 +313,11 @@ export const make = Effect.gen(function* () {
     // fetches only: a manifest already cached on disk from an earlier fetch
     // stays in effect, since the setting is about phoning home, not about
     // discarding data the server already holds.
-    const settings = yield* settingsService.getSettings.pipe(
-      Effect.catchCause(() => Effect.succeed(null)),
+    const updatesEnabled = yield* settingsService.getSettings.pipe(
+      Effect.map((settings) => settings.enableProviderUpdateChecks),
+      Effect.catchCause(() => Effect.succeed(false)),
     );
-    if (settings !== null && !settings.enableProviderUpdateChecks) return manifest;
+    if (!updatesEnabled) return manifest;
 
     lastAttemptMs = now;
     const fetched = yield* httpClient.get(MODEL_MANIFEST_URL).pipe(

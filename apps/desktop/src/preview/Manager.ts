@@ -1887,6 +1887,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const setMainWindow = Effect.fn("PreviewManager.setMainWindow")(function* (
     window: BrowserWindow,
   ) {
+    // Claim the replacement before the first suspension so the outgoing window's
+    // close callback cannot start capture cleanup while this handoff is waiting.
+    const previousMainWindow = currentMainWindow;
+    currentMainWindow = window;
+    frameCaptureWindowOpen = true;
     if (mainWindowCleanupFiber) {
       yield* Fiber.join(mainWindowCleanupFiber);
       mainWindowCleanupFiber = undefined;
@@ -1897,8 +1902,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           yield* setWindowBackgroundThrottling(window, false);
         }
         yield* Ref.set(mainWindowRef, Option.some(window));
-        currentMainWindow = window;
-        frameCaptureWindowOpen = true;
         window.once("closed", () => {
           if (currentMainWindow !== window) return;
           currentMainWindow = undefined;
@@ -1912,7 +1915,19 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         });
         return [undefined, sessions] as const;
       }),
-    ).pipe(Effect.uninterruptible);
+    ).pipe(
+      Effect.uninterruptible,
+      Effect.onError(() =>
+        Effect.sync(() => {
+          if (currentMainWindow === window) {
+            const previousWindowIsOpen =
+              previousMainWindow !== undefined && !previousMainWindow.isDestroyed();
+            currentMainWindow = previousWindowIsOpen ? previousMainWindow : undefined;
+            frameCaptureWindowOpen = previousWindowIsOpen;
+          }
+        }),
+      ),
+    );
   });
 
   const createTabUnlocked = Effect.fn("PreviewManager.createTabUnlocked")(function* (

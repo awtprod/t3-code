@@ -109,8 +109,24 @@ const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.
         timeoutBehavior: "timedOutResult",
       })
       .pipe(Effect.option);
-    if (topLevelResult._tag === "None" || topLevelResult.value.code !== 0) {
+    if (topLevelResult._tag === "None") {
       return null;
+    }
+    if (topLevelResult.value.code !== 0) {
+      const bareResult = yield* processRunner
+        .run({
+          command: gitExecutable,
+          args: hardenedHostGitArguments(["-C", cwd, "rev-parse", "--is-bare-repository"]),
+          env: hardenedHostGitEnvironment([], { writableRoots: [cwd] }),
+          extendEnv: false,
+          timeoutBehavior: "timedOutResult",
+        })
+        .pipe(Effect.option);
+      return bareResult._tag === "Some" &&
+        bareResult.value.code === 0 &&
+        bareResult.value.stdout.trim() === "true"
+        ? cwd
+        : null;
     }
 
     const candidate = topLevelResult.value.stdout.trim();

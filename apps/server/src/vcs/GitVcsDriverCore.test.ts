@@ -1505,12 +1505,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    // Skipped in Command Center: `createWorktree` populates submodules exactly
-    // as upstream does, but this fixture wires the submodule over a `file:`
-    // transport, and the hardened git environment scrubs the
-    // `GIT_ALLOW_PROTOCOL` escape the fixture relies on (HostGitSecurity keeps
-    // a fixed key allowlist). Real submodules are https/ssh and unaffected.
-    it.effect.skip("checks out submodules in a new worktree", () =>
+    it.effect("does not fetch repository-controlled submodule URLs", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const pathService = yield* Path.Path;
@@ -1522,8 +1517,6 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         // Real submodules are https/ssh and need none of this.
         const allowFileTransport = ["-c", "protocol.file.allow=always"] as const;
 
-        // A real submodule: `git worktree add` leaves these empty, which is
-        // what silently strips shared tooling out of every new worktree.
         const submoduleRepo = yield* makeTmpDir("git-submodule-");
         yield* initRepoWithCommit(submoduleRepo);
         yield* writeTextFile(submoduleRepo, "SHARED.md", "# shared\n");
@@ -1549,7 +1542,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
 
         assert.equal(
           yield* fileSystem.exists(pathService.join(worktreePath, "shared", "SHARED.md")),
-          true,
+          false,
         );
       }),
     );

@@ -53,6 +53,7 @@ import {
   isModelSelectionProviderEnabled,
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import { withServerSettingsFileLock } from "./serverSettingsFileLock.ts";
 
 export { resolveSourceControlWriterModelSelection } from "@t3tools/shared/serverSettings";
 
@@ -870,25 +871,37 @@ const make = Effect.gen(function* () {
     ),
     updateSettings: (patch) =>
       writeSemaphore.withPermits(1)(
-        Effect.gen(function* () {
-          const current = yield* getSettingsFromCache;
-          const nextWithProviderSecrets = yield* persistProviderEnvironmentSecrets(
-            current,
-            applyServerSettingsPatch(current, patch),
-          );
-          const nextPersisted = yield* persistDatabaseConnectionSecrets(
-            current,
-            nextWithProviderSecrets,
-          );
-          const next = yield* normalizeServerSettings(nextPersisted);
-          yield* writeSettingsAtomically(next);
-          yield* Cache.set(settingsCache, cacheKey, next);
-          yield* emitChange(next);
-          const materialized = yield* materializeProviderEnvironmentSecrets(next).pipe(
-            Effect.flatMap(materializeDatabaseConnectionSecrets),
-          );
-          return resolveTextGenerationProvider(materialized);
-        }),
+        withServerSettingsFileLock(
+          settingsPath,
+          Effect.gen(function* () {
+            const current = yield* loadSettingsFromDisk;
+            const nextWithProviderSecrets = yield* persistProviderEnvironmentSecrets(
+              current,
+              applyServerSettingsPatch(current, patch),
+            );
+            const nextPersisted = yield* persistDatabaseConnectionSecrets(
+              current,
+              nextWithProviderSecrets,
+            );
+            const next = yield* normalizeServerSettings(nextPersisted);
+            yield* writeSettingsAtomically(next);
+            yield* Cache.set(settingsCache, cacheKey, next);
+            yield* emitChange(next);
+            const materialized = yield* materializeProviderEnvironmentSecrets(next).pipe(
+              Effect.flatMap(materializeDatabaseConnectionSecrets),
+            );
+            return resolveTextGenerationProvider(materialized);
+          }),
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, pathService),
+          Effect.mapError((cause) =>
+            cause._tag === "ServerSettingsFileLockError" ||
+            cause._tag === "ServerSettingsFileLockBusyError"
+              ? new ServerSettingsError({ settingsPath, operation: "write-file", cause })
+              : cause,
+          ),
+        ),
       ),
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));

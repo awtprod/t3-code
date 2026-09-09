@@ -43,7 +43,9 @@ export function codexFeedbackMessage(
         ? `Feedback sent to OpenAI.\n\nThread ID: \`${submission.feedbackId}\``
         : submission.status === "failed"
           ? `Could not send feedback to OpenAI.\n\n${submission.errorMessage}`
-          : "Sending feedback to OpenAI...";
+          : submission.status === "interrupted"
+            ? "Feedback upload was interrupted."
+            : "Sending feedback to OpenAI...";
 
   return {
     id: role === "user" ? submission.id : MessageId.make(`${submission.id}:feedback`),

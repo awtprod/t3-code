@@ -13,6 +13,7 @@ import {
   parseAttachmentFileExtension,
   planAttachmentClaim,
   parseThreadSegmentFromAttachmentId,
+  PENDING_ATTACHMENT_THREAD_SEGMENT,
   resolveAttachmentPathById,
   sweepStalePendingAttachments,
 } from "./attachmentStore.ts";
@@ -52,9 +53,15 @@ describe("attachmentStore", () => {
 
   it("reserves the pending attachment segment", () => {
     const pendingId = createPendingAttachmentId();
-    expect(parseThreadSegmentFromAttachmentId(pendingId)).toBe("pending");
+    expect(parseThreadSegmentFromAttachmentId(pendingId)).toBe(PENDING_ATTACHMENT_THREAD_SEGMENT);
     expect(parseAttachmentUuid(pendingId)).toMatch(/^[a-f0-9-]{36}$/);
-    expect(parseThreadSegmentFromAttachmentId(createAttachmentId("pending")!)).toBe("_pending");
+    for (const threadId of ["pending", "_pending", "__pending"]) {
+      const finalId = createAttachmentId(threadId)!;
+      expect(parseThreadSegmentFromAttachmentId(finalId)).toBe("pending");
+      expect(parseThreadSegmentFromAttachmentId(finalId)).not.toBe(
+        PENDING_ATTACHMENT_THREAD_SEGMENT,
+      );
+    }
     expect(parseThreadSegmentFromAttachmentId(createAttachmentId("pending_thread")!)).toBe(
       "pending_thread",
     );
@@ -63,7 +70,9 @@ describe("attachmentStore", () => {
   it("preserves safe file extensions in attachment ids and paths", () => {
     const attachmentId = createPendingAttachmentId(".PDF");
 
-    expect(parseThreadSegmentFromAttachmentId(attachmentId)).toBe("pending");
+    expect(parseThreadSegmentFromAttachmentId(attachmentId)).toBe(
+      PENDING_ATTACHMENT_THREAD_SEGMENT,
+    );
     expect(parseAttachmentUuid(attachmentId)).toMatch(/^[a-f0-9-]{36}$/);
     expect(parseAttachmentFileExtension(attachmentId)).toBe("pdf");
     expect(attachmentFileExtension("report.PDF")).toBe(".pdf");
@@ -130,13 +139,14 @@ describe("attachmentStore", () => {
     );
     try {
       const uuid = "00000000-0000-4000-8000-000000000001";
-      const pendingPath = NodePath.join(attachmentsDir, `pending-${uuid}.png`);
+      const pendingId = `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${uuid}`;
+      const pendingPath = NodePath.join(attachmentsDir, `${pendingId}.png`);
       NodeFS.writeFileSync(pendingPath, Buffer.from("pixels"));
 
       const claim = planAttachmentClaim({
         attachmentsDir,
         threadId: "thread-1",
-        attachmentId: `pending-${uuid}`,
+        attachmentId: pendingId,
       });
       expect(claim).toMatchObject({
         ok: true,
@@ -178,11 +188,26 @@ describe("attachmentStore", () => {
       const now = 1_800_000_000_000;
       const oldTimeSeconds = (now - 2 * 24 * 60 * 60 * 1000) / 1000;
       const uuid = "00000000-0000-4000-8000-000000000002";
-      const pendingPath = NodePath.join(attachmentsDir, `pending-${uuid}.png`);
-      const pendingFilePath = NodePath.join(attachmentsDir, `pending-${uuid}-pdf.pdf`);
+      const pendingPath = NodePath.join(
+        attachmentsDir,
+        `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${uuid}.png`,
+      );
+      const pendingFilePath = NodePath.join(
+        attachmentsDir,
+        `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${uuid}-pdf.pdf`,
+      );
+      const legacyPendingPath = NodePath.join(attachmentsDir, `pending-${uuid}.png`);
+      const legacyRemappedPath = NodePath.join(attachmentsDir, `_pending-${uuid}.png`);
       const threadPath = NodePath.join(attachmentsDir, `thread-1-${uuid}.png`);
       const partialPath = NodePath.join(attachmentsDir, `${uuid}.part`);
-      for (const filePath of [pendingPath, pendingFilePath, threadPath, partialPath]) {
+      for (const filePath of [
+        pendingPath,
+        pendingFilePath,
+        legacyPendingPath,
+        legacyRemappedPath,
+        threadPath,
+        partialPath,
+      ]) {
         NodeFS.writeFileSync(filePath, Buffer.from("pixels"));
         NodeFS.utimesSync(filePath, oldTimeSeconds, oldTimeSeconds);
       }
@@ -191,7 +216,18 @@ describe("attachmentStore", () => {
       expect(NodeFS.existsSync(pendingPath)).toBe(false);
       expect(NodeFS.existsSync(pendingFilePath)).toBe(false);
       expect(NodeFS.existsSync(partialPath)).toBe(false);
+      expect(NodeFS.existsSync(legacyPendingPath)).toBe(true);
+      expect(NodeFS.existsSync(legacyRemappedPath)).toBe(true);
       expect(NodeFS.existsSync(threadPath)).toBe(true);
+      expect(resolveAttachmentPathById({ attachmentsDir, attachmentId: `pending-${uuid}` })).toBe(
+        legacyPendingPath,
+      );
+      expect(
+        resolveAttachmentPathById({
+          attachmentsDir,
+          attachmentId: `_pending-${uuid}`,
+        }),
+      ).toBe(legacyRemappedPath);
     } finally {
       NodeFS.rmSync(attachmentsDir, { recursive: true, force: true });
     }

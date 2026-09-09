@@ -48,6 +48,7 @@ import type {
   TerminalSessionSnapshot,
   TerminalWriteInput,
 } from "./terminal.ts";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type {
   DiscoveredLocalServerList,
@@ -120,6 +121,7 @@ export interface ContextMenuItem<T extends string = string> {
 export type QuitShortcutHintEvent =
   | { readonly state: "down"; readonly mode: Exclude<QuitConfirmationMode, "direct"> }
   | { readonly state: "up" };
+export type LegacyQuitShortcutHintEvent = "down" | "up";
 
 export interface ContextMenuItemSchemaType {
   readonly id: string;
@@ -640,7 +642,7 @@ export const DesktopPreviewNavStatusSchema = Schema.Union([
   }),
 ]);
 
-export const DesktopPreviewTabStateSchema: Schema.Codec<DesktopPreviewTabState> = Schema.Struct({
+export const DesktopPreviewTabStateSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
   webContentsId: Schema.NullOr(Schema.Int),
   navStatus: DesktopPreviewNavStatusSchema,
@@ -649,8 +651,8 @@ export const DesktopPreviewTabStateSchema: Schema.Codec<DesktopPreviewTabState> 
   zoomFactor: Schema.Number,
   pictureInPicture: Schema.Boolean,
   colorScheme: DesktopPreviewColorSchemeSchema,
-  audioMuted: Schema.Boolean,
-  audible: Schema.Boolean,
+  audioMuted: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  audible: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   controller: Schema.Literals(["human", "agent", "none"]),
   favicon: Schema.optionalKey(DesktopPreviewFaviconSchema),
   updatedAt: Schema.String,
@@ -1214,7 +1216,9 @@ export interface DesktopBridge {
    * Quit-confirmation hint pushes. Optional: older desktop builds never emit
    * them.
    */
-  onQuitShortcut?: (listener: (event: QuitShortcutHintEvent) => void) => () => void;
+  onQuitShortcut?: (
+    listener: (event: QuitShortcutHintEvent | LegacyQuitShortcutHintEvent) => void,
+  ) => () => void;
   getWindowFullscreenState: () => boolean;
   onWindowFullscreenStateChange: (listener: (fullscreen: boolean) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;

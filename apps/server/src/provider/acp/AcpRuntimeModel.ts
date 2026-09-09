@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import type * as EffectAcpSchema from "effect-acp/schema";
+import { stableStringify } from "@t3tools/shared/relaySigning";
 import { deriveToolActivityPresentation } from "@t3tools/shared/toolActivity";
 import type { ToolLifecycleItemType } from "@t3tools/contracts";
 
@@ -593,6 +594,16 @@ function toolCallOutputUnchanged(previous: AcpToolCallState, next: AcpToolCallSt
   );
 }
 
+function toolCallMetadataUnchanged(previous: AcpToolCallState, next: AcpToolCallState): boolean {
+  const {
+    content: _previousContent,
+    rawOutput: _previousOutput,
+    ...previousMetadata
+  } = previous.data;
+  const { content: _nextContent, rawOutput: _nextOutput, ...nextMetadata } = next.data;
+  return stableStringify(previousMetadata) === stableStringify(nextMetadata);
+}
+
 // Command tools keep `detail` equal to the command, so live stdout lives on
 // `data.content` / `data.rawOutput`. Measure that too, otherwise coalescing never
 // sees growth and in-progress output is held until completed/failed.
@@ -633,8 +644,16 @@ export function decideToolCallUpdateEmission(
   if (previous === undefined || previous.title !== next.title || previous.status !== next.status) {
     return { emit: true, skippedSinceEmit: 0 };
   }
-  if (previous.detail === next.detail && toolCallOutputUnchanged(previous, next)) {
+  const metadataUnchanged = toolCallMetadataUnchanged(previous, next);
+  if (
+    previous.detail === next.detail &&
+    toolCallOutputUnchanged(previous, next) &&
+    metadataUnchanged
+  ) {
     return { emit: false, skippedSinceEmit };
+  }
+  if (!metadataUnchanged) {
+    return { emit: true, skippedSinceEmit: 0 };
   }
   const progressLength = toolCallProgressLength(next);
   const grewMeaningfully =

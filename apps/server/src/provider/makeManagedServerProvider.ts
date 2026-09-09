@@ -127,15 +127,16 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       !forceRefresh &&
       input.checkProviderOnSettingsChange?.(previousSettings, nextSettings) === false
     ) {
-      const state = yield* Ref.get(snapshotStateRef);
-      const nextGeneration = state.enrichmentGeneration + 1;
-      yield* Ref.set(snapshotStateRef, {
-        ...state,
-        enrichmentGeneration: nextGeneration,
+      const [snapshot, nextGeneration] = yield* Ref.modify(snapshotStateRef, (state) => {
+        const nextGeneration = state.enrichmentGeneration + 1;
+        return [
+          [state.snapshot, nextGeneration] as const,
+          { ...state, enrichmentGeneration: nextGeneration },
+        ];
       });
       yield* Ref.set(settingsRef, nextSettings);
-      yield* restartSnapshotEnrichment(nextSettings, state.snapshot, nextGeneration);
-      return state.snapshot;
+      yield* restartSnapshotEnrichment(nextSettings, snapshot, nextGeneration);
+      return snapshot;
     }
 
     const nextSnapshot = yield* input.checkProvider;

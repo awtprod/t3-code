@@ -204,9 +204,7 @@ const OpenCodeSkillSchema = Schema.Struct({
   description: Schema.optionalKey(Schema.NullOr(Schema.String)),
   location: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
-const decodeOpenCodeSkillsCliOutputExit = Schema.decodeUnknownExit(
-  Schema.fromJsonString(Schema.Array(OpenCodeSkillSchema)),
-);
+const decodeOpenCodeSkillExit = Schema.decodeUnknownExit(OpenCodeSkillSchema);
 
 export interface OpenCodeRuntimeShape {
   /**
@@ -387,8 +385,17 @@ export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> {
 
 /** @internal */
 export function parseSkillsCliOutput(stdout: string): ReadonlyArray<OpenCodeSkill> {
-  const result = decodeOpenCodeSkillsCliOutputExit(stdout);
-  return Exit.isSuccess(result) ? result.value : [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((entry) => {
+    const result = decodeOpenCodeSkillExit(entry);
+    return Exit.isSuccess(result) ? [result.value] : [];
+  });
 }
 
 export function parseOpenCodeModelSlug(

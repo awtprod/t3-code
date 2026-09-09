@@ -57,6 +57,15 @@ describe("classifyModels", () => {
       ],
     );
   });
+
+  it("preserves existing classifications when the manifest omits the provider", () => {
+    const models = [model({ slug: "known-old", isLegacy: true }), model({ slug: "known-current" })];
+
+    assert.deepStrictEqual(
+      classifyModels(models, { version: 1, currentModels: {} }, CODEX),
+      models,
+    );
+  });
 });
 
 describe("resolveProviderCatalog", () => {
@@ -357,6 +366,36 @@ describe("ModelManifest service", () => {
           prefix: "model-manifest-optout-test",
           response: () => Response.json(REMOTE_MANIFEST),
           settings: { enableProviderUpdateChecks: false },
+        }),
+      ),
+    ),
+  );
+
+  it.live("does not fetch when update-check settings cannot be read", () =>
+    Effect.gen(function* () {
+      let fetchCount = 0;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const service = yield* make.pipe(
+        Effect.provideService(ServerSettings.ServerSettingsService, {
+          ...settings,
+          getSettings: Effect.die("settings unavailable"),
+        }),
+        Effect.provide(
+          httpClientLayer(() => {
+            fetchCount += 1;
+            return Response.json(REMOTE_MANIFEST);
+          }),
+        ),
+      );
+
+      assert.deepStrictEqual(yield* service.refresh, BUNDLED_MODEL_MANIFEST);
+      assert.strictEqual(fetchCount, 0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        serviceLayers({
+          prefix: "model-manifest-settings-failure-test",
+          response: () => Response.json(REMOTE_MANIFEST),
         }),
       ),
     ),

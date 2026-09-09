@@ -283,6 +283,18 @@ describe("parseSkillsCliOutput", () => {
   it("degrades malformed output to an empty skill list", () => {
     NodeAssert.deepEqual(parseSkillsCliOutput("not json"), []);
   });
+
+  it("keeps valid skills when another record is malformed", () => {
+    NodeAssert.deepEqual(
+      parseSkillsCliOutput(
+        JSON.stringify([
+          { name: "review-pr", description: "Review a pull request." },
+          { name: 42, description: "invalid" },
+        ]),
+      ),
+      [{ name: "review-pr", description: "Review a pull request." }],
+    );
+  });
 });
 
 describe("toOpenCodeFileParts", () => {

@@ -2942,7 +2942,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
-  it.effect("lets a child reply supersede an ask while ancestry lookup is retrying", () =>
+  it.effect("emits a child ask before its reply when ancestry lookup is retrying", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
       const threadId = asThreadId("thread-child-terminal-during-ancestry");
@@ -2971,7 +2971,8 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
             event.threadId === threadId &&
             (event.type === "request.opened" || event.type === "request.resolved"),
         ),
-        Stream.runHead,
+        Stream.take(2),
+        Stream.runCollect,
         Effect.forkChild,
       );
       yield* adapter.startSession({
@@ -2983,14 +2984,74 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       runtimeMock.state.transientErrorSessionIds.delete(childId);
       yield* advanceTestClock(250);
 
-      const terminal = Option.getOrUndefined(
+      const terminal = Array.from(
         yield* Fiber.join(terminalFiber).pipe(Effect.timeout("1 second")),
       );
-      NodeAssert.equal(terminal?.type, "request.resolved");
+      NodeAssert.deepEqual(
+        terminal.map((event) => event.type),
+        ["request.opened", "request.resolved"],
+      );
       const response = yield* Effect.exit(
         adapter.respondToRequest(threadId, ApprovalRequestId.make(request.id), "accept"),
       );
       NodeAssert.equal(Exit.isFailure(response), true);
+    }),
+  );
+
+  it.effect("preserves child question answers when the reply arrives during ancestry retry", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-child-question-during-ancestry");
+      const ancestryAttempted = promiseWithResolvers<void>();
+      const childId = "ses_question_child";
+      const request = questionRequest("que_terminal", childId);
+      runtimeMock.state.sessionParentById.set(childId, "http://127.0.0.1:9999/session");
+      runtimeMock.state.transientErrorSessionIds.add(childId);
+      runtimeMock.state.sessionGetObserved = (sessionID) => {
+        if (sessionID === childId) ancestryAttempted.resolve(undefined);
+      };
+      runtimeMock.state.subscribedEvents = [
+        { id: "evt-question-ask", type: "question.asked", properties: request },
+        {
+          id: "evt-question-reply",
+          type: "question.replied",
+          properties: {
+            sessionID: childId,
+            requestID: request.id,
+            answers: [["Workspace"]],
+          },
+        },
+      ];
+
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type === "user-input.requested" || event.type === "user-input.resolved"),
+        ),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "approval-required",
+      });
+      yield* Effect.promise(() => ancestryAttempted.promise);
+      runtimeMock.state.transientErrorSessionIds.delete(childId);
+      yield* advanceTestClock(250);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber).pipe(Effect.timeout("1 second")));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["user-input.requested", "user-input.resolved"],
+      );
+      const resolved = events[1];
+      if (resolved?.type !== "user-input.resolved") {
+        return NodeAssert.fail("expected user-input.resolved");
+      }
+      NodeAssert.deepEqual(resolved.payload.answers, { "question-0-scope": "Workspace" });
     }),
   );
 
@@ -3001,24 +3062,12 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const childId = "ses_terminal_retry_cap_child";
       const request = permissionRequest("per_terminal_retry_cap", childId);
       const terminalEvent = promiseWithResolvers<unknown>();
-      const askedAttempted = promiseWithResolvers<void>();
       const terminalAttempted = promiseWithResolvers<void>();
-      let terminalReleased = false;
       runtimeMock.state.transientErrorSessionIds.add(childId);
       runtimeMock.state.sessionGetObserved = (sessionID) => {
-        if (sessionID !== childId) {
-          return;
-        }
-        if (terminalReleased) {
-          terminalAttempted.resolve(undefined);
-        } else {
-          askedAttempted.resolve(undefined);
-        }
+        if (sessionID === childId) terminalAttempted.resolve(undefined);
       };
-      runtimeMock.state.subscribedEvents = [
-        { id: "evt-terminal-cap-ask", type: "permission.asked", properties: request },
-        terminalEvent.promise,
-      ];
+      runtimeMock.state.subscribedEvents = [terminalEvent.promise];
 
       const unexpectedRequestFiber = yield* adapter.streamEvents.pipe(
         Stream.filter(
@@ -3034,12 +3083,6 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         threadId,
         runtimeMode: "approval-required",
       });
-      yield* Effect.promise(() => askedAttempted.promise);
-      const askedAttempts = runtimeMock.state.sessionGetIds.filter(
-        (sessionID) => sessionID === childId,
-      ).length;
-
-      terminalReleased = true;
       terminalEvent.resolve({
         id: "evt-terminal-cap-reply",
         type: "permission.replied",
@@ -3050,7 +3093,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const callsAfterCap = runtimeMock.state.sessionGetIds.filter(
         (sessionID) => sessionID === childId,
       ).length;
-      NodeAssert.equal(callsAfterCap - askedAttempts, 5);
+      NodeAssert.equal(callsAfterCap, 5);
 
       yield* advanceTestClock(30_000);
       NodeAssert.equal(

@@ -20,7 +20,12 @@ export function QuitHoldOverlay() {
     let pressedMode: "hold" | "double-click" = "hold";
     const unsubscribe = subscribe((hint) => {
       window.clearTimeout(hideTimer);
-      if (hint.state === "down") {
+      if (hint === "down") {
+        pressedMode = "hold";
+        setVisibleMode("hold");
+        return;
+      }
+      if (hint !== "up" && hint.state === "down") {
         pressedMode = hint.mode;
         setVisibleMode(hint.mode);
         return;

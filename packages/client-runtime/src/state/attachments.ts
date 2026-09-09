@@ -197,9 +197,9 @@ export async function runAttachmentUploadCycle<E, RE>(input: {
     };
   }
 
-  const transfer = input.transport(url);
-  input.onTransferStart?.(transfer.abort);
   try {
+    const transfer = input.transport(url);
+    input.onTransferStart?.(transfer.abort);
     await transfer.done;
   } catch (error) {
     return { status: "failed", step: "transfer", attachmentId, error };

@@ -658,6 +658,48 @@ describe("Atom.fn mutation semantics", () => {
 });
 
 describe("executeAtomQuery", () => {
+  it.effect("restarts a pre-existing waiting refresh when fresh data is required", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const staleStarted = Latch.makeUnsafe();
+        const keepStalePending = Latch.makeUnsafe();
+        let executions = 0;
+        const atom = Atom.make(
+          Effect.suspend(() => {
+            executions += 1;
+            if (executions === 1) return Effect.succeed("cached");
+            if (executions === 2) {
+              staleStarted.openUnsafe();
+              return keepStalePending.await.pipe(Effect.as("stale"));
+            }
+            return Effect.succeed("fresh");
+          }),
+        );
+        const registry = AtomRegistry.make();
+        const unmount = registry.mount(atom);
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            unmount();
+            registry.dispose();
+          }),
+        );
+
+        expect(yield* AtomRegistry.getResult(registry, atom, { suspendOnWaiting: true })).toBe(
+          "cached",
+        );
+        registry.refresh(atom);
+        yield* staleStarted.await;
+        expect(registry.get(atom)).toMatchObject({ value: "cached", waiting: true });
+
+        const result = yield* Effect.promise(() =>
+          executeAtomQuery(registry, atom, { refresh: true }),
+        );
+        expect(result).toMatchObject({ _tag: "Success", value: "fresh" });
+        expect(executions).toBe(3);
+      }),
+    ),
+  );
+
   it("keeps concurrent query results correlated to their atoms", async () => {
     const firstLatch = Latch.makeUnsafe();
     const secondLatch = Latch.makeUnsafe();

@@ -396,6 +396,25 @@ describe("parseGrokLine", () => {
     expect(record?.dedupeKey).toBe("019fec1a-12f7-72f2-9b1f-7778a00aea3c:prompt-1:grok");
   });
 
+  it("falls back to aggregate usage when every model row is empty", () => {
+    const records = parseGrokLine(
+      turnCompleted({
+        modelUsage: {
+          "grok-4.5-build": {
+            inputTokens: 0,
+            outputTokens: 0,
+            cachedReadTokens: 0,
+            reasoningTokens: 0,
+          },
+        },
+      }),
+    );
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.model).toBe("grok");
+    expect(records[0]?.totals.uncachedInputTokens).toBe(20_272 - 11_264);
+  });
+
   it("pro-rates top-level cost ticks across multi-model turns without per-model ticks", () => {
     const records = parseGrokLine(
       turnCompleted({
@@ -534,6 +553,15 @@ describe("parseGrokLine", () => {
               reasoningTokens: 0,
               costUsdTicks: 0,
             },
+          },
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            cachedReadTokens: 0,
+            cacheCreationTokens: 0,
+            reasoningTokens: 0,
+            costUsdTicks: 0,
           },
         }),
       ),

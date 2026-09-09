@@ -15,6 +15,7 @@ export function videoMimeType(attachment: {
 }): string | null {
   const mimeType = attachment.mimeType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
   if (mimeType.startsWith("video/")) return mimeType;
+  if (mimeType !== "" && mimeType !== "application/octet-stream") return null;
   const dotIndex = attachment.name.lastIndexOf(".");
   return dotIndex < 0
     ? null

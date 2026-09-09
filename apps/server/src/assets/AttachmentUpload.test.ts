@@ -15,7 +15,10 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { base64UrlEncode, signPayload } from "../auth/utils.ts";
 import * as ServerConfig from "../config.ts";
-import { parseThreadSegmentFromAttachmentId } from "../attachmentStore.ts";
+import {
+  parseThreadSegmentFromAttachmentId,
+  PENDING_ATTACHMENT_THREAD_SEGMENT,
+} from "../attachmentStore.ts";
 import {
   ATTACHMENT_UPLOAD_ROUTE_PREFIX,
   deletePendingAttachment,
@@ -52,7 +55,9 @@ describe("AttachmentUpload", () => {
   it.effect("signs the attachment metadata and validates the upload token", () =>
     Effect.gen(function* () {
       const issued = yield* issueAttachmentUploadUrl(uploadInput);
-      expect(parseThreadSegmentFromAttachmentId(issued.attachmentId)).toBe("pending");
+      expect(parseThreadSegmentFromAttachmentId(issued.attachmentId)).toBe(
+        PENDING_ATTACHMENT_THREAD_SEGMENT,
+      );
 
       const token = issued.relativeUrl.slice(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`.length);
       expect(yield* validateAttachmentUploadToken(token)).toMatchObject({
@@ -115,7 +120,7 @@ describe("AttachmentUpload", () => {
   it.effect("removes expired pending uploads while issuing a new upload URL", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
-      const staleId = "pending-00000000-0000-4000-8000-0000000000cc";
+      const staleId = `${PENDING_ATTACHMENT_THREAD_SEGMENT}-00000000-0000-4000-8000-0000000000cc`;
       const stalePath = NodePath.join(config.attachmentsDir, `${staleId}.png`);
       NodeFS.writeFileSync(stalePath, Buffer.from("pixels"));
       NodeFS.utimesSync(stalePath, 0, 0);
@@ -230,20 +235,28 @@ describe("AttachmentUpload", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
-  it.effect("deletes pending uploads without deleting thread-owned copies", () =>
+  it.effect("deletes new pending uploads without deleting legacy or thread-owned files", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const uuid = "00000000-0000-4000-8000-0000000000dd";
-      const pendingPath = NodePath.join(config.attachmentsDir, `pending-${uuid}.png`);
+      const pendingId = `${PENDING_ATTACHMENT_THREAD_SEGMENT}-${uuid}`;
+      const pendingPath = NodePath.join(config.attachmentsDir, `${pendingId}.png`);
+      const legacyPendingPath = NodePath.join(config.attachmentsDir, `pending-${uuid}.png`);
+      const legacyRemappedPath = NodePath.join(config.attachmentsDir, `_pending-${uuid}.png`);
       const claimedPath = NodePath.join(config.attachmentsDir, `thread-1-${uuid}.png`);
-      NodeFS.writeFileSync(pendingPath, Buffer.from("pixels"));
-      NodeFS.writeFileSync(claimedPath, Buffer.from("pixels"));
+      for (const filePath of [pendingPath, legacyPendingPath, legacyRemappedPath, claimedPath]) {
+        NodeFS.writeFileSync(filePath, Buffer.from("pixels"));
+      }
 
+      yield* deletePendingAttachment(pendingId);
+      yield* deletePendingAttachment(pendingId);
       yield* deletePendingAttachment(`pending-${uuid}`);
-      yield* deletePendingAttachment(`pending-${uuid}`);
+      yield* deletePendingAttachment(`_pending-${uuid}`);
       yield* deletePendingAttachment(`thread-1-${uuid}`);
 
       expect(NodeFS.existsSync(pendingPath)).toBe(false);
+      expect(NodeFS.existsSync(legacyPendingPath)).toBe(true);
+      expect(NodeFS.existsSync(legacyRemappedPath)).toBe(true);
       expect(NodeFS.existsSync(claimedPath)).toBe(true);
     }).pipe(Effect.provide(testLayer)),
   );

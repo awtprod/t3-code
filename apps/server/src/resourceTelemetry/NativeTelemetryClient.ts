@@ -463,7 +463,10 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
           const nativeSnapshot = { generation, snapshot: event } satisfies NativeTelemetrySnapshot;
           const sampledAt = DateTime.makeUnsafe(event.sampledAtUnixMs);
           const healthChanged = yield* Ref.modify(state, (current) => [
-            current.status !== "healthy" || Option.isSome(current.lastError),
+            current.status !== "healthy" ||
+              Option.isSome(current.lastError) ||
+              Option.isNone(current.lastSampleAt) ||
+              DateTime.toEpochMillis(current.lastSampleAt.value) !== event.sampledAtUnixMs,
             {
               ...current,
               status: "healthy" as const,
@@ -489,7 +492,12 @@ export const make = Effect.fn("resourceTelemetry.nativeTelemetryClient.make")(fu
         return Effect.gen(function* () {
           const latestSnapshot = event.snapshots.at(-1);
           const healthChanged = yield* Ref.modify(state, (current) => [
-            current.status !== "healthy" || Option.isSome(current.lastError),
+            current.status !== "healthy" ||
+              Option.isSome(current.lastError) ||
+              (latestSnapshot !== undefined &&
+                (Option.isNone(current.lastSampleAt) ||
+                  DateTime.toEpochMillis(current.lastSampleAt.value) !==
+                    latestSnapshot.sampledAtUnixMs)),
             {
               ...current,
               status: "healthy" as const,

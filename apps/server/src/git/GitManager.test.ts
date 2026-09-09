@@ -15,7 +15,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as References from "effect/References";
 import * as Scope from "effect/Scope";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import { expect } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 import type {
   GitActionProgressEvent,
   GitPreparePullRequestThreadInput,
@@ -40,6 +40,41 @@ import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.t
 import * as ProviderRegistry from "../provider/Services/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitManager from "./GitManager.ts";
+
+const instructionReadSwap = vi.hoisted(() => ({
+  targetPath: null as string | null,
+  replacementPath: null as string | null,
+  targetFd: null as number | null,
+  executed: false,
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      const fd = (actual.openSync as (...openArgs: typeof args) => number)(...args);
+      if (args[0] === instructionReadSwap.targetPath) {
+        instructionReadSwap.targetFd = fd;
+      }
+      return fd;
+    },
+    fstatSync: (...args: Parameters<typeof actual.fstatSync>) => {
+      const info = (actual.fstatSync as (...statArgs: typeof args) => NodeFS.Stats)(...args);
+      if (
+        args[0] === instructionReadSwap.targetFd &&
+        instructionReadSwap.targetPath !== null &&
+        instructionReadSwap.replacementPath !== null &&
+        !instructionReadSwap.executed
+      ) {
+        actual.unlinkSync(instructionReadSwap.targetPath);
+        actual.symlinkSync(instructionReadSwap.replacementPath, instructionReadSwap.targetPath);
+        instructionReadSwap.executed = true;
+      }
+      return info;
+    },
+  };
+});
 
 interface FakeGhScenario {
   prListSequence?: string[];
@@ -2430,6 +2465,120 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         changeRequestInstructions: `Follow the repository's established change request title and body style when examples are available.\n\nLocal AGENTS.md:\n${agentInstructions}\n\nLocal CLAUDE.md:\n${claudeInstructions}`,
         inferRepositoryConventions: true,
       });
+    }),
+  );
+
+  it.effect("ignores oversized and symlinked repository instruction entries", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      const outsideDir = yield* makeTempDir("t3code-git-manager-outside-");
+      yield* runGit(repoDir, ["init", "--initial-branch=main"]);
+      yield* runGit(repoDir, ["config", "user.email", "test@example.com"]);
+      yield* runGit(repoDir, ["config", "user.name", "Test User"]);
+      const oversizedMarker = "OVERSIZED_INSTRUCTION_MARKER";
+      const symlinkMarker = "SYMLINKED_INSTRUCTION_MARKER";
+      NodeFS.writeFileSync(
+        NodePath.join(repoDir, "AGENTS.md"),
+        oversizedMarker.padEnd(20_001, "x"),
+      );
+      const outsideInstructions = NodePath.join(outsideDir, "outside-claude.md");
+      NodeFS.writeFileSync(outsideInstructions, symlinkMarker);
+      NodeFS.symlinkSync(outsideInstructions, NodePath.join(repoDir, "CLAUDE.md"));
+      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "hello\n");
+      yield* runGit(repoDir, ["add", "README.md"]);
+      let generatedPolicy: TextGeneration.CommitMessageGenerationInput["policy"] = undefined;
+
+      const { manager } = yield* makeManager({
+        serverSettings: {
+          textGenerationModelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-sonnet-4-6",
+          },
+          sourceControlWritingStyle: {
+            mode: "repo_conventions" as const,
+          },
+        },
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            generatedPolicy = input.policy;
+            return Effect.succeed({ subject: "Ignore unusable instructions", body: "" });
+          },
+        },
+      });
+      yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit",
+      });
+
+      expect(generatedPolicy).toEqual({
+        kind: "repo_conventions",
+        commitInstructions:
+          "Follow the repository's established commit message style when examples are available.",
+        changeRequestInstructions:
+          "Follow the repository's established change request title and body style when examples are available.",
+        inferRepositoryConventions: true,
+      });
+    }),
+  );
+
+  it.effect("does not reopen repository instructions swapped after descriptor metadata", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      const outsideDir = yield* makeTempDir("t3code-git-manager-outside-");
+      yield* runGit(repoDir, ["init", "--initial-branch=main"]);
+      yield* runGit(repoDir, ["config", "user.email", "test@example.com"]);
+      yield* runGit(repoDir, ["config", "user.name", "Test User"]);
+      const instructionPath = NodePath.join(repoDir, "AGENTS.md");
+      const safeInstructions = "SAFE_ORIGINAL_INSTRUCTION_MARKER";
+      const outsideMarker = "OUTSIDE_REPLACEMENT_INSTRUCTION_MARKER";
+      const outsideInstructions = NodePath.join(outsideDir, "oversized-agents.md");
+      NodeFS.writeFileSync(instructionPath, safeInstructions);
+      NodeFS.writeFileSync(outsideInstructions, outsideMarker.padEnd(20_001, "x"));
+      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "hello\n");
+      yield* runGit(repoDir, ["add", "README.md"]);
+      let generatedPolicy: TextGeneration.CommitMessageGenerationInput["policy"] = undefined;
+
+      const { manager } = yield* makeManager({
+        serverSettings: {
+          sourceControlWritingStyle: {
+            mode: "repo_conventions" as const,
+          },
+        },
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            generatedPolicy = input.policy;
+            return Effect.succeed({ subject: "Reject swapped instructions", body: "" });
+          },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        instructionReadSwap.targetPath = instructionPath;
+        instructionReadSwap.replacementPath = outsideInstructions;
+        yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+        });
+
+        expect(instructionReadSwap.executed).toBe(true);
+        expect(generatedPolicy).toEqual({
+          kind: "repo_conventions",
+          commitInstructions:
+            "Follow the repository's established commit message style when examples are available.",
+          changeRequestInstructions:
+            "Follow the repository's established change request title and body style when examples are available.",
+          inferRepositoryConventions: true,
+        });
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            instructionReadSwap.targetPath = null;
+            instructionReadSwap.replacementPath = null;
+            instructionReadSwap.targetFd = null;
+            instructionReadSwap.executed = false;
+          }),
+        ),
+      );
     }),
   );
 

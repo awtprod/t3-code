@@ -134,6 +134,7 @@ import {
   prepareQueuedMessageAttachments,
   recoverEditedCreationAfterDelivery,
   removeAcknowledgedExistingThreadMessage,
+  resolveQueuedMessageDispatchStep,
   restoreRejectedQueuedMessage,
 } from "./use-thread-outbox-drain";
 
@@ -322,6 +323,73 @@ describe("thread outbox attachment preparation", () => {
 });
 
 describe("thread outbox drain delivery cleanup", () => {
+  it("keeps an incomplete worktree creation queued before rejecting its file", async () => {
+    const message: QueuedThreadMessage = {
+      ...queuedMessage({
+        messageId: "incomplete-worktree-file",
+        text: "Finish this task",
+        fileUri: "file:///documents/t3-composer-attachments/task.pdf",
+      }),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
+      creation: {
+        projectId: ProjectId.make("project-1"),
+        workspaceMode: "worktree",
+        branch: null,
+        worktreePath: null,
+      },
+    };
+    await harness.manager.enqueue(message);
+
+    expect(
+      resolveQueuedMessageDispatchStep({
+        deliveryAction: "send",
+        queuedMessage: message,
+        serverConfig: { maxFileUploadBytes: undefined },
+      }),
+    ).toEqual({ step: "wait" });
+    expect(remainingMessages()).toEqual([message]);
+    expect(
+      composerDrafts.getComposerDraftSnapshot(
+        `new-task:${message.environmentId}:${message.creation!.projectId}`,
+      ),
+    ).toEqual({ text: "", attachments: [] });
+  });
+
+  it("keeps the remove action for an acknowledged creation and does not restore a draft", async () => {
+    const message: QueuedThreadMessage = {
+      ...queuedMessage({
+        messageId: "acknowledged-creation-file",
+        text: "Created already",
+        fileUri: "file:///documents/t3-composer-attachments/created.pdf",
+      }),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
+      creation: {
+        projectId: ProjectId.make("project-1"),
+        workspaceMode: "local",
+        branch: null,
+        worktreePath: null,
+      },
+    };
+    await harness.manager.enqueue(message);
+
+    expect(
+      resolveQueuedMessageDispatchStep({
+        deliveryAction: "remove",
+        queuedMessage: message,
+        serverConfig: { maxFileUploadBytes: undefined },
+      }),
+    ).toEqual({ step: "remove" });
+    await expect(
+      completeQueuedMessageDelivery(message, harness.manager.revisionOf(message.messageId)),
+    ).resolves.toBe("removed");
+    expect(remainingMessages()).toEqual([]);
+    expect(
+      composerDrafts.getComposerDraftSnapshot(
+        `new-task:${message.environmentId}:${message.creation!.projectId}`,
+      ),
+    ).toEqual({ text: "", attachments: [] });
+  });
+
   it("removes an acknowledged outbox item even when the sign-out archive write fails", async () => {
     const message = queuedMessage({ messageId: "archive-write-failure", text: "Delivered" });
     await harness.manager.enqueue(message);
@@ -493,7 +561,7 @@ describe("thread outbox delivered creation recovery", () => {
       expect(remainingMessages()).toEqual([newer]);
       expect(
         composerDrafts.getComposerDraftSnapshot(`${message.environmentId}:${message.threadId}`),
-      ).toMatchObject({ text: message.text, attachments: [] });
+      ).toMatchObject({ text: "", attachments: [] });
       expect(harness.removePersistedFile).not.toHaveBeenCalled();
     } finally {
       releaseRecovery.resolve();
@@ -555,11 +623,12 @@ describe("thread outbox delivered creation recovery", () => {
 
       await expect(recoverEditedCreationAfterDelivery(message)).resolves.toBe(false);
       expect(remainingMessages()).toEqual([message]);
+      composerDrafts.setComposerDraftText(draftKey, `${message.text}\n\ntext typed after recovery`);
 
       await expect(recoverEditedCreationAfterDelivery(message)).resolves.toBe(true);
 
       const draft = composerDrafts.getComposerDraftSnapshot(draftKey);
-      expect(draft.text).toBe(message.text);
+      expect(draft.text).toBe(`${message.text}\n\ntext typed after recovery`);
       expect(draft.attachments).toEqual(message.attachments);
       expect(remainingMessages()).toEqual([]);
       expect(harness.removePersistedFile).not.toHaveBeenCalled();

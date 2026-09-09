@@ -327,4 +327,34 @@ describe("mobile model options", () => {
     expect(resolve(null, null, sticky)).toBe(sticky);
     expect(resolve(null, null, null)).toBe(providerDefault.selection);
   });
+
+  it("does not implicitly select a legacy provider default or fallback", () => {
+    const legacyDefault = {
+      selection: { instanceId: ProviderInstanceId.make("codex"), model: "legacy-default" },
+      isDefault: true,
+      isLegacy: true,
+    } as ModelOption;
+    const current = {
+      selection: { instanceId: ProviderInstanceId.make("codex"), model: "current" },
+      isDefault: false,
+      isLegacy: false,
+    } as ModelOption;
+
+    expect(
+      resolveNewTaskModelSelection({
+        draftSelection: null,
+        projectDefaultSelection: null,
+        stickySelection: null,
+        modelOptions: [legacyDefault, current],
+      }),
+    ).toBe(current.selection);
+    expect(
+      resolveNewTaskModelSelection({
+        draftSelection: null,
+        projectDefaultSelection: null,
+        stickySelection: null,
+        modelOptions: [legacyDefault],
+      }),
+    ).toBeNull();
+  });
 });
