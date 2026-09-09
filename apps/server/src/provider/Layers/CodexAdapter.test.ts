@@ -2813,7 +2813,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         return;
       }
       NodeAssert.equal(firstEvent.value.payload.requestType, "mcp_elicitation_approval");
-      NodeAssert.equal(firstEvent.value.payload.appName, "Safari");
+      NodeAssert.equal(firstEvent.value.payload.appName, "computer-use");
       NodeAssert.equal(firstEvent.value.payload.detail, "Allow ChatGPT to use Safari?");
       NodeAssert.deepStrictEqual(firstEvent.value.payload.options, [
         { decision: "cancel", label: "Cancel" },

@@ -58,12 +58,14 @@ export function flushPendingTaskEditorWrite(input: {
           nextRevision: expectedRevision + (updated ? 1 : 0),
         };
       } catch (error) {
-        // A failed write does not advance the outbox, but later editor saves
-        // still need the expected revision handed off by its predecessor.
+        // The manager reserves its revision before the durable write so a
+        // concurrent cleanup cannot win while persistence is in flight. Keep
+        // that monotonic reservation even when the write fails, allowing a
+        // later editor save to retry from the handed-off revision.
         return {
           status: "failed",
           error,
-          nextRevision: expectedRevision,
+          nextRevision: expectedRevision + 1,
         };
       }
     },
