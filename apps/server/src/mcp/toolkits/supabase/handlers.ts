@@ -19,11 +19,15 @@ const callSupabase = Effect.fn("SupabaseToolkit.call")(function* (
     });
   }
   const connector = yield* SupabaseMcpConnector.SupabaseMcpConnector;
+  // `database` selects among the project's connections; it is never forwarded
+  // to Supabase, whose tools do not know the field.
+  const { database, ...remoteArgs } = args;
   const response = yield* connector.callTool({
     ...(invocation.projectId === undefined ? {} : { projectId: invocation.projectId }),
     ...(invocation.cwd === undefined ? {} : { cwd: invocation.cwd }),
+    ...(typeof database === "string" && database.trim().length > 0 ? { database } : {}),
     tool,
-    arguments: args,
+    arguments: remoteArgs,
   });
   const result = capOpaqueResult(response.result, {
     maxChars: MODEL_RESULT_LIMITS.supabaseChars,

@@ -35,7 +35,9 @@ it("records the committed static-context baseline", () => {
   };
   expect(baseline).toEqual({
     collaborationInstructions: { defaultBytes: 2_071, planBytes: 10_302 },
-    mcp: { toolCount: 36, schemaBytes: 23_519, toolkitCounts: [14, 13, 9] },
+    // 2026-09: +1,938 bytes for the optional `database` selector on the nine
+    // Supabase tools (multi-database projects).
+    mcp: { toolCount: 36, schemaBytes: 25_457, toolkitCounts: [14, 13, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

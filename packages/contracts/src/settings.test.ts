@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import { ProjectId } from "./baseSchemas.ts";
+import { type DatabaseConnectionId, ProjectId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
@@ -9,6 +9,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   ServerSettings,
   ServerSettingsPatch,
+  databaseConnectionDisplayName,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -245,25 +246,68 @@ describe("ServerSettings.databaseConnections", () => {
     expect(decodeServerSettings({}).databaseConnections).toEqual({});
   });
 
-  it("decodes and trims a project-scoped Supabase connection", () => {
+  it("decodes and trims a Supabase connection keyed by connection id", () => {
     const projectId = ProjectId.make("project-a");
     const decoded = decodeServerSettings({
       databaseConnections: {
-        [projectId]: {
+        "conn-1": {
           provider: "supabase",
+          projectId,
           workspaceRoot: "  /work/project-a  ",
+          label: "  staging ",
           projectRef: "  abcdefghijk  ",
           accessToken: "  sbp-token  ",
         },
       },
     });
-    expect(decoded.databaseConnections[projectId]).toEqual({
+    expect(decoded.databaseConnections["conn-1" as DatabaseConnectionId]).toEqual({
       provider: "supabase",
+      projectId,
       workspaceRoot: "/work/project-a",
+      label: "staging",
+      isDefault: false,
       projectRef: "abcdefghijk",
       readOnly: true,
       accessToken: "sbp-token",
     });
+  });
+
+  it("upgrades legacy project-keyed connections in place as the project's default", () => {
+    const projectId = ProjectId.make("legacy-project-id");
+    const decoded = decodeServerSettings({
+      databaseConnections: {
+        [projectId]: {
+          provider: "supabase",
+          workspaceRoot: "/work/web-app",
+          projectRef: "prodrefabcdefghijklm",
+          readOnly: true,
+          accessToken: "",
+          accessTokenRedacted: true,
+        },
+      },
+    });
+    // The key is preserved so the secret stored under it stays reachable.
+    expect(decoded.databaseConnections[projectId as string as DatabaseConnectionId]).toEqual({
+      provider: "supabase",
+      projectId,
+      workspaceRoot: "/work/web-app",
+      label: "",
+      isDefault: true,
+      projectRef: "prodrefabcdefghijklm",
+      readOnly: true,
+      accessToken: "",
+      accessTokenRedacted: true,
+    });
+    // Re-encoding writes the new shape, so the upgrade happens once.
+    expect(encodeServerSettings(decoded).databaseConnections?.[projectId]).toMatchObject({
+      projectId,
+      isDefault: true,
+    });
+  });
+
+  it("names a connection by label, falling back to the project ref", () => {
+    expect(databaseConnectionDisplayName({ label: "prod", projectRef: "abc" })).toBe("prod");
+    expect(databaseConnectionDisplayName({ label: "", projectRef: "abc" })).toBe("abc");
   });
 });
 

@@ -62,7 +62,7 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
-import { resolveSupabaseConnection } from "../../database/SupabaseMcpConnector.ts";
+import { resolveSupabaseConnectionsForScope } from "../../database/SupabaseMcpConnector.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import {
   bindSandboxProviderTarget,
@@ -272,21 +272,27 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   ) =>
     serverSettings.getSettings.pipe(
       Effect.map((settings) =>
-        resolveSupabaseConnection(settings.databaseConnections, {
+        resolveSupabaseConnectionsForScope(settings.databaseConnections, {
           ...(projectId === undefined ? {} : { projectId }),
           ...(cwd === undefined ? {} : { cwd }),
         }),
       ),
-      Effect.orElseSucceed(() => undefined),
-      Effect.flatMap((database) =>
+      Effect.orElseSucceed((): ReadonlyArray<never> => []),
+      Effect.flatMap((databases) =>
         McpSessionRegistry.issueActiveMcpCredential({
           threadId,
           providerInstanceId,
           ...(projectId === undefined ? {} : { projectId }),
           ...(cwd === undefined ? {} : { cwd }),
-          ...(database === undefined
+          // The credential covers every database the thread can reach; the
+          // connector still enforces read-only per connection at call time.
+          ...(databases.length === 0
             ? {}
-            : { databaseAccess: database.connection.readOnly ? "read" : "write" }),
+            : {
+                databaseAccess: databases.some((entry) => !entry.connection.readOnly)
+                  ? "write"
+                  : "read",
+              }),
         }),
       ),
       Effect.tap((credential) =>
