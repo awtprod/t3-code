@@ -33,6 +33,7 @@ import {
 import type { SandboxAdoptionHint } from "../../sandbox/types.ts";
 import { reconcileProviderStoreCursor } from "../../sandbox/providerStoreCursor.ts";
 import { asSandboxGitRemoteUrl } from "../../sandbox/SandboxGitIdentity.ts";
+import { resolveSandboxGitBase } from "../../sandbox/sandboxGitBase.ts";
 import { dispatchProvisionReadyOrTearDown } from "../../sandbox/provisionReadyDispatch.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -79,16 +80,15 @@ export const make = Effect.gen(function* () {
   const resolveTracking = Effect.fn("SandboxLifecycleReactor.resolveTracking")(function* (
     cwd: string,
   ) {
-    const local = yield* gitWorkflow.localStatus({ cwd });
-    if (!local.isRepo || local.refName === null)
-      return yield* new SandboxManagerError({
-        message: "Isolated threads require a Git repository with a selected branch.",
-      });
-    return yield* gitWorkflow.resolveRemoteTrackingCommit({
-      cwd,
-      refName: local.refName,
-      fallbackRemoteName: "origin",
-    });
+    return yield* resolveSandboxGitBase({ gitWorkflow, cwd }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new SandboxManagerError({
+            message: cause instanceof Error ? cause.message : String(cause),
+            cause,
+          }),
+      ),
+    );
   });
 
   /**
