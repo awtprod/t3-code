@@ -1,15 +1,20 @@
 name: Upstream sync
 
 on:
+  schedule:
+    # Daily, shortly after T3 Code's nightly publishes. Runs against the default branch.
+    - cron: "17 9 * * *"
   workflow_dispatch:
     inputs:
       upstream_ref:
         description: Exact fetched ref (refs/tags/... or refs/remotes/upstream/...)
-        required: true
+        required: false
+        default: refs/remotes/upstream/main
         type: string
       expected_commit:
-        description: Full 40-character commit expected at that ref
-        required: true
+        description: Optional full 40-character commit the ref must resolve to
+        required: false
+        default: ""
         type: string
 
 concurrency:
@@ -17,14 +22,21 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
+env:
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'refs/remotes/upstream/main' }}
+  EXPECTED_COMMIT: ${{ inputs.expected_commit || '' }}
+  SYNC_BOT_NAME: github-actions[bot]
+  SYNC_BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+
 jobs:
   sync:
-    name: Validate, verify, and draft sync PR
+    name: Check for conflicts and open the sync PR
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - name: Checkout the public fork
         uses: actions/checkout@v6
@@ -43,37 +55,105 @@ jobs:
             '+refs/heads/*:refs/remotes/upstream/*' \
             '+refs/tags/*:refs/tags/*'
 
-      - name: Validate the exact target and ancestry
+      - name: Validate the target and its ancestry
         id: plan
-        env:
-          UPSTREAM_REF: ${{ inputs.upstream_ref }}
-          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
         run: |
-          node scripts/command-center/upstream-sync.ts plan \
-            --upstream-ref "$UPSTREAM_REF" \
-            --expected-commit "$EXPECTED_COMMIT" \
-            --github-output "$GITHUB_OUTPUT"
+          args=(--upstream-ref "$UPSTREAM_REF" --github-output "$GITHUB_OUTPUT")
+          if [ -n "$EXPECTED_COMMIT" ]; then
+            args+=(--expected-commit "$EXPECTED_COMMIT")
+          fi
+          node scripts/command-center/upstream-sync.ts plan "${args[@]}"
 
-      - name: Refuse to replace an existing sync branch
+      - name: Record a no-op
+        if: steps.plan.outputs.status == 'already-contained'
+        run: |
+          echo "main already contains upstream ${{ steps.plan.outputs.target_commit }}; nothing to sync." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Refuse to discard human work on the sync branch
         if: steps.plan.outputs.status == 'needs-sync'
+        id: existing
         env:
           BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
         run: |
-          if git ls-remote --exit-code --heads origin "$BRANCH_NAME"; then
-            echo "A sync branch already exists; review or remove it before dispatching again." >&2
+          existing="$(git ls-remote --heads origin "refs/heads/$BRANCH_NAME" | cut -f1)"
+          echo "sha=$existing" >> "$GITHUB_OUTPUT"
+          if [ -z "$existing" ]; then
+            exit 0
+          fi
+          git fetch --force origin "+refs/heads/$BRANCH_NAME:refs/remotes/origin/$BRANCH_NAME"
+          # First-parent only: the merged upstream commits are not this branch's own work.
+          foreign="$(git log --first-parent --format='%h %ae %s' "origin/$BRANCH_NAME" --not origin/main \
+            | grep -F -v " $SYNC_BOT_EMAIL " || true)"
+          if [ -n "$foreign" ]; then
+            {
+              echo "## Sync branch has commits that were not written by this workflow"
+              echo
+              echo "Refusing to rebuild \`$BRANCH_NAME\`. Merge or close its pull request, or delete the branch, and the next run will recreate it."
+              echo
+              echo '```'
+              echo "$foreign"
+              echo '```'
+            } | tee -a "$GITHUB_STEP_SUMMARY" >&2
             exit 1
           fi
+
+      - name: Check the upstream delta for merge conflicts
+        if: steps.plan.outputs.status == 'needs-sync'
+        env:
+          TARGET_COMMIT: ${{ steps.plan.outputs.target_commit }}
+          MERGE_BASE: ${{ steps.plan.outputs.merge_base }}
+        run: |
+          set +e
+          result="$(git merge-tree --write-tree --name-only main "$TARGET_COMMIT")"
+          status=$?
+          set -e
+          case "$status" in
+            0) echo "Upstream ${TARGET_COMMIT:0:12} merges cleanly into main." ;;
+            1)
+              {
+                echo "## Upstream ${TARGET_COMMIT:0:12} conflicts with Command Center"
+                echo
+                echo "No branch or pull request was created. Resolve these by hand (branch from main, merge \`$TARGET_COMMIT\`, open a PR) or wait for a later upstream commit."
+                echo
+                echo "Commits since the last integrated upstream point: $(git rev-list --count "$MERGE_BASE..$TARGET_COMMIT")"
+                echo
+                echo "Conflicting paths:"
+                echo '```'
+                echo "$result" | tail -n +2
+                echo '```'
+              } | tee -a "$GITHUB_STEP_SUMMARY" >&2
+              exit 1
+              ;;
+            *) echo "git merge-tree failed with status $status" >&2; exit "$status" ;;
+          esac
 
       - name: Merge upstream into an isolated branch
         if: steps.plan.outputs.status == 'needs-sync'
         env:
           BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
           TARGET_COMMIT: ${{ steps.plan.outputs.target_commit }}
+          MERGE_BASE: ${{ steps.plan.outputs.merge_base }}
         run: |
-          git config user.name github-actions[bot]
-          git config user.email command-center-sync@example.test
-          git switch --create "$BRANCH_NAME"
-          git merge --no-ff --no-edit "$TARGET_COMMIT"
+          git config user.name "$SYNC_BOT_NAME"
+          git config user.email "$SYNC_BOT_EMAIL"
+          git switch --force-create "$BRANCH_NAME" main
+          count="$(git rev-list --count "$MERGE_BASE..$TARGET_COMMIT")"
+          git merge --no-ff "$TARGET_COMMIT" \
+            -m "sync: integrate T3 Code upstream ${TARGET_COMMIT:0:12} ($count commits)"
+
+      - name: Refuse colliding migration numbers
+        if: steps.plan.outputs.status == 'needs-sync'
+        run: |
+          duplicates="$(ls apps/server/src/persistence/Migrations \
+            | grep -v '\.test\.ts$' | sed -E 's/^([0-9]+)_.*/\1/' | sort | uniq -d)"
+          if [ -n "$duplicates" ]; then
+            {
+              echo "## Upstream migrations collide with Command Center migration numbers"
+              echo
+              echo "Duplicate prefixes: $duplicates. Renumber upstream's migrations after the fork's highest before syncing."
+            } | tee -a "$GITHUB_STEP_SUMMARY" >&2
+            exit 1
+          fi
 
       - name: Setup Vite+
         if: steps.plan.outputs.status == 'needs-sync'
@@ -106,45 +186,63 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_VERSION: 8.30.1
 
-      - name: Verify upstream and Command Center behavior
+      - name: Advance the public baseline to the sync merge
         if: steps.plan.outputs.status == 'needs-sync'
         run: |
-          vp check
-          vpr typecheck
-          vp run test
-          vp run build:desktop
-
-      - name: Advance the baseline only after the upstream delta passes
-        if: steps.plan.outputs.status == 'needs-sync'
-        env:
-          TARGET_COMMIT: ${{ steps.plan.outputs.target_commit }}
-        run: |
+          # The baseline pins the merge commit, not the upstream commit: the fork's history was
+          # squash-imported, so the leak scan's first-parent walk from an upstream commit would
+          # cover the entire fork history instead of just the delta since this sync.
           node scripts/command-center/upstream-sync.ts advance-baseline \
-            --expected-commit "$TARGET_COMMIT"
+            --expected-commit "$(git rev-parse HEAD)"
           git add .command-center-public-baseline
           git commit -m "chore: advance public upstream baseline"
 
-      - name: Push the reviewed sync candidate
+      - name: Push the sync candidate
         if: steps.plan.outputs.status == 'needs-sync'
         env:
           BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
-        run: git push --set-upstream origin "$BRANCH_NAME"
+          EXISTING_SHA: ${{ steps.existing.outputs.sha }}
+        run: |
+          git push --force-with-lease="refs/heads/$BRANCH_NAME:$EXISTING_SHA" \
+            origin "HEAD:refs/heads/$BRANCH_NAME"
 
-      - name: Open a draft sync pull request
+      - name: Open or refresh the sync pull request
         if: steps.plan.outputs.status == 'needs-sync'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
-          UPSTREAM_REF: ${{ inputs.upstream_ref }}
           TARGET_COMMIT: ${{ steps.plan.outputs.target_commit }}
+          MERGE_BASE: ${{ steps.plan.outputs.merge_base }}
         run: |
-          gh pr create \
-            --base main \
-            --head "$BRANCH_NAME" \
-            --draft \
-            --title "chore: sync T3 Code upstream ${TARGET_COMMIT:0:12}" \
-            --body "Manual upstream sync from \`$UPSTREAM_REF\` at \`$TARGET_COMMIT\`. The workflow validated ancestry from the pinned public baseline and completed the public-boundary, check, type, test, and desktop-build gates. Preserve the upstream MIT license and attribution during review."
+          count="$(git rev-list --count "$MERGE_BASE..$TARGET_COMMIT")"
+          title="sync: bring Command Center up to T3 Code ${TARGET_COMMIT:0:12}"
+          body="$(cat <<EOF
+          Command Center is behind T3 Code upstream by $count commits. Left alone, the gap grows until an upstream sync becomes a multi-day conflict resolution.
 
-      - name: Record a no-op
-        if: steps.plan.outputs.status == 'already-contained'
-        run: echo "The exact requested upstream commit is already contained in main; no branch or PR was created."
+          This is the daily automated sync from \`$UPSTREAM_REF\` at \`$TARGET_COMMIT\`. The workflow verified that the target descends from the original T3 Code baseline, confirmed the delta merges into \`main\` with no conflicts, checked that no migration numbers collide, and ran the public-boundary and secret scans against the complete upstream delta before pushing. CI runs on this branch as the build, type, and test gate.
+
+          Review for preserved Command Center contracts, privacy boundaries, migrations, and T3 Code attribution before merging. The branch is rebuilt from \`main\` on every run until this PR is merged or closed; commits pushed by anyone other than the workflow stop it from being rebuilt.
+
+          Upstream changes: https://github.com/pingdotgg/t3code/compare/${MERGE_BASE:0:12}...${TARGET_COMMIT:0:12}
+
+          _Opened by the Upstream sync GitHub Actions workflow._
+          EOF
+          )"
+          existing="$(gh pr list --head "$BRANCH_NAME" --base main --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "$title" --body "$body"
+            echo "Refreshed pull request #$existing for $BRANCH_NAME." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            gh pr create --base main --head "$BRANCH_NAME" --title "$title" --body "$body" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run CI on the sync branch
+        if: steps.plan.outputs.status == 'needs-sync'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
+        run: |
+          # Pushes and PRs made with GITHUB_TOKEN do not trigger other workflows, so start CI
+          # explicitly; its check runs attach to the branch head and show on the pull request.
+          gh workflow run ci.yml --ref "$BRANCH_NAME"

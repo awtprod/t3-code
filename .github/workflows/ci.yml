@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - main
+  # The upstream-sync workflow pushes with GITHUB_TOKEN, which never triggers other workflows,
+  # so it dispatches CI on its branch explicitly.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
