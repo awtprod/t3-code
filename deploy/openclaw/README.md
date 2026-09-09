@@ -22,6 +22,7 @@ provider homes. Install the pinned service-owned CLIs with `sudo ./install-provi
 authenticate `codex-primary`, `codex-secondary`, `claude-primary`, `claude-secondary`, `kimi-primary`, and
 `kimi-secondary` deliberately. The wrappers put the matching GitHub profile and provider home in the
 process environment and fail closed when an instance name is not mapped.
+Keep the host installer and workspace sandbox image on the same provider CLI versions when updating them.
 
 The provisioner installs `command-center.candidate.service`, not the live unit. Promoting it,
 stopping legacy services, and changing the Tailscale root route are cutover actions and require the
