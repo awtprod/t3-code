@@ -39,6 +39,7 @@ import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.t
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+const isSandboxGitBaseUnavailableError = Schema.is(SandboxGitBaseUnavailableError);
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
@@ -433,7 +434,7 @@ export const make = Effect.gen(function* () {
         cwd: project.workspaceRoot,
       }).pipe(
         Effect.mapError((cause) =>
-          cause instanceof SandboxGitBaseUnavailableError
+          isSandboxGitBaseUnavailableError(cause)
             ? new OrchestrationDispatchCommandError({ message: cause.message })
             : toDispatchCommandError(cause, "Failed to resolve the sandbox Git base"),
         ),
