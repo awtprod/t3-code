@@ -22,12 +22,12 @@ import {
   ProjectId,
   ProviderUploadFeedbackInput,
   type ProviderInstanceId,
-  type ProviderInstanceConfig,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderTurnTargetIdentity,
 } from "@t3tools/contracts";
+import { resolveProviderInstanceGitHubIdentity } from "../githubProvisioningIdentity.ts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -63,7 +63,7 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
-import { resolveSupabaseConnection } from "../../database/SupabaseMcpConnector.ts";
+import { resolveSupabaseConnectionsForScope } from "../../database/SupabaseMcpConnector.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import {
   bindSandboxProviderTarget,
@@ -78,32 +78,7 @@ import {
 import { commandCenterProviderIsolationIssue } from "../security/CommandCenterProviderIsolation.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
-export function resolveProviderInstanceGitHubIdentity(
-  instanceId: ProviderInstanceId,
-  instance: ProviderInstanceConfig | undefined,
-): string | undefined {
-  const configured = instance?.environment?.find(
-    (variable) =>
-      variable.name === "COMMAND_CENTER_GITHUB_IDENTITY" && variable.valueRedacted !== true,
-  )?.value;
-  if (configured && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(configured.trim())) {
-    return configured.trim();
-  }
-  const config = instance?.config;
-  const binaryPath =
-    typeof config === "object" && config !== null && "binaryPath" in config
-      ? (config as { readonly binaryPath?: unknown }).binaryPath
-      : undefined;
-  const candidates = [
-    typeof binaryPath === "string" ? binaryPath.split("/").pop() : undefined,
-    instanceId,
-  ];
-  for (const candidate of candidates) {
-    const identity = /-([a-z0-9][a-z0-9_-]{0,63})$/i.exec(candidate ?? "")?.[1];
-    if (identity) return identity;
-  }
-  return undefined;
-}
+export { resolveProviderInstanceGitHubIdentity };
 
 /**
  * Hook for tests that want to override the canonical event logger pulled
@@ -349,23 +324,29 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
       // Command Center: scope the Supabase database tools on the MCP server to
       // the connection configured for this project/cwd, if any.
-      const database = yield* serverSettings.getSettings.pipe(
+      const databases = yield* serverSettings.getSettings.pipe(
         Effect.map((settings) =>
-          resolveSupabaseConnection(settings.databaseConnections, {
+          resolveSupabaseConnectionsForScope(settings.databaseConnections, {
             ...(projectId === undefined ? {} : { projectId }),
             ...(cwd === undefined ? {} : { cwd }),
           }),
         ),
-        Effect.orElseSucceed(() => undefined),
+        Effect.orElseSucceed((): ReadonlyArray<never> => []),
       );
       const credential = yield* issueMcpCredential({
         threadId,
         providerInstanceId,
         ...(projectId === undefined ? {} : { projectId }),
         ...(cwd === undefined ? {} : { cwd }),
-        ...(database === undefined
+        // The credential covers every database the thread can reach; the
+        // connector still enforces read-only per connection at call time.
+        ...(databases.length === 0
           ? {}
-          : { databaseAccess: database.connection.readOnly ? "read" : "write" }),
+          : {
+              databaseAccess: databases.some((entry) => !entry.connection.readOnly)
+                ? "write"
+                : "read",
+            }),
       });
       if (credential) {
         yield* Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config));

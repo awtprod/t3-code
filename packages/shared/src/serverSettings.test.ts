@@ -4,6 +4,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
+  DatabaseConnectionId,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import { describe, expect, it } from "vite-plus/test";
@@ -305,9 +306,12 @@ describe("serverSettings helpers", () => {
     const current = {
       ...DEFAULT_SERVER_SETTINGS,
       databaseConnections: {
-        [projectA]: {
+        [DatabaseConnectionId.make("conn-a")]: {
           provider: "supabase" as const,
+          projectId: projectA,
           workspaceRoot: "/work/a",
+          label: "",
+          isDefault: true,
           projectRef: "supabase-a",
           readOnly: true,
           accessToken: "",
@@ -316,9 +320,12 @@ describe("serverSettings helpers", () => {
       },
     };
     const replacement = {
-      [projectB]: {
+      [DatabaseConnectionId.make("conn-b")]: {
         provider: "supabase" as const,
+        projectId: projectB,
         workspaceRoot: "/work/b",
+        label: "prod",
+        isDefault: true,
         projectRef: "supabase-b",
         readOnly: false,
         accessToken: "replacement",

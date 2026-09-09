@@ -35,5 +35,15 @@ case "$identity" in
   *) echo "gh: unknown GitHub identity '$identity'" >&2; exit 77 ;;
 esac
 
+# GH_TOKEN/GITHUB_TOKEN in the environment take precedence over the identity's stored credential,
+# so whatever token the session was launched with wins no matter which workspace we are standing in.
+# That silently defeats the identity mapping above, and in practice the env token is a narrower
+# classic PAT: 'repo' only, so `gh pr edit` fails on read:org and pushes touching .github/workflows
+# are rejected for want of 'workflow'. Drop them when the identity has its own hosts.yml, and keep
+# them as the fallback for a host that was never `gh auth login`-ed.
+if [ -s "$GH_CONFIG_DIR/hosts.yml" ]; then
+  unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+fi
+
 export GH_CONFIG_DIR COMMAND_CENTER_GITHUB_IDENTITY=$identity
 exec /usr/bin/gh "$@"

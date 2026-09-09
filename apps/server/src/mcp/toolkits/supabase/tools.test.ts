@@ -4,7 +4,7 @@ import { Tool } from "effect/unstable/ai";
 
 import { SupabaseToolkit } from "./tools.ts";
 
-it("exposes project-scoped Supabase tools without credential or project selectors", () => {
+it("exposes project-scoped Supabase tools with a database selector but no credential inputs", () => {
   const tools = Object.values(SupabaseToolkit.tools);
   const names = tools.map((tool) => tool.name);
 
@@ -22,16 +22,21 @@ it("exposes project-scoped Supabase tools without credential or project selector
 
   for (const tool of tools) {
     const schema = Tool.getJsonSchema(tool) as {
+      readonly required?: ReadonlyArray<string>;
       readonly properties?: Readonly<Record<string, unknown>>;
     };
     expect(schema.properties ?? {}).not.toHaveProperty("projectRef");
     expect(schema.properties ?? {}).not.toHaveProperty("accessToken");
+    // Optional on every tool so a project with staging and prod can be addressed.
+    expect(schema.properties ?? {}).toHaveProperty("database");
+    expect(schema.required ?? []).not.toContain("database");
     expect(Context.get(tool.annotations, Tool.OpenWorld)).toBe(true);
   }
 
   const listTables = tools.find((tool) => tool.name === "supabase_list_tables")!;
   const listTablesSchema = Tool.getJsonSchema(listTables) as {
     readonly type?: string;
+    readonly required?: ReadonlyArray<string>;
     readonly properties?: Readonly<Record<string, unknown>>;
   };
   expect(listTablesSchema.type).toBe("object");

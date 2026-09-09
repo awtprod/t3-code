@@ -134,8 +134,8 @@ function providerEnvironmentSecretName(input: {
   return `provider-env-${Buffer.from(input.instanceId, "utf8").toString("base64url")}-${Buffer.from(input.name, "utf8").toString("base64url")}`;
 }
 
-function databaseConnectionSecretName(projectId: string): string {
-  return `database-supabase-${Buffer.from(projectId, "utf8").toString("base64url")}`;
+function databaseConnectionSecretName(connectionId: string): string {
+  return `database-supabase-${Buffer.from(connectionId, "utf8").toString("base64url")}`;
 }
 
 function redactProviderEnvironmentVariable(
@@ -175,8 +175,8 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
     ]),
   );
   const databaseConnections = Object.fromEntries(
-    Object.entries(settings.databaseConnections).map(([projectId, connection]) => [
-      projectId,
+    Object.entries(settings.databaseConnections).map(([connectionId, connection]) => [
+      connectionId,
       redactDatabaseConnection(connection),
     ]),
   );
@@ -553,7 +553,7 @@ const make = Effect.gen(function* () {
               operation: error.operation,
               providerInstanceId: error.providerInstanceId,
               environmentVariable: error.environmentVariable,
-              databaseProjectId: error.databaseProjectId,
+              databaseConnectionId: error.databaseConnectionId,
               cause: error.cause,
             }).pipe(Effect.as(settings)),
           ),
@@ -670,20 +670,20 @@ const make = Effect.gen(function* () {
       const databaseConnections: Record<string, DatabaseConnection> = {
         ...settings.databaseConnections,
       };
-      for (const [projectId, connection] of Object.entries(settings.databaseConnections)) {
+      for (const [connectionId, connection] of Object.entries(settings.databaseConnections)) {
         if (!connection.accessTokenRedacted) continue;
-        const secret = yield* secretStore.get(databaseConnectionSecretName(projectId)).pipe(
+        const secret = yield* secretStore.get(databaseConnectionSecretName(connectionId)).pipe(
           Effect.mapError(
             (cause) =>
               new ServerSettingsError({
                 settingsPath,
                 operation: "read-secret",
-                databaseProjectId: projectId,
+                databaseConnectionId: connectionId,
                 cause,
               }),
           ),
         );
-        databaseConnections[projectId] = {
+        databaseConnections[connectionId] = {
           ...connection,
           accessToken: Option.isSome(secret) ? textDecoder.decode(secret.value) : "",
         };
@@ -702,11 +702,11 @@ const make = Effect.gen(function* () {
       const databaseConnections: Record<string, DatabaseConnection> = {};
       const nextSecretKeys = new Set<string>();
 
-      for (const [projectId, connection] of Object.entries(next.databaseConnections)) {
-        const secretName = databaseConnectionSecretName(projectId);
+      for (const [connectionId, connection] of Object.entries(next.databaseConnections)) {
+        const secretName = databaseConnectionSecretName(connectionId);
         if (connection.accessTokenRedacted) {
           nextSecretKeys.add(secretName);
-          databaseConnections[projectId] = redactDatabaseConnection(connection);
+          databaseConnections[connectionId] = redactDatabaseConnection(connection);
           continue;
         }
 
@@ -717,13 +717,13 @@ const make = Effect.gen(function* () {
                 new ServerSettingsError({
                   settingsPath,
                   operation: "write-secret",
-                  databaseProjectId: projectId,
+                  databaseConnectionId: connectionId,
                   cause,
                 }),
             ),
           );
           nextSecretKeys.add(secretName);
-          databaseConnections[projectId] = {
+          databaseConnections[connectionId] = {
             ...connection,
             accessToken: "",
             accessTokenRedacted: true,
@@ -737,17 +737,17 @@ const make = Effect.gen(function* () {
               new ServerSettingsError({
                 settingsPath,
                 operation: "remove-secret",
-                databaseProjectId: projectId,
+                databaseConnectionId: connectionId,
                 cause,
               }),
           ),
         );
         const { accessTokenRedacted: _omit, ...withoutRedaction } = connection;
-        databaseConnections[projectId] = withoutRedaction;
+        databaseConnections[connectionId] = withoutRedaction;
       }
 
-      for (const projectId of Object.keys(current.databaseConnections)) {
-        const secretName = databaseConnectionSecretName(projectId);
+      for (const connectionId of Object.keys(current.databaseConnections)) {
+        const secretName = databaseConnectionSecretName(connectionId);
         if (nextSecretKeys.has(secretName)) continue;
         yield* secretStore.remove(secretName).pipe(
           Effect.mapError(
@@ -755,7 +755,7 @@ const make = Effect.gen(function* () {
               new ServerSettingsError({
                 settingsPath,
                 operation: "remove-stale-secret",
-                databaseProjectId: projectId,
+                databaseConnectionId: connectionId,
                 cause,
               }),
           ),

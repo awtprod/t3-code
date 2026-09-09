@@ -2,7 +2,13 @@ import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { PositiveInt, ProjectId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import {
+  DatabaseConnectionId,
+  PositiveInt,
+  ProjectId,
+  TrimmedNonEmptyString,
+  TrimmedString,
+} from "./baseSchemas.ts";
 import { ThreadEnvMode } from "./environment.ts";
 import {
   DEFAULT_TEXT_GENERATION_MODEL,
@@ -663,7 +669,17 @@ export type ObservabilitySettings = typeof ObservabilitySettings.Type;
 
 export const SupabaseDatabaseConnection = Schema.Struct({
   provider: Schema.Literal("supabase"),
+  /** Local project this database belongs to. A project may have several. */
+  projectId: ProjectId,
   workspaceRoot: TrimmedNonEmptyString,
+  /**
+   * Human name the agent selects the database by ("staging", "prod"). Empty
+   * for connections created before labels existed; the project ref is shown
+   * and matched instead.
+   */
+  label: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Used when a thread does not name a database. At most one per project. */
+  isDefault: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   projectRef: TrimmedNonEmptyString,
   readOnly: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   accessToken: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -673,6 +689,51 @@ export type SupabaseDatabaseConnection = typeof SupabaseDatabaseConnection.Type;
 
 export const DatabaseConnection = SupabaseDatabaseConnection;
 export type DatabaseConnection = typeof DatabaseConnection.Type;
+
+const DatabaseConnectionRecord = Schema.Record(DatabaseConnectionId, DatabaseConnection);
+
+/**
+ * Settings files written before multi-database support keyed the map by
+ * project id and carried no `projectId` field. Those entries keep their key,
+ * so the secret stored under it stays reachable, and become the project's
+ * default connection.
+ */
+export function normalizeLegacyDatabaseConnections(
+  raw: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return Object.fromEntries(
+    Object.entries(raw).map(([key, value]) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return [key, value];
+      const entry = value as Record<string, unknown>;
+      if (typeof entry.projectId === "string") return [key, value];
+      return [key, { ...entry, projectId: key, isDefault: entry.isDefault ?? true }];
+    }),
+  );
+}
+
+/** Map of connection id to database connection; decodes the legacy shape too. */
+export const DatabaseConnections = Schema.Record(Schema.String, Schema.Unknown).pipe(
+  Schema.decodeTo(
+    DatabaseConnectionRecord,
+    SchemaTransformation.transform<
+      typeof DatabaseConnectionRecord.Encoded,
+      Readonly<Record<string, unknown>>
+    >({
+      decode: (raw) =>
+        normalizeLegacyDatabaseConnections(raw) as typeof DatabaseConnectionRecord.Encoded,
+      encode: (connections) => connections,
+    }),
+  ),
+);
+export type DatabaseConnections = typeof DatabaseConnections.Type;
+
+/** Name shown for a connection and matched by the agent's `database` selector. */
+export function databaseConnectionDisplayName(connection: {
+  readonly label: string;
+  readonly projectRef: string;
+}): string {
+  return connection.label.length > 0 ? connection.label : connection.projectRef;
+}
 
 export const SourceControlWritingStyleMode = Schema.Literals([
   "repo_conventions",
@@ -836,9 +897,7 @@ export const ServerSettings = Schema.Struct({
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
-  databaseConnections: Schema.Record(ProjectId, DatabaseConnection).pipe(
-    Schema.withDecodingDefault(Effect.succeed({})),
-  ),
+  databaseConnections: DatabaseConnections.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   usagePricingOverrides: Schema.Array(UsagePricingOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -920,7 +979,7 @@ export class ServerSettingsError extends Schema.TaggedErrorClass<ServerSettingsE
     operation: ServerSettingsOperation,
     providerInstanceId: Schema.optional(Schema.String),
     environmentVariable: Schema.optional(Schema.String),
-    databaseProjectId: Schema.optional(Schema.String),
+    databaseConnectionId: Schema.optional(Schema.String),
     cause: Schema.Defect(),
   },
 ) {
@@ -932,7 +991,9 @@ export class ServerSettingsError extends Schema.TaggedErrorClass<ServerSettingsE
         ? ""
         : ` and environment variable ${this.environmentVariable}`;
     const database =
-      this.databaseProjectId === undefined ? "" : ` for database project ${this.databaseProjectId}`;
+      this.databaseConnectionId === undefined
+        ? ""
+        : ` for database connection ${this.databaseConnectionId}`;
     return `Server settings ${this.operation} failed${provider}${variable}${database} at ${this.settingsPath}.`;
   }
 }
@@ -1058,7 +1119,7 @@ export const ServerSettingsPatch = Schema.Struct({
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
   // Database bindings are also replaced as a whole. Credentials in redacted
   // entries are materialized and persisted by the server settings service.
-  databaseConnections: Schema.optionalKey(Schema.Record(ProjectId, DatabaseConnection)),
+  databaseConnections: Schema.optionalKey(DatabaseConnections),
   usagePricingOverrides: Schema.optionalKey(Schema.Array(UsagePricingOverride)),
   worktreeCleanupAfterDays: Schema.optionalKey(Schema.NullOr(PositiveInt)),
 });

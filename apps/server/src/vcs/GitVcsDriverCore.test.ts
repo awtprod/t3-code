@@ -199,15 +199,35 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
 
     assert.deepStrictEqual(commands, [
       {
-        args: [...HOST_GIT_HARDENED_CONFIG_ARGS, "status", "--porcelain=2", "--branch"],
+        args: [
+          ...HOST_GIT_HARDENED_CONFIG_ARGS,
+          "-c",
+          "safe.directory=/repo",
+          "status",
+          "--porcelain=2",
+          "--branch",
+        ],
         lcAll: "C",
       },
       {
-        args: [...HOST_GIT_HARDENED_CONFIG_ARGS, "rev-parse", "--abbrev-ref", "HEAD"],
+        args: [
+          ...HOST_GIT_HARDENED_CONFIG_ARGS,
+          "-c",
+          "safe.directory=/repo",
+          "rev-parse",
+          "--abbrev-ref",
+          "HEAD",
+        ],
         lcAll: "C",
       },
       {
-        args: [...HOST_GIT_HARDENED_CONFIG_ARGS, "rev-parse", "--git-common-dir"],
+        args: [
+          ...HOST_GIT_HARDENED_CONFIG_ARGS,
+          "-c",
+          "safe.directory=/repo",
+          "rev-parse",
+          "--git-common-dir",
+        ],
         lcAll: "C",
       },
     ]);
