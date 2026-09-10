@@ -89,6 +89,30 @@ it.effect("shares concurrent borrowers and closes after the idle TTL", () =>
   }).pipe(Effect.provide(TestClock.layer())),
 );
 
+it.effect("releases a borrower when its callback throws synchronously", () =>
+  Effect.gen(function* () {
+    const testRuntime = yield* makeRuntime;
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const owner = yield* OpenCodeServerOwner.make({
+          binaryPath: "opencode",
+          directory: "/project",
+        });
+        const result = yield* Effect.exit(
+          owner.withServer((): Effect.Effect<never, never, never> => {
+            throw new Error("synchronous borrower failure");
+          }),
+        );
+
+        expect(result._tag).toBe("Failure");
+        yield* TestClock.adjust(Duration.seconds(31));
+        yield* Deferred.await(testRuntime.closed);
+        expect(yield* Ref.get(testRuntime.closes)).toBe(1);
+      }),
+    ).pipe(Effect.provideService(OpenCodeRuntime, testRuntime.runtime));
+  }).pipe(Effect.provide(TestClock.layer())),
+);
+
 it.effect("retries a failed start and closes on owner scope shutdown", () =>
   Effect.gen(function* () {
     const testRuntime = yield* makeRuntime;

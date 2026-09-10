@@ -3152,10 +3152,15 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const pruneWorktrees: GitVcsDriver.GitVcsDriver["Service"]["pruneWorktrees"] = Effect.fn(
     "pruneWorktrees",
   )(function* (input) {
-    yield* executeGit("GitVcsDriver.pruneWorktrees", input.cwd, ["worktree", "prune"], {
-      timeoutMs: 15_000,
-      fallbackErrorDetail: "git worktree prune failed",
-    });
+    yield* executeGit(
+      "GitVcsDriver.pruneWorktrees",
+      input.cwd,
+      ["worktree", "prune", "--expire=now"],
+      {
+        timeoutMs: 15_000,
+        fallbackErrorDetail: "git worktree prune failed",
+      },
+    );
   });
 
   const renameBranch: GitVcsDriver.GitVcsDriver["Service"]["renameBranch"] = Effect.fn(

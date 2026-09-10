@@ -169,7 +169,7 @@ export const make = Effect.fn("OpenCodeServerOwner.make")(function* (input: {
       Effect.uninterruptibleMask((restore) =>
         restore(acquireServer).pipe(
           Effect.flatMap((server) =>
-            restore(use(server)).pipe(Effect.ensuring(releaseServer(server))),
+            restore(Effect.suspend(() => use(server))).pipe(Effect.ensuring(releaseServer(server))),
           ),
         ),
       ),

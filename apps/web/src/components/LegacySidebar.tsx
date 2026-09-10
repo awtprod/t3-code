@@ -2151,9 +2151,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const threadKey = scopedThreadKey(threadRef);
       const thread = sidebarThreadByKeyRef.current.get(threadKey) ?? null;
       if (!thread) return;
-      const threadProject = memberProjectByScopedKey.get(
-        scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
+      const threadProjectKey = scopedProjectKey(
+        scopeProjectRef(thread.environmentId, thread.projectId),
       );
+      const threadProject = memberProjectByScopedKey.get(threadProjectKey);
       const threadWorkspacePath =
         thread.worktreePath ?? threadProject?.workspaceRoot ?? project.workspaceRoot ?? null;
       const clicked = await api.contextMenu.show(
@@ -2175,7 +2176,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         if (isMobile) setOpenMobile(false);
         void router.navigate({
           to: "/projects/$projectKey",
-          params: { projectKey: project.projectKey },
+          params: { projectKey: threadProjectKey },
         });
         return;
       }

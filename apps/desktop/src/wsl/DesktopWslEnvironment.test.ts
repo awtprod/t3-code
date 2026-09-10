@@ -670,7 +670,7 @@ describe.skipIf(posixShellRunner === null)("WSL runtime install script (executed
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
   });
 
-  it("removes an aged stale tree after replacing an active unready cache", () => {
+  it("keeps an aged stale tree until the backend using its original path exits", () => {
     const fixture = createFixture();
     expect(fixture.install().status).toBe(0);
     const result = runShell(
@@ -689,9 +689,11 @@ describe.skipIf(posixShellRunner === null)("WSL runtime install script (executed
         `HOME=${sh(`${fixture.work}/home`)}`,
         "export HOME",
         buildWslRuntimePruneScript(fixture.runtimeId),
-        'test ! -e "$stale"',
+        'test -d "$stale"',
         "kill $active_pid",
         "wait $active_pid 2>/dev/null || true",
+        buildWslRuntimePruneScript(fixture.runtimeId),
+        'test ! -e "$stale"',
       ].join("\n"),
     );
 

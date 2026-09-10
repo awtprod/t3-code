@@ -605,6 +605,16 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const startResult = yield* Fiber.join(startFiber);
       const sendResult = yield* Fiber.join(sendFiber);
       NodeAssert.equal(startResult._tag, "Failure");
+      if (startResult._tag === "Failure") {
+        NodeAssert.equal(startResult.failure._tag, "ProviderAdapterRequestError");
+        if (startResult.failure._tag !== "ProviderAdapterRequestError") {
+          return;
+        }
+        NodeAssert.equal(
+          startResult.failure.detail,
+          "OpenCode session stopped before the event stream connected.",
+        );
+      }
       NodeAssert.equal(sendResult._tag, "Failure");
       NodeAssert.equal(runtimeMock.state.promptCalls.length, 0);
       NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["http://127.0.0.1:9999"]);
@@ -3398,6 +3408,86 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const session = sessions.find((candidate) => candidate.threadId === threadId);
       NodeAssert.equal(session?.status, "running");
       NodeAssert.equal(session?.activeTurnId, turn.turnId);
+
+      runtimeMock.state.abortImplementation = null;
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("reconciles a deferred idle event when child cleanup fails", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-interrupt-child-failure-idle");
+      const rootSessionId = "http://127.0.0.1:9999/session";
+      const idleEvent = promiseWithResolvers<unknown>();
+      const markerEvent = promiseWithResolvers<unknown>();
+      const failingChildStarted = promiseWithResolvers<void>();
+      const failingChildRelease = promiseWithResolvers<void>();
+      runtimeMock.state.subscribedEvents = [idleEvent.promise, markerEvent.promise];
+      runtimeMock.state.sessionChildrenById.set(rootSessionId, [{ id: "ses_failing_child" }]);
+      runtimeMock.state.abortImplementation = async (sessionID) => {
+        if (sessionID === "ses_failing_child") {
+          failingChildStarted.resolve(undefined);
+          await failingChildRelease.promise;
+          throw new Error("child abort failed");
+        }
+      };
+
+      const markerFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) => event.threadId === threadId && event.type === "thread.metadata.updated",
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "Run a child agent",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "opencode/kimi-k3",
+        ),
+      });
+
+      const interruptFiber = yield* adapter
+        .interruptTurn(threadId, turn.turnId)
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Effect.promise(() => failingChildStarted.promise);
+      idleEvent.resolve({
+        id: "evt-idle-during-child-cleanup",
+        type: "session.status",
+        properties: {
+          sessionID: rootSessionId,
+          status: { type: "idle" },
+        },
+      });
+      markerEvent.resolve({
+        id: "evt-after-idle-during-child-cleanup",
+        type: "session.updated",
+        properties: { info: { id: rootSessionId, title: "Idle received" } },
+      });
+      yield* Fiber.join(markerFiber);
+      failingChildRelease.resolve(undefined);
+
+      const result = yield* Fiber.join(interruptFiber);
+      NodeAssert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        NodeAssert.equal(result.failure._tag, "ProviderAdapterRequestError");
+        if (result.failure._tag !== "ProviderAdapterRequestError") {
+          return;
+        }
+        NodeAssert.equal(result.failure.detail, "child abort failed");
+      }
+      yield* Effect.yieldNow;
+      const sessions = yield* adapter.listSessions();
+      const session = sessions.find((candidate) => candidate.threadId === threadId);
+      NodeAssert.equal(session?.status, "ready");
+      NodeAssert.equal(session?.activeTurnId, undefined);
 
       runtimeMock.state.abortImplementation = null;
       yield* adapter.stopSession(threadId);

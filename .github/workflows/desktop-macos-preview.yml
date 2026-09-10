@@ -150,6 +150,20 @@ jobs:
 
           tag="desktop-preview"
 
+          delete_asset_if_present() {
+            local asset="$1"
+            if gh release delete-asset "$tag" "$asset" --repo "$GITHUB_REPOSITORY" --yes; then
+              return
+            fi
+            local assets
+            assets="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+            if grep -Fxq -- "$asset" <<< "$assets"; then
+              echo "Failed to delete preview asset $asset." >&2
+              return 1
+            fi
+            echo "Asset $asset was already removed by a concurrent run."
+          }
+
           preview_eligibility() {
             local snapshot
             if ! snapshot="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
@@ -211,8 +225,7 @@ jobs:
             | { grep -F -- "-pr.${PR_NUMBER}." || true; } \
             | while read -r asset; do
                 [[ "$asset" == "$uploaded_name" ]] && continue
-                gh release delete-asset "$tag" "$asset" --repo "$GITHUB_REPOSITORY" --yes \
-                  || echo "Asset $asset was already removed by a concurrent run."
+                delete_asset_if_present "$asset"
               done
 
           # Re-check after uploading. A cleanup run that started during the
@@ -221,8 +234,7 @@ jobs:
           # became ineligible, delete what we just uploaded.
           eligibility="$(preview_eligibility)"
           if [[ "$eligibility" != "true" ]]; then
-            gh release delete-asset "$tag" "$uploaded_name" --repo "$GITHUB_REPOSITORY" --yes \
-              || echo "Asset was already removed by a concurrent run."
+            delete_asset_if_present "$uploaded_name"
             echo "PR closed or preview label removed during upload. Removed the download."
             exit 0
           fi
@@ -320,6 +332,20 @@ jobs:
 
           tag="desktop-preview"
 
+          delete_asset_if_present() {
+            local asset="$1"
+            if gh release delete-asset "$tag" "$asset" --repo "$GITHUB_REPOSITORY" --yes; then
+              return
+            fi
+            local assets
+            assets="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+            if grep -Fxq -- "$asset" <<< "$assets"; then
+              echo "Failed to delete preview asset $asset." >&2
+              return 1
+            fi
+            echo "Asset $asset was already removed by a concurrent run."
+          }
+
           # A stale cleanup must not delete a download that became valid
           # again. If the PR is open and labeled once more, the next publish
           # owns this PR's assets and replaces them itself.
@@ -357,8 +383,7 @@ jobs:
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
             | { grep -F -- "-pr.${PR_NUMBER}." || true; } \
             | while read -r asset; do
-                gh release delete-asset "$tag" "$asset" --repo "$GITHUB_REPOSITORY" --yes \
-                  || echo "Asset $asset was already removed by a concurrent run."
+                delete_asset_if_present "$asset"
               done
 
       - name: Mark the preview comment as removed

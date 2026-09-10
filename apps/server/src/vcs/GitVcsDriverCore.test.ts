@@ -658,6 +658,32 @@ it.effect("ignores worktree metadata for directories that no longer exist", () =
   ).pipe(Effect.provide(ServerConfigLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
+it.effect("prunes a recently deleted worktree registration immediately", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const driver = yield* GitVcsDriver.GitVcsDriver;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const cwd = yield* makeTmpDir();
+      const worktreeParent = yield* makeTmpDir("git-vcs-prune-worktree-");
+      const worktreePath = path.join(worktreeParent, "recently-deleted");
+      const { initialBranch } = yield* initRepoWithCommit(cwd);
+
+      yield* driver.createWorktree({
+        cwd,
+        refName: initialBranch,
+        newRefName: "recently-deleted",
+        path: worktreePath,
+      });
+      yield* fileSystem.remove(worktreePath, { recursive: true });
+      yield* driver.pruneWorktrees({ cwd });
+
+      const registrations = yield* git(cwd, ["worktree", "list", "--porcelain"]);
+      assert.notInclude(registrations, worktreePath);
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
 it.effect("refreshes the current branch after an external checkout", () =>
   Effect.scoped(
     Effect.gen(function* () {

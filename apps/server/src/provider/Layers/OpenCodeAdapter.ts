@@ -2626,14 +2626,15 @@ export function makeOpenCodeAdapter(
           yield* startEventPump(context);
           yield* Deferred.await(context.firstConnection).pipe(
             Effect.timeout("10 seconds"),
-            Effect.mapError(
-              (cause) =>
+            Effect.catchTag("TimeoutError", (cause) =>
+              Effect.fail(
                 new ProviderAdapterRequestError({
                   provider: PROVIDER,
                   method: "event.subscribe",
                   detail: "OpenCode event stream did not connect within 10 seconds.",
                   cause,
                 }),
+              ),
             ),
           );
         }).pipe(
@@ -3151,11 +3152,7 @@ export function makeOpenCodeAdapter(
         if (failedExit !== undefined && Exit.isFailure(failedExit)) {
           if (context.cancellation === cancellation) {
             context.cancellation = undefined;
-            if (
-              parentAbortFailed &&
-              cancellation.turnId !== undefined &&
-              cancellation.deferredIdleEvent
-            ) {
+            if (cancellation.turnId !== undefined && cancellation.deferredIdleEvent) {
               yield* scheduleIdleReconciliation(
                 context,
                 cancellation.turnId,
