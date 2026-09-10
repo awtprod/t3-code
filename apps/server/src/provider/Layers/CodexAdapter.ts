@@ -882,14 +882,19 @@ function mapCollabAgentEvent(
           },
         ];
       }
-      // interacted → the child is (again) actively driven.
-      return [
-        {
-          ...base,
-          type: "task.updated",
-          payload: { taskId, status: "running", ...statusLinkage },
-        },
-      ];
+      if (activityKind === "completed") {
+        return [
+          {
+            ...base,
+            type: "task.updated",
+            payload: { taskId, status: "idle", ...statusLinkage },
+          },
+        ];
+      }
+      // Interaction is a relationship notification, not task activity. Even
+      // a status-less update refreshes downstream liveness, so only explicit
+      // lifecycle signals may emit here.
+      return [];
     }
     case "collabAgent/turnStarted":
       return [
