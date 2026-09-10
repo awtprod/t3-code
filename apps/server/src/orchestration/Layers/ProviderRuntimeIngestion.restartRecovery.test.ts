@@ -112,14 +112,18 @@ function makeTestLayer(dbPath: string, workspaceRoot: string) {
     Layer.provideMerge(NodeServices.layer),
   );
 
+  // ingestionLayer provideMerges orchestration, snapshots and the platform
+  // services below, so the repositories merged here depend on what it exports.
+  // Layer.mergeAll builds its members in parallel, which would leave those
+  // dependencies unsatisfied; provideMerge sequences it ahead of them instead.
   return Layer.mergeAll(
-    ingestionLayer,
-    orchestrationLayer,
-    snapshotLayer,
     ProviderRestartRecoveryRepositoryLive,
     ProviderTurnSendClaimRepositoryLive,
     ProjectionTurnRepositoryLive,
   ).pipe(
+    Layer.provideMerge(ingestionLayer),
+    Layer.provideMerge(orchestrationLayer),
+    Layer.provideMerge(snapshotLayer),
     Layer.provideMerge(ThreadBackgroundLiveness.layer),
     Layer.provideMerge(ThreadPlanProgress.layer),
     Layer.provideMerge(ServerConfig.layerTest(workspaceRoot, workspaceRoot)),
