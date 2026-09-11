@@ -6,9 +6,12 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   resolveInitialThreadSidebarWidth,
   THREAD_MAIN_CONTENT_MIN_WIDTH,
-  THREAD_SIDEBAR_DEFAULT_WIDTH,
   THREAD_SIDEBAR_MIN_WIDTH,
 } from "./threadSidebarWidth";
+
+// Upstream stopped exporting the default width; assert the value the module
+// actually falls back to rather than dropping the case.
+const THREAD_SIDEBAR_DEFAULT_WIDTH = 16 * 16;
 
 describe("thread sidebar width", () => {
   it("uses the default width when no preference is stored", () => {

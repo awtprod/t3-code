@@ -64,6 +64,7 @@ import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
+  describeMcpElicitation,
   makeCodexSessionRuntime,
   matchesCodexInterruptTarget,
   type CodexSessionRuntimeError,
@@ -453,6 +454,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_read_approval";
     case "item/fileChange/requestApproval":
       return "file_change_approval";
+    case "mcpServer/elicitation/request":
+      return "mcp_elicitation_approval";
     case "applyPatchApproval":
       return "apply_patch_approval";
     case "execCommandApproval":
@@ -478,6 +481,8 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_read_approval";
     case "file-change":
       return "file_change_approval";
+    case "mcp-elicitation":
+      return "mcp_elicitation_approval";
     default:
       return "unknown";
   }
@@ -646,7 +651,9 @@ function mapItemLifecycle(
     lifecycle === "item.started"
       ? "inProgress"
       : lifecycle === "item.completed"
-        ? "completed"
+        ? "status" in item && (item.status === "failed" || item.status === "declined")
+          ? item.status
+          : "completed"
         : undefined;
 
   return {
@@ -822,12 +829,16 @@ function mapCollabAgentEvent(
   // finding: progress rows renamed math_one to its UUID).
   const knownName = nickname ?? pathLeaf;
   const title = knownName ?? agentThreadId;
+  const model = typeof payload.model === "string" ? payload.model.trim() : "";
+  const effort = typeof payload.effort === "string" ? payload.effort.trim() : "";
   // Identity repeated on every status patch so rows are self-describing when
   // the start row ages out of activity retention (review finding: a
   // reconstructed agent had a UUID name and no role/path).
-  const statusLinkage = {
+  const linkage = {
     role,
     ...(knownName ? { title: knownName } : {}),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
     ...(agentPath ? { agentPath } : {}),
     timelineBypass: true,
   } as const;
@@ -842,13 +853,19 @@ function mapCollabAgentEvent(
             taskId,
             description: title,
             title,
-            role,
-            ...(agentPath ? { agentPath } : {}),
+            ...linkage,
             ...(typeof payload.parentThreadId === "string"
               ? { parentAgentId: payload.parentThreadId }
               : {}),
-            timelineBypass: true,
           },
+        },
+      ];
+    case "collabAgent/metadataUpdated":
+      return [
+        {
+          ...base,
+          type: "task.updated",
+          payload: { taskId, ...linkage },
         },
       ];
     case "collabAgent/activity": {
@@ -858,7 +875,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "interrupted", ...statusLinkage },
+            payload: { taskId, status: "interrupted", ...linkage },
           },
         ];
       }
@@ -875,25 +892,26 @@ function mapCollabAgentEvent(
               taskId,
               description: title,
               title,
-              role,
-              ...(agentPath ? { agentPath } : {}),
-              timelineBypass: true,
+              ...linkage,
             },
           },
         ];
       }
       if (activityKind === "completed") {
+        // #75: a completed child must drop to idle so it stops holding the
+        // thread busy — otherwise the parent thread never frees.
         return [
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "idle", ...statusLinkage },
+            payload: { taskId, status: "idle", ...linkage },
           },
         ];
       }
-      // Interaction is a relationship notification, not task activity. Even
-      // a status-less update refreshes downstream liveness, so only explicit
-      // lifecycle signals may emit here.
+      // Reading a child's result also emits "interacted" after its turn is idle.
+      // Interaction is a relationship notification, not task activity; only the
+      // child's own turn or thread lifecycle can prove it resumed work, so a
+      // bare "interacted" emits nothing.
       return [];
     }
     case "collabAgent/turnStarted":
@@ -901,7 +919,7 @@ function mapCollabAgentEvent(
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, status: "running", ...statusLinkage },
+          payload: { taskId, status: "running", ...linkage },
         },
       ];
     case "collabAgent/turnCompleted": {
@@ -921,7 +939,7 @@ function mapCollabAgentEvent(
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, status, ...statusLinkage },
+          payload: { taskId, status, ...linkage },
         },
       ];
     }
@@ -937,7 +955,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "failed", ...statusLinkage },
+            payload: { taskId, status: "failed", ...linkage },
           },
         ];
       }
@@ -950,7 +968,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: waiting ? "waiting" : "running", ...statusLinkage },
+            payload: { taskId, status: waiting ? "waiting" : "running", ...linkage },
           },
         ];
       }
@@ -959,7 +977,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "idle", ...statusLinkage },
+            payload: { taskId, status: "idle", ...linkage },
           },
         ];
       }
@@ -1006,9 +1024,8 @@ function mapCollabAgentEvent(
           payload: {
             taskId,
             description: title,
-            ...(knownName ? { title: knownName } : {}),
+            ...linkage,
             typedUsage,
-            timelineBypass: true,
           },
         },
       ];
@@ -1038,9 +1055,8 @@ function mapCollabAgentEvent(
           payload: {
             taskId,
             description: title,
-            ...(knownName ? { title: knownName } : {}),
+            ...linkage,
             summary,
-            timelineBypass: true,
           },
         },
       ];
@@ -1050,7 +1066,7 @@ function mapCollabAgentEvent(
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, status: "interrupted", ...statusLinkage },
+          payload: { taskId, status: "interrupted", ...linkage },
         },
       ];
     default:
@@ -1103,6 +1119,11 @@ function mapToRuntimeEvents(
       ];
     }
 
+    const elicitation =
+      event.method === "mcpServer/elicitation/request"
+        ? readPayload(EffectCodexSchema.McpServerElicitationRequestParams, event.payload)
+        : undefined;
+    const elicitationApproval = elicitation ? describeMcpElicitation(elicitation) : undefined;
     const detail = (() => {
       switch (event.method) {
         case "item/commandExecution/requestApproval": {
@@ -1119,6 +1140,8 @@ function mapToRuntimeEvents(
           );
           return payload?.reason ?? undefined;
         }
+        case "mcpServer/elicitation/request":
+          return elicitation?.message;
         case "applyPatchApproval": {
           const payload = readPayload(
             EffectCodexSchema.ServerRequest__ApplyPatchApprovalParams,
@@ -1161,6 +1184,12 @@ function mapToRuntimeEvents(
         payload: {
           requestType: toRequestTypeFromMethod(event.method),
           ...(detail ? { detail } : {}),
+          ...(elicitationApproval
+            ? {
+                appName: elicitationApproval.appName,
+                options: elicitationApproval.options,
+              }
+            : {}),
           ...(event.payload !== undefined ? { args: event.payload } : {}),
         },
       },
@@ -2252,6 +2281,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 },
               }
             : {}),
+          ...(mcpSession
+            ? {
+                browserToolsAvailable: mcpSession.capabilities?.has("preview") ?? true,
+              }
+            : {}),
           ...(appServerArgs.length > 0 ? { appServerArgs } : {}),
         };
         const turnRequestCorrelation: CodexTurnRequestCorrelation = {
@@ -2383,8 +2417,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    // Codex ingests images only. Anything else would be base64-encoded as an
+    // image and rejected or misread; generic files reach the agent through the
+    // path line ProviderService puts in the prompt.
     const codexAttachments = yield* Effect.forEach(
-      input.attachments ?? [],
+      (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
       (attachment) => resolveAttachment(input, attachment),
       { concurrency: 1 },
     );
@@ -2551,6 +2588,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   };
 
+  const uploadFeedback: CodexAdapterShape["uploadFeedback"] = (input) =>
+    requireSession(input.threadId).pipe(
+      Effect.flatMap((session) => session.runtime.uploadFeedback(input.reason)),
+      Effect.map(({ threadId }) => ({ feedbackId: threadId })),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(input.threadId, "feedback/upload", cause),
+      ),
+    );
+
   const respondToRequest: CodexAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
     requireSession(threadId).pipe(
       Effect.flatMap((session) => session.runtime.respondToRequest(requestId, decision)),
@@ -2640,6 +2688,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     readThread,
     rollbackThread,
+    uploadFeedback,
     respondToRequest,
     respondToUserInput,
     stopSession,

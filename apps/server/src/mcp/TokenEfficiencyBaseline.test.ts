@@ -2,8 +2,8 @@ import { expect, it } from "@effect/vitest";
 import { Tool } from "effect/unstable/ai";
 
 import {
-  CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
-  CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  codexDefaultModeDeveloperInstructions,
+  codexPlanModeDeveloperInstructions,
 } from "../provider/CodexDeveloperInstructions.ts";
 import { COMMAND_CENTER_CONTEXT_LIMITS } from "../command-center/RunDispatcher.ts";
 import { CommandCenterToolkit } from "./toolkits/command-center/tools.ts";
@@ -15,8 +15,8 @@ it("records the committed static-context baseline", () => {
   const tools = groups.flatMap((group) => Object.values(group.tools));
   const baseline = {
     collaborationInstructions: {
-      defaultBytes: Buffer.byteLength(CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS),
-      planBytes: Buffer.byteLength(CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS),
+      defaultBytes: Buffer.byteLength(codexDefaultModeDeveloperInstructions(true)),
+      planBytes: Buffer.byteLength(codexPlanModeDeveloperInstructions(true)),
     },
     mcp: {
       toolCount: tools.length,

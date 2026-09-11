@@ -26,6 +26,7 @@ import { Button } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger } from "~/components/ui/select";
 import { Textarea } from "~/components/ui/textarea";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
 
 import type {
@@ -102,9 +103,10 @@ function RouteFact({
           {ROUTE_SOURCE_LABEL[source]}
         </span>
       </div>
-      <div className="mt-1 truncate text-xs font-medium" title={value}>
-        {value}
-      </div>
+      <Tooltip>
+        <TooltipTrigger render={<div className="mt-1 truncate text-xs font-medium">{value}</div>} />
+        <TooltipPopup>{value}</TooltipPopup>
+      </Tooltip>
     </div>
   );
 }
@@ -1000,12 +1002,16 @@ export function NeedsYouRows({
               <p className="mb-1 w-full whitespace-pre-wrap break-words rounded-lg bg-background/70 p-2 text-[0.6875rem] leading-relaxed text-foreground">
                 {action.proposal}
               </p>
-              <span
-                className="mr-auto max-w-full truncate font-mono text-[0.625rem] text-muted-foreground"
-                title={action.payloadDigest}
-              >
-                Digest {action.payloadDigest.slice(0, 12)}…
-              </span>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <span className="mr-auto max-w-full truncate font-mono text-[0.625rem] text-muted-foreground">
+                      Digest {action.payloadDigest.slice(0, 12)}…
+                    </span>
+                  }
+                />
+                <TooltipPopup>{action.payloadDigest}</TooltipPopup>
+              </Tooltip>
               <Button
                 disabled={resolving}
                 onClick={() =>

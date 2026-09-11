@@ -97,8 +97,13 @@ function turnUsage(value: unknown) {
   };
 }
 
-function approvalDecision(decision: "accept" | "acceptForSession" | "decline" | "cancel") {
-  if (decision === "acceptForSession") return { decision: "approved", scope: "session" } as const;
+function approvalDecision(
+  decision: "accept" | "acceptAlways" | "acceptForSession" | "decline" | "cancel",
+) {
+  // Kimi's approval protocol has no permanent grant, so "always" lands on the
+  // widest scope it does support: the rest of this session.
+  if (decision === "acceptForSession" || decision === "acceptAlways")
+    return { decision: "approved", scope: "session" } as const;
   if (decision === "accept") return { decision: "approved" } as const;
   if (decision === "decline") return { decision: "rejected" } as const;
   return { decision: "cancelled" } as const;

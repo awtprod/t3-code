@@ -27,7 +27,7 @@ import * as PreviewManager from "../preview/Manager.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
-import { makeQuitHoldHandler } from "./QuitHold.ts";
+import { makeQuitShortcutHandler } from "./QuitHold.ts";
 
 const TITLEBAR_HEIGHT = 40;
 const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linux
@@ -359,6 +359,11 @@ export const make = Effect.gen(function* () {
       ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
       webPreferences: {
         preload: environment.preloadPath,
+        // The window boots hidden (show: false until ready-to-show), and
+        // Chromium throttles hidden renderers: timers coalesce and rAF stops,
+        // which stalls first paint. Boot unthrottled; the first-reveal trigger
+        // re-enables throttling so a hidden or minimized window goes back to
+        // being cheap after it has been shown once.
         backgroundThrottling: false,
         contextIsolation: true,
         nodeIntegration: false,
@@ -546,12 +551,11 @@ export const make = Effect.gen(function* () {
     // close-terminal shortcut can outlive the terminal that handled its first
     // press, so reject repeats before they reach the native window accelerator.
     // Deliberate presses still flow through the renderer or native menu.
-    // Chrome-style hold-to-quit: intercept the quit accelerator before the
-    // native menu sees it and only quit after the shortcut is held. The
-    // renderer shows the "Hold to Quit" hint via QUIT_SHORTCUT_CHANNEL.
-    const quitHoldHandler = makeQuitHoldHandler({
+    // Intercept the quit accelerator before the native menu sees it and apply
+    // the configured direct, hold, or double-press behavior.
+    const quitShortcutHandler = makeQuitShortcutHandler({
       platform: environment.platform,
-      isEnabled: () =>
+      getMode: () =>
         runPromise(
           Effect.map(
             clientSettings.get,
@@ -561,9 +565,9 @@ export const make = Effect.gen(function* () {
             }),
           ),
         ),
-      notify: (state) => {
+      notify: (hint) => {
         if (!window.isDestroyed()) {
-          window.webContents.send(QUIT_SHORTCUT_CHANNEL, state);
+          window.webContents.send(QUIT_SHORTCUT_CHANNEL, hint);
         }
       },
       quit: () => {
@@ -571,7 +575,7 @@ export const make = Effect.gen(function* () {
       },
     });
     window.webContents.on("before-input-event", (event, input) => {
-      quitHoldHandler(event, input);
+      quitShortcutHandler(event, input);
       if (input.type !== "keyDown" || !input.isAutoRepeat) return;
       const modifier = environment.platform === "darwin" ? input.meta : input.control;
       if (modifier && !input.alt && !input.shift && input.key.toLowerCase() === "w") {
@@ -726,6 +730,11 @@ export const make = Effect.gen(function* () {
       revealSubscribers.push((fire) => window.webContents.once("did-finish-load", fire));
     }
     bindFirstRevealTrigger(revealSubscribers, () => {
+      // Boot is done; hand the window back to normal hidden-window throttling
+      // (see the backgroundThrottling comment on the create options above).
+      if (!window.isDestroyed()) {
+        window.webContents.setBackgroundThrottling(true);
+      }
       // Reveal the real window, then close the connecting splash (if any) so the
       // two don't overlap and there's no blank gap between them.
       if (persistedSettings.mainWindowMaximized) {

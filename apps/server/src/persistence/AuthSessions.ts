@@ -10,6 +10,7 @@ import {
   AuthClientMetadataDeviceType,
   AuthEnvironmentScopes,
   AuthSessionId,
+  ClientSurface,
   ServerAuthSessionMethod,
 } from "@t3tools/contracts";
 
@@ -76,11 +77,13 @@ export const RevokeOtherAuthSessionsInput = Schema.Struct({
 });
 export type RevokeOtherAuthSessionsInput = typeof RevokeOtherAuthSessionsInput.Type;
 
-export const SetAuthSessionLastConnectedAtInput = Schema.Struct({
+export const SetAuthSessionConnectionInput = Schema.Struct({
   sessionId: AuthSessionId,
-  lastConnectedAt: Schema.DateTimeUtcFromString,
+  lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  surface: Schema.NullOr(ClientSurface),
+  appVersion: Schema.NullOr(Schema.String),
 });
-export type SetAuthSessionLastConnectedAtInput = typeof SetAuthSessionLastConnectedAtInput.Type;
+export type SetAuthSessionConnectionInput = typeof SetAuthSessionConnectionInput.Type;
 
 export class AuthSessionRepository extends Context.Service<
   AuthSessionRepository,
@@ -100,8 +103,8 @@ export class AuthSessionRepository extends Context.Service<
     readonly revokeAllExcept: (
       input: RevokeOtherAuthSessionsInput,
     ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
-    readonly setLastConnectedAt: (
-      input: SetAuthSessionLastConnectedAtInput,
+    readonly setConnection: (
+      input: SetAuthSessionConnectionInput,
     ) => Effect.Effect<void, AuthSessionRepositoryError>;
   }
 >()("@awtprod/command-center/persistence/AuthSessions/AuthSessionRepository") {}
@@ -270,12 +273,16 @@ export const make = Effect.gen(function* () {
       `,
   });
 
-  const setLastConnectedAtRow = SqlSchema.void({
-    Request: SetAuthSessionLastConnectedAtInput,
-    execute: ({ sessionId, lastConnectedAt }) =>
+  // COALESCE preserves the first-connect timestamp on concurrent connections
+  // and metadata fields omitted by partial reports.
+  const setConnectionRow = SqlSchema.void({
+    Request: SetAuthSessionConnectionInput,
+    execute: ({ sessionId, lastConnectedAt, surface, appVersion }) =>
       sql`
         UPDATE auth_sessions
-        SET last_connected_at = ${lastConnectedAt}
+        SET last_connected_at = COALESCE(${lastConnectedAt}, last_connected_at),
+            client_surface = COALESCE(${surface}, client_surface),
+            client_app_version = COALESCE(${appVersion}, client_app_version)
         WHERE session_id = ${sessionId}
           AND revoked_at IS NULL
       `,
@@ -393,12 +400,12 @@ export const make = Effect.gen(function* () {
       Effect.map((rows) => rows.map((row) => row.sessionId)),
     );
 
-  const setLastConnectedAt: AuthSessionRepository["Service"]["setLastConnectedAt"] = (input) =>
-    setLastConnectedAtRow(input).pipe(
+  const setConnection: AuthSessionRepository["Service"]["setConnection"] = (input) =>
+    setConnectionRow(input).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
-          "AuthSessionRepository.setLastConnectedAt:query",
-          "AuthSessionRepository.setLastConnectedAt:encodeRequest",
+          "AuthSessionRepository.setConnection:query",
+          "AuthSessionRepository.setConnection:encodeRequest",
           { sessionId: input.sessionId },
         ),
       ),
@@ -410,7 +417,7 @@ export const make = Effect.gen(function* () {
     listActive,
     revoke,
     revokeAllExcept,
-    setLastConnectedAt,
+    setConnection,
   } satisfies AuthSessionRepository["Service"];
 });
 
