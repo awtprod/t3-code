@@ -52,4 +52,20 @@ describe("usage pricing", () => {
     expect(lookupRate(table, "provider-b/example-model")?.inputCostPerToken).toBe(3);
     expect(lookupRate(table, "example-model")).toBeNull();
   });
+
+  it("prices a local-override model the LiteLLM table doesn't carry", () => {
+    const table = parseRateTable({});
+
+    const priced = lookupRate(table, "z-ai/glm-5.3-flash");
+    expect(priced?.inputCostPerToken).toBe(0.15 / 1_000_000);
+    expect(priced?.outputCostPerToken).toBe(0.5 / 1_000_000);
+    // Casing/whitespace still normalizes onto the override.
+    expect(lookupRate(table, " Z-AI/GLM-5.3-Flash ")?.inputCostPerToken).toBe(0.15 / 1_000_000);
+  });
+
+  it("lets a real LiteLLM entry win over the local override", () => {
+    const table = parseRateTable({ "z-ai/glm-5.3-flash": rate(9) });
+
+    expect(lookupRate(table, "z-ai/glm-5.3-flash")?.inputCostPerToken).toBe(9);
+  });
 });
