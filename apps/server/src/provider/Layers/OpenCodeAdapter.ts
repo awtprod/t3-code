@@ -67,6 +67,22 @@ const PROVIDER = ProviderDriverKind.make("opencode");
 const OPENCODE_RESUME_VERSION = 1 as const;
 
 /**
+ * Event-pump reconnect policy. The OpenCode SSE event stream can end while a
+ * session is still live — a clean EOF (the SDK's SSE client stops on normal
+ * completion without reconnecting) or an error the SDK surfaces once
+ * `sseMaxRetryAttempts` is exhausted. When that happens the adapter owns
+ * reconnection: it resubscribes with this backoff and reconciles the active
+ * turn's status so a terminal `idle` missed during the gap still completes the
+ * turn. Backoff mirrors `scheduleIdleReconciliation` (250ms → 5s). Only
+ * *consecutive* ends that delivered no events count toward the attempt bound;
+ * any subscription that streamed at least one event resets the budget, so a
+ * healthy long turn that drops keep-alives never trips it.
+ */
+const OPENCODE_EVENT_RECONNECT_BASE_MS = 250;
+const OPENCODE_EVENT_RECONNECT_MAX_MS = 5_000;
+const OPENCODE_EVENT_MAX_RECONNECT_ATTEMPTS = 6;
+
+/**
  * Decode a persisted resume cursor into the upstream `ses_…` id. Anything
  * that isn't a current-version cursor with a non-empty id means "no resume"
  * rather than an error. Re-adopting the session id IS the resume mechanism —
@@ -1185,6 +1201,29 @@ export function makeOpenCodeAdapter(
       );
       pending.fiber = yield* reconcile.pipe(Effect.forkIn(context.sessionScope));
     });
+
+    /**
+     * Recover a terminal `idle` that may have been emitted on the OpenCode event
+     * stream while it was disconnected. Called after every (re)subscribe in the
+     * event pump. When a turn is active this schedules an idle reconciliation
+     * (which polls `session.status` and completes the turn if the session is
+     * already idle); otherwise it is a no-op. `scheduleIdleReconciliation`
+     * requires a `TurnId` and folds duplicate calls for the same
+     * turn/generation, so this is safe to call on the first subscribe (no active
+     * turn) and on repeated reconnects within one turn.
+     */
+    const reconcileActiveTurnAfterSubscribe = Effect.fn("reconcileActiveTurnAfterSubscribe")(
+      function* (context: OpenCodeSessionContext) {
+        const turnId = context.activeTurnId;
+        if (turnId === undefined || (yield* Ref.get(context.stopped))) {
+          return;
+        }
+        yield* scheduleIdleReconciliation(context, turnId, {
+          type: "t3.event-pump.reconnect",
+          properties: { sessionID: context.openCodeSessionId },
+        });
+      },
+    );
 
     const failPromptAdmissionRecovery = Effect.fn("failPromptAdmissionRecovery")(function* (
       context: OpenCodeSessionContext,
@@ -2355,41 +2394,93 @@ export function makeOpenCodeAdapter(
 
       // Fibers forked into `context.sessionScope` are interrupted
       // automatically when the scope closes — no bookkeeping required.
-      yield* Effect.flatMap(
-        runOpenCodeSdk("event.subscribe", () =>
-          context.client.event.subscribe(undefined, {
-            signal: eventsAbortController.signal,
-          }),
-        ),
-        (subscription) =>
-          Stream.fromAsyncIterable(
-            subscription.stream,
-            (cause) =>
-              new OpenCodeRuntimeError({
-                operation: "event.subscribe",
-                detail: openCodeRuntimeErrorDetail(cause),
-                cause,
-              }),
-          ).pipe(Stream.runForEach((event) => handleSubscribedEvent(context, event))),
-      ).pipe(
-        Effect.exit,
-        Effect.flatMap((exit) =>
-          Effect.gen(function* () {
-            // Expected paths: caller aborted the fetch or the session
-            // has already been marked stopped. Treat as a clean exit.
-            if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
-              return;
-            }
-            if (Exit.isFailure(exit)) {
-              yield* emitUnexpectedExit(
-                context,
-                openCodeRuntimeErrorDetail(Cause.squash(exit.cause)),
-              );
-            }
-          }),
-        ),
-        Effect.forkIn(context.sessionScope),
-      );
+      //
+      // The OpenCode SSE event stream can end while the session is still live:
+      // a clean EOF (the SDK's SSE client stops on normal completion without
+      // reconnecting) or, once `sseMaxRetryAttempts` is exhausted, a surfaced
+      // error. A single subscription that silently stopped pumping used to hang
+      // the thread forever — no further events (including the turn's terminal
+      // `idle`) were ever processed. The adapter now owns reconnection: it
+      // resubscribes with backoff and reconciles the active turn's status so a
+      // terminal `idle` missed during the gap still completes the turn.
+      const pumpLoop = Effect.gen(function* () {
+        let attempt = 0;
+        while (true) {
+          // Clean-exit semantics preserved: the scope's finalizer aborts the
+          // controller (or a concurrent stop flips the flag) → stop pumping.
+          if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
+            return;
+          }
+
+          let sawEvent = false;
+          const exit = yield* runOpenCodeSdk("event.subscribe", () =>
+            context.client.event.subscribe(undefined, {
+              signal: eventsAbortController.signal,
+              // The adapter is the single reconnection authority. Cap the SDK's
+              // own (uncontrolled, TestClock-invisible) error retries so it
+              // surfaces stream ends promptly to this loop.
+              sseMaxRetryAttempts: 1,
+            }),
+          ).pipe(
+            // Recover a terminal `idle` that may have landed while the stream
+            // was disconnected. Fire-and-forget (it forks its own poller), so
+            // it does not delay stream consumption; a no-op when no turn is
+            // active (e.g. the initial subscribe at session startup).
+            Effect.tap(() => reconcileActiveTurnAfterSubscribe(context)),
+            Effect.flatMap((subscription) =>
+              Stream.fromAsyncIterable(
+                subscription.stream,
+                (cause) =>
+                  new OpenCodeRuntimeError({
+                    operation: "event.subscribe",
+                    detail: openCodeRuntimeErrorDetail(cause),
+                    cause,
+                  }),
+              ).pipe(
+                Stream.runForEach((event) =>
+                  Effect.gen(function* () {
+                    sawEvent = true;
+                    yield* handleSubscribedEvent(context, event);
+                  }),
+                ),
+              ),
+            ),
+            Effect.exit,
+          );
+
+          // Re-check after the stream ended: the finalizer may have aborted us,
+          // or a concurrent stop flipped the flag mid-stream.
+          if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
+            return;
+          }
+
+          // A subscription that delivered events and then ended is a healthy
+          // reconnect; reset the failure budget so only *consecutive*
+          // no-progress ends count toward the bound.
+          if (sawEvent) {
+            attempt = 0;
+          }
+          attempt += 1;
+
+          if (attempt >= OPENCODE_EVENT_MAX_RECONNECT_ATTEMPTS) {
+            yield* emitUnexpectedExit(
+              context,
+              Exit.isFailure(exit)
+                ? openCodeRuntimeErrorDetail(Cause.squash(exit.cause))
+                : "OpenCode event stream ended repeatedly without recovering.",
+            );
+            return;
+          }
+
+          const delayMs = Math.min(
+            OPENCODE_EVENT_RECONNECT_BASE_MS * 2 ** (attempt - 1),
+            OPENCODE_EVENT_RECONNECT_MAX_MS,
+          );
+          yield* Effect.sleep(`${delayMs} millis`);
+        }
+      });
+
+      yield* pumpLoop.pipe(Effect.forkIn(context.sessionScope));
 
       if (!context.server.external && context.server.exitCode !== null) {
         yield* context.server.exitCode.pipe(
