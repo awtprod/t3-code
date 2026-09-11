@@ -8,19 +8,19 @@ interface ParsedArguments {
   readonly command: "plan" | "advance-baseline";
   readonly repositoryPath: string;
   readonly upstreamRef?: string | undefined;
-  readonly expectedCommit: string;
+  readonly expectedCommit?: string | undefined;
   readonly githubOutput?: string | undefined;
 }
 
 function usage(): never {
   throw new Error(`Usage:
   node scripts/command-center/upstream-sync.ts plan \\
-    --upstream-ref refs/tags/<tag> --expected-commit <40-char-sha> [--repository /path]
+    --upstream-ref refs/tags/<tag> [--expected-commit <40-char-sha>] [--repository /path]
   node scripts/command-center/upstream-sync.ts advance-baseline \\
     --expected-commit <40-char-sha> [--repository /path]
 
-The planner never fetches, merges, pushes, or opens a pull request. The dispatch-only workflow owns
-those reviewed GitHub writes.`);
+The planner never fetches, merges, pushes, or opens a pull request. The scheduled upstream-sync
+workflow owns those GitHub writes; every change still lands through a reviewed pull request.`);
 }
 
 function parseArguments(argv: readonly string[]): ParsedArguments {
@@ -42,7 +42,7 @@ function parseArguments(argv: readonly string[]): ParsedArguments {
     else usage();
   }
 
-  if (!expectedCommit || (commandValue === "plan" && !upstreamRef)) usage();
+  if (commandValue === "plan" ? !upstreamRef : !expectedCommit) usage();
   return { command: commandValue, repositoryPath, upstreamRef, expectedCommit, githubOutput };
 }
 
@@ -54,8 +54,9 @@ function appendGitHubOutput(path: string, values: Readonly<Record<string, string
 function main(): void {
   const args = parseArguments(process.argv.slice(2));
   if (args.command === "advance-baseline") {
-    advancePublicBaseline(args.repositoryPath, args.expectedCommit);
-    process.stdout.write(`${args.expectedCommit}\n`);
+    const target = args.expectedCommit ?? "";
+    advancePublicBaseline(args.repositoryPath, target);
+    process.stdout.write(`${target}\n`);
     return;
   }
 
@@ -68,6 +69,7 @@ function main(): void {
     appendGitHubOutput(args.githubOutput, {
       status: plan.status,
       target_commit: plan.targetCommit,
+      merge_base: plan.mergeBase,
       branch_name: plan.branchName ?? "",
     });
   }
