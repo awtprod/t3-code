@@ -8,13 +8,13 @@ import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("065_ProviderRestartRecovery", (it) => {
+layer("068_ProviderRestartRecovery", (it) => {
   it.effect("creates a bounded durable restart-recovery ledger", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 64 });
-      yield* runMigrations({ toMigrationInclusive: 65 });
+      yield* runMigrations({ toMigrationInclusive: 67 });
+      yield* runMigrations({ toMigrationInclusive: 68 });
 
       const columns = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(provider_restart_recoveries)

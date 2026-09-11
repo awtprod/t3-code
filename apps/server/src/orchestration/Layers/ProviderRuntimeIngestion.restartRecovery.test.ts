@@ -61,6 +61,7 @@ const providerService: ProviderServiceShape = {
   interruptTurn: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
   respondToRequest: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
   respondToUserInput: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
+  uploadFeedback: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
   stopSession: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
   listSessions: () => Effect.succeed([] as ReadonlyArray<ProviderSession>),
   getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
