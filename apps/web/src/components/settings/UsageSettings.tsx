@@ -17,6 +17,7 @@ import { usageEnvironment } from "../../state/usage";
 import { useLiveRefresh } from "../../hooks/useLiveRefresh";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 
@@ -281,13 +282,20 @@ export function UsageSettingsPanel() {
               {result?.timeSeries.length ? (
                 result.timeSeries.map((bucket) => {
                   const total = tokenTotal(bucket.summary.tokens) ?? 0;
+                  const label = `${bucket.from.slice(0, 10)}: ${number(total)} tokens`;
                   return (
-                    <div
-                      key={bucket.from}
-                      className="min-w-1 flex-1 rounded-t bg-primary/65"
-                      style={{ height: `${Math.max(2, (total / maxBucket) * 100)}%` }}
-                      title={`${bucket.from.slice(0, 10)}: ${number(total)} tokens`}
-                    />
+                    <Tooltip key={bucket.from}>
+                      <TooltipTrigger
+                        render={
+                          <div
+                            aria-label={label}
+                            className="min-w-1 flex-1 rounded-t bg-primary/65"
+                            style={{ height: `${Math.max(2, (total / maxBucket) * 100)}%` }}
+                          />
+                        }
+                      />
+                      <TooltipPopup>{label}</TooltipPopup>
+                    </Tooltip>
                   );
                 })
               ) : (

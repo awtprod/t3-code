@@ -245,7 +245,7 @@ describe("browser target resolver", () => {
       }),
     ).toEqual({
       requestedUrl: "http://localhost:5173/app",
-      resolvedUrl: "http://127.0.0.1:5173/app",
+      resolvedUrl: "http://localhost:5173/app",
       resolutionKind: "direct",
       environmentId: "environment-1",
     });
@@ -318,7 +318,19 @@ describe("browser target resolver", () => {
         kind: "environment-port",
         port: 5173,
       }).resolvedUrl,
-    ).toBe("http://[::1]:5173/");
+    ).toBe("http://localhost:5173/");
+  });
+
+  it("maps local IPv4 environment ports onto localhost for dual-stack guests", async () => {
+    readPreparedConnection.mockReturnValue({ httpBaseUrl: "http://127.0.0.1:3773" });
+    const { resolveBrowserNavigationTarget } = await import("./browserTargetResolver");
+    expect(
+      resolveBrowserNavigationTarget(EnvironmentId.make("environment-1"), {
+        kind: "environment-port",
+        port: 5173,
+        path: "/app",
+      }).resolvedUrl,
+    ).toBe("http://localhost:5173/app");
   });
 
   it("leaves malformed input for the normal navigation error path", async () => {

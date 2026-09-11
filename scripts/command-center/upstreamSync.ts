@@ -9,18 +9,21 @@ export const PUBLIC_BASELINE_FILE = ".command-center-public-baseline";
 export interface UpstreamSyncPlanOptions {
   readonly repositoryPath: string;
   readonly upstreamRef: string;
-  readonly expectedCommit: string;
+  /** When provided, the fetched ref must resolve to exactly this commit. */
+  readonly expectedCommit?: string | undefined;
   readonly baseRef?: string | undefined;
   readonly initialBaseline?: string | undefined;
   readonly requireCleanWorktree?: boolean | undefined;
 }
 
 export interface UpstreamSyncPlan {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly initialBaseline: string;
   readonly currentBaseline: string;
   readonly baseCommit: string;
   readonly targetCommit: string;
+  /** The newest upstream commit already contained in the sync base. */
+  readonly mergeBase: string;
   readonly upstreamRef: string;
   readonly status: "needs-sync" | "already-contained";
   readonly branchName: string | null;
@@ -28,6 +31,8 @@ export interface UpstreamSyncPlan {
 
 const FULL_COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 const SAFE_UPSTREAM_REF_PATTERN = /^refs\/(?:tags|remotes\/upstream)\/[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const UPSTREAM_REF_PREFIX_PATTERN = /^refs\/(?:tags|remotes\/upstream)\//;
+const SYNC_BRANCH_PREFIX = "upstream-sync/";
 
 export function validateUpstreamRef(value: string): string {
   if (
@@ -43,6 +48,14 @@ export function validateUpstreamRef(value: string): string {
     );
   }
   return value;
+}
+
+/**
+ * One sync branch per tracked upstream ref, so a daily run against `refs/remotes/upstream/main`
+ * keeps refreshing `upstream-sync/main` instead of piling up a branch per commit.
+ */
+export function syncBranchName(upstreamRef: string): string {
+  return `${SYNC_BRANCH_PREFIX}${validateUpstreamRef(upstreamRef).replace(UPSTREAM_REF_PREFIX_PATTERN, "")}`;
 }
 
 export function validateCommit(value: string, label: string): string {
@@ -64,7 +77,10 @@ export function readPublicBaseline(repositoryPath: string): string {
 export function planUpstreamSync(options: UpstreamSyncPlanOptions): UpstreamSyncPlan {
   const repositoryPath = NodePath.resolve(options.repositoryPath);
   const upstreamRef = validateUpstreamRef(options.upstreamRef);
-  const expectedCommit = validateCommit(options.expectedCommit, "Expected upstream commit");
+  const expectedCommit =
+    options.expectedCommit === undefined
+      ? undefined
+      : validateCommit(options.expectedCommit, "Expected upstream commit");
   const initialBaseline = validateCommit(
     options.initialBaseline ?? INITIAL_PUBLIC_BASELINE,
     "Initial public baseline",
@@ -78,7 +94,7 @@ export function planUpstreamSync(options: UpstreamSyncPlanOptions): UpstreamSync
   assertCommitExists(repositoryPath, initialBaseline, "Initial public baseline");
   assertCommitExists(repositoryPath, currentBaseline, "Pinned public baseline");
   const targetCommit = resolveCommit(repositoryPath, upstreamRef);
-  if (targetCommit !== expectedCommit) {
+  if (expectedCommit !== undefined && targetCommit !== expectedCommit) {
     throw new Error(
       `Fetched upstream ref resolved to ${targetCommit}, not the explicitly expected ${expectedCommit}.`,
     );
@@ -97,23 +113,31 @@ export function planUpstreamSync(options: UpstreamSyncPlanOptions): UpstreamSync
     baseCommit,
     "The sync base does not contain the currently pinned public baseline.",
   );
+  // The pinned public baseline may be a Command Center merge commit rather than an upstream commit,
+  // so upstream lineage is proven against the original T3 Code baseline and the integrated point is
+  // read from Git itself rather than from the pin.
   assertAncestor(
     repositoryPath,
-    currentBaseline,
+    initialBaseline,
     targetCommit,
-    "The requested upstream target does not descend from the currently pinned public baseline.",
+    "The requested upstream target does not descend from the original T3 Code baseline.",
+  );
+  const mergeBase = validateCommit(
+    git(repositoryPath, ["merge-base", baseCommit, targetCommit]),
+    "Merge base",
   );
 
   const alreadyContained = isAncestor(repositoryPath, targetCommit, baseCommit);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     initialBaseline,
     currentBaseline,
     baseCommit,
     targetCommit,
+    mergeBase,
     upstreamRef,
     status: alreadyContained ? "already-contained" : "needs-sync",
-    branchName: alreadyContained ? null : `upstream-sync/${targetCommit.slice(0, 12)}`,
+    branchName: alreadyContained ? null : syncBranchName(upstreamRef),
   };
 }
 

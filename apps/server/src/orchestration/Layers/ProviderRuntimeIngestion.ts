@@ -66,6 +66,7 @@ import { canReplaceThreadTitle } from "../threadTitles.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
+const TASK_TITLE_ACTIVITY_KINDS = ["task.started", "task.progress"] as const;
 
 // Fallback when the in-memory description cache no longer has the task name
 // (server restart, session-exit sweep, TTL/capacity eviction): earlier
@@ -713,7 +714,7 @@ function sessionStatusAllowsActiveTurn(
 
 function requestKindFromCanonicalRequestType(
   requestType: string | undefined,
-): "command" | "file-read" | "file-change" | undefined {
+): "command" | "file-read" | "file-change" | "mcp-elicitation" | undefined {
   switch (requestType) {
     case "command_execution_approval":
     case "exec_command_approval":
@@ -727,6 +728,8 @@ function requestKindFromCanonicalRequestType(
     // stamps on the request itself.
     case "permissions_approval":
       return "file-change";
+    case "mcp_elicitation_approval":
+      return "mcp-elicitation";
     default:
       return undefined;
   }
@@ -809,12 +812,16 @@ export function runtimeEventToActivities(
                   ? "File-read approval requested"
                   : requestKind === "file-change"
                     ? "File-change approval requested"
-                    : "Approval requested",
+                    : requestKind === "mcp-elicitation"
+                      ? "App access approval requested"
+                      : "Approval requested",
           payload: {
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
             ...(event.payload.detail ? { detail: event.payload.detail } : {}),
+            ...(event.payload.appName ? { appName: event.payload.appName } : {}),
+            ...(event.payload.options ? { options: event.payload.options } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1224,6 +1231,7 @@ export function runtimeEventToActivities(
           summary: event.payload.title ?? "Tool updated",
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { toolCallId: event.itemId } : {}),
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(normalizeSubagentActivityData(event)
@@ -1255,6 +1263,8 @@ export function runtimeEventToActivities(
           summary: event.payload.title ?? "Tool",
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { toolCallId: event.itemId } : {}),
+            ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(normalizeSubagentActivityData(event)
               ? { data: normalizeSubagentActivityData(event) }
@@ -1285,6 +1295,8 @@ export function runtimeEventToActivities(
           summary: `${event.payload.title ?? "Tool"} started`,
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { toolCallId: event.itemId } : {}),
+            ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(normalizeSubagentActivityData(event)
               ? { data: normalizeSubagentActivityData(event) }
@@ -1466,9 +1478,12 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
+  const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (
+    threadId: ThreadId,
+    activityKinds: ReadonlyArray<string> = [],
+  ) {
     return yield* projectionSnapshotQuery
-      .getThreadDetailById(threadId)
+      .getThreadDetailById(threadId, { activityKinds })
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
@@ -2184,6 +2199,10 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEventUnprotected = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
+      if (event.type === "content.delta" && event.payload.streamKind !== "assistant_text") {
+        return;
+      }
+
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 
@@ -2200,9 +2219,17 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
-      const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-        threadId: thread.id,
-      });
+      const pendingTurnStart =
+        event.type === "session.started" ||
+        event.type === "session.state.changed" ||
+        event.type === "session.exited" ||
+        event.type === "thread.started" ||
+        event.type === "turn.started" ||
+        event.type === "turn.completed"
+          ? yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+              threadId: thread.id,
+            })
+          : Option.none();
       const hasPendingTurnStart =
         Option.isSome(pendingTurnStart) && thread.session?.status === "starting";
 
@@ -3785,7 +3812,7 @@ const make = Effect.gen(function* () {
       if (event.type === "task.completed") {
         taskTitle = yield* lookupTaskDescription(thread.id, event.payload.taskId);
         if (!taskTitle) {
-          const threadDetail = yield* getLoadedThreadDetail();
+          const threadDetail = yield* resolveThreadDetail(thread.id, TASK_TITLE_ACTIVITY_KINDS);
           taskTitle = findTaskTitleInActivities(threadDetail?.activities, event.payload.taskId);
         }
       }
@@ -3941,6 +3968,14 @@ const make = Effect.gen(function* () {
         });
       });
 
+      // Kept in sync with the identical constant in serverRuntimeStartup.ts.
+      // reconcileProviderSessions settles every orphaned session to "error"
+      // early in startup; this later turn-level pass keeps that same error
+      // surface (rather than downgrading it to "stopped") while additionally
+      // recording the stranded turn's terminal `interrupted` transition.
+      const ORPHANED_PROVIDER_SESSION_ERROR =
+        "Provider session did not survive a server restart. Send a new message to continue.";
+
       yield* Effect.forEach(
         pendingOnlyOrphans.flatMap((entry) =>
           entry.pending.map((pending) => ({ thread: entry.thread, pending })),
@@ -4094,7 +4129,7 @@ const make = Effect.gen(function* () {
               threadId: thread.id,
               session: {
                 threadId: thread.id,
-                status: "stopped",
+                status: "error",
                 providerName: thread.session?.providerName ?? null,
                 ...(thread.session?.providerInstanceId !== undefined
                   ? { providerInstanceId: thread.session.providerInstanceId }
@@ -4104,7 +4139,7 @@ const make = Effect.gen(function* () {
                   : {}),
                 runtimeMode: thread.session?.runtimeMode ?? thread.runtimeMode,
                 activeTurnId: null,
-                lastError: thread.session?.lastError ?? null,
+                lastError: ORPHANED_PROVIDER_SESSION_ERROR,
                 updatedAt: reconciledAt,
               },
               pendingTurnStartAdoption: "none",

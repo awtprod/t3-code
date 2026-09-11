@@ -8,6 +8,7 @@ import type {
   PullRequestRef,
   PullRequestReviewPosition,
   PullRequestReviewThread,
+  PullRequestThreadCommentsResult,
 } from "@t3tools/contracts";
 import {
   ChevronDownIcon,
@@ -346,6 +347,9 @@ export function PullRequestCodeTab({
     reportFailure: false,
   });
   const updateComment = useAtomCommand(pullRequestEnvironment.updateComment, {
+    reportFailure: false,
+  });
+  const loadThreadComments = useAtomCommand(pullRequestEnvironment.threadComments, {
     reportFailure: false,
   });
   const getDiffFileContents = useAtomCommand(pullRequestEnvironment.diffFileContents);
@@ -810,6 +814,20 @@ export function PullRequestCodeTab({
         fixPending={pendingFinding === pullRequestFindingKey({ kind: "thread", thread })}
         fixLabel={fixFindingLabel}
         {...(onFixFinding ? { onFix: () => onFixFinding({ kind: "thread", thread }) } : {})}
+        onLoadMore={async (cursor): Promise<PullRequestThreadCommentsResult | null> => {
+          const result = await loadThreadComments({
+            environmentId,
+            input: { ...reference, threadId: thread.id, cursor },
+          });
+          if (result._tag === "Failure") {
+            toastManager.add({
+              type: "error",
+              title: "More comments could not be loaded",
+            });
+            return null;
+          }
+          return result.value;
+        }}
         onReply={(body) =>
           runThreadCommand("Reply could not be posted", () =>
             replyToThread({
@@ -845,6 +863,7 @@ export function PullRequestCodeTab({
       detail,
       environmentId,
       fixFindingLabel,
+      loadThreadComments,
       onRefresh,
       onFixFinding,
       pendingFinding,
@@ -1031,9 +1050,12 @@ export function PullRequestCodeTab({
                 >
                   {/* Headlines run long, and the abbreviated oid after one is what a reader
                       matches against the commit list on the host. */}
-                  <span className="min-w-0 truncate" title={entry.messageHeadline}>
-                    {entry.messageHeadline}
-                  </span>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={<span className="min-w-0 truncate">{entry.messageHeadline}</span>}
+                    />
+                    <TooltipPopup side="top">{entry.messageHeadline}</TooltipPopup>
+                  </Tooltip>
                   <span className="ml-auto shrink-0 font-mono text-xs text-muted-foreground">
                     {entry.oid.slice(0, 7)}
                   </span>
@@ -1289,9 +1311,14 @@ export function PullRequestCodeTab({
               <div className="max-h-64 space-y-3 overflow-auto px-4 pb-3">
                 {[...orphanFiles].map(([path, threads]) => (
                   <div key={path}>
-                    <p className="truncate px-3 text-xs text-muted-foreground" title={path}>
-                      {path}
-                    </p>
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <p className="truncate px-3 text-xs text-muted-foreground">{path}</p>
+                        }
+                      />
+                      <TooltipPopup side="top">{path}</TooltipPopup>
+                    </Tooltip>
                     <div className="mt-1 space-y-2">
                       {threads.map((thread) => (
                         <div key={thread.id}>

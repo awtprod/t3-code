@@ -1,13 +1,15 @@
 import type { ServerProviderSkill } from "@t3tools/contracts";
 import {
+  dedupeProviderSkillsByName,
+  formatProviderSkillDisplayName,
+} from "@t3tools/client-runtime/providerSkills";
+import {
   insertRankedSearchResult,
   normalizeSearchQuery,
   scoreQueryMatch,
 } from "@t3tools/shared/searchRanking";
 
-import { formatProviderSkillDisplayName } from "./providerSkillPresentation";
-
-function scoreProviderSkill(skill: ServerProviderSkill, query: string): number | null {
+export function scoreProviderSkill(skill: ServerProviderSkill, query: string): number | null {
   const normalizedName = skill.name.toLowerCase();
   const normalizedLabel = formatProviderSkillDisplayName(skill).toLowerCase();
   const normalizedShortDescription = skill.shortDescription?.toLowerCase() ?? "";
@@ -71,7 +73,7 @@ export function searchProviderSkills(
   query: string,
   limit = Number.POSITIVE_INFINITY,
 ): ServerProviderSkill[] {
-  const enabledSkills = skills.filter((skill) => skill.enabled);
+  const enabledSkills = dedupeProviderSkillsByName(skills.filter((skill) => skill.enabled));
   const normalizedQuery = normalizeSearchQuery(query, { trimLeadingPattern: /^\$+/ });
 
   if (!normalizedQuery) {

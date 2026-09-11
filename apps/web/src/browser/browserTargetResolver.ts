@@ -257,9 +257,13 @@ const resolveEnvironmentPortTarget = (
     }
   }
 
-  const resolvedHost = normalizedEnvironmentHost.includes(":")
-    ? `[${normalizedEnvironmentHost}]`
-    : normalizedEnvironmentHost;
+  // Local loopback environments should advertise `localhost` so Chromium
+  // dual-stack lookup can reach a Vite server bound only to ::1 or 127.0.0.1.
+  const resolvedHost = isLocalEnvironment
+    ? "localhost"
+    : normalizedEnvironmentHost.includes(":")
+      ? `[${normalizedEnvironmentHost}]`
+      : normalizedEnvironmentHost;
   const resolved = sourceUrl
     ? new URL(sourceUrl)
     : new URL(path, `${protocol}://${resolvedHost}:${target.port}`);

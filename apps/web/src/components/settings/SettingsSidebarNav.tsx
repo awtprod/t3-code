@@ -9,8 +9,8 @@ import {
 } from "react";
 import {
   ArchiveIcon,
-  ArrowLeftIcon,
   BellIcon,
+  BlocksIcon,
   BotIcon,
   DatabaseIcon,
   ChartNoAxesCombinedIcon,
@@ -24,7 +24,7 @@ import {
   Settings2Icon,
   XIcon,
 } from "lucide-react";
-import { useCanGoBack, useLocation, useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -39,6 +39,7 @@ import {
   useSidebar,
 } from "../ui/sidebar";
 import { T3ConnectSidebarAvatar, T3ConnectSidebarSignIn } from "../clerk/T3ConnectSidebarSignIn";
+import { SidebarUtilityMenu } from "../sidebar/SidebarChrome";
 import { scrollToSettingsTarget } from "./settingsLayout";
 import { isRemoteOnlyBuild } from "../../hostedPairing";
 import { useEnvironments } from "../../state/environments";
@@ -48,6 +49,7 @@ import {
   type SettingsPath,
   type SettingsSearchItem,
 } from "./settingsSearch";
+import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
 
 export type SettingsSectionPath = SettingsPath;
 
@@ -60,6 +62,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/providers": BotIcon,
   "/settings/usage": ChartNoAxesCombinedIcon,
   "/settings/efficiency": GaugeIcon,
+  "/settings/integrations": BlocksIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/databases": DatabaseIcon,
   "/settings/connections": Link2Icon,
@@ -86,7 +89,6 @@ function SettingsSectionIcon({ to }: { to: SettingsPath }) {
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const navigate = useNavigate();
   const currentHash = useLocation({ select: (location) => location.hash });
-  const canGoBack = useCanGoBack();
   const { isMobile, setOpenMobile, open, setOpen } = useSidebar();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
@@ -94,15 +96,20 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const { environments, isReady: environmentsReady } = useEnvironments();
   const remoteOnlyDisconnected =
     isRemoteOnlyBuild() && environmentsReady && environments.length === 0;
+  const searchableItems = useAvailableSettingsSearchItems();
   const results = useMemo(
     () =>
-      searchSettings(query).filter(
+      searchSettings(query, searchableItems).filter(
         (item) => !remoteOnlyDisconnected || item.to === "/settings/connections",
       ),
-    [query, remoteOnlyDisconnected],
+    [query, remoteOnlyDisconnected, searchableItems],
   );
   const isSearching = query.trim().length > 0;
   const hasResults = results.length > 0;
+
+  useEffect(() => {
+    setActiveResultIndex((index) => Math.min(index, Math.max(results.length - 1, 0)));
+  }, [results.length]);
 
   useEffect(() => {
     const result = results[activeResultIndex];
@@ -199,17 +206,6 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
     },
     [activeResultIndex, clearSearch, handleSearchResultClick, isSearching, results],
   );
-  const handleBackClick = useCallback(() => {
-    if (isMobile) {
-      setOpenMobile(false);
-    }
-    if (canGoBack) {
-      window.history.back();
-      return;
-    }
-    void navigate({ to: "/" });
-  }, [canGoBack, isMobile, navigate, setOpenMobile]);
-
   return (
     <>
       <SidebarContent className="overflow-x-hidden">
@@ -323,14 +319,9 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       <SidebarFooter className="p-[var(--sidebar-content-inset)]">
         <T3ConnectSidebarSignIn />
         <div className="flex items-center gap-1">
-          <SidebarMenu className="min-w-0 flex-1">
-            <SidebarMenuItem>
-              <SidebarMenuButton onClick={handleBackClick}>
-                <ArrowLeftIcon />
-                <span>Back</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
+          <div className="min-w-0 flex-1">
+            <SidebarUtilityMenu />
+          </div>
           <T3ConnectSidebarAvatar />
         </div>
       </SidebarFooter>

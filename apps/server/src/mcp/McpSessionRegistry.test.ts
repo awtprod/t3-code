@@ -3,6 +3,7 @@ import { RepositoryId, SpaceId } from "@command-center/core";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -31,6 +32,12 @@ const makeRegistry = (now: () => number, httpServer = fakeHttpServer) =>
       Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
       Effect.provide(NodeServices.layer),
     );
+
+const activeRegistryLayer = McpSessionRegistry.layer.pipe(
+  Layer.provide(Layer.succeed(HttpServer.HttpServer, fakeHttpServer)),
+  Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment)),
+  Layer.provide(NodeServices.layer),
+);
 
 it.effect("stores only a token hash, resolves the bearer token, and revokes by thread", () =>
   Effect.gen(function* () {
@@ -94,6 +101,53 @@ it.effect("derives read-only and writable database capabilities at credential is
   }),
 );
 
+it.effect("issues database-only credentials when preview is explicitly omitted", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issueCapabilities = Effect.fnUntraced(function* (databaseAccess: "read" | "write") {
+      const issued = yield* registry.issue({
+        threadId: ThreadId.make(`thread-database-only-${databaseAccess}`),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        capabilities: new Set(),
+        databaseAccess,
+      });
+      const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      const resolved = yield* registry.resolve(token);
+      expect(issued.config.capabilities).toEqual(resolved?.capabilities);
+      return resolved?.capabilities ?? new Set();
+    });
+
+    expect([...(yield* issueCapabilities("read"))]).toEqual(["database.read"]);
+    expect([...(yield* issueCapabilities("write"))]).toEqual(["database.read", "database.write"]);
+  }),
+);
+
+it.effect("revokes the previous preview credential when a thread is re-issued database-only", () =>
+  Effect.gen(function* () {
+    const registry = yield* McpSessionRegistry.McpSessionRegistry;
+    const threadId = ThreadId.make("thread-reprepare-database-only");
+    const first = yield* McpSessionRegistry.issueActiveMcpCredential({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(["preview"]),
+    });
+    const firstToken = first?.config.authorizationHeader.replace(/^Bearer\s+/, "") ?? "";
+
+    const second = yield* McpSessionRegistry.issueActiveMcpCredential({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(),
+      databaseAccess: "read",
+    });
+    const secondToken = second?.config.authorizationHeader.replace(/^Bearer\s+/, "") ?? "";
+
+    expect(firstToken.length).toBeGreaterThan(20);
+    expect(secondToken.length).toBeGreaterThan(20);
+    expect(yield* registry.resolve(firstToken)).toBeUndefined();
+    expect([...(yield* registry.resolve(secondToken))!.capabilities]).toEqual(["database.read"]);
+  }).pipe(Effect.provide(activeRegistryLayer)),
+);
+
 it.effect("builds MCP endpoints from the bound server host", () =>
   Effect.gen(function* () {
     const cases = [
@@ -144,6 +198,7 @@ it.effect("binds registered Command Center capabilities to one Space and reposit
     const issued = yield* registry.issue({
       threadId,
       providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(["preview"]),
     });
     const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
     const resolved = yield* registry.resolve(token);
