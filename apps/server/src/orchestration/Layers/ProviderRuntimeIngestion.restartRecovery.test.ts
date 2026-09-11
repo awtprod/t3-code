@@ -97,19 +97,19 @@ function makeTestLayer(dbPath: string, workspaceRoot: string) {
     Layer.provide(RepositoryIdentityResolver.layer),
   );
   const ingestionLayer = ProviderRuntimeIngestionLive.pipe(
-    Layer.provideMerge(orchestrationLayer),
-    Layer.provideMerge(snapshotLayer),
-    Layer.provideMerge(ThreadBackgroundLiveness.layer),
-    Layer.provideMerge(ThreadPlanProgress.layer),
+    Layer.provide(orchestrationLayer),
+    Layer.provide(snapshotLayer),
+    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provide(ThreadPlanProgress.layer),
     Layer.provideMerge(Layer.succeed(ProviderService, providerService)),
     Layer.provideMerge(
       Layer.mock(ProviderSessionDirectory)({
         getBinding: () => Effect.succeed(Option.none()),
       }),
     ),
-    Layer.provideMerge(ServerSettingsService.layerTest()),
-    Layer.provideMerge(ServerConfig.layerTest(workspaceRoot, workspaceRoot)),
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provide(ServerSettingsService.layerTest()),
+    Layer.provide(ServerConfig.layerTest(workspaceRoot, workspaceRoot)),
+    Layer.provide(NodeServices.layer),
   );
 
   return Layer.mergeAll(
