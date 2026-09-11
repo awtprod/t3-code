@@ -2204,6 +2204,93 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("keeps passive child activity from asserting execution liveness", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 6)).pipe(
+        Effect.forkChild,
+      );
+      const emitCollabEvent = (id: string, method: string, payload: Record<string, unknown>) =>
+        runtime.emit({
+          id: asEventId(id),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("parent-turn-1"),
+          payload: {
+            agentThreadId: "child-thread-1",
+            nickname: "reviewer",
+            role: "worker",
+            agentPath: "/agents/reviewer",
+            ...payload,
+          },
+        } satisfies ProviderEvent);
+
+      yield* emitCollabEvent("evt-child-started", "collabAgent/activity", {
+        activityKind: "started",
+      });
+      yield* emitCollabEvent("evt-child-completed", "collabAgent/turnCompleted", {
+        turn: { status: "completed" },
+      });
+      yield* emitCollabEvent("evt-child-late-completed", "collabAgent/activity", {
+        activityKind: "completed",
+      });
+      yield* emitCollabEvent("evt-child-idle-interacted", "collabAgent/activity", {
+        activityKind: "interacted",
+      });
+      yield* emitCollabEvent("evt-child-follow-up", "collabAgent/turnStarted", {});
+      yield* emitCollabEvent("evt-child-running-interacted", "collabAgent/activity", {
+        activityKind: "interacted",
+      });
+      yield* emitCollabEvent("evt-child-standalone-completed", "collabAgent/activity", {
+        activityKind: "completed",
+      });
+      yield* emitCollabEvent("evt-child-unknown-activity", "collabAgent/activity", {
+        activityKind: "futureKind",
+      });
+      yield* emitCollabEvent("evt-child-status-active", "collabAgent/statusChanged", {
+        status: { type: "active", activeFlags: [] },
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepStrictEqual(
+        events.map((event) => [
+          event.eventId,
+          event.type,
+          "status" in event.payload ? event.payload.status : undefined,
+        ]),
+        [
+          ["evt-child-started", "task.started", undefined],
+          ["evt-child-completed", "task.updated", "idle"],
+          ["evt-child-late-completed", "task.updated", "idle"],
+          ["evt-child-follow-up", "task.updated", "running"],
+          ["evt-child-standalone-completed", "task.updated", "idle"],
+          ["evt-child-status-active", "task.updated", "running"],
+        ],
+      );
+      const expectedIdentity = {
+        taskId: "child-thread-1",
+        role: "worker",
+        title: "reviewer",
+        agentPath: "/agents/reviewer",
+        timelineBypass: true,
+      };
+      NodeAssert.deepStrictEqual(events[0]?.payload, {
+        ...expectedIdentity,
+        description: "reviewer",
+      });
+      for (const event of events.slice(1)) {
+        const status = "status" in event.payload ? event.payload.status : undefined;
+        NodeAssert.deepStrictEqual(event.payload, {
+          ...expectedIdentity,
+          status,
+        });
+      }
+    }),
+  );
+
   it.effect("maps completed agent message items to canonical item.completed events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

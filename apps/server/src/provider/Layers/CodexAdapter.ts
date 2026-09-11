@@ -897,8 +897,21 @@ function mapCollabAgentEvent(
           },
         ];
       }
+      if (activityKind === "completed") {
+        // #75: a completed child must drop to idle so it stops holding the
+        // thread busy — otherwise the parent thread never frees.
+        return [
+          {
+            ...base,
+            type: "task.updated",
+            payload: { taskId, status: "idle", ...linkage },
+          },
+        ];
+      }
       // Reading a child's result also emits "interacted" after its turn is idle.
-      // Only the child's turn or thread lifecycle can prove it resumed work.
+      // Interaction is a relationship notification, not task activity; only the
+      // child's own turn or thread lifecycle can prove it resumed work, so a
+      // bare "interacted" emits nothing.
       return [];
     }
     case "collabAgent/turnStarted":
