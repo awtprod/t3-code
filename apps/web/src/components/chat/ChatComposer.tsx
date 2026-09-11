@@ -57,6 +57,7 @@ import {
   type DraftId,
   type PersistedComposerFileAttachment,
   type PersistedComposerImageAttachment,
+  composerFileDedupKey,
   composerFileMatchesReattachMarker,
   composerFileNeedsReattach,
   composerTargetKey,
@@ -2441,6 +2442,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             file.uploadedAttachmentId ? [file.uploadedAttachmentId] : [],
           ),
         );
+        const existingFileKeys = new Set(composerFilesNow.map(composerFileDedupKey));
         const reattachMarkers = composerFilesNow.filter(composerFileNeedsReattach);
         const restoredMarkerIds = new Set<string>();
         const duplicateFiles: PersistedComposerFileAttachment[] = [];
@@ -2448,6 +2450,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         const appendedFiles: ComposerFileAttachment[] = [];
         for (const file of stashedFiles) {
           const expired = expiredAttachmentIds.has(file.attachmentId);
+          const key = composerFileDedupKey(file);
           const restored: ComposerFileAttachment = {
             type: "file",
             id: file.id,
@@ -2474,6 +2477,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           if (reattachMarker) {
             restoredMarkerIds.add(reattachMarker.id);
             existingFileIds.add(file.id);
+            existingFileKeys.add(key);
             if (expired) {
               expiredFileNames.push(file.name);
             } else {
@@ -2482,7 +2486,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             }
             continue;
           }
+          if (existingFileKeys.has(key)) {
+            if (!expired && !retainedUploadIds.has(file.attachmentId)) {
+              duplicateFiles.push(file);
+            }
+            continue;
+          }
           existingFileIds.add(file.id);
+          existingFileKeys.add(key);
           if (expired) {
             expiredFileNames.push(file.name);
           } else {

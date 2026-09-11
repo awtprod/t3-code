@@ -3925,6 +3925,14 @@ const make = Effect.gen(function* () {
 
       const reconciledAt = DateTime.formatIso(yield* DateTime.now);
 
+      // Kept in sync with the identical constant in serverRuntimeStartup.ts.
+      // reconcileProviderSessions settles every orphaned session to "error"
+      // early in startup; this later turn-level pass keeps that same error
+      // surface (rather than downgrading it to "stopped") while additionally
+      // recording the stranded turn's terminal `interrupted` transition.
+      const ORPHANED_PROVIDER_SESSION_ERROR =
+        "Provider session did not survive a server restart. Send a new message to continue.";
+
       // Report each stranded placeholder in the transcript, THEN clear it. The
       // session-set dispatched below cannot clear it — the pending row carries
       // no turn id, so the turns projector's settle path (which only touches
@@ -4032,7 +4040,7 @@ const make = Effect.gen(function* () {
               threadId: thread.id,
               session: {
                 threadId: thread.id,
-                status: "stopped",
+                status: "error",
                 providerName: thread.session?.providerName ?? null,
                 ...(thread.session?.providerInstanceId !== undefined
                   ? { providerInstanceId: thread.session.providerInstanceId }
@@ -4042,7 +4050,7 @@ const make = Effect.gen(function* () {
                   : {}),
                 runtimeMode: thread.session?.runtimeMode ?? thread.runtimeMode,
                 activeTurnId: null,
-                lastError: thread.session?.lastError ?? null,
+                lastError: ORPHANED_PROVIDER_SESSION_ERROR,
                 updatedAt: reconciledAt,
               },
               pendingTurnStartAdoption: "none",
