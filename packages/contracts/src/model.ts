@@ -224,6 +224,34 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
   [KIMI_DRIVER_KIND]: {},
 };
 
+// ── Manager / worker model policy ─────────────────────────────────────
+//
+// Expensive "manager"-tier models (Fable on the Claude provider) are meant to
+// orchestrate and delegate, not to be spawned as subagents. When a manager
+// model would spawn a subagent that inherits or explicitly requests a
+// manager-tier model, the subagent is forced onto a cheaper worker model.
+// Enforced by the `Task`-tool guardrail in ClaudeAdapter's `canUseTool`.
+
+/**
+ * Canonical Claude worker model that manager-tier subagents are downgraded to.
+ * Opus 4.8 is the fleet's designated delegated-work model and is cheaper than
+ * Opus 5. It is `legacy`-classified in the catalog (so it cannot be chosen from
+ * the Agent tool's model picker) but runs fine when injected as a subagent
+ * model. Flip this to `claude-opus-5` if a future SDK rejects legacy models on
+ * spawn.
+ */
+export const CLAUDE_WORKER_FALLBACK_MODEL = "claude-opus-4-8";
+
+/**
+ * True when `slug` is a Claude "manager"-tier model that must not be spawned as
+ * a subagent of another manager. Matches the Fable family by canonical-slug
+ * prefix so future Fable versions are covered automatically. Pass a canonical
+ * slug (resolve aliases via `resolveClaudeModelSlug` first).
+ */
+export function isClaudeManagerModelSlug(slug: string | null | undefined): boolean {
+  return typeof slug === "string" && slug.trim().toLowerCase().startsWith("claude-fable");
+}
+
 // ── Provider display names ────────────────────────────────────────────
 
 export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>> = {

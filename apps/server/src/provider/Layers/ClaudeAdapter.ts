@@ -24,8 +24,10 @@ import {
   ApprovalRequestId,
   type CanonicalItemType,
   type CanonicalRequestType,
+  CLAUDE_WORKER_FALLBACK_MODEL,
   type ClaudeSettings,
   EventId,
+  isClaudeManagerModelSlug,
   type ProviderApprovalDecision,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -1011,6 +1013,37 @@ function trimmedString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Manager/worker guardrail for the subagent-spawning `Task` tool. When the
+ * session (root) model is a manager-tier model (Fable), a subagent that would
+ * inherit that model (no explicit `model`) or explicitly request a manager
+ * model is downgraded to the cheaper worker fallback; an explicit non-manager
+ * worker model is respected. Non-`Task` tools and non-manager sessions pass
+ * through unchanged. Pure, so it is unit-testable without the SDK.
+ */
+export function maybeDowngradeSubagentModel(
+  toolName: Parameters<CanUseTool>[0],
+  toolInput: Parameters<CanUseTool>[1],
+  sessionModel: string | undefined,
+  catalog: ClaudeModelCatalog,
+): Parameters<CanUseTool>[1] {
+  if (toolName !== "Task" || !sessionModel) {
+    return toolInput;
+  }
+  const sessionSlug = resolveClaudeModelSlug(catalog, sessionModel);
+  if (!isClaudeManagerModelSlug(sessionSlug)) {
+    return toolInput;
+  }
+  const requested = trimmedString((toolInput as { readonly model?: unknown }).model);
+  const requestedSlug = requested ? resolveClaudeModelSlug(catalog, requested) : undefined;
+  // No explicit model → the subagent would inherit the manager model; or the
+  // request is itself a manager model. Either way, force the worker fallback.
+  if (!requestedSlug || isClaudeManagerModelSlug(requestedSlug)) {
+    return { ...toolInput, model: CLAUDE_WORKER_FALLBACK_MODEL };
+  }
+  return toolInput;
 }
 
 /**
@@ -4144,6 +4177,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           } satisfies PermissionResult;
         }
 
+        // Guardrail: a manager-tier session (Fable) must not spawn manager-tier
+        // subagents. Downgrade an inheriting or manager `Task` model to the
+        // cheaper worker fallback. Applied across every runtime mode below, so
+        // both the auto-allow and the approval paths carry the rewritten model.
+        const effectiveInput = maybeDowngradeSubagentModel(
+          toolName,
+          toolInput,
+          modelSelection?.model ?? context.session.model ?? undefined,
+          modelCatalog,
+        );
+
         // Handle AskUserQuestion: surface clarifying questions to the
         // user via the user-input runtime event channel, regardless of
         // runtime mode (plan mode relies on this heavily).
@@ -4177,13 +4221,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (runtimeMode === "full-access") {
           return {
             behavior: "allow",
-            updatedInput: toolInput,
+            updatedInput: effectiveInput,
           } satisfies PermissionResult;
         }
 
         const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
         const requestType = classifyRequestType(toolName);
-        const detail = summarizeToolRequest(toolName, toolInput);
+        const detail = summarizeToolRequest(toolName, effectiveInput);
         const decisionDeferred = yield* Deferred.make<ProviderApprovalDecision>();
         const pendingApproval: PendingApproval = {
           requestType,
@@ -4206,7 +4250,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             detail,
             args: {
               toolName,
-              input: toolInput,
+              input: effectiveInput,
               ...(callbackOptions.toolUseID ? { toolUseId: callbackOptions.toolUseID } : {}),
             },
           },
@@ -4273,7 +4317,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (decision === "accept" || decision === "acceptForSession") {
           return {
             behavior: "allow",
-            updatedInput: toolInput,
+            updatedInput: effectiveInput,
             ...(decision === "acceptForSession"
               ? {
                   updatedPermissions: toSessionPermissionUpdates(
