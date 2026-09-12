@@ -135,11 +135,39 @@ const UNPRICEABLE_MODELS = new Set([
   "fable",
 ]);
 
+/**
+ * Rates for models the LiteLLM table doesn't carry.
+ *
+ * OpenCode passthrough models (slug `provider/model`) never report a per-message
+ * cost in their transcripts, so they depend entirely on the rate table. When
+ * LiteLLM has no entry for the slug they price as `unpriced` ($0.00). This map
+ * fills those gaps with published list prices. It is a fallback only: a real
+ * LiteLLM entry always wins, so these go stale gracefully once upstream carries
+ * the model.
+ *
+ * Keys are normalized full slugs (`normalizeRateKey`). Values are USD per token.
+ */
+const LOCAL_RATE_OVERRIDES: RateTable = new Map<string, ModelRate>([
+  // z.ai GLM-5.3-Flash, direct Z.ai API list price (launch promo expired
+  // 2026-09-09): $0.15 / 1M input, $0.50 / 1M output, $0.03 / 1M cached input.
+  // https://docs.z.ai / z.ai pricing. No separate cache-write price is
+  // published, so cache creation is priced as plain input.
+  [
+    "z-ai/glm-5.3-flash",
+    {
+      inputCostPerToken: 0.15 / 1_000_000,
+      outputCostPerToken: 0.5 / 1_000_000,
+      cacheReadCostPerToken: 0.03 / 1_000_000,
+      cacheCreationCostPerToken: 0.15 / 1_000_000,
+    },
+  ],
+]);
+
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
   const key = normalizeRateKey(model);
   const bareName = bareModelName(key);
   if (bareName.length === 0 || UNPRICEABLE_MODELS.has(bareName)) return null;
-  return table.get(key) ?? null;
+  return table.get(key) ?? LOCAL_RATE_OVERRIDES.get(key) ?? null;
 }
 
 export interface PricedUsage {
