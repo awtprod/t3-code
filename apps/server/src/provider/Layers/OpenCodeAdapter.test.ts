@@ -87,6 +87,14 @@ const runtimeMock = {
     closeError: null as Error | null,
     messages: [] as MessageEntry[],
     subscribedEvents: [] as Array<unknown | Promise<unknown>>,
+    // Opt-in reconnect scripting. Each entry is one subscription's event script;
+    // the mock consumes the next entry per `event.subscribe` call and the
+    // generator RETURNS at the script's end (a clean EOF), which drives the
+    // adapter's reconnect loop to resubscribe. When the queue is empty the
+    // default `subscribedEvents` path runs and PARKS instead of returning, so
+    // existing single-subscribe tests never trip the reconnect loop.
+    eventStreamQueue: [] as Array<Array<unknown | Promise<unknown>>>,
+    eventSubscribeCount: 0,
     eventSubscribeObserved: null as (() => void) | null,
     permissionReplyCalls: [] as Array<{ requestID: string; reply: string }>,
     questionReplyCalls: [] as Array<{
@@ -137,6 +145,8 @@ const runtimeMock = {
     this.state.closeError = null;
     this.state.messages = [];
     this.state.subscribedEvents = [];
+    this.state.eventStreamQueue = [];
+    this.state.eventSubscribeCount = 0;
     this.state.eventSubscribeObserved = null;
     this.state.permissionReplyCalls.length = 0;
     this.state.questionReplyCalls.length = 0;
@@ -349,21 +359,43 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       },
       event: {
         subscribe: async () => {
+          runtimeMock.state.eventSubscribeCount += 1;
           runtimeMock.state.eventSubscribeObserved?.();
-          return {
-            stream: (async function* () {
-              if (runtimeMock.state.autoConnect) {
-                yield { id: "evt-auto-connected", type: "server.connected", properties: {} };
-              }
-              for (const event of runtimeMock.state.subscribedEvents) {
+          // Queued script: drive one reconnect cycle. Yield the scripted events
+          // (interleaving prompt echoes exactly like the default path) and then
+          // end — a clean EOF the adapter recovers from by resubscribing.
+          const script = runtimeMock.state.eventStreamQueue.shift();
+          if (script) {
+            const scriptGen = (async function* () {
+              for (const event of script) {
                 const resolved = await event;
                 while (runtimeMock.state.promptEchoEvents.length > 0) {
                   yield runtimeMock.state.promptEchoEvents.shift();
                 }
                 yield resolved;
               }
-            })(),
-          };
+              while (runtimeMock.state.promptEchoEvents.length > 0) {
+                yield runtimeMock.state.promptEchoEvents.shift();
+              }
+            })();
+            return { stream: makeSubscriptionStream(scriptGen, false) };
+          }
+          const defaultGen = (async function* () {
+            if (runtimeMock.state.autoConnect) {
+              yield { id: "evt-auto-connected", type: "server.connected", properties: {} };
+            }
+            for (const event of runtimeMock.state.subscribedEvents) {
+              const resolved = await event;
+              while (runtimeMock.state.promptEchoEvents.length > 0) {
+                yield runtimeMock.state.promptEchoEvents.shift();
+              }
+              yield resolved;
+            }
+          })();
+          // Model a long-lived subscription: PARK after the scripted events
+          // instead of ending, so a clean EOF does not trip the adapter's
+          // reconnect loop for tests that advance the clock with a live session.
+          return { stream: makeSubscriptionStream(defaultGen, true) };
         },
       },
       permission: {
@@ -465,6 +497,43 @@ beforeEach(() => {
 
 const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
+
+/**
+ * Build the async iterable returned by the mocked `event.subscribe`. The
+ * exposed iterator deliberately has NO `return` method: Effect's
+ * `Stream.fromAsyncIterable` registers an `iter.return()` scope finalizer only
+ * when one exists, and awaiting `iter.return()` on a generator suspended at a
+ * non-settling `await` deadlocks scope teardown. Without a `return` method
+ * Effect simply abandons the pending pull on interruption. When `park` is true
+ * the stream never ends after the generator drains (models a long-lived
+ * subscription); otherwise it ends cleanly (a clean EOF that drives the
+ * adapter's reconnect loop).
+ */
+function makeSubscriptionStream(
+  gen: AsyncGenerator<unknown, void, unknown>,
+  park: boolean,
+): AsyncIterable<unknown> {
+  return {
+    [Symbol.asyncIterator]() {
+      let drained = false;
+      return {
+        async next(): Promise<IteratorResult<unknown>> {
+          if (!drained) {
+            const result = await gen.next();
+            if (!result.done) {
+              return { value: result.value, done: false };
+            }
+            drained = true;
+          }
+          if (park) {
+            return new Promise<IteratorResult<unknown>>(() => {});
+          }
+          return { value: undefined, done: true };
+        },
+      };
+    },
+  };
+}
 
 function promiseWithResolvers<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -1859,6 +1928,153 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const abortCallsAfterCompletion = runtimeMock.state.abortCalls.length;
       yield* adapter.interruptTurn(threadId, activeTurn.turnId);
       NodeAssert.equal(runtimeMock.state.abortCalls.length, abortCallsAfterCompletion);
+    }),
+  );
+
+  it.effect("reconnects and completes a turn after the event stream drops mid-turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-reconnect-midturn");
+      // Stream 1 carries `server.connected` explicitly; disabling autoConnect
+      // keeps the post-drop resubscribe from re-emitting it, so completion is
+      // driven purely by the new post-subscribe reconciliation — not the older
+      // `server.connected` recovery branch.
+      runtimeMock.state.autoConnect = false;
+      // Busy until the adapter has resubscribed (>= 2 subscribes), idle after,
+      // so the turn cannot complete on stream 1: only the reconnect
+      // reconciliation poll observes the missed terminal idle and finishes it.
+      runtimeMock.state.sessionStatusImplementation = async () =>
+        runtimeMock.state.eventSubscribeCount >= 2
+          ? { data: {} }
+          : { data: { "http://127.0.0.1:9999/session": { type: "busy" as const } } };
+
+      const assistantActivity = promiseWithResolvers<unknown>();
+      // Stream 1: connect, then (after the turn is sent) assistant activity,
+      // then a clean EOF with no `idle` — the exact GLM stall shape.
+      runtimeMock.state.eventStreamQueue = [
+        [
+          { id: "evt-connected-midturn", type: "server.connected", properties: {} },
+          assistantActivity.promise,
+        ],
+      ];
+
+      const completedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const activeTurn = yield* adapter.sendTurn({
+        threadId,
+        input: "Long turn that outlives its event stream",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("opencode"),
+          "opencode/kimi-k3",
+        ),
+      });
+      // The turn's user-message echo is admitted on stream 1; the assistant
+      // activity shows the turn is live before stream 1 drops without an idle.
+      assistantActivity.resolve({
+        id: "evt-assistant-activity-midturn",
+        type: "message.updated",
+        properties: {
+          sessionID: "http://127.0.0.1:9999/session",
+          info: { id: "msg-assistant-midturn", role: "assistant" },
+        },
+      });
+      yield* Effect.yieldNow;
+
+      // Stream 1 has dropped: advance past the reconnect backoff to resubscribe,
+      // then past the reconciliation poll that observes the missed idle.
+      yield* advanceTestClock(250);
+      yield* advanceTestClock(2_000);
+
+      const completed = Option.getOrUndefined(
+        yield* Fiber.join(completedFiber).pipe(Effect.timeout("1 second")),
+      );
+      NodeAssert.equal(completed?.turnId, activeTurn.turnId);
+      NodeAssert.equal(runtimeMock.state.eventSubscribeCount >= 2, true);
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("stops the reconnect loop when the session is torn down", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-reconnect-teardown");
+      runtimeMock.state.autoConnect = false;
+      // Stream 1 connects then ends immediately (a drop), arming the backoff.
+      runtimeMock.state.eventStreamQueue = [
+        [{ id: "evt-connected-teardown", type: "server.connected", properties: {} }],
+      ];
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      // Session established via stream 1; that stream has dropped and the pump
+      // is now sleeping on its reconnect backoff.
+      NodeAssert.equal(runtimeMock.state.eventSubscribeCount, 1);
+
+      yield* adapter.stopSession(threadId);
+      // Teardown interrupts the pump; no resubscribe happens no matter how far
+      // the clock advances.
+      yield* advanceTestClock(30_000);
+
+      NodeAssert.equal(runtimeMock.state.eventSubscribeCount, 1);
+      NodeAssert.equal(yield* adapter.hasSession(threadId), false);
+    }),
+  );
+
+  it.effect("gives up after repeated event-less reconnects and reports an unexpected exit", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-reconnect-giveup");
+      runtimeMock.state.autoConnect = false;
+      const exitedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId && event.type === "session.exited"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      // Stream 1 connects (progress → resets the attempt counter); every
+      // subsequent resubscribe yields nothing and ends immediately, so the
+      // adapter exhausts its consecutive no-progress budget (6) and gives up.
+      runtimeMock.state.eventStreamQueue = [
+        [{ id: "evt-connected-giveup", type: "server.connected", properties: {} }],
+        [],
+        [],
+        [],
+        [],
+        [],
+      ];
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      // Advance through every backoff: 250 + 500 + 1000 + 2000 + 4000 ms.
+      yield* advanceTestClock(250);
+      yield* advanceTestClock(500);
+      yield* advanceTestClock(1_000);
+      yield* advanceTestClock(2_000);
+      yield* advanceTestClock(4_000);
+      yield* advanceTestClock(1_000);
+
+      const exited = Option.getOrUndefined(
+        yield* Fiber.join(exitedFiber).pipe(Effect.timeout("1 second")),
+      );
+      NodeAssert.equal(exited?.type, "session.exited");
+      // 1 healthy subscribe + 5 event-less ones trips the 6-attempt bound.
+      NodeAssert.equal(runtimeMock.state.eventSubscribeCount, 6);
+      NodeAssert.equal(yield* adapter.hasSession(threadId), false);
     }),
   );
 
