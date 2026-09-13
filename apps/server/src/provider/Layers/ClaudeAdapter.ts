@@ -4222,6 +4222,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           modelCatalog,
         );
 
+        // When the Task guardrail downgraded a subagent's model, seed the
+        // pending-model map keyed by this tool_use_id so the `task.started`
+        // activity reports the worker model rather than momentarily inheriting
+        // the manager session model (which the card then visibly "switches" off
+        // of once the authoritative subagent snapshot arrives). The snapshot
+        // still refines this in place; we only fill the pre-snapshot gap.
+        if (toolName === "Task" && effectiveInput !== toolInput && callbackOptions.toolUseID) {
+          const downgradedModel = trimmedString(
+            (effectiveInput as { readonly model?: unknown }).model,
+          );
+          if (downgradedModel) {
+            rememberPendingTaskModel(
+              context.pendingTaskModels,
+              callbackOptions.toolUseID,
+              downgradedModel,
+            );
+          }
+        }
+
         // Handle AskUserQuestion: surface clarifying questions to the
         // user via the user-input runtime event channel, regardless of
         // runtime mode (plan mode relies on this heavily).

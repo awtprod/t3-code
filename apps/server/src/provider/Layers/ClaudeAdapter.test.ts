@@ -2309,6 +2309,81 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "task.started reports the downgraded worker model when a Fable manager spawns a subagent",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            "claude-fable-5-1",
+            [],
+          ),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "spawn an agent",
+          attachments: [],
+        });
+
+        const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+        assert.equal(typeof canUseTool, "function");
+        if (!canUseTool) {
+          return;
+        }
+
+        // The Fable manager spawns a Task subagent with no explicit model. The
+        // guardrail downgrades it to the worker fallback AND seeds the model so
+        // the task.started activity reports the worker model straight away,
+        // rather than momentarily inheriting the manager session model.
+        const decision = yield* Effect.promise(() =>
+          canUseTool(
+            "Task",
+            { description: "Agent D", prompt: "do the thing" },
+            { signal: new AbortController().signal, toolUseID: "toolu_agent_dg" },
+          ),
+        );
+        assert.equal(decision.behavior, "allow");
+        if (decision.behavior === "allow") {
+          assert.equal((decision.updatedInput as { model?: unknown }).model, "claude-opus-4-8");
+        }
+
+        const startedFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "task-dg",
+          description: "Agent D",
+          task_type: "local_agent",
+          tool_use_id: "toolu_agent_dg",
+          uuid: "task-dg-uuid",
+          session_id: "sdk-session",
+        } as unknown as SDKMessage);
+
+        const started = Array.from(yield* Fiber.join(startedFiber))[0];
+        assert.equal(started?.type, "task.started");
+        if (started?.type === "task.started") {
+          assert.equal(started.payload.model, "claude-opus-4-8");
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("closes the session when the Claude stream aborts after a turn starts", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
