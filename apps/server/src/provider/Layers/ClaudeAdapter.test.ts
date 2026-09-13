@@ -54,6 +54,7 @@ import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { BUNDLED_CLAUDE_MODEL_CATALOG } from "../ClaudeModelCatalog.ts";
 import {
   makeClaudeAdapter,
+  maybeDowngradeBashWorkerModel,
   maybeDowngradeSubagentModel,
   type ClaudeAdapterLiveOptions,
 } from "./ClaudeAdapter.ts";
@@ -5391,5 +5392,47 @@ describe("maybeDowngradeSubagentModel", () => {
       input,
     );
     assert.strictEqual(maybeDowngradeSubagentModel("Task", input, undefined, catalog), input);
+  });
+});
+
+describe("maybeDowngradeBashWorkerModel", () => {
+  const catalog = BUNDLED_CLAUDE_MODEL_CATALOG;
+  const bashInput = (command: string) =>
+    ({ command }) as Parameters<typeof maybeDowngradeBashWorkerModel>[1];
+  const commandOf = (input: unknown) => (input as { command?: unknown }).command;
+
+  it("rewrites a Fable `claude -p` worker dispatch from a Fable manager", () => {
+    const result = maybeDowngradeBashWorkerModel(
+      "Bash",
+      bashInput("claude -p --model claude-fable-5-1 --max-turns 120 'go'"),
+      "claude-fable-5-1",
+      catalog,
+    );
+    assert.equal(commandOf(result), "claude -p --model claude-opus-4-8 --max-turns 120 'go'");
+  });
+
+  it("leaves an opus worker dispatch untouched (same reference)", () => {
+    const input = bashInput("claude -p --model claude-opus-4-8 --max-turns 160");
+    assert.strictEqual(
+      maybeDowngradeBashWorkerModel("Bash", input, "claude-fable-5-1", catalog),
+      input,
+    );
+  });
+
+  it("does not rewrite when the session model is not a manager", () => {
+    const input = bashInput("claude -p --model claude-fable-5-1");
+    assert.strictEqual(
+      maybeDowngradeBashWorkerModel("Bash", input, "claude-opus-5", catalog),
+      input,
+    );
+  });
+
+  it("ignores non-Bash tools and unknown session models", () => {
+    const input = bashInput("claude -p --model claude-fable-5-1");
+    assert.strictEqual(
+      maybeDowngradeBashWorkerModel("Task", input, "claude-fable-5-1", catalog),
+      input,
+    );
+    assert.strictEqual(maybeDowngradeBashWorkerModel("Bash", input, undefined, catalog), input);
   });
 });
