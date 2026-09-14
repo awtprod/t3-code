@@ -54,6 +54,7 @@ import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { BUNDLED_CLAUDE_MODEL_CATALOG } from "../ClaudeModelCatalog.ts";
 import {
   makeClaudeAdapter,
+  maybeDowngradeBashWorkerModel,
   maybeDowngradeSubagentModel,
   type ClaudeAdapterLiveOptions,
 } from "./ClaudeAdapter.ts";
@@ -2307,6 +2308,81 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "task.started reports the downgraded worker model when a Fable manager spawns a subagent",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            "claude-fable-5-1",
+            [],
+          ),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "spawn an agent",
+          attachments: [],
+        });
+
+        const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+        assert.equal(typeof canUseTool, "function");
+        if (!canUseTool) {
+          return;
+        }
+
+        // The Fable manager spawns a Task subagent with no explicit model. The
+        // guardrail downgrades it to the worker fallback AND seeds the model so
+        // the task.started activity reports the worker model straight away,
+        // rather than momentarily inheriting the manager session model.
+        const decision = yield* Effect.promise(() =>
+          canUseTool(
+            "Task",
+            { description: "Agent D", prompt: "do the thing" },
+            { signal: new AbortController().signal, toolUseID: "toolu_agent_dg" },
+          ),
+        );
+        assert.equal(decision.behavior, "allow");
+        if (decision.behavior === "allow") {
+          assert.equal((decision.updatedInput as { model?: unknown }).model, "claude-opus-4-8");
+        }
+
+        const startedFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "task-dg",
+          description: "Agent D",
+          task_type: "local_agent",
+          tool_use_id: "toolu_agent_dg",
+          uuid: "task-dg-uuid",
+          session_id: "sdk-session",
+        } as unknown as SDKMessage);
+
+        const started = Array.from(yield* Fiber.join(startedFiber))[0];
+        assert.equal(started?.type, "task.started");
+        if (started?.type === "task.started") {
+          assert.equal(started.payload.model, "claude-opus-4-8");
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("closes the session when the Claude stream aborts after a turn starts", () => {
     const harness = makeHarness();
@@ -5391,5 +5467,47 @@ describe("maybeDowngradeSubagentModel", () => {
       input,
     );
     assert.strictEqual(maybeDowngradeSubagentModel("Task", input, undefined, catalog), input);
+  });
+});
+
+describe("maybeDowngradeBashWorkerModel", () => {
+  const catalog = BUNDLED_CLAUDE_MODEL_CATALOG;
+  const bashInput = (command: string) =>
+    ({ command }) as Parameters<typeof maybeDowngradeBashWorkerModel>[1];
+  const commandOf = (input: unknown) => (input as { command?: unknown }).command;
+
+  it("rewrites a Fable `claude -p` worker dispatch from a Fable manager", () => {
+    const result = maybeDowngradeBashWorkerModel(
+      "Bash",
+      bashInput("claude -p --model claude-fable-5-1 --max-turns 120 'go'"),
+      "claude-fable-5-1",
+      catalog,
+    );
+    assert.equal(commandOf(result), "claude -p --model claude-opus-4-8 --max-turns 120 'go'");
+  });
+
+  it("leaves an opus worker dispatch untouched (same reference)", () => {
+    const input = bashInput("claude -p --model claude-opus-4-8 --max-turns 160");
+    assert.strictEqual(
+      maybeDowngradeBashWorkerModel("Bash", input, "claude-fable-5-1", catalog),
+      input,
+    );
+  });
+
+  it("does not rewrite when the session model is not a manager", () => {
+    const input = bashInput("claude -p --model claude-fable-5-1");
+    assert.strictEqual(
+      maybeDowngradeBashWorkerModel("Bash", input, "claude-opus-5", catalog),
+      input,
+    );
+  });
+
+  it("ignores non-Bash tools and unknown session models", () => {
+    const input = bashInput("claude -p --model claude-fable-5-1");
+    assert.strictEqual(
+      maybeDowngradeBashWorkerModel("Task", input, "claude-fable-5-1", catalog),
+      input,
+    );
+    assert.strictEqual(maybeDowngradeBashWorkerModel("Bash", input, undefined, catalog), input);
   });
 });
