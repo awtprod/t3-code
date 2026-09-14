@@ -252,6 +252,37 @@ export function isClaudeManagerModelSlug(slug: string | null | undefined): boole
   return typeof slug === "string" && slug.trim().toLowerCase().startsWith("claude-fable");
 }
 
+/**
+ * Rewrite any `--model claude-fable*` flag in a shell command that launches the
+ * `claude` CLI so it targets the worker model instead. Covers the headless
+ * `claude -p --model claude-fable-5-1` worker-dispatch path, which the Task-tool
+ * guardrail cannot see (those run as detached OS processes, not subagents).
+ *
+ * Conservative and regex-based, not a shell parser: it rewrites the model token
+ * (versioned slug, optional `[1m]`-style context suffix, quoted or `=` form) only
+ * when the command also invokes `claude`. This fails safe toward the cheaper
+ * model; the only false positive is rewriting a literal `--model claude-fable…`
+ * mention inside prompt prose, which is harmless. Returns the input string
+ * unchanged (same reference) when there is nothing to rewrite.
+ */
+export function rewriteManagerModelInCommand(command: string): string {
+  // Require an actual `claude` executable invocation (at a command position,
+  // followed by whitespace) — not merely the substring "claude" that every
+  // `claude-*` model slug contains — so a bare mention like `echo claude-fable`
+  // is left alone.
+  if (typeof command !== "string" || !/(?:^|[\s;&|(/])claude(?=\s|$)/.test(command)) {
+    return command;
+  }
+  const rewritten = command.replace(
+    // Model token is limited to slug characters (letters, digits, `.`, `-`) plus
+    // an optional `[…]` context-window suffix, so it stops at shell separators
+    // like `;` `&` `|` and whitespace rather than swallowing them.
+    /(--model[=\s]+["']?)claude-fable[\w.\-[\]]*/gi,
+    (_match, prefix: string) => `${prefix}${CLAUDE_WORKER_FALLBACK_MODEL}`,
+  );
+  return rewritten === command ? command : rewritten;
+}
+
 // ── Provider display names ────────────────────────────────────────────
 
 export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>> = {

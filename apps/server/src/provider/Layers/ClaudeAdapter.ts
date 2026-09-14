@@ -39,6 +39,7 @@ import {
   type ProviderSession,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
+  rewriteManagerModelInCommand,
   type RuntimeContentStreamKind,
   RuntimeItemId,
   RuntimeRequestId,
@@ -1044,6 +1045,35 @@ export function maybeDowngradeSubagentModel(
     return { ...toolInput, model: CLAUDE_WORKER_FALLBACK_MODEL };
   }
   return toolInput;
+}
+
+/**
+ * Manager/worker guardrail for the `Bash` tool's headless worker-dispatch path.
+ * The fleet's managers spawn workers as detached `claude -p --model …` processes
+ * (not `Task` subagents), which `maybeDowngradeSubagentModel` cannot see. When the
+ * session (root) model is a manager-tier model (Fable), any `claude … --model
+ * claude-fable*` in the command is rewritten to the worker fallback. Non-`Bash`
+ * tools and non-manager sessions pass through unchanged. Pure/unit-testable.
+ */
+export function maybeDowngradeBashWorkerModel(
+  toolName: Parameters<CanUseTool>[0],
+  toolInput: Parameters<CanUseTool>[1],
+  sessionModel: string | undefined,
+  catalog: ClaudeModelCatalog,
+): Parameters<CanUseTool>[1] {
+  if (toolName !== "Bash" || !sessionModel) {
+    return toolInput;
+  }
+  const sessionSlug = resolveClaudeModelSlug(catalog, sessionModel);
+  if (!isClaudeManagerModelSlug(sessionSlug)) {
+    return toolInput;
+  }
+  const command = trimmedString((toolInput as { readonly command?: unknown }).command);
+  if (!command) {
+    return toolInput;
+  }
+  const rewritten = rewriteManagerModelInCommand(command);
+  return rewritten === command ? toolInput : { ...toolInput, command: rewritten };
 }
 
 /**
@@ -4178,15 +4208,38 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
 
         // Guardrail: a manager-tier session (Fable) must not spawn manager-tier
-        // subagents. Downgrade an inheriting or manager `Task` model to the
-        // cheaper worker fallback. Applied across every runtime mode below, so
-        // both the auto-allow and the approval paths carry the rewritten model.
-        const effectiveInput = maybeDowngradeSubagentModel(
+        // subagents. Downgrade an inheriting or manager `Task` model, and rewrite
+        // any `claude … --model claude-fable*` in a `Bash` worker-dispatch command,
+        // to the cheaper worker fallback. Each helper is a no-op for the other's
+        // tool. Applied across every runtime mode below, so both the auto-allow and
+        // the approval paths carry the rewritten input.
+        const sessionModelForGuardrail =
+          modelSelection?.model ?? context.session.model ?? undefined;
+        const effectiveInput = maybeDowngradeBashWorkerModel(
           toolName,
-          toolInput,
-          modelSelection?.model ?? context.session.model ?? undefined,
+          maybeDowngradeSubagentModel(toolName, toolInput, sessionModelForGuardrail, modelCatalog),
+          sessionModelForGuardrail,
           modelCatalog,
         );
+
+        // When the Task guardrail downgraded a subagent's model, seed the
+        // pending-model map keyed by this tool_use_id so the `task.started`
+        // activity reports the worker model rather than momentarily inheriting
+        // the manager session model (which the card then visibly "switches" off
+        // of once the authoritative subagent snapshot arrives). The snapshot
+        // still refines this in place; we only fill the pre-snapshot gap.
+        if (toolName === "Task" && effectiveInput !== toolInput && callbackOptions.toolUseID) {
+          const downgradedModel = trimmedString(
+            (effectiveInput as { readonly model?: unknown }).model,
+          );
+          if (downgradedModel) {
+            rememberPendingTaskModel(
+              context.pendingTaskModels,
+              callbackOptions.toolUseID,
+              downgradedModel,
+            );
+          }
+        }
 
         // Handle AskUserQuestion: surface clarifying questions to the
         // user via the user-input runtime event channel, regardless of
