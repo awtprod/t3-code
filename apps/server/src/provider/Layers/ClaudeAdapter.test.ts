@@ -51,7 +51,12 @@ import {
 } from "../ClaudeModelCatalog.testFixtures.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
-import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+import { BUNDLED_CLAUDE_MODEL_CATALOG } from "../ClaudeModelCatalog.ts";
+import {
+  makeClaudeAdapter,
+  maybeDowngradeSubagentModel,
+  type ClaudeAdapterLiveOptions,
+} from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
@@ -5322,5 +5327,69 @@ describe("ClaudeAdapterLive", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
+  });
+});
+
+describe("maybeDowngradeSubagentModel", () => {
+  const catalog = BUNDLED_CLAUDE_MODEL_CATALOG;
+  const taskInput = (model?: string) =>
+    ({
+      description: "delegated work",
+      prompt: "do the thing",
+      subagent_type: "worker",
+      ...(model ? { model } : {}),
+    }) as Parameters<typeof maybeDowngradeSubagentModel>[1];
+  const modelOf = (input: unknown) => (input as { model?: unknown }).model;
+
+  it("downgrades an inheriting Task spawn from a Fable manager to the worker fallback", () => {
+    const result = maybeDowngradeSubagentModel("Task", taskInput(), "claude-fable-5-1", catalog);
+    assert.equal(modelOf(result), "claude-opus-4-8");
+  });
+
+  it("downgrades an explicit Fable subagent (including via alias) to the worker fallback", () => {
+    assert.equal(
+      modelOf(
+        maybeDowngradeSubagentModel(
+          "Task",
+          taskInput("claude-fable-5-1"),
+          "claude-fable-5-1",
+          catalog,
+        ),
+      ),
+      "claude-opus-4-8",
+    );
+    // Alias resolves to the canonical Fable slug before the manager check.
+    assert.equal(
+      modelOf(maybeDowngradeSubagentModel("Task", taskInput("fable"), "claude-fable-5-1", catalog)),
+      "claude-opus-4-8",
+    );
+  });
+
+  it("respects an explicit non-manager worker model chosen under a Fable manager", () => {
+    assert.equal(
+      modelOf(
+        maybeDowngradeSubagentModel("Task", taskInput("sonnet"), "claude-fable-5-1", catalog),
+      ),
+      "sonnet",
+    );
+  });
+
+  it("leaves Task spawns untouched when the session model is not a manager", () => {
+    const input = taskInput();
+    assert.strictEqual(maybeDowngradeSubagentModel("Task", input, "claude-opus-5", catalog), input);
+    // A non-manager session may even keep an inherited/explicit Fable child.
+    assert.strictEqual(
+      maybeDowngradeSubagentModel("Task", input, "claude-sonnet-5", catalog),
+      input,
+    );
+  });
+
+  it("ignores non-Task tools and unknown session models", () => {
+    const input = taskInput();
+    assert.strictEqual(
+      maybeDowngradeSubagentModel("Bash", input, "claude-fable-5-1", catalog),
+      input,
+    );
+    assert.strictEqual(maybeDowngradeSubagentModel("Task", input, undefined, catalog), input);
   });
 });
