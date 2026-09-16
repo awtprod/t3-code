@@ -2,6 +2,7 @@ import {
   CommandCenterMcpCapabilityUnavailableError,
   DatabaseToolError,
   type EnvironmentId,
+  McpCapabilityUnavailableError,
   PreviewAutomationUnavailableError,
   type ProjectId,
   type ProviderInstanceId,
@@ -11,7 +12,13 @@ import type { CapabilityName, RepositoryId, SpaceId } from "@command-center/core
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-export type McpCapability = "preview" | "database.read" | "database.write" | CapabilityName;
+export type McpCapability =
+  | "preview"
+  | "device"
+  | "pull-requests"
+  | "database.read"
+  | "database.write"
+  | CapabilityName;
 export type McpMemoryWriteMode = "propose" | "remember";
 
 export interface McpInvocationScope {
@@ -77,9 +84,32 @@ export const requireDatabaseCapability = Effect.fn("mcp.requireDatabaseCapabilit
   return invocation;
 });
 
+/**
+ * Neutral capability check for upstream capabilities that carry no bespoke
+ * error type (e.g. "device", "pull-requests"). Surfaces the generic
+ * McpCapabilityUnavailableError so the broker routes it uniformly.
+ */
+export const requireNeutralCapability = Effect.fn("mcp.requireNeutralCapability")(function* (
+  capability: McpCapability,
+) {
+  const invocation = yield* McpInvocationContext;
+  if (!invocation.capabilities.has(capability)) {
+    return yield* new McpCapabilityUnavailableError({
+      capability,
+      environmentId: invocation.environmentId,
+      threadId: invocation.threadId,
+      providerSessionId: invocation.providerSessionId,
+      providerInstanceId: invocation.providerInstanceId,
+    });
+  }
+  return invocation;
+});
+
 export const requireMcpCapability = (capability: McpCapability) =>
   capability === "preview"
     ? requirePreviewCapability()
     : capability === "database.read" || capability === "database.write"
       ? requireDatabaseCapability(capability)
-      : requireCommandCenterCapability(capability);
+      : capability === "device" || capability === "pull-requests"
+        ? requireNeutralCapability(capability)
+        : requireCommandCenterCapability(capability);

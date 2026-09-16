@@ -12,6 +12,7 @@ import {
   ModelSelection,
   ProjectId,
   SourceProposedPlanReference,
+  ProjectIconOverride,
   ThreadId,
 } from "@t3tools/contracts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -59,6 +60,7 @@ const ThreadTurnStartAboveCutoffRowSchema = Schema.Struct({
   sourceProposedPlan: Schema.NullOr(Schema.fromJsonString(SourceProposedPlanReference)),
 });
 
+const encodeProjectIcon = Schema.encodeSync(ProjectIconOverride);
 const decodeEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const UnknownFromJsonString = Schema.fromJsonString(Schema.Unknown);
 const EventMetadataFromJsonString = Schema.fromJsonString(OrchestrationEventMetadata);
@@ -101,6 +103,18 @@ const HasEventAfterRequestSchema = Schema.Struct({
 const ReadFromSequenceRequestSchema = Schema.Struct({
   sequenceExclusive: NonNegativeInt,
   limit: Schema.Number,
+});
+const AggregateReplayRequestSchema = Schema.Struct({
+  aggregateKind: OrchestrationAggregateKind,
+  aggregateId: Schema.String,
+  fromSequenceExclusive: NonNegativeInt,
+  toSequenceInclusive: NonNegativeInt,
+  limit: Schema.Number,
+});
+const AggregateReplayStatsRowSchema = Schema.Struct({
+  eventCount: Schema.Number,
+  payloadBytes: Schema.Number,
+  hasCreateEvent: Schema.Number,
 });
 const DEFAULT_READ_FROM_SEQUENCE_LIMIT = 1_000;
 const READ_PAGE_SIZE = 500;
@@ -486,6 +500,57 @@ const makeEventStore = Effect.gen(function* () {
       })),
     );
 
+  const readAggregateEventRows = SqlSchema.findAll({
+    Request: AggregateReplayRequestSchema,
+    Result: OrchestrationEventPersistedRowSchema,
+    execute: (request) =>
+      sql`
+        SELECT
+          sequence,
+          event_id AS "eventId",
+          event_type AS "type",
+          aggregate_kind AS "aggregateKind",
+          stream_id AS "aggregateId",
+          occurred_at AS "occurredAt",
+          command_id AS "commandId",
+          causation_event_id AS "causationEventId",
+          correlation_id AS "correlationId",
+          payload_json AS "payload",
+          metadata_json AS "metadata"
+        FROM orchestration_events
+        WHERE aggregate_kind = ${request.aggregateKind}
+          AND stream_id = ${request.aggregateId}
+          AND sequence > ${request.fromSequenceExclusive}
+          AND sequence <= ${request.toSequenceInclusive}
+        ORDER BY sequence ASC
+        LIMIT ${request.limit}
+      `,
+  });
+
+  const readAggregateReplayStats = SqlSchema.findOne({
+    Request: AggregateReplayRequestSchema,
+    Result: AggregateReplayStatsRowSchema,
+    execute: (request) =>
+      sql`
+        SELECT
+          COUNT(*) AS "eventCount",
+          COALESCE(SUM(octet_length(payload_json)), 0) AS "payloadBytes",
+          COALESCE(MAX(event_type IN (
+            'thread.created', 'project.created'
+          )), 0) AS "hasCreateEvent"
+        FROM (
+          SELECT payload_json, event_type
+          FROM orchestration_events
+          WHERE aggregate_kind = ${request.aggregateKind}
+            AND stream_id = ${request.aggregateId}
+            AND sequence > ${request.fromSequenceExclusive}
+            AND sequence <= ${request.toSequenceInclusive}
+          ORDER BY sequence ASC
+          LIMIT ${request.limit}
+        )
+      `,
+  });
+
   const append: OrchestrationEventStoreShape["append"] = (event) =>
     appendEventRow({
       eventId: event.eventId,
@@ -497,7 +562,10 @@ const makeEventStore = Effect.gen(function* () {
       actorKind: inferActorKind(event),
       occurredAt: event.occurredAt,
       commandId: event.commandId,
-      payloadJson: event.payload,
+      payloadJson:
+        "projectIcon" in event.payload && event.payload.projectIcon
+          ? { ...event.payload, projectIcon: encodeProjectIcon(event.payload.projectIcon) }
+          : event.payload,
       metadataJson: event.metadata,
     }).pipe(
       Effect.mapError(
@@ -521,11 +589,9 @@ const makeEventStore = Effect.gen(function* () {
     if (normalizedLimit === 0) {
       return Stream.empty;
     }
-    const readPage = (
-      cursor: number,
-      remaining: number,
-    ): Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError> =>
-      Stream.fromEffect(
+    return Stream.paginate(
+      { cursor: sequenceExclusive, remaining: normalizedLimit },
+      ({ cursor, remaining }) =>
         readEventRowsFromSequence({
           sequenceExclusive: cursor,
           limit: Math.min(remaining, READ_PAGE_SIZE),
@@ -545,24 +611,18 @@ const makeEventStore = Effect.gen(function* () {
               ),
             ),
           ),
+          Effect.map((events) => {
+            const last = events.at(-1);
+            const nextRemaining = remaining - events.length;
+            return [
+              events,
+              last === undefined || nextRemaining <= 0
+                ? Option.none()
+                : Option.some({ cursor: last.sequence, remaining: nextRemaining }),
+            ] as const;
+          }),
         ),
-      ).pipe(
-        Stream.flatMap((events) => {
-          if (events.length === 0) {
-            return Stream.empty;
-          }
-          const nextRemaining = remaining - events.length;
-          if (nextRemaining <= 0) {
-            return Stream.fromIterable(events);
-          }
-          return Stream.concat(
-            Stream.fromIterable(events),
-            readPage(events[events.length - 1]!.sequence, nextRemaining),
-          );
-        }),
-      );
-
-    return readPage(sequenceExclusive, normalizedLimit);
+    );
   };
 
   const findEventAfter = SqlSchema.findOneOption({
@@ -592,9 +652,72 @@ const makeEventStore = Effect.gen(function* () {
       ),
     );
 
+  const readAggregateRange: OrchestrationEventStoreShape["readAggregateRange"] = (input) => {
+    const limit = Math.max(0, Math.floor(input.limit ?? DEFAULT_READ_FROM_SEQUENCE_LIMIT));
+    if (limit === 0 || input.fromSequenceExclusive >= input.toSequenceInclusive) {
+      return Stream.empty;
+    }
+    return Stream.paginate(
+      { cursor: input.fromSequenceExclusive, remaining: limit },
+      ({ cursor, remaining }) =>
+        readAggregateEventRows({
+          ...input,
+          fromSequenceExclusive: cursor,
+          limit: Math.min(remaining, READ_PAGE_SIZE),
+        }).pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "OrchestrationEventStore.readAggregateRange:query",
+              "OrchestrationEventStore.readAggregateRange:decodeRows",
+            ),
+          ),
+          Effect.flatMap((rows) =>
+            Effect.forEach(rows, (row) =>
+              decodeEvent(row).pipe(
+                Effect.mapError(
+                  toPersistenceDecodeError("OrchestrationEventStore.readAggregateRange:rowToEvent"),
+                ),
+              ),
+            ),
+          ),
+          Effect.map((events) => {
+            const last = events.at(-1);
+            const nextRemaining = remaining - events.length;
+            return [
+              events,
+              last === undefined ||
+              events.length < READ_PAGE_SIZE ||
+              nextRemaining === 0 ||
+              last.sequence >= input.toSequenceInclusive
+                ? Option.none()
+                : Option.some({ cursor: last.sequence, remaining: nextRemaining }),
+            ] as const;
+          }),
+        ),
+    );
+  };
+
+  const getAggregateReplayStats: OrchestrationEventStoreShape["getAggregateReplayStats"] = (
+    input,
+  ) =>
+    readAggregateReplayStats({
+      ...input,
+      limit: Math.max(0, Math.floor(input.maxEvents)) + 1,
+    }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "OrchestrationEventStore.getAggregateReplayStats:query",
+          "OrchestrationEventStore.getAggregateReplayStats:decodeRow",
+        ),
+      ),
+      Effect.map((row) => ({ ...row, hasCreateEvent: row.hasCreateEvent !== 0 })),
+    );
+
   return {
     append,
     readFromSequence,
+    readAggregateRange,
+    getAggregateReplayStats,
     readAll: () => readFromSequence(0, Number.MAX_SAFE_INTEGER),
     getThreadTurnStartClaim,
     listThreadTurnStartsAboveCutoff,

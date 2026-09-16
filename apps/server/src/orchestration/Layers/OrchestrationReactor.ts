@@ -13,6 +13,8 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { SandboxLifecycleReactor } from "../Services/SandboxLifecycleReactor.ts";
 import { SandboxSettleCleanupReactor } from "../Services/SandboxSettleCleanupReactor.ts";
 import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
+import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
+import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
@@ -24,6 +26,8 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const sandboxLifecycleReactor = yield* SandboxLifecycleReactor;
   const sandboxSettleCleanupReactor = yield* SandboxSettleCleanupReactor;
   const threadSettlementReactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
+  const pullRequestSyncReactor = yield* PullRequestSyncReactor.PullRequestSyncReactor;
+  const threadPullRequestReactor = yield* ThreadPullRequestReactor.ThreadPullRequestReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
@@ -33,7 +37,9 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* threadDeletionReactor.start();
     yield* sandboxLifecycleReactor.start();
     yield* sandboxSettleCleanupReactor.start();
+    yield* threadPullRequestReactor.start();
     yield* threadSettlementReactor.start();
+    yield* pullRequestSyncReactor.start();
     yield* agentAwarenessRelay.start();
   });
 

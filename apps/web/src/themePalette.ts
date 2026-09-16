@@ -28,11 +28,8 @@ export const VERCEL_DARK_THEME_LABEL = "Vercel Dark";
 export const GROVE_THEME_ID = "grove" as const;
 export const GROVE_THEME_LABEL = "Grove";
 export const OCEAN_THEME_ID = "ocean" as const;
-export const OCEAN_THEME_LABEL = "Ocean";
-export const EMBER_THEME_ID = "ember" as const;
-export const EMBER_THEME_LABEL = "Ember";
-export const IRIS_THEME_ID = "iris" as const;
-export const IRIS_THEME_LABEL = "Iris";
+const EMBER_THEME_ID = "ember" as const;
+const IRIS_THEME_ID = "iris" as const;
 export const THEME_FILE_VERSION = 1 as const;
 export const CUSTOM_THEMES_STORAGE_KEY = "t3code:themes:v1";
 export const THEME_FOLLOW_SYSTEM_STORAGE_KEY = "t3code:theme-follow-system";
@@ -475,12 +472,12 @@ const T3_CODE_DARK_THEME_COLORS: ThemeColors = {
   toolbar: "#0a0a0a",
   toolbarForeground: "#f5f5f5",
   toolbarBorder: "#191919",
-  toolbarControl: "#191919",
+  toolbarControl: "#111111",
   toolbarControlForeground: "#f5f5f5",
   toolbarControlHover: "#141414",
   surface: "#111111",
-  surfaceRaised: "#141414",
-  surfaceOverlay: "#191919",
+  surfaceRaised: "#111111",
+  surfaceOverlay: "#111111",
   text: "#f5f5f5",
   textMuted: "#818181",
   border: "#191919",
@@ -488,9 +485,9 @@ const T3_CODE_DARK_THEME_COLORS: ThemeColors = {
   focus: "#346bf1",
   accent: "#346bf1",
   accentForeground: "#ffffff",
-  secondary: "#141414",
+  secondary: "#111111",
   secondaryForeground: "#f5f5f5",
-  muted: "#141414",
+  muted: "#111111",
   mutedForeground: "#818181",
   placeholder: "#818181",
   secondaryLabel: "#818181",
@@ -546,12 +543,6 @@ type ThemeRgbColor = {
   r: number;
   g: number;
   b: number;
-};
-
-type ThemeHslColor = {
-  h: number;
-  s: number;
-  l: number;
 };
 
 type ThemeOklch = { L: number; C: number; h: number };
@@ -672,48 +663,6 @@ function canonicalizeThemeDefinition(theme: ThemeDefinition): ThemeDefinition {
         }
       : {}),
   };
-}
-
-function themeRgbToHsl(color: ThemeRgbColor): ThemeHslColor {
-  const red = color.r / 255;
-  const green = color.g / 255;
-  const blue = color.b / 255;
-  const max = Math.max(red, green, blue);
-  const min = Math.min(red, green, blue);
-  const delta = max - min;
-  const lightness = (max + min) / 2;
-
-  if (delta === 0) return { h: 0, s: 0, l: lightness };
-
-  const saturation = delta / (1 - Math.abs(2 * lightness - 1));
-  let hue = 0;
-  if (max === red) hue = ((green - blue) / delta) % 6;
-  else if (max === green) hue = (blue - red) / delta + 2;
-  else hue = (red - green) / delta + 4;
-
-  return { h: (hue * 60 + 360) % 360, s: saturation, l: lightness };
-}
-
-function themeHslToRgb(color: ThemeHslColor): ThemeRgbColor {
-  const hue = ((color.h % 360) + 360) % 360;
-  const chroma = (1 - Math.abs(2 * color.l - 1)) * color.s;
-  const hueSector = hue / 60;
-  const secondary = chroma * (1 - Math.abs((hueSector % 2) - 1));
-  const match = color.l - chroma / 2;
-  const [red, green, blue] =
-    hueSector < 1
-      ? [chroma, secondary, 0]
-      : hueSector < 2
-        ? [secondary, chroma, 0]
-        : hueSector < 3
-          ? [0, chroma, secondary]
-          : hueSector < 4
-            ? [0, secondary, chroma]
-            : hueSector < 5
-              ? [secondary, 0, chroma]
-              : [chroma, 0, secondary];
-
-  return { r: (red + match) * 255, g: (green + match) * 255, b: (blue + match) * 255 };
 }
 
 function mixThemeRgbColors(
@@ -989,7 +938,7 @@ export function createVividThemeColors(
     themeOklchToThemeColor(
       solveOklchLightness(textBase, surfaceRgb, 4.6, dark ? "lighter" : "darker"),
     );
-  const mutedForeground = foregroundOn(mutedRgb);
+  const mutedForeground = themeRgbToThemeColor(readableThemeText(mutedRgb, textRgb, 1, 4.6));
   const placeholder = themeRgbToThemeColor(readableThemeText(surfaceRaisedRgb, textRgb, 1, 4.6));
 
   const actionHover: ThemeOklch = { ...action, L: action.L + (dark ? 0.06 : -0.06) };
@@ -1593,7 +1542,7 @@ export function themeIdFromName(name: string): string {
   return normalized || "custom-theme";
 }
 
-export class ThemeLibraryStorageError extends Schema.TaggedErrorClass<ThemeLibraryStorageError>()(
+export class ThemeLibraryStorageError extends Schema.TaggedError<ThemeLibraryStorageError>()(
   "ThemeLibraryStorageError",
   {
     storageKey: Schema.String,
@@ -1607,8 +1556,6 @@ export class ThemeLibraryStorageError extends Schema.TaggedErrorClass<ThemeLibra
     return `Failed to ${this.operation} the theme library ${direction} ${this.storageKey}.`;
   }
 }
-
-export const isThemeLibraryStorageError = Schema.is(ThemeLibraryStorageError);
 
 function saveCustomThemes(
   storedThemes: ReadonlyArray<unknown>,

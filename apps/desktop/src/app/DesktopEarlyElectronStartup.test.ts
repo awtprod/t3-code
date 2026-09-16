@@ -81,7 +81,9 @@ describe("DesktopEarlyElectronStartup", () => {
     });
 
     assert.deepEqual(options, {
+      isDevelopment: true,
       linuxWmClass: "commandcenter-dev",
+      linuxDesktopEntryName: "commandcenter-dev.desktop",
       passwordStore: "gnome-libsecret",
     });
   });

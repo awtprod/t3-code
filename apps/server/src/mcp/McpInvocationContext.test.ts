@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import {
   CommandCenterMcpCapabilityUnavailableError,
   EnvironmentId,
+  McpCapabilityUnavailableError,
   PreviewAutomationUnavailableError,
   ProviderInstanceId,
   ThreadId,
@@ -87,4 +88,30 @@ it.effect("does not let a Gmail-only credential cross into Calendar or Drive", (
       expect(error).toMatchObject({ capability });
     }
   }).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, invocation));
+});
+
+it.effect("reports other missing capabilities with the neutral error", () => {
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: ThreadId.make("thread-1"),
+    providerSessionId: "provider-session-1",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    capabilities: new Set(["preview"]),
+    issuedAt: 1,
+  };
+
+  return Effect.gen(function* () {
+    const error = yield* McpInvocationContext.requireMcpCapability("pull-requests").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.flip,
+    );
+
+    expect(error).toBeInstanceOf(McpCapabilityUnavailableError);
+    expect(error).toMatchObject({ capability: "pull-requests", threadId: invocation.threadId });
+
+    const scope = yield* McpInvocationContext.requireMcpCapability("preview").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+    );
+    expect(scope).toBe(invocation);
+  });
 });

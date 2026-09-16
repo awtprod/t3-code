@@ -2,18 +2,22 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ProviderDriverKind, type ServerProviderModel } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
+  applyManifestDefault,
   BUNDLED_MODEL_MANIFEST,
   classifyModels,
   make,
   resolveProviderCatalog,
   type ModelManifestData,
+  encodeManifestCache,
 } from "./ModelManifest.ts";
 
 /**
@@ -34,6 +38,20 @@ const model = (overrides: Partial<ServerProviderModel>): ServerProviderModel => 
 });
 
 describe("classifyModels", () => {
+  it("classifies qualified Codex families without changing their wire ids", () => {
+    const manifest: ModelManifestData = { version: 1, currentModels: { codex: ["gpt-test"] } };
+    const models = [
+      model({ slug: "openai.gpt-test", isLegacy: true }),
+      model({ slug: "openai.gpt-old" }),
+    ];
+    assert.deepStrictEqual(
+      classifyModels(models, manifest, CODEX).map((entry) => [entry.slug, entry.isLegacy ?? false]),
+      [
+        ["openai.gpt-test", false],
+        ["openai.gpt-old", true],
+      ],
+    );
+  });
   it("flags non-current models, clears stale flags, and skips custom models", () => {
     const manifest: ModelManifestData = {
       version: 1,
@@ -64,6 +82,51 @@ describe("classifyModels", () => {
     assert.deepStrictEqual(
       classifyModels(models, { version: 1, currentModels: {} }, CODEX),
       models,
+    );
+  });
+});
+
+describe("applyManifestDefault", () => {
+  it("resolves the manifest default to the qualified live model", () => {
+    const manifest: ModelManifestData = {
+      version: 1,
+      currentModels: {},
+      providers: { codex: { models: [], profiles: {}, defaults: { chat: "gpt-test" } } },
+    };
+    const models = [
+      model({ slug: "openai.gpt-old", isDefault: true }),
+      model({ slug: "openai.gpt-test" }),
+    ];
+    assert.strictEqual(
+      applyManifestDefault(models, manifest, CODEX).find((entry) => entry.isDefault)?.slug,
+      "openai.gpt-test",
+    );
+  });
+  it("moves the default flag and its aliases to the manifest's chat default", () => {
+    const driver = ProviderDriverKind.make("antigravity");
+    const manifest: ModelManifestData = {
+      version: 1,
+      currentModels: {},
+      providers: {
+        antigravity: {
+          defaults: { chat: "gemini-new" },
+          profiles: {},
+          models: [{ slug: "gemini-new", name: "New", status: "current" }],
+        },
+      },
+    };
+    const models = [
+      model({ slug: "gemini-old", isDefault: true, aliases: ["antigravity-default"] }),
+      model({ slug: "gemini-new" }),
+    ];
+    assert.deepStrictEqual(applyManifestDefault(models, manifest, driver), [
+      model({ slug: "gemini-old" }),
+      model({ slug: "gemini-new", isDefault: true, aliases: ["antigravity-default"] }),
+    ]);
+    // The account does not offer the manifest default: keep the runtime's choice.
+    assert.deepStrictEqual(
+      applyManifestDefault(models.slice(0, 1), manifest, driver),
+      models.slice(0, 1),
     );
   });
 });
@@ -164,8 +227,12 @@ describe("resolveProviderCatalog", () => {
   });
 });
 
+// Remote fixtures date after the bundle so a fetch still outranks it.
+const REMOTE_UPDATED_AT = "2099-01-01T00:00:00Z";
+
 const REMOTE_MANIFEST: ModelManifestData = {
   version: 1,
+  updatedAt: REMOTE_UPDATED_AT,
   currentModels: {
     codex: ["remote-model"],
     claudeAgent: ["remote-agent-model"],
@@ -174,6 +241,7 @@ const REMOTE_MANIFEST: ModelManifestData = {
 
 const REMOTE_CLAUDE_MANIFEST: ModelManifestData = {
   version: 1,
+  updatedAt: REMOTE_UPDATED_AT,
   currentModels: {},
   providers: {
     claudeAgent: {
@@ -345,6 +413,46 @@ describe("ModelManifest service", () => {
       ),
     );
   });
+
+  it.live("drops a disk cache of a manifest older than the bundled one", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const config = yield* ServerConfig.ServerConfig;
+      const cachePath = path.join(config.stateDir, "model-manifest.json");
+      // A cache of the manifest as it was before the release edited it. The
+      // fetch time is irrelevant: the remote may be unreachable now, so
+      // `current` must already prefer the bundle.
+      const { updatedAt: _undated, ...undatedManifest } = REMOTE_MANIFEST;
+      for (const stale of [
+        undatedManifest,
+        { ...REMOTE_MANIFEST, updatedAt: "2000-01-01T00:00:00Z" },
+      ]) {
+        yield* fs.writeFileString(
+          cachePath,
+          yield* encodeManifestCache({ fetchedAtMs: 0, manifest: stale }),
+        );
+        const service = yield* make;
+        assert.deepStrictEqual(yield* service.current, BUNDLED_MODEL_MANIFEST);
+      }
+
+      // A cache of a newer edit still outranks the bundle.
+      yield* fs.writeFileString(
+        cachePath,
+        yield* encodeManifestCache({ fetchedAtMs: 0, manifest: REMOTE_MANIFEST }),
+      );
+      const later = yield* make;
+      assert.deepStrictEqual(yield* later.current, REMOTE_MANIFEST);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        serviceLayers({
+          prefix: "model-manifest-newer-bundle-test",
+          response: () => Response.json(REMOTE_MANIFEST),
+        }),
+      ),
+    ),
+  );
 
   it.live("does not fetch when provider update checks are disabled", () =>
     Effect.gen(function* () {

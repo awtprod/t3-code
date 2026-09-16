@@ -101,6 +101,20 @@ export const ThreadTurnStartAboveCutoff = Schema.Struct({
 });
 export type ThreadTurnStartAboveCutoff = typeof ThreadTurnStartAboveCutoff.Type;
 
+export interface OrchestrationAggregateReplayRange {
+  readonly aggregateKind: OrchestrationEvent["aggregateKind"];
+  readonly aggregateId: string;
+  readonly fromSequenceExclusive: number;
+  readonly toSequenceInclusive: number;
+}
+
+export interface OrchestrationAggregateReplayStats {
+  readonly eventCount: number;
+  readonly payloadBytes: number;
+  /** A creation in this range does not prove that the aggregate still exists. */
+  readonly hasCreateEvent: boolean;
+}
+
 /**
  * OrchestrationEventStoreShape - Service API for orchestration event persistence.
  */
@@ -130,6 +144,19 @@ export interface OrchestrationEventStoreShape {
     sequenceExclusive: number,
     limit?: number,
   ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
+
+  /** Read one aggregate through a captured global head, without decoding other streams. */
+  readonly readAggregateRange: (
+    input: OrchestrationAggregateReplayRange & { readonly limit?: number },
+  ) => Stream.Stream<OrchestrationEvent, OrchestrationEventStoreError>;
+
+  /**
+   * Measure at most maxEvents + 1 rows without decoding payloads. The extra
+   * row tells the caller to use a snapshot instead of a truncated replay.
+   */
+  readonly getAggregateReplayStats: (
+    input: OrchestrationAggregateReplayRange & { readonly maxEvents: number },
+  ) => Effect.Effect<OrchestrationAggregateReplayStats, OrchestrationEventStoreError>;
 
   /**
    * Read all events from the beginning of the stream.
