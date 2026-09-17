@@ -27,7 +27,6 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
-import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -71,10 +70,6 @@ import {
   type ProviderCommandReactorShape,
 } from "../Services/ProviderCommandReactor.ts";
 import { forkParked, ServerActivation } from "../../serverActivation.ts";
-import {
-  formatThreadTitleContext,
-  type ThreadTitleMessage,
-} from "../../textGeneration/ThreadTitleContext.ts";
 import { canReplaceThreadTitle, DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
 import {
   resolveSourceControlWriterModelSelection,
@@ -1820,7 +1815,7 @@ export const make = Effect.gen(function* () {
     readonly implementedAt: string;
   }) =>
     Effect.gen(function* () {
-      const sourceThread = yield* resolveThread(input.sourceThreadId);
+      const sourceThread = yield* resolveThreadDetail(input.sourceThreadId);
       const sourcePlan = sourceThread?.proposedPlans.find(
         (entry) => entry.id === input.sourcePlanId,
       );
@@ -2058,7 +2053,7 @@ export const make = Effect.gen(function* () {
           // session that is ready for the next turn — the opposite of what the
           // user asked for. Re-read first and treat an already-settled session
           // as the interrupt having achieved its purpose.
-          const latestThreadRead = yield* resolveThread(input.threadId).pipe(
+          const latestThreadRead = yield* resolveThreadDetail(input.threadId).pipe(
             Effect.map((thread) => ({ _tag: "resolved" as const, thread })),
             Effect.catchCause((lookupCause) => {
               if (Cause.hasInterruptsOnly(lookupCause)) {
@@ -3566,7 +3561,7 @@ export const make = Effect.gen(function* () {
     // — it recovers the persisted binding and RESURRECTS the session the user
     // just shut down, delivering a prompt to a provider they had finished with.
     //
-    // It precedes the `resolveThread` early return deliberately: a thread whose
+    // It precedes the `resolveThreadDetail` early return deliberately: a thread whose
     // session is already gone is exactly the case where an undriven turn-start
     // is still queued, so returning first would skip the barrier for the only
     // requests it can still stop.

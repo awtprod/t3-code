@@ -4,6 +4,9 @@ import {
   EventId,
   MessageId,
   type OrchestrationEvent,
+  type OrchestrationMessage,
+  type OrchestrationProposedPlan,
+  type OrchestrationThread,
   OrchestrationProposedPlanId,
   CheckpointRef,
   classifyTaskAgentKind,
@@ -48,7 +51,6 @@ import { ProviderTurnSendClaimRepository } from "../../persistence/Services/Prov
 import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
 import { ProviderRestartRecoveryRepository } from "../../persistence/Services/ProviderRestartRecovery.ts";
 import { ProviderRestartRecoveryRepositoryLive } from "../../persistence/Layers/ProviderRestartRecovery.ts";
-import { isGitRepository } from "../../git/Utils.ts";
 import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
@@ -1628,6 +1630,15 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
+  const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (
+    threadId: ThreadId,
+    activityKinds: ReadonlyArray<string> = [],
+  ) {
+    return yield* projectionSnapshotQuery
+      .getThreadDetailById(threadId, { activityKinds })
+      .pipe(Effect.map(Option.getOrUndefined));
+  });
+
   const getThreadMessageById = Effect.fn("getThreadMessageById")(function* (
     threadId: ThreadId,
     messageId: MessageId,
@@ -2353,6 +2364,16 @@ const make = Effect.gen(function* () {
 
       const thread = yield* resolveThreadRuntimeContext(event.threadId);
       if (!thread) return;
+
+      let loadedThreadDetail: OrchestrationThread | null | undefined;
+      const getLoadedThreadDetail = () =>
+        Effect.gen(function* () {
+          if (loadedThreadDetail !== undefined) {
+            return loadedThreadDetail;
+          }
+          loadedThreadDetail = (yield* resolveThreadDetail(thread.id)) ?? null;
+          return loadedThreadDetail;
+        });
 
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
