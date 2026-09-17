@@ -63,7 +63,7 @@ export class PullRequestReadCache extends Context.Service<
     ) => Effect.Effect<string, ReadError>;
     readonly invalidate: (scope: string) => Effect.Effect<void>;
   }
->()("t3/pullRequest/PullRequestReadCache") {}
+>()("@awtprod/command-center/pullRequest/PullRequestReadCache") {}
 
 export const make = Effect.gen(function* () {
   const backing = yield* KeyValueStore.KeyValueStore;

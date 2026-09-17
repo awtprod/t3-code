@@ -160,7 +160,7 @@ const make = Effect.gen(function* () {
       | typeof PullRequestUnlinkFailedError
       | typeof PullRequestListFailedError,
   ) {
-    const scope = yield* McpInvocationContext.requireMcpCapability("pull-requests");
+    const scope = yield* McpInvocationContext.requireNeutralCapability("pull-requests");
     const thread = yield* snapshots
       .getThreadShellById(scope.threadId)
       .pipe(Effect.mapError((cause) => new Failure({ cause })));

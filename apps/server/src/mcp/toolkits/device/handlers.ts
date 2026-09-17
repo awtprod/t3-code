@@ -65,7 +65,7 @@ export function agentDeviceQuickStart(
   ].join("\n");
 }
 
-const requireDeviceAccess = McpInvocationContext.requireMcpCapability("device").pipe(
+const requireDeviceAccess = McpInvocationContext.requireNeutralCapability("device").pipe(
   Effect.mapError(
     () =>
       new DeviceToolUnavailableError({

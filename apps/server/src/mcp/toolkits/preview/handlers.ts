@@ -217,7 +217,7 @@ const handlers = {
     invokeTargeted<PreviewAutomationRecordingStatus>("recordingStart", input ?? {}),
   preview_recording_stop: (input) =>
     Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+      const scope = yield* McpInvocationContext.requirePreviewCapability();
       const { tabId, ...operationInput } = input;
       const response = yield* invoke<unknown>(
         "recordingStop",

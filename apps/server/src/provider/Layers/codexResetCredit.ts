@@ -43,7 +43,7 @@ export class CodexResetCreditCoordinator extends Context.Service<
       consume: (idempotencyKey: string) => Effect.Effect<ProviderConsumeResetCreditOutcome, E, R>,
     ) => Effect.Effect<ProviderConsumeResetCreditOutcome, E | PlatformError.PlatformError, R>;
   }
->()("t3/provider/Layers/codexResetCredit/CodexResetCreditCoordinator") {}
+>()("@awtprod/command-center/provider/Layers/codexResetCredit/CodexResetCreditCoordinator") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
