@@ -67,7 +67,7 @@ export class DesktopDevelopmentBackendPortRequiredError extends Schema.TaggedErr
   }
 }
 
-export class DesktopRemoteBackendUnavailableError extends Schema.TaggedErrorClass<DesktopRemoteBackendUnavailableError>()(
+export class DesktopRemoteBackendUnavailableError extends Schema.TaggedError<DesktopRemoteBackendUnavailableError>()(
   "DesktopRemoteBackendUnavailableError",
   { endpoint: Schema.String, cause: Schema.Defect() },
 ) {

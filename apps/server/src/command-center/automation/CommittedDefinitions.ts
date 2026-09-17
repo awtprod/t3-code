@@ -30,7 +30,7 @@ const COMMITTED_AUTOMATION_PATH_PATTERN = /^automations\/[^/]+\.json$/u;
 const decodeAutomation = Schema.decodeUnknownEffect(Automation);
 const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
-export class CommittedAutomationConfigError extends Schema.TaggedErrorClass<CommittedAutomationConfigError>()(
+export class CommittedAutomationConfigError extends Schema.TaggedError<CommittedAutomationConfigError>()(
   "CommittedAutomationConfigError",
   {
     detail: Schema.String,

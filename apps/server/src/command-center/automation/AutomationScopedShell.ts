@@ -76,7 +76,7 @@ export const AutomationScopedShellErrorCode = Schema.Literals([
 ]);
 export type AutomationScopedShellErrorCode = typeof AutomationScopedShellErrorCode.Type;
 
-export class AutomationScopedShellError extends Schema.TaggedErrorClass<AutomationScopedShellError>()(
+export class AutomationScopedShellError extends Schema.TaggedError<AutomationScopedShellError>()(
   "AutomationScopedShellError",
   {
     code: AutomationScopedShellErrorCode,

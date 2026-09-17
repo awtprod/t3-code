@@ -78,7 +78,7 @@ export const commandCenterAuditHashDocument = (input: {
     : encodeJson({ hashVersion: 2, eventId: input.eventId, ...event });
 };
 
-export class CommandCenterAuditReplayConflictError extends Schema.TaggedErrorClass<CommandCenterAuditReplayConflictError>()(
+export class CommandCenterAuditReplayConflictError extends Schema.TaggedError<CommandCenterAuditReplayConflictError>()(
   "CommandCenterAuditReplayConflictError",
   {
     eventId: Schema.String,

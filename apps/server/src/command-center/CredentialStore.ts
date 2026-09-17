@@ -17,7 +17,7 @@ const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const KEY_BYTES = 32;
 
-export class CommandCenterCredentialStoreError extends Schema.TaggedErrorClass<CommandCenterCredentialStoreError>()(
+export class CommandCenterCredentialStoreError extends Schema.TaggedError<CommandCenterCredentialStoreError>()(
   "CommandCenterCredentialStoreError",
   {
     reason: Schema.Literals([

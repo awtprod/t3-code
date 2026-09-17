@@ -10,7 +10,7 @@ export const DatabaseToolErrorReason = Schema.Literals([
 ]);
 export type DatabaseToolErrorReason = typeof DatabaseToolErrorReason.Type;
 
-export class DatabaseToolError extends Schema.TaggedErrorClass<DatabaseToolError>()(
+export class DatabaseToolError extends Schema.TaggedError<DatabaseToolError>()(
   "DatabaseToolError",
   {
     reason: DatabaseToolErrorReason,

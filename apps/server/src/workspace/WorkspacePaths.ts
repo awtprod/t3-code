@@ -95,7 +95,7 @@ export class WorkspacePathOutsideRootError extends Schema.TaggedError<WorkspaceP
  * created by a human under their own account while the server runs as a
  * dedicated service account; the two numbers are what make that diagnosable.
  */
-export class WorkspaceRootUnusableError extends Schema.TaggedErrorClass<WorkspaceRootUnusableError>()(
+export class WorkspaceRootUnusableError extends Schema.TaggedError<WorkspaceRootUnusableError>()(
   "WorkspaceRootUnusableError",
   {
     workspaceRoot: Schema.String,

@@ -72,7 +72,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   googleRead: "cc.connections.google.read",
 } as const;
 
-export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
+export class CommandCenterError extends Schema.TaggedError<CommandCenterError>()(
   "CommandCenterError",
   {
     reason: Schema.Literals([
@@ -89,7 +89,7 @@ export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterErr
   },
 ) {}
 
-export class CommandCenterMcpCapabilityUnavailableError extends Schema.TaggedErrorClass<CommandCenterMcpCapabilityUnavailableError>()(
+export class CommandCenterMcpCapabilityUnavailableError extends Schema.TaggedError<CommandCenterMcpCapabilityUnavailableError>()(
   "CommandCenterMcpCapabilityUnavailableError",
   {
     capability: CapabilityName,

@@ -126,7 +126,7 @@ export const VerifiedScopedShellErrorCode = Schema.Literals([
 ]);
 export type VerifiedScopedShellErrorCode = typeof VerifiedScopedShellErrorCode.Type;
 
-export class VerifiedScopedShellError extends Schema.TaggedErrorClass<VerifiedScopedShellError>()(
+export class VerifiedScopedShellError extends Schema.TaggedError<VerifiedScopedShellError>()(
   "VerifiedScopedShellError",
   {
     code: VerifiedScopedShellErrorCode,

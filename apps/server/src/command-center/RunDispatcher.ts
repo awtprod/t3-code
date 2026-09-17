@@ -79,7 +79,7 @@ const decodeRepositories = Schema.decodeUnknownEffect(Schema.Array(RepositoryBin
 const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
-export class RunDispatcherError extends Schema.TaggedErrorClass<RunDispatcherError>()(
+export class RunDispatcherError extends Schema.TaggedError<RunDispatcherError>()(
   "RunDispatcherError",
   {
     reason: Schema.Literals([

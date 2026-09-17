@@ -195,7 +195,7 @@ export function commandCenterProviderEnvironment(
   };
 }
 
-export class CommandCenterManagedWorktreeIsolationError extends Schema.TaggedErrorClass<CommandCenterManagedWorktreeIsolationError>()(
+export class CommandCenterManagedWorktreeIsolationError extends Schema.TaggedError<CommandCenterManagedWorktreeIsolationError>()(
   "CommandCenterManagedWorktreeIsolationError",
   {
     issue: Schema.String,
@@ -207,7 +207,7 @@ export class CommandCenterManagedWorktreeIsolationError extends Schema.TaggedErr
   }
 }
 
-export class CommandCenterCodexHomeIsolationError extends Schema.TaggedErrorClass<CommandCenterCodexHomeIsolationError>()(
+export class CommandCenterCodexHomeIsolationError extends Schema.TaggedError<CommandCenterCodexHomeIsolationError>()(
   "CommandCenterCodexHomeIsolationError",
   {
     issue: Schema.String,

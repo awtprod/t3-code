@@ -382,6 +382,6 @@ export const UsagePricingOverride = Schema.Struct({
 });
 export type UsagePricingOverride = typeof UsagePricingOverride.Type;
 
-export class UsageQueryError extends Schema.TaggedErrorClass<UsageQueryError>()("UsageQueryError", {
+export class UsageQueryError extends Schema.TaggedError<UsageQueryError>()("UsageQueryError", {
   message: TrimmedNonEmptyString,
 }) {}

@@ -62,7 +62,7 @@ export const AutomationRuntimeErrorCode = Schema.Literals([
 ]);
 export type AutomationRuntimeErrorCode = typeof AutomationRuntimeErrorCode.Type;
 
-export class AutomationRuntimeError extends Schema.TaggedErrorClass<AutomationRuntimeError>()(
+export class AutomationRuntimeError extends Schema.TaggedError<AutomationRuntimeError>()(
   "AutomationRuntimeError",
   {
     code: AutomationRuntimeErrorCode,

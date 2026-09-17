@@ -55,7 +55,7 @@ const decodeJson = Schema.decodeUnknownSync(Schema.Json);
 const isWebhookRoute = Schema.is(CommandCenterWebhookRoute);
 const isWebhookDeliveryId = Schema.is(CommandCenterWebhookDeliveryId);
 
-export class WebhookAdmissionError extends Schema.TaggedErrorClass<WebhookAdmissionError>()(
+export class WebhookAdmissionError extends Schema.TaggedError<WebhookAdmissionError>()(
   "WebhookAdmissionError",
   {
     reason: Schema.Literals([

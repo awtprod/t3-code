@@ -85,7 +85,7 @@ export const GOOGLE_READ_COMMAND_ALLOWLIST = [
 ] as const;
 export const GOOGLE_DRAFT_COMMAND_ALLOWLIST = ["gmail.drafts.create"] as const;
 
-export class GoogleReadConnectorError extends Schema.TaggedErrorClass<GoogleReadConnectorError>()(
+export class GoogleReadConnectorError extends Schema.TaggedError<GoogleReadConnectorError>()(
   "GoogleReadConnectorError",
   {
     reason: Schema.Literals(["configuration", "version", "process", "output"]),

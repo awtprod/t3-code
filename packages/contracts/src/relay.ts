@@ -413,7 +413,7 @@ export class RelayEnvironmentLinkProofInvalidError extends Schema.TaggedError<Re
   }
 }
 
-export class RelayDeviceRegistrationInvalidError extends Schema.TaggedErrorClass<RelayDeviceRegistrationInvalidError>()(
+export class RelayDeviceRegistrationInvalidError extends Schema.TaggedError<RelayDeviceRegistrationInvalidError>()(
   "RelayDeviceRegistrationInvalidError",
   {
     code: Schema.Literal("device_registration_invalid"),

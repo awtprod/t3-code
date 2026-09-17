@@ -356,7 +356,7 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
     Effect.withSpan(`server.startup.${phase}`),
   );
 
-export class CommandCenterAuditIntegrityError extends Schema.TaggedErrorClass<CommandCenterAuditIntegrityError>()(
+export class CommandCenterAuditIntegrityError extends Schema.TaggedError<CommandCenterAuditIntegrityError>()(
   "CommandCenterAuditIntegrityError",
   {
     eventCount: Schema.Number,

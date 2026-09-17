@@ -11,12 +11,12 @@ import * as DesktopIpc from "../DesktopIpc.ts";
 
 export const LOCAL_EXECUTION_ONCE_SWITCH = DesktopAppSettings.LOCAL_EXECUTION_ONCE_SWITCH;
 
-class DesktopRemoteConnectivityError extends Schema.TaggedErrorClass<DesktopRemoteConnectivityError>()(
+class DesktopRemoteConnectivityError extends Schema.TaggedError<DesktopRemoteConnectivityError>()(
   "DesktopRemoteConnectivityError",
   { cause: Schema.Defect() },
 ) {}
 
-class DesktopPrimaryBackendValidationError extends Schema.TaggedErrorClass<DesktopPrimaryBackendValidationError>()(
+class DesktopPrimaryBackendValidationError extends Schema.TaggedError<DesktopPrimaryBackendValidationError>()(
   "DesktopPrimaryBackendValidationError",
   { message: Schema.String },
 ) {}

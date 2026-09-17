@@ -22,7 +22,7 @@ import * as CommandCenterService from "../Service.ts";
 
 const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
-export class AutomationTriggerError extends Schema.TaggedErrorClass<AutomationTriggerError>()(
+export class AutomationTriggerError extends Schema.TaggedError<AutomationTriggerError>()(
   "AutomationTriggerError",
   {
     reason: Schema.Literals([

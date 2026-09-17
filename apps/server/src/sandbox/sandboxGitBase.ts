@@ -9,7 +9,7 @@ import type * as GitWorkflowService from "../git/GitWorkflowService.ts";
  * from a Git command failure: no retry and no other base resolves this, the
  * workspace itself has to change.
  */
-export class SandboxGitBaseUnavailableError extends Schema.TaggedErrorClass<SandboxGitBaseUnavailableError>()(
+export class SandboxGitBaseUnavailableError extends Schema.TaggedError<SandboxGitBaseUnavailableError>()(
   "SandboxGitBaseUnavailableError",
   {
     message: Schema.String,

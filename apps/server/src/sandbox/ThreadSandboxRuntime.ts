@@ -21,7 +21,7 @@ export type LegacyHostExecutionTarget = {
 
 export type ProviderExecutionTarget = SandboxExecutionTarget | LegacyHostExecutionTarget;
 
-export class ThreadSandboxNotReadyError extends Schema.TaggedErrorClass<ThreadSandboxNotReadyError>()(
+export class ThreadSandboxNotReadyError extends Schema.TaggedError<ThreadSandboxNotReadyError>()(
   "ThreadSandboxNotReadyError",
   { threadId: Schema.String, detail: Schema.String },
 ) {}

@@ -337,7 +337,7 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimeInvalidUserInputAnswersError
   | CodexSessionRuntimeThreadIdMissingError;
 
-export class CodexSessionRuntimeIsolationProbeError extends Schema.TaggedErrorClass<CodexSessionRuntimeIsolationProbeError>()(
+export class CodexSessionRuntimeIsolationProbeError extends Schema.TaggedError<CodexSessionRuntimeIsolationProbeError>()(
   "CodexSessionRuntimeIsolationProbeError",
   {
     issue: Schema.String,
@@ -349,7 +349,7 @@ export class CodexSessionRuntimeIsolationProbeError extends Schema.TaggedErrorCl
   }
 }
 
-export class CodexSessionRuntimeWindowsSandboxSetupError extends Schema.TaggedErrorClass<CodexSessionRuntimeWindowsSandboxSetupError>()(
+export class CodexSessionRuntimeWindowsSandboxSetupError extends Schema.TaggedError<CodexSessionRuntimeWindowsSandboxSetupError>()(
   "CodexSessionRuntimeWindowsSandboxSetupError",
   {
     issue: Schema.String,
@@ -361,7 +361,7 @@ export class CodexSessionRuntimeWindowsSandboxSetupError extends Schema.TaggedEr
   }
 }
 
-export class CodexSessionRuntimePermissionProfileMismatchError extends Schema.TaggedErrorClass<CodexSessionRuntimePermissionProfileMismatchError>()(
+export class CodexSessionRuntimePermissionProfileMismatchError extends Schema.TaggedError<CodexSessionRuntimePermissionProfileMismatchError>()(
   "CodexSessionRuntimePermissionProfileMismatchError",
   {
     expected: Schema.String,

@@ -309,7 +309,7 @@ export interface SandboxRuntimeManagerShape {
   ) => Effect.Effect<number, SandboxManagerError>;
 }
 
-export class SandboxManagerError extends Schema.TaggedErrorClass<SandboxManagerError>()(
+export class SandboxManagerError extends Schema.TaggedError<SandboxManagerError>()(
   "SandboxManagerError",
   {
     message: Schema.String,

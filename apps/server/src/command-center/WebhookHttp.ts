@@ -9,7 +9,7 @@ import { CommandCenterNotReadyError, CommandCenterReadinessGate } from "./Readin
 
 export const COMMAND_CENTER_WEBHOOK_HTTP_PATH = "/api/command-center/webhooks";
 
-class WebhookBodyReadError extends Schema.TaggedErrorClass<WebhookBodyReadError>()(
+class WebhookBodyReadError extends Schema.TaggedError<WebhookBodyReadError>()(
   "WebhookBodyReadError",
   {
     reason: Schema.Literals(["invalid-length", "payload-too-large", "read-failed"]),

@@ -192,7 +192,7 @@ function worktreeIsBusy(group: WorktreeGroup, runningTerminalThreadIds: Readonly
   );
 }
 
-export class WorktreePreparationError extends Schema.TaggedErrorClass<WorktreePreparationError>()(
+export class WorktreePreparationError extends Schema.TaggedError<WorktreePreparationError>()(
   "WorktreePreparationError",
   {
     worktreePath: Schema.String,
