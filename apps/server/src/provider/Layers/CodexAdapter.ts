@@ -506,8 +506,11 @@ function toUserInputQuestions(questions: ReadonlyArray<CodexToolUserInputQuestio
         question.options
           ?.map((option) => {
             const label = trimText(option.label);
-            const description = trimText(option.description);
-            if (!label || !description) {
+            // A missing description stays renderable (the composer panel hides
+            // it); dropping the option here would instead drop the question
+            // and leave Codex waiting on an answer nothing can surface.
+            const description = trimText(option.description) ?? "";
+            if (!label) {
               return undefined;
             }
             return { label, description };

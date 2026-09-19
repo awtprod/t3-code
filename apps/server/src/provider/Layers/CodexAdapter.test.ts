@@ -3127,6 +3127,50 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("keeps requestUserInput questions whose options have an empty description", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 1)).pipe(
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-user-input-requested-empty-description"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/tool/requestUserInput",
+        requestId: ApprovalRequestId.make("req-user-input-2"),
+        payload: {
+          itemId: "item-user-input-2",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          questions: [
+            {
+              id: "option_preference",
+              header: "Preference",
+              question: "Alpha or beta?",
+              options: [
+                { label: "Option alpha", description: "" },
+                { label: "Option beta", description: "" },
+              ],
+            },
+          ],
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(events[0]?.type, "user-input.requested");
+      if (events[0]?.type === "user-input.requested") {
+        NodeAssert.deepEqual(events[0].payload.questions[0]?.options, [
+          { label: "Option alpha", description: "" },
+          { label: "Option beta", description: "" },
+        ]);
+      }
+    }),
+  );
+
   it.effect("unwraps Codex token usage payloads for context window events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

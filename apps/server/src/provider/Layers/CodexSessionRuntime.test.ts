@@ -697,6 +697,16 @@ describe("T3 browser developer instructions", () => {
       /preview_open/,
     );
   });
+
+  it("routes default-mode questions through request_user_input when it is listed", () => {
+    const instructions = codexDefaultModeDeveloperInstructions(true);
+    NodeAssert.match(
+      instructions,
+      /ask it with the `request_user_input` tool when that tool is listed/,
+    );
+    // The plain-text fallback remains only for the tool-unavailable case.
+    NodeAssert.match(instructions, /only when the tool is unavailable, ask directly/);
+  });
 });
 
 describe("hasConfiguredMcpServer", () => {
@@ -853,6 +863,8 @@ describe("codexSessionAppServerArgs", () => {
     NodeAssert.deepStrictEqual(codexSessionAppServerArgs(["-c", "model=gpt-5"], undefined), [
       "app-server",
       "-c",
+      "features.default_mode_request_user_input=true",
+      "-c",
       "model=gpt-5",
     ]);
   });
@@ -868,6 +880,8 @@ describe("codexSessionAppServerArgs", () => {
         "--strict-config",
         "--enable",
         "foo",
+        "-c",
+        "features.default_mode_request_user_input=true",
         "-c",
         "mcp_servers.t3-code.url=http://127.0.0.1/mcp",
       ],
