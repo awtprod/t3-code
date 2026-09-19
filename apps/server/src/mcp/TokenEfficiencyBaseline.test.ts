@@ -34,7 +34,10 @@ it("records the committed static-context baseline", () => {
     },
   };
   expect(baseline).toEqual({
-    collaborationInstructions: { defaultBytes: 2_071, planBytes: 10_302 },
+    // 2026-09: +94 bytes to route default-mode questions through
+    // `request_user_input` when the tool is listed (plain-text fallback
+    // remains for the tool-unavailable case).
+    collaborationInstructions: { defaultBytes: 2_165, planBytes: 10_302 },
     // 2026-09: +1,938 bytes for the optional `database` selector on the nine
     // Supabase tools (multi-database projects).
     mcp: { toolCount: 36, schemaBytes: 25_457, toolkitCounts: [14, 13, 9] },
