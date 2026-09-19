@@ -1017,12 +1017,20 @@ function trimmedString(value: unknown): string | undefined {
 }
 
 /**
- * Manager/worker guardrail for the subagent-spawning `Task` tool. When the
- * session (root) model is a manager-tier model (Fable), a subagent that would
- * inherit that model (no explicit `model`) or explicitly request a manager
- * model is downgraded to the cheaper worker fallback; an explicit non-manager
- * worker model is respected. Non-`Task` tools and non-manager sessions pass
- * through unchanged. Pure, so it is unit-testable without the SDK.
+ * Names the subagent-spawning tool has used across SDK versions. Older SDKs
+ * called it `Task`; `@anthropic-ai/claude-agent-sdk` >= 0.3.x renamed it to
+ * `Agent`. The guardrail below must match every name, or a manager-tier
+ * coordinator can fan out manager-tier subagents through the unrecognized name.
+ */
+const SUBAGENT_SPAWN_TOOL_NAMES: ReadonlySet<string> = new Set(["Agent", "Task"]);
+
+/**
+ * Manager/worker guardrail for the subagent-spawning tool (`Agent`, formerly
+ * `Task`). When the session (root) model is a manager-tier model (Fable), a
+ * subagent that would inherit that model (no explicit `model`) or explicitly
+ * request a manager model is downgraded to the cheaper worker fallback; an
+ * explicit non-manager worker model is respected. Other tools and non-manager
+ * sessions pass through unchanged. Pure, so it is unit-testable without the SDK.
  */
 export function maybeDowngradeSubagentModel(
   toolName: Parameters<CanUseTool>[0],
@@ -1030,7 +1038,7 @@ export function maybeDowngradeSubagentModel(
   sessionModel: string | undefined,
   catalog: ClaudeModelCatalog,
 ): Parameters<CanUseTool>[1] {
-  if (toolName !== "Task" || !sessionModel) {
+  if (!SUBAGENT_SPAWN_TOOL_NAMES.has(toolName) || !sessionModel) {
     return toolInput;
   }
   const sessionSlug = resolveClaudeModelSlug(catalog, sessionModel);

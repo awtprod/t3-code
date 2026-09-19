@@ -5417,56 +5417,70 @@ describe("maybeDowngradeSubagentModel", () => {
     }) as Parameters<typeof maybeDowngradeSubagentModel>[1];
   const modelOf = (input: unknown) => (input as { model?: unknown }).model;
 
-  it("downgrades an inheriting Task spawn from a Fable manager to the worker fallback", () => {
-    const result = maybeDowngradeSubagentModel("Task", taskInput(), "claude-fable-5-1", catalog);
-    assert.equal(modelOf(result), "claude-opus-4-8");
-  });
+  // The spawn tool was renamed `Task` -> `Agent` across SDK versions; the guard
+  // must cover every name, so run the core scenarios against each.
+  for (const spawnTool of ["Agent", "Task"] as const) {
+    it(`downgrades an inheriting ${spawnTool} spawn from a Fable manager to the worker fallback`, () => {
+      const result = maybeDowngradeSubagentModel(
+        spawnTool,
+        taskInput(),
+        "claude-fable-5-1",
+        catalog,
+      );
+      assert.equal(modelOf(result), "claude-opus-4-8");
+    });
 
-  it("downgrades an explicit Fable subagent (including via alias) to the worker fallback", () => {
-    assert.equal(
-      modelOf(
-        maybeDowngradeSubagentModel(
-          "Task",
-          taskInput("claude-fable-5-1"),
-          "claude-fable-5-1",
-          catalog,
+    it(`downgrades an explicit Fable ${spawnTool} subagent (including via alias) to the worker fallback`, () => {
+      assert.equal(
+        modelOf(
+          maybeDowngradeSubagentModel(
+            spawnTool,
+            taskInput("claude-fable-5-1"),
+            "claude-fable-5-1",
+            catalog,
+          ),
         ),
-      ),
-      "claude-opus-4-8",
-    );
-    // Alias resolves to the canonical Fable slug before the manager check.
-    assert.equal(
-      modelOf(maybeDowngradeSubagentModel("Task", taskInput("fable"), "claude-fable-5-1", catalog)),
-      "claude-opus-4-8",
-    );
-  });
+        "claude-opus-4-8",
+      );
+      // Alias resolves to the canonical Fable slug before the manager check.
+      assert.equal(
+        modelOf(
+          maybeDowngradeSubagentModel(spawnTool, taskInput("fable"), "claude-fable-5-1", catalog),
+        ),
+        "claude-opus-4-8",
+      );
+    });
 
-  it("respects an explicit non-manager worker model chosen under a Fable manager", () => {
-    assert.equal(
-      modelOf(
-        maybeDowngradeSubagentModel("Task", taskInput("sonnet"), "claude-fable-5-1", catalog),
-      ),
-      "sonnet",
-    );
-  });
+    it(`respects an explicit non-manager worker model chosen under a Fable manager (${spawnTool})`, () => {
+      assert.equal(
+        modelOf(
+          maybeDowngradeSubagentModel(spawnTool, taskInput("sonnet"), "claude-fable-5-1", catalog),
+        ),
+        "sonnet",
+      );
+    });
 
-  it("leaves Task spawns untouched when the session model is not a manager", () => {
-    const input = taskInput();
-    assert.strictEqual(maybeDowngradeSubagentModel("Task", input, "claude-opus-5", catalog), input);
-    // A non-manager session may even keep an inherited/explicit Fable child.
-    assert.strictEqual(
-      maybeDowngradeSubagentModel("Task", input, "claude-sonnet-5", catalog),
-      input,
-    );
-  });
+    it(`leaves ${spawnTool} spawns untouched when the session model is not a manager`, () => {
+      const input = taskInput();
+      assert.strictEqual(
+        maybeDowngradeSubagentModel(spawnTool, input, "claude-opus-5", catalog),
+        input,
+      );
+      // A non-manager session may even keep an inherited/explicit Fable child.
+      assert.strictEqual(
+        maybeDowngradeSubagentModel(spawnTool, input, "claude-sonnet-5", catalog),
+        input,
+      );
+    });
+  }
 
-  it("ignores non-Task tools and unknown session models", () => {
+  it("ignores non-spawn tools and unknown session models", () => {
     const input = taskInput();
     assert.strictEqual(
       maybeDowngradeSubagentModel("Bash", input, "claude-fable-5-1", catalog),
       input,
     );
-    assert.strictEqual(maybeDowngradeSubagentModel("Task", input, undefined, catalog), input);
+    assert.strictEqual(maybeDowngradeSubagentModel("Agent", input, undefined, catalog), input);
   });
 });
 
