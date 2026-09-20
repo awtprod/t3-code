@@ -27,8 +27,14 @@ import { makeClaudeTextGeneration } from "../../textGeneration/ClaudeTextGenerat
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  DEFAULT_SIEVE_SETTINGS,
+  sieveToolResult,
+  type JudgeLike,
+  type SieveSettings,
+} from "../../efficiency/ToolResultSieve.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { makeClaudeAdapter } from "../Layers/ClaudeAdapter.ts";
+import { makeClaudeAdapter, type ToolResultSieveHookInput } from "../Layers/ClaudeAdapter.ts";
 import {
   checkClaudeProviderStatus,
   makePendingClaudeProvider,
@@ -61,6 +67,50 @@ const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CAPABILITIES_PROBE_TTL = Duration.minutes(5);
+
+const DEFAULT_JUDGE_TIMEOUT_MS = 15_000;
+
+/**
+ * Read `efficiency.sieve` from server settings and fill DESIGN defaults.
+ *
+ * TEMPORARY: slice A owns the typed `ServerSettings.efficiency.sieve` contract
+ * key. Until it lands this reads through an `as` cast. DELETE this shim and read
+ * the typed field once A's contract is merged.
+ */
+function readSieveSettings(settings: unknown): SieveSettings {
+  const raw = (settings as { efficiency?: { sieve?: Partial<SieveSettings> } } | undefined)
+    ?.efficiency?.sieve;
+  if (!raw || typeof raw !== "object") return DEFAULT_SIEVE_SETTINGS;
+  return {
+    mode: raw.mode ?? DEFAULT_SIEVE_SETTINGS.mode,
+    tools: raw.tools ?? DEFAULT_SIEVE_SETTINGS.tools,
+    minChars: raw.minChars ?? DEFAULT_SIEVE_SETTINGS.minChars,
+    blockLines: raw.blockLines ?? DEFAULT_SIEVE_SETTINGS.blockLines,
+    maxBlocks: raw.maxBlocks ?? DEFAULT_SIEVE_SETTINGS.maxBlocks,
+    dropBelow: raw.dropBelow ?? DEFAULT_SIEVE_SETTINGS.dropBelow,
+    keepAbove: raw.keepAbove ?? DEFAULT_SIEVE_SETTINGS.keepAbove,
+    minPruneRatio: raw.minPruneRatio ?? DEFAULT_SIEVE_SETTINGS.minPruneRatio,
+  };
+}
+
+/** Judge request timeout from settings (same `as`-cast shim caveat as above). */
+function readJudgeTimeoutMs(settings: unknown): number {
+  const timeoutMs = (settings as { efficiency?: { judge?: { timeoutMs?: number } } } | undefined)
+    ?.efficiency?.judge?.timeoutMs;
+  return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : DEFAULT_JUDGE_TIMEOUT_MS;
+}
+
+/**
+ * Placeholder Judge until slice A's `Judge` service lands. Disabled, so the
+ * sieve always falls through to today's behaviour (no rewrite). Swap for the
+ * real `Judge` service (yielded from context) on rebase.
+ */
+const DISABLED_JUDGE_STUB: JudgeLike = {
+  enabled: false,
+  ask: () => Effect.fail({ _tag: "JudgeDisabled", reason: "judge disabled (stub)" }),
+};
 
 function isClaudeNativeCommandPath(commandPath: string): boolean {
   const normalized = normalizeCommandPath(commandPath);
@@ -149,11 +199,54 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         continuationGroupKey,
       });
 
+      // Tool-result sieve (slice B). Register the adapter hook only when the
+      // sieve is enabled at instance-creation time; the callback re-reads live
+      // settings each invocation so a runtime flip to `off` makes it inert, and
+      // it binds to a disabled stub judge until slice A's Judge service lands
+      // (so today it never rewrites — behaviour stays identical).
+      const initialSieveSettings = readSieveSettings(
+        yield* serverSettings.getSettings.pipe(Effect.catch(() => Effect.succeed(undefined))),
+      );
+      const toolResultSieve =
+        initialSieveSettings.mode === "off"
+          ? undefined
+          : (input: ToolResultSieveHookInput): Effect.Effect<unknown | undefined> =>
+              Effect.gen(function* () {
+                const settings = yield* serverSettings.getSettings;
+                const outcome = yield* sieveToolResult(
+                  {
+                    judge: DISABLED_JUDGE_STUB,
+                    settings: readSieveSettings(settings),
+                    timeoutMs: readJudgeTimeoutMs(settings),
+                  },
+                  input,
+                );
+                if (outcome.decision) {
+                  yield* Effect.logDebug("tool-result sieve decision", {
+                    tool: outcome.decision.tool,
+                    mode: outcome.decision.mode,
+                    rewritten: outcome.decision.rewritten,
+                    blockCount: outcome.decision.blockCount,
+                    hiddenBlockIds: outcome.decision.hiddenBlockIds,
+                    uncertainBlockIds: outcome.decision.uncertainBlockIds,
+                    hiddenRanges: outcome.decision.hiddenRanges,
+                    charsBefore: outcome.decision.charsBefore,
+                    charsAfter: outcome.decision.charsAfter,
+                    prunedRatio: outcome.decision.prunedRatio,
+                    reason: outcome.decision.reason,
+                    latencyMs: outcome.decision.latencyMs,
+                    inputSummary: outcome.decision.inputSummary,
+                  });
+                }
+                return outcome.updatedToolOutput;
+              }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+
       const adapterOptions = {
         instanceId,
         environment: processEnv,
         modelCatalog,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        ...(toolResultSieve ? { toolResultSieve } : {}),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
       const textGeneration = yield* makeClaudeTextGeneration(
