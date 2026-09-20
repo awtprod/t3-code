@@ -131,6 +131,7 @@ import {
   OrchestrationRuntimeStateLayerLive,
 } from "./orchestration/runtimeLayer.ts";
 import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
+import * as Judge from "./efficiency/Judge.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./orchestration/Layers/ProjectionSnapshotQuery.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -195,6 +196,13 @@ const ServerSettingsLayerLive = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
   Layer.provideMerge(SqlitePersistenceLayerLive),
 );
+
+// The efficiency Judge reads the live judge settings, records usage rows, and
+// writes the decision log. Wired once here alongside ServerSettings so both the
+// command dispatcher (tier judgment) and the WebSocket preview RPC see the same
+// instance. ServerConfig / FileSystem / Path stay open requirements, satisfied
+// by the runtime.
+const JudgeLayerLive = Judge.layer.pipe(Layer.provide(ServerSettingsLayerLive));
 
 const NativeTelemetryLayerLive = NativeTelemetryClient.layer.pipe(
   Layer.provide(ResourceMonitorBinary.layer),
@@ -552,6 +560,7 @@ const OrchestrationCommandDispatcherLayerLive = OrchestrationCommandDispatcher.l
   Layer.provide(ProviderRegistryLive),
   Layer.provide(ProjectSetupScriptRunnerLayerLive),
   Layer.provide(ServerSettingsLayerLive),
+  Layer.provide(JudgeLayerLive),
   Layer.provide(T3ProjectFileLoader.layer),
   Layer.provide(VcsStatusBroadcaster.layer.pipe(Layer.provide(GitWorkflowLayerLive))),
   Layer.provide(WorkspacePaths.layer),
@@ -639,7 +648,9 @@ const ProviderRuntimeLayerLive = Layer.mergeAll(
 
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
-  Layer.provideMerge(Layer.mergeAll(OrchestrationRuntimeStateLayerLive, ServerSettingsLayerLive)),
+  Layer.provideMerge(
+    Layer.mergeAll(OrchestrationRuntimeStateLayerLive, ServerSettingsLayerLive, JudgeLayerLive),
+  ),
   Layer.provideMerge(CheckpointingLayerLive),
   Layer.provideMerge(
     Layer.mergeAll(

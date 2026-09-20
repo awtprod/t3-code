@@ -68,4 +68,10 @@ describe("usage pricing", () => {
 
     expect(lookupRate(table, "z-ai/glm-5.3-flash")?.inputCostPerToken).toBe(9);
   });
+
+  it("prices the TypeSafe judge model (jev-latest) with free output", () => {
+    const priced = lookupRate(parseRateTable({}), "jev-latest");
+    expect(priced?.inputCostPerToken).toBe(0.042 / 1_000_000);
+    expect(priced?.outputCostPerToken).toBe(0);
+  });
 });

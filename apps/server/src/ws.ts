@@ -120,7 +120,12 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as WorktreeCleanup from "./worktreeCleanup.ts";
-import { resolveInteractiveEfficiency } from "./efficiency/EfficiencyRouting.ts";
+import {
+  resolveInteractiveEfficiency,
+  type TierJudgmentInput,
+} from "./efficiency/EfficiencyRouting.ts";
+import { Judge } from "./efficiency/Judge.ts";
+import { buildTierJudgmentRequest, tierJudgmentFromAnswers } from "./efficiency/TierJudgment.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -559,6 +564,7 @@ const makeWsRpcLayer = (
       const config = yield* ServerConfig.ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const judge = yield* Judge;
       const worktreeCleanup = yield* Effect.serviceOption(WorktreeCleanup.WorktreeCleanup);
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
@@ -2364,6 +2370,31 @@ const makeWsRpcLayer = (
                 serverSettings.getSettings,
                 providerRegistry.getProviders,
               ]);
+              // Mirror the dispatcher: resolve an optional judgment so the
+              // settings-page preview shows it. Any judge error leaves the
+              // preview identical to today.
+              const tierJudgment: TierJudgmentInput | undefined =
+                settings.efficiency.enabled &&
+                settings.efficiency.tierJudgment.enabled &&
+                judge.enabled
+                  ? yield* judge
+                      .ask(
+                        buildTierJudgmentRequest({
+                          message: "",
+                          attachmentCount: input.attachmentCount,
+                          interactionMode: input.interactionMode,
+                          ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+                          priorTurnCount: thread?.latestTurn ? 1 : 0,
+                        }),
+                        { preview: true },
+                      )
+                      .pipe(
+                        Effect.map((result) =>
+                          tierJudgmentFromAnswers(result.answers, result.model),
+                        ),
+                        Effect.catchTag("JudgeError", () => Effect.succeed(undefined)),
+                      )
+                  : undefined;
               const resolution = resolveInteractiveEfficiency({
                 command: {
                   type: "thread.turn.start",
@@ -2387,6 +2418,7 @@ const makeWsRpcLayer = (
                 providers,
                 ...(input.projectId === undefined ? {} : { projectIdOverride: input.projectId }),
                 attachmentCountOverride: input.attachmentCount,
+                ...(tierJudgment === undefined ? {} : { tierJudgment }),
               });
               return {
                 modelSelection: resolution.command.modelSelection ?? input.modelSelection,

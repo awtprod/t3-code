@@ -142,3 +142,91 @@ describe("interactive efficiency routing", () => {
     expect(result.decision?.matchedRuleId).toBe("quality-for-project");
   });
 });
+
+describe("confidence-gated tier judgment", () => {
+  const enabledSettings = {
+    ...DEFAULT_SERVER_SETTINGS.efficiency,
+    enabled: true,
+    tierJudgment: { enabled: true, minConfidence: 0.6 },
+  };
+
+  it("applies the judged tier when confidence clears the threshold", () => {
+    const result = resolveInteractiveEfficiency({
+      command,
+      settings: enabledSettings,
+      providers: [codex],
+      tierJudgment: { score: 2, confidence: 0.9, model: "glm-5.3-flash" },
+    });
+    expect(result.command.modelSelection).toEqual({
+      instanceId: "codex",
+      model: "gpt-5.6-sol",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    });
+    expect(result.decision?.tier).toBe("quality");
+    expect(result.decision?.judgment).toEqual({
+      score: 2,
+      confidence: 0.9,
+      tier: "quality",
+      applied: true,
+      model: "glm-5.3-flash",
+    });
+  });
+
+  it("records but does not apply a low-confidence judgment", () => {
+    const result = resolveInteractiveEfficiency({
+      command,
+      settings: enabledSettings,
+      providers: [codex],
+      tierJudgment: { score: 2, confidence: 0.3, model: "glm-5.3-flash" },
+    });
+    // Falls back to today's tier (default economy).
+    expect(result.decision?.tier).toBe("economy");
+    expect(result.decision?.judgment?.applied).toBe(false);
+    expect(result.decision?.judgment?.reason).toContain("confidence");
+  });
+
+  it("does not apply a judgment when tier judgment is disabled", () => {
+    const result = resolveInteractiveEfficiency({
+      command,
+      settings: { ...DEFAULT_SERVER_SETTINGS.efficiency, enabled: true },
+      providers: [codex],
+      tierJudgment: { score: 2, confidence: 0.99, model: "glm-5.3-flash" },
+    });
+    expect(result.decision?.tier).toBe("economy");
+    expect(result.decision?.judgment?.applied).toBe(false);
+    expect(result.decision?.judgment?.reason).toBe("tier judgment disabled");
+  });
+
+  it("keeps rules ahead of a confident judgment", () => {
+    const result = resolveInteractiveEfficiency({
+      command,
+      projectIdOverride: ProjectId.make("project-routed"),
+      settings: {
+        ...enabledSettings,
+        rules: [
+          {
+            id: "economy-for-project",
+            projectId: ProjectId.make("project-routed"),
+            tier: "economy",
+          },
+        ],
+      },
+      providers: [codex],
+      tierJudgment: { score: 2, confidence: 0.99, model: "glm-5.3-flash" },
+    });
+    expect(result.decision?.tier).toBe("economy");
+    expect(result.decision?.matchedRuleId).toBe("economy-for-project");
+    expect(result.decision?.judgment?.applied).toBe(false);
+    expect(result.decision?.judgment?.reason).toContain("rule");
+  });
+
+  it("leaves output identical to today when no judgment is supplied", () => {
+    const withoutJudgment = resolveInteractiveEfficiency({
+      command,
+      settings: enabledSettings,
+      providers: [codex],
+    });
+    expect(withoutJudgment.decision?.judgment).toBeUndefined();
+    expect(withoutJudgment.decision?.tier).toBe("economy");
+  });
+});

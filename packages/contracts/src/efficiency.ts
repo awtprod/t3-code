@@ -72,6 +72,90 @@ export const EfficiencyExperiment = Schema.Struct({
 );
 export type EfficiencyExperiment = typeof EfficiencyExperiment.Type;
 
+/**
+ * Judge transport. `off` is the safe default: no judge model is called and every
+ * consumer falls through to today's deterministic behavior. `typesafe` speaks the
+ * TypeSafe System One protocol; `openai-compatible` posts to a `/chat/completions`
+ * endpoint (the host's cliproxyapi gateway by default).
+ */
+export const JudgeTransport = Schema.Literals(["off", "typesafe", "openai-compatible"]);
+export type JudgeTransport = typeof JudgeTransport.Type;
+
+/**
+ * Judge model configuration. Additive and fully defaulted so existing settings
+ * JSON decodes to a disabled judge. `model` and `apiKeyEnv` carry the TypeSafe
+ * defaults; the Judge service swaps them for the gateway defaults when
+ * `transport` is `openai-compatible` and the operator left them untouched (see
+ * `resolveJudgeConfig` in `apps/server/src/efficiency/Judge.ts`).
+ *
+ * `apiKeyEnv` is the NAME of the environment variable that holds the key, never a
+ * key value.
+ */
+export const EfficiencyJudgeSettings = Schema.Struct({
+  transport: JudgeTransport.pipe(Schema.withDecodingDefault(Effect.succeed("off" as const))),
+  baseUrl: Schema.optional(TrimmedNonEmptyString),
+  model: TrimmedNonEmptyString.pipe(Schema.withDecodingDefault(Effect.succeed("jev-latest"))),
+  apiKeyEnv: TrimmedNonEmptyString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("TYPESAFE_API_KEY")),
+  ),
+  timeoutMs: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(15000))),
+  maxStateChars: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(120000))),
+});
+export type EfficiencyJudgeSettings = typeof EfficiencyJudgeSettings.Type;
+
+/**
+ * Confidence-gated tier judgment. When `enabled`, an auto-routed turn asks the
+ * judge to score task complexity; the mapped tier only overrides the static tier
+ * when `confidence >= minConfidence`.
+ */
+export const EfficiencyTierJudgmentSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  minConfidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.6)),
+  ),
+});
+export type EfficiencyTierJudgmentSettings = typeof EfficiencyTierJudgmentSettings.Type;
+
+export const EfficiencySieveMode = Schema.Literals(["off", "shadow", "active"]);
+export type EfficiencySieveMode = typeof EfficiencySieveMode.Type;
+
+/**
+ * Tool-result sieve (winnow). Additive and defaulted; `mode: "off"` keeps every
+ * tool result byte-for-byte. `dropBelow < keepAbove` is enforced at the boundary
+ * so the "hide" band can never overlap the "keep/error gate" band. Slice B
+ * depends on this exact shape.
+ */
+export const EfficiencySieveSettings = Schema.Struct({
+  mode: EfficiencySieveMode.pipe(Schema.withDecodingDefault(Effect.succeed("off" as const))),
+  // May only narrow from the default. Bash stays opt-in (re-running has side
+  // effects) and is off by default.
+  tools: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(["Read", "Grep"])),
+  ),
+  minChars: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1500))),
+  blockLines: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(25))),
+  maxBlocks: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(200))),
+  // Hide a block when P(needed) < dropBelow.
+  dropBelow: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.1)),
+  ),
+  // Error gate and the upper bound of the "uncertain" band.
+  keepAbove: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.5)),
+  ),
+  // Skip the rewrite unless at least this fraction of chars would be hidden.
+  minPruneRatio: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.2)),
+  ),
+}).check(
+  Schema.makeFilter((sieve) =>
+    sieve.dropBelow < sieve.keepAbove
+      ? true
+      : "Tool-result sieve dropBelow must be strictly less than keepAbove",
+  ),
+);
+export type EfficiencySieveSettings = typeof EfficiencySieveSettings.Type;
+
 export const EfficiencySettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   defaultTier: EfficiencyTier.pipe(Schema.withDecodingDefault(Effect.succeed("economy"))),
@@ -111,6 +195,9 @@ export const EfficiencySettings = Schema.Struct({
   experiments: Schema.Array(EfficiencyExperiment).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  judge: EfficiencyJudgeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  tierJudgment: EfficiencyTierJudgmentSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  sieve: EfficiencySieveSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type EfficiencySettings = typeof EfficiencySettings.Type;
 
@@ -119,6 +206,22 @@ export const EfficiencyModelSelection = Schema.Struct({
   model: TrimmedNonEmptyString,
   options: Schema.optionalKey(ProviderOptionSelections),
 });
+
+/**
+ * Confidence-gated tier judgment recorded on a decision. `applied` is true only
+ * when the judgment actually overrode the static tier (no rule matched and
+ * `confidence >= minConfidence`); otherwise `reason` explains why it was kept for
+ * the log only. `score` is the probability-weighted rubric level (0..2).
+ */
+export const EfficiencyTierJudgment = Schema.Struct({
+  score: Schema.Number,
+  confidence: Schema.Number,
+  tier: EfficiencyTier,
+  applied: Schema.Boolean,
+  reason: Schema.optional(TrimmedNonEmptyString),
+  model: TrimmedNonEmptyString,
+});
+export type EfficiencyTierJudgment = typeof EfficiencyTierJudgment.Type;
 
 export const EfficiencyDecision = Schema.Struct({
   tier: EfficiencyTier,
@@ -132,6 +235,7 @@ export const EfficiencyDecision = Schema.Struct({
   fallbackReason: Schema.optional(TrimmedNonEmptyString),
   retryOfTurnId: Schema.optional(TurnId),
   experimentArm: Schema.optional(Schema.Literals(["control", "challenger"])),
+  judgment: Schema.optional(EfficiencyTierJudgment),
 });
 export type EfficiencyDecision = typeof EfficiencyDecision.Type;
 

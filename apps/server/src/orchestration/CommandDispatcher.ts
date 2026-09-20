@@ -4,6 +4,7 @@ import {
   EventId,
   OrchestrationDispatchCommandError,
   type OrchestrationCommand,
+  type OrchestrationThreadShell,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -18,7 +19,12 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
-import { resolveInteractiveEfficiency } from "../efficiency/EfficiencyRouting.ts";
+import {
+  resolveInteractiveEfficiency,
+  type TierJudgmentInput,
+} from "../efficiency/EfficiencyRouting.ts";
+import { Judge } from "../efficiency/Judge.ts";
+import { buildTierJudgmentRequest, tierJudgmentFromAnswers } from "../efficiency/TierJudgment.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
@@ -109,6 +115,7 @@ export const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerRegistry = yield* ProviderRegistry;
   const serverSettings = yield* ServerSettingsService;
+  const judge = yield* Judge;
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const projectFileLoader = yield* T3ProjectFileLoader;
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -353,6 +360,34 @@ export const make = Effect.gen(function* () {
       );
     });
 
+  const resolveTierJudgment = (
+    command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+    thread: OrchestrationThreadShell | undefined,
+  ): Effect.Effect<TierJudgmentInput | undefined> => {
+    const projectId = command.bootstrap?.createThread?.projectId ?? thread?.projectId;
+    return judge
+      .ask(
+        buildTierJudgmentRequest({
+          message: command.message.text,
+          attachmentCount: command.message.attachments.length,
+          interactionMode: command.interactionMode,
+          ...(projectId === undefined ? {} : { projectId }),
+          // A brand-new thread has no prior turns; an existing thread has had at
+          // least one. A precise count would need an events query we skip.
+          priorTurnCount: thread?.latestTurn ? 1 : 0,
+        }),
+        { threadId: command.threadId },
+      )
+      .pipe(
+        Effect.map((result) => tierJudgmentFromAnswers(result.answers, result.model)),
+        Effect.catchTag("JudgeError", (error) =>
+          Effect.logDebug("tier judgment skipped", { reason: error.reason }).pipe(
+            Effect.as(undefined),
+          ),
+        ),
+      );
+  };
+
   const resolveEfficiency = (
     command: OrchestrationCommand,
   ): Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError> => {
@@ -372,11 +407,19 @@ export const make = Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings;
       if (!settings.efficiency.enabled) return command;
       const providers = yield* providerRegistry.getProviders;
+      // Resolve an optional judgment first. Any judge error (or a disabled
+      // judge) leaves `tierJudgment` undefined, so routing proceeds exactly as
+      // it does today.
+      const tierJudgment =
+        settings.efficiency.tierJudgment.enabled && judge.enabled
+          ? yield* resolveTierJudgment(command, thread)
+          : undefined;
       return resolveInteractiveEfficiency({
         command,
         ...(thread === undefined ? {} : { thread }),
         settings: settings.efficiency,
         providers,
+        ...(tierJudgment === undefined ? {} : { tierJudgment }),
       }).command;
     }).pipe(
       Effect.mapError((cause) =>
