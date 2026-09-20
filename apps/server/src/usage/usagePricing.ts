@@ -148,6 +148,17 @@ const UNPRICEABLE_MODELS = new Set([
  * Keys are normalized full slugs (`normalizeRateKey`). Values are USD per token.
  */
 const LOCAL_RATE_OVERRIDES: RateTable = new Map<string, ModelRate>([
+  // TypeSafe System One judge model (`jev-latest`): $0.042 / 1M input tokens,
+  // output free. Early-access list price. https://docs.typesafe.ai/models
+  [
+    "jev-latest",
+    {
+      inputCostPerToken: 0.042 / 1_000_000,
+      outputCostPerToken: 0,
+      cacheReadCostPerToken: 0.042 / 1_000_000,
+      cacheCreationCostPerToken: 0.042 / 1_000_000,
+    },
+  ],
   // z.ai GLM-5.3-Flash, direct Z.ai API list price (launch promo expired
   // 2026-09-09): $0.15 / 1M input, $0.50 / 1M output, $0.03 / 1M cached input.
   // https://docs.z.ai / z.ai pricing. No separate cache-write price is

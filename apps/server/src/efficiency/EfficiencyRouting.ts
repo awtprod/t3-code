@@ -10,6 +10,7 @@ import {
   type EfficiencyDecision,
   type EfficiencyRule,
   type EfficiencySettings,
+  type EfficiencyTierJudgment,
   type ModelSelection,
   ProviderInstanceId,
   type OrchestrationCommand,
@@ -22,6 +23,18 @@ import { assignExperiment } from "./Experiments.ts";
 
 type TurnStartCommand = Extract<OrchestrationCommand, { readonly type: "thread.turn.start" }>;
 
+/**
+ * A resolved judge complexity judgment for this turn, produced by the caller
+ * (CommandDispatcher / preview RPC) from the {@link Judge} service. The pure
+ * routing function stays synchronous; the async judge call happens upstream.
+ */
+export interface TierJudgmentInput {
+  /** Probability-weighted rubric level in `[0, 2]` (economy..quality). */
+  readonly score: number;
+  readonly confidence: number;
+  readonly model: string;
+}
+
 export interface InteractiveEfficiencyInput {
   readonly command: TurnStartCommand;
   readonly thread?: OrchestrationThreadShell;
@@ -29,6 +42,7 @@ export interface InteractiveEfficiencyInput {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly projectIdOverride?: string;
   readonly attachmentCountOverride?: number;
+  readonly tierJudgment?: TierJudgmentInput;
 }
 
 export interface InteractiveEfficiencyResolution {
@@ -100,28 +114,105 @@ function effectiveRoutingMode(
   );
 }
 
-function selectedTier(input: InteractiveEfficiencyInput): {
-  readonly tier: EfficiencyTier;
-  readonly matchedRuleId?: string;
-} {
+const TIER_BY_LEVEL: ReadonlyArray<EfficiencyTier> = ["economy", "balanced", "quality"];
+
+/** Maps a probability-weighted rubric score to a tier: round, then clamp to
+ * the economy..quality range. */
+function scoreToTier(score: number): EfficiencyTier {
+  const level = Math.min(TIER_BY_LEVEL.length - 1, Math.max(0, Math.round(score)));
+  return TIER_BY_LEVEL[level]!;
+}
+
+function findMatchingRule(input: InteractiveEfficiencyInput): EfficiencyRule | undefined {
   const projectId =
     input.projectIdOverride ??
     input.command.bootstrap?.createThread?.projectId ??
     input.thread?.projectId;
-  const rule = input.settings.rules.find((candidate) =>
+  return input.settings.rules.find((candidate) =>
     matchesRule(candidate, {
       projectId,
       interactionMode: input.command.interactionMode,
       attachmentCount: input.attachmentCountOverride ?? input.command.message.attachments.length,
     }),
   );
-  const tier =
-    rule?.tier ??
+}
+
+/**
+ * Whether an explicit efficiency rule matches this interactive turn. Rules take
+ * precedence over any tier judgment, so upstream callers use this to skip the
+ * judge round-trip (latency + cost) entirely when a rule is going to win anyway.
+ */
+export function interactiveTurnMatchesRule(params: {
+  readonly settings: EfficiencySettings;
+  readonly projectId: string | undefined;
+  readonly interactionMode: "default" | "plan";
+  readonly attachmentCount: number;
+}): boolean {
+  return params.settings.rules.some((candidate) =>
+    matchesRule(candidate, {
+      projectId: params.projectId,
+      interactionMode: params.interactionMode,
+      attachmentCount: params.attachmentCount,
+    }),
+  );
+}
+
+/**
+ * Resolves the tier and the (optional) recorded judgment.
+ *
+ * Precedence: explicit rule match > confidence-gated judgment > command tier >
+ * thread tier > default tier. Rules are operator intent and always win, so a
+ * judgment is only *applied* when no rule matched, tier judgment is enabled, and
+ * `confidence >= minConfidence`. The judgment is still recorded (for the log and
+ * later calibration) whenever a judgment input is present, with `applied: false`
+ * and a `reason` when it was not used.
+ */
+function selectedTier(input: InteractiveEfficiencyInput): {
+  readonly tier: EfficiencyTier;
+  readonly matchedRuleId?: string;
+  readonly judgment?: EfficiencyTierJudgment;
+} {
+  const rule = findMatchingRule(input);
+  const staticTier =
     input.command.efficiencyTier ??
     input.command.bootstrap?.createThread?.efficiencyTier ??
     input.thread?.efficiencyTier ??
     input.settings.defaultTier;
-  return rule === undefined ? { tier } : { tier, matchedRuleId: rule.id };
+
+  const baseTier = rule?.tier ?? staticTier;
+  const matchedRuleId = rule?.id;
+
+  const tj = input.tierJudgment;
+  if (tj === undefined) {
+    return matchedRuleId === undefined ? { tier: baseTier } : { tier: baseTier, matchedRuleId };
+  }
+
+  const mappedTier = scoreToTier(tj.score);
+  const enabled = input.settings.tierJudgment.enabled;
+  const minConfidence = input.settings.tierJudgment.minConfidence;
+  const applied = rule === undefined && enabled && tj.confidence >= minConfidence;
+  const reason =
+    rule !== undefined
+      ? `explicit rule '${rule.id}' takes precedence`
+      : !enabled
+        ? "tier judgment disabled"
+        : tj.confidence < minConfidence
+          ? `confidence ${tj.confidence.toFixed(2)} below minConfidence ${minConfidence}`
+          : undefined;
+  const judgment: EfficiencyTierJudgment = {
+    score: tj.score,
+    confidence: tj.confidence,
+    tier: mappedTier,
+    applied,
+    ...(reason === undefined ? {} : { reason }),
+    model: tj.model,
+  };
+  const tier = applied ? mappedTier : baseTier;
+  return {
+    tier,
+    ...(matchedRuleId === undefined ? {} : { matchedRuleId }),
+    judgment,
+  };
 }
 
 function candidateOverlay(
@@ -209,6 +300,7 @@ export function resolveInteractiveEfficiency(
       ? {}
       : { retryOfTurnId: input.command.retryOfTurnId }),
     ...(experimentAssignment === undefined ? {} : { experimentArm: experimentAssignment.arm }),
+    ...(selected.judgment === undefined ? {} : { judgment: selected.judgment }),
   };
 
   return {

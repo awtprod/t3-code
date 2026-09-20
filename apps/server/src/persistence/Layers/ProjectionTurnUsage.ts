@@ -67,7 +67,11 @@ const UsageDbRow = Schema.Struct({
 type UsageDbRow = typeof UsageDbRow.Type;
 
 const InternalGenerationDbRow = Schema.Struct({
-  operation: Schema.Literals(["title", "branch", "commit", "pull-request"]),
+  // Text-generation operations plus dynamic `judge.<operation>` rows written by
+  // the efficiency Judge. Kept as a free string so a new operation label never
+  // fails the whole read at the boundary; the value is only used as a grouping
+  // key, never as a discriminant.
+  operation: Schema.String,
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
   durationMs: NonNegativeInt,

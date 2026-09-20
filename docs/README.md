@@ -39,6 +39,7 @@ policy in [CONTRIBUTING.md](../CONTRIBUTING.md); agent rules in [AGENTS.md](../A
 - [Connection runtime](./internals/connection-runtime.md)
 - [Voice input](./internals/voice-input.md)
 - [Providers](./internals/providers.md)
+- [Model efficiency](./internals/efficiency.md)
 - [Remote environments](./internals/remote.md)
 - [Server updates](./internals/server-updates.md)
 - [Resource telemetry](./internals/resource-telemetry.md)

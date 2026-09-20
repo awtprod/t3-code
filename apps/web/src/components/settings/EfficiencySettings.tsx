@@ -19,6 +19,35 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
 
 const TIERS: ReadonlyArray<EfficiencyTier> = ["economy", "balanced", "quality"];
 
+type JudgeTransport = EfficiencySettings["judge"]["transport"];
+const JUDGE_TRANSPORTS: ReadonlyArray<{ value: JudgeTransport; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "typesafe", label: "TypeSafe" },
+  { value: "openai-compatible", label: "OpenAI-compatible" },
+];
+
+type SieveMode = EfficiencySettings["sieve"]["mode"];
+const SIEVE_MODES: ReadonlyArray<{ value: SieveMode; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "shadow", label: "Shadow (log only)" },
+  { value: "active", label: "Active (rewrite)" },
+];
+
+const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+
+/**
+ * Parse a numeric input value, returning `undefined` for an empty or
+ * non-numeric field. Callers skip the persist on `undefined` so clearing a
+ * field to retype it never silently coerces to `0`/`1` (which would disable a
+ * confidence/threshold gate — the opposite of the setting's intent).
+ */
+const parseNumericInput = (raw: string): number | undefined => {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
 export function EfficiencySettingsPanel() {
   const efficiency = usePrimarySettings((settings) => settings.efficiency);
   const updateSettings = useUpdatePrimarySettings();
@@ -62,6 +91,22 @@ export function EfficiencySettingsPanel() {
       return false;
     }
     return true;
+  };
+
+  // Persist a sieve drop/keep threshold change, enforcing the schema's
+  // `dropBelow < keepAbove` invariant client-side so an invalid combination
+  // gives specific guidance instead of the generic "not saved" toast that the
+  // rejected server-side decode would otherwise produce.
+  const persistSieveThresholds = (dropBelow: number, keepAbove: number) => {
+    if (dropBelow >= keepAbove) {
+      toastManager.add({
+        title: "Drop must be below Keep",
+        description: `Drop (${dropBelow.toFixed(2)}) must be strictly less than Keep (${keepAbove.toFixed(2)}).`,
+        type: "error",
+      });
+      return;
+    }
+    void persist({ ...efficiency, sieve: { ...efficiency.sieve, dropBelow, keepAbove } });
   };
 
   const importJson = async () => {
@@ -231,6 +276,230 @@ export function EfficiencySettingsPanel() {
             )}
           </div>
         </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title="Judge">
+        <SettingsRow
+          title="Transport"
+          description="A cheap model that answers typed questions with calibrated probabilities. Off keeps every feature deterministic. TypeSafe uses System One; OpenAI-compatible posts to a /chat/completions gateway."
+          control={
+            <Select
+              value={efficiency.judge.transport}
+              onValueChange={(value) =>
+                value &&
+                void persist({
+                  ...efficiency,
+                  judge: { ...efficiency.judge, transport: value as JudgeTransport },
+                })
+              }
+            >
+              <SelectTrigger className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectPopup>
+                {JUDGE_TRANSPORTS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
+        {efficiency.judge.transport === "openai-compatible" ? (
+          <SettingsRow
+            title="Base URL"
+            description="The OpenAI-compatible endpoint. Defaults to the local gateway when left blank."
+            control={
+              <Input
+                className="w-72"
+                placeholder="http://127.0.0.1:8317/v1"
+                value={efficiency.judge.baseUrl ?? ""}
+                onChange={(event) => {
+                  const next = event.target.value.trim();
+                  void persist({
+                    ...efficiency,
+                    judge: {
+                      ...efficiency.judge,
+                      ...(next.length === 0 ? { baseUrl: undefined } : { baseUrl: next }),
+                    },
+                  });
+                }}
+              />
+            }
+          />
+        ) : null}
+        <SettingsRow
+          title="Model"
+          description="The judge model. TypeSafe uses jev-latest; the gateway default is glm-5.3-flash."
+          control={
+            <Input
+              className="w-56"
+              value={efficiency.judge.model}
+              onChange={(event) => {
+                const next = event.target.value.trim();
+                if (next.length === 0) return;
+                void persist({
+                  ...efficiency,
+                  judge: { ...efficiency.judge, model: next },
+                });
+              }}
+            />
+          }
+        />
+        <SettingsRow
+          title="API key env var"
+          description="The NAME of the environment variable holding the API key — never the key itself."
+          control={
+            <Input
+              className="w-56"
+              value={efficiency.judge.apiKeyEnv}
+              onChange={(event) => {
+                const next = event.target.value.trim();
+                if (next.length === 0) return;
+                void persist({
+                  ...efficiency,
+                  judge: { ...efficiency.judge, apiKeyEnv: next },
+                });
+              }}
+            />
+          }
+        />
+        <SettingsRow
+          title="Confidence-gated tier judgment"
+          description="Ask the judge to rate task complexity on each auto-routed turn. The tier only changes when the judge is confident enough; rules always win (and skip the judge entirely). Adds a judge round-trip to each auto-routed turn before it starts."
+          control={
+            <Switch
+              checked={efficiency.tierJudgment.enabled}
+              onCheckedChange={(enabled) =>
+                void persist({
+                  ...efficiency,
+                  tierJudgment: { ...efficiency.tierJudgment, enabled },
+                })
+              }
+            />
+          }
+        />
+        <SettingsRow
+          title="Minimum confidence"
+          description="A judgment overrides the static tier only when its confidence reaches this value (0–1)."
+          control={
+            <Input
+              aria-label="minimum confidence"
+              className="w-24"
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={efficiency.tierJudgment.minConfidence}
+              onChange={(event) => {
+                const parsed = parseNumericInput(event.target.value);
+                if (parsed === undefined) return;
+                void persist({
+                  ...efficiency,
+                  tierJudgment: {
+                    ...efficiency.tierJudgment,
+                    minConfidence: clamp01(parsed),
+                  },
+                });
+              }}
+            />
+          }
+        />
+      </SettingsSection>
+
+      <SettingsSection title="Tool-result sieve">
+        <SettingsRow
+          title="Mode"
+          description="Hide tool-result blocks the judge is confident the task does not need. Shadow logs decisions without changing output; Active rewrites the result. Errors and uncertain blocks are always kept."
+          control={
+            <Select
+              value={efficiency.sieve.mode}
+              onValueChange={(value) =>
+                value &&
+                void persist({
+                  ...efficiency,
+                  sieve: { ...efficiency.sieve, mode: value as SieveMode },
+                })
+              }
+            >
+              <SelectTrigger className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectPopup>
+                {SIEVE_MODES.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
+        <SettingsRow
+          title="Minimum result size"
+          description="Only sieve tool results at least this many characters long."
+          control={
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="minimum result size"
+                className="w-28"
+                type="number"
+                min={1}
+                value={efficiency.sieve.minChars}
+                onChange={(event) => {
+                  const parsed = parseNumericInput(event.target.value);
+                  if (parsed === undefined) return;
+                  void persist({
+                    ...efficiency,
+                    sieve: {
+                      ...efficiency.sieve,
+                      minChars: Math.max(1, Math.round(parsed)),
+                    },
+                  });
+                }}
+              />
+              <span className="text-xs text-muted-foreground">chars</span>
+            </div>
+          }
+        />
+        <SettingsRow
+          title="Drop / keep thresholds"
+          description="Hide a block when P(needed) is below Drop; keep and gate errors at or above Keep. Drop must be below Keep."
+          control={
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="drop below"
+                className="w-24"
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={efficiency.sieve.dropBelow}
+                onChange={(event) => {
+                  const parsed = parseNumericInput(event.target.value);
+                  if (parsed === undefined) return;
+                  persistSieveThresholds(clamp01(parsed), efficiency.sieve.keepAbove);
+                }}
+              />
+              <span className="text-xs text-muted-foreground">/</span>
+              <Input
+                aria-label="keep above"
+                className="w-24"
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={efficiency.sieve.keepAbove}
+                onChange={(event) => {
+                  const parsed = parseNumericInput(event.target.value);
+                  if (parsed === undefined) return;
+                  persistSieveThresholds(efficiency.sieve.dropBelow, clamp01(parsed));
+                }}
+              />
+            </div>
+          }
+        />
       </SettingsSection>
 
       <SettingsSection title="Candidates, rules, and experiments">

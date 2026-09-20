@@ -2364,6 +2364,12 @@ const makeWsRpcLayer = (
                 serverSettings.getSettings,
                 providerRegistry.getProviders,
               ]);
+              // Tier judgment is a per-message live signal: it scores the real
+              // turn text, which the settings preview does not have. Calling the
+              // judge here would score an empty message (a meaningless result)
+              // and record preview traffic into `internal_generation_usage`
+              // indistinguishable from real turns, so the preview deliberately
+              // shows only the deterministic rule/static routing.
               const resolution = resolveInteractiveEfficiency({
                 command: {
                   type: "thread.turn.start",
