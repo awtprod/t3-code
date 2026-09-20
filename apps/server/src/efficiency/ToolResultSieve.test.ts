@@ -182,6 +182,42 @@ describe("decideSievePlan", () => {
     expect(rebuilt.file.content).toContain("Re-run Read with offset=26 limit=50");
   });
 
+  it("rebuild is shape-preserving: swaps only file.content, keeps other keys", () => {
+    // The CLI honours updatedToolOutput only when it matches the tool's output
+    // shape (a bare string is discarded); the rebuild must keep the Read
+    // envelope intact and only replace file.content.
+    const original = readResponse(content, 1) as {
+      type: string;
+      file: {
+        filePath: string;
+        content: string;
+        startLine: number;
+        numLines: number;
+        totalLines: number;
+      };
+    };
+    const plan = decideSievePlan({
+      toolName: "Read",
+      chunked,
+      answers: answers({ b002: 0.02, b003: 0.02 }),
+      settings: activeSettings,
+      normalized,
+    });
+    expect(plan.applied).toBe(true);
+    const rebuilt = plan.rebuiltResponse as typeof original;
+    expect(rebuilt.type).toBe(original.type);
+    expect(rebuilt.file.filePath).toBe(original.file.filePath);
+    expect(rebuilt.file.startLine).toBe(original.file.startLine);
+    // numLines/totalLines are left untouched (CLI does not require recompute).
+    expect(rebuilt.file.numLines).toBe(original.file.numLines);
+    expect(rebuilt.file.totalLines).toBe(original.file.totalLines);
+    // Only the content changed, and it is shorter than the original.
+    expect(rebuilt.file.content).not.toBe(original.file.content);
+    expect(rebuilt.file.content.length).toBeLessThan(original.file.content.length);
+    // The original object is not mutated.
+    expect(original.file.content).toBe(content);
+  });
+
   it("error gate: is_error >= keepAbove hides nothing", () => {
     const plan = decideSievePlan({
       toolName: "Read",

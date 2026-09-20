@@ -217,6 +217,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * Read (claude-code 2.1.258): `{ type:"text", file:{ content, startLine, … } }`
  * — raw content, no `cat -n` prefixes; line numbers derive from `startLine`.
  * A future CLI that embeds `N\t` prefixes is also handled by the block parser.
+ *
+ * The rebuild only swaps `file.content`, keeping every other key (`type`,
+ * `file.filePath`, `file.startLine`, `file.numLines`, `file.totalLines`). The
+ * CLI honours a `PostToolUse` `updatedToolOutput` only when it matches the
+ * tool's output shape (a bare string is silently discarded); this shape-
+ * preserving swap is accepted on CLI 2.1.258 and 2.1.278, and the CLI does not
+ * require `numLines`/`totalLines` to be recomputed (verified by probe), so we
+ * leave that metadata untouched for a minimal, shape-faithful rewrite.
  */
 export function normalizeToolResult(
   toolName: string,
