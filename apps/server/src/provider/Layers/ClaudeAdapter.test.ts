@@ -58,6 +58,13 @@ import {
   maybeDowngradeSubagentModel,
   type ClaudeAdapterLiveOptions,
 } from "./ClaudeAdapter.ts";
+import {
+  DEFAULT_SIEVE_SETTINGS,
+  sieveToolResult,
+  type JudgeAnswer as SieveJudgeAnswer,
+  type JudgeLike as SieveJudgeLike,
+  type SieveSettings as SieveSettingsLike,
+} from "../../efficiency/ToolResultSieve.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
@@ -175,6 +182,7 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly toolResultSieve?: ClaudeAdapterLiveOptions["toolResultSieve"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -201,6 +209,7 @@ function makeHarness(config?: {
           nativeEventLogPath: config.nativeEventLogPath,
         }
       : {}),
+    ...(config?.toolResultSieve ? { toolResultSieve: config.toolResultSieve } : {}),
   };
 
   return {
@@ -5523,5 +5532,187 @@ describe("maybeDowngradeBashWorkerModel", () => {
       input,
     );
     assert.strictEqual(maybeDowngradeBashWorkerModel("Bash", input, undefined, catalog), input);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool-result sieve (slice B) wiring.
+// ---------------------------------------------------------------------------
+
+describe("ClaudeAdapter tool-result sieve wiring", () => {
+  const bigReadContent = (): string => {
+    const lines: Array<string> = [];
+    for (let n = 1; n <= 150; n += 1) lines.push(`content line ${String(n).padStart(3, "0")} xxxx`);
+    return lines.join("\n") + "\n";
+  };
+
+  const readResponse = (content: string): unknown => ({
+    type: "text",
+    file: {
+      filePath: "/repo/src/parse.ts",
+      content,
+      numLines: content.split("\n").length,
+      startLine: 1,
+      totalLines: content.split("\n").length,
+    },
+  });
+
+  // A judge answering `noul` per requested key: blocks default 0.9 ("needed"),
+  // is_error defaults 0; `byKey` overrides; `fail` fails the whole request.
+  const fakeSieveJudge = (
+    byKey: Readonly<Record<string, number>>,
+    opts?: { readonly fail?: boolean },
+  ): SieveJudgeLike => ({
+    enabled: true,
+    ask: (req) =>
+      opts?.fail === true
+        ? Effect.fail({ _tag: "JudgeError", reason: "boom" })
+        : Effect.sync(() => {
+            const answers: Record<string, SieveJudgeAnswer> = {};
+            for (const key of Object.keys(req.questions)) {
+              const fallback = key === "is_error" ? 0 : 0.9;
+              answers[key] = { type: "noul", noul: byKey[key] ?? fallback };
+            }
+            return {
+              answers,
+              model: "glm-5.3-flash",
+              usage: { inputTokens: 10, outputTokens: 0 },
+              latencyMs: 5,
+            };
+          }),
+  });
+
+  const activeSieve: SieveSettingsLike = {
+    ...DEFAULT_SIEVE_SETTINGS,
+    mode: "active",
+    minChars: 50,
+  };
+
+  // Mirror ClaudeDriver's wiring: wrap sieveToolResult, expose updatedToolOutput.
+  const sieveCallback =
+    (
+      judge: SieveJudgeLike,
+      settings: SieveSettingsLike,
+    ): NonNullable<ClaudeAdapterLiveOptions["toolResultSieve"]> =>
+    (input) =>
+      sieveToolResult({ judge, settings, timeoutMs: 15000 }, input).pipe(
+        Effect.map((outcome) => outcome.updatedToolOutput),
+      );
+
+  const startAndPrime = (adapter: ClaudeAdapterShape) =>
+    Effect.gen(function* () {
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "fix the bug in parse()",
+        attachments: [],
+      });
+    });
+
+  const getPostToolUseMatcher = (options: ClaudeQueryOptions | undefined) =>
+    options?.hooks?.PostToolUse?.[0];
+
+  const invokeReadHook = (
+    hook: NonNullable<
+      NonNullable<ClaudeQueryOptions["hooks"]>["PostToolUse"]
+    >[number]["hooks"][number],
+    toolResponse: unknown,
+  ) =>
+    Effect.promise(() =>
+      hook(
+        {
+          hook_event_name: "PostToolUse",
+          tool_name: "Read",
+          tool_input: { file_path: "/repo/src/parse.ts" },
+          tool_response: toolResponse,
+          tool_use_id: "tool-1",
+          session_id: "s",
+          transcript_path: "",
+          cwd: "/repo",
+        } as unknown as Parameters<typeof hook>[0],
+        "tool-1",
+        { signal: new AbortController().signal },
+      ),
+    );
+
+  it.effect("does not register hooks when the sieve is off (options unchanged)", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* startAndPrime(adapter);
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.hooks, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("active mode: Read matcher rewrites with stub and preserved numbering", () => {
+    const harness = makeHarness({
+      toolResultSieve: sieveCallback(
+        fakeSieveJudge({ b002: 0.02, b003: 0.02, b004: 0.02, b005: 0.02 }),
+        activeSieve,
+      ),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* startAndPrime(adapter);
+      const matcher = getPostToolUseMatcher(harness.getLastCreateQueryInput()?.options);
+      assert.ok(matcher, "a PostToolUse matcher is registered");
+      assert.match(matcher!.matcher ?? "", /Read/);
+      const result = yield* invokeReadHook(matcher!.hooks[0]!, readResponse(bigReadContent()));
+      const specific = (result as { hookSpecificOutput?: { updatedToolOutput?: unknown } })
+        .hookSpecificOutput;
+      assert.ok(specific?.updatedToolOutput, "returns updatedToolOutput");
+      const rebuilt = specific!.updatedToolOutput as { file: { content: string } };
+      assert.match(rebuilt.file.content, /content line 001 xxxx/);
+      assert.match(rebuilt.file.content, /content line 150 xxxx/);
+      assert.ok(!rebuilt.file.content.includes("content line 075 xxxx"), "hidden line dropped");
+      assert.match(rebuilt.file.content, /\[sieve\] Lines 26-125 \(100 lines\) hidden/);
+      assert.match(rebuilt.file.content, /Re-run Read with offset=26 limit=100/);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("error gate: is_error high ⇒ no updatedToolOutput", () => {
+    const harness = makeHarness({
+      toolResultSieve: sieveCallback(
+        fakeSieveJudge({ b002: 0.02, b003: 0.02, b004: 0.02, b005: 0.02, is_error: 0.9 }),
+        activeSieve,
+      ),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* startAndPrime(adapter);
+      const matcher = getPostToolUseMatcher(harness.getLastCreateQueryInput()?.options);
+      const result = yield* invokeReadHook(matcher!.hooks[0]!, readResponse(bigReadContent()));
+      assert.deepEqual(result, {});
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("judge failure ⇒ no updatedToolOutput (untouched)", () => {
+    const harness = makeHarness({
+      toolResultSieve: sieveCallback(fakeSieveJudge({}, { fail: true }), activeSieve),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* startAndPrime(adapter);
+      const matcher = getPostToolUseMatcher(harness.getLastCreateQueryInput()?.options);
+      const result = yield* invokeReadHook(matcher!.hooks[0]!, readResponse(bigReadContent()));
+      assert.deepEqual(result, {});
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
   });
 });
