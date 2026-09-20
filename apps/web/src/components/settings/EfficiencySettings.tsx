@@ -35,6 +35,19 @@ const SIEVE_MODES: ReadonlyArray<{ value: SieveMode; label: string }> = [
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
+/**
+ * Parse a numeric input value, returning `undefined` for an empty or
+ * non-numeric field. Callers skip the persist on `undefined` so clearing a
+ * field to retype it never silently coerces to `0`/`1` (which would disable a
+ * confidence/threshold gate — the opposite of the setting's intent).
+ */
+const parseNumericInput = (raw: string): number | undefined => {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
 export function EfficiencySettingsPanel() {
   const efficiency = usePrimarySettings((settings) => settings.efficiency);
   const updateSettings = useUpdatePrimarySettings();
@@ -78,6 +91,22 @@ export function EfficiencySettingsPanel() {
       return false;
     }
     return true;
+  };
+
+  // Persist a sieve drop/keep threshold change, enforcing the schema's
+  // `dropBelow < keepAbove` invariant client-side so an invalid combination
+  // gives specific guidance instead of the generic "not saved" toast that the
+  // rejected server-side decode would otherwise produce.
+  const persistSieveThresholds = (dropBelow: number, keepAbove: number) => {
+    if (dropBelow >= keepAbove) {
+      toastManager.add({
+        title: "Drop must be below Keep",
+        description: `Drop (${dropBelow.toFixed(2)}) must be strictly less than Keep (${keepAbove.toFixed(2)}).`,
+        type: "error",
+      });
+      return;
+    }
+    void persist({ ...efficiency, sieve: { ...efficiency.sieve, dropBelow, keepAbove } });
   };
 
   const importJson = async () => {
@@ -338,7 +367,7 @@ export function EfficiencySettingsPanel() {
         />
         <SettingsRow
           title="Confidence-gated tier judgment"
-          description="Ask the judge to rate task complexity on each auto-routed turn. The tier only changes when the judge is confident enough; rules always win."
+          description="Ask the judge to rate task complexity on each auto-routed turn. The tier only changes when the judge is confident enough; rules always win (and skip the judge entirely). Adds a judge round-trip to each auto-routed turn before it starts."
           control={
             <Switch
               checked={efficiency.tierJudgment.enabled}
@@ -363,15 +392,17 @@ export function EfficiencySettingsPanel() {
               max={1}
               step={0.05}
               value={efficiency.tierJudgment.minConfidence}
-              onChange={(event) =>
+              onChange={(event) => {
+                const parsed = parseNumericInput(event.target.value);
+                if (parsed === undefined) return;
                 void persist({
                   ...efficiency,
                   tierJudgment: {
                     ...efficiency.tierJudgment,
-                    minConfidence: clamp01(Number(event.target.value) || 0),
+                    minConfidence: clamp01(parsed),
                   },
-                })
-              }
+                });
+              }}
             />
           }
         />
@@ -416,15 +447,17 @@ export function EfficiencySettingsPanel() {
                 type="number"
                 min={1}
                 value={efficiency.sieve.minChars}
-                onChange={(event) =>
+                onChange={(event) => {
+                  const parsed = parseNumericInput(event.target.value);
+                  if (parsed === undefined) return;
                   void persist({
                     ...efficiency,
                     sieve: {
                       ...efficiency.sieve,
-                      minChars: Math.max(1, Math.round(Number(event.target.value) || 1)),
+                      minChars: Math.max(1, Math.round(parsed)),
                     },
-                  })
-                }
+                  });
+                }}
               />
               <span className="text-xs text-muted-foreground">chars</span>
             </div>
@@ -443,15 +476,11 @@ export function EfficiencySettingsPanel() {
                 max={1}
                 step={0.05}
                 value={efficiency.sieve.dropBelow}
-                onChange={(event) =>
-                  void persist({
-                    ...efficiency,
-                    sieve: {
-                      ...efficiency.sieve,
-                      dropBelow: clamp01(Number(event.target.value) || 0),
-                    },
-                  })
-                }
+                onChange={(event) => {
+                  const parsed = parseNumericInput(event.target.value);
+                  if (parsed === undefined) return;
+                  persistSieveThresholds(clamp01(parsed), efficiency.sieve.keepAbove);
+                }}
               />
               <span className="text-xs text-muted-foreground">/</span>
               <Input
@@ -462,15 +491,11 @@ export function EfficiencySettingsPanel() {
                 max={1}
                 step={0.05}
                 value={efficiency.sieve.keepAbove}
-                onChange={(event) =>
-                  void persist({
-                    ...efficiency,
-                    sieve: {
-                      ...efficiency.sieve,
-                      keepAbove: clamp01(Number(event.target.value) || 0),
-                    },
-                  })
-                }
+                onChange={(event) => {
+                  const parsed = parseNumericInput(event.target.value);
+                  if (parsed === undefined) return;
+                  persistSieveThresholds(efficiency.sieve.dropBelow, clamp01(parsed));
+                }}
               />
             </div>
           }
