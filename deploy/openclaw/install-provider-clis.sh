@@ -8,9 +8,9 @@ fi
 
 install -d -o root -g root -m 0755 /opt/command-center/provider-cli
 /usr/local/bin/npm install --prefix /opt/command-center/provider-cli --omit=dev --no-audit --no-fund \
-  @openai/codex@0.153.4 \
+  @openai/codex@0.155.1 \
   @anthropic-ai/claude-code@2.1.278 \
-  @moonshot-ai/kimi-code@0.41.0
+  @moonshot-ai/kimi-code@2.0.2
 chown -R root:root /opt/command-center/provider-cli
 chmod -R a-w /opt/command-center/provider-cli
 
