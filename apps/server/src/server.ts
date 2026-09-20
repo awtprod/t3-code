@@ -681,7 +681,14 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // `providerInstances` hydration merges `settings.providers.<kind>`
   // with explicit `providerInstances` entries on boot.
-  Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+  //
+  // `ClaudeDriver.create` yields the efficiency `Judge` for the tool-result
+  // sieve, so this hydration layer (the single site where `BUILT_IN_DRIVERS`
+  // are instantiated) requires `Judge`. Close it here with `JudgeLayerLive`
+  // so the requirement never leaks onto the runtime's exported surface —
+  // Effect memoizes the shared layer reference, so this is the same Judge
+  // singleton used by the tier-judgment dispatcher.
+  Layer.provideMerge(ProviderInstanceRegistryHydrationLive.pipe(Layer.provide(JudgeLayerLive))),
   // Shared native/canonical NDJSON writers used by both the per-instance
   // drivers (native stream, written from inside each `<X>Adapter`) and
   // `ProviderService` (canonical stream, written after event normalization).

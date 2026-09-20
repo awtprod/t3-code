@@ -377,6 +377,8 @@ export interface ToolResultSieveHookInput {
   readonly toolResponse: unknown;
   readonly task: { readonly user_request: string; readonly assistant_intent: string };
   readonly agentId?: string;
+  /** Owning thread id, forwarded to the judge decision-log meta. */
+  readonly threadId?: string;
 }
 
 /**
@@ -4505,6 +4507,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               toolInput: post.tool_input,
               toolResponse: post.tool_response,
               task: deriveSieveTask(context),
+              threadId: context.session.threadId,
               ...(post.agent_id ? { agentId: post.agent_id } : {}),
             }).pipe(
               Effect.timeout(Duration.millis(SIEVE_HOOK_HARD_TIMEOUT_MS)),

@@ -14,6 +14,7 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EfficiencySieveSettings,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -59,13 +60,16 @@ import {
   type ClaudeAdapterLiveOptions,
 } from "./ClaudeAdapter.ts";
 import {
-  DEFAULT_SIEVE_SETTINGS,
-  sieveToolResult,
+  JudgeError,
   type JudgeAnswer as SieveJudgeAnswer,
-  type JudgeLike as SieveJudgeLike,
+  type JudgeShape as SieveJudgeLike,
+} from "../../efficiency/Judge.ts";
+import {
+  sieveToolResult,
   type SieveSettings as SieveSettingsLike,
 } from "../../efficiency/ToolResultSieve.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const decodeSieveSettings = Schema.decodeSync(EfficiencySieveSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
 class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(
@@ -5566,7 +5570,7 @@ describe("ClaudeAdapter tool-result sieve wiring", () => {
     enabled: true,
     ask: (req) =>
       opts?.fail === true
-        ? Effect.fail({ _tag: "JudgeError", reason: "boom" })
+        ? Effect.fail(new JudgeError({ reason: "network", detail: "boom" }))
         : Effect.sync(() => {
             const answers: Record<string, SieveJudgeAnswer> = {};
             for (const key of Object.keys(req.questions)) {
@@ -5582,11 +5586,10 @@ describe("ClaudeAdapter tool-result sieve wiring", () => {
           }),
   });
 
-  const activeSieve: SieveSettingsLike = {
-    ...DEFAULT_SIEVE_SETTINGS,
+  const activeSieve: SieveSettingsLike = decodeSieveSettings({
     mode: "active",
     minChars: 50,
-  };
+  });
 
   // Mirror ClaudeDriver's wiring: wrap sieveToolResult, expose updatedToolOutput.
   const sieveCallback =

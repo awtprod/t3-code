@@ -18,109 +18,26 @@
  * that calls into it; `ClaudeDriver` builds it from `ServerSettingsService`
  * and the `Judge` service.
  */
+import { EfficiencySieveSettings } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+
+import type { JudgeAnswer, JudgeMeta, JudgeQuestion, JudgeShape } from "./Judge.ts";
 
 // ---------------------------------------------------------------------------
-// Minimal local Judge interface (DESIGN §0). Slice A owns the real `Judge`
-// service; this structural interface lets slice B compile and be tested now
-// and binds to A's service on rebase. The error channel is a broad structural
-// `JudgeError` ({ _tag, reason }) so A's concrete tagged error is assignable at
-// the wiring boundary; every consumer here treats any failure as "no judgment"
-// and falls through to today's behaviour.
+// Settings — single source of truth is the contracts schema (slice A). The
+// branded `PositiveInt`/`TrimmedNonEmptyString` fields widen to number/string
+// for the reads the sieve does; branded values are built via the schema
+// (`Schema.decodeSync`), never by hand.
 // ---------------------------------------------------------------------------
 
-export type JudgeQuestion =
-  | {
-      readonly type: "noul";
-      readonly instructions: string;
-      readonly criteria?: { readonly true: string; readonly false: string };
-    }
-  | {
-      readonly type: "choice";
-      readonly instructions: string;
-      readonly criteria: Readonly<Record<string, string>>;
-    }
-  | {
-      readonly type: "score";
-      readonly instructions: string;
-      readonly criteria: ReadonlyArray<string>;
-    };
+export type SieveSettings = EfficiencySieveSettings;
+export type SieveMode = EfficiencySieveSettings["mode"];
 
-export type JudgeAnswer =
-  | { readonly type: "noul"; readonly noul: number }
-  | {
-      readonly type: "choice";
-      readonly choice: string;
-      readonly probabilities: Readonly<Record<string, number>>;
-      readonly confidence: number;
-    }
-  | {
-      readonly type: "score";
-      readonly score: number;
-      readonly probabilities: Readonly<Record<string, number>>;
-      readonly confidence: number;
-    };
-
-export interface JudgeRequest {
-  readonly operation: string;
-  readonly state: unknown;
-  readonly questions: Readonly<Record<string, JudgeQuestion>>;
-  readonly timeoutMs?: number;
-  readonly meta?: Readonly<Record<string, unknown>>;
-}
-
-export interface JudgeResult {
-  readonly answers: Readonly<Record<string, JudgeAnswer>>;
-  readonly model: string;
-  readonly usage: { readonly inputTokens: number; readonly outputTokens: number };
-  readonly latencyMs: number;
-}
-
-/**
- * Structural judge error. Slice A's `Judge` fails with a tagged `JudgeError`
- * ({ _tag, reason }); this broad structural shape lets A's concrete error bind
- * to `JudgeLike` on rebase without importing A's module. Every consumer here
- * treats any failure as "no judgment" and falls through to today's behaviour.
- */
-export interface JudgeError {
-  readonly _tag: string;
-  readonly reason?: string;
-}
-
-export interface JudgeLike {
-  readonly enabled: boolean;
-  readonly ask: (req: JudgeRequest) => Effect.Effect<JudgeResult, JudgeError>;
-}
-
-// ---------------------------------------------------------------------------
-// Settings (mirror of packages/contracts efficiency.sieve, owned by slice A).
-// ---------------------------------------------------------------------------
-
-export type SieveMode = "off" | "shadow" | "active";
-
-export interface SieveSettings {
-  readonly mode: SieveMode;
-  readonly tools: ReadonlyArray<string>;
-  readonly minChars: number;
-  readonly blockLines: number;
-  readonly maxBlocks: number;
-  readonly dropBelow: number;
-  readonly keepAbove: number;
-  readonly minPruneRatio: number;
-}
-
-export const DEFAULT_SIEVE_SETTINGS: SieveSettings = {
-  mode: "off",
-  tools: ["Read", "Grep"],
-  minChars: 1500,
-  blockLines: 25,
-  maxBlocks: 200,
-  dropBelow: 0.1,
-  keepAbove: 0.5,
-  minPruneRatio: 0.2,
-};
+/** Fully-defaulted sieve settings (mode "off"), via the contracts schema. */
+export const DEFAULT_SIEVE_SETTINGS: SieveSettings = Schema.decodeSync(EfficiencySieveSettings)({});
 
 /**
  * Tools the sieve will ever consider. `Bash` is never sieved in v1 (re-running
@@ -145,6 +62,8 @@ export interface ToolResultSieveInput {
   readonly toolResponse: unknown;
   readonly task: SieveTask;
   readonly agentId?: string;
+  /** Owning thread id, recorded in the judge decision-log meta. */
+  readonly threadId?: string;
 }
 
 export interface SieveHiddenRange {
@@ -581,7 +500,7 @@ function summarizeInput(toolName: string, toolInput: unknown): string {
 // ---------------------------------------------------------------------------
 
 export interface SieveDeps {
-  readonly judge: JudgeLike;
+  readonly judge: JudgeShape;
   readonly settings: SieveSettings;
   /** Hard time budget for one sieve invocation (the judge timeout). */
   readonly timeoutMs: number;
@@ -604,7 +523,7 @@ export const sieveToolResult = (
     if (settings.mode === "off") return skip("off");
     // Bash is never sieved in v1; live settings.tools narrows the supported set.
     if (input.toolName === "Bash") return skip("bash_never_sieved");
-    if (!settings.tools.includes(input.toolName)) return skip("tool_not_enabled");
+    if (!settings.tools.some((tool) => tool === input.toolName)) return skip("tool_not_enabled");
     if (!SIEVE_SUPPORTED_TOOLS.includes(input.toolName)) return skip("tool_unsupported");
     // Subagent tool calls carry an agent_id; pass through unjudged in v1.
     if (input.agentId !== undefined && input.agentId !== "") return skip("subagent");
@@ -620,14 +539,23 @@ export const sieveToolResult = (
     if (!deps.judge.enabled) return skip("judge_disabled");
 
     const { state, questions } = buildSieveQuestions(chunked.blocks, input);
+    // Meta feeds A's judge decision-log line (never usage rows).
+    const meta: JudgeMeta = {
+      ...(input.threadId ? { threadId: input.threadId } : {}),
+      tool: input.toolName,
+      mode: settings.mode,
+      blocks: chunked.blocks.length,
+    };
     const result = yield* deps.judge
-      .ask({
-        operation: "tool-result-sieve",
-        state,
-        questions,
-        timeoutMs: deps.timeoutMs,
-        meta: { tool: input.toolName, blocks: chunked.blocks.length },
-      })
+      .ask(
+        {
+          operation: "tool-result-sieve",
+          state,
+          questions,
+          timeoutMs: deps.timeoutMs,
+        },
+        meta,
+      )
       .pipe(
         // Bound the judge with its own timeout; any failure OR timeout → None,
         // which the caller treats as "no judgment" (untouched result).

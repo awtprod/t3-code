@@ -1,19 +1,33 @@
+import { EfficiencySieveSettings } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
+import { JudgeError, type JudgeAnswer, type JudgeResult, type JudgeShape } from "./Judge.ts";
 import {
   buildSieveQuestions,
   chunkIntoBlocks,
-  DEFAULT_SIEVE_SETTINGS,
   decideSievePlan,
   normalizeToolResult,
   sieveToolResult,
-  type JudgeAnswer,
-  type JudgeLike,
-  type JudgeResult,
   type SieveSettings,
   type ToolResultSieveInput,
 } from "./ToolResultSieve.ts";
+
+/** Build fully-defaulted, branded sieve settings with overrides (via schema). */
+const decodeSieveSettings = Schema.decodeSync(EfficiencySieveSettings);
+const makeSieveSettings = (
+  overrides: Partial<{
+    mode: "off" | "shadow" | "active";
+    tools: ReadonlyArray<string>;
+    minChars: number;
+    blockLines: number;
+    maxBlocks: number;
+    dropBelow: number;
+    keepAbove: number;
+    minPruneRatio: number;
+  }> = {},
+): SieveSettings => decodeSieveSettings(overrides);
 
 // ---------------------------------------------------------------------------
 // Fakes / fixtures.
@@ -52,12 +66,12 @@ interface FakeJudgeOptions {
 function fakeJudge(
   byKey: Readonly<Record<string, number>>,
   options: FakeJudgeOptions = {},
-): JudgeLike {
+): JudgeShape {
   return {
     enabled: options.enabled ?? true,
     ask: (req) =>
       options.fail === true
-        ? Effect.fail({ _tag: "JudgeError", reason: "boom" })
+        ? Effect.fail(new JudgeError({ reason: "network", detail: "boom" }))
         : Effect.sync((): JudgeResult => {
             const answers: Record<string, JudgeAnswer> = {};
             for (const key of Object.keys(req.questions)) {
@@ -76,7 +90,7 @@ function fakeJudge(
   };
 }
 
-const activeSettings: SieveSettings = { ...DEFAULT_SIEVE_SETTINGS, mode: "active", minChars: 50 };
+const activeSettings: SieveSettings = makeSieveSettings({ mode: "active", minChars: 50 });
 
 function readInput(content: string, startLine = 1): ToolResultSieveInput {
   return {
@@ -86,8 +100,6 @@ function readInput(content: string, startLine = 1): ToolResultSieveInput {
     task,
   };
 }
-
-const run = <A>(effect: Effect.Effect<A>): Promise<A> => Effect.runPromise(effect);
 
 // ---------------------------------------------------------------------------
 // Pure: chunking.
@@ -302,114 +314,124 @@ describe("sieveToolResult", () => {
   const content = hundredLines();
   const judge = fakeJudge({ b002: 0.02, b003: 0.02 });
 
-  it("active mode rewrites and returns updatedToolOutput", async () => {
-    const out = await run(
-      sieveToolResult({ judge, settings: activeSettings, timeoutMs: 15000 }, readInput(content)),
-    );
-    expect(out.updatedToolOutput).toBeDefined();
-    const rebuilt = out.updatedToolOutput as { file: { content: string } };
-    expect(rebuilt.file.content).toContain("[sieve] Lines 26-75");
-    expect(out.decision?.rewritten).toBe(true);
-    expect(out.decision?.hiddenBlockIds).toEqual(["b002", "b003"]);
-    expect(out.decision?.judgeModel).toBe("glm-5.3-flash");
-  });
-
-  it("shadow mode records a decision but never rewrites", async () => {
-    const out = await run(
-      sieveToolResult(
-        { judge, settings: { ...activeSettings, mode: "shadow" }, timeoutMs: 15000 },
+  it.effect("active mode rewrites and returns updatedToolOutput", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
+        { judge, settings: activeSettings, timeoutMs: 15000 },
         readInput(content),
-      ),
-    );
-    expect(out.updatedToolOutput).toBeUndefined();
-    expect(out.decision?.rewritten).toBe(false);
-    expect(out.decision?.hiddenBlockIds).toEqual(["b002", "b003"]);
-  });
+      );
+      expect(out.updatedToolOutput).toBeDefined();
+      const rebuilt = out.updatedToolOutput as { file: { content: string } };
+      expect(rebuilt.file.content).toContain("[sieve] Lines 26-75");
+      expect(out.decision?.rewritten).toBe(true);
+      expect(out.decision?.hiddenBlockIds).toEqual(["b002", "b003"]);
+      expect(out.decision?.judgeModel).toBe("glm-5.3-flash");
+    }),
+  );
 
-  it("off mode short-circuits", async () => {
-    const out = await run(
-      sieveToolResult(
-        { judge, settings: { ...activeSettings, mode: "off" }, timeoutMs: 15000 },
+  it.effect("shadow mode records a decision but never rewrites", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
+        { judge, settings: makeSieveSettings({ mode: "shadow", minChars: 50 }), timeoutMs: 15000 },
         readInput(content),
-      ),
-    );
-    expect(out).toEqual({ skipped: "off" });
-  });
+      );
+      expect(out.updatedToolOutput).toBeUndefined();
+      expect(out.decision?.rewritten).toBe(false);
+      expect(out.decision?.hiddenBlockIds).toEqual(["b002", "b003"]);
+    }),
+  );
 
-  it("passes through subagent (agent_id) calls unjudged", async () => {
-    const out = await run(
-      sieveToolResult(
+  it.effect("off mode short-circuits", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
+        { judge, settings: makeSieveSettings({ mode: "off" }), timeoutMs: 15000 },
+        readInput(content),
+      );
+      expect(out).toEqual({ skipped: "off" });
+    }),
+  );
+
+  it.effect("passes through subagent (agent_id) calls unjudged", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
         { judge, settings: activeSettings, timeoutMs: 15000 },
         { ...readInput(content), agentId: "sub-1" },
-      ),
-    );
-    expect(out).toEqual({ skipped: "subagent" });
-  });
+      );
+      expect(out).toEqual({ skipped: "subagent" });
+    }),
+  );
 
-  it("never sieves Bash", async () => {
-    const out = await run(
-      sieveToolResult(
+  it.effect("never sieves Bash", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
         {
           judge,
-          settings: { ...activeSettings, tools: ["Read", "Grep", "Bash"] },
+          settings: makeSieveSettings({
+            mode: "active",
+            minChars: 50,
+            tools: ["Read", "Grep", "Bash"],
+          }),
           timeoutMs: 15000,
         },
         { toolName: "Bash", toolInput: { command: "ls" }, toolResponse: content, task },
-      ),
-    );
-    expect(out).toEqual({ skipped: "bash_never_sieved" });
-  });
+      );
+      expect(out).toEqual({ skipped: "bash_never_sieved" });
+    }),
+  );
 
-  it("skips below minChars", async () => {
-    const out = await run(
-      sieveToolResult({ judge, settings: activeSettings, timeoutMs: 15000 }, readInput("tiny\n")),
-    );
-    expect(out).toEqual({ skipped: "below_min_chars" });
-  });
+  it.effect("skips below minChars", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
+        { judge, settings: activeSettings, timeoutMs: 15000 },
+        readInput("tiny\n"),
+      );
+      expect(out).toEqual({ skipped: "below_min_chars" });
+    }),
+  );
 
-  it("unknown output shape → untouched", async () => {
-    const out = await run(
-      sieveToolResult(
+  it.effect("unknown output shape → untouched", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
         { judge, settings: activeSettings, timeoutMs: 15000 },
         { toolName: "Read", toolInput: {}, toolResponse: { weird: 123 }, task },
-      ),
-    );
-    expect(out).toEqual({ skipped: "unknown_shape" });
-  });
+      );
+      expect(out).toEqual({ skipped: "unknown_shape" });
+    }),
+  );
 
-  it("judge disabled → untouched", async () => {
-    const out = await run(
-      sieveToolResult(
+  it.effect("judge disabled → untouched", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
         { judge: fakeJudge({}, { enabled: false }), settings: activeSettings, timeoutMs: 15000 },
         readInput(content),
-      ),
-    );
-    expect(out).toEqual({ skipped: "judge_disabled" });
-  });
+      );
+      expect(out).toEqual({ skipped: "judge_disabled" });
+    }),
+  );
 
-  it("judge failure → untouched (no updatedToolOutput)", async () => {
-    const out = await run(
-      sieveToolResult(
+  it.effect("judge failure → untouched (no updatedToolOutput)", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
         { judge: fakeJudge({}, { fail: true }), settings: activeSettings, timeoutMs: 15000 },
         readInput(content),
-      ),
-    );
-    expect(out.updatedToolOutput).toBeUndefined();
-    expect(out.skipped).toBe("judge_error");
-  });
+      );
+      expect(out.updatedToolOutput).toBeUndefined();
+      expect(out.skipped).toBe("judge_error");
+    }),
+  );
 
-  it("error gate via orchestrator → decision without rewrite", async () => {
-    const out = await run(
-      sieveToolResult(
+  it.effect("error gate via orchestrator → decision without rewrite", () =>
+    Effect.gen(function* () {
+      const out = yield* sieveToolResult(
         {
           judge: fakeJudge({ b002: 0.02, b003: 0.02, is_error: 0.95 }),
           settings: activeSettings,
           timeoutMs: 15000,
         },
         readInput(content),
-      ),
-    );
-    expect(out.updatedToolOutput).toBeUndefined();
-    expect(out.decision?.reason).toBe("error_gate");
-  });
+      );
+      expect(out.updatedToolOutput).toBeUndefined();
+      expect(out.decision?.reason).toBe("error_gate");
+    }),
+  );
 });

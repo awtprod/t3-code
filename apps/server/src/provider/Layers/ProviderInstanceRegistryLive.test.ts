@@ -44,6 +44,7 @@ import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import type { BuiltInDriversEnv } from "../builtInDrivers.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import * as Judge from "../../efficiency/Judge.ts";
 import { ClaudeDriver } from "../Drivers/ClaudeDriver.ts";
 import { CodexDriver } from "../Drivers/CodexDriver.ts";
 import { CursorDriver } from "../Drivers/CursorDriver.ts";
@@ -318,6 +319,8 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(TestHttpClientLive),
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
     Layer.provideMerge(ModelManifest.layerTest),
+    // ClaudeDriver.create yields the efficiency Judge for the tool-result sieve.
+    Layer.provideMerge(Judge.layerTest),
   );
 
   it.live("boots one instance of every shipped driver from a single config map", () =>
