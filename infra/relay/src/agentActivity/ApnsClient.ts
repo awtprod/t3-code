@@ -8,7 +8,7 @@ import * as Headers from "effect/unstable/http/Headers";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import { ApnsEnvironment as ApnsEnvironmentSchema, type ApnsCredentials } from "../Config.ts";
-import type { ApnsLiveActivityAlert, ApnsNotificationPayload } from "./apnsDeliveryJobs.ts";
+import type { ApnsLiveActivityAlert, ApnsThreadNotificationPayload } from "./apnsDeliveryJobs.ts";
 import { ApnsJwtEncodingError, ApnsJwtSigningError } from "./apnsJwt.ts";
 import * as ApnsProviderTokens from "./ApnsProviderTokens.ts";
 
@@ -173,7 +173,7 @@ function makeLiveActivityRequest(input: MakeLiveActivityRequestInput): ApnsLiveA
 
 function makePushNotificationRequest(input: {
   readonly token: string;
-  readonly notification: ApnsNotificationPayload;
+  readonly notification: ApnsThreadNotificationPayload;
 }): ApnsPushNotificationRequest {
   return {
     token: input.token,

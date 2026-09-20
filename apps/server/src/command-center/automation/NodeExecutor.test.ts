@@ -12,10 +12,12 @@ import type {
   AutomationScopedShellRequest,
   AutomationScopedShellResult,
 } from "./AutomationScopedShell.ts";
+import { ProspectEvaluationError } from "../ProspectEvaluation.ts";
 import {
   AUTOMATION_V1_NODE_POLICY,
   makeSafeAutomationNodeExecutor,
   type AutomationItemCreateRequest,
+  type ProspectNotificationRequest,
 } from "./NodeExecutor.ts";
 import type { AutomationNodeExecutionContext } from "./Runtime.ts";
 
@@ -56,6 +58,21 @@ function dependencies(
     readonly runScopedShell?: (
       input: AutomationScopedShellRequest,
     ) => Effect.Effect<AutomationScopedShellResult, never>;
+    readonly evaluateProspects?: (
+      input: import("../ProspectEvaluation.ts").ProspectEvaluationRequest,
+    ) => Effect.Effect<
+      import("../ProspectEvaluation.ts").ProspectEvaluationResult,
+      ProspectEvaluationError
+    >;
+    readonly notifyProspects?: (input: ProspectNotificationRequest) => Effect.Effect<
+      {
+        readonly status: "noop" | "queued" | "skipped" | "partial";
+        readonly queuedCount: number;
+        readonly skippedCount: number;
+        readonly failedCount: number;
+      },
+      { readonly message: string; readonly retryable: boolean }
+    >;
   } = {},
 ) {
   return {
@@ -108,6 +125,31 @@ function dependencies(
           stderrTruncated: false,
           retryable: false,
           idempotent: false,
+        })),
+    evaluateProspects:
+      overrides.evaluateProspects ??
+      (() =>
+        Effect.succeed({
+          evaluatedCount: 0,
+          actionableCount: 0,
+          itemIds: [],
+          actionableItemIds: [],
+          investigateCount: 0,
+          investigateItemIds: [],
+          reviewCount: 0,
+          noActionCount: 0,
+          skippedExistingCount: 0,
+          feedbackCount: 0,
+          feedbackRemaining: 0,
+        })),
+    notifyProspects:
+      overrides.notifyProspects ??
+      (() =>
+        Effect.succeed({
+          status: "queued" as const,
+          queuedCount: 0,
+          skippedCount: 0,
+          failedCount: 0,
         })),
   };
 }
@@ -389,5 +431,275 @@ it.effect("runs only a resolved scoped-shell id and preserves retry metadata", (
       type: "retry",
       error: "Scoped shell 'repo.status' exited 9: temporary failure",
     });
+  });
+});
+
+it.effect("admits only a named bounded prospect profile and returns a sanitized aggregate", () => {
+  const captured: Array<import("../ProspectEvaluation.ts").ProspectEvaluationRequest> = [];
+  const execute = makeSafeAutomationNodeExecutor(
+    dependencies({
+      evaluateProspects: (input) => {
+        captured.push(input);
+        return Effect.succeed({
+          evaluatedCount: 2,
+          actionableCount: 1,
+          itemIds: ["prospect-review:one:fingerprint"],
+          actionableItemIds: ["prospect-review:one:fingerprint"],
+          investigateCount: 1,
+          investigateItemIds: ["prospect-review:one:fingerprint"],
+          reviewCount: 0,
+          noActionCount: 1,
+          skippedExistingCount: 3,
+          feedbackCount: 1,
+          feedbackRemaining: 0,
+        });
+      },
+    }),
+  );
+
+  return Effect.gen(function* () {
+    const valid = yield* execute(
+      context("prospect.evaluate", { profile: "prospect-primary", limit: 2 }),
+    );
+    const pathInjection = yield* execute(
+      context("prospect.evaluate", {
+        profile: "prospect-primary",
+        limit: 2,
+        dbPath: "/srv/prospector.sqlite",
+      }),
+    );
+    const unbounded = yield* execute(
+      context("prospect.evaluate", { profile: "prospect-primary", limit: 11 }),
+    );
+
+    expect(captured).toEqual([
+      {
+        profile: "prospect-primary",
+        limit: 2,
+        spaceId: "space-a",
+        executionId: "execution-1",
+        nodeId: "node-1",
+      },
+    ]);
+    expect(valid).toMatchObject({
+      type: "succeeded",
+      output: { evaluatedCount: 2, actionableCount: 1 },
+    });
+    expect(pathInjection).toMatchObject({ type: "failed" });
+    expect(unbounded).toMatchObject({ type: "failed" });
+    expect(AUTOMATION_V1_NODE_POLICY.automatic).toContain("prospect.evaluate");
+  });
+});
+
+it.effect("preserves prospect retryability without exposing connector internals", () => {
+  const execute = makeSafeAutomationNodeExecutor(
+    dependencies({
+      evaluateProspects: () =>
+        Effect.fail(
+          new ProspectEvaluationError({
+            message: "The Jev evaluation request failed or exceeded its bounds.",
+            retryable: true,
+          }),
+        ),
+    }),
+  );
+  return Effect.gen(function* () {
+    const outcome = yield* execute(
+      context("prospect.evaluate", { profile: "prospect-primary", limit: 1 }),
+    );
+    expect(outcome).toEqual({
+      type: "retry",
+      error: "The Jev evaluation request failed or exceeded its bounds.",
+    });
+  });
+});
+
+it.effect("notifies only unique bounded actionable Item IDs from direct predecessors", () => {
+  const captured: ProspectNotificationRequest[] = [];
+  const execute = makeSafeAutomationNodeExecutor(
+    dependencies({
+      notifyProspects: (input) => {
+        captured.push(input);
+        return Effect.succeed({
+          status: "queued",
+          queuedCount: 2,
+          skippedCount: 0,
+          failedCount: 0,
+        });
+      },
+    }),
+  );
+  return Effect.gen(function* () {
+    const outcome = yield* execute(
+      context(
+        "prospect.notify",
+        {},
+        {
+          predecessorOutputs: {
+            evaluate: {
+              itemIds: ["prospect-review:one:fingerprint", "prospect-review:no-action:fingerprint"],
+              actionableItemIds: [
+                "prospect-review:one:fingerprint",
+                "prospect-review:one:fingerprint",
+                "prospect-review:two:fingerprint",
+              ],
+              title: "untrusted notification copy",
+            },
+          },
+        },
+      ),
+    );
+
+    expect(captured).toEqual([
+      {
+        spaceId: "space-a",
+        itemIds: ["prospect-review:one:fingerprint", "prospect-review:two:fingerprint"],
+      },
+    ]);
+    expect(outcome).toEqual({
+      type: "succeeded",
+      output: { status: "queued", queuedCount: 2, skippedCount: 0, failedCount: 0 },
+    });
+    expect(AUTOMATION_V1_NODE_POLICY.automatic).toContain("prospect.notify");
+  });
+});
+
+it.effect("succeeds as a no-op when direct predecessors have no actionable Items", () => {
+  let notifyCalls = 0;
+  const execute = makeSafeAutomationNodeExecutor(
+    dependencies({
+      notifyProspects: () => {
+        notifyCalls += 1;
+        return Effect.die("an empty actionable batch reached the relay adapter");
+      },
+    }),
+  );
+  return Effect.gen(function* () {
+    const outcome = yield* execute(
+      context(
+        "prospect.notify",
+        {},
+        {
+          predecessorOutputs: {
+            evaluate: {
+              itemIds: ["prospect-review:no-action:fingerprint"],
+              actionableItemIds: [],
+            },
+          },
+        },
+      ),
+    );
+
+    expect(outcome).toEqual({
+      type: "succeeded",
+      output: { status: "noop", queuedCount: 0, skippedCount: 0, failedCount: 0 },
+    });
+    expect(notifyCalls).toBe(0);
+  });
+});
+
+it.effect(
+  "fails malformed prospect notification config and predecessor Item IDs permanently",
+  () => {
+    let notifyCalls = 0;
+    const execute = makeSafeAutomationNodeExecutor(
+      dependencies({
+        notifyProspects: () => {
+          notifyCalls += 1;
+          return Effect.succeed({
+            status: "queued",
+            queuedCount: 0,
+            skippedCount: 0,
+            failedCount: 0,
+          });
+        },
+      }),
+    );
+    const tooMany = Array.from(
+      { length: 11 },
+      (_, index) => `prospect-review:${index}:fingerprint`,
+    );
+    return Effect.gen(function* () {
+      const outcomes = yield* Effect.all([
+        execute(
+          context(
+            "prospect.notify",
+            { title: "Injected copy" },
+            {
+              predecessorOutputs: {
+                evaluate: { actionableItemIds: ["prospect-review:one:id"] },
+              },
+            },
+          ),
+        ),
+        execute(context("prospect.notify", {}, { predecessorOutputs: {} })),
+        execute(context("prospect.notify", {}, { predecessorOutputs: { evaluate: { count: 1 } } })),
+        execute(
+          context(
+            "prospect.notify",
+            {},
+            {
+              predecessorOutputs: { evaluate: { actionableItemIds: "not-an-array" } },
+            },
+          ),
+        ),
+        execute(
+          context(
+            "prospect.notify",
+            {},
+            {
+              predecessorOutputs: { evaluate: { actionableItemIds: ["task:not-a-prospect"] } },
+            },
+          ),
+        ),
+        execute(
+          context(
+            "prospect.notify",
+            {},
+            {
+              predecessorOutputs: { evaluate: { actionableItemIds: tooMany } },
+            },
+          ),
+        ),
+        execute(
+          context(
+            "prospect.notify",
+            {},
+            {
+              spaceId: " ",
+              predecessorOutputs: {
+                evaluate: { actionableItemIds: ["prospect-review:one:id"] },
+              },
+            },
+          ),
+        ),
+      ]);
+
+      expect(outcomes.every((outcome) => outcome.type === "failed")).toBe(true);
+      expect(notifyCalls).toBe(0);
+    });
+  },
+);
+
+it.effect("retries retryable prospect notification adapter failures", () => {
+  const execute = makeSafeAutomationNodeExecutor(
+    dependencies({
+      notifyProspects: () =>
+        Effect.fail({ message: "Relay temporarily unavailable.", retryable: true }),
+    }),
+  );
+  return Effect.gen(function* () {
+    const outcome = yield* execute(
+      context(
+        "prospect.notify",
+        {},
+        {
+          predecessorOutputs: {
+            evaluate: { actionableItemIds: ["prospect-review:one:fingerprint"] },
+          },
+        },
+      ),
+    );
+    expect(outcome).toEqual({ type: "retry", error: "Relay temporarily unavailable." });
   });
 });

@@ -3,6 +3,7 @@ import type {
   RelayAgentAwarenessPreferences,
   RelayDeliveryKind,
   RelayDeliveryResult,
+  RelayProspectNotification,
 } from "@t3tools/contracts/relay";
 import {
   RelayAgentActivityAggregateState as RelayAgentActivityAggregateStateSchema,
@@ -30,9 +31,11 @@ import {
   ApnsDeliveryJobQueuePayloadInvalid,
   type ApnsLiveActivityAlert,
   type ApnsNotificationPayload,
+  type ApnsThreadNotificationPayload,
   SignedApnsDeliveryJob,
   isApnsDeliveryJobVerificationError,
   verifySignedApnsDeliveryJob,
+  isProspectNotificationPayload,
   type ApnsDeliveryJobVerificationError,
 } from "./apnsDeliveryJobs.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
@@ -77,7 +80,7 @@ type ChosenLiveActivityDelivery =
 type ChosenPushNotificationDelivery = {
   readonly kind: "push_notification";
   readonly token: string;
-  readonly notification: ApnsNotificationPayload;
+  readonly notification: ApnsThreadNotificationPayload;
 };
 
 type ChosenDelivery = ChosenLiveActivityDelivery | ChosenPushNotificationDelivery;
@@ -337,7 +340,7 @@ function notificationForAggregate(input: {
   readonly target: LiveActivities.TargetRow;
   readonly aggregate: RelayAgentActivityAggregateState | null;
   readonly nowMs: number;
-}): ApnsNotificationPayload | null {
+}): ApnsThreadNotificationPayload | null {
   if (!input.target.push_token) {
     return null;
   }
@@ -355,7 +358,7 @@ function notificationForPreferences(input: {
   readonly preferences: ReturnType<typeof parsePreferences>;
   readonly aggregate: RelayAgentActivityAggregateState | null;
   readonly nowMs: number;
-}): ApnsNotificationPayload | null {
+}): ApnsThreadNotificationPayload | null {
   if (input.aggregate === null) {
     return null;
   }
@@ -712,7 +715,7 @@ export class ApnsDeliveries extends Context.Service<
       readonly target: LiveActivityDeliveryTarget;
       readonly token: string;
       readonly sourceJobId?: string | null;
-      readonly notification: ApnsNotificationPayload;
+      readonly notification: ApnsThreadNotificationPayload;
     }) => Effect.Effect<RelayDeliveryResult, ApnsDeliveryError>;
     // Enqueue web_push jobs for every browser subscription of the user whose
     // preferences allow this aggregate's leading activity to ring.
@@ -721,6 +724,13 @@ export class ApnsDeliveries extends Context.Service<
       readonly aggregate: RelayAgentActivityAggregateState | null;
       readonly nowMs: number;
     }) => Effect.Effect<ReadonlyArray<RelayDeliveryResult>, ApnsDeliveryError>;
+    readonly sendProspectWebPushForUser: (input: {
+      readonly userId: string;
+      readonly notification: RelayProspectNotification;
+    }) => Effect.Effect<
+      ReadonlyArray<RelayDeliveryResult>,
+      WebPushSubscriptions.WebPushSubscriptionPersistenceError
+    >;
   }
 >()("t3code-relay/agentActivity/ApnsDeliveries") {}
 
@@ -823,7 +833,7 @@ export const make = Effect.gen(function* () {
 
   const notificationStateIsCurrent = Effect.fnUntraced(function* (input: {
     readonly userId: string;
-    readonly notification: ApnsNotificationPayload;
+    readonly notification: ApnsThreadNotificationPayload;
   }) {
     // Jobs from older relay versions do not carry a state identity. Preserve
     // backwards compatibility and only revalidate newly queued jobs.
@@ -1009,7 +1019,9 @@ export const make = Effect.gen(function* () {
     });
     const now = yield* DateTime.now;
     const epochSeconds = Math.floor(now.epochMilliseconds / 1_000);
-    const notification = sanitizeApnsNotificationPayload(input.notification);
+    const notification = sanitizeApnsNotificationPayload(
+      input.notification,
+    ) as ApnsThreadNotificationPayload;
     yield* Effect.annotateCurrentSpan({
       "relay.environment_id": notification.environmentId,
       "relay.thread_id": notification.threadId,
@@ -1142,10 +1154,11 @@ export const make = Effect.gen(function* () {
       "relay.delivery.job_id": input.sourceJobId,
     });
     const notification = sanitizeApnsNotificationPayload(input.notification);
+    const isProspect = isProspectNotificationPayload(notification);
     const claim = yield* attempts.claimSourceJob({
       userId: input.target.user_id,
       environmentId: notification.environmentId,
-      threadId: notification.threadId,
+      threadId: isProspect ? null : notification.threadId,
       deviceId: input.target.device_id,
       kind: "web_push",
       sourceJobId: input.sourceJobId,
@@ -1158,6 +1171,7 @@ export const make = Effect.gen(function* () {
       return yield* new ApnsDeliveryJobClaimInFlight({ sourceJobId: input.sourceJobId });
     }
     if (
+      !isProspect &&
       !(yield* notificationStateIsCurrent({
         userId: input.target.user_id,
         notification,
@@ -1174,13 +1188,15 @@ export const make = Effect.gen(function* () {
         endpoint: input.endpoint,
         p256dh: input.p256dh,
         auth: input.auth,
-        payload: {
-          title: notification.title,
-          body: notification.body,
-          environmentId: notification.environmentId,
-          threadId: notification.threadId,
-          deepLink: notification.deepLink,
-        },
+        payload: isProspect
+          ? notification
+          : {
+              title: notification.title,
+              body: notification.body,
+              environmentId: notification.environmentId,
+              threadId: notification.threadId,
+              deepLink: notification.deepLink,
+            },
       })
       .pipe(
         Effect.catch((cause) =>
@@ -1252,6 +1268,38 @@ export const make = Effect.gen(function* () {
       );
     },
   );
+
+  const sendProspectWebPushForUser: ApnsDeliveries["Service"]["sendProspectWebPushForUser"] =
+    Effect.fnUntraced(function* (input) {
+      const targets = yield* webPushSubscriptions.listTargets({ userId: input.userId });
+      return yield* Effect.forEach(
+        targets.filter((target) => target.preferences.notificationsEnabled),
+        (target) =>
+          deliveryQueue
+            .enqueueWebPush({
+              userId: target.userId,
+              deviceId: target.deviceId,
+              endpoint: target.endpoint,
+              p256dh: target.p256dh,
+              auth: target.auth,
+              notification: input.notification,
+            })
+            .pipe(
+              Effect.catchTag("ApnsDeliveryQueueSendError", (error) =>
+                Effect.succeed({
+                  deviceId: target.deviceId,
+                  kind: "web_push" as const,
+                  ok: false,
+                  queued: false,
+                  apnsStatus: null,
+                  apnsReason: `queue_failed:${error.operation}`,
+                  apnsId: null,
+                }),
+              ),
+            ),
+        { concurrency: 4 },
+      );
+    });
 
   const processSignedJob: ApnsDeliveries["Service"]["processSignedJob"] = Effect.fn(
     "relay.apns_deliveries.process_signed_job",
@@ -1330,6 +1378,14 @@ export const make = Effect.gen(function* () {
               }),
             );
           }
+          if (isProspectNotificationPayload(payload.notification)) {
+            return Effect.fail(
+              new ApnsDeliveryJobQueuePayloadInvalid({
+                receivedType: "prospect push_notification",
+                cause: "Prospect notifications are browser-only.",
+              }),
+            );
+          }
           return sendPushNotification({
             target: {
               user_id: payload.target.userId,
@@ -1373,6 +1429,7 @@ export const make = Effect.gen(function* () {
     sendLiveActivity,
     sendPushNotification,
     sendWebPushForUser,
+    sendProspectWebPushForUser,
     processSignedJob,
     sendPushNotificationForTarget: Effect.fnUntraced(function* (input) {
       const now = yield* DateTime.now;
