@@ -899,8 +899,10 @@ const make = Effect.gen(function* () {
         holder.config = resolveJudgeConfig(settings.efficiency.judge);
       }),
     ),
-    Effect.forkScoped,
+    // Swallow inside the fiber so a settings-stream fault leaves `enabled`
+    // pinned at its last value rather than killing the forked fiber.
     Effect.catchCause(() => Effect.void),
+    Effect.forkScoped,
   );
 
   const decisionLogDir = path.join(serverConfig.stateDir, "efficiency");
