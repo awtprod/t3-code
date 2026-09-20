@@ -188,91 +188,100 @@ describe("Judge config resolution", () => {
 });
 
 describe("Judge.ask", () => {
-  it("resolves computed answers and usage over the openai-compatible transport", async () => {
-    const judge = makeTestJudge(
-      config(),
-      jsonResponse(
-        openAiChat(
-          { complexity: { probabilities: [0.1, 0.2, 0.7] } },
-          { prompt_tokens: 123, completion_tokens: 4 },
+  it.effect("resolves computed answers and usage over the openai-compatible transport", () =>
+    Effect.gen(function* () {
+      const judge = makeTestJudge(
+        config(),
+        jsonResponse(
+          openAiChat(
+            { complexity: { probabilities: [0.1, 0.2, 0.7] } },
+            { prompt_tokens: 123, completion_tokens: 4 },
+          ),
         ),
-      ),
-    );
-    const result = await Effect.runPromise(
-      judge.ask({
+      );
+      const result = yield* judge.ask({
         operation: "tier-judgment",
         state: { message: "add a feature" },
         questions: { complexity: scoreQuestion },
-      }),
-    );
-    expect(asScore(result.answers.complexity).score).toBeCloseTo(1.6, 10);
-    expect(result.usage).toEqual({ inputTokens: 123, outputTokens: 4 });
-    expect(result.model).toBe("glm-5.3-flash");
-  });
+      });
+      expect(asScore(result.answers.complexity).score).toBeCloseTo(1.6, 10);
+      expect(result.usage).toEqual({ inputTokens: 123, outputTokens: 4 });
+      expect(result.model).toBe("glm-5.3-flash");
+    }),
+  );
 
-  it("fails with 'disabled' when the transport is off", async () => {
-    const judge = makeTestJudge(config({ transport: "off" }), jsonResponse({}));
-    const error = await Effect.runPromise(
-      Effect.flip(judge.ask({ operation: "x", state: "", questions: {} })),
-    );
-    expect(error).toBeInstanceOf(JudgeError);
-    expect(error.reason).toBe("disabled");
-  });
+  it.effect("fails with 'disabled' when the transport is off", () =>
+    Effect.gen(function* () {
+      const judge = makeTestJudge(config({ transport: "off" }), jsonResponse({}));
+      const error = yield* Effect.flip(judge.ask({ operation: "x", state: "", questions: {} }));
+      expect(error).toBeInstanceOf(JudgeError);
+      expect(error.reason).toBe("disabled");
+    }),
+  );
 
-  it("refuses oversized state instead of truncating", async () => {
-    const judge = makeTestJudge(config({ maxStateChars: 10 }), jsonResponse({}));
-    const error = await Effect.runPromise(
-      Effect.flip(
+  it.effect("refuses oversized state instead of truncating", () =>
+    Effect.gen(function* () {
+      const judge = makeTestJudge(config({ maxStateChars: 10 }), jsonResponse({}));
+      const error = yield* Effect.flip(
         judge.ask({
           operation: "x",
           state: "0123456789ABCDEF",
           questions: { complexity: scoreQuestion },
         }),
-      ),
-    );
-    expect(error.reason).toBe("state-too-large");
-  });
+      );
+      expect(error.reason).toBe("state-too-large");
+    }),
+  );
 
-  it("fails with 'invalid-response' on a malformed body", async () => {
-    const judge = makeTestJudge(config(), jsonResponse(openAiChat({ complexity: { nope: true } })));
-    const error = await Effect.runPromise(
-      Effect.flip(
+  it.effect("fails with 'invalid-response' on a malformed body", () =>
+    Effect.gen(function* () {
+      const judge = makeTestJudge(
+        config(),
+        jsonResponse(openAiChat({ complexity: { nope: true } })),
+      );
+      const error = yield* Effect.flip(
         judge.ask({
           operation: "x",
           state: "",
           questions: { complexity: scoreQuestion },
         }),
-      ),
-    );
-    expect(error.reason).toBe("invalid-response");
-  });
+      );
+      expect(error.reason).toBe("invalid-response");
+    }),
+  );
 
-  it("maps a non-retryable HTTP status to an 'http' error", async () => {
-    const judge = makeTestJudge(config(), jsonResponse({ error: "bad" }, 400));
-    const error = await Effect.runPromise(
-      Effect.flip(
+  it.effect("maps a non-retryable HTTP status to an 'http' error", () =>
+    Effect.gen(function* () {
+      const judge = makeTestJudge(config(), jsonResponse({ error: "bad" }, 400));
+      const error = yield* Effect.flip(
         judge.ask({ operation: "x", state: "", questions: { complexity: scoreQuestion } }),
-      ),
-    );
-    expect(error.reason).toBe("http");
-    expect(error.status).toBe(400);
-  });
+      );
+      expect(error.reason).toBe("http");
+      expect(error.status).toBe(400);
+    }),
+  );
 
-  it("retries once on 429 and then succeeds", async () => {
-    let calls = 0;
-    const fetchImpl = (async () => {
-      calls += 1;
-      return calls === 1
-        ? new Response("rate limited", { status: 429 })
-        : new Response(JSON.stringify(openAiChat({ complexity: { probabilities: [1, 0, 0] } })), {
-            status: 200,
-          });
-    }) as unknown as typeof fetch;
-    const judge = makeTestJudge(config(), fetchImpl);
-    const result = await Effect.runPromise(
-      judge.ask({ operation: "x", state: "", questions: { complexity: scoreQuestion } }),
-    );
-    expect(calls).toBe(2);
-    expect(asScore(result.answers.complexity).score).toBe(0);
-  });
+  // Uses the live clock: the retry path sleeps for a real backoff between the
+  // 429 and the successful retry, which a TestClock would never advance.
+  it.live("retries once on 429 and then succeeds", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const fetchImpl = (async () => {
+        calls += 1;
+        return calls === 1
+          ? new Response("rate limited", { status: 429 })
+          : new Response(JSON.stringify(openAiChat({ complexity: { probabilities: [1, 0, 0] } })), {
+              status: 200,
+            });
+      }) as unknown as typeof fetch;
+      const judge = makeTestJudge(config(), fetchImpl);
+      const result = yield* judge.ask({
+        operation: "x",
+        state: "",
+        questions: { complexity: scoreQuestion },
+      });
+      expect(calls).toBe(2);
+      expect(asScore(result.answers.complexity).score).toBe(0);
+    }),
+  );
 });
