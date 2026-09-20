@@ -175,6 +175,7 @@ import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
+import * as Judge from "./efficiency/Judge.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as Data from "effect/Data";
 
@@ -1005,6 +1006,9 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = servedRoutesLayer.pipe(
+      // The tier-judgment dispatcher and efficiency preview RPC resolve the Judge;
+      // the harness uses a disabled Judge so behavior matches the pre-feature path.
+      Layer.provide(Judge.layerTest),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
       Layer.provide(

@@ -945,3 +945,17 @@ const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(Judge, make);
+
+/**
+ * A disabled Judge with no external requirements, for test harnesses that
+ * compose the orchestration/route layers directly and do not exercise the judge.
+ * `ask` always fails with `disabled`, matching the `off` transport.
+ */
+export const layerTest: Layer.Layer<Judge> = Layer.succeed(
+  Judge,
+  Judge.of({
+    enabled: false,
+    ask: () =>
+      Effect.fail(new JudgeError({ reason: "disabled", detail: "Judge is disabled (test layer)" })),
+  }),
+);

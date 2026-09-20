@@ -198,10 +198,11 @@ const ServerSettingsLayerLive = ServerSettings.layer.pipe(
 );
 
 // The efficiency Judge reads the live judge settings, records usage rows, and
-// writes the decision log. Wired once here alongside ServerSettings so both the
-// command dispatcher (tier judgment) and the WebSocket preview RPC see the same
-// instance. ServerConfig / FileSystem / Path stay open requirements, satisfied
-// by the runtime.
+// writes the decision log. Self-contained (bundles ServerSettings + SQL) so it
+// can be provided both to the command dispatcher (tier judgment) and, ambiently,
+// to the WebSocket preview RPC. ServerConfig / FileSystem / Path stay open
+// requirements, satisfied by the runtime. Test harnesses that compose the raw
+// orchestration/route layers provide `Judge.layerTest` at their boundary.
 const JudgeLayerLive = Judge.layer.pipe(Layer.provide(ServerSettingsLayerLive));
 
 const NativeTelemetryLayerLive = NativeTelemetryClient.layer.pipe(
