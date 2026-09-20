@@ -164,15 +164,24 @@ with a _prune_: drop whole tool calls/results (the agent can re-run them) instea
 of summarizing, keeping pinned first/newest messages, with thresholds in code and
 a fallback to the built-in path on any failure.
 
-**It is blocked on the deployed CLI.** Replacing compaction messages needs the
-`session.compact` **function hook**, which requires:
+Replacing compaction messages needs the `session.compact` **function hook**,
+which requires **Claude Code ≥ 2.1.274** with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.
+The SDK 0.3.170 `PreCompact` hook has no output that can replace messages.
 
-- **Claude Code ≥ 2.1.274** with `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.
+**Status of the prerequisites:**
 
-The SDK 0.3.170 `PreCompact` hook has no output that can replace messages, and
-the deployed CLI is **2.1.258**. Until the CLI is bumped and function hooks are
-enabled, this cannot be built without papering over the gap.
+- The deployed provider-cli is being upgraded from **2.1.258** to **2.1.278**
+  (`deploy/openclaw/install-provider-clis.sh`). The **2.1.278** binary contains
+  both `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` and the `session.compact` function
+  hook (verified 2026-09-20), so the prerequisite for prune-only compaction is
+  now met on that binary.
+- The tool-result sieve's `PostToolUse` `updatedToolOutput` rewrite is honored on
+  **2.1.258 and 2.1.278 only when the replacement matches the tool's output
+  shape** (Read keeps its `cat -n` line-number prefixes and continuity, Grep
+  keeps `file:line:` lines) — a mismatched shape is dropped rather than applied,
+  which is why the sieve rebuilds output in the tool's exact format.
 
-The tool-result sieve (slice B) delivers most of the same benefit upstream:
-results that would later be pruned never enter context in the first place. When
-the CLI is bumped past 2.1.274, revisit this with the `session.compact` hook.
+The tool-result sieve (slice B) still delivers most of the same benefit upstream:
+results that would later be pruned never enter context in the first place. With
+2.1.278 deployed, prune-only compaction can now be built against the
+`session.compact` hook (enable `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
