@@ -20,6 +20,8 @@ export const AUTOMATION_EDITOR_NODE_KINDS = [
   "delay",
   "approval",
   "shell.scoped",
+  "prospect.evaluate",
+  "prospect.notify",
 ] as const;
 
 export type AutomationEditorNodeKind = (typeof AUTOMATION_EDITOR_NODE_KINDS)[number];

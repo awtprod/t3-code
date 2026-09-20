@@ -187,6 +187,34 @@ describe("automation definition validation", () => {
       );
     }
   });
+
+  it("accepts only empty prospect notification config", () => {
+    const notification = sampleDefinition();
+    notification.nodes[0]!.kind = "prospect.notify" as never;
+    notification.nodes[0]!.config = {} as never;
+    expect(validateAutomationDefinition(notification).ok).toBe(true);
+
+    for (const config of [
+      { url: "https://example.test" },
+      { title: "Injected copy" },
+      { itemIds: ["prospect-review:one:id"] },
+      { evaluationId: "evaluation-1" },
+    ]) {
+      const injected = sampleDefinition();
+      injected.nodes[0]!.kind = "prospect.notify" as never;
+      injected.nodes[0]!.config = config as never;
+      const result = validateAutomationDefinition(injected);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.issues).toContainEqual(
+          expect.objectContaining({
+            code: "node.config.invalid",
+            nodeIds: ["publish-summary"],
+          }),
+        );
+      }
+    }
+  });
 });
 
 describe("automation digest and planner", () => {

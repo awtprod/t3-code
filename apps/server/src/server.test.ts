@@ -1006,8 +1006,8 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = servedRoutesLayer.pipe(
-      // The tier-judgment dispatcher and efficiency preview RPC resolve the Judge;
-      // the harness uses a disabled Judge so behavior matches the pre-feature path.
+      // The tier-judgment dispatcher resolves the Judge; the harness uses a
+      // disabled Judge so behavior matches the pre-feature path.
       Layer.provide(Judge.layerTest),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),

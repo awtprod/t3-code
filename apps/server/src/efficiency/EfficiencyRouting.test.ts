@@ -14,6 +14,7 @@ import {
 
 import {
   fromCommandCenterSelection,
+  interactiveTurnMatchesRule,
   resolveInteractiveEfficiency,
   toCommandCenterSelection,
 } from "./EfficiencyRouting.ts";
@@ -228,5 +229,52 @@ describe("confidence-gated tier judgment", () => {
     });
     expect(withoutJudgment.decision?.judgment).toBeUndefined();
     expect(withoutJudgment.decision?.tier).toBe("economy");
+  });
+});
+
+describe("interactiveTurnMatchesRule", () => {
+  const projectRule = {
+    ...DEFAULT_SERVER_SETTINGS.efficiency,
+    enabled: true,
+    rules: [
+      {
+        id: "quality-for-project",
+        projectId: ProjectId.make("project-routed"),
+        tier: "quality" as const,
+      },
+    ],
+  };
+
+  it("reports a match so the dispatcher can skip the judge round-trip", () => {
+    expect(
+      interactiveTurnMatchesRule({
+        settings: projectRule,
+        projectId: "project-routed",
+        interactionMode: "default",
+        attachmentCount: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("reports no match when the rule's project differs", () => {
+    expect(
+      interactiveTurnMatchesRule({
+        settings: projectRule,
+        projectId: "other-project",
+        interactionMode: "default",
+        attachmentCount: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("reports no match when there are no rules", () => {
+    expect(
+      interactiveTurnMatchesRule({
+        settings: { ...DEFAULT_SERVER_SETTINGS.efficiency, enabled: true },
+        projectId: "project-routed",
+        interactionMode: "default",
+        attachmentCount: 0,
+      }),
+    ).toBe(false);
   });
 });

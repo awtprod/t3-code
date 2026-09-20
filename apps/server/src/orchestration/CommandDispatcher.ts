@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import {
+  interactiveTurnMatchesRule,
   resolveInteractiveEfficiency,
   type TierJudgmentInput,
 } from "../efficiency/EfficiencyRouting.ts";
@@ -407,11 +408,20 @@ export const make = Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings;
       if (!settings.efficiency.enabled) return command;
       const providers = yield* providerRegistry.getProviders;
+      // An explicit rule always wins over a judgment, so skip the judge
+      // round-trip (its latency and cost) entirely when a rule already matches
+      // this turn — the judgment would only be recorded and discarded.
+      const ruleMatches = interactiveTurnMatchesRule({
+        settings: settings.efficiency,
+        projectId: command.bootstrap?.createThread?.projectId ?? thread?.projectId,
+        interactionMode: command.interactionMode,
+        attachmentCount: command.message.attachments.length,
+      });
       // Resolve an optional judgment first. Any judge error (or a disabled
       // judge) leaves `tierJudgment` undefined, so routing proceeds exactly as
       // it does today.
       const tierJudgment =
-        settings.efficiency.tierJudgment.enabled && judge.enabled
+        !ruleMatches && settings.efficiency.tierJudgment.enabled && judge.enabled
           ? yield* resolveTierJudgment(command, thread)
           : undefined;
       return resolveInteractiveEfficiency({

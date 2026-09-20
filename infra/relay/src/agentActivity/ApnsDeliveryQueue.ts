@@ -18,9 +18,11 @@ import {
 } from "./agentActivityPayloads.ts";
 import {
   expiresAtForJob,
+  isProspectNotificationPayload,
   makeApnsDeliveryJobPayload,
   signApnsDeliveryJob,
   type ApnsDeliveryJobPayload,
+  type ApnsThreadNotificationPayload,
   type SignedApnsDeliveryJob,
 } from "./apnsDeliveryJobs.ts";
 import * as RelayConfiguration from "../Config.ts";
@@ -71,7 +73,7 @@ export class ApnsDeliveryQueue extends Context.Service<
       readonly token: string;
       readonly bundleId?: string | null;
       readonly apsEnvironment?: "sandbox" | "production" | null;
-      readonly notification: NonNullable<ApnsDeliveryJobPayload["notification"]>;
+      readonly notification: ApnsThreadNotificationPayload;
     }) => Effect.Effect<RelayDeliveryResult, ApnsDeliveryQueueError>;
     readonly enqueueWebPush: (input: {
       readonly userId: string;
@@ -213,11 +215,16 @@ export const make = Effect.gen(function* () {
       },
     ),
     enqueueWebPush: Effect.fn("relay.apns_delivery_queue.enqueue_web_push")(function* (input) {
+      const threadId = "threadId" in input.notification ? input.notification.threadId : undefined;
+      const itemId = isProspectNotificationPayload(input.notification)
+        ? input.notification.itemId
+        : undefined;
       yield* Effect.annotateCurrentSpan({
         "relay.web_push.device_id": input.deviceId,
         "relay.delivery.kind": "web_push",
         "relay.environment_id": input.notification.environmentId,
-        "relay.thread_id": input.notification.threadId,
+        ...(threadId === undefined ? {} : { "relay.thread_id": threadId }),
+        ...(itemId === undefined ? {} : { "relay.prospect.item_id": itemId }),
       });
       const now = yield* DateTime.now;
       const jobId = yield* crypto.randomUUIDv4.pipe(

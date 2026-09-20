@@ -138,6 +138,26 @@ function findMatchingRule(input: InteractiveEfficiencyInput): EfficiencyRule | u
 }
 
 /**
+ * Whether an explicit efficiency rule matches this interactive turn. Rules take
+ * precedence over any tier judgment, so upstream callers use this to skip the
+ * judge round-trip (latency + cost) entirely when a rule is going to win anyway.
+ */
+export function interactiveTurnMatchesRule(params: {
+  readonly settings: EfficiencySettings;
+  readonly projectId: string | undefined;
+  readonly interactionMode: "default" | "plan";
+  readonly attachmentCount: number;
+}): boolean {
+  return params.settings.rules.some((candidate) =>
+    matchesRule(candidate, {
+      projectId: params.projectId,
+      interactionMode: params.interactionMode,
+      attachmentCount: params.attachmentCount,
+    }),
+  );
+}
+
+/**
  * Resolves the tier and the (optional) recorded judgment.
  *
  * Precedence: explicit rule match > confidence-gated judgment > command tier >

@@ -3,6 +3,7 @@ import {
   ChartNoAxesColumnIcon,
   CircleAlertIcon,
   CommandIcon,
+  ContactRoundIcon,
   GitPullRequestIcon,
   HomeIcon,
   SettingsIcon,
@@ -127,6 +128,12 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       label: "Automations",
       icon: WorkflowIcon,
       active: pathname.startsWith("/automations"),
+    },
+    {
+      to: "/prospects" as const,
+      label: "Prospects",
+      icon: ContactRoundIcon,
+      active: pathname.startsWith("/prospects"),
     },
   ];
 

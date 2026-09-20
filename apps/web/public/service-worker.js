@@ -111,6 +111,89 @@ function threadDeepLinkFromPayload(data) {
   return `/${parts[2]}/${parts[3]}`;
 }
 
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactlyKeys(value, keys) {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function isBoundedText(value, maxLength) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    value.trim() === value
+  );
+}
+
+function decodeProspectDeepLink(deepLink) {
+  if (
+    typeof deepLink !== "string" ||
+    deepLink.includes("?") ||
+    deepLink.includes("#") ||
+    !deepLink.startsWith("/prospects/")
+  ) {
+    return null;
+  }
+  const segment = deepLink.slice("/prospects/".length);
+  if (!segment || segment.includes("/")) return null;
+  try {
+    const itemId = decodeURIComponent(segment);
+    return itemId.startsWith("prospect-review:") && encodeURIComponent(itemId) === segment
+      ? itemId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function decodePushPayload(value) {
+  if (!isPlainObject(value)) return null;
+  if (value.type === "prospect") {
+    if (
+      !hasExactlyKeys(value, [
+        "type",
+        "itemId",
+        "spaceId",
+        "evaluationId",
+        "environmentId",
+        "title",
+        "body",
+        "deepLink",
+      ]) ||
+      !isBoundedText(value.itemId, 512) ||
+      !isBoundedText(value.spaceId, 256) ||
+      !isBoundedText(value.evaluationId, 256) ||
+      !isBoundedText(value.environmentId, 512) ||
+      !isBoundedText(value.title, 120) ||
+      !isBoundedText(value.body, 240)
+    ) {
+      return null;
+    }
+    const deepLinkItemId = decodeProspectDeepLink(value.deepLink);
+    return deepLinkItemId === value.itemId ? value : null;
+  }
+  if (
+    !hasExactlyKeys(value, ["title", "body", "environmentId", "threadId", "deepLink"]) ||
+    !isBoundedText(value.title, 120) ||
+    !isBoundedText(value.body, 120) ||
+    !isBoundedText(value.environmentId, 512) ||
+    !isBoundedText(value.threadId, 512) ||
+    threadDeepLinkFromPayload(value) === "/"
+  ) {
+    return null;
+  }
+  return { type: "thread", ...value };
+}
+
+function notificationTargetFromData(data) {
+  return data?.type === "prospect" ? "/prospects" : threadDeepLinkFromPayload(data);
+}
+
 // Payloads are encrypted in transit (RFC 8291) and produced solely by the
 // relay's WebPushClient; see WebPushNotificationPayload for the shape.
 self.addEventListener("push", (event) => {
@@ -118,13 +201,11 @@ self.addEventListener("push", (event) => {
 
   let payload;
   try {
-    payload = event.data.json();
+    payload = decodePushPayload(event.data.json());
   } catch {
     return;
   }
-  if (typeof payload?.title !== "string" || typeof payload?.body !== "string") {
-    return;
-  }
+  if (payload === null) return;
 
   event.waitUntil(
     self.registration.showNotification(payload.title, {
@@ -133,11 +214,12 @@ self.addEventListener("push", (event) => {
       // One notification per thread: a newer phase replaces the stale one
       // instead of stacking.
       tag:
-        typeof payload.environmentId === "string" && typeof payload.threadId === "string"
-          ? `thread:${payload.environmentId}:${payload.threadId}`
-          : undefined,
+        payload.type === "prospect"
+          ? `prospect:${payload.itemId}`
+          : `thread:${payload.environmentId}:${payload.threadId}`,
       data: {
-        deepLink: typeof payload.deepLink === "string" ? payload.deepLink : undefined,
+        type: payload.type,
+        deepLink: payload.deepLink,
       },
     }),
   );
@@ -146,7 +228,7 @@ self.addEventListener("push", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const target = new URL(
-    threadDeepLinkFromPayload(event.notification.data),
+    notificationTargetFromData(event.notification.data),
     self.location.origin,
   ).toString();
 
