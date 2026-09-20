@@ -27,8 +27,10 @@ import { makeClaudeTextGeneration } from "../../textGeneration/ClaudeTextGenerat
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { Judge } from "../../efficiency/Judge.ts";
+import { sieveToolResult } from "../../efficiency/ToolResultSieve.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { makeClaudeAdapter } from "../Layers/ClaudeAdapter.ts";
+import { makeClaudeAdapter, type ToolResultSieveHookInput } from "../Layers/ClaudeAdapter.ts";
 import {
   checkClaudeProviderStatus,
   makePendingClaudeProvider,
@@ -89,6 +91,7 @@ export type ClaudeDriverEnv =
   | Crypto.Crypto
   | FileSystem.FileSystem
   | HttpClient.HttpClient
+  | Judge
   | ModelManifest.ModelManifest
   | Path.Path
   | ProviderEventLoggers
@@ -128,6 +131,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const { cwd } = yield* ServerConfig;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
+      const judge = yield* Judge;
       const eventLoggers = yield* ProviderEventLoggers;
       const modelManifest = yield* ModelManifest.ModelManifest;
       const modelCatalog = modelManifest.current.pipe(Effect.map(resolveClaudeModelCatalog));
@@ -149,11 +153,54 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         continuationGroupKey,
       });
 
+      // Tool-result sieve (slice B). Register the adapter hook only when the
+      // sieve is enabled at instance-creation time; the callback re-reads live
+      // settings each invocation so a runtime flip to `off` makes it inert. The
+      // real `Judge` service gates whether any rewrite happens (a disabled judge
+      // fails `ask`, so the sieve passes the result through untouched).
+      const initialSettings = yield* serverSettings.getSettings.pipe(
+        Effect.orElseSucceed(() => undefined),
+      );
+      const toolResultSieve =
+        (initialSettings?.efficiency.sieve.mode ?? "off") === "off"
+          ? undefined
+          : (input: ToolResultSieveHookInput): Effect.Effect<unknown | undefined> =>
+              Effect.gen(function* () {
+                const settings = yield* serverSettings.getSettings;
+                const outcome = yield* sieveToolResult(
+                  {
+                    judge,
+                    settings: settings.efficiency.sieve,
+                    timeoutMs: settings.efficiency.judge.timeoutMs,
+                  },
+                  input,
+                );
+                if (outcome.decision) {
+                  yield* Effect.logDebug("tool-result sieve decision", {
+                    tool: outcome.decision.tool,
+                    mode: outcome.decision.mode,
+                    rewritten: outcome.decision.rewritten,
+                    blockCount: outcome.decision.blockCount,
+                    hiddenBlockIds: outcome.decision.hiddenBlockIds,
+                    uncertainBlockIds: outcome.decision.uncertainBlockIds,
+                    hiddenRanges: outcome.decision.hiddenRanges,
+                    charsBefore: outcome.decision.charsBefore,
+                    charsAfter: outcome.decision.charsAfter,
+                    prunedRatio: outcome.decision.prunedRatio,
+                    reason: outcome.decision.reason,
+                    latencyMs: outcome.decision.latencyMs,
+                    inputSummary: outcome.decision.inputSummary,
+                  });
+                }
+                return outcome.updatedToolOutput;
+              }).pipe(Effect.orElseSucceed(() => undefined));
+
       const adapterOptions = {
         instanceId,
         environment: processEnv,
         modelCatalog,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        ...(toolResultSieve ? { toolResultSieve } : {}),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
       const textGeneration = yield* makeClaudeTextGeneration(

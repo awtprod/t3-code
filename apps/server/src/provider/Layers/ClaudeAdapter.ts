@@ -8,6 +8,9 @@
  */
 import {
   type CanUseTool,
+  type HookCallback,
+  type HookCallbackMatcher,
+  type PostToolUseHookInput,
   query,
   type Options as ClaudeQueryOptions,
   type PermissionMode,
@@ -67,6 +70,7 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -325,6 +329,12 @@ interface ClaudeSessionContext {
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
+  /**
+   * Head of the latest real user turn's request text, captured in `sendTurn`
+   * and reset on each new (non-steer) turn. Feeds the tool-result sieve's
+   * `task.user_request` (slice B).
+   */
+  lastUserRequestText: string | undefined;
   stopped: boolean;
 }
 
@@ -345,6 +355,78 @@ export interface ClaudeAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
+  /**
+   * Tool-result sieve (slice B). When present, a `PostToolUse` hook is
+   * registered that calls this back with the tool result plus the derived task;
+   * it returns the replacement output (`updatedToolOutput`) or `undefined` to
+   * leave the result untouched. `ClaudeDriver` builds it from
+   * `ServerSettingsService` + `Judge` and only supplies it when the sieve mode
+   * is not `off`. The effect is self-contained (deps pre-provided), bounds its
+   * own time, and never fails — the adapter still defends with an outer cap and
+   * a catch so the hook can never throw into the SDK.
+   */
+  readonly toolResultSieve?: (
+    input: ToolResultSieveHookInput,
+  ) => Effect.Effect<unknown | undefined>;
+}
+
+/** Input handed to the tool-result sieve callback (slice B wiring). */
+export interface ToolResultSieveHookInput {
+  readonly toolName: string;
+  readonly toolInput: unknown;
+  readonly toolResponse: unknown;
+  readonly task: { readonly user_request: string; readonly assistant_intent: string };
+  readonly agentId?: string;
+  /** Owning thread id, forwarded to the judge decision-log meta. */
+  readonly threadId?: string;
+}
+
+/**
+ * Tools whose `PostToolUse` fires the sieve hook. Built as a regex alternation
+ * for the SDK matcher; live `settings.efficiency.sieve.tools` narrows further
+ * inside the sieve callback (and `Bash` is never sieved in v1).
+ */
+const SIEVE_HOOK_MATCHER_TOOLS = ["Read", "Grep"] as const;
+
+/**
+ * Absolute hard cap for a single sieve hook invocation. The judge timeout
+ * (typically 15 s) bounds the work inside the callback; this is a belt-and-
+ * suspenders ceiling so a wedged callback can never stall the SDK's turn.
+ */
+const SIEVE_HOOK_HARD_TIMEOUT_MS = 30_000;
+
+/** Head/tail budget (chars) for the task fields handed to the sieve judge. */
+const SIEVE_TASK_USER_REQUEST_CHARS = 1500;
+const SIEVE_TASK_ASSISTANT_INTENT_CHARS = 1500;
+
+/**
+ * Tail of the current turn's assistant text (its stated intent before the tool
+ * call). Uses the retained per-block `fallbackText`; empty when a turn streamed
+ * only deltas or has no assistant text yet. Best-effort — the sieve judge still
+ * has the user request when this is empty.
+ */
+function deriveSieveAssistantIntent(context: ClaudeSessionContext): string {
+  const turnState = context.turnState;
+  if (!turnState) return "";
+  const parts: Array<string> = [];
+  for (const block of turnState.assistantTextBlockOrder) {
+    if (block.fallbackText.length > 0) parts.push(block.fallbackText);
+  }
+  const joined = parts.join("\n");
+  return joined.length > SIEVE_TASK_ASSISTANT_INTENT_CHARS
+    ? joined.slice(joined.length - SIEVE_TASK_ASSISTANT_INTENT_CHARS)
+    : joined;
+}
+
+/** Task context for the tool-result sieve, from what the adapter already keeps. */
+function deriveSieveTask(context: ClaudeSessionContext): {
+  readonly user_request: string;
+  readonly assistant_intent: string;
+} {
+  return {
+    user_request: context.lastUserRequestText ?? "",
+    assistant_intent: deriveSieveAssistantIntent(context),
+  };
 }
 
 function isUuid(value: string): boolean {
@@ -4406,6 +4488,45 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         callbackOptions,
       ) => runPromise(handleResumeDialog(request, callbackOptions));
 
+      // Tool-result sieve (slice B). Registered only when the driver supplied a
+      // callback (sieve mode !== off). The callback is self-contained and bounds
+      // its own time via the judge timeout; the outer cap + catch here guarantee
+      // the hook can never throw into, or stall, the SDK turn. On any doubt the
+      // tool result passes through untouched.
+      const toolResultSieveCallback = options?.toolResultSieve;
+      const postToolUseSieveHook: HookCallback = async (hookInput) => {
+        try {
+          if (!toolResultSieveCallback) return {};
+          if (hookInput.hook_event_name !== "PostToolUse") return {};
+          const post = hookInput as PostToolUseHookInput;
+          const context = await runPromise(Ref.get(contextRef));
+          if (!context) return {};
+          const updatedToolOutput = await runPromise(
+            toolResultSieveCallback({
+              toolName: post.tool_name,
+              toolInput: post.tool_input,
+              toolResponse: post.tool_response,
+              task: deriveSieveTask(context),
+              threadId: context.session.threadId,
+              ...(post.agent_id ? { agentId: post.agent_id } : {}),
+            }).pipe(
+              Effect.timeout(Duration.millis(SIEVE_HOOK_HARD_TIMEOUT_MS)),
+              Effect.catchCause(() => Effect.succeed(undefined)),
+            ),
+          );
+          if (updatedToolOutput === undefined) return {};
+          return {
+            hookSpecificOutput: {
+              hookEventName: "PostToolUse",
+              updatedToolOutput,
+            },
+          };
+        } catch {
+          // The hook must never throw into the SDK: swallow and leave untouched.
+          return {};
+        }
+      };
+
       const claudeBinaryPath = claudeSdkExecutablePath;
       const extraArgs = parseCliArgs(claudeSettings.launchArgs).flags;
       const selectedModel =
@@ -4489,6 +4610,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         includePartialMessages: true,
         canUseTool,
         onUserDialog,
+        // Register the tool-result sieve PostToolUse hook only when the driver
+        // supplied a callback (sieve mode !== off). With the sieve off, options
+        // stay byte-for-byte identical to today (no `hooks` key).
+        ...(toolResultSieveCallback
+          ? {
+              hooks: {
+                PostToolUse: [
+                  {
+                    matcher: SIEVE_HOOK_MATCHER_TOOLS.join("|"),
+                    hooks: [postToolUseSieveHook],
+                  } satisfies HookCallbackMatcher,
+                ],
+              },
+            }
+          : {}),
         supportedDialogKinds: ["resume_return"],
         env: claudeEnvironment,
         additionalDirectories,
@@ -4598,6 +4734,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
+        lastUserRequestText: undefined,
         stopped: false,
       };
       yield* Ref.set(contextRef, context);
@@ -4679,6 +4816,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     const context = yield* requireSession(input.threadId);
+    // Capture the latest user request head for the tool-result sieve's task
+    // context (slice B). Steers and new turns both update it; a fresh turn's
+    // assistant intent is derived live from the turn's assistant text blocks.
+    const userRequestText = input.input?.trim();
+    if (userRequestText) {
+      context.lastUserRequestText = userRequestText.slice(0, SIEVE_TASK_USER_REQUEST_CHARS);
+    }
     const modelCatalog = yield* modelCatalogEffect;
     const selectedModel =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
