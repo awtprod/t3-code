@@ -292,6 +292,8 @@ export const AutomationNodeKind = Schema.Literals([
   "delay",
   "approval",
   "shell.scoped",
+  "prospect.evaluate",
+  "prospect.notify",
 ]);
 export type AutomationNodeKind = typeof AutomationNodeKind.Type;
 

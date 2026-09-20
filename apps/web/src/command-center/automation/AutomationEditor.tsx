@@ -178,6 +178,20 @@ const NODE_PRESENTATION: Record<AutomationEditorNodeKind, NodePresentation> = {
     icon: TerminalIcon,
     accentClassName: "bg-destructive/8 text-destructive-foreground",
   },
+  "prospect.evaluate": {
+    label: "Evaluate prospects",
+    description: "Evaluate a bounded prospect review batch",
+    category: "Data",
+    icon: SparklesIcon,
+    accentClassName: "bg-info/10 text-info-foreground",
+  },
+  "prospect.notify": {
+    label: "Notify prospect review",
+    description: "Send the resulting review notification",
+    category: "Actions",
+    icon: SparklesIcon,
+    accentClassName: "bg-success/10 text-success-foreground",
+  },
 };
 
 const EMPTY_ISSUES: ReadonlyArray<AutomationEditorValidationIssue> = [];
@@ -228,6 +242,10 @@ function nodeSummary(node: AutomationEditorNode): string {
       return `Decision: ${stringValue(config.approvalKey) || "decision"}`;
     case "shell.scoped":
       return stringValue(config.allowlistId) || "Choose an approved command";
+    case "prospect.evaluate":
+      return stringValue(config.profile) || "Choose a prospect profile";
+    case "prospect.notify":
+      return "Notify from the previous prospect evaluation";
   }
 }
 
@@ -1167,6 +1185,18 @@ function GuidedNodeFields({
           readOnly={readOnly}
           value={stringValue(config.allowlistId)}
         />
+      );
+    case "prospect.evaluate":
+      return (
+        <Field help="Configured by the prospect evaluation workflow." label="Prospect evaluation">
+          <p className="text-sm text-muted-foreground">Server-managed step</p>
+        </Field>
+      );
+    case "prospect.notify":
+      return (
+        <Field help="Uses the previous prospect evaluation result." label="Prospect notification">
+          <p className="text-sm text-muted-foreground">Server-managed step</p>
+        </Field>
       );
   }
 }

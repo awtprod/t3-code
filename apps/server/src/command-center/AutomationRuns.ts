@@ -6,7 +6,7 @@ import {
   type CommandCenterAutomationRunStartInput,
   CommandCenterError,
 } from "@t3tools/contracts";
-import type { Approval as ApprovalType } from "@command-center/core";
+import { ItemId, SpaceId, type Approval as ApprovalType } from "@command-center/core";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -15,6 +15,9 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as CommandCenterService from "./Service.ts";
+import * as CommandCenterCredentialStore from "./CredentialStore.ts";
+import { makeProspectEvaluationConnector } from "./ProspectEvaluation.ts";
+import * as ProspectNotificationRelay from "../relay/ProspectNotificationRelay.ts";
 import { ServerConfig } from "../config.ts";
 import * as GoogleReadConnector from "./GoogleReadConnector.ts";
 import { googleCapabilityForDraft, googleCapabilityForOperation } from "./GoogleCapabilities.ts";
@@ -27,13 +30,23 @@ import {
   type AutomationAgentRunFailure,
 } from "./automation/AgentRunAdapter.ts";
 import * as AutomationScopedShell from "./automation/AutomationScopedShell.ts";
-import { makeSafeAutomationNodeExecutor } from "./automation/NodeExecutor.ts";
+import {
+  makeSafeAutomationNodeExecutor,
+  type ProspectNotificationResult,
+} from "./automation/NodeExecutor.ts";
 import * as AutomationRuntime from "./automation/Runtime.ts";
 
 const decodeExecution = Schema.decodeUnknownEffect(CommandCenterAutomationExecution);
 const isCommandCenterError = Schema.is(CommandCenterError);
 const isAutomationRuntimeError = Schema.is(AutomationRuntime.AutomationRuntimeError);
 const terminalStates = new Set(["succeeded", "failed", "canceled"]);
+const retryableProspectNotificationReasons =
+  new Set<ProspectNotificationRelay.ProspectNotificationRelayFailureReason>([
+    "item_load_failed",
+    "signing_failed",
+    "request_failed",
+    "timed_out",
+  ]);
 
 type JsonRecord = Readonly<Record<string, Schema.Json>>;
 
@@ -44,6 +57,33 @@ function isJsonRecord(value: Schema.Json | null): value is JsonRecord {
 function readRequiredString(record: JsonRecord, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function summarizeProspectNotificationResults(
+  results: ReadonlyArray<ProspectNotificationRelay.ProspectNotificationRelayItemResult>,
+): ProspectNotificationResult {
+  const queuedCount = results.filter((result) => result.status === "queued").length;
+  const skippedCount = results.filter((result) => result.status === "skipped").length;
+  const failedCount = results.filter((result) => result.status === "failed").length;
+  const status =
+    results.length === 0
+      ? "noop"
+      : skippedCount === results.length
+        ? "skipped"
+        : queuedCount === results.length
+          ? "queued"
+          : "partial";
+  return { status, queuedCount, skippedCount, failedCount };
+}
+
+function isRetryableProspectNotificationError(
+  error: ProspectNotificationRelay.ProspectNotificationRelayBatchError,
+): boolean {
+  const failedReasons = error.results.flatMap((result) =>
+    result.status === "failed" ? [result.reason] : [],
+  );
+  const reasons = failedReasons.length === 0 ? [error.reason] : failedReasons;
+  return reasons.every((reason) => retryableProspectNotificationReasons.has(reason));
 }
 
 const toCommandCenterError = (cause: unknown): CommandCenterError => {
@@ -560,9 +600,41 @@ export const safeRuntimeLayer = Layer.unwrap(
     const serverConfig = yield* ServerConfig;
     const path = yield* Path.Path;
     const scopedShell = yield* AutomationScopedShell.AutomationScopedShell;
+    const prospectNotificationRelay = yield* ProspectNotificationRelay.ProspectNotificationRelay;
+    const credentials = yield* CommandCenterCredentialStore.make;
     const startAgentRun = yield* makeLiveAutomationAgentRunAdapter;
+    const prospectEvaluation = makeProspectEvaluationConnector({
+      credentials,
+      items: {
+        queryItems: (input) =>
+          commandCenter
+            .queryItems({ spaceId: SpaceId.make(input.spaceId) })
+            .pipe(Effect.mapError((cause) => cause.message)),
+        createItem: (input) =>
+          commandCenter
+            .createItem({ ...input, spaceId: SpaceId.make(input.spaceId) })
+            .pipe(Effect.mapError((cause) => cause.message)),
+        updateItem: (input) =>
+          commandCenter
+            .updateItem({
+              ...input,
+              itemId: ItemId.make(input.itemId),
+              spaceId: SpaceId.make(input.spaceId),
+            })
+            .pipe(Effect.mapError((cause) => cause.message)),
+      },
+    });
     const executeNode = makeSafeAutomationNodeExecutor({
       startAgentRun,
+      evaluateProspects: prospectEvaluation.evaluate,
+      notifyProspects: (input) =>
+        prospectNotificationRelay.notify(input).pipe(
+          Effect.map(summarizeProspectNotificationResults),
+          Effect.mapError((error) => ({
+            message: error.message,
+            retryable: isRetryableProspectNotificationError(error),
+          })),
+        ),
       runScopedShell: scopedShell.execute,
       createItem: (input) =>
         commandCenter.createItem(input).pipe(
@@ -655,4 +727,4 @@ export const safeRuntimeLayer = Layer.unwrap(
       defaultRetryDelayMs: 1_000,
     });
   }),
-);
+).pipe(Layer.provide(ProspectNotificationRelay.layer));

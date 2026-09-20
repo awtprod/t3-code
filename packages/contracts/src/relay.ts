@@ -221,6 +221,85 @@ export const RelayAgentActivityPublishRequest = Schema.Struct({
 }).annotate({ description: "Publishes a signed agent-awareness update from an environment." });
 export type RelayAgentActivityPublishRequest = typeof RelayAgentActivityPublishRequest.Type;
 
+export const RELAY_PROSPECT_ITEM_ID_MAX_LENGTH = 512;
+export const RELAY_PROSPECT_SPACE_ID_MAX_LENGTH = 256;
+export const RELAY_PROSPECT_EVALUATION_ID_MAX_LENGTH = 256;
+export const RELAY_PROSPECT_TITLE_MAX_LENGTH = 120;
+export const RELAY_PROSPECT_BODY_MAX_LENGTH = 240;
+
+const RelayProspectItemId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(RELAY_PROSPECT_ITEM_ID_MAX_LENGTH),
+  Schema.isPattern(/^prospect-review:/u),
+);
+const RelayProspectSpaceId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(RELAY_PROSPECT_SPACE_ID_MAX_LENGTH),
+);
+const RelayProspectEvaluationId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(RELAY_PROSPECT_EVALUATION_ID_MAX_LENGTH),
+);
+const RelayProspectDeepLink = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(RELAY_PROSPECT_ITEM_ID_MAX_LENGTH * 3 + 16),
+  Schema.makeFilter((deepLink) => {
+    if (deepLink.includes("?") || deepLink.includes("#")) {
+      return "Prospect deep links cannot contain a query or fragment.";
+    }
+    const match = /^\/prospects\/([^/]+)$/u.exec(deepLink);
+    if (!match?.[1]) {
+      return "Prospect deep links must contain exactly one item-id segment.";
+    }
+    try {
+      const itemId = decodeURIComponent(match[1]);
+      return (
+        (itemId.startsWith("prospect-review:") && match[1] === encodeURIComponent(itemId)) ||
+        "Prospect deep links must contain one canonical percent-encoded prospect item id."
+      );
+    } catch {
+      return "Prospect deep links must contain a valid percent-encoded item id.";
+    }
+  }),
+);
+
+export const RelayProspectNotification = Schema.Struct({
+  type: Schema.Literal("prospect"),
+  itemId: RelayProspectItemId,
+  spaceId: RelayProspectSpaceId,
+  evaluationId: RelayProspectEvaluationId,
+  environmentId: EnvironmentId,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(RELAY_PROSPECT_TITLE_MAX_LENGTH)),
+  body: TrimmedNonEmptyString.check(Schema.isMaxLength(RELAY_PROSPECT_BODY_MAX_LENGTH)),
+  deepLink: RelayProspectDeepLink,
+}).check(
+  Schema.makeFilter(
+    (notification) =>
+      notification.deepLink === `/prospects/${encodeURIComponent(notification.itemId)}` ||
+      "Prospect deep link must identify the notification item.",
+  ),
+);
+export type RelayProspectNotification = typeof RelayProspectNotification.Type;
+
+export const RelayProspectNotificationPublishProofPayload = Schema.Struct({
+  ...RelaySignedJwtRegisteredClaims,
+  environmentId: EnvironmentId,
+  itemId: RelayProspectItemId,
+  notification: RelayProspectNotification,
+});
+export type RelayProspectNotificationPublishProofPayload =
+  typeof RelayProspectNotificationPublishProofPayload.Type;
+
+export const RelayProspectNotificationPublishRequest = Schema.Struct({
+  notification: RelayProspectNotification,
+  proof: TrimmedNonEmptyString,
+});
+export type RelayProspectNotificationPublishRequest =
+  typeof RelayProspectNotificationPublishRequest.Type;
+
+export function relayProspectNotificationIdempotencyKey(input: {
+  readonly itemId: string;
+  readonly evaluationId: string;
+}): string {
+  return `prospect:${encodeURIComponent(input.itemId)}:${encodeURIComponent(input.evaluationId)}`;
+}
+
 export const RelayEnvironmentLinkScope = Schema.Literals([
   "agent_activity_notifications",
   "managed_tunnels",
@@ -328,6 +407,13 @@ export const RelayAgentActivityPublishProofInvalidReason = Schema.Literals([
 ]);
 export type RelayAgentActivityPublishProofInvalidReason =
   typeof RelayAgentActivityPublishProofInvalidReason.Type;
+
+export const RelayProspectNotificationPublishProofInvalidReason = Schema.Literals([
+  "invalid_signature_or_payload",
+  "replayed_nonce",
+]);
+export type RelayProspectNotificationPublishProofInvalidReason =
+  typeof RelayProspectNotificationPublishProofInvalidReason.Type;
 
 export const RelayAuthInvalidReason = Schema.Literals([
   "missing_bearer",
@@ -532,6 +618,33 @@ export class RelayAgentActivityPublishProofInvalidError extends Schema.TaggedErr
   }
 }
 
+export class RelayProspectNotificationPublishProofExpiredError extends Schema.TaggedErrorClass<RelayProspectNotificationPublishProofExpiredError>()(
+  "RelayProspectNotificationPublishProofExpiredError",
+  {
+    code: Schema.Literal("prospect_notification_publish_proof_expired"),
+    traceId: TrimmedNonEmptyString,
+  },
+  { httpApiStatus: 401 },
+) {
+  override get message(): string {
+    return "Relay prospect notification publish proof expired";
+  }
+}
+
+export class RelayProspectNotificationPublishProofInvalidError extends Schema.TaggedErrorClass<RelayProspectNotificationPublishProofInvalidError>()(
+  "RelayProspectNotificationPublishProofInvalidError",
+  {
+    code: Schema.Literal("prospect_notification_publish_proof_invalid"),
+    reason: RelayProspectNotificationPublishProofInvalidReason,
+    traceId: TrimmedNonEmptyString,
+  },
+  { httpApiStatus: 401 },
+) {
+  override get message(): string {
+    return `Relay prospect notification publish proof is invalid: ${this.reason}`;
+  }
+}
+
 export class RelayInternalError extends Schema.TaggedErrorClass<RelayInternalError>()(
   "RelayInternalError",
   {
@@ -587,6 +700,13 @@ const RelayAgentActivityPublishErrors = [
   RelayAuthInvalidError,
   RelayAgentActivityPublishProofExpiredError,
   RelayAgentActivityPublishProofInvalidError,
+  RelayInternalError,
+] as const;
+
+const RelayProspectNotificationPublishErrors = [
+  RelayAuthInvalidError,
+  RelayProspectNotificationPublishProofExpiredError,
+  RelayProspectNotificationPublishProofInvalidError,
   RelayInternalError,
 ] as const;
 
@@ -895,6 +1015,14 @@ export const RelayPublishResponse = Schema.Struct({
 });
 export type RelayPublishResponse = typeof RelayPublishResponse.Type;
 
+export const RelayProspectNotificationPublishResponse = Schema.Struct({
+  status: Schema.Literals(["queued", "failed"]),
+  idempotencyKey: TrimmedNonEmptyString,
+  deliveries: Schema.Array(RelayDeliveryResult),
+});
+export type RelayProspectNotificationPublishResponse =
+  typeof RelayProspectNotificationPublishResponse.Type;
+
 export const RelayHealthResponse = Schema.Struct({
   ok: Schema.Boolean,
   service: Schema.Literal("relay"),
@@ -1113,6 +1241,18 @@ export const RelayServerGroup = HttpApiGroup.make("server")
         error: RelayAgentActivityPublishErrors,
       },
     ).annotate(OpenApi.Summary, "Publish agent activity"),
+  )
+  .add(
+    HttpApiEndpoint.post(
+      "publishProspectNotification",
+      "/v1/environments/:environmentId/prospect-notifications",
+      {
+        params: Schema.Struct({ environmentId: EnvironmentId }),
+        payload: RelayProspectNotificationPublishRequest,
+        success: RelayProspectNotificationPublishResponse,
+        error: RelayProspectNotificationPublishErrors,
+      },
+    ).annotate(OpenApi.Summary, "Publish a prospect notification"),
   )
   .annotate(OpenApi.Description, "Environment-authenticated activity publication.")
   .middleware(RelayEnvironmentAuth);

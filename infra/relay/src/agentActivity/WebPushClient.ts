@@ -5,6 +5,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import { RelayProspectNotification } from "@t3tools/contracts/relay";
 
 import * as RelayConfiguration from "../Config.ts";
 import { encryptWebPushPayload, makeVapidJwt, WebPushCryptoError } from "./webPushCrypto.ts";
@@ -46,13 +47,17 @@ export interface WebPushDeliveryResult {
 
 // What the service worker's push handler receives; keep in sync with
 // apps/web/public/service-worker.js.
-export interface WebPushNotificationPayload {
+export interface WebPushThreadNotificationPayload {
   readonly title: string;
   readonly body: string;
   readonly environmentId: string;
   readonly threadId: string;
   readonly deepLink: string;
 }
+
+export type WebPushNotificationPayload =
+  | WebPushThreadNotificationPayload
+  | typeof RelayProspectNotification.Type;
 
 export class WebPushClient extends Context.Service<
   WebPushClient,
@@ -68,13 +73,16 @@ export class WebPushClient extends Context.Service<
 
 const encodeWebPushPayloadJson = Schema.encodeEffect(
   Schema.fromJsonString(
-    Schema.Struct({
-      title: Schema.String,
-      body: Schema.String,
-      environmentId: Schema.String,
-      threadId: Schema.String,
-      deepLink: Schema.String,
-    }),
+    Schema.Union([
+      Schema.Struct({
+        title: Schema.String,
+        body: Schema.String,
+        environmentId: Schema.String,
+        threadId: Schema.String,
+        deepLink: Schema.String,
+      }),
+      RelayProspectNotification,
+    ]),
   ),
 );
 
