@@ -226,14 +226,14 @@ describe("CommandCenterHome projection", () => {
     expect(
       defaultCommandCenterRouteSelection({
         models: [
-          { id: "gpt-5.6-sol", label: "Sol", providerId: "codex-work" },
-          { id: "gpt-5.6-terra", label: "Terra", providerId: "codex-personal" },
+          { id: "gpt-6-sol", label: "Sol", providerId: "codex-work" },
+          { id: "gpt-6-terra", label: "Terra", providerId: "codex-personal" },
         ],
         projects: [],
         providers: [],
         repositories: [],
       }),
-    ).toEqual({ providerId: "codex-personal", modelId: "gpt-5.6-terra" });
+    ).toEqual({ providerId: "codex-personal", modelId: "gpt-6-terra" });
   });
 
   it("projects bootstrap data into live shell context", () => {
