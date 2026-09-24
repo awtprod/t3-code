@@ -39,7 +39,7 @@ const EMPTY_ROUTE_OPTIONS: CommandCenterRouteOptions = {
   models: [],
 };
 
-export const DEFAULT_COMMAND_CENTER_MODEL = "gpt-5.6-terra";
+export const DEFAULT_COMMAND_CENTER_MODEL = "gpt-6-terra";
 
 export function defaultCommandCenterRouteSelection(
   options: CommandCenterRouteOptions,

@@ -59,7 +59,7 @@ export {
 } from "./RepositoryProvisioningPolicy.ts";
 
 export const COMMAND_CENTER_SYSTEM_PROJECT_ID = ProjectId.make("command-center:system");
-export const COMMAND_CENTER_DEFAULT_MODEL = "gpt-5.6-terra";
+export const COMMAND_CENTER_DEFAULT_MODEL = "gpt-6-terra";
 
 export const commandCenterModelSelection = (input: {
   readonly providerId: string;
