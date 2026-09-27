@@ -42,7 +42,7 @@ describe("isClaudeManagerModelSlug", () => {
 
 describe("CLAUDE_WORKER_FALLBACK_MODEL", () => {
   it("is the designated worker model and is not itself manager-tier", () => {
-    expect(CLAUDE_WORKER_FALLBACK_MODEL).toBe("claude-opus-4-8");
+    expect(CLAUDE_WORKER_FALLBACK_MODEL).toBe("claude-opus-5-5");
     expect(isClaudeManagerModelSlug(CLAUDE_WORKER_FALLBACK_MODEL)).toBe(false);
   });
 });
@@ -67,7 +67,7 @@ describe("isCodexManagerModelSlug", () => {
 describe("rewriteManagerModelInCommand", () => {
   it("rewrites the bare `fable` alias but not look-alike tokens", () => {
     expect(rewriteManagerModelInCommand("claude -p --model fable 'go'")).toBe(
-      "claude -p --model claude-opus-4-8 'go'",
+      "claude -p --model claude-opus-5-5 'go'",
     );
     const cmd = "claude -p --model fabled-thing";
     expect(rewriteManagerModelInCommand(cmd)).toBe(cmd);
@@ -94,19 +94,19 @@ describe("rewriteManagerModelInCommand", () => {
 
   it("rewrites a headless `claude -p --model claude-fable*` dispatch", () => {
     expect(rewriteManagerModelInCommand("claude -p --model claude-fable-5-1 --max-turns 120")).toBe(
-      "claude -p --model claude-opus-4-8 --max-turns 120",
+      "claude -p --model claude-opus-5-5 --max-turns 120",
     );
   });
 
   it("strips a context-window suffix on the fable model token", () => {
     expect(rewriteManagerModelInCommand("claude -p --model claude-fable-5-1[1m]")).toBe(
-      "claude -p --model claude-opus-4-8",
+      "claude -p --model claude-opus-5-5",
     );
   });
 
   it("handles the `--model=` form and preserves quotes", () => {
     expect(rewriteManagerModelInCommand('claude --model="claude-fable-5" -p')).toBe(
-      'claude --model="claude-opus-4-8" -p',
+      'claude --model="claude-opus-5-5" -p',
     );
   });
 
@@ -115,7 +115,7 @@ describe("rewriteManagerModelInCommand", () => {
       rewriteManagerModelInCommand(
         "claude -p --model Claude-Fable-5-1; claude -p --model claude-fable-5",
       ),
-    ).toBe("claude -p --model claude-opus-4-8; claude -p --model claude-opus-4-8");
+    ).toBe("claude -p --model claude-opus-5-5; claude -p --model claude-opus-5-5");
   });
 
   it("leaves worker-model dispatches untouched (same reference)", () => {

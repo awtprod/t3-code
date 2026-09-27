@@ -2364,7 +2364,7 @@ describe("ClaudeAdapterLive", () => {
         );
         assert.equal(decision.behavior, "allow");
         if (decision.behavior === "allow") {
-          assert.equal((decision.updatedInput as { model?: unknown }).model, "claude-opus-4-8");
+          assert.equal((decision.updatedInput as { model?: unknown }).model, "claude-opus-5-5");
         }
 
         const startedFiber = yield* adapter.streamEvents.pipe(
@@ -2388,7 +2388,7 @@ describe("ClaudeAdapterLive", () => {
         const started = Array.from(yield* Fiber.join(startedFiber))[0];
         assert.equal(started?.type, "task.started");
         if (started?.type === "task.started") {
-          assert.equal(started.payload.model, "claude-opus-4-8");
+          assert.equal(started.payload.model, "claude-opus-5-5");
         }
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -2457,7 +2457,7 @@ describe("ClaudeAdapterLive", () => {
               description: "Agent H",
               prompt: "do the thing",
               subagent_type: "general-purpose",
-              model: "claude-opus-4-8",
+              model: "claude-opus-5-5",
             },
           },
         });
@@ -2488,7 +2488,7 @@ describe("ClaudeAdapterLive", () => {
         const started = Array.from(yield* Fiber.join(startedFiber))[0];
         assert.equal(started?.type, "task.started");
         if (started?.type === "task.started") {
-          assert.equal(started.payload.model, "claude-opus-4-8");
+          assert.equal(started.payload.model, "claude-opus-5-5");
         }
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -5540,7 +5540,7 @@ describe("maybeDowngradeSubagentModel", () => {
         "claude-fable-5-1",
         catalog,
       );
-      assert.equal(modelOf(result), "claude-opus-4-8");
+      assert.equal(modelOf(result), "claude-opus-5-5");
     });
 
     it(`downgrades an explicit Fable ${spawnTool} subagent (including via alias) to the worker fallback`, () => {
@@ -5553,14 +5553,14 @@ describe("maybeDowngradeSubagentModel", () => {
             catalog,
           ),
         ),
-        "claude-opus-4-8",
+        "claude-opus-5-5",
       );
       // Alias resolves to the canonical Fable slug before the manager check.
       assert.equal(
         modelOf(
           maybeDowngradeSubagentModel(spawnTool, taskInput("fable"), "claude-fable-5-1", catalog),
         ),
-        "claude-opus-4-8",
+        "claude-opus-5-5",
       );
     });
 
@@ -5590,13 +5590,13 @@ describe("maybeDowngradeSubagentModel", () => {
         modelOf(
           maybeDowngradeSubagentModel(spawnTool, taskInput("fable"), "claude-opus-5-5", catalog),
         ),
-        "claude-opus-4-8",
+        "claude-opus-5-5",
       );
       assert.equal(
         modelOf(
           maybeDowngradeSubagentModel(spawnTool, taskInput("claude-fable-5-1"), undefined, catalog),
         ),
-        "claude-opus-4-8",
+        "claude-opus-5-5",
       );
     });
   }
@@ -5621,7 +5621,7 @@ describe("maybeDowngradeBashWorkerModel", () => {
       "Bash",
       bashInput("claude -p --model claude-fable-5-1 --max-turns 120 'go'"),
     );
-    assert.equal(commandOf(result), "claude -p --model claude-opus-4-8 --max-turns 120 'go'");
+    assert.equal(commandOf(result), "claude -p --model claude-opus-5-5 --max-turns 120 'go'");
   });
 
   it("rewrites an Astra `codex exec` worker dispatch", () => {

@@ -240,13 +240,10 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
 
 /**
  * Canonical Claude worker model that manager-tier subagents are downgraded to.
- * Opus 4.8 is the fleet's designated delegated-work model and is cheaper than
- * Opus 5. It is `legacy`-classified in the catalog (so it cannot be chosen from
- * the Agent tool's model picker) but runs fine when injected as a subagent
- * model. Flip this to `claude-opus-5` if a future SDK rejects legacy models on
- * spawn.
+ * Opus 5.5 is the fleet's designated delegated-work model (the current Opus in
+ * the catalog; requires claude-code >= 2.1.280).
  */
-export const CLAUDE_WORKER_FALLBACK_MODEL = "claude-opus-4-8";
+export const CLAUDE_WORKER_FALLBACK_MODEL = "claude-opus-5-5";
 
 /**
  * True when `slug` is a Claude "manager"-tier model that must not be spawned as
