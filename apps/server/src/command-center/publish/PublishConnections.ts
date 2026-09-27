@@ -19,6 +19,7 @@ import {
   InstagramTokenStore,
   layer as instagramTokenStoreLayer,
 } from "./instagram/InstagramTokenStore.ts";
+import { layer as youTubeTokenStoreLayer, YouTubeTokenStore } from "./youtube/YouTubeTokenStore.ts";
 
 /**
  * Publishing connections: the external accounts finished clips publish to (YouTube, Instagram).
@@ -61,7 +62,7 @@ const PUBLISH_PROVIDERS: ReadonlyArray<{
   {
     provider: "youtube",
     setupMode: "oauth-redirect",
-    unavailableDetail: "YouTube publishing is not available in this environment yet.",
+    unavailableDetail: "YouTube publishing is not available in this environment.",
   },
   {
     provider: "instagram",
@@ -207,12 +208,27 @@ export const instagramConnectionProvider = Effect.gen(function* () {
   } satisfies PublishConnectionProvider;
 });
 
+/** YouTube: open Google's consent page, paste back the 127.0.0.1 address; the refresh token is stored. */
+export const youTubeConnectionProvider = Effect.gen(function* () {
+  const store = yield* YouTubeTokenStore;
+  return {
+    provider: "youtube",
+    setupMode: "oauth-redirect",
+    status: store.summary,
+    begin: store.begin,
+    remove: store.disconnect,
+  } satisfies PublishConnectionProvider;
+});
+
 export const layerWithoutDependencies = Layer.effect(
   PublishConnections,
   Effect.gen(function* () {
+    const youtube = yield* youTubeConnectionProvider;
     const instagram = yield* instagramConnectionProvider;
-    return yield* make([instagram]);
+    return yield* make([youtube, instagram]);
   }),
 );
 
-export const layer = layerWithoutDependencies.pipe(Layer.provide(instagramTokenStoreLayer));
+export const layer = layerWithoutDependencies.pipe(
+  Layer.provide(Layer.mergeAll(youTubeTokenStoreLayer, instagramTokenStoreLayer)),
+);
