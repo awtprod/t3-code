@@ -11,7 +11,8 @@ The efficiency subsystem has four parts:
 2. **The Judge** — one service that asks a cheap model typed questions and gets
    calibrated probabilities back.
 3. **Confidence-gated tier judgment** — an optional judge call that can nudge the
-   routed tier.
+   routed tier, pick a task-kind specialist, and keep a continuation on the
+   thread's current route.
 4. **The tool-result sieve** — an optional judge-driven trim of large tool
    results before they reach the agent (Claude provider).
 
@@ -28,13 +29,39 @@ resolver [`resolveInteractiveEfficiency`](../../apps/server/src/efficiency/Effic
 picks the tier, then the first healthy enabled candidate for that tier, falling
 back to the caller's model when none is available.
 
+A candidate may list `taskKinds` (see [task kinds](#task-kinds-and-specialists)).
+A candidate without `taskKinds` (or with an empty list) is a **general**
+candidate; only general candidates are considered unless the judge confidently
+names a kind the candidate lists.
+
+**Default candidates** (used when `candidates` is absent from settings):
+
+| Candidate id                         | Tier     | Instance      | Model             | Options                 | Kinds       |
+| ------------------------------------ | -------- | ------------- | ----------------- | ----------------------- | ----------- |
+| `claude-economy-opus-5-5`            | economy  | `claudeAgent` | `claude-opus-5-5` | `effort: low`           | general     |
+| `claude-balanced-opus-5-5`           | balanced | `claudeAgent` | `claude-opus-5-5` | `effort: medium`        | general     |
+| `claude-quality-opus-5-5`            | quality  | `claudeAgent` | `claude-opus-5-5` | `effort: high`          | general     |
+| `claude-balanced-review-opus-4-8`    | balanced | `claudeAgent` | `claude-opus-4-8` | `effort: medium`        | `review`    |
+| `codex-quality-review-astra`         | quality  | `codex`       | `gpt-6-astra`     | `reasoningEffort: high` | `review`    |
+| `claude-balanced-implement-opus-4-8` | balanced | `claudeAgent` | `claude-opus-4-8` | `effort: medium`        | `implement` |
+| `claude-quality-implement-opus-4-8`  | quality  | `claudeAgent` | `claude-opus-4-8` | `effort: high`          | `implement` |
+
+Why these defaults: a hand-labelled audit of 243 real Command Center threads
+found Claude Opus 4.8 the most reliable worker, Sol weak in interactive threads,
+and GLM weak at review, so the earlier Codex Terra/Sol defaults were replaced by
+Claude Opus 5.5 (the current Opus) at rising effort per tier, with Opus 4.8 as
+the implementation and balanced-review specialist. Quality review goes to Codex
+Astra on Andrew's first-hand observation that it is the strongest reviewer.
+Existing settings that already list `candidates` are unaffected.
+
 **Tier precedence** (highest wins):
 
 1. an explicit `rule` match (operator intent — always wins);
-2. a confidence-gated **judgment** (see below);
-3. the command's `efficiencyTier`;
-4. the thread's `efficiencyTier`;
-5. `defaultTier`.
+2. a **sticky continuation** of the thread's current route (see below);
+3. a confidence-gated **judgment** (see below);
+4. the command's `efficiencyTier`;
+5. the thread's `efficiencyTier`;
+6. `defaultTier`.
 
 The resolver is pure and synchronous and runs in
 [`CommandDispatcher`](../../apps/server/src/orchestration/CommandDispatcher.ts)
@@ -114,17 +141,65 @@ The layer is wired once, alongside `ServerSettingsService`, in
 ## Confidence-gated tier judgment
 
 When `efficiency.tierJudgment.enabled` and the judge is enabled, each auto-routed
-turn asks the judge one `score` question (`complexity`, rubric levels =
-economy/balanced/quality) plus a `needs_investigation` `noul` kept only for the
-decision log and later calibration. The request/answer mapping lives in
-[`TierJudgment.ts`](../../apps/server/src/efficiency/TierJudgment.ts).
+turn sends the judge **one** request
+([`TierJudgment.ts`](../../apps/server/src/efficiency/TierJudgment.ts)) with four
+questions:
+
+- `complexity` (`score`, rubric levels = economy/balanced/quality) — drives the
+  tier;
+- `needs_investigation` (`noul`) — kept only for the decision log and later
+  calibration;
+- `task_kind` (`choice` over the task kinds below) — picks a specialist within
+  the tier;
+- `continuation` (`noul`) — "`message` continues the task already under way in
+  this thread (e.g. go-ahead, retry, pasted command output, 'commit and push', a
+  status question) rather than starting a new task".
+
+The judge state carries the message (first 4 000 chars), attachment count,
+interaction mode, project, prior turn count, and — so a short follow-up is judged
+in context — the thread's `threadTitle` and `taskMessage`, the user message that
+started the thread's current route (the newest routed turn whose decision was not
+itself sticky; also truncated to 4 000 chars). The dispatcher reads these from
+the projected turns and messages before calling the judge; a lookup failure only
+drops the context.
 
 The mapped tier (`round(score)` clamped to economy..quality) overrides the static
 tier **only** when no rule matched and `confidence >= minConfidence`
 (default 0.6). The judgment — `{ score, confidence, tier, applied, reason?,
-model }` — is recorded on the `EfficiencyDecision` whether or not it was applied,
-so the composer preview and the persisted decision show it. **Any judge error or
-a disabled judge leaves routing byte-for-byte identical to today.**
+model, kind?, kindConfidence?, kindApplied?, continuation?, sticky? }` — is
+recorded on the `EfficiencyDecision` whether or not it was applied, so the
+persisted decision shows it. **Any judge error or a disabled judge leaves
+routing byte-for-byte identical to today** (no kind preference, no sticky
+reuse).
+
+### Task kinds and specialists
+
+`TaskKind` is `review | debug | implement | refactor | design | question | docs |
+ops | research | creative | other`. Within the chosen tier, when no rule matched
+and `kindConfidence >= minConfidence`, the enabled candidates whose `taskKinds`
+include the judged kind are tried first, then the tier's general candidates
+exactly as before; if no specialist is healthy the general candidates are used.
+Otherwise (low kind confidence, an unlisted kind, judgment disabled) only the
+general candidates are considered. A specialist is never routed for a kind it
+does not list, and never stands in as a general candidate. `kindApplied` records
+whether a specialist was routed.
+
+### Sticky routing for continuations
+
+Roughly 43% of Andrew's 1 451 real messages are continuations ("proceed", pasted
+logs, "try again"); judged on their own they look trivial and would drop a hard
+task to economy mid-flight. So: when the thread's latest turn has a routed
+`EfficiencyDecision`, no rule matched, and `continuation >=
+tierJudgment.continuationThreshold` (default 0.5), the turn **reuses that
+decision's tier, candidate, and model selection unchanged**. The new judgment is
+recorded with `sticky: true`, `applied: false`, this turn's raw
+complexity/continuation answers, and the kind fields inherited from the route.
+If the previous route's provider or model is no longer available, or the thread
+has no routed decision, the turn is routed fresh. The resolver stays pure: the
+dispatcher passes the prior decision in as `priorDecision`.
+
+The settings-page preview never calls the judge (it has no real message), so it
+shows only the rule/static routing — never a kind or sticky decision.
 
 ## Tool-result sieve (slice B)
 

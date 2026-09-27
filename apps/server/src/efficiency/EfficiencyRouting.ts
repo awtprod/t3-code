@@ -12,6 +12,7 @@ import {
   type EfficiencySettings,
   type EfficiencyTierJudgment,
   type ModelSelection,
+  type TaskKind,
   ProviderInstanceId,
   type OrchestrationCommand,
   type OrchestrationThreadShell,
@@ -33,6 +34,11 @@ export interface TierJudgmentInput {
   readonly score: number;
   readonly confidence: number;
   readonly model: string;
+  /** Judged task kind (`task_kind` choice) and its confidence. */
+  readonly kind?: TaskKind;
+  readonly kindConfidence?: number;
+  /** Probability that the message continues the thread's current task. */
+  readonly continuation?: number;
 }
 
 export interface InteractiveEfficiencyInput {
@@ -43,6 +49,9 @@ export interface InteractiveEfficiencyInput {
   readonly projectIdOverride?: string;
   readonly attachmentCountOverride?: number;
   readonly tierJudgment?: TierJudgmentInput;
+  /** The decision recorded on the thread's latest turn, when it was routed.
+   * A confident continuation reuses it (sticky routing). */
+  readonly priorDecision?: EfficiencyDecision;
 }
 
 export interface InteractiveEfficiencyResolution {
@@ -160,12 +169,13 @@ export function interactiveTurnMatchesRule(params: {
 /**
  * Resolves the tier and the (optional) recorded judgment.
  *
- * Precedence: explicit rule match > confidence-gated judgment > command tier >
- * thread tier > default tier. Rules are operator intent and always win, so a
- * judgment is only *applied* when no rule matched, tier judgment is enabled, and
- * `confidence >= minConfidence`. The judgment is still recorded (for the log and
- * later calibration) whenever a judgment input is present, with `applied: false`
- * and a `reason` when it was not used.
+ * Precedence: explicit rule match > sticky continuation (see
+ * {@link stickyDecision}, applied by the caller) > confidence-gated judgment >
+ * command tier > thread tier > default tier. Rules are operator intent and
+ * always win, so a judgment is only *applied* when no rule matched, tier
+ * judgment is enabled, and `confidence >= minConfidence`. The judgment is still
+ * recorded (for the log and later calibration) whenever a judgment input is
+ * present, with `applied: false` and a `reason` when it was not used.
  */
 function selectedTier(input: InteractiveEfficiencyInput): {
   readonly tier: EfficiencyTier;
@@ -206,12 +216,116 @@ function selectedTier(input: InteractiveEfficiencyInput): {
     applied,
     ...(reason === undefined ? {} : { reason }),
     model: tj.model,
+    ...(tj.kind === undefined ? {} : { kind: tj.kind }),
+    ...(tj.kindConfidence === undefined ? {} : { kindConfidence: tj.kindConfidence }),
+    ...(tj.continuation === undefined ? {} : { continuation: tj.continuation }),
   };
   const tier = applied ? mappedTier : baseTier;
   return {
     tier,
     ...(matchedRuleId === undefined ? {} : { matchedRuleId }),
     judgment,
+  };
+}
+
+/** The judged kind to prefer specialists for: only when no rule matched, tier
+ * judgment is enabled, and the kind is confident. */
+function confidentKind(
+  input: InteractiveEfficiencyInput,
+  matchedRuleId: string | undefined,
+): TaskKind | undefined {
+  const tj = input.tierJudgment;
+  if (matchedRuleId !== undefined || !input.settings.tierJudgment.enabled) return undefined;
+  if (tj?.kind === undefined || tj.kindConfidence === undefined) return undefined;
+  return tj.kindConfidence >= input.settings.tierJudgment.minConfidence ? tj.kind : undefined;
+}
+
+function isGeneralCandidate(candidate: EfficiencySettings["candidates"][number]): boolean {
+  return candidate.taskKinds === undefined || candidate.taskKinds.length === 0;
+}
+
+/**
+ * Sticky routing: a confident continuation of a routed thread keeps that
+ * route's tier, kind, and model selection unchanged. Only when no rule matched,
+ * tier judgment is enabled, and the previous route's provider/model is still
+ * available; otherwise the turn is routed fresh.
+ */
+function stickyDecision(
+  input: InteractiveEfficiencyInput,
+  matchedRuleId: string | undefined,
+): EfficiencyDecision | undefined {
+  const prior = input.priorDecision;
+  const tj = input.tierJudgment;
+  const threshold = input.settings.tierJudgment.continuationThreshold;
+  if (prior === undefined || tj?.continuation === undefined) return undefined;
+  if (matchedRuleId !== undefined || !input.settings.tierJudgment.enabled) return undefined;
+  if (tj.continuation < threshold) return undefined;
+  const available = resolveProviderModelSelection({
+    policy: toCommandCenterSelection(prior.modelSelection),
+    providers: providerAvailability(input.providers, "interactive-routing"),
+  });
+  if (available.providerSource !== "policy") return undefined;
+  const inherited = prior.judgment;
+  const judgment: EfficiencyTierJudgment = {
+    score: tj.score,
+    confidence: tj.confidence,
+    tier: scoreToTier(tj.score),
+    applied: false,
+    reason: `continuation ${tj.continuation.toFixed(2)} kept the current route`,
+    model: tj.model,
+    ...(inherited?.kind === undefined ? {} : { kind: inherited.kind }),
+    ...(inherited?.kindConfidence === undefined
+      ? {}
+      : { kindConfidence: inherited.kindConfidence }),
+    ...(inherited?.kindApplied === undefined ? {} : { kindApplied: inherited.kindApplied }),
+    continuation: tj.continuation,
+    sticky: true,
+  };
+  return {
+    tier: prior.tier,
+    ...(prior.candidateId === undefined ? {} : { candidateId: prior.candidateId }),
+    modelSelection: prior.modelSelection,
+    source: prior.source,
+    workload: "interactive",
+    contextThresholdPercent: prior.contextThresholdPercent,
+    toolWarningThreshold: prior.toolWarningThreshold,
+    ...(prior.fallbackReason === undefined ? {} : { fallbackReason: prior.fallbackReason }),
+    ...(input.command.retryOfTurnId === undefined
+      ? {}
+      : { retryOfTurnId: input.command.retryOfTurnId }),
+    ...(prior.experimentArm === undefined ? {} : { experimentArm: prior.experimentArm }),
+    judgment,
+  };
+}
+
+function withDecision(
+  command: TurnStartCommand,
+  decision: EfficiencyDecision,
+): InteractiveEfficiencyResolution {
+  const modelSelection: ModelSelection = decision.modelSelection;
+  const tier = decision.tier;
+  return {
+    command: {
+      ...command,
+      modelSelection,
+      routingMode: "auto",
+      efficiencyTier: tier,
+      efficiencyDecision: decision,
+      ...(command.bootstrap?.createThread === undefined
+        ? {}
+        : {
+            bootstrap: {
+              ...command.bootstrap,
+              createThread: {
+                ...command.bootstrap.createThread,
+                modelSelection,
+                routingMode: "auto" as const,
+                efficiencyTier: tier,
+              },
+            },
+          }),
+    },
+    decision,
   };
 }
 
@@ -234,6 +348,9 @@ export function resolveInteractiveEfficiency(
   if (fallback === undefined) return { command: input.command };
 
   const selected = selectedTier(input);
+  const sticky = stickyDecision(input, selected.matchedRuleId);
+  if (sticky !== undefined) return withDecision(input.command, sticky);
+
   const experimentAssignment = input.settings.experiments
     .map((experiment) =>
       assignExperiment({
@@ -247,9 +364,18 @@ export function resolveInteractiveEfficiency(
     .find((assignment) => assignment !== undefined);
   const tier = experimentAssignment?.tier ?? selected.tier;
   const matchedRuleId = selected.matchedRuleId;
-  const enabledCandidates = input.settings.candidates.filter(
+  // Specialists for a confidently judged kind go first; the tier's general
+  // candidates follow exactly as before. A specialist never stands in for a
+  // kind it does not list.
+  const kind = confidentKind(input, matchedRuleId);
+  const inTier = input.settings.candidates.filter(
     (candidate) => candidate.enabled && candidate.tier === tier,
   );
+  const specialists =
+    kind === undefined
+      ? []
+      : inTier.filter((candidate) => candidate.taskKinds?.includes(kind) === true);
+  const enabledCandidates = [...specialists, ...inTier.filter(isGeneralCandidate)];
   const tierCandidates: ReadonlyArray<ProviderModelCandidate> = enabledCandidates.map(
     (candidate) => ({
       candidateId: candidate.candidateId,
@@ -300,30 +426,20 @@ export function resolveInteractiveEfficiency(
       ? {}
       : { retryOfTurnId: input.command.retryOfTurnId }),
     ...(experimentAssignment === undefined ? {} : { experimentArm: experimentAssignment.arm }),
-    ...(selected.judgment === undefined ? {} : { judgment: selected.judgment }),
+    ...(selected.judgment === undefined
+      ? {}
+      : {
+          judgment:
+            selected.judgment.kind === undefined
+              ? selected.judgment
+              : {
+                  ...selected.judgment,
+                  kindApplied: specialists.some(
+                    (candidate) => candidate.candidateId === selection.candidateId,
+                  ),
+                },
+        }),
   };
 
-  return {
-    command: {
-      ...input.command,
-      modelSelection: effectiveSelection,
-      routingMode: "auto",
-      efficiencyTier: tier,
-      efficiencyDecision: decision,
-      ...(input.command.bootstrap?.createThread === undefined
-        ? {}
-        : {
-            bootstrap: {
-              ...input.command.bootstrap,
-              createThread: {
-                ...input.command.bootstrap.createThread,
-                modelSelection: effectiveSelection,
-                routingMode: "auto" as const,
-                efficiencyTier: tier,
-              },
-            },
-          }),
-    },
-    decision,
-  };
+  return withDecision(input.command, decision);
 }

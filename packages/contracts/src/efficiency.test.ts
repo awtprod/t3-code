@@ -21,7 +21,105 @@ describe("EfficiencySettings judge/tierJudgment/sieve defaults", () => {
   });
 
   it("applies the tier-judgment defaults when the key is absent", () => {
-    expect(decodeEfficiency({}).tierJudgment).toEqual({ enabled: false, minConfidence: 0.6 });
+    expect(decodeEfficiency({}).tierJudgment).toEqual({
+      enabled: false,
+      minConfidence: 0.6,
+      continuationThreshold: 0.5,
+    });
+  });
+
+  it("defaults the general candidates to Claude Opus 5.5 at low/medium/high effort", () => {
+    const general = decodeEfficiency({}).candidates.filter(
+      (candidate) => candidate.taskKinds === undefined,
+    );
+    expect(
+      general.map(({ candidateId, tier, instanceId, model, options }) => ({
+        candidateId,
+        tier,
+        instanceId,
+        model,
+        options,
+      })),
+    ).toEqual([
+      {
+        candidateId: "claude-economy-opus-5-5",
+        tier: "economy",
+        instanceId: "claudeAgent",
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "low" }],
+      },
+      {
+        candidateId: "claude-balanced-opus-5-5",
+        tier: "balanced",
+        instanceId: "claudeAgent",
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "medium" }],
+      },
+      {
+        candidateId: "claude-quality-opus-5-5",
+        tier: "quality",
+        instanceId: "claudeAgent",
+        model: "claude-opus-5-5",
+        options: [{ id: "effort", value: "high" }],
+      },
+    ]);
+  });
+
+  it("seeds the review and implement specialists", () => {
+    const specialists = decodeEfficiency({}).candidates.filter(
+      (candidate) => candidate.taskKinds !== undefined,
+    );
+    expect(
+      specialists.map(({ tier, instanceId, model, options, taskKinds }) => ({
+        tier,
+        instanceId,
+        model,
+        options,
+        taskKinds,
+      })),
+    ).toEqual([
+      {
+        tier: "balanced",
+        instanceId: "claudeAgent",
+        model: "claude-opus-4-8",
+        options: [{ id: "effort", value: "medium" }],
+        taskKinds: ["review"],
+      },
+      {
+        tier: "quality",
+        instanceId: "codex",
+        model: "gpt-6-astra",
+        options: [{ id: "reasoningEffort", value: "high" }],
+        taskKinds: ["review"],
+      },
+      {
+        tier: "balanced",
+        instanceId: "claudeAgent",
+        model: "claude-opus-4-8",
+        options: [{ id: "effort", value: "medium" }],
+        taskKinds: ["implement"],
+      },
+      {
+        tier: "quality",
+        instanceId: "claudeAgent",
+        model: "claude-opus-4-8",
+        options: [{ id: "effort", value: "high" }],
+        taskKinds: ["implement"],
+      },
+    ]);
+  });
+
+  it("decodes candidates without taskKinds as general and rejects unknown kinds", () => {
+    const candidate = {
+      candidateId: "legacy",
+      tier: "economy",
+      instanceId: "codex",
+      model: "gpt-6-terra",
+    };
+    expect(decodeEfficiency({ candidates: [candidate] }).candidates[0]?.taskKinds).toBeUndefined();
+    expect(() =>
+      decodeEfficiency({ candidates: [{ ...candidate, taskKinds: ["gardening"] }] }),
+    ).toThrow();
   });
 
   it("applies the sieve defaults when the key is absent", () => {
@@ -107,6 +205,22 @@ describe("EfficiencyDecision judgment field", () => {
     });
     expect(decoded.judgment?.applied).toBe(true);
     expect(decoded.judgment?.score).toBe(1.4);
+  });
+  it("round-trips the kind and sticky-continuation fields", () => {
+    const judgment = {
+      score: 0.2,
+      confidence: 0.9,
+      tier: "economy" as const,
+      applied: false,
+      reason: "continuation 0.85 kept the current route",
+      model: "jev-latest",
+      kind: "review" as const,
+      kindConfidence: 0.92,
+      kindApplied: true,
+      continuation: 0.85,
+      sticky: true,
+    };
+    expect(decodeDecision({ ...base, judgment }).judgment).toEqual(judgment);
   });
 });
 

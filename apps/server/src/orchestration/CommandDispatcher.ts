@@ -1,7 +1,9 @@
 import {
   CommandId,
   type ClientOrchestrationCommand,
+  type EfficiencyDecision,
   EventId,
+  MessageId,
   OrchestrationDispatchCommandError,
   type OrchestrationCommand,
   type OrchestrationThreadShell,
@@ -25,8 +27,16 @@ import {
   type TierJudgmentInput,
 } from "../efficiency/EfficiencyRouting.ts";
 import { Judge } from "../efficiency/Judge.ts";
-import { buildTierJudgmentRequest, tierJudgmentFromAnswers } from "../efficiency/TierJudgment.ts";
+import {
+  buildTierJudgmentRequest,
+  findRouteContext,
+  tierJudgmentFromAnswers,
+} from "../efficiency/TierJudgment.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import { ProjectionThreadMessageRepositoryLive } from "../persistence/Layers/ProjectionThreadMessages.ts";
+import { ProjectionTurnRepositoryLive } from "../persistence/Layers/ProjectionTurns.ts";
+import { ProjectionThreadMessageRepository } from "../persistence/Services/ProjectionThreadMessages.ts";
+import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
 import {
@@ -117,6 +127,8 @@ export const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry;
   const serverSettings = yield* ServerSettingsService;
   const judge = yield* Judge;
+  const projectionTurns = yield* ProjectionTurnRepository;
+  const projectionMessages = yield* ProjectionThreadMessageRepository;
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const projectFileLoader = yield* T3ProjectFileLoader;
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -361,11 +373,51 @@ export const make = Effect.gen(function* () {
       );
     });
 
+  /**
+   * The thread's current route: the latest turn's decision (for sticky
+   * routing), the text of the message that started the route, and the turn
+   * count. Best-effort — a lookup failure only drops the context.
+   */
+  const loadRouteContext = (
+    thread: OrchestrationThreadShell | undefined,
+  ): Effect.Effect<{
+    readonly priorTurnCount: number;
+    readonly priorDecision?: EfficiencyDecision;
+    readonly taskMessage?: string;
+  }> =>
+    Effect.gen(function* () {
+      const latestTurnId = thread?.latestTurn?.turnId;
+      if (thread === undefined || latestTurnId === undefined) return { priorTurnCount: 0 };
+      const turns = yield* projectionTurns.listByThreadId({ threadId: thread.id });
+      const context = findRouteContext(turns, latestTurnId);
+      const taskMessage =
+        context.taskMessageId === undefined
+          ? undefined
+          : Option.getOrUndefined(
+              yield* projectionMessages.getByMessageId({
+                messageId: MessageId.make(context.taskMessageId),
+              }),
+            )?.text;
+      return {
+        priorTurnCount: Math.max(1, turns.filter((turn) => turn.turnId !== null).length),
+        ...(context.priorDecision === undefined ? {} : { priorDecision: context.priorDecision }),
+        ...(taskMessage === undefined ? {} : { taskMessage }),
+      };
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logDebug("efficiency route context unavailable", { error }).pipe(
+          Effect.as({ priorTurnCount: thread?.latestTurn ? 1 : 0 }),
+        ),
+      ),
+    );
+
   const resolveTierJudgment = (
     command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
     thread: OrchestrationThreadShell | undefined,
+    route: { readonly priorTurnCount: number; readonly taskMessage?: string },
   ): Effect.Effect<TierJudgmentInput | undefined> => {
     const projectId = command.bootstrap?.createThread?.projectId ?? thread?.projectId;
+    const threadTitle = thread?.title ?? command.bootstrap?.createThread?.title;
     return judge
       .ask(
         buildTierJudgmentRequest({
@@ -373,9 +425,9 @@ export const make = Effect.gen(function* () {
           attachmentCount: command.message.attachments.length,
           interactionMode: command.interactionMode,
           ...(projectId === undefined ? {} : { projectId }),
-          // A brand-new thread has no prior turns; an existing thread has had at
-          // least one. A precise count would need an events query we skip.
-          priorTurnCount: thread?.latestTurn ? 1 : 0,
+          priorTurnCount: route.priorTurnCount,
+          ...(threadTitle === undefined ? {} : { threadTitle }),
+          ...(route.taskMessage === undefined ? {} : { taskMessage: route.taskMessage }),
         }),
         { threadId: command.threadId },
       )
@@ -419,17 +471,19 @@ export const make = Effect.gen(function* () {
       });
       // Resolve an optional judgment first. Any judge error (or a disabled
       // judge) leaves `tierJudgment` undefined, so routing proceeds exactly as
-      // it does today.
+      // it does today (a prior decision is only reused on a judged
+      // continuation).
+      const judging = !ruleMatches && settings.efficiency.tierJudgment.enabled && judge.enabled;
+      const route = judging ? yield* loadRouteContext(thread) : undefined;
       const tierJudgment =
-        !ruleMatches && settings.efficiency.tierJudgment.enabled && judge.enabled
-          ? yield* resolveTierJudgment(command, thread)
-          : undefined;
+        route === undefined ? undefined : yield* resolveTierJudgment(command, thread, route);
       return resolveInteractiveEfficiency({
         command,
         ...(thread === undefined ? {} : { thread }),
         settings: settings.efficiency,
         providers,
         ...(tierJudgment === undefined ? {} : { tierJudgment }),
+        ...(route?.priorDecision === undefined ? {} : { priorDecision: route.priorDecision }),
       }).command;
     }).pipe(
       Effect.mapError((cause) =>
@@ -537,4 +591,8 @@ export const make = Effect.gen(function* () {
   return OrchestrationCommandDispatcher.of({ dispatch, dispatchNormalized });
 });
 
-export const layer = Layer.effect(OrchestrationCommandDispatcher, make);
+export const layer = Layer.effect(OrchestrationCommandDispatcher, make).pipe(
+  Layer.provide(
+    Layer.mergeAll(ProjectionTurnRepositoryLive, ProjectionThreadMessageRepositoryLive),
+  ),
+);

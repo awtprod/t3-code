@@ -20,6 +20,26 @@ export type ThreadRoutingMode = typeof ThreadRoutingMode.Type;
 export const EfficiencyWorkload = Schema.Literals(["interactive", "automation"]);
 export type EfficiencyWorkload = typeof EfficiencyWorkload.Type;
 
+/**
+ * What an auto-routed turn is for, as judged by the tier-judgment request.
+ * Candidates may list the kinds they specialize in (see
+ * {@link EfficiencyTierCandidate.taskKinds}).
+ */
+export const TaskKind = Schema.Literals([
+  "review",
+  "debug",
+  "implement",
+  "refactor",
+  "design",
+  "question",
+  "docs",
+  "ops",
+  "research",
+  "creative",
+  "other",
+]);
+export type TaskKind = typeof TaskKind.Type;
+
 export const EfficiencyTierCandidate = Schema.Struct({
   candidateId: EfficiencyCandidateId,
   tier: EfficiencyTier,
@@ -27,6 +47,12 @@ export const EfficiencyTierCandidate = Schema.Struct({
   model: TrimmedNonEmptyString,
   options: Schema.optional(ProviderOptionSelections),
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * Task kinds this candidate specializes in. Absent (or empty) = a general
+   * candidate. A specialist is only ever picked for a confidently judged kind
+   * it lists, ahead of the tier's general candidates; never as a general one.
+   */
+  taskKinds: Schema.optional(Schema.Array(TaskKind)),
 });
 export type EfficiencyTierCandidate = typeof EfficiencyTierCandidate.Type;
 
@@ -105,13 +131,18 @@ export type EfficiencyJudgeSettings = typeof EfficiencyJudgeSettings.Type;
 
 /**
  * Confidence-gated tier judgment. When `enabled`, an auto-routed turn asks the
- * judge to score task complexity; the mapped tier only overrides the static tier
- * when `confidence >= minConfidence`.
+ * judge to score task complexity, classify its task kind, and say whether it
+ * continues the thread's current task. The mapped tier (and kind) only apply when
+ * `confidence >= minConfidence`; a continuation (`continuation >=
+ * continuationThreshold`) keeps the thread's current route instead.
  */
 export const EfficiencyTierJudgmentSettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   minConfidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
     Schema.withDecodingDefault(Effect.succeed(0.6)),
+  ),
+  continuationThreshold: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.5)),
   ),
 });
 export type EfficiencyTierJudgmentSettings = typeof EfficiencyTierJudgmentSettings.Type;
@@ -163,28 +194,65 @@ export const EfficiencySettings = Schema.Struct({
     Schema.withDecodingDefault(
       Effect.succeed([
         {
-          candidateId: EfficiencyCandidateId.make("codex-economy-terra"),
+          candidateId: EfficiencyCandidateId.make("claude-economy-opus-5-5"),
           tier: "economy" as const,
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-6-terra",
-          options: [{ id: "reasoningEffort", value: "low" }],
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "low" }],
           enabled: true,
         },
         {
-          candidateId: EfficiencyCandidateId.make("codex-balanced-terra"),
+          candidateId: EfficiencyCandidateId.make("claude-balanced-opus-5-5"),
           tier: "balanced" as const,
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-6-terra",
-          options: [{ id: "reasoningEffort", value: "medium" }],
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "medium" }],
           enabled: true,
         },
         {
-          candidateId: EfficiencyCandidateId.make("codex-quality-sol"),
+          candidateId: EfficiencyCandidateId.make("claude-quality-opus-5-5"),
+          tier: "quality" as const,
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "high" }],
+          enabled: true,
+        },
+        // Task-kind specialists (see docs/internals/efficiency.md for why).
+        {
+          candidateId: EfficiencyCandidateId.make("claude-balanced-review-opus-4-8"),
+          tier: "balanced" as const,
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-8",
+          options: [{ id: "effort", value: "medium" }],
+          enabled: true,
+          taskKinds: ["review" as const],
+        },
+        {
+          candidateId: EfficiencyCandidateId.make("codex-quality-review-astra"),
           tier: "quality" as const,
           instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-6-sol",
+          model: "gpt-6-astra",
           options: [{ id: "reasoningEffort", value: "high" }],
           enabled: true,
+          taskKinds: ["review" as const],
+        },
+        {
+          candidateId: EfficiencyCandidateId.make("claude-balanced-implement-opus-4-8"),
+          tier: "balanced" as const,
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-8",
+          options: [{ id: "effort", value: "medium" }],
+          enabled: true,
+          taskKinds: ["implement" as const],
+        },
+        {
+          candidateId: EfficiencyCandidateId.make("claude-quality-implement-opus-4-8"),
+          tier: "quality" as const,
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-8",
+          options: [{ id: "effort", value: "high" }],
+          enabled: true,
+          taskKinds: ["implement" as const],
         },
       ]),
     ),
@@ -212,6 +280,12 @@ export const EfficiencyModelSelection = Schema.Struct({
  * when the judgment actually overrode the static tier (no rule matched and
  * `confidence >= minConfidence`); otherwise `reason` explains why it was kept for
  * the log only. `score` is the probability-weighted rubric level (0..2).
+ *
+ * `kind`/`kindConfidence` are the judged task kind; `kindApplied` is true when a
+ * specialist candidate for that kind was routed. `continuation` is the judged
+ * probability that the message continues the current task; `sticky` is true
+ * when the thread's previous route was reused because of it (the kind fields are
+ * then inherited from that route). All five are additive and optional.
  */
 export const EfficiencyTierJudgment = Schema.Struct({
   score: Schema.Number,
@@ -220,6 +294,11 @@ export const EfficiencyTierJudgment = Schema.Struct({
   applied: Schema.Boolean,
   reason: Schema.optional(TrimmedNonEmptyString),
   model: TrimmedNonEmptyString,
+  kind: Schema.optional(TaskKind),
+  kindConfidence: Schema.optional(Schema.Number),
+  kindApplied: Schema.optional(Schema.Boolean),
+  continuation: Schema.optional(Schema.Number),
+  sticky: Schema.optional(Schema.Boolean),
 });
 export type EfficiencyTierJudgment = typeof EfficiencyTierJudgment.Type;
 
