@@ -125,36 +125,87 @@ describe("Judge OpenAI answer building (computed in code)", () => {
   });
 });
 
+// The live TypeSafe response, recorded verbatim from
+// https://api.typesafe.ai/v1/systemone for a single `complexity` score question.
+// The typed answers are wrapped in an `answers` envelope alongside `model` and
+// `usage` — the shape buildAnswersFromTypesafe must read.
+const LIVE_TYPESAFE_RESPONSE = {
+  model: "jev-1.13.0",
+  answers: {
+    complexity: {
+      type: "score",
+      score: 0.01,
+      confidence: 0.99,
+      legend: {
+        "0": "0: trivial mechanical edit",
+        "1": "1: moderate multi-file change",
+        "2": "2: hard design or debugging work",
+      },
+      probabilities: { "0": 0.99, "1": 0.01, "2": 0.0 },
+    },
+  },
+  usage: { input_tokens: 326, output_tokens: 19 },
+} as const;
+
 describe("Judge TypeSafe answer building (passthrough, validated)", () => {
-  it("passes through typed answers and drops the score legend", () => {
+  it("reads answers from the live envelope and drops the score legend", () => {
+    const answers = buildAnswersFromTypesafe({ complexity: scoreQuestion }, LIVE_TYPESAFE_RESPONSE);
+    const complexity = asScore(answers.complexity);
+    expect(complexity.score).toBe(0.01);
+    expect(complexity.confidence).toBe(0.99);
+    expect(complexity.probabilities).toEqual({ "0": 0.99, "1": 0.01, "2": 0 });
+    expect("legend" in complexity).toBe(false);
+  });
+
+  it("passes through typed answers inside the envelope", () => {
     const answers = buildAnswersFromTypesafe(
       { complexity: scoreQuestion, which: choiceQuestion },
       {
-        complexity: {
-          type: "score",
-          score: 1.7,
-          legend: ["low", "mid", "high"],
-          probabilities: { "0": 0.1, "1": 0.1, "2": 0.8 },
-          confidence: 0.6,
-        },
-        which: {
-          type: "choice",
-          choice: "a",
-          probabilities: { a: 0.9, b: 0.1 },
-          confidence: 0.8,
+        answers: {
+          complexity: {
+            type: "score",
+            score: 1.7,
+            legend: ["low", "mid", "high"],
+            probabilities: { "0": 0.1, "1": 0.1, "2": 0.8 },
+            confidence: 0.6,
+          },
+          which: {
+            type: "choice",
+            choice: "a",
+            probabilities: { a: 0.9, b: 0.1 },
+            confidence: 0.8,
+          },
         },
       },
     );
     const complexity = asScore(answers.complexity);
     expect(complexity.score).toBe(1.7);
     expect("legend" in complexity).toBe(false);
+    expect(asChoice(answers.which).choice).toBe("a");
+  });
+
+  it("passes through a noul answer inside the envelope", () => {
+    const answers = buildAnswersFromTypesafe(
+      { flag: noulQuestion },
+      { answers: { flag: { type: "noul", noul: 0.8 } } },
+    );
+    expect(asNoul(answers.flag).noul).toBe(0.8);
+  });
+
+  it("throws when the response has no 'answers' object", () => {
+    expect(() =>
+      buildAnswersFromTypesafe(
+        { complexity: scoreQuestion },
+        { model: "jev-1.13.0", usage: { input_tokens: 1, output_tokens: 1 } },
+      ),
+    ).toThrow(/no 'answers' object/);
   });
 
   it("throws when the answer type does not match the question", () => {
     expect(() =>
       buildAnswersFromTypesafe(
         { complexity: scoreQuestion },
-        { complexity: { type: "noul", noul: 0.5 } },
+        { answers: { complexity: { type: "noul", noul: 0.5 } } },
       ),
     ).toThrow();
   });
@@ -207,6 +258,25 @@ describe("Judge.ask", () => {
       expect(asScore(result.answers.complexity).score).toBeCloseTo(1.6, 10);
       expect(result.usage).toEqual({ inputTokens: 123, outputTokens: 4 });
       expect(result.model).toBe("glm-5.3-flash");
+    }),
+  );
+
+  it.effect("resolves answers, model, and usage over the typesafe transport", () =>
+    Effect.gen(function* () {
+      const judge = makeTestJudge(
+        config({ transport: "typesafe", model: "jev-1.13.0" }),
+        jsonResponse(LIVE_TYPESAFE_RESPONSE),
+      );
+      const result = yield* judge.ask({
+        operation: "tier-judgment",
+        state: { message: "add a feature" },
+        questions: { complexity: scoreQuestion },
+      });
+      const complexity = asScore(result.answers.complexity);
+      expect(complexity.score).toBe(0.01);
+      expect(complexity.confidence).toBe(0.99);
+      expect(result.model).toBe("jev-1.13.0");
+      expect(result.usage).toEqual({ inputTokens: 326, outputTokens: 19 });
     }),
   );
 
