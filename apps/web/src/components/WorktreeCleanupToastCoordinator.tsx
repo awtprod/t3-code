@@ -5,6 +5,11 @@ import { useEffect, useRef } from "react";
 import { primaryServerWorktreeCleanupNoticesAtom } from "../state/server";
 import { toastManager } from "./ui/toast";
 import { stackedThreadToast } from "./ui/toastHelpers";
+import {
+  planWorktreeCleanupNoticeToasts,
+  readToastedWorktreeCleanupNoticeKeys,
+  rememberToastedWorktreeCleanupNoticeKeys,
+} from "./WorktreeCleanupToastCoordinator.logic";
 
 const NOTICE_REASON_COPY: Record<WorktreeCleanupNotice["reason"], string> = {
   "local-changes": "has uncommitted changes",
@@ -22,15 +27,15 @@ function describeNotice(notice: WorktreeCleanupNotice): string {
 
 export function WorktreeCleanupToastCoordinator() {
   const notices = useAtomValue(primaryServerWorktreeCleanupNoticesAtom);
-  const seenIdsRef = useRef<Set<string>>(new Set());
+  const toastedKeysRef = useRef<Set<string> | null>(null);
 
   useEffect(() => {
-    for (const notice of notices) {
-      if (seenIdsRef.current.has(notice.id)) {
-        continue;
-      }
-      seenIdsRef.current.add(notice.id);
+    toastedKeysRef.current ??= readToastedWorktreeCleanupNoticeKeys();
+    const { toToast, nextKeys } = planWorktreeCleanupNoticeToasts(notices, toastedKeysRef.current);
+    toastedKeysRef.current = nextKeys;
+    rememberToastedWorktreeCleanupNoticeKeys(nextKeys);
 
+    for (const notice of toToast) {
       toastManager.add(
         stackedThreadToast({
           type: "warning",
@@ -38,13 +43,6 @@ export function WorktreeCleanupToastCoordinator() {
           description: describeNotice(notice),
         }),
       );
-    }
-
-    const currentIds = new Set(notices.map((notice) => notice.id));
-    for (const id of seenIdsRef.current) {
-      if (!currentIds.has(id)) {
-        seenIdsRef.current.delete(id);
-      }
     }
   }, [notices]);
 
