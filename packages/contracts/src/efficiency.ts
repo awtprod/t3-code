@@ -142,7 +142,7 @@ export const EfficiencyTierJudgmentSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(0.6)),
   ),
   continuationThreshold: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
-    Schema.withDecodingDefault(Effect.succeed(0.5)),
+    Schema.withDecodingDefault(Effect.succeed(0.8)),
   ),
 });
 export type EfficiencyTierJudgmentSettings = typeof EfficiencyTierJudgmentSettings.Type;

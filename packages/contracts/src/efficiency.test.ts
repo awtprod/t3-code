@@ -24,7 +24,7 @@ describe("EfficiencySettings judge/tierJudgment/sieve defaults", () => {
     expect(decodeEfficiency({}).tierJudgment).toEqual({
       enabled: false,
       minConfidence: 0.6,
-      continuationThreshold: 0.5,
+      continuationThreshold: 0.8,
     });
   });
 

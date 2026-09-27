@@ -439,7 +439,7 @@ describe("sticky continuation routing", () => {
   const judgingSettings: EfficiencySettings = {
     ...DEFAULT_SERVER_SETTINGS.efficiency,
     enabled: true,
-    tierJudgment: { enabled: true, minConfidence: 0.6, continuationThreshold: 0.5 },
+    tierJudgment: { enabled: true, minConfidence: 0.6, continuationThreshold: 0.8 },
   };
   const priorDecision: EfficiencyDecision = {
     tier: "quality",

@@ -190,8 +190,11 @@ Roughly 43% of Andrew's 1 451 real messages are continuations ("proceed", pasted
 logs, "try again"); judged on their own they look trivial and would drop a hard
 task to economy mid-flight. So: when the thread's latest turn has a routed
 `EfficiencyDecision`, no rule matched, and `continuation >=
-tierJudgment.continuationThreshold` (default 0.5), the turn **reuses that
-decision's tier, candidate, and model selection unchanged**. The new judgment is
+tierJudgment.continuationThreshold` (default 0.8), the turn **reuses that
+decision's tier, candidate, and model selection unchanged**. The default is 0.8
+because a live Jev probe separated the cases cleanly only above it: in-context
+continuations scored 0.88–0.96 and in-context new tasks 0.07–0.08, but
+context-free follow-ups drifted as high as 0.75. The new judgment is
 recorded with `sticky: true`, `applied: false`, this turn's raw
 complexity/continuation answers, and the kind fields inherited from the route.
 If the previous route's provider or model is no longer available, or the thread
