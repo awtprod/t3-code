@@ -81,7 +81,7 @@ describe("Command Center execution targeting", () => {
       installed: true,
       availability: "available",
       status: "ready",
-      models: [{ slug: "gpt-5.6-terra", name: "GPT-5.6 Terra" }],
+      models: [{ slug: "gpt-6-terra", name: "GPT-6 Terra" }],
     } as unknown as ServerProvider;
 
     const project = resolveDesktopWorkerProject({
@@ -95,7 +95,7 @@ describe("Command Center execution targeting", () => {
       resolveDesktopWorkerModelSelection({ project: project!, providers: [provider] }),
     ).toEqual({
       instanceId: "codex",
-      model: "gpt-5.6-terra",
+      model: "gpt-6-terra",
       options: [{ id: "reasoningEffort", value: "high" }],
     });
   });
