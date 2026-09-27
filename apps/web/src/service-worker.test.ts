@@ -111,6 +111,31 @@ describe("prospect service-worker notifications", () => {
     expect(showNotification).not.toHaveBeenCalled();
   });
 
+  it("opens the app root when a test notification is tapped", async () => {
+    const { listeners, showNotification, openWindow } = loadServiceWorker();
+    await dispatchPush(listeners, {
+      title: "Test notification",
+      body: "This is a test.",
+      environmentId: "env-1",
+      threadId: "web-push-test",
+      deepLink: "/threads/env-1/web-push-test",
+    });
+    // The payload still validates and shows: only the tap target changes.
+    expect(showNotification).toHaveBeenCalledWith(
+      "Test notification",
+      expect.objectContaining({ tag: "thread:env-1:web-push-test" }),
+    );
+    let pending: Promise<unknown> | undefined;
+    listeners.get("notificationclick")?.({
+      notification: { close: vi.fn(), data: showNotification.mock.calls[0]?.[1]?.data },
+      waitUntil: (effect: Promise<unknown>) => {
+        pending = effect;
+      },
+    });
+    await pending;
+    expect(openWindow).toHaveBeenCalledWith("https://app.example.test/");
+  });
+
   it("preserves current thread notification routing and tags", async () => {
     const { listeners, showNotification, openWindow } = loadServiceWorker();
     await dispatchPush(listeners, {
