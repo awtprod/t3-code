@@ -35,15 +35,36 @@ const WEB_PUSH_STORAGE_KEY = "t3code:web-push:v1";
 // Valid base64url; applicationServerKeyBytes must be able to atob-decode it.
 const VAPID_KEY = "BExampleKey";
 
+// Mirrors applicationServerKeyBytes() in webPush.ts so a mock subscription can
+// carry the exact bytes the code will compare against.
+function vapidKeyBytes(base64url: string): ArrayBuffer {
+  const base64 = base64url.replaceAll("-", "+").replaceAll("_", "/");
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+}
+
+const MATCHING_KEY = () => vapidKeyBytes(VAPID_KEY);
+const WRONG_KEY = () => new Uint8Array([9, 8, 7, 6, 5]).buffer;
+
 interface MockSubscription {
   endpoint: string;
+  options: { applicationServerKey: ArrayBuffer | null; userVisibleOnly: boolean };
   getKey: (name: string) => ArrayBuffer;
   unsubscribe: ReturnType<typeof vi.fn>;
 }
 
-function makeSubscription(endpoint: string): MockSubscription {
+function makeSubscription(
+  endpoint: string,
+  applicationServerKey: ArrayBuffer | null = null,
+): MockSubscription {
   return {
     endpoint,
+    options: { applicationServerKey, userVisibleOnly: true },
     getKey: (name: string) =>
       new Uint8Array(name === "p256dh" ? [1, 2, 3, 4] : [5, 6, 7, 8]).buffer,
     unsubscribe: vi.fn(() => Promise.resolve(true)),
@@ -236,11 +257,44 @@ describe("local mode enable", () => {
     expect(result.ok).toBe(false);
     expect(readWebPushRegistration()).toBeNull();
   });
+
+  it("reuses an existing subscription whose key matches the server VAPID key", async () => {
+    const existing = makeSubscription("https://push.example/existing", MATCHING_KEY());
+    const { subscribe } = installBrowser({ existingSubscription: existing });
+    const calls = installPrimaryClient();
+
+    const result = await enableWebPushNotifications();
+
+    expect(result).toEqual({ ok: true });
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(existing.unsubscribe).not.toHaveBeenCalled();
+    expect((calls.put[0] as Record<string, unknown>).endpoint).toBe(
+      "https://push.example/existing",
+    );
+  });
+
+  it("drops a stale subscription whose key no longer matches and subscribes fresh", async () => {
+    const existing = makeSubscription("https://push.example/stale", WRONG_KEY());
+    const fresh = makeSubscription("https://push.example/fresh", MATCHING_KEY());
+    const { subscribe } = installBrowser({
+      existingSubscription: existing,
+      newSubscription: fresh,
+    });
+    const calls = installPrimaryClient();
+
+    const result = await enableWebPushNotifications();
+
+    expect(result).toEqual({ ok: true });
+    expect(existing.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    expect((calls.put[0] as Record<string, unknown>).endpoint).toBe("https://push.example/fresh");
+    expect(readWebPushRegistration()?.endpoint).toBe("https://push.example/fresh");
+  });
 });
 
 describe("local mode disable", () => {
   it("unsubscribes, DELETEs by deviceId, and clears the stored record", async () => {
-    const existing = makeSubscription("https://push.example/existing");
+    const existing = makeSubscription("https://push.example/existing", MATCHING_KEY());
     installBrowser({ existingSubscription: existing, newSubscription: existing });
     const calls = installPrimaryClient();
 
@@ -263,7 +317,7 @@ describe("local mode reconcile", () => {
     const seeded = readWebPushRegistration();
     expect(seeded?.endpoint).toBe("https://push.example/new");
 
-    const rotated = makeSubscription("https://push.example/rotated");
+    const rotated = makeSubscription("https://push.example/rotated", MATCHING_KEY());
     installBrowser({ existingSubscription: rotated });
     const calls = installPrimaryClient();
 
@@ -273,6 +327,29 @@ describe("local mode reconcile", () => {
     const payload = calls.put[0] as Record<string, unknown>;
     expect(payload.endpoint).toBe("https://push.example/rotated");
     expect(payload.deviceId).toBe(seeded?.deviceId);
+  });
+
+  it("re-registers when the live subscription's key no longer matches", async () => {
+    // Seed a registration at a stable endpoint with a matching key.
+    const seededSub = makeSubscription("https://push.example/seed", MATCHING_KEY());
+    installBrowser({ existingSubscription: seededSub, newSubscription: seededSub });
+    installPrimaryClient();
+    await enableWebPushNotifications();
+    expect(readWebPushRegistration()?.endpoint).toBe("https://push.example/seed");
+
+    // Same endpoint, but the live subscription now carries a stale key: the
+    // endpoint-only check would miss this, leaving the browser undeliverable.
+    const stale = makeSubscription("https://push.example/seed", WRONG_KEY());
+    const fresh = makeSubscription("https://push.example/fresh", MATCHING_KEY());
+    const { subscribe } = installBrowser({ existingSubscription: stale, newSubscription: fresh });
+    const calls = installPrimaryClient();
+
+    await reconcileWebPushRegistration();
+
+    expect(stale.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    expect(calls.put).toHaveLength(1);
+    expect((calls.put[0] as Record<string, unknown>).endpoint).toBe("https://push.example/fresh");
   });
 
   it("does nothing when there is no stored registration", async () => {

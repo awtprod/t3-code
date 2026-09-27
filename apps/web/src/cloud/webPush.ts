@@ -180,6 +180,44 @@ async function acquireSubscription(vapidPublicKey: string): Promise<PushSubscrip
   );
 }
 
+// Whether a live subscription was created with this VAPID key. A subscription
+// bound to a different applicationServerKey (server key regenerated, or a
+// leftover relay-mode subscription) is silently undeliverable: the push service
+// rejects every send whose signing key does not match the subscription's key.
+function subscriptionMatchesVapidKey(
+  subscription: PushSubscription,
+  vapidPublicKey: string,
+): boolean {
+  const existingKey = subscription.options.applicationServerKey;
+  if (!existingKey) {
+    return false;
+  }
+  const expected = applicationServerKeyBytes(vapidPublicKey);
+  const actual = new Uint8Array(existingKey);
+  if (actual.length !== expected.length) {
+    return false;
+  }
+  return actual.every((byte, index) => byte === expected[index]);
+}
+
+// Local mode: unlike the relay, the server owns the VAPID key, so a stale
+// subscription bound to a different key must be dropped and recreated — reusing
+// it would leave the browser subscribed but unreachable.
+async function acquireLocalSubscription(vapidPublicKey: string): Promise<PushSubscription> {
+  const registration = await navigator.serviceWorker.ready;
+  const existing = await registration.pushManager.getSubscription();
+  if (existing) {
+    if (subscriptionMatchesVapidKey(existing, vapidPublicKey)) {
+      return existing;
+    }
+    await existing.unsubscribe();
+  }
+  return registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: applicationServerKeyBytes(vapidPublicKey),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Relay mode (T3 Connect): registers the subscription with the cloud relay.
 // Behaviourally unchanged from before local mode existed.
@@ -327,9 +365,29 @@ async function enableLocalWebPush(events: WebPushEventPreferences): Promise<WebP
     return { ok: false, reason: "not-configured" };
   }
 
-  const subscription = await acquireSubscription(config.vapidPublicKey);
+  const subscription = await acquireLocalSubscription(config.vapidPublicKey);
   const deviceId = readWebPushRegistration()?.deviceId ?? `web-${randomUUID()}`;
   return await putLocalSubscription(subscription, deviceId, events);
+}
+
+// Local-mode reconcile fetches the server key so it can catch not just endpoint
+// rotation but a key mismatch (which leaves the same endpoint but an
+// undeliverable subscription); `acquireLocalSubscription` recreates the sub when
+// the key changed, then we re-register whenever the live endpoint drifted.
+async function reconcileLocalWebPush(record: WebPushRegistrationRecord): Promise<void> {
+  let config: WebPushConfigResult;
+  try {
+    config = await fetchLocalWebPushConfig();
+  } catch {
+    return;
+  }
+  if (!config.configured || !config.vapidPublicKey) {
+    return;
+  }
+  const subscription = await acquireLocalSubscription(config.vapidPublicKey);
+  if (subscription.endpoint !== record.endpoint) {
+    await putLocalSubscription(subscription, record.deviceId, record.preferences);
+  }
 }
 
 async function disableLocalWebPush(record: WebPushRegistrationRecord): Promise<void> {
@@ -448,6 +506,10 @@ export async function reconcileWebPushRegistration(): Promise<void> {
     if (Notification.permission !== "granted") {
       return;
     }
+    if (isLocalWebPushMode()) {
+      await reconcileLocalWebPush(record);
+      return;
+    }
     const registration = await navigator.serviceWorker.ready;
     const subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
@@ -456,11 +518,7 @@ export async function reconcileWebPushRegistration(): Promise<void> {
       return;
     }
     if (subscription.endpoint !== record.endpoint) {
-      if (isLocalWebPushMode()) {
-        await putLocalSubscription(subscription, record.deviceId, record.preferences);
-      } else {
-        await registerWithRelay(subscription, record.deviceId, record.preferences);
-      }
+      await registerWithRelay(subscription, record.deviceId, record.preferences);
     }
   } catch {
     // Reconciliation is opportunistic; the next launch retries.
