@@ -198,5 +198,25 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       scheduler: commandScheduler,
       concurrency: { mode: "parallel" },
     }),
+    // Windows media picker: read-only browse of the configured Windows host.
+    // "latest" per environment so fast folder clicks drop stale listings.
+    windowsMediaRoots: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:windows-media-roots",
+      tag: COMMAND_CENTER_WS_METHODS.windowsMediaRoots,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId }) => JSON.stringify([environmentId, "roots"]),
+      },
+    }),
+    windowsMediaList: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:windows-media-list",
+      tag: COMMAND_CENTER_WS_METHODS.windowsMediaList,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId }) => JSON.stringify([environmentId, "list"]),
+      },
+    }),
   };
 }
