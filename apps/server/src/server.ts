@@ -24,6 +24,11 @@ import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
+import { webPushHttpApiLayer } from "./webPush/http.ts";
+import * as WebPushConfig from "./webPush/WebPushConfig.ts";
+import * as WebPushSubscriptions from "./webPush/WebPushSubscriptions.ts";
+import * as WebPushSender from "./webPush/WebPushSender.ts";
+import { layer as localWebPushNotifierLayer } from "./webPush/LocalWebPushNotifier.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -353,8 +358,20 @@ const PlatformServicesLive = Layer.unwrap(
   }),
 );
 
+// Web Push services (VAPID config, subscription store, sender) shared by the
+// notifier reactor and the HTTP route group. ServerSecretStore holds the VAPID
+// key pair; the sender reads the resolved config. SqlClient (subscription store)
+// and the secret store's own deps are satisfied by the runtime context.
+const WebPushConfigLayerLive = WebPushConfig.layer.pipe(Layer.provide(ServerSecretStore.layer));
+export const WebPushServicesLive = Layer.mergeAll(
+  WebPushConfigLayerLive,
+  WebPushSubscriptions.layer,
+  WebPushSender.layer.pipe(Layer.provide(WebPushConfigLayerLive)),
+);
+
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
+  Layer.provideMerge(localWebPushNotifierLayer),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
@@ -671,7 +688,12 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
       Layer.provideMerge(TerminalLayerLive),
     ),
   ),
-  Layer.provideMerge(PersistenceLayerLive),
+  // Web Push config/store/sender, shared by the notifier reactor (above) and the
+  // route group. Kept above PersistenceLayerLive in the pipe so the later
+  // PersistenceLayerLive satisfies the subscription store's SqlClient requirement;
+  // nested so both stay a single pipe step and PersistenceLayerLive is still
+  // exposed to the rest of the runtime.
+  Layer.provideMerge(WebPushServicesLive.pipe(Layer.provideMerge(PersistenceLayerLive))),
   // Both read a user-owned file out of the state directory and stream changes
   // to clients; neither depends on the other.
   Layer.provideMerge(Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer)),
@@ -752,6 +774,7 @@ export const makeRoutesLayer = Layer.mergeAll(
       Layer.provide(connectHttpApiLayer),
       Layer.provide(orchestrationHttpApiLayer),
       Layer.provide(pullRequestHttpApiLayer),
+      Layer.provide(webPushHttpApiLayer),
       Layer.provide(serverEnvironmentHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),
     ),

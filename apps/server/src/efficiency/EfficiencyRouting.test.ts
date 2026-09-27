@@ -48,14 +48,20 @@ const codex = {
   checkedAt: "2026-08-03T00:00:00.000Z",
   models: [
     {
-      slug: "gpt-5.6-terra",
+      slug: "gpt-6-terra",
       name: "Terra",
       isCustom: false,
       capabilities: null,
     },
     {
-      slug: "gpt-5.6-sol",
+      slug: "gpt-6-sol",
       name: "Sol",
+      isCustom: false,
+      capabilities: null,
+    },
+    {
+      slug: "gpt-5.6-sol",
+      name: "Sol 5.6",
       isCustom: false,
       capabilities: null,
     },
@@ -84,7 +90,7 @@ describe("interactive efficiency routing", () => {
     expect(first).toEqual(second);
     expect(first.command.modelSelection).toEqual({
       instanceId: "codex",
-      model: "gpt-5.6-terra",
+      model: "gpt-6-terra",
       options: [{ id: "reasoningEffort", value: "low" }],
     });
     expect(first.decision?.source).toBe("tier-policy");
@@ -136,7 +142,7 @@ describe("interactive efficiency routing", () => {
 
     expect(result.command.modelSelection).toEqual({
       instanceId: "codex",
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       options: [{ id: "reasoningEffort", value: "high" }],
     });
     expect(result.decision?.tier).toBe("quality");
@@ -160,7 +166,7 @@ describe("confidence-gated tier judgment", () => {
     });
     expect(result.command.modelSelection).toEqual({
       instanceId: "codex",
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       options: [{ id: "reasoningEffort", value: "high" }],
     });
     expect(result.decision?.tier).toBe("quality");

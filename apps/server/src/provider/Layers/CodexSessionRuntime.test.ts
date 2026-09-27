@@ -19,6 +19,7 @@ import {
   buildCommandCenterDarwinIsolationProbeScript,
   buildCommandCenterIsolationProbeScript,
   buildCommandCenterWindowsIsolationProbeScript,
+  buildThreadStartParams,
   buildTurnStartParams,
   describeMcpElicitation,
   ensureCommandCenterWindowsSandbox,
@@ -163,6 +164,20 @@ function makeThreadOpenResponse(
     },
   } as unknown as CodexRpc.ClientRequestResponsesByMethod["thread/start"];
 }
+
+describe("buildThreadStartParams", () => {
+  const base = { cwd: "/repo", runtimeMode: "full-access", serviceTier: undefined } as const;
+
+  it("points an Astra thread's inheriting subagents at the worker model", () => {
+    const params = buildThreadStartParams({ ...base, model: "gpt-6-astra" });
+    NodeAssert.deepEqual(params.config, { "agents.default_subagent_model": "gpt-6-sol" });
+  });
+
+  it("leaves non-manager threads without a subagent config override", () => {
+    NodeAssert.equal(buildThreadStartParams({ ...base, model: "gpt-6-terra" }).config, undefined);
+    NodeAssert.equal(buildThreadStartParams({ ...base, model: undefined }).config, undefined);
+  });
+});
 
 describe("buildTurnStartParams", () => {
   it("keeps invalid turn values only in the schema cause", () => {

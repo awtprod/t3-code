@@ -11,6 +11,7 @@ import {
   type HookCallback,
   type HookCallbackMatcher,
   type PostToolUseHookInput,
+  type PreToolUseHookInput,
   query,
   type Options as ClaudeQueryOptions,
   type PermissionMode,
@@ -1101,18 +1102,21 @@ function trimmedString(value: unknown): string | undefined {
 /**
  * Names the subagent-spawning tool has used across SDK versions. Older SDKs
  * called it `Task`; `@anthropic-ai/claude-agent-sdk` >= 0.3.x renamed it to
- * `Agent`. The guardrail below must match every name, or a manager-tier
- * coordinator can fan out manager-tier subagents through the unrecognized name.
+ * `Agent`. The guardrail below must match every name, or a subagent can land on
+ * a manager-tier model through the unrecognized name.
  */
 const SUBAGENT_SPAWN_TOOL_NAMES: ReadonlySet<string> = new Set(["Agent", "Task"]);
 
+/** PreToolUse matcher for the tools the model guardrail rewrites. */
+const MODEL_GUARDRAIL_HOOK_MATCHER = [...SUBAGENT_SPAWN_TOOL_NAMES, "Bash"].join("|");
+
 /**
  * Manager/worker guardrail for the subagent-spawning tool (`Agent`, formerly
- * `Task`). When the session (root) model is a manager-tier model (Fable), a
- * subagent that would inherit that model (no explicit `model`) or explicitly
- * request a manager model is downgraded to the cheaper worker fallback; an
- * explicit non-manager worker model is respected. Other tools and non-manager
- * sessions pass through unchanged. Pure, so it is unit-testable without the SDK.
+ * `Task`). A subagent that would run on a manager-tier model (Fable) — either
+ * by inheriting the session model (no explicit `model`) or by requesting one —
+ * is downgraded to the cheaper worker fallback, whatever the session model is.
+ * An explicit non-manager model is respected. Other tools pass through
+ * unchanged. Pure, so it is unit-testable without the SDK.
  */
 export function maybeDowngradeSubagentModel(
   toolName: Parameters<CanUseTool>[0],
@@ -1120,42 +1124,31 @@ export function maybeDowngradeSubagentModel(
   sessionModel: string | undefined,
   catalog: ClaudeModelCatalog,
 ): Parameters<CanUseTool>[1] {
-  if (!SUBAGENT_SPAWN_TOOL_NAMES.has(toolName) || !sessionModel) {
-    return toolInput;
-  }
-  const sessionSlug = resolveClaudeModelSlug(catalog, sessionModel);
-  if (!isClaudeManagerModelSlug(sessionSlug)) {
+  if (!SUBAGENT_SPAWN_TOOL_NAMES.has(toolName)) {
     return toolInput;
   }
   const requested = trimmedString((toolInput as { readonly model?: unknown }).model);
-  const requestedSlug = requested ? resolveClaudeModelSlug(catalog, requested) : undefined;
-  // No explicit model → the subagent would inherit the manager model; or the
-  // request is itself a manager model. Either way, force the worker fallback.
-  if (!requestedSlug || isClaudeManagerModelSlug(requestedSlug)) {
-    return { ...toolInput, model: CLAUDE_WORKER_FALLBACK_MODEL };
+  // No explicit model → the subagent inherits the session model.
+  const effective = requested ?? sessionModel;
+  if (!effective || !isClaudeManagerModelSlug(resolveClaudeModelSlug(catalog, effective))) {
+    return toolInput;
   }
-  return toolInput;
+  return { ...toolInput, model: CLAUDE_WORKER_FALLBACK_MODEL };
 }
 
 /**
  * Manager/worker guardrail for the `Bash` tool's headless worker-dispatch path.
- * The fleet's managers spawn workers as detached `claude -p --model …` processes
- * (not `Task` subagents), which `maybeDowngradeSubagentModel` cannot see. When the
- * session (root) model is a manager-tier model (Fable), any `claude … --model
- * claude-fable*` in the command is rewritten to the worker fallback. Non-`Bash`
- * tools and non-manager sessions pass through unchanged. Pure/unit-testable.
+ * Workers can also be spawned as detached `claude -p --model …` / `codex exec
+ * -m …` processes, which `maybeDowngradeSubagentModel` cannot see. Any
+ * manager-tier model (Fable, Astra) in such a command is rewritten to the
+ * matching worker fallback. Non-`Bash` tools pass through unchanged.
+ * Pure/unit-testable.
  */
 export function maybeDowngradeBashWorkerModel(
   toolName: Parameters<CanUseTool>[0],
   toolInput: Parameters<CanUseTool>[1],
-  sessionModel: string | undefined,
-  catalog: ClaudeModelCatalog,
 ): Parameters<CanUseTool>[1] {
-  if (toolName !== "Bash" || !sessionModel) {
-    return toolInput;
-  }
-  const sessionSlug = resolveClaudeModelSlug(catalog, sessionModel);
-  if (!isClaudeManagerModelSlug(sessionSlug)) {
+  if (toolName !== "Bash") {
     return toolInput;
   }
   const command = trimmedString((toolInput as { readonly command?: unknown }).command);
@@ -4284,6 +4277,63 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return { behavior: "completed" as const, result: action };
       });
 
+      // Guardrail: no subagent may run on a manager-tier model. Downgrade an
+      // inheriting or manager `Agent` spawn, and rewrite manager models in a
+      // `Bash` worker-dispatch command, to the cheaper worker fallback. Each
+      // helper is a no-op for the other's tool. Enforced from a PreToolUse hook
+      // because the SDK never consults canUseTool for auto-allowed tools
+      // (`Agent` is always auto-allowed, in every permission mode).
+      const applyModelGuardrail = (
+        context: ClaudeSessionContext,
+        toolName: Parameters<CanUseTool>[0],
+        toolInput: Parameters<CanUseTool>[1],
+        toolUseId: string | undefined,
+      ): Parameters<CanUseTool>[1] => {
+        // The live session model tracks mid-thread model switches; the
+        // start-time selection is only a fallback.
+        const sessionModel = context.session.model ?? modelSelection?.model ?? undefined;
+        const effectiveInput = maybeDowngradeBashWorkerModel(
+          toolName,
+          maybeDowngradeSubagentModel(toolName, toolInput, sessionModel, modelCatalog),
+        );
+
+        // When the spawn guardrail downgraded a subagent's model, seed the
+        // pending-model map keyed by this tool_use_id so the `task.started`
+        // activity reports the worker model rather than momentarily inheriting
+        // the session model (which the card then visibly "switches" off of once
+        // the authoritative subagent snapshot arrives). The snapshot still
+        // refines this in place; we only fill the pre-snapshot gap.
+        if (SUBAGENT_SPAWN_TOOL_NAMES.has(toolName) && effectiveInput !== toolInput && toolUseId) {
+          const downgradedModel = trimmedString(
+            (effectiveInput as { readonly model?: unknown }).model,
+          );
+          if (downgradedModel) {
+            rememberPendingTaskModel(context.pendingTaskModels, toolUseId, downgradedModel);
+          }
+        }
+        return effectiveInput;
+      };
+
+      const preToolUseModelGuardrailHook: HookCallback = async (hookInput) => {
+        if (hookInput.hook_event_name !== "PreToolUse") return {};
+        const pre = hookInput as PreToolUseHookInput;
+        const context = await runPromise(Ref.get(contextRef));
+        if (!context) return {};
+        const rawInput = pre.tool_input;
+        if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) {
+          return {};
+        }
+        const toolInput = rawInput as Parameters<CanUseTool>[1];
+        const updatedInput = applyModelGuardrail(
+          context,
+          pre.tool_name,
+          toolInput,
+          pre.tool_use_id,
+        );
+        if (updatedInput === toolInput) return {};
+        return { hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput } };
+      };
+
       const canUseToolEffect = Effect.fn("canUseTool")(function* (
         toolName: Parameters<CanUseTool>[0],
         toolInput: Parameters<CanUseTool>[1],
@@ -4297,39 +4347,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           } satisfies PermissionResult;
         }
 
-        // Guardrail: a manager-tier session (Fable) must not spawn manager-tier
-        // subagents. Downgrade an inheriting or manager `Task` model, and rewrite
-        // any `claude … --model claude-fable*` in a `Bash` worker-dispatch command,
-        // to the cheaper worker fallback. Each helper is a no-op for the other's
-        // tool. Applied across every runtime mode below, so both the auto-allow and
-        // the approval paths carry the rewritten input.
-        const sessionModelForGuardrail =
-          modelSelection?.model ?? context.session.model ?? undefined;
-        const effectiveInput = maybeDowngradeBashWorkerModel(
+        // The PreToolUse guardrail hook has already rewritten the input; this is
+        // idempotent defense in depth for the tools that do reach canUseTool.
+        const effectiveInput = applyModelGuardrail(
+          context,
           toolName,
-          maybeDowngradeSubagentModel(toolName, toolInput, sessionModelForGuardrail, modelCatalog),
-          sessionModelForGuardrail,
-          modelCatalog,
+          toolInput,
+          callbackOptions.toolUseID,
         );
-
-        // When the Task guardrail downgraded a subagent's model, seed the
-        // pending-model map keyed by this tool_use_id so the `task.started`
-        // activity reports the worker model rather than momentarily inheriting
-        // the manager session model (which the card then visibly "switches" off
-        // of once the authoritative subagent snapshot arrives). The snapshot
-        // still refines this in place; we only fill the pre-snapshot gap.
-        if (toolName === "Task" && effectiveInput !== toolInput && callbackOptions.toolUseID) {
-          const downgradedModel = trimmedString(
-            (effectiveInput as { readonly model?: unknown }).model,
-          );
-          if (downgradedModel) {
-            rememberPendingTaskModel(
-              context.pendingTaskModels,
-              callbackOptions.toolUseID,
-              downgradedModel,
-            );
-          }
-        }
 
         // Handle AskUserQuestion: surface clarifying questions to the
         // user via the user-input runtime event channel, regardless of
@@ -4610,21 +4635,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         includePartialMessages: true,
         canUseTool,
         onUserDialog,
-        // Register the tool-result sieve PostToolUse hook only when the driver
-        // supplied a callback (sieve mode !== off). With the sieve off, options
-        // stay byte-for-byte identical to today (no `hooks` key).
-        ...(toolResultSieveCallback
-          ? {
-              hooks: {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: MODEL_GUARDRAIL_HOOK_MATCHER,
+              hooks: [preToolUseModelGuardrailHook],
+            } satisfies HookCallbackMatcher,
+          ],
+          // Register the tool-result sieve PostToolUse hook only when the driver
+          // supplied a callback (sieve mode !== off).
+          ...(toolResultSieveCallback
+            ? {
                 PostToolUse: [
                   {
                     matcher: SIEVE_HOOK_MATCHER_TOOLS.join("|"),
                     hooks: [postToolUseSieveHook],
                   } satisfies HookCallbackMatcher,
                 ],
-              },
-            }
-          : {}),
+              }
+            : {}),
+        },
         supportedDialogKinds: ["resume_return"],
         env: claudeEnvironment,
         additionalDirectories,

@@ -230,21 +230,20 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
 
 // ── Manager / worker model policy ─────────────────────────────────────
 //
-// Expensive "manager"-tier models (Fable on the Claude provider) are meant to
-// orchestrate and delegate, not to be spawned as subagents. When a manager
-// model would spawn a subagent that inherits or explicitly requests a
-// manager-tier model, the subagent is forced onto a cheaper worker model.
-// Enforced by the `Task`-tool guardrail in ClaudeAdapter's `canUseTool`.
+// Expensive "manager"-tier models (Fable on the Claude provider, Astra on the
+// Codex provider) are meant to orchestrate and delegate, not to be spawned as
+// subagents. Any subagent that would inherit or explicitly request a
+// manager-tier model is forced onto a cheaper worker model, whatever the
+// parent model is. Enforced by ClaudeAdapter's PreToolUse guardrail hook
+// (`Agent` spawns and `Bash` worker dispatch) and by the Codex thread config
+// (`agents.default_subagent_model`).
 
 /**
  * Canonical Claude worker model that manager-tier subagents are downgraded to.
- * Opus 4.8 is the fleet's designated delegated-work model and is cheaper than
- * Opus 5. It is `legacy`-classified in the catalog (so it cannot be chosen from
- * the Agent tool's model picker) but runs fine when injected as a subagent
- * model. Flip this to `claude-opus-5` if a future SDK rejects legacy models on
- * spawn.
+ * Opus 5.5 is the fleet's designated delegated-work model (the current Opus in
+ * the catalog; requires claude-code >= 2.1.280).
  */
-export const CLAUDE_WORKER_FALLBACK_MODEL = "claude-opus-4-8";
+export const CLAUDE_WORKER_FALLBACK_MODEL = "claude-opus-5-5";
 
 /**
  * True when `slug` is a Claude "manager"-tier model that must not be spawned as
@@ -257,33 +256,56 @@ export function isClaudeManagerModelSlug(slug: string | null | undefined): boole
 }
 
 /**
- * Rewrite any `--model claude-fable*` flag in a shell command that launches the
- * `claude` CLI so it targets the worker model instead. Covers the headless
- * `claude -p --model claude-fable-5-1` worker-dispatch path, which the Task-tool
- * guardrail cannot see (those run as detached OS processes, not subagents).
+ * Codex worker model that Astra-rooted threads spawn subagents on instead of
+ * inheriting Astra.
+ */
+export const CODEX_WORKER_FALLBACK_MODEL = "gpt-6-sol";
+
+/**
+ * True when `slug` is a Codex "manager"-tier model (the Astra family, e.g.
+ * `gpt-6-astra`) that subagents must not inherit or request.
+ */
+export function isCodexManagerModelSlug(slug: string | null | undefined): boolean {
+  return typeof slug === "string" && /(?:^|-)astra(?:$|-)/.test(slug.trim().toLowerCase());
+}
+
+/**
+ * Rewrite manager-tier model flags in a shell command that launches a headless
+ * worker CLI: `claude … --model claude-fable*` (or the bare `fable` alias)
+ * becomes the Claude worker model, and `codex … --model/-m *astra*` (or
+ * `-c model=*astra*`) becomes the Codex worker model. Covers the detached
+ * worker-dispatch path, which the `Agent`-tool guardrail cannot see.
  *
  * Conservative and regex-based, not a shell parser: it rewrites the model token
  * (versioned slug, optional `[1m]`-style context suffix, quoted or `=` form) only
- * when the command also invokes `claude`. This fails safe toward the cheaper
- * model; the only false positive is rewriting a literal `--model claude-fable…`
+ * when the command also invokes the matching CLI. This fails safe toward the
+ * cheaper model; the only false positive is rewriting a literal `--model …`
  * mention inside prompt prose, which is harmless. Returns the input string
  * unchanged (same reference) when there is nothing to rewrite.
  */
 export function rewriteManagerModelInCommand(command: string): string {
-  // Require an actual `claude` executable invocation (at a command position,
-  // followed by whitespace) — not merely the substring "claude" that every
-  // `claude-*` model slug contains — so a bare mention like `echo claude-fable`
-  // is left alone.
-  if (typeof command !== "string" || !/(?:^|[\s;&|(/])claude(?=\s|$)/.test(command)) {
+  if (typeof command !== "string") {
     return command;
   }
-  const rewritten = command.replace(
-    // Model token is limited to slug characters (letters, digits, `.`, `-`) plus
-    // an optional `[…]` context-window suffix, so it stops at shell separators
-    // like `;` `&` `|` and whitespace rather than swallowing them.
-    /(--model[=\s]+["']?)claude-fable[\w.\-[\]]*/gi,
-    (_match, prefix: string) => `${prefix}${CLAUDE_WORKER_FALLBACK_MODEL}`,
-  );
+  let rewritten = command;
+  // Require an actual executable invocation (at a command position, followed by
+  // whitespace) — not merely the substring "claude" that every `claude-*` model
+  // slug contains — so a bare mention like `echo claude-fable` is left alone.
+  if (/(?:^|[\s;&|(/])claude(?=\s|$)/.test(rewritten)) {
+    rewritten = rewritten.replace(
+      // Model token is limited to slug characters (letters, digits, `.`, `-`) plus
+      // an optional `[…]` context-window suffix, so it stops at shell separators
+      // like `;` `&` `|` and whitespace rather than swallowing them.
+      /(--model[=\s]+["']?)(?:claude-fable[\w.\-[\]]*|fable(?![\w.-]))/gi,
+      (_match, prefix: string) => `${prefix}${CLAUDE_WORKER_FALLBACK_MODEL}`,
+    );
+  }
+  if (/(?:^|[\s;&|(/])codex(?=\s|$)/.test(rewritten)) {
+    rewritten = rewritten.replace(
+      /((?<![\w-])(?:--model|-m)[=\s]+["']?|(?:^|\s)(?:-c|--config)[=\s]+["']?model\s*=\s*["']?)[\w.-]*astra[\w.-]*/gi,
+      (_match, prefix: string) => `${prefix}${CODEX_WORKER_FALLBACK_MODEL}`,
+    );
+  }
   return rewritten === command ? command : rewritten;
 }
 

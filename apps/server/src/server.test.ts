@@ -106,7 +106,7 @@ const collectQueueUntil = Effect.fn("TransferBudget.collectQueueUntil")(function
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as ServerConfig from "./config.ts";
-import { HTTP_ROUTER_CONFIG, makeRoutesLayer } from "./server.ts";
+import { HTTP_ROUTER_CONFIG, makeRoutesLayer, WebPushServicesLive } from "./server.ts";
 import {
   isThreadDetailEvent,
   resolveAvailableEditorsForConfig,
@@ -764,7 +764,10 @@ const buildAppUnderTest = (options?: {
     );
 
     const servedRoutesLayer = HttpRouter.serve(
-      makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
+      makeRoutesLayer.pipe(
+        Layer.provide(serviceLauncherClientLayer),
+        Layer.provide(WebPushServicesLive.pipe(Layer.provide(SqlitePersistenceMemory))),
+      ),
       {
         disableListenLog: true,
         disableLogger: true,
@@ -1783,6 +1786,62 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       // Desktop, so port-scoped: instances scan for a free port and share
       // 127.0.0.1, and cookies are not scoped by port.
       assert.isTrue(body.auth.sessionCookieName.startsWith("t3_session_"));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects unauthenticated web push config requests", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const url = yield* getHttpServerUrl("/api/web-push/config");
+      const response = yield* fetchEffect(url);
+
+      assert.equal(response.status, 401);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("reports web push not configured for an authenticated client without a subject", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const url = yield* getHttpServerUrl("/api/web-push/config");
+      const response = yield* fetchEffect(url, { headers: { cookie } });
+      const body = yield* responseJsonEffect<{
+        readonly configured: boolean;
+        readonly vapidPublicKey: string | null;
+      }>(response);
+
+      assert.equal(response.status, 200);
+      assert.equal(body.configured, false);
+      assert.equal(body.vapidPublicKey, null);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects a web push subscription with a disallowed endpoint host", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const url = yield* getHttpServerUrl("/api/web-push/subscription");
+      const response = yield* fetchEffect(url, {
+        method: "PUT",
+        headers: { cookie, "content-type": "application/json" },
+        body: jsonRequestBody({
+          deviceId: "device-a",
+          endpoint: "https://fcm.googleapis.com.evil.com/x",
+          p256dh: "p",
+          auth: "a",
+          preferences: {
+            notifyOnApproval: true,
+            notifyOnInput: true,
+            notifyOnCompletion: true,
+            notifyOnFailure: true,
+          },
+        }),
+      });
+
+      assert.equal(response.status, 400);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

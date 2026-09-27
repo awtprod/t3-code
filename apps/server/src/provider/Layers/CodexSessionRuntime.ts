@@ -3,8 +3,10 @@ import * as NodeNet from "node:net";
 
 import {
   ApprovalRequestId,
+  CODEX_WORKER_FALLBACK_MODEL,
   DEFAULT_MODEL,
   EventId,
+  isCodexManagerModelSlug,
   ProviderDriverKind,
   ProviderItemId,
   type ProviderInstanceId,
@@ -693,6 +695,12 @@ export function buildThreadStartParams(input: {
       : { sandbox: config.sandbox, approvalsReviewer: config.approvalsReviewer }),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    // Manager/worker guardrail: Codex subagents inherit the parent model by
+    // default, so an Astra-rooted thread would fan out Astra workers. Point
+    // inheriting spawns at the worker model instead (resume reuses these params).
+    ...(isCodexManagerModelSlug(input.model)
+      ? { config: { "agents.default_subagent_model": CODEX_WORKER_FALLBACK_MODEL } }
+      : {}),
   };
 }
 
