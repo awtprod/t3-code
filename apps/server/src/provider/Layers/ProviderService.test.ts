@@ -1583,6 +1583,35 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.include(fileOnlyInput.input ?? "", '[Attached file "report.pdf" is saved at: ');
       assert.deepEqual(fileOnlyInput.attachments, [fileAttachment]);
 
+      // A windows-file reference has no local bytes: the agent gets the
+      // Windows path, its host, and the exact scp pull command.
+      const windowsFile = {
+        type: "windows-file" as const,
+        id: "wf-12345678-1234-1234-1234-123456789abc",
+        name: "Timeline 1.mov",
+        mimeType: "video/quicktime",
+        sizeBytes: 372874603,
+        host: "jvl3rp2",
+        path: "C:\\Timeline 1.mov",
+      };
+      routing.codex.sendTurn.mockClear();
+      yield* provider.sendTurn({
+        threadId: session.threadId,
+        input: "cut a short from this",
+        attachments: [windowsFile],
+      });
+      const windowsInput = routing.codex.sendTurn.mock.calls[0]?.[0] as ProviderSendTurnInput;
+      assert.include(
+        windowsInput.input ?? "",
+        '[Referenced Windows file "Timeline 1.mov" lives on host jvl3rp2 at: C:\\Timeline 1.mov',
+      );
+      assert.include(
+        windowsInput.input ?? "",
+        "scp -F '/var/lib/command-center/providers/claude/awtprod/.ssh/config' 'jvl3rp2:C:/Timeline 1.mov' <dest>]",
+      );
+      assert.notInclude(windowsInput.input ?? "", "is saved at");
+      assert.deepEqual(windowsInput.attachments, [windowsFile]);
+
       yield* provider.stopSession({ threadId: session.threadId });
     }),
   );

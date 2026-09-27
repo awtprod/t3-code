@@ -262,6 +262,10 @@ import {
   CommandCenterSpacesSyncInput,
   CommandCenterSpacesSyncResult,
   GoogleReadRequest,
+  CommandCenterWindowsMediaListInput,
+  CommandCenterWindowsMediaListResult,
+  CommandCenterWindowsMediaRootsInput,
+  CommandCenterWindowsMediaRootsResult,
   GoogleReadResult,
 } from "./commandCenter.ts";
 import {
@@ -649,6 +653,24 @@ export const WsCommandCenterGoogleReadRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.g
   success: GoogleReadResult,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
+
+export const WsCommandCenterWindowsMediaListRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.windowsMediaList,
+  {
+    payload: CommandCenterWindowsMediaListInput,
+    success: CommandCenterWindowsMediaListResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterWindowsMediaRootsRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.windowsMediaRoots,
+  {
+    payload: CommandCenterWindowsMediaRootsInput,
+    success: CommandCenterWindowsMediaRootsResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
@@ -1390,6 +1412,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterAutomationRunGetRpc,
   WsCommandCenterAutomationWebhookAdmitRpc,
   WsCommandCenterGoogleReadRpc,
+  WsCommandCenterWindowsMediaListRpc,
+  WsCommandCenterWindowsMediaRootsRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

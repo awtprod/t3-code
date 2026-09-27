@@ -70,6 +70,8 @@ export const COMMAND_CENTER_WS_METHODS = {
   automationRunGet: "cc.automations.run.get",
   automationWebhookAdmit: "cc.automations.webhook.admit",
   googleRead: "cc.connections.google.read",
+  windowsMediaList: "cc.windowsMedia.list",
+  windowsMediaRoots: "cc.windowsMedia.roots",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
@@ -813,3 +815,59 @@ export const GoogleDraftCreateResult = Schema.Struct({
   threadId: Schema.optional(TrimmedNonEmptyString),
 });
 export type GoogleDraftCreateResult = typeof GoogleDraftCreateResult.Type;
+
+/** Upper bounds that keep a Windows directory listing websocket-sized. */
+export const WINDOWS_MEDIA_MAX_ENTRIES = 2_000;
+export const WINDOWS_MEDIA_PATH_MAX_CHARS = 4_096;
+
+export const WindowsMediaPath = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(WINDOWS_MEDIA_PATH_MAX_CHARS),
+);
+export type WindowsMediaPath = typeof WindowsMediaPath.Type;
+
+export const WindowsMediaEntryKind = Schema.Literals(["dir", "video", "image", "audio", "other"]);
+export type WindowsMediaEntryKind = typeof WindowsMediaEntryKind.Type;
+
+export const CommandCenterWindowsMediaListInput = Schema.Struct({
+  path: WindowsMediaPath,
+});
+export type CommandCenterWindowsMediaListInput = typeof CommandCenterWindowsMediaListInput.Type;
+
+export const CommandCenterWindowsMediaEntry = Schema.Struct({
+  name: Schema.String,
+  /** Absolute Windows path of the entry, ready to send back as a list path or attach. */
+  path: Schema.String,
+  isDir: Schema.Boolean,
+  sizeBytes: Schema.Number,
+  /** ISO-8601 UTC last-write time, null when Windows did not report one. */
+  mtime: Schema.NullOr(Schema.String),
+  kind: WindowsMediaEntryKind,
+  mimeType: Schema.String,
+});
+export type CommandCenterWindowsMediaEntry = typeof CommandCenterWindowsMediaEntry.Type;
+
+export const CommandCenterWindowsMediaListResult = Schema.Struct({
+  host: Schema.String,
+  path: Schema.String,
+  /** Parent directory, or null at a drive/allowlisted root. */
+  parent: Schema.NullOr(Schema.String),
+  entries: Schema.Array(CommandCenterWindowsMediaEntry),
+  /** True when the directory held more entries than the listing cap. */
+  truncated: Schema.Boolean,
+});
+export type CommandCenterWindowsMediaListResult = typeof CommandCenterWindowsMediaListResult.Type;
+
+export const CommandCenterWindowsMediaRootsInput = Schema.Struct({});
+export type CommandCenterWindowsMediaRootsInput = typeof CommandCenterWindowsMediaRootsInput.Type;
+
+export const CommandCenterWindowsMediaRoot = Schema.Struct({
+  label: Schema.String,
+  path: Schema.String,
+});
+export type CommandCenterWindowsMediaRoot = typeof CommandCenterWindowsMediaRoot.Type;
+
+export const CommandCenterWindowsMediaRootsResult = Schema.Struct({
+  host: Schema.String,
+  roots: Schema.Array(CommandCenterWindowsMediaRoot),
+});
+export type CommandCenterWindowsMediaRootsResult = typeof CommandCenterWindowsMediaRootsResult.Type;
