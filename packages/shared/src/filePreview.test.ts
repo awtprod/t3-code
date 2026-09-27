@@ -39,7 +39,7 @@ describe("workspace file previews", () => {
   it.each([
     ["clip.mp4", "video/mp4"],
     ["renders/final.MOV", "video/quicktime"],
-    ["a.webm?v=2", "video/webm"],
+    ["renders/odd#1?.webm", "video/webm"],
     ["b.m4v", "video/mp4"],
     ["c.ogv", "video/ogg"],
   ])("recognizes video preview path %s", (path, mimeType) => {
@@ -49,8 +49,13 @@ describe("workspace file previews", () => {
     expect(isWorkspacePreviewEntryPath(path)).toBe(false);
   });
 
-  it.each(["clip.mp4.txt", "clip.mkv", "mp4", "notes.md"])("rejects non-video path %s", (path) => {
-    expect(isWorkspaceVideoPreviewPath(path)).toBe(false);
-    expect(workspaceVideoPreviewMimeType(path)).toBeNull();
-  });
+  // Filesystem paths: `?`/`#` are literal filename characters, never stripped,
+  // so client classification matches the exact file the server resolves.
+  it.each(["clip.mp4.txt", "clip.mkv", "mp4", "notes.md", "a.webm?v=2", "data.mp4#x", "a.mp4?/b"])(
+    "rejects non-video path %s",
+    (path) => {
+      expect(isWorkspaceVideoPreviewPath(path)).toBe(false);
+      expect(workspaceVideoPreviewMimeType(path)).toBeNull();
+    },
+  );
 });

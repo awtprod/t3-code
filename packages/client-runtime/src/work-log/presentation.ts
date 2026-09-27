@@ -139,21 +139,136 @@ export function resolveViewedImageAsset(
   };
 }
 
-/** Render commands whose last video argument is the file they write. */
-const VIDEO_RENDER_COMMAND_PATTERN = /(?:^|[\s;&|/(])(?:ffmpeg|melt|HandBrakeCLI)(?:\.exe)?\s/i;
-const SHELL_WORD_PATTERN = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
+const FFMPEG_PROGRAM_PATTERN = /^(?:.*[\\/])?ffmpeg(?:\.exe)?$/i;
+const HANDBRAKE_PROGRAM_PATTERN = /^(?:.*[\\/])?HandBrakeCLI(?:\.exe)?$/i;
+/** `rtmp://…`, `avformat:out.mp4` etc. are not workspace files (drive letters are). */
+const URI_LIKE_PATH_PATTERN = /^[a-z][a-z0-9+.-]+:/i;
+/** Shell words that the shell would still expand; never a literal emitted path. */
+const UNEXPANDED_SHELL_WORD_PATTERN = /[$`*?{}]/;
+/** Fragment/query characters the markdown asset classifier would strip. */
+const PATH_QUERY_OR_FRAGMENT_PATTERN = /[?#]/;
+const ABSOLUTE_PATH_PATTERN = /^(?:[\\/]|[a-z]:[\\/])/i;
+const SHELL_TOKEN_PATTERN =
+  /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\d*[<>]{1,2}&?\d*|\|\||&&|[|;&()])|([^\s"'|;&()<>]+)/g;
+const SHELL_CONTROL_OPERATORS = new Set(["|", "||", "&&", ";", "&", "(", ")"]);
 
-function shellWords(command: string): string[] {
-  return Array.from(command.matchAll(SHELL_WORD_PATTERN), (match) =>
-    (match[1] ?? match[2] ?? match[3] ?? "").replace(/^[<>]+|[;&|)]+$/g, ""),
+interface ShellWord {
+  readonly value: string;
+}
+
+/**
+ * Splits a command line into simple-command segments of words, dropping
+ * redirections and their targets. Deliberately naive: anything it cannot
+ * model (adjacent quoted pieces, expansions) yields words that later fail
+ * the literal-path checks, so the caller shows no tile rather than a wrong one.
+ */
+function shellSegments(command: string): ShellWord[][] {
+  const segments: ShellWord[][] = [[]];
+  let skipRedirectTarget = false;
+  for (const match of command.matchAll(SHELL_TOKEN_PATTERN)) {
+    const operator = match[3];
+    if (operator !== undefined) {
+      skipRedirectTarget = false;
+      if (SHELL_CONTROL_OPERATORS.has(operator)) {
+        segments.push([]);
+      } else if (!/&\d*$/.test(operator)) {
+        // `> file` / `2> file`: the next word is the redirect target, not an argument.
+        skipRedirectTarget = true;
+      }
+      continue;
+    }
+    if (skipRedirectTarget) {
+      skipRedirectTarget = false;
+      continue;
+    }
+    segments.at(-1)?.push({ value: match[1] ?? match[2] ?? match[4] ?? "" });
+  }
+  return segments.filter((segment) => segment.length > 0);
+}
+
+function isLiteralVideoOutputPath(path: string): boolean {
+  return (
+    isWorkspaceVideoPreviewPath(path) &&
+    !UNEXPANDED_SHELL_WORD_PATTERN.test(path) &&
+    !PATH_QUERY_OR_FRAGMENT_PATTERN.test(path) &&
+    !URI_LIKE_PATH_PATTERN.test(path)
   );
+}
+
+/**
+ * The file a render invocation writes: HandBrakeCLI's `-o`/`--output`
+ * argument, or ffmpeg's final positional argument. Arguments to `-i` are
+ * inputs and never count as the output. melt is not handled: its
+ * positionals are inputs and its output hides inside `-consumer`.
+ */
+function renderSegmentOutput(
+  program: "ffmpeg" | "handbrake",
+  args: ReadonlyArray<string>,
+): string | null {
+  const inputs = new Set<string>();
+  let output: string | null = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    const next = args[index + 1];
+    if (arg === "-i" && next !== undefined) {
+      inputs.add(next);
+      index += 1;
+    } else if (
+      program === "handbrake" &&
+      (arg === "-o" || arg === "--output") &&
+      next !== undefined
+    ) {
+      output = next;
+      index += 1;
+    } else if (program === "handbrake" && arg.startsWith("--output=")) {
+      output = arg.slice("--output=".length);
+    }
+  }
+  if (output === null) {
+    if (program !== "ffmpeg") return null;
+    const last = args.at(-1);
+    const beforeLast = args.at(-2);
+    if (last === undefined || beforeLast === "-i" || last.startsWith("-")) return null;
+    output = last;
+  }
+  return inputs.has(output) || !isLiteralVideoOutputPath(output) ? null : output;
+}
+
+/**
+ * The clip a completed render command wrote, or null when it cannot be
+ * identified with confidence. A relative output after a `cd`/`pushd` is
+ * dropped: it would resolve against the workspace root, not the new cwd.
+ */
+function renderCommandOutputPath(command: string): string | null {
+  let changedDirectory = false;
+  let output: string | null = null;
+  for (const segment of shellSegments(command)) {
+    const words = segment.map((word) => word.value);
+    const first = words[0];
+    if (first === "cd" || first === "pushd" || first === "popd") {
+      changedDirectory = true;
+      continue;
+    }
+    const programIndex = words.findIndex(
+      (word) => FFMPEG_PROGRAM_PATTERN.test(word) || HANDBRAKE_PROGRAM_PATTERN.test(word),
+    );
+    if (programIndex < 0) continue;
+    const program = FFMPEG_PROGRAM_PATTERN.test(words[programIndex] ?? "") ? "ffmpeg" : "handbrake";
+    const candidate = renderSegmentOutput(program, words.slice(programIndex + 1));
+    if (candidate === null) continue;
+    if (changedDirectory && !ABSOLUTE_PATH_PATTERN.test(candidate)) continue;
+    output = candidate;
+  }
+  return output;
 }
 
 /**
  * The finished video clip a work-log entry points at, if any: a video the
  * agent read, a video file it changed, or the output of a completed
- * ffmpeg-like render command (ffmpeg writes its last positional argument).
- * Running tools return null because the file may still be partial.
+ * ffmpeg-like render command. Conservative by design: no tile beats a
+ * broken one, so inputs, unexpanded shell words and ambiguous relative
+ * outputs are ignored. Running tools return null because the file may
+ * still be partial.
  */
 export function workEntryVideoPath(entry: WorkLogPresentationEntry): string | null {
   if (entry.toolLifecycleStatus === "inProgress") return null;
@@ -163,20 +278,18 @@ export function workEntryVideoPath(entry: WorkLogPresentationEntry): string | nu
     action === "read" &&
     detail !== undefined &&
     !/[\r\n]/.test(detail) &&
-    isWorkspaceVideoPreviewPath(detail)
+    isWorkspaceVideoPreviewPath(detail) &&
+    !PATH_QUERY_OR_FRAGMENT_PATTERN.test(detail)
   ) {
     return detail;
   }
-  const changedVideo = entry.changedFiles?.findLast(isWorkspaceVideoPreviewPath);
+  const changedVideo = entry.changedFiles?.findLast(
+    (path) => isWorkspaceVideoPreviewPath(path) && !PATH_QUERY_OR_FRAGMENT_PATTERN.test(path),
+  );
   if (changedVideo !== undefined) return changedVideo;
   const command = entry.command?.trim();
-  if (
-    action === "command" &&
-    entry.toolLifecycleStatus === "completed" &&
-    command !== undefined &&
-    VIDEO_RENDER_COMMAND_PATTERN.test(command)
-  ) {
-    return shellWords(command).findLast(isWorkspaceVideoPreviewPath) ?? null;
+  if (action === "command" && entry.toolLifecycleStatus === "completed" && command !== undefined) {
+    return renderCommandOutputPath(command);
   }
   return null;
 }
@@ -198,8 +311,10 @@ export function resolveVideoClipAsset(
     readonly workspaceRoot?: string | null | undefined;
   },
 ): VideoClipAsset | null {
-  const mimeType = workspaceVideoPreviewMimeType(source);
-  const asset = mimeType === null ? null : resolveViewedImageAsset(source, input);
+  const asset = resolveViewedImageAsset(source, input);
+  // Classify the file name the server will actually resolve (the markdown
+  // classifier strips `?query`/`#fragment`), so client and server agree.
+  const mimeType = asset === null ? null : workspaceVideoPreviewMimeType(asset.alt);
   if (mimeType === null || asset === null) return null;
   return {
     resource:

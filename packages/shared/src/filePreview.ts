@@ -33,6 +33,17 @@ function hasPreviewExtension(path: string, extensions: ReadonlyArray<string>): b
   return extensions.some((extension) => pathWithoutQuery.endsWith(extension));
 }
 
+/**
+ * The video extension of a workspace FILESYSTEM path. `?` and `#` are literal
+ * filename characters here (the server signs and serves exactly this path),
+ * so nothing is stripped: `clip.mp4#x` is not a video, `a.webm?v=2` is not
+ * `a.webm`. Callers holding a URL must strip query/fragment themselves.
+ */
+function workspaceVideoPreviewExtension(path: string): string | undefined {
+  const lowerPath = path.toLowerCase();
+  return WORKSPACE_VIDEO_PREVIEW_EXTENSIONS.find((extension) => lowerPath.endsWith(extension));
+}
+
 export function isWorkspaceBrowserPreviewPath(path: string): boolean {
   return hasPreviewExtension(path, WORKSPACE_BROWSER_PREVIEW_EXTENSIONS);
 }
@@ -46,14 +57,11 @@ export function isWorkspacePreviewEntryPath(path: string): boolean {
 }
 
 export function isWorkspaceVideoPreviewPath(path: string): boolean {
-  return hasPreviewExtension(path, WORKSPACE_VIDEO_PREVIEW_EXTENSIONS);
+  return workspaceVideoPreviewExtension(path) !== undefined;
 }
 
 /** The inline video Content-Type for a workspace video path, or null for non-videos. */
 export function workspaceVideoPreviewMimeType(path: string): string | null {
-  const pathWithoutQuery = path.split(/[?#]/, 1)[0]?.toLowerCase() ?? "";
-  const extension = WORKSPACE_VIDEO_PREVIEW_EXTENSIONS.find((candidate) =>
-    pathWithoutQuery.endsWith(candidate),
-  );
+  const extension = workspaceVideoPreviewExtension(path);
   return extension === undefined ? null : (VIDEO_MIME_TYPE_BY_PREVIEW_EXTENSION[extension] ?? null);
 }
