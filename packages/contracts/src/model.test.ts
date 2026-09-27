@@ -2,7 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   CLAUDE_WORKER_FALLBACK_MODEL,
+  CODEX_WORKER_FALLBACK_MODEL,
   isClaudeManagerModelSlug,
+  isCodexManagerModelSlug,
   rewriteManagerModelInCommand,
 } from "./model.ts";
 
@@ -45,7 +47,51 @@ describe("CLAUDE_WORKER_FALLBACK_MODEL", () => {
   });
 });
 
+describe("isCodexManagerModelSlug", () => {
+  it("treats the Astra family as manager-tier", () => {
+    expect(isCodexManagerModelSlug("gpt-6-astra")).toBe(true);
+    expect(isCodexManagerModelSlug(" GPT-7-Astra ")).toBe(true);
+    expect(isCodexManagerModelSlug("gpt-6-astra-mini")).toBe(true);
+  });
+
+  it("treats worker models and look-alikes as non-manager", () => {
+    expect(isCodexManagerModelSlug("gpt-6-sol")).toBe(false);
+    expect(isCodexManagerModelSlug("gpt-6-terra")).toBe(false);
+    expect(isCodexManagerModelSlug("gpt-6-castrato")).toBe(false);
+    expect(isCodexManagerModelSlug(CODEX_WORKER_FALLBACK_MODEL)).toBe(false);
+    expect(isCodexManagerModelSlug(undefined)).toBe(false);
+    expect(isCodexManagerModelSlug("")).toBe(false);
+  });
+});
+
 describe("rewriteManagerModelInCommand", () => {
+  it("rewrites the bare `fable` alias but not look-alike tokens", () => {
+    expect(rewriteManagerModelInCommand("claude -p --model fable 'go'")).toBe(
+      "claude -p --model claude-opus-4-8 'go'",
+    );
+    const cmd = "claude -p --model fabled-thing";
+    expect(rewriteManagerModelInCommand(cmd)).toBe(cmd);
+  });
+
+  it("rewrites a headless `codex exec` Astra dispatch in every flag form", () => {
+    expect(rewriteManagerModelInCommand("codex exec -m gpt-6-astra 'review'")).toBe(
+      "codex exec -m gpt-6-sol 'review'",
+    );
+    expect(rewriteManagerModelInCommand("codex exec --model=gpt-6-astra 'review'")).toBe(
+      "codex exec --model=gpt-6-sol 'review'",
+    );
+    expect(rewriteManagerModelInCommand('codex exec -c model="gpt-6-astra" review')).toBe(
+      'codex exec -c model="gpt-6-sol" review',
+    );
+  });
+
+  it("leaves non-Astra codex dispatches and non-codex commands untouched", () => {
+    const worker = "codex exec -m gpt-6-terra --max-turns 3";
+    expect(rewriteManagerModelInCommand(worker)).toBe(worker);
+    const mention = "echo -m gpt-6-astra";
+    expect(rewriteManagerModelInCommand(mention)).toBe(mention);
+  });
+
   it("rewrites a headless `claude -p --model claude-fable*` dispatch", () => {
     expect(rewriteManagerModelInCommand("claude -p --model claude-fable-5-1 --max-turns 120")).toBe(
       "claude -p --model claude-opus-4-8 --max-turns 120",
