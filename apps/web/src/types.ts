@@ -2,6 +2,7 @@ import type {
   ChatFileAttachment as ContractChatFileAttachment,
   ChatImageAttachment as ContractChatImageAttachment,
   ChatUnknownAttachment as ContractChatUnknownAttachment,
+  ChatWindowsFileAttachment as ContractChatWindowsFileAttachment,
   OrchestrationCheckpointFile,
   OrchestrationCheckpointSummary,
   OrchestrationLatestTurn,
@@ -50,7 +51,14 @@ export interface ChatFileAttachment extends ContractChatFileAttachment {
 // older client.
 export type ChatUnknownAttachment = ContractChatUnknownAttachment;
 
-export type ChatAttachment = ChatImageAttachment | ChatFileAttachment | ChatUnknownAttachment;
+// A reference to a file on the remote Windows host: no bytes, only a path.
+export type ChatWindowsFileAttachment = ContractChatWindowsFileAttachment;
+
+export type ChatAttachment =
+  | ChatImageAttachment
+  | ChatFileAttachment
+  | ChatWindowsFileAttachment
+  | ChatUnknownAttachment;
 
 // The union has an open member (`type: string`), so a literal comparison does
 // not narrow. Use these guards wherever type-specific fields are read.
@@ -60,6 +68,12 @@ export function isImageAttachment(attachment: ChatAttachment): attachment is Cha
 
 export function isFileAttachment(attachment: ChatAttachment): attachment is ChatFileAttachment {
   return attachment.type === "file";
+}
+
+export function isWindowsFileAttachment(
+  attachment: ChatAttachment,
+): attachment is ChatWindowsFileAttachment {
+  return attachment.type === "windows-file";
 }
 
 export function isVideoAttachment(attachment: ChatFileAttachment): boolean {

@@ -45,6 +45,8 @@ export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.automationRunGet, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.automationWebhookAdmit, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.googleRead, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.windowsMediaList, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.windowsMediaRoots, AuthCommandCenterReadScope],
 ] as const satisfies ReadonlyArray<readonly [string, AuthEnvironmentScope]>;
 
 const COMMAND_CENTER_RPC_METHODS = new Set<string>(

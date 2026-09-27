@@ -38,6 +38,7 @@ import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   type ChatFileAttachment,
+  type ChatWindowsFileAttachment,
   type ChatImageAttachment,
   videoMimeType,
 } from "./types";
@@ -138,6 +139,24 @@ function clearStaleFileUploadMetadata(
   return changed ? { ...draft, files } : draft;
 }
 
+/**
+ * A picked reference to a file on the remote Windows host. Pure metadata (no
+ * bytes, no upload), so it persists and sends as-is as a `windows-file`
+ * attachment.
+ */
+export type ComposerWindowsFileAttachment = ChatWindowsFileAttachment;
+
+export const PersistedComposerWindowsFileAttachment = Schema.Struct({
+  type: Schema.Literal("windows-file"),
+  id: Schema.String,
+  name: Schema.String,
+  mimeType: Schema.String,
+  sizeBytes: Schema.Number,
+  host: Schema.String,
+  path: Schema.String,
+});
+const isPersistedComposerWindowsFileAttachment = Schema.is(PersistedComposerWindowsFileAttachment);
+
 export const PersistedComposerFileAttachment = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
@@ -202,6 +221,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   prompt: Schema.String,
   attachments: Schema.Array(PersistedComposerImageAttachment),
   files: Schema.optionalKey(Schema.Array(PersistedComposerDraftFileAttachment)),
+  windowsFiles: Schema.optionalKey(Schema.Array(PersistedComposerWindowsFileAttachment)),
   terminalContexts: Schema.optionalKey(Schema.Array(PersistedTerminalContextDraft)),
   elementContexts: Schema.optionalKey(Schema.Array(PersistedElementContextDraft)),
   previewAnnotations: Schema.optionalKey(Schema.Array(PreviewAnnotationPayloadSchema)),
@@ -329,6 +349,8 @@ export interface ComposerThreadDraftState {
   prompt: string;
   images: ComposerImageAttachment[];
   files: ComposerFileAttachment[];
+  /** Picked Windows file references (optional so older stubs stay valid). */
+  windowsFiles?: ComposerWindowsFileAttachment[];
   nonPersistedImageIds: string[];
   persistedAttachments: PersistedComposerImageAttachment[];
   terminalContexts: TerminalContextDraft[];
@@ -380,6 +402,7 @@ export function composerDraftHasUserContent(
     draft.prompt.trim().length > 0 ||
     draft.images.length > 0 ||
     draft.files.length > 0 ||
+    (draft.windowsFiles?.length ?? 0) > 0 ||
     draft.persistedAttachments.length > 0 ||
     draft.terminalContexts.length > 0 ||
     draft.elementContexts.length > 0 ||
@@ -565,6 +588,8 @@ interface ComposerDraftStoreState {
   removeImage: (threadRef: ComposerThreadTarget, imageId: string) => void;
   addFiles: (threadRef: ComposerThreadTarget, files: ComposerFileAttachment[]) => void;
   removeFile: (threadRef: ComposerThreadTarget, fileId: string) => void;
+  addWindowsFile: (threadRef: ComposerThreadTarget, file: ComposerWindowsFileAttachment) => void;
+  removeWindowsFile: (threadRef: ComposerThreadTarget, fileId: string) => void;
   setFileUpload: (
     threadRef: ComposerThreadTarget,
     fileId: string,
@@ -841,6 +866,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.prompt.length === 0 &&
     draft.images.length === 0 &&
     draft.files.length === 0 &&
+    (draft.windowsFiles?.length ?? 0) === 0 &&
     draft.persistedAttachments.length === 0 &&
     draft.terminalContexts.length === 0 &&
     draft.elementContexts.length === 0 &&
@@ -1828,6 +1854,9 @@ function normalizePersistedDraftsByThreadId(
     const files = Array.isArray(draftCandidate.files)
       ? draftCandidate.files.filter(isPersistedComposerDraftFileAttachment)
       : [];
+    const windowsFiles = Array.isArray(draftCandidate.windowsFiles)
+      ? draftCandidate.windowsFiles.filter(isPersistedComposerWindowsFileAttachment)
+      : [];
     const terminalContexts = Array.isArray(draftCandidate.terminalContexts)
       ? draftCandidate.terminalContexts.flatMap((entry) => {
           const normalized = normalizePersistedTerminalContextDraft(entry);
@@ -1908,6 +1937,7 @@ function normalizePersistedDraftsByThreadId(
       promptCandidate.length === 0 &&
       attachments.length === 0 &&
       files.length === 0 &&
+      windowsFiles.length === 0 &&
       terminalContexts.length === 0 &&
       elementContexts.length === 0 &&
       reviewComments.length === 0 &&
@@ -1933,6 +1963,7 @@ function normalizePersistedDraftsByThreadId(
       prompt,
       attachments,
       ...(files.length > 0 ? { files } : {}),
+      ...(windowsFiles.length > 0 ? { windowsFiles } : {}),
       ...(terminalContexts.length > 0 ? { terminalContexts } : {}),
       ...(elementContexts.length > 0 ? { elementContexts } : {}),
       ...(reviewComments.length > 0 ? { reviewComments } : {}),
@@ -1956,6 +1987,7 @@ function persistedComposerDraftHasUserContent(draft: PersistedComposerThreadDraf
     draft.prompt.trim().length > 0 ||
     draft.attachments.length > 0 ||
     (draft.files?.length ?? 0) > 0 ||
+    (draft.windowsFiles?.length ?? 0) > 0 ||
     (draft.terminalContexts?.length ?? 0) > 0 ||
     (draft.elementContexts?.length ?? 0) > 0 ||
     (draft.previewAnnotations?.length ?? 0) > 0 ||
@@ -2040,6 +2072,7 @@ function partializeComposerDraftStoreState(
       draft.prompt.length === 0 &&
       draft.persistedAttachments.length === 0 &&
       draft.files.length === 0 &&
+      (draft.windowsFiles?.length ?? 0) === 0 &&
       draft.terminalContexts.length === 0 &&
       draft.elementContexts.length === 0 &&
       draft.previewAnnotations.length === 0 &&
@@ -2071,6 +2104,9 @@ function partializeComposerDraftStoreState(
                 : {}),
             })),
           }
+        : {}),
+      ...(draft.windowsFiles && draft.windowsFiles.length > 0
+        ? { windowsFiles: draft.windowsFiles.map((file) => ({ ...file })) }
         : {}),
       ...(draft.terminalContexts.length > 0
         ? {
@@ -2368,6 +2404,13 @@ function toHydratedThreadDraft(
           ? { uploadedAttachmentId: file.attachmentId, uploadEnvironmentId: file.environmentId }
           : {}),
       })) ?? [],
+    ...(persistedDraft.windowsFiles && persistedDraft.windowsFiles.length > 0
+      ? {
+          windowsFiles: persistedDraft.windowsFiles.map(
+            (file) => ({ ...file }) as ComposerWindowsFileAttachment,
+          ),
+        }
+      : {}),
     nonPersistedImageIds: [],
     persistedAttachments: [...persistedDraft.attachments],
     terminalContexts:
@@ -3315,6 +3358,49 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
           });
         },
+        addWindowsFile: (threadRef, file) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            const current = existing.windowsFiles ?? [];
+            // Same host + path is the same file; picking it twice is a no-op.
+            if (current.some((entry) => entry.host === file.host && entry.path === file.path)) {
+              return state;
+            }
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: { ...existing, windowsFiles: [...current, file] },
+              },
+            };
+          });
+        },
+        removeWindowsFile: (threadRef, fileId) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey];
+            if (!current?.windowsFiles?.some((file) => file.id === fileId)) {
+              return state;
+            }
+            const nextDraft = {
+              ...current,
+              windowsFiles: current.windowsFiles.filter((file) => file.id !== fileId),
+            } satisfies ComposerThreadDraftState;
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) {
+              delete nextDraftsByThreadKey[threadKey];
+            } else {
+              nextDraftsByThreadKey[threadKey] = nextDraft;
+            }
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
         removeFile: (threadRef, fileId) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
@@ -3813,6 +3899,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               prompt: "",
               images: [],
               files: [],
+              windowsFiles: [],
               nonPersistedImageIds: [],
               persistedAttachments: [],
               terminalContexts: [],
@@ -3847,6 +3934,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               prompt: ensureInlineTerminalContextPlaceholders("", current.terminalContexts.length),
               images: [],
               files: [],
+              windowsFiles: [],
               nonPersistedImageIds: [],
               persistedAttachments: [],
             };

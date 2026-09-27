@@ -54,6 +54,7 @@ import {
   type ChatImageAttachment,
   isFileAttachment,
   isImageAttachment,
+  isWindowsFileAttachment,
   isVideoAttachment,
   type TurnDiffSummary,
 } from "../../types";
@@ -123,6 +124,7 @@ import {
 } from "./MessagesTimeline.logic";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { WindowsFileChip } from "./WindowsFileChip";
 import {
   deriveDisplayedUserMessageState,
   type ParsedTerminalContextEntry,
@@ -1079,8 +1081,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const userFiles = (row.message.attachments ?? []).filter(isFileAttachment);
   const userVideos = userFiles.filter(isVideoAttachment);
   const otherUserFiles = userFiles.filter((file) => !isVideoAttachment(file));
+  const windowsFiles = (row.message.attachments ?? []).filter(isWindowsFileAttachment);
   const unknownAttachments = (row.message.attachments ?? []).filter(
-    (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
+    (attachment) =>
+      !isImageAttachment(attachment) &&
+      !isFileAttachment(attachment) &&
+      !isWindowsFileAttachment(attachment),
   );
   const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
   const terminalContexts = displayedUserMessage.contexts;
@@ -1215,6 +1221,13 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                 <FileIcon className="size-4 shrink-0 text-secondary-label" />
                 <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
               </div>
+            ))}
+          </div>
+        ) : null}
+        {windowsFiles.length > 0 ? (
+          <div className="mb-2 flex flex-wrap justify-end gap-1.5">
+            {windowsFiles.map((file) => (
+              <WindowsFileChip key={file.id} file={file} />
             ))}
           </div>
         ) : null}

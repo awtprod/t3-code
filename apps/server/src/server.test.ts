@@ -35,6 +35,7 @@ import {
   ThreadId,
   TurnId,
   WS_METHODS,
+  COMMAND_CENTER_WS_METHODS,
   WsRpcGroup,
   EditorId,
 } from "@t3tools/contracts";
@@ -175,6 +176,8 @@ import * as AutomationDefinitionConfig from "./command-center/AutomationDefiniti
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
+import { makeWindowsMediaSettings } from "./command-center/WindowsMediaConfig.ts";
 import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
 import * as Judge from "./efficiency/Judge.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
@@ -494,6 +497,10 @@ const buildAppUnderTest = (options?: {
     desktopTelemetryReceiver?: Partial<
       DesktopTelemetryReceiver.DesktopTelemetryReceiver["Service"]
     >;
+    commandCenterReadiness?: Partial<
+      CommandCenterReadinessGate.CommandCenterReadinessGate["Service"]
+    >;
+    windowsMediaConnector?: Partial<WindowsMediaConnector.WindowsMediaConnector["Service"]>;
   };
 }) =>
   Effect.gen(function* () {
@@ -1000,11 +1007,17 @@ const buildAppUnderTest = (options?: {
           }),
           Layer.mock(CommandCenterService.CommandCenterService)({}),
           Layer.mock(CommandCenterEventStream.CommandCenterEventStream)({}),
-          Layer.mock(CommandCenterReadinessGate.CommandCenterReadinessGate)({}),
+          Layer.mock(CommandCenterReadinessGate.CommandCenterReadinessGate)({
+            ...options?.layers?.commandCenterReadiness,
+          }),
           Layer.mock(AutomationDefinitionConfig.AutomationDefinitionConfig)({}),
           Layer.mock(AutomationRuns.AutomationRuns)({}),
           Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
           Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+          Layer.mock(WindowsMediaConnector.WindowsMediaConnector)({
+            settings: makeWindowsMediaSettings({}),
+            ...options?.layers?.windowsMediaConnector,
+          }),
           orchestrationCommandDispatcherLayer,
         ),
       ),
@@ -3753,6 +3766,91 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       if (rpcError._tag === "EnvironmentAuthorizationError") {
         assert.equal(rpcError.requiredScope, "orchestration:read");
       }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves cc.windowsMedia.* only to tokens holding command-center:read", () =>
+    Effect.gen(function* () {
+      const listedPaths: string[] = [];
+      yield* buildAppUnderTest({
+        layers: {
+          commandCenterReadiness: { requireReady: Effect.void },
+          windowsMediaConnector: {
+            roots: () =>
+              Effect.succeed({ host: "jvl3rp2", roots: [{ label: "C:", path: "C:\\" }] }),
+            list: (path) =>
+              Effect.sync(() => {
+                listedPaths.push(path);
+                return {
+                  host: "jvl3rp2",
+                  path,
+                  parent: "C:\\",
+                  truncated: false,
+                  entries: [
+                    {
+                      name: "clip.mov",
+                      path: `${path}\\clip.mov`,
+                      isDir: false,
+                      sizeBytes: 42,
+                      mtime: "2026-09-27T00:00:00.0000000Z",
+                      kind: "video" as const,
+                      mimeType: "video/quicktime",
+                    },
+                  ],
+                };
+              }),
+          },
+        },
+      });
+
+      const wsUrlForScope = (scope: string) =>
+        Effect.gen(function* () {
+          const { body } = yield* exchangeAccessToken(defaultDesktopBootstrapToken, { scope });
+          const ticketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+            headers: { authorization: `Bearer ${body.access_token ?? ""}` },
+          });
+          const ticket = (yield* ticketResponse.json) as { readonly ticket: string };
+          return `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsTicket=${encodeURIComponent(ticket.ticket)}`;
+        });
+
+      const scopedUrl = yield* wsUrlForScope("command-center:read");
+      const listing = yield* Effect.scoped(
+        withWsRpcClient(scopedUrl, (client) =>
+          client[COMMAND_CENTER_WS_METHODS.windowsMediaList]({ path: "C:\\Clips" }),
+        ),
+      );
+      assert.equal(listing.entries[0]?.name, "clip.mov");
+      assert.deepEqual(listedPaths, ["C:\\Clips"]);
+      const roots = yield* Effect.scoped(
+        withWsRpcClient(scopedUrl, (client) =>
+          client[COMMAND_CENTER_WS_METHODS.windowsMediaRoots]({}),
+        ),
+      );
+      assert.equal(roots.roots[0]?.path, "C:\\");
+
+      const unscopedUrl = yield* wsUrlForScope("orchestration:read");
+      const rejectedList = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(unscopedUrl, (client) =>
+            client[COMMAND_CENTER_WS_METHODS.windowsMediaList]({ path: "C:\\Clips" }),
+          ),
+        ),
+      );
+      const rejectedRoots = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(unscopedUrl, (client) =>
+            client[COMMAND_CENTER_WS_METHODS.windowsMediaRoots]({}),
+          ),
+        ),
+      );
+      for (const rpcError of [rejectedList, rejectedRoots]) {
+        assert.equal(rpcError._tag, "EnvironmentAuthorizationError");
+        if (rpcError._tag === "EnvironmentAuthorizationError") {
+          assert.equal(rpcError.requiredScope, "command-center:read");
+        }
+      }
+      // The rejected calls never reached the connector.
+      assert.deepEqual(listedPaths, ["C:\\Clips"]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

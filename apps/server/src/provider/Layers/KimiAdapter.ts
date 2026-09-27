@@ -755,6 +755,8 @@ export const makeKimiAdapter = Effect.fn("makeKimiAdapter")(function* (
       const content: Array<Record<string, unknown>> = [];
       if (input.input?.trim()) content.push({ type: "text", text: input.input.trim() });
       for (const attachment of input.attachments ?? []) {
+        // Remote references reach the agent only through the prompt path line.
+        if (attachment.type === "windows-file") continue;
         const attachmentPath = resolveAttachmentPath({
           attachmentsDir: serverConfig.attachmentsDir,
           attachment,

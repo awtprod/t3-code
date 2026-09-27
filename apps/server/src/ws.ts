@@ -176,6 +176,7 @@ import * as AutomationTriggerCoordinator from "./command-center/automation/Trigg
 import * as AutomationScheduleInterpreter from "./command-center/automation/ScheduleInterpreter.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
 import * as PublishConnections from "./command-center/publish/PublishConnections.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
@@ -621,6 +622,20 @@ const makeWsRpcLayer = (
       const commandCenterAutomationTriggers = yield* AutomationTriggerCoordinator.make;
       const commandCenterMemorySearch = yield* MemorySearchIndex.MemorySearchIndex;
       const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
+      const windowsMediaConnector = yield* WindowsMediaConnector.WindowsMediaConnector;
+      const toWindowsMediaError = (cause: WindowsMediaConnector.WindowsMediaConnectorError) =>
+        new CommandCenterError({
+          reason:
+            cause.reason === "invalid_path" || cause.reason === "forbidden"
+              ? "validation"
+              : cause.reason === "not_found"
+                ? "not_found"
+                : cause.reason === "disabled"
+                  ? "config"
+                  : "connector",
+          message: cause.message,
+          cause,
+        });
       const googleConnectionSetup = yield* Effect.serviceOption(
         GoogleConnectionSetup.GoogleConnectionSetup,
       );
@@ -1919,6 +1934,18 @@ const makeWsRpcLayer = (
                 sizeBytes: exported.sizeBytes,
               };
             }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.windowsMediaRoots]: () =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.windowsMediaRoots,
+            windowsMediaConnector.roots().pipe(Effect.mapError(toWindowsMediaError)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.windowsMediaList]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.windowsMediaList,
+            windowsMediaConnector.list(input.path).pipe(Effect.mapError(toWindowsMediaError)),
             { "rpc.aggregate": "command-center" },
           ),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
