@@ -319,6 +319,9 @@ import { proposedPlanTitle } from "../../proposedPlan";
 import { WindowsFileChip } from "./WindowsFileChip";
 import { WindowsMediaPickerDialog } from "./WindowsMediaPickerDialog";
 import { windowsFileAttachmentFromEntry } from "./windowsMediaPicker.logic";
+import { routeDroppedFiles } from "./windowsMediaDrop.logic";
+import { commandCenterEnvironment } from "~/state/commandCenter";
+import { useAtomCommand } from "~/state/use-atom-command";
 import { getProviderInteractionModeToggle } from "../../providerModels";
 import {
   applyProviderInstanceSettings,
@@ -892,6 +895,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const addComposerDraftFiles = useComposerDraftStore((store) => store.addFiles);
   const removeComposerDraftFile = useComposerDraftStore((store) => store.removeFile);
   const addComposerDraftWindowsFile = useComposerDraftStore((store) => store.addWindowsFile);
+  const listWindowsMediaFolder = useAtomCommand(commandCenterEnvironment.windowsMediaList, {
+    reportFailure: false,
+  });
   const removeComposerDraftWindowsFile = useComposerDraftStore((store) => store.removeWindowsFile);
   const setComposerDraftFileUpload = useComposerDraftStore((store) => store.setFileUpload);
   const insertComposerDraftTerminalContext = useComposerDraftStore(
@@ -3009,6 +3015,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Callbacks: attachments
   // ------------------------------------------------------------------
   const addComposerAttachments = async (files: File[]) => {
+    if (!activeThreadId || files.length === 0) return;
+    const getPathForFile = window.desktopBridge?.getPathForFile;
+    if (!supportsWindowsMedia || !getPathForFile || pendingUserInputs.length > 0) {
+      await addComposerUploadAttachments(files);
+      return;
+    }
+    // Desktop app on the Windows media host: a dropped video that already
+    // lives on that box becomes a path reference instead of an upload.
+    const routed = await routeDroppedFiles(files, {
+      enabled: true,
+      getPathForFile,
+      newId: randomUUID,
+      listFolder: async (path) => {
+        const result = await listWindowsMediaFolder({ environmentId, input: { path } });
+        return result._tag === "Success" ? result.value : null;
+      },
+    });
+    for (const reference of routed.references) {
+      addComposerDraftWindowsFile(composerDraftTarget, reference);
+    }
+    if (routed.uploads.length > 0) {
+      await addComposerUploadAttachments(routed.uploads);
+    }
+  };
+
+  const addComposerUploadAttachments = async (files: File[]) => {
     if (!activeThreadId || files.length === 0) return;
     if (pendingUserInputs.length > 0) {
       toastManager.add({
