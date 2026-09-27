@@ -328,19 +328,25 @@ export function buildAnswersFromOpenAi(
 }
 
 /**
- * Builds validated answers from the `typesafe` payload. TypeSafe already returns
- * typed answers with probabilities and confidence, so we validate and pass the
- * values through (dropping the score `legend`, which is not part of JudgeAnswer).
+ * Builds validated answers from the `typesafe` payload. TypeSafe wraps the typed
+ * answers in an envelope (`{ model, answers, usage }`), so we read the answers
+ * from `payload.answers` — not the response root. Each answer already carries its
+ * probabilities and confidence, so we validate and pass the values through
+ * (dropping the score `legend`, which is not part of JudgeAnswer).
  */
 export function buildAnswersFromTypesafe(
   questions: Readonly<Record<string, JudgeQuestion>>,
   raw: unknown,
 ): Record<string, JudgeAnswer> {
   const root = asRecord(raw, "response");
+  if (typeof root.answers !== "object" || root.answers === null || Array.isArray(root.answers)) {
+    throw new ResponseShapeError("response has no 'answers' object");
+  }
+  const answersRaw = root.answers as Record<string, unknown>;
   const answers: Record<string, JudgeAnswer> = {};
   for (const [key, question] of Object.entries(questions)) {
-    if (!(key in root)) throw new ResponseShapeError(`missing answer for '${key}'`);
-    const entry = asRecord(root[key], key);
+    if (!(key in answersRaw)) throw new ResponseShapeError(`missing answer for '${key}'`);
+    const entry = asRecord(answersRaw[key], key);
     if (entry.type !== question.type) {
       throw new ResponseShapeError(`answer '${key}' has type '${String(entry.type)}'`);
     }
