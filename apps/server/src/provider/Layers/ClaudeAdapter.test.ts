@@ -2364,7 +2364,7 @@ describe("ClaudeAdapterLive", () => {
         );
         assert.equal(decision.behavior, "allow");
         if (decision.behavior === "allow") {
-          assert.equal((decision.updatedInput as { model?: unknown }).model, "claude-opus-4-8");
+          assert.equal((decision.updatedInput as { model?: unknown }).model, "claude-opus-5-5");
         }
 
         const startedFiber = yield* adapter.streamEvents.pipe(
@@ -2388,7 +2388,107 @@ describe("ClaudeAdapterLive", () => {
         const started = Array.from(yield* Fiber.join(startedFiber))[0];
         assert.equal(started?.type, "task.started");
         if (started?.type === "task.started") {
-          assert.equal(started.payload.model, "claude-opus-4-8");
+          assert.equal(started.payload.model, "claude-opus-5-5");
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "PreToolUse guardrail hook downgrades an auto-allowed Agent spawn that canUseTool never sees",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            "claude-fable-5-1",
+            [],
+          ),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "spawn an agent",
+          attachments: [],
+        });
+
+        const matcher = harness.getLastCreateQueryInput()?.options.hooks?.PreToolUse?.[0];
+        const hook = matcher?.hooks[0];
+        assert.equal(typeof hook, "function");
+        if (!hook) {
+          return;
+        }
+        const invoke = (toolName: string, toolInput: unknown, toolUseId: string) =>
+          Effect.promise(() =>
+            hook(
+              {
+                hook_event_name: "PreToolUse",
+                tool_name: toolName,
+                tool_input: toolInput,
+                tool_use_id: toolUseId,
+                session_id: "s",
+                transcript_path: "",
+                cwd: "/repo",
+              } as unknown as Parameters<typeof hook>[0],
+              toolUseId,
+              { signal: new AbortController().signal },
+            ),
+          );
+
+        // The SDK auto-allows `Agent` in every permission mode, so this hook —
+        // not canUseTool — is the only place the spawn can be rewritten.
+        const spawn = yield* invoke(
+          "Agent",
+          { description: "Agent H", prompt: "do the thing", subagent_type: "general-purpose" },
+          "toolu_agent_hook",
+        );
+        assert.deepEqual(spawn, {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            updatedInput: {
+              description: "Agent H",
+              prompt: "do the thing",
+              subagent_type: "general-purpose",
+              model: "claude-opus-5-5",
+            },
+          },
+        });
+
+        // A worker-model spawn and an unrelated Bash command pass through.
+        assert.deepEqual(
+          yield* invoke("Agent", { prompt: "x", model: "sonnet" }, "toolu_agent_ok"),
+          {},
+        );
+        assert.deepEqual(yield* invoke("Bash", { command: "ls" }, "toolu_bash_ok"), {});
+
+        const startedFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "task-hook",
+          description: "Agent H",
+          task_type: "local_agent",
+          tool_use_id: "toolu_agent_hook",
+          uuid: "task-hook-uuid",
+          session_id: "sdk-session",
+        } as unknown as SDKMessage);
+        const started = Array.from(yield* Fiber.join(startedFiber))[0];
+        assert.equal(started?.type, "task.started");
+        if (started?.type === "task.started") {
+          assert.equal(started.payload.model, "claude-opus-5-5");
         }
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -5440,7 +5540,7 @@ describe("maybeDowngradeSubagentModel", () => {
         "claude-fable-5-1",
         catalog,
       );
-      assert.equal(modelOf(result), "claude-opus-4-8");
+      assert.equal(modelOf(result), "claude-opus-5-5");
     });
 
     it(`downgrades an explicit Fable ${spawnTool} subagent (including via alias) to the worker fallback`, () => {
@@ -5453,14 +5553,14 @@ describe("maybeDowngradeSubagentModel", () => {
             catalog,
           ),
         ),
-        "claude-opus-4-8",
+        "claude-opus-5-5",
       );
       // Alias resolves to the canonical Fable slug before the manager check.
       assert.equal(
         modelOf(
           maybeDowngradeSubagentModel(spawnTool, taskInput("fable"), "claude-fable-5-1", catalog),
         ),
-        "claude-opus-4-8",
+        "claude-opus-5-5",
       );
     });
 
@@ -5473,16 +5573,30 @@ describe("maybeDowngradeSubagentModel", () => {
       );
     });
 
-    it(`leaves ${spawnTool} spawns untouched when the session model is not a manager`, () => {
+    it(`leaves inheriting ${spawnTool} spawns untouched when the session model is not a manager`, () => {
       const input = taskInput();
       assert.strictEqual(
         maybeDowngradeSubagentModel(spawnTool, input, "claude-opus-5", catalog),
         input,
       );
-      // A non-manager session may even keep an inherited/explicit Fable child.
       assert.strictEqual(
         maybeDowngradeSubagentModel(spawnTool, input, "claude-sonnet-5", catalog),
         input,
+      );
+    });
+
+    it(`downgrades an explicit Fable ${spawnTool} subagent even under a non-manager session`, () => {
+      assert.equal(
+        modelOf(
+          maybeDowngradeSubagentModel(spawnTool, taskInput("fable"), "claude-opus-5-5", catalog),
+        ),
+        "claude-opus-5-5",
+      );
+      assert.equal(
+        modelOf(
+          maybeDowngradeSubagentModel(spawnTool, taskInput("claude-fable-5-1"), undefined, catalog),
+        ),
+        "claude-opus-5-5",
       );
     });
   }
@@ -5498,44 +5612,34 @@ describe("maybeDowngradeSubagentModel", () => {
 });
 
 describe("maybeDowngradeBashWorkerModel", () => {
-  const catalog = BUNDLED_CLAUDE_MODEL_CATALOG;
   const bashInput = (command: string) =>
     ({ command }) as Parameters<typeof maybeDowngradeBashWorkerModel>[1];
   const commandOf = (input: unknown) => (input as { command?: unknown }).command;
 
-  it("rewrites a Fable `claude -p` worker dispatch from a Fable manager", () => {
+  it("rewrites a Fable `claude -p` worker dispatch", () => {
     const result = maybeDowngradeBashWorkerModel(
       "Bash",
       bashInput("claude -p --model claude-fable-5-1 --max-turns 120 'go'"),
-      "claude-fable-5-1",
-      catalog,
     );
-    assert.equal(commandOf(result), "claude -p --model claude-opus-4-8 --max-turns 120 'go'");
+    assert.equal(commandOf(result), "claude -p --model claude-opus-5-5 --max-turns 120 'go'");
+  });
+
+  it("rewrites an Astra `codex exec` worker dispatch", () => {
+    const result = maybeDowngradeBashWorkerModel(
+      "Bash",
+      bashInput("codex exec -m gpt-6-astra 'review the diff'"),
+    );
+    assert.equal(commandOf(result), "codex exec -m gpt-6-sol 'review the diff'");
   });
 
   it("leaves an opus worker dispatch untouched (same reference)", () => {
     const input = bashInput("claude -p --model claude-opus-4-8 --max-turns 160");
-    assert.strictEqual(
-      maybeDowngradeBashWorkerModel("Bash", input, "claude-fable-5-1", catalog),
-      input,
-    );
+    assert.strictEqual(maybeDowngradeBashWorkerModel("Bash", input), input);
   });
 
-  it("does not rewrite when the session model is not a manager", () => {
+  it("ignores non-Bash tools", () => {
     const input = bashInput("claude -p --model claude-fable-5-1");
-    assert.strictEqual(
-      maybeDowngradeBashWorkerModel("Bash", input, "claude-opus-5", catalog),
-      input,
-    );
-  });
-
-  it("ignores non-Bash tools and unknown session models", () => {
-    const input = bashInput("claude -p --model claude-fable-5-1");
-    assert.strictEqual(
-      maybeDowngradeBashWorkerModel("Task", input, "claude-fable-5-1", catalog),
-      input,
-    );
-    assert.strictEqual(maybeDowngradeBashWorkerModel("Bash", input, undefined, catalog), input);
+    assert.strictEqual(maybeDowngradeBashWorkerModel("Agent", input), input);
   });
 });
 
@@ -5642,13 +5746,15 @@ describe("ClaudeAdapter tool-result sieve wiring", () => {
       ),
     );
 
-  it.effect("does not register hooks when the sieve is off (options unchanged)", () => {
+  it.effect("does not register the PostToolUse sieve hook when the sieve is off", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
       yield* startAndPrime(adapter);
       const options = harness.getLastCreateQueryInput()?.options;
-      assert.equal(options?.hooks, undefined);
+      assert.equal(options?.hooks?.PostToolUse, undefined);
+      // The model guardrail PreToolUse hook is always registered.
+      assert.equal(options?.hooks?.PreToolUse?.[0]?.matcher, "Agent|Task|Bash");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
