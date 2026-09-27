@@ -14,6 +14,7 @@ import { SandboxLifecycleReactor } from "../Services/SandboxLifecycleReactor.ts"
 import { SandboxSettleCleanupReactor } from "../Services/SandboxSettleCleanupReactor.ts";
 import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
+import { LocalWebPushNotifier } from "../../webPush/LocalWebPushNotifier.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
@@ -25,6 +26,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const sandboxSettleCleanupReactor = yield* SandboxSettleCleanupReactor;
   const threadSettlementReactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
+  const localWebPushNotifier = yield* LocalWebPushNotifier;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
     yield* providerRuntimeIngestion.start();
@@ -35,6 +37,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* sandboxSettleCleanupReactor.start();
     yield* threadSettlementReactor.start();
     yield* agentAwarenessRelay.start();
+    yield* localWebPushNotifier.start();
   });
 
   const drain: OrchestrationReactorShape["drain"] = Effect.gen(function* () {
