@@ -1,3 +1,4 @@
+import type { WebPushConfigResult, WebPushTestResult } from "@t3tools/contracts";
 import type { RelayAgentAwarenessPreferences } from "@t3tools/contracts/relay";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
 import * as Effect from "effect/Effect";
@@ -10,7 +11,8 @@ import {
   removeLocalStorageItem,
   setLocalStorageItem,
 } from "../hooks/useLocalStorage";
-import { runtime } from "../lib/runtime";
+import { PrimaryEnvironmentHttpClient } from "../environments/primary/httpClient";
+import { runPrimaryHttp, runtime } from "../lib/runtime";
 import { readManagedRelayClerkToken } from "./managedAuth";
 import { hasCloudPublicConfig } from "./publicConfig";
 
@@ -50,16 +52,20 @@ export function readWebPushRegistration(): WebPushRegistrationRecord | null {
   }
 }
 
+// Two delivery modes share the browser plumbing below. Relay mode (T3 Connect
+// present) registers the subscription with the cloud relay; local mode registers
+// straight with the paired Command Center server over its HTTP API. Which one
+// runs is decided purely by whether the public T3 Connect config is baked in,
+// so a production build with no relay config falls into local mode.
+export function isLocalWebPushMode(): boolean {
+  return !hasCloudPublicConfig();
+}
+
 export type WebPushSupport =
   | { readonly supported: true }
   | {
       readonly supported: false;
-      readonly reason:
-        | "cloud-not-configured"
-        | "electron"
-        | "insecure-context"
-        | "no-push-api"
-        | "ios-needs-install";
+      readonly reason: "electron" | "insecure-context" | "no-push-api" | "ios-needs-install";
     };
 
 // iOS Safari only exposes the Push API once the app is installed to the home
@@ -70,10 +76,10 @@ function isIosBrowserNeedingInstall(): boolean {
   return isIos && !isStandalone && !("PushManager" in window);
 }
 
+// Browser-capability only. Whether a delivery backend (relay vs local server)
+// exists is a separate axis: relay mode is gated by the presence of T3 Connect
+// config, local mode by the server's own `/api/web-push/config` response.
 export function webPushSupport(): WebPushSupport {
-  if (!hasCloudPublicConfig()) {
-    return { supported: false, reason: "cloud-not-configured" };
-  }
   if (isElectron) {
     return { supported: false, reason: "electron" };
   }
@@ -159,9 +165,25 @@ export type WebPushEnableResult =
   | { readonly ok: true }
   | {
       readonly ok: false;
-      readonly reason: "permission-denied" | "not-signed-in" | "failed";
+      readonly reason: "permission-denied" | "not-signed-in" | "not-configured" | "failed";
       readonly detail?: string;
     };
+
+async function acquireSubscription(vapidPublicKey: string): Promise<PushSubscription> {
+  const registration = await navigator.serviceWorker.ready;
+  return (
+    (await registration.pushManager.getSubscription()) ??
+    (await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: applicationServerKeyBytes(vapidPublicKey),
+    }))
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Relay mode (T3 Connect): registers the subscription with the cloud relay.
+// Behaviourally unchanged from before local mode existed.
+// ---------------------------------------------------------------------------
 
 async function registerWithRelay(
   subscription: PushSubscription,
@@ -201,33 +223,191 @@ async function registerWithRelay(
   return { ok: true };
 }
 
+async function enableRelayWebPush(events: WebPushEventPreferences): Promise<WebPushEnableResult> {
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") {
+    return { ok: false, reason: "permission-denied" };
+  }
+
+  const config = await runtime.runPromiseExit(
+    ManagedRelay.ManagedRelayClient.pipe(Effect.flatMap((client) => client.getWebPushConfig)),
+  );
+  if (config._tag === "Failure") {
+    return { ok: false, reason: "failed", detail: String(config.cause) };
+  }
+
+  const subscription = await acquireSubscription(config.value.vapidPublicKey);
+  const deviceId = readWebPushRegistration()?.deviceId ?? `web-${randomUUID()}`;
+  return await registerWithRelay(subscription, deviceId, events);
+}
+
+async function disableRelayWebPush(record: WebPushRegistrationRecord): Promise<void> {
+  const clerkToken = await readManagedRelayClerkToken();
+  if (clerkToken) {
+    await runtime.runPromiseExit(
+      ManagedRelay.ManagedRelayClient.pipe(
+        Effect.flatMap((client) =>
+          client.unregisterDevice({ clerkToken, deviceId: record.deviceId }),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Local mode: registers straight with the paired Command Center server over
+// its authenticated HTTP API (the same primary-environment client used for
+// auth/session calls). The relay and Clerk are never touched.
+// ---------------------------------------------------------------------------
+
+// `configured: false` (null key) means the server has no VAPID subject set; the
+// UI shows a not-configured hint instead of offering the toggle.
+export function fetchLocalWebPushConfig(): Promise<WebPushConfigResult> {
+  return runPrimaryHttp(
+    PrimaryEnvironmentHttpClient.pipe(
+      Effect.flatMap((client) => client.webPush.config({ headers: {} })),
+    ),
+  );
+}
+
+async function putLocalSubscription(
+  subscription: PushSubscription,
+  deviceId: string,
+  events: WebPushEventPreferences,
+): Promise<WebPushEnableResult> {
+  try {
+    await runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) =>
+          client.webPush.putSubscription({
+            headers: {},
+            payload: {
+              deviceId,
+              endpoint: subscription.endpoint,
+              p256dh: subscriptionKey(subscription, "p256dh"),
+              auth: subscriptionKey(subscription, "auth"),
+              preferences: events,
+            },
+          }),
+        ),
+      ),
+    );
+  } catch (cause) {
+    return {
+      ok: false,
+      reason: "failed",
+      detail: cause instanceof Error ? cause.message : String(cause),
+    };
+  }
+  setLocalStorageItem(
+    WEB_PUSH_STORAGE_KEY,
+    { deviceId, endpoint: subscription.endpoint, preferences: events },
+    WebPushRegistrationRecord,
+  );
+  return { ok: true };
+}
+
+async function enableLocalWebPush(events: WebPushEventPreferences): Promise<WebPushEnableResult> {
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") {
+    return { ok: false, reason: "permission-denied" };
+  }
+
+  let config: WebPushConfigResult;
+  try {
+    config = await fetchLocalWebPushConfig();
+  } catch (cause) {
+    return {
+      ok: false,
+      reason: "failed",
+      detail: cause instanceof Error ? cause.message : String(cause),
+    };
+  }
+  if (!config.configured || !config.vapidPublicKey) {
+    return { ok: false, reason: "not-configured" };
+  }
+
+  const subscription = await acquireSubscription(config.vapidPublicKey);
+  const deviceId = readWebPushRegistration()?.deviceId ?? `web-${randomUUID()}`;
+  return await putLocalSubscription(subscription, deviceId, events);
+}
+
+async function disableLocalWebPush(record: WebPushRegistrationRecord): Promise<void> {
+  try {
+    await runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) =>
+          client.webPush.deleteSubscription({
+            headers: {},
+            payload: { deviceId: record.deviceId },
+          }),
+        ),
+      ),
+    );
+  } catch {
+    // The server may already have dropped the row (dead endpoint cleanup); the
+    // local unsubscribe above is what stops delivery to this browser.
+  }
+}
+
+export type WebPushTestOutcome =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason: "not-configured" | "not-registered" | "failed";
+      readonly status?: number;
+      readonly detail?: string;
+    };
+
+// Local mode only: asks the server to push a "web-push-test" notification to
+// this device. Relay mode has no equivalent endpoint.
+export async function sendWebPushTestNotification(): Promise<WebPushTestOutcome> {
+  const record = readWebPushRegistration();
+  if (!record) {
+    return { ok: false, reason: "not-registered" };
+  }
+  let result: WebPushTestResult;
+  try {
+    result = await runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) =>
+          client.webPush.test({ headers: {}, payload: { deviceId: record.deviceId } }),
+        ),
+      ),
+    );
+  } catch (cause) {
+    return {
+      ok: false,
+      reason: "failed",
+      detail: cause instanceof Error ? cause.message : String(cause),
+    };
+  }
+  if (result.notConfigured) {
+    return { ok: false, reason: "not-configured" };
+  }
+  if (result.ok) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: "failed",
+    status: result.status,
+    ...(result.reason !== null ? { detail: result.reason } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Mode-dispatching public API used by the UI and startup.
+// ---------------------------------------------------------------------------
+
 export async function enableWebPushNotifications(
   events: WebPushEventPreferences = readWebPushRegistration()?.preferences ??
     defaultWebPushEventPreferences,
 ): Promise<WebPushEnableResult> {
   try {
-    const permission = await Notification.requestPermission();
-    if (permission !== "granted") {
-      return { ok: false, reason: "permission-denied" };
-    }
-
-    const config = await runtime.runPromiseExit(
-      ManagedRelay.ManagedRelayClient.pipe(Effect.flatMap((client) => client.getWebPushConfig)),
-    );
-    if (config._tag === "Failure") {
-      return { ok: false, reason: "failed", detail: String(config.cause) };
-    }
-
-    const registration = await navigator.serviceWorker.ready;
-    const subscription =
-      (await registration.pushManager.getSubscription()) ??
-      (await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: applicationServerKeyBytes(config.value.vapidPublicKey),
-      }));
-
-    const deviceId = readWebPushRegistration()?.deviceId ?? `web-${randomUUID()}`;
-    return await registerWithRelay(subscription, deviceId, events);
+    return isLocalWebPushMode()
+      ? await enableLocalWebPush(events)
+      : await enableRelayWebPush(events);
   } catch (cause) {
     return {
       ok: false,
@@ -244,18 +424,13 @@ export async function disableWebPushNotifications(): Promise<void> {
     const registration = await navigator.serviceWorker.ready;
     await (await registration.pushManager.getSubscription())?.unsubscribe();
   } catch {
-    // The subscription may already be gone; relay-side cleanup still runs.
+    // The subscription may already be gone; server/relay-side cleanup still runs.
   }
   if (record) {
-    const clerkToken = await readManagedRelayClerkToken();
-    if (clerkToken) {
-      await runtime.runPromiseExit(
-        ManagedRelay.ManagedRelayClient.pipe(
-          Effect.flatMap((client) =>
-            client.unregisterDevice({ clerkToken, deviceId: record.deviceId }),
-          ),
-        ),
-      );
+    if (isLocalWebPushMode()) {
+      await disableLocalWebPush(record);
+    } else {
+      await disableRelayWebPush(record);
     }
   }
 }
@@ -263,7 +438,7 @@ export async function disableWebPushNotifications(): Promise<void> {
 // Launch-time reconcile: push services rotate subscriptions (the SW forwards
 // pushsubscriptionchange while a window is open, but rotation can also happen
 // while none is), so a stored registration whose endpoint no longer matches
-// the live subscription re-registers with the relay.
+// the live subscription re-registers with the current delivery backend.
 export async function reconcileWebPushRegistration(): Promise<void> {
   const record = readWebPushRegistration();
   if (!record || !webPushSupport().supported) {
@@ -281,7 +456,11 @@ export async function reconcileWebPushRegistration(): Promise<void> {
       return;
     }
     if (subscription.endpoint !== record.endpoint) {
-      await registerWithRelay(subscription, record.deviceId, record.preferences);
+      if (isLocalWebPushMode()) {
+        await putLocalSubscription(subscription, record.deviceId, record.preferences);
+      } else {
+        await registerWithRelay(subscription, record.deviceId, record.preferences);
+      }
     }
   } catch {
     // Reconciliation is opportunistic; the next launch retries.
@@ -299,4 +478,110 @@ export function listenForWebPushSubscriptionChange(): void {
       void reconcileWebPushRegistration();
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Local-mode view helpers (pure) — shared by the settings row and its tests.
+// ---------------------------------------------------------------------------
+
+export type LocalWebPushConfigState = "loading" | "configured" | "not-configured" | "unavailable";
+
+export interface LocalWebPushViewModel {
+  readonly toggleDisabled: boolean;
+  readonly testButtonDisabled: boolean;
+  readonly explanation: string | null;
+}
+
+export function localWebPushViewModel(input: {
+  readonly configState: LocalWebPushConfigState;
+  readonly enabled: boolean;
+  readonly isUpdating: boolean;
+  readonly isTesting: boolean;
+}): LocalWebPushViewModel {
+  const isConfigured = input.configState === "configured";
+  return {
+    toggleDisabled: input.isUpdating || !isConfigured,
+    testButtonDisabled: !input.enabled || input.isTesting || !isConfigured,
+    explanation:
+      input.configState === "not-configured"
+        ? "Notifications aren't set up on this server yet."
+        : input.configState === "unavailable"
+          ? "Couldn't reach this server to check notification settings."
+          : null,
+  };
+}
+
+export interface WebPushToastContent {
+  readonly type: "success" | "error";
+  readonly title: string;
+  readonly description: string;
+}
+
+export function localEnableResultToast(result: WebPushEnableResult): WebPushToastContent {
+  if (result.ok) {
+    return {
+      type: "success",
+      title: "Browser notifications enabled",
+      description:
+        "This browser will notify you when agents need approval or input, or when work finishes.",
+    };
+  }
+  if (result.reason === "permission-denied") {
+    return {
+      type: "error",
+      title: "Could not enable notifications",
+      description:
+        "Notification permission was denied. Allow notifications for this site in your browser settings.",
+    };
+  }
+  if (result.reason === "not-configured") {
+    return {
+      type: "error",
+      title: "Notifications aren't set up on this server",
+      description: "This server hasn't been configured to send notifications yet.",
+    };
+  }
+  return {
+    type: "error",
+    title: "Could not enable notifications",
+    description: "Something went wrong while registering this browser.",
+  };
+}
+
+export const localDisableToast: WebPushToastContent = {
+  type: "success",
+  title: "Browser notifications disabled",
+  description: "This browser will no longer receive agent activity notifications.",
+};
+
+export function localTestResultToast(outcome: WebPushTestOutcome): WebPushToastContent {
+  if (outcome.ok) {
+    return {
+      type: "success",
+      title: "Test notification sent",
+      description: "Look for a notification from this server.",
+    };
+  }
+  if (outcome.reason === "not-configured") {
+    return {
+      type: "error",
+      title: "Not configured on this server",
+      description: "This server hasn't been configured to send notifications yet.",
+    };
+  }
+  if (outcome.reason === "not-registered") {
+    return {
+      type: "error",
+      title: "Enable notifications first",
+      description: "Turn on browser notifications before sending a test.",
+    };
+  }
+  return {
+    type: "error",
+    title: "Test notification failed",
+    description:
+      outcome.status !== undefined
+        ? `The push service responded with status ${outcome.status}.`
+        : (outcome.detail ?? "Something went wrong while sending the test notification."),
+  };
 }
