@@ -758,6 +758,7 @@ const buildAppUnderTest = (options?: {
       Layer.provide(vcsStatusBroadcasterLayer),
       Layer.provide(WorkspacePaths.layer),
       Layer.provide(layerConfig),
+      Layer.provide(SqlitePersistenceMemory),
     );
     const serviceLauncherClientLayer = ServiceLauncherClient.layer.pipe(
       Layer.provide(Layer.succeed(HostProcessEnvironment, {})),

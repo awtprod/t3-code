@@ -367,7 +367,7 @@ export function EfficiencySettingsPanel() {
         />
         <SettingsRow
           title="Confidence-gated tier judgment"
-          description="Ask the judge to rate task complexity on each auto-routed turn. The tier only changes when the judge is confident enough; rules always win (and skip the judge entirely). Adds a judge round-trip to each auto-routed turn before it starts."
+          description="Ask the judge to rate task complexity, classify the task kind, and spot continuations on each auto-routed turn. The tier (and a task-kind specialist) only apply when the judge is confident enough; rules always win (and skip the judge entirely). Adds a judge round-trip to each auto-routed turn before it starts."
           control={
             <Switch
               checked={efficiency.tierJudgment.enabled}
@@ -400,6 +400,32 @@ export function EfficiencySettingsPanel() {
                   tierJudgment: {
                     ...efficiency.tierJudgment,
                     minConfidence: clamp01(parsed),
+                  },
+                });
+              }}
+            />
+          }
+        />
+        <SettingsRow
+          title="Continuation threshold"
+          description="When the judge rates a message at least this likely (0–1) to continue the thread's current task — a go-ahead, a retry, pasted output — the turn keeps the previous turn's tier and model instead of being routed fresh."
+          control={
+            <Input
+              aria-label="continuation threshold"
+              className="w-24"
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={efficiency.tierJudgment.continuationThreshold}
+              onChange={(event) => {
+                const parsed = parseNumericInput(event.target.value);
+                if (parsed === undefined) return;
+                void persist({
+                  ...efficiency,
+                  tierJudgment: {
+                    ...efficiency.tierJudgment,
+                    continuationThreshold: clamp01(parsed),
                   },
                 });
               }}
