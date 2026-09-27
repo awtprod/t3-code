@@ -447,6 +447,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["add pair backend host code ssh config agent tunnel saved t3 connect"],
   },
   {
+    id: "publishing-accounts",
+    title: "Publishing accounts",
+    to: "/settings/connections",
+    searchTerms: ["publish clips youtube shorts instagram reels account token connect disconnect"],
+  },
+  {
     id: "notifications-desktop",
     title: "Notifications",
     to: "/settings/notifications",

@@ -58,6 +58,10 @@ export const COMMAND_CENTER_WS_METHODS = {
   googleConnectionSetupBegin: "cc.connections.google.setup.begin",
   googleConnectionSetupComplete: "cc.connections.google.setup.complete",
   googleConnectionRemove: "cc.connections.google.remove",
+  publishConnectionsQuery: "cc.connections.publish.query",
+  publishConnectionSetupBegin: "cc.connections.publish.setup.begin",
+  publishConnectionSetupComplete: "cc.connections.publish.setup.complete",
+  publishConnectionRemove: "cc.connections.publish.remove",
   memoryQuery: "cc.memory.query",
   memorySearch: "cc.memory.search",
   itemCreate: "cc.items.create",
@@ -461,6 +465,86 @@ export const CommandCenterGoogleConnectionRemoveResult = Schema.Struct({
 });
 export type CommandCenterGoogleConnectionRemoveResult =
   typeof CommandCenterGoogleConnectionRemoveResult.Type;
+
+/** External accounts finished clips can be published to. One account per provider per environment. */
+export const CommandCenterPublishProvider = Schema.Literals(["youtube", "instagram"]);
+export type CommandCenterPublishProvider = typeof CommandCenterPublishProvider.Type;
+
+/**
+ * How a provider collects its credential during `complete`:
+ * - `paste-token`: the user pastes a long-lived access token (Instagram).
+ * - `oauth-redirect`: the user opens `authUrl`, approves, and pastes the 127.0.0.1 callback address (YouTube).
+ */
+export const CommandCenterPublishConnectionSetupMode = Schema.Literals([
+  "paste-token",
+  "oauth-redirect",
+]);
+export type CommandCenterPublishConnectionSetupMode =
+  typeof CommandCenterPublishConnectionSetupMode.Type;
+
+/** Browser-safe connection summary. Never carries a token. */
+export const CommandCenterPublishConnection = Schema.Struct({
+  provider: CommandCenterPublishProvider,
+  state: Schema.Literals(["connected", "disconnected", "unavailable"]),
+  setupMode: CommandCenterPublishConnectionSetupMode,
+  accountId: Schema.optional(TrimmedNonEmptyString),
+  accountLabel: Schema.optional(TrimmedNonEmptyString),
+  expiresAt: Schema.optional(Timestamp),
+  lastRefreshedAt: Schema.optional(Timestamp),
+  detail: Schema.optional(TrimmedNonEmptyString),
+});
+export type CommandCenterPublishConnection = typeof CommandCenterPublishConnection.Type;
+
+export const CommandCenterPublishConnectionsQueryInput = Schema.Struct({});
+export type CommandCenterPublishConnectionsQueryInput =
+  typeof CommandCenterPublishConnectionsQueryInput.Type;
+
+export const CommandCenterPublishConnectionsQueryResult = Schema.Struct({
+  connections: Schema.Array(CommandCenterPublishConnection),
+});
+export type CommandCenterPublishConnectionsQueryResult =
+  typeof CommandCenterPublishConnectionsQueryResult.Type;
+
+export const CommandCenterPublishConnectionSetupBeginInput = Schema.Struct({
+  provider: CommandCenterPublishProvider,
+});
+export type CommandCenterPublishConnectionSetupBeginInput =
+  typeof CommandCenterPublishConnectionSetupBeginInput.Type;
+
+export const CommandCenterPublishConnectionSetupBeginResult = Schema.Struct({
+  sessionId: TrimmedNonEmptyString,
+  provider: CommandCenterPublishProvider,
+  setupMode: CommandCenterPublishConnectionSetupMode,
+  authUrl: Schema.optional(TrimmedNonEmptyString),
+  expiresAt: Timestamp,
+});
+export type CommandCenterPublishConnectionSetupBeginResult =
+  typeof CommandCenterPublishConnectionSetupBeginResult.Type;
+
+export const CommandCenterPublishConnectionSetupCompleteInput = Schema.Struct({
+  sessionId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  credential: TrimmedNonEmptyString.check(Schema.isMaxLength(8 * 1024)),
+});
+export type CommandCenterPublishConnectionSetupCompleteInput =
+  typeof CommandCenterPublishConnectionSetupCompleteInput.Type;
+
+export const CommandCenterPublishConnectionSetupCompleteResult = Schema.Struct({
+  connection: CommandCenterPublishConnection,
+});
+export type CommandCenterPublishConnectionSetupCompleteResult =
+  typeof CommandCenterPublishConnectionSetupCompleteResult.Type;
+
+export const CommandCenterPublishConnectionRemoveInput = Schema.Struct({
+  provider: CommandCenterPublishProvider,
+});
+export type CommandCenterPublishConnectionRemoveInput =
+  typeof CommandCenterPublishConnectionRemoveInput.Type;
+
+export const CommandCenterPublishConnectionRemoveResult = Schema.Struct({
+  connection: CommandCenterPublishConnection,
+});
+export type CommandCenterPublishConnectionRemoveResult =
+  typeof CommandCenterPublishConnectionRemoveResult.Type;
 
 export const CommandCenterMemoryQueryInput = Schema.Struct({
   spaceId: Schema.optional(SpaceId),

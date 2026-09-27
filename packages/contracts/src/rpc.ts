@@ -238,6 +238,14 @@ import {
   CommandCenterGoogleConnectionSetupCompleteResult,
   CommandCenterGoogleConnectionRemoveInput,
   CommandCenterGoogleConnectionRemoveResult,
+  CommandCenterPublishConnectionRemoveInput,
+  CommandCenterPublishConnectionRemoveResult,
+  CommandCenterPublishConnectionSetupBeginInput,
+  CommandCenterPublishConnectionSetupBeginResult,
+  CommandCenterPublishConnectionSetupCompleteInput,
+  CommandCenterPublishConnectionSetupCompleteResult,
+  CommandCenterPublishConnectionsQueryInput,
+  CommandCenterPublishConnectionsQueryResult,
   CommandCenterConnectionsQueryInput,
   CommandCenterConnectionsQueryResult,
   CommandCenterError,
@@ -565,6 +573,42 @@ export const WsCommandCenterGoogleConnectionRemoveRpc = Rpc.make(
   {
     payload: CommandCenterGoogleConnectionRemoveInput,
     success: CommandCenterGoogleConnectionRemoveResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterPublishConnectionsQueryRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.publishConnectionsQuery,
+  {
+    payload: CommandCenterPublishConnectionsQueryInput,
+    success: CommandCenterPublishConnectionsQueryResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterPublishConnectionSetupBeginRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin,
+  {
+    payload: CommandCenterPublishConnectionSetupBeginInput,
+    success: CommandCenterPublishConnectionSetupBeginResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterPublishConnectionSetupCompleteRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete,
+  {
+    payload: CommandCenterPublishConnectionSetupCompleteInput,
+    success: CommandCenterPublishConnectionSetupCompleteResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterPublishConnectionRemoveRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.publishConnectionRemove,
+  {
+    payload: CommandCenterPublishConnectionRemoveInput,
+    success: CommandCenterPublishConnectionRemoveResult,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
@@ -1378,6 +1422,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterGoogleConnectionSetupBeginRpc,
   WsCommandCenterGoogleConnectionSetupCompleteRpc,
   WsCommandCenterGoogleConnectionRemoveRpc,
+  WsCommandCenterPublishConnectionsQueryRpc,
+  WsCommandCenterPublishConnectionSetupBeginRpc,
+  WsCommandCenterPublishConnectionSetupCompleteRpc,
+  WsCommandCenterPublishConnectionRemoveRpc,
   WsCommandCenterMemoryQueryRpc,
   WsCommandCenterMemorySearchRpc,
   WsCommandCenterItemCreateRpc,

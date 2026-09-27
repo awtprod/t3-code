@@ -106,6 +106,38 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.connectionId]),
       },
     }),
+    publishConnections: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:publish-connections",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionsQuery,
+      staleTimeMs: 5_000,
+    }),
+    beginPublishConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:publish-connection-setup-begin",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.provider]),
+      },
+    }),
+    completePublishConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:publish-connection-setup-complete",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sessionId]),
+      },
+    }),
+    removePublishConnection: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:publish-connection-remove",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionRemove,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.provider]),
+      },
+    }),
     eventReplay: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:event-replay",
       tag: COMMAND_CENTER_WS_METHODS.eventsReplay,

@@ -56,6 +56,7 @@ import {
   useRelativeTimeTick,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { PublishingConnectionsSection } from "./PublishingConnectionsSection";
 import { Input } from "../ui/input";
 import { Checkbox } from "../ui/checkbox";
 import {
@@ -3587,6 +3588,9 @@ export function ConnectionsSettings() {
           savedEnvironments={savedEnvironments}
         />
       </SettingsSection>
+      {primaryEnvironmentId === null ? null : (
+        <PublishingConnectionsSection environmentId={primaryEnvironmentId} />
+      )}
     </SettingsPageContainer>
   );
 }
