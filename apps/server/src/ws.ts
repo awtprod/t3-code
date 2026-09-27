@@ -177,6 +177,7 @@ import * as AutomationScheduleInterpreter from "./command-center/automation/Sche
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
+import * as PublishConnections from "./command-center/publish/PublishConnections.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
@@ -623,6 +624,22 @@ const makeWsRpcLayer = (
       const googleConnectionSetup = yield* Effect.serviceOption(
         GoogleConnectionSetup.GoogleConnectionSetup,
       );
+      const publishConnections = yield* Effect.serviceOption(PublishConnections.PublishConnections);
+      const withPublishConnections = <A>(
+        use: (
+          service: PublishConnections.PublishConnections["Service"],
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        Option.match(publishConnections, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "connector",
+                message: "Publishing connections are unavailable in this environment.",
+              }),
+            ),
+          onSome: use,
+        });
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1688,6 +1705,36 @@ const makeWsRpcLayer = (
                   .remove(input)
                   .pipe(Effect.tap(() => commandCenter.syncConfiguration({ force: true }))),
             }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.publishConnectionsQuery]: (_input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.publishConnectionsQuery,
+            withPublishConnections((service) =>
+              service.query.pipe(Effect.map((connections) => ({ connections }))),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin,
+            withPublishConnections((service) => service.begin(input)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete,
+            withPublishConnections((service) =>
+              service.complete(input).pipe(Effect.map((connection) => ({ connection }))),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.publishConnectionRemove]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.publishConnectionRemove,
+            withPublishConnections((service) =>
+              service.remove(input).pipe(Effect.map((connection) => ({ connection }))),
+            ),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.memoryQuery]: (input) =>
