@@ -1,8 +1,5 @@
-import * as Effect from "effect/Effect";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { PrimaryEnvironmentHttpClient } from "../environments/primary/httpClient";
-import { __setPrimaryHttpRunnerForTests, type PrimaryHttpEffectRunner } from "../lib/runtime";
 import { removeLocalStorageItem } from "../hooks/useLocalStorage";
 
 const publicConfigState = vi.hoisted(() => ({ localMode: true }));
@@ -17,6 +14,7 @@ vi.mock("./publicConfig", async (importOriginal) => {
 });
 
 import {
+  __setLocalWebPushServerApiForTests,
   disableWebPushNotifications,
   enableWebPushNotifications,
   isLocalWebPushMode,
@@ -29,6 +27,7 @@ import {
   sendWebPushTestNotification,
   webPushSupport,
   type LocalWebPushConfigState,
+  type LocalWebPushServerApi,
 } from "./webPush";
 
 const WEB_PUSH_STORAGE_KEY = "t3code:web-push:v1";
@@ -86,8 +85,9 @@ function installBrowser(options?: {
   vi.stubGlobal("window", {
     isSecureContext: true,
     matchMedia: () => ({ matches: false }),
-    PushManager: class {},
-    Notification: class {},
+    // Only the `"PushManager"/"Notification" in window` presence check matters.
+    PushManager: {},
+    Notification: {},
   });
   vi.stubGlobal("navigator", {
     userAgent: options?.userAgent ?? "Mozilla/5.0 (Macintosh) Chrome/120",
@@ -108,47 +108,41 @@ interface MockCalls {
   test: unknown[];
 }
 
+// Fake the Promise-level server seam: record payloads and return canned
+// responses without touching the Effect runtime (which tests must not drive).
 function installPrimaryClient(overrides?: {
   config?: { configured: boolean; vapidPublicKey: string | null };
   test?: { ok: boolean; notConfigured: boolean; status: number; reason: string | null };
   putFails?: boolean;
 }): MockCalls {
   const calls: MockCalls = { config: 0, put: [], del: [], test: [] };
-  const client = {
-    webPush: {
-      config: () => {
-        calls.config += 1;
-        return Effect.succeed(overrides?.config ?? { configured: true, vapidPublicKey: VAPID_KEY });
-      },
-      putSubscription: ({ payload }: { payload: unknown }) => {
-        calls.put.push(payload);
-        return overrides?.putFails
-          ? Effect.die(new Error("put failed"))
-          : Effect.succeed({ ok: true });
-      },
-      deleteSubscription: ({ payload }: { payload: unknown }) => {
-        calls.del.push(payload);
-        return Effect.succeed({ ok: true });
-      },
-      test: ({ payload }: { payload: unknown }) => {
-        calls.test.push(payload);
-        return Effect.succeed(
-          overrides?.test ?? { ok: true, notConfigured: false, status: 201, reason: null },
-        );
-      },
+  const api: LocalWebPushServerApi = {
+    getConfig: () => {
+      calls.config += 1;
+      return Promise.resolve(overrides?.config ?? { configured: true, vapidPublicKey: VAPID_KEY });
+    },
+    putSubscription: (payload) => {
+      calls.put.push(payload);
+      return overrides?.putFails ? Promise.reject(new Error("put failed")) : Promise.resolve();
+    },
+    deleteSubscription: (deviceId) => {
+      calls.del.push({ deviceId });
+      return Promise.resolve();
+    },
+    sendTest: (deviceId) => {
+      calls.test.push({ deviceId });
+      return Promise.resolve(
+        overrides?.test ?? { ok: true, notConfigured: false, status: 201, reason: null },
+      );
     },
   };
-  const runner: PrimaryHttpEffectRunner = (effect) =>
-    Effect.runPromise(
-      effect.pipe(Effect.provideService(PrimaryEnvironmentHttpClient, client as never)),
-    );
-  __setPrimaryHttpRunnerForTests(runner);
+  __setLocalWebPushServerApiForTests(api);
   return calls;
 }
 
 afterEach(() => {
   removeLocalStorageItem(WEB_PUSH_STORAGE_KEY);
-  __setPrimaryHttpRunnerForTests();
+  __setLocalWebPushServerApiForTests();
   vi.unstubAllGlobals();
   publicConfigState.localMode = true;
 });

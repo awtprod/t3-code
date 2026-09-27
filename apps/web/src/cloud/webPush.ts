@@ -1,4 +1,8 @@
-import type { WebPushConfigResult, WebPushTestResult } from "@t3tools/contracts";
+import type {
+  WebPushConfigResult,
+  WebPushSubscriptionInput,
+  WebPushTestResult,
+} from "@t3tools/contracts";
 import type { RelayAgentAwarenessPreferences } from "@t3tools/contracts/relay";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
 import * as Effect from "effect/Effect";
@@ -298,14 +302,55 @@ async function disableRelayWebPush(record: WebPushRegistrationRecord): Promise<v
 // auth/session calls). The relay and Clerk are never touched.
 // ---------------------------------------------------------------------------
 
+// A Promise-level seam over the four server calls. The live implementation runs
+// them through the primary-environment HTTP client; tests inject a fake that
+// records payloads (the Effect runtime must not be driven from a test).
+export interface LocalWebPushServerApi {
+  readonly getConfig: () => Promise<WebPushConfigResult>;
+  readonly putSubscription: (input: WebPushSubscriptionInput) => Promise<void>;
+  readonly deleteSubscription: (deviceId: string) => Promise<void>;
+  readonly sendTest: (deviceId: string) => Promise<WebPushTestResult>;
+}
+
+const liveLocalWebPushServerApi: LocalWebPushServerApi = {
+  getConfig: () =>
+    runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) => client.webPush.config({ headers: {} })),
+      ),
+    ),
+  putSubscription: (payload) =>
+    runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) => client.webPush.putSubscription({ headers: {}, payload })),
+      ),
+    ).then(() => undefined),
+  deleteSubscription: (deviceId) =>
+    runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) =>
+          client.webPush.deleteSubscription({ headers: {}, payload: { deviceId } }),
+        ),
+      ),
+    ).then(() => undefined),
+  sendTest: (deviceId) =>
+    runPrimaryHttp(
+      PrimaryEnvironmentHttpClient.pipe(
+        Effect.flatMap((client) => client.webPush.test({ headers: {}, payload: { deviceId } })),
+      ),
+    ),
+};
+
+let localWebPushServerApi = liveLocalWebPushServerApi;
+
+export function __setLocalWebPushServerApiForTests(api?: LocalWebPushServerApi): void {
+  localWebPushServerApi = api ?? liveLocalWebPushServerApi;
+}
+
 // `configured: false` (null key) means the server has no VAPID subject set; the
 // UI shows a not-configured hint instead of offering the toggle.
 export function fetchLocalWebPushConfig(): Promise<WebPushConfigResult> {
-  return runPrimaryHttp(
-    PrimaryEnvironmentHttpClient.pipe(
-      Effect.flatMap((client) => client.webPush.config({ headers: {} })),
-    ),
-  );
+  return localWebPushServerApi.getConfig();
 }
 
 async function putLocalSubscription(
@@ -314,22 +359,13 @@ async function putLocalSubscription(
   events: WebPushEventPreferences,
 ): Promise<WebPushEnableResult> {
   try {
-    await runPrimaryHttp(
-      PrimaryEnvironmentHttpClient.pipe(
-        Effect.flatMap((client) =>
-          client.webPush.putSubscription({
-            headers: {},
-            payload: {
-              deviceId,
-              endpoint: subscription.endpoint,
-              p256dh: subscriptionKey(subscription, "p256dh"),
-              auth: subscriptionKey(subscription, "auth"),
-              preferences: events,
-            },
-          }),
-        ),
-      ),
-    );
+    await localWebPushServerApi.putSubscription({
+      deviceId,
+      endpoint: subscription.endpoint,
+      p256dh: subscriptionKey(subscription, "p256dh"),
+      auth: subscriptionKey(subscription, "auth"),
+      preferences: events,
+    });
   } catch (cause) {
     return {
       ok: false,
@@ -392,16 +428,7 @@ async function reconcileLocalWebPush(record: WebPushRegistrationRecord): Promise
 
 async function disableLocalWebPush(record: WebPushRegistrationRecord): Promise<void> {
   try {
-    await runPrimaryHttp(
-      PrimaryEnvironmentHttpClient.pipe(
-        Effect.flatMap((client) =>
-          client.webPush.deleteSubscription({
-            headers: {},
-            payload: { deviceId: record.deviceId },
-          }),
-        ),
-      ),
-    );
+    await localWebPushServerApi.deleteSubscription(record.deviceId);
   } catch {
     // The server may already have dropped the row (dead endpoint cleanup); the
     // local unsubscribe above is what stops delivery to this browser.
@@ -426,13 +453,7 @@ export async function sendWebPushTestNotification(): Promise<WebPushTestOutcome>
   }
   let result: WebPushTestResult;
   try {
-    result = await runPrimaryHttp(
-      PrimaryEnvironmentHttpClient.pipe(
-        Effect.flatMap((client) =>
-          client.webPush.test({ headers: {}, payload: { deviceId: record.deviceId } }),
-        ),
-      ),
-    );
+    result = await localWebPushServerApi.sendTest(record.deviceId);
   } catch (cause) {
     return {
       ok: false,
