@@ -116,6 +116,32 @@ function resolveThreadAwarenessPhase(
   return null;
 }
 
+/**
+ * Short status word for a phase, shown as the leading token of a notification
+ * body (`${status}: ${projectTitle}`). Mirrors the relay's private
+ * `statusForPhase` in infra/relay/src/agentActivity/AgentActivityPublisher.ts so
+ * the same thread reads identically across the relay (APNs) and direct Web Push
+ * channels; keep the two in sync.
+ */
+export function agentAwarenessStatusWord(phase: AgentAwarenessPhase): string {
+  switch (phase) {
+    case "waiting_for_approval":
+      return "Approval";
+    case "waiting_for_input":
+      return "Input";
+    case "completed":
+      return "Done";
+    case "failed":
+      return "Failed";
+    case "starting":
+      return "Connecting";
+    case "running":
+      return "Working";
+    case "stale":
+      return "Waiting";
+  }
+}
+
 function headlineForPhase(phase: AgentAwarenessPhase): string {
   switch (phase) {
     case "starting":
