@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -75,11 +76,22 @@ interface Harness {
 
 const okResult: WebPushDeliveryResult = { ok: true, status: 201, permanentFailure: false };
 
-const makeHarness = Effect.fn(function* () {
+// `seedThreads` overrides what getShellSnapshot returns for the startup seed;
+// when omitted the seed reflects the current threadRef (used by the transition
+// tests). Passing an explicit list lets a test seed a baseline that differs
+// from the live thread state, modelling boot-time transitions.
+const makeHarness = Effect.fn(function* (seedThreads?: readonly OrchestrationThreadShell[]) {
   const threadRef = yield* Ref.make(Option.some(threadForPhase("running")));
   const sends = yield* Ref.make<ReadonlyArray<WebPushSendInput>>([]);
   const resultRef = yield* Ref.make<WebPushDeliveryResult>(okResult);
   const harness: Harness = { threadRef, sends, resultRef };
+
+  const shellThreads = () =>
+    seedThreads !== undefined
+      ? Effect.succeed(seedThreads)
+      : Ref.get(threadRef).pipe(
+          Effect.map((thread) => (Option.isSome(thread) ? [thread.value] : [])),
+        );
 
   const depsLayer = Layer.mergeAll(
     Layer.succeed(WebPushConfig, {
@@ -101,11 +113,11 @@ const makeHarness = Effect.fn(function* () {
       getThreadShellById: () => Ref.get(threadRef),
       getProjectShellById: () => Effect.succeed(Option.some(PROJECT)),
       getShellSnapshot: () =>
-        Ref.get(threadRef).pipe(
-          Effect.map((thread) => ({
+        shellThreads().pipe(
+          Effect.map((threads) => ({
             snapshotSequence: 0,
             projects: [PROJECT],
-            threads: Option.isSome(thread) ? [thread.value] : [],
+            threads,
             updatedAt: FIXED_UPDATED_AT,
           })),
         ),
@@ -196,4 +208,48 @@ it.effect("deletes the subscription when a delivery reports a permanent failure 
       }).pipe(Effect.provide(depsLayer));
     }),
   ),
+);
+
+it.effect("delivers a transition that lands during seeding (event not lost)", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      // Seed snapshot is empty: this thread enters waiting_for_approval right as
+      // the server boots, so it is NOT in the seed baseline.
+      const { harness, depsLayer } = yield* makeHarness([]);
+      yield* Ref.set(harness.threadRef, Option.some(threadForPhase("approval")));
+      yield* Effect.gen(function* () {
+        const store = yield* WebPushSubscriptions;
+        yield* store.upsert(SUBSCRIPTION);
+        const notifier = yield* makeNotifier;
+        // The event is processed before the seed opens the gate; processThread
+        // must block until seeding completes, then still deliver.
+        const fiber = yield* Effect.forkScoped(notifier.processThread(THREAD_ID));
+        assert.equal((yield* Ref.get(harness.sends)).length, 0);
+        yield* notifier.seedFromSnapshot;
+        yield* Fiber.join(fiber);
+        assert.equal((yield* Ref.get(harness.sends)).length, 1);
+      }).pipe(Effect.provide(depsLayer));
+    }),
+  ),
+);
+
+it.effect(
+  "does not notify for a state unchanged since the seed even if queued during seeding",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        // Seed baseline already has this thread in waiting_for_approval.
+        const { harness, depsLayer } = yield* makeHarness([threadForPhase("approval")]);
+        yield* Ref.set(harness.threadRef, Option.some(threadForPhase("approval")));
+        yield* Effect.gen(function* () {
+          const store = yield* WebPushSubscriptions;
+          yield* store.upsert(SUBSCRIPTION);
+          const notifier = yield* makeNotifier;
+          const fiber = yield* Effect.forkScoped(notifier.processThread(THREAD_ID));
+          yield* notifier.seedFromSnapshot;
+          yield* Fiber.join(fiber);
+          assert.equal((yield* Ref.get(harness.sends)).length, 0);
+        }).pipe(Effect.provide(depsLayer));
+      }),
+    ),
 );

@@ -5,6 +5,7 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -59,6 +60,12 @@ export const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
 
   const publishedIdentityByThreadRef = yield* Ref.make(new Map<ThreadId, string>());
+  // Resolved once the startup snapshot seed has recorded the last-seen identity
+  // for every current thread. start() subscribes to the event stream BEFORE
+  // seeding, so events that land mid-seed are buffered in the worker; each
+  // processThread waits on this gate so it compares against seeded identities
+  // (no restart flood) yet no mid-seed transition is dropped.
+  const seedComplete = yield* Deferred.make<void>();
   // Deadlines for transitions that need confirmation. The confirming re-publish
   // is re-enqueued through the same worker, so it can never race a live update.
   const publishConfirmDeadlines = new Map<ThreadId, number>();
@@ -113,6 +120,10 @@ export const make = Effect.gen(function* () {
     if (!configured) {
       return;
     }
+    // Hold until the startup seed has run so a thread's first comparison is
+    // against its seeded identity, never an empty map (which would notify for
+    // states that merely existed at boot).
+    yield* Deferred.await(seedComplete);
     const environmentId = yield* serverEnvironment.getEnvironmentId;
     const thread = yield* snapshotQuery.getThreadShellById(threadId);
     const project = Option.isSome(thread)
@@ -197,6 +208,9 @@ export const make = Effect.gen(function* () {
         cause: Cause.pretty(cause),
       }),
     ),
+    // Always open the gate, even if seeding failed, so buffered events are not
+    // stuck forever; a failed seed just means an empty baseline for this boot.
+    Effect.ensuring(Deferred.succeed(seedComplete, undefined).pipe(Effect.asVoid)),
   );
 
   const worker = yield* makeDrainableWorker(processThread);
@@ -221,9 +235,9 @@ export const make = Effect.gen(function* () {
         return;
       }
       yield* Effect.logInfo("direct Web Push notifier enabled");
-      // Seed the last-seen identities from the current snapshot BEFORE consuming
-      // the event stream, so startup catch-up never delivers notifications.
-      yield* seedFromSnapshot;
+      // Subscribe to the event stream FIRST so a transition that lands during the
+      // seed is buffered in the worker rather than lost; each queued processThread
+      // waits on `seedComplete` (below) before comparing against the seed.
       yield* forkParked(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
           const threadId = eventThreadId(event);
@@ -233,6 +247,10 @@ export const make = Effect.gen(function* () {
           return worker.enqueue(threadId);
         }),
       );
+      // Seed the last-seen identities, then open the gate. Startup catch-up never
+      // notifies (seeded == current => unchanged), but a mid-seed transition is
+      // still delivered once the buffered event drains.
+      yield* forkParked(seedFromSnapshot);
     },
   );
 
