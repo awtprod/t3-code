@@ -1,27 +1,38 @@
 import { useAuth } from "@clerk/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   disableWebPushNotifications,
   enableWebPushNotifications,
+  fetchLocalWebPushConfig,
+  isLocalWebPushMode,
+  localDisableToast,
+  localEnableResultToast,
+  localTestResultToast,
+  localWebPushViewModel,
   readWebPushRegistration,
+  sendWebPushTestNotification,
   webPushSupport,
+  type LocalWebPushConfigState,
 } from "~/cloud/webPush";
+import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsRow } from "./settingsLayout";
 
-// Per-browser T3 Connect notification opt-in: agent activity (approvals,
-// input requests, completions, failures) arrives as Web Push through the
-// relay, mirroring the mobile app's notifications. Renders nothing when the
-// deployment has no T3 Connect config or the runtime cannot do push at all;
+// Per-browser notification opt-in. Agent activity (approvals, input requests,
+// completions, failures) arrives as Web Push. In relay mode (T3 Connect) the
+// relay delivers it; in local mode the paired Command Center server delivers it
+// directly. Renders nothing when the runtime cannot do push at all;
 // iOS-needs-install gets a hint row instead of silence.
+//
+// Clerk is only mounted in relay builds, so the relay row (which reads the
+// sign-in state) and the local row (which never touches Clerk) are separate
+// components — the parent picks one, so useAuth is never called without a
+// provider.
 export function WebPushNotificationsRow() {
-  const { isSignedIn } = useAuth();
   const support = webPushSupport();
-  const [enabled, setEnabled] = useState(() => readWebPushRegistration() !== null);
-  const [isUpdating, setIsUpdating] = useState(false);
 
   if (!support.supported) {
     if (support.reason === "ios-needs-install") {
@@ -34,6 +45,16 @@ export function WebPushNotificationsRow() {
     }
     return null;
   }
+
+  return isLocalWebPushMode() ? <LocalWebPushRow /> : <RelayWebPushRow />;
+}
+
+// Relay mode (T3 Connect present): unchanged behaviour — notifications require a
+// signed-in relay session.
+function RelayWebPushRow() {
+  const { isSignedIn } = useAuth();
+  const [enabled, setEnabled] = useState(() => readWebPushRegistration() !== null);
+  const [isUpdating, setIsUpdating] = useState(false);
 
   const disabledReason = !isSignedIn
     ? "Sign in to T3 Connect to receive notifications in this browser."
@@ -96,6 +117,85 @@ export function WebPushNotificationsRow() {
         ) : (
           control
         )
+      }
+    />
+  );
+}
+
+// Local mode (no T3 Connect): the paired server holds its own VAPID key and
+// pushes directly. No Clerk sign-in involved; instead we ask the server whether
+// it has push configured, and offer a test button once registered.
+function LocalWebPushRow() {
+  const [enabled, setEnabled] = useState(() => readWebPushRegistration() !== null);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
+  const [configState, setConfigState] = useState<LocalWebPushConfigState>("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchLocalWebPushConfig()
+      .then((config) => {
+        if (!cancelled) {
+          setConfigState(
+            config.configured && config.vapidPublicKey ? "configured" : "not-configured",
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setConfigState("unavailable");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const view = localWebPushViewModel({ configState, enabled, isUpdating, isTesting });
+
+  const updateEnabled = async (next: boolean) => {
+    setIsUpdating(true);
+    if (next) {
+      const result = await enableWebPushNotifications();
+      setEnabled(result.ok);
+      toastManager.add(localEnableResultToast(result));
+    } else {
+      await disableWebPushNotifications();
+      setEnabled(false);
+      toastManager.add(localDisableToast);
+    }
+    setIsUpdating(false);
+  };
+
+  const sendTest = async () => {
+    setIsTesting(true);
+    const outcome = await sendWebPushTestNotification();
+    toastManager.add(localTestResultToast(outcome));
+    setIsTesting(false);
+  };
+
+  return (
+    <SettingsRow
+      title="Browser notifications"
+      description="Notify this browser when agents need approval or input, or when work finishes. Delivered directly by this server."
+      status={view.explanation}
+      control={
+        <>
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={view.testButtonDisabled}
+            onClick={() => void sendTest()}
+          >
+            Send test notification
+          </Button>
+          <Switch
+            aria-label="Enable browser notifications"
+            checked={enabled}
+            disabled={view.toggleDisabled}
+            onCheckedChange={(next) => void updateEnabled(next)}
+          />
+        </>
       }
     />
   );
