@@ -191,7 +191,6 @@ export function WindowsMediaPickerView(props: WindowsMediaPickerViewProps) {
                     <button
                       type="button"
                       className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent"
-                      title={entry.path}
                       onClick={() =>
                         entry.isDir
                           ? props.onNavigate({ kind: "folder", path: entry.path })
