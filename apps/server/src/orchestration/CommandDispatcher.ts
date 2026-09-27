@@ -108,6 +108,17 @@ export interface OrchestrationCommandDispatcherShape {
   readonly dispatchNormalized: (
     command: OrchestrationCommand,
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
+  /**
+   * Token-efficiency routing for a normalized command, without dispatching it.
+   * An auto-routed `thread.turn.start` comes back carrying its
+   * `efficiencyDecision` (and the decided model / tier on any bootstrap
+   * `createThread`); every other command is returned unchanged. The WebSocket
+   * transport dispatches through its own bootstrap path, so it calls this
+   * first rather than `dispatchNormalized`.
+   */
+  readonly resolve: (
+    command: OrchestrationCommand,
+  ) => Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError>;
 }
 
 /**
@@ -588,7 +599,11 @@ export const make = Effect.gen(function* () {
       Effect.flatMap(dispatchNormalized),
     );
 
-  return OrchestrationCommandDispatcher.of({ dispatch, dispatchNormalized });
+  return OrchestrationCommandDispatcher.of({
+    dispatch,
+    dispatchNormalized,
+    resolve: resolveEfficiency,
+  });
 });
 
 export const layer = Layer.effect(OrchestrationCommandDispatcher, make).pipe(
