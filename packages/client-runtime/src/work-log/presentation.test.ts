@@ -2,7 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { ThreadId } from "@t3tools/contracts";
 
-import { resolveViewedImageAsset, workEntryViewedImagePath } from "./presentation.js";
+import {
+  resolveVideoClipAsset,
+  resolveViewedImageAsset,
+  workEntryVideoPath,
+  workEntryViewedImagePath,
+} from "./presentation.js";
 
 describe("workEntryViewedImagePath", () => {
   const entry = { label: "Read", tone: "tool" } as const;
@@ -83,5 +88,79 @@ describe("resolveViewedImageAsset", () => {
       srcFragment: "#mark",
     });
     expect(resolveViewedImageAsset("https://example.com/logo.png", { threadId })).toBeNull();
+  });
+});
+
+describe("workEntryVideoPath", () => {
+  const tool = { label: "Tool", tone: "tool" } as const;
+
+  it("surfaces videos the agent read or changed", () => {
+    expect(
+      workEntryVideoPath({ ...tool, requestKind: "file-read", detail: " out/clip.mp4 " }),
+    ).toBe("out/clip.mp4");
+    expect(
+      workEntryVideoPath({
+        ...tool,
+        itemType: "file_change",
+        changedFiles: ["notes.md", "renders/a.webm", "renders/b.mov"],
+      }),
+    ).toBe("renders/b.mov");
+  });
+
+  it("surfaces the output of a completed ffmpeg render", () => {
+    const render = {
+      ...tool,
+      itemType: "command_execution",
+      toolLifecycleStatus: "completed",
+      command: `cd /work && ffmpeg -y -i "raw/take 1.mov" -vf scale=1080:-2 'out/final clip.mp4' 2>&1 | tail -5`,
+    } as const;
+    expect(workEntryVideoPath(render)).toBe("out/final clip.mp4");
+    expect(workEntryVideoPath({ ...render, toolLifecycleStatus: "inProgress" })).toBeNull();
+    expect(workEntryVideoPath({ ...render, toolLifecycleStatus: "failed" })).toBeNull();
+    expect(workEntryVideoPath({ ...render, command: "ls out/final.mp4 raw/take.mov" })).toBeNull();
+  });
+
+  it("ignores non-video and multi-line entries", () => {
+    expect(workEntryVideoPath({ ...tool, requestKind: "file-read", detail: "a.png" })).toBeNull();
+    expect(
+      workEntryVideoPath({ ...tool, requestKind: "file-read", detail: "a.mp4\nb.mp4" }),
+    ).toBeNull();
+    expect(workEntryVideoPath({ ...tool, detail: "a.mp4" })).toBeNull();
+  });
+});
+
+describe("resolveVideoClipAsset", () => {
+  const threadId = ThreadId.make("thread-1");
+
+  it("resolves workspace clips to workspace-file resources", () => {
+    expect(
+      resolveVideoClipAsset("out/clip.mp4", { threadId, workspaceRoot: "/workspace" }),
+    ).toEqual({
+      resource: { _tag: "workspace-file", threadId, path: "/workspace/out/clip.mp4" },
+      name: "clip.mp4",
+    });
+  });
+
+  it("gives attachment clips an inline video mime", () => {
+    const attachmentId =
+      "11111111-1111-4111-8111-111111111111-22222222-2222-4222-8222-222222222222";
+    expect(
+      resolveVideoClipAsset(`/var/lib/t3/userdata/attachments/${attachmentId}.webm`, {
+        threadId,
+      }),
+    ).toEqual({
+      resource: {
+        _tag: "attachment",
+        attachmentId,
+        fileName: `${attachmentId}.webm`,
+        mimeType: "video/webm",
+      },
+      name: `${attachmentId}.webm`,
+    });
+  });
+
+  it("rejects non-video and remote sources", () => {
+    expect(resolveVideoClipAsset("out/a.png", { threadId, workspaceRoot: "/w" })).toBeNull();
+    expect(resolveVideoClipAsset("https://example.com/a.mp4", { threadId })).toBeNull();
   });
 });

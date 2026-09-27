@@ -8,7 +8,11 @@ import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
 } from "@t3tools/client-runtime/markdown-images";
-import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+import {
+  isWorkspaceImagePreviewPath,
+  isWorkspaceVideoPreviewPath,
+  workspaceVideoPreviewMimeType,
+} from "@t3tools/shared/filePreview";
 
 export function isWorktreeSetupActivity(kind: string): boolean {
   return kind === "setup-script.requested" || kind === "setup-script.started";
@@ -132,6 +136,77 @@ export function resolveViewedImageAsset(
       : { _tag: "workspace-file", threadId: input.threadId, path },
     alt: path.split(/[\\/]/).at(-1) ?? "image",
     srcFragment: markdownImageSourceFragment(source),
+  };
+}
+
+/** Render commands whose last video argument is the file they write. */
+const VIDEO_RENDER_COMMAND_PATTERN = /(?:^|[\s;&|/(])(?:ffmpeg|melt|HandBrakeCLI)(?:\.exe)?\s/i;
+const SHELL_WORD_PATTERN = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
+
+function shellWords(command: string): string[] {
+  return Array.from(command.matchAll(SHELL_WORD_PATTERN), (match) =>
+    (match[1] ?? match[2] ?? match[3] ?? "").replace(/^[<>]+|[;&|)]+$/g, ""),
+  );
+}
+
+/**
+ * The finished video clip a work-log entry points at, if any: a video the
+ * agent read, a video file it changed, or the output of a completed
+ * ffmpeg-like render command (ffmpeg writes its last positional argument).
+ * Running tools return null because the file may still be partial.
+ */
+export function workEntryVideoPath(entry: WorkLogPresentationEntry): string | null {
+  if (entry.toolLifecycleStatus === "inProgress") return null;
+  const action = toolGroupAction(entry);
+  const detail = entry.detail?.trim();
+  if (
+    action === "read" &&
+    detail !== undefined &&
+    !/[\r\n]/.test(detail) &&
+    isWorkspaceVideoPreviewPath(detail)
+  ) {
+    return detail;
+  }
+  const changedVideo = entry.changedFiles?.findLast(isWorkspaceVideoPreviewPath);
+  if (changedVideo !== undefined) return changedVideo;
+  const command = entry.command?.trim();
+  if (
+    action === "command" &&
+    entry.toolLifecycleStatus === "completed" &&
+    command !== undefined &&
+    VIDEO_RENDER_COMMAND_PATTERN.test(command)
+  ) {
+    return shellWords(command).findLast(isWorkspaceVideoPreviewPath) ?? null;
+  }
+  return null;
+}
+
+export interface VideoClipAsset {
+  readonly resource: Extract<AssetResource, { readonly _tag: "attachment" | "workspace-file" }>;
+  readonly name: string;
+}
+
+/**
+ * Maps a video path from a work entry or markdown to the signed-asset
+ * resource the existing video player streams. T3 attachment videos carry
+ * their inline mime so the server serves them for playback, not download.
+ */
+export function resolveVideoClipAsset(
+  source: string,
+  input: {
+    readonly threadId: ThreadId;
+    readonly workspaceRoot?: string | null | undefined;
+  },
+): VideoClipAsset | null {
+  const mimeType = workspaceVideoPreviewMimeType(source);
+  const asset = mimeType === null ? null : resolveViewedImageAsset(source, input);
+  if (mimeType === null || asset === null) return null;
+  return {
+    resource:
+      asset.resource._tag === "attachment"
+        ? { ...asset.resource, fileName: asset.alt, mimeType }
+        : asset.resource,
+    name: asset.alt,
   };
 }
 

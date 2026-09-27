@@ -42,6 +42,7 @@ import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
 } from "@t3tools/client-runtime/markdown-images";
+import { resolveVideoClipAsset } from "@t3tools/client-runtime/work-log/presentation";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import React, {
@@ -77,6 +78,7 @@ import {
 } from "@t3tools/client-runtime/codex-markdown-directives";
 import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
+import { ChatVideoClipTile } from "./chat/ChatVideoClipTile";
 import { CHAT_FILE_TAG_CHIP_CLASS_NAME, FileTagChipContent } from "./chat/FileTagChip";
 import { PierreEntryIcon } from "./chat/PierreEntryIcon";
 import {
@@ -2371,6 +2373,24 @@ function ChatMarkdown({
               )}
               style={authoredSizeStyle}
               {...expandableMarkdownImageProps(imageExpand, imageSource.uri, altText)}
+            />
+          );
+        }
+        const videoClip =
+          imageSource._tag === "WorkspaceFile" && threadRef
+            ? resolveVideoClipAsset(classifiedSrc, {
+                threadId: threadRef.threadId,
+                workspaceRoot: imageBaseDir ?? cwd,
+              })
+            : null;
+        if (videoClip && threadRef) {
+          return (
+            <ChatVideoClipTile
+              environmentId={threadRef.environmentId}
+              resource={videoClip.resource}
+              name={altText.trim() || videoClip.name}
+              copyMarkdown={copyMarkdown}
+              onImageExpand={imageExpand}
             />
           );
         }

@@ -4,6 +4,7 @@ import {
   omitSupersededLifecycleMarkers,
   summarizeToolGroup,
   toolGroupSummaryKind,
+  workEntryVideoPath,
   type ToolGroupSummaryKind,
 } from "@t3tools/client-runtime/work-log/presentation";
 export {
@@ -218,6 +219,8 @@ export type MessagesTimelineRow =
       summary: string;
       summaryKind: ToolGroupSummaryKind;
       hasFailure: boolean;
+      /** Finished clips in a collapsed group, shown under its summary. */
+      videoClipPaths: ReadonlyArray<string>;
     }
   | {
       kind: "turn-fold";
@@ -412,6 +415,15 @@ function workGroupIdentity(timelineEntryId: string, entry: WorkLogEntry): string
 
 function workGroupId(timelineEntryId: string, entry: WorkLogEntry): string {
   return `work-group:${workGroupIdentity(timelineEntryId, entry)}`;
+}
+
+/** Distinct clips produced or read by the group's successful entries, in order. */
+function workGroupVideoClipPaths(entries: ReadonlyArray<WorkLogEntry>): string[] {
+  const paths = entries.flatMap((entry) => {
+    const path = workEntryDisplayIndicatesToolFailure(entry) ? null : workEntryVideoPath(entry);
+    return path === null ? [] : [path];
+  });
+  return [...new Set(paths)];
 }
 
 export function resolveAssistantMessageCopyState({
@@ -893,6 +905,8 @@ export function deriveMessagesTimelineRows(input: {
             hasFailure:
               latestToolEntry !== undefined &&
               workEntryDisplayIndicatesToolFailure(latestToolEntry),
+            // Expanded groups show each clip on its own entry row instead.
+            videoClipPaths: expanded ? [] : workGroupVideoClipPaths(visibleGroupedEntries),
           });
           if (expanded) {
             for (const [entryIndex, workEntry] of visibleGroupedEntries.entries()) {
@@ -1049,7 +1063,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.expanded === bw.expanded &&
         a.summary === bw.summary &&
         a.summaryKind === bw.summaryKind &&
-        a.hasFailure === bw.hasFailure
+        a.hasFailure === bw.hasFailure &&
+        a.videoClipPaths.join("\n") === bw.videoClipPaths.join("\n")
       );
     }
 

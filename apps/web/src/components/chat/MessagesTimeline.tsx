@@ -11,7 +11,9 @@ import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifa
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import { commandProgramName } from "@t3tools/client-runtime/work-log/command-label";
 import {
+  resolveVideoClipAsset,
   resolveViewedImageAsset,
+  workEntryVideoPath,
   workEntryViewedImagePath,
 } from "@t3tools/client-runtime/work-log/presentation";
 import type { AgentPanelModel } from "@t3tools/client-runtime/state/subagentRuntime";
@@ -61,6 +63,7 @@ import {
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
 import ChatMarkdown, { ChatMarkdownAssetImage } from "../ChatMarkdown";
+import { ChatVideoClipTile } from "./ChatVideoClipTile";
 import {
   BotIcon,
   CheckIcon,
@@ -1754,7 +1757,7 @@ function WorkGroupToggleTimelineRow({
   row: Extract<TimelineRow, { kind: "work-toggle" }>;
 }) {
   const ctx = use(TimelineRowCtx);
-  return (
+  const toggle = (
     <button
       type="button"
       className="group/tool-group flex min-h-6 w-full cursor-pointer items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-sm leading-relaxed transition-colors duration-150 hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
@@ -1770,6 +1773,30 @@ function WorkGroupToggleTimelineRow({
       </span>
       <span className="min-w-0 flex-1 truncate text-secondary-label">{row.summary}</span>
     </button>
+  );
+  const { threadRef, workspaceRoot } = ctx;
+  if (row.videoClipPaths.length === 0 || !threadRef) return toggle;
+  return (
+    <div>
+      {toggle}
+      <div className="mt-1 mb-0.5 ms-7 flex flex-wrap gap-2">
+        {row.videoClipPaths.map((videoPath) => {
+          const clip = resolveVideoClipAsset(videoPath, {
+            threadId: threadRef.threadId,
+            workspaceRoot,
+          });
+          return clip ? (
+            <ChatVideoClipTile
+              key={videoPath}
+              environmentId={threadRef.environmentId}
+              resource={clip.resource}
+              name={clip.name}
+              onImageExpand={ctx.onImageExpand}
+            />
+          ) : null;
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -2673,6 +2700,13 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           workspaceRoot,
         })
       : null;
+  // Finished clips stay visible without expanding the row: they are the
+  // deliverable, not a detail of the tool call.
+  const videoPath = showFailedIndicator ? null : workEntryVideoPath(workEntry);
+  const videoClip =
+    videoPath && threadRef
+      ? resolveVideoClipAsset(videoPath, { threadId: threadRef.threadId, workspaceRoot })
+      : null;
   const canExpand = expandedBody !== null;
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -2779,6 +2813,20 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
             </div>
           ) : null}
           <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+        </div>
+      ) : null}
+      {videoClip && threadRef ? (
+        <div
+          className="mt-1 mb-0.5 ms-7 cursor-default"
+          onClick={stopRowToggle}
+          onPointerDown={stopRowToggle}
+        >
+          <ChatVideoClipTile
+            environmentId={threadRef.environmentId}
+            resource={videoClip.resource}
+            name={videoClip.name}
+            onImageExpand={onImageExpand}
+          />
         </div>
       ) : null}
     </div>

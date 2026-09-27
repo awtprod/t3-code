@@ -184,6 +184,40 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
+  it.effect("issues exact inline-video workspace URLs for video clips", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-video-workspace-",
+      });
+      const rendersDirectory = path.join(root, "renders");
+      const videoPath = path.join(rendersDirectory, "clip.mp4");
+      yield* fileSystem.makeDirectory(rendersDirectory, { recursive: true });
+      yield* fileSystem.writeFile(videoPath, new Uint8Array([0, 0, 0, 24]));
+      yield* fileSystem.writeFile(path.join(rendersDirectory, "other.mp4"), new Uint8Array([1]));
+      const canonicalVideoPath = yield* fileSystem.realPath(videoPath);
+
+      const result = yield* issueAssetUrl({
+        resource: {
+          _tag: "workspace-file",
+          threadId: ThreadId.make("thread-1"),
+          path: "renders/clip.mp4",
+        },
+        workspaceRoot: root,
+      });
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const token = suffix.slice(0, suffix.indexOf("/"));
+
+      expect(yield* resolveAsset(token, "clip.mp4")).toEqual({
+        kind: "file",
+        path: canonicalVideoPath,
+        mimeType: "video/mp4",
+      });
+      expect(yield* resolveAsset(token, "other.mp4")).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect("issues exact attachment capabilities by attachment id", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

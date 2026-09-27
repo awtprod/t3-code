@@ -37,6 +37,10 @@ Supported videos show a thumbnail in the conversation and composer.
 On iOS, received videos stream from their environment as they play. Supported formats and codecs
 depend on the browser or device; you can save an unsupported video to open it in another app.
 
+On web and desktop, video clips the agent renders or opens (MP4, WebM, MOV, M4V, and OGV) also
+appear in the conversation as a thumbnail tile, including when the agent embeds one in its reply
+as an image. Select the tile to play the clip in the same player.
+
 On iOS, the system player zooms from the attachment. Swipe down or tap Close to return to the
 conversation or draft. Touch and hold the attachment, then choose **Save or share video** to open
 the system share options. On Android, use **Save or share video** inside the preview.
