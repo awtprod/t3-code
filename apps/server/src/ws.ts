@@ -99,6 +99,7 @@ import {
   projectActivityEvent,
   projectThreadDetailSnapshot,
 } from "./orchestration/ActivityPayloadProjection.ts";
+import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
 import { makeThreadLiveEventCoalescer } from "./orchestration/ThreadLiveEventCoalescer.ts";
 import {
   cleanupFailedUploadedAttachments,
@@ -511,6 +512,8 @@ const makeWsRpcLayer = (
       const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const orchestrationCommandDispatcher =
+        yield* OrchestrationCommandDispatcher.OrchestrationCommandDispatcher;
       const threadDeletionReactor = yield* ThreadDeletionReactor;
       const analytics = yield* AnalyticsService.AnalyticsService;
       // Every command dispatched on this connection carries the connecting
@@ -1221,6 +1224,12 @@ const makeWsRpcLayer = (
                 projectId: bootstrap.createThread.projectId,
                 title: bootstrap.createThread.title,
                 modelSelection: bootstrap.createThread.modelSelection,
+                ...(bootstrap.createThread.routingMode === undefined
+                  ? {}
+                  : { routingMode: bootstrap.createThread.routingMode }),
+                ...(bootstrap.createThread.efficiencyTier === undefined
+                  ? {}
+                  : { efficiencyTier: bootstrap.createThread.efficiencyTier }),
                 runtimeMode: bootstrap.createThread.runtimeMode,
                 interactionMode: bootstrap.createThread.interactionMode,
                 branch: bootstrap.createThread.branch,
@@ -1295,25 +1304,35 @@ const makeWsRpcLayer = (
           );
         });
 
+      const dispatchResolvedCommand = (
+        resolvedCommand: OrchestrationCommand,
+      ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> =>
+        resolvedCommand.type === "thread.turn.start" && resolvedCommand.bootstrap
+          ? dispatchBootstrapTurnStart(resolvedCommand)
+          : dispatchFromClient(resolvedCommand).pipe(
+              Effect.tap(({ sequence }) =>
+                // Returning from thread.create is the handoff point at which
+                // clients may start resources for the new incarnation. Use
+                // its event sequence as the exact deletion-cleanup fence.
+                resolvedCommand.type === "thread.create"
+                  ? threadDeletionReactor.drainThrough(sequence)
+                  : Effect.void,
+              ),
+              Effect.mapError((cause) =>
+                toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
+              ),
+            );
+
       const dispatchNormalizedCommand = (
         normalizedCommand: OrchestrationCommand,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
-        const dispatchEffect =
-          normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-            ? dispatchBootstrapTurnStart(normalizedCommand)
-            : dispatchFromClient(normalizedCommand).pipe(
-                Effect.tap(({ sequence }) =>
-                  // Returning from thread.create is the handoff point at which
-                  // clients may start resources for the new incarnation. Use
-                  // its event sequence as the exact deletion-cleanup fence.
-                  normalizedCommand.type === "thread.create"
-                    ? threadDeletionReactor.drainThrough(sequence)
-                    : Effect.void,
-                ),
-                Effect.mapError((cause) =>
-                  toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
-                ),
-              );
+        // Token-efficiency routing (auto tier / sticky continuation / judged
+        // kind) runs inside the startup gate, like the dispatch it feeds, so it
+        // reads settled projections and settings. Non-auto and non-turn-start
+        // commands come back unchanged.
+        const dispatchEffect = orchestrationCommandDispatcher
+          .resolve(normalizedCommand)
+          .pipe(Effect.flatMap(dispatchResolvedCommand));
 
         return startup
           .enqueueCommand(dispatchEffect)

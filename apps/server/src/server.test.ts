@@ -9,6 +9,7 @@ import {
   AuthAccessTokenType,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
+  type ClientOrchestrationCommand,
   CommandId,
   DEFAULT_SERVER_SETTINGS,
   type DpopFailureReason,
@@ -9064,6 +9065,164 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(localStatus.mock.calls.length, 0);
         assert.equal(resolveRemoteTrackingCommit.mock.calls.length, 0);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // Client turn starts must pass through token-efficiency routing (auto tier,
+  // sticky continuation) before they reach the engine.
+  const efficiencyClaudeProvider = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    driver: ProviderDriverKind.make("claudeAgent"),
+    enabled: true,
+    installed: true,
+    version: "1.0.0",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-01-01T00:00:00.000Z",
+    models: [
+      { slug: "claude-opus-5-5", name: "Claude Opus 5.5", isCustom: false, capabilities: null },
+    ],
+    slashCommands: [],
+    skills: [],
+  } as const;
+
+  const makeBootstrapTurnStart = (
+    routingMode: "auto" | "manual",
+  ): Extract<ClientOrchestrationCommand, { type: "thread.turn.start" }> => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    return {
+      type: "thread.turn.start",
+      commandId: CommandId.make(`cmd-efficiency-${routingMode}`),
+      threadId: ThreadId.make(`thread-efficiency-${routingMode}`),
+      message: {
+        messageId: MessageId.make(`msg-efficiency-${routingMode}`),
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      modelSelection: defaultModelSelection,
+      routingMode,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      bootstrap: {
+        createThread: {
+          projectId: defaultProjectId,
+          title: "Efficiency Thread",
+          modelSelection: defaultModelSelection,
+          routingMode,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "main",
+          worktreePath: null,
+          createdAt,
+        },
+      },
+      createdAt,
+    };
+  };
+
+  const dispatchThroughClientRpc = (input: {
+    readonly command: ClientOrchestrationCommand;
+    readonly efficiencyEnabled: boolean;
+  }) =>
+    Effect.gen(function* () {
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const settings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        efficiency: { ...DEFAULT_SERVER_SETTINGS.efficiency, enabled: input.efficiencyEnabled },
+      };
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+          providerRegistry: { getProviders: Effect.succeed([efficiencyClaudeProvider]) },
+          serverSettings: { getSettings: Effect.succeed(settings) },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand](input.command),
+        ),
+      );
+      const createCommand = dispatchedCommands.find(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+          command.type === "thread.create",
+      );
+      const turnStartCommand = dispatchedCommands.find(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
+          command.type === "thread.turn.start",
+      );
+      return { createCommand, turnStartCommand };
+    });
+
+  it.effect("routes an auto turn through efficiency and creates the bootstrap thread as auto", () =>
+    Effect.gen(function* () {
+      const { createCommand, turnStartCommand } = yield* dispatchThroughClientRpc({
+        command: makeBootstrapTurnStart("auto"),
+        efficiencyEnabled: true,
+      });
+
+      assert.isDefined(turnStartCommand?.efficiencyDecision);
+      assert.equal(turnStartCommand?.efficiencyDecision?.workload, "interactive");
+      assert.equal(turnStartCommand?.routingMode, "auto");
+      assert.equal(turnStartCommand?.modelSelection?.model, "claude-opus-5-5");
+      assert.equal(turnStartCommand?.efficiencyTier, turnStartCommand?.efficiencyDecision?.tier);
+      assert.equal(createCommand?.routingMode, "auto");
+      assert.equal(createCommand?.efficiencyTier, turnStartCommand?.efficiencyDecision?.tier);
+      assert.deepEqual(
+        createCommand?.modelSelection,
+        turnStartCommand?.efficiencyDecision?.modelSelection,
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("leaves the turn byte-identical when efficiency is disabled", () =>
+    Effect.gen(function* () {
+      const command = makeBootstrapTurnStart("auto");
+      const { createCommand, turnStartCommand } = yield* dispatchThroughClientRpc({
+        command,
+        efficiencyEnabled: false,
+      });
+
+      // Only the bootstrap is split off, and the normalizer's server-side
+      // `createdAt` stamp; efficiency routing adds and rewrites nothing.
+      const { bootstrap: _bootstrap, ...expectedTurnStart } = command;
+      assert.deepEqual<unknown>(turnStartCommand, {
+        ...expectedTurnStart,
+        createdAt: turnStartCommand?.createdAt ?? command.createdAt,
+      });
+      assert.isUndefined(turnStartCommand?.efficiencyDecision);
+      // The user's routing choice is still persisted on the thread.
+      assert.equal(createCommand?.routingMode, "auto");
+      assert.isUndefined(createCommand?.efficiencyTier);
+      assert.deepEqual(createCommand?.modelSelection, defaultModelSelection);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("leaves a manual turn byte-identical when efficiency is enabled", () =>
+    Effect.gen(function* () {
+      const command = makeBootstrapTurnStart("manual");
+      const { createCommand, turnStartCommand } = yield* dispatchThroughClientRpc({
+        command,
+        efficiencyEnabled: true,
+      });
+
+      // Only the bootstrap is split off, and the normalizer's server-side
+      // `createdAt` stamp; efficiency routing adds and rewrites nothing.
+      const { bootstrap: _bootstrap, ...expectedTurnStart } = command;
+      assert.deepEqual<unknown>(turnStartCommand, {
+        ...expectedTurnStart,
+        createdAt: turnStartCommand?.createdAt ?? command.createdAt,
+      });
+      assert.equal(createCommand?.routingMode, "manual");
+      assert.isUndefined(createCommand?.efficiencyTier);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("does not misattribute setup activity dispatch failures as setup launch failures", () =>
