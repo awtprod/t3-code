@@ -190,8 +190,14 @@ function decodePushPayload(value) {
   return { type: "thread", ...value };
 }
 
+// The server sends test notifications with this reserved threadId; there is no
+// such thread to open, so a tap falls back to the app root.
+const TEST_THREAD_ID = "web-push-test";
+
 function notificationTargetFromData(data) {
-  return data?.type === "prospect" ? "/prospects" : threadDeepLinkFromPayload(data);
+  if (data?.type === "prospect") return "/prospects";
+  const target = threadDeepLinkFromPayload(data);
+  return target.endsWith(`/${TEST_THREAD_ID}`) ? "/" : target;
 }
 
 // Payloads are encrypted in transit (RFC 8291) and produced solely by the
