@@ -169,6 +169,7 @@ import { DESKTOP_RENDERER_ORIGINS } from "./httpCors.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterInbox from "./command-center/Inbox.ts";
+import * as CommandCenterDigest from "./command-center/Digest.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
 import { refreshCommandCenterConnection } from "./command-center/ConnectionRefresh.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
@@ -614,6 +615,9 @@ const makeWsRpcLayer = (
       const relayClient = yield* RelayClient.RelayClient;
       const commandCenter = yield* CommandCenterService.CommandCenterService;
       const commandCenterInbox = yield* Effect.serviceOption(CommandCenterInbox.CommandCenterInbox);
+      const commandCenterDigest = yield* Effect.serviceOption(
+        CommandCenterDigest.CommandCenterDigest,
+      );
       const commandCenterEvents = yield* CommandCenterEventStream.CommandCenterEventStream;
       const automationDefinitionConfig =
         yield* AutomationDefinitionConfig.AutomationDefinitionConfig;
@@ -641,22 +645,6 @@ const makeWsRpcLayer = (
       const googleConnectionSetup = yield* Effect.serviceOption(
         GoogleConnectionSetup.GoogleConnectionSetup,
       );
-      const publishConnections = yield* Effect.serviceOption(PublishConnections.PublishConnections);
-      const withPublishConnections = <A>(
-        use: (
-          service: PublishConnections.PublishConnections["Service"],
-        ) => Effect.Effect<A, CommandCenterError>,
-      ) =>
-        Option.match(publishConnections, {
-          onNone: () =>
-            Effect.fail(
-              new CommandCenterError({
-                reason: "connector",
-                message: "Publishing connections are unavailable in this environment.",
-              }),
-            ),
-          onSome: use,
-        });
       const withCommandCenterInbox = <A>(
         use: (
           service: CommandCenterInbox.CommandCenterInbox["Service"],
@@ -681,6 +669,27 @@ const makeWsRpcLayer = (
         commandCenter
           .refreshInboxSpaceProjection(spaceId)
           .pipe(Effect.andThen(withCommandCenterInbox(use)));
+      const withVerifiedCommandCenterDigest = <A>(
+        use: (
+          service: CommandCenterDigest.CommandCenterDigest["Service"],
+          configTimezone: string | null,
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        commandCenter.refreshInboxSpaceProjection(undefined).pipe(
+          Effect.andThen(commandCenter.bootstrap),
+          Effect.flatMap((snapshot) =>
+            Option.match(commandCenterDigest, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "config",
+                    message: "Command Center Digest is unavailable in this environment.",
+                  }),
+                ),
+              onSome: (service) => use(service, snapshot.timezone ?? null),
+            }),
+          ),
+        );
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1577,6 +1586,37 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.inboxQuery,
             withVerifiedCommandCenterInbox(input.spaceId, (inbox) => inbox.query(input)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.digestQuery]: (_input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.digestQuery,
+            withVerifiedCommandCenterDigest((digest, configTimezone) =>
+              digest.query({ recipientSubject: currentSession.subject, configTimezone }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate,
+            withVerifiedCommandCenterDigest((digest, configTimezone) =>
+              digest.updatePreferences({
+                recipientSubject: currentSession.subject,
+                configTimezone,
+                preferences: input,
+              }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.digestMarkViewed]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.digestMarkViewed,
+            withVerifiedCommandCenterDigest((digest) =>
+              digest.markViewed({
+                recipientSubject: currentSession.subject,
+                snapshotId: input.snapshotId,
+              }),
+            ),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.inboxDetail]: (input) =>

@@ -6,6 +6,7 @@ import {
   ContactRoundIcon,
   GitPullRequestIcon,
   HomeIcon,
+  InboxIcon,
   SettingsIcon,
   SquarePenIcon,
   WorkflowIcon,
@@ -122,6 +123,12 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
   }, [isMobile, setOpenMobile]);
   const entries = [
     { to: "/" as const, label: "Home", icon: HomeIcon, active: pathname === "/" },
+    {
+      to: "/inbox" as const,
+      label: "Inbox",
+      icon: InboxIcon,
+      active: pathname.startsWith("/inbox"),
+    },
     { to: "/new" as const, label: "New thread", icon: SquarePenIcon, active: pathname === "/new" },
     {
       to: "/automations" as const,

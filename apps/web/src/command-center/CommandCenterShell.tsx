@@ -1374,6 +1374,9 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
         />
 
         <ScrollArea className="min-h-0 flex-1" scrollFade>
+          {props.digest ? (
+            <div className="mx-auto w-full max-w-3xl px-4 pt-16 sm:px-6">{props.digest}</div>
+          ) : null}
           <Messages
             context={props.context}
             conversations={props.conversations}
