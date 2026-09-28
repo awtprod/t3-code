@@ -13,6 +13,7 @@ import * as ServerConfig from "./config.ts";
 import {
   otlpTracesProxyRouteLayer,
   assetRouteLayer,
+  ccnArtifactRouteLayer,
   serverEnvironmentHttpApiLayer,
   staticAndDevRouteLayer,
   browserApiCorsLayer,
@@ -723,6 +724,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     sandboxArtifactHttpRouteLayer,
     sandboxPreviewResolveHttpRouteLayer,
     assetRouteLayer,
+    ccnArtifactRouteLayer,
     staticAndDevRouteLayer,
     webhookHttpRouteLayer,
     websocketRpcRouteLayer,

@@ -44,6 +44,8 @@ describe("Command Center RPC authorization", () => {
       COMMAND_CENTER_WS_METHODS.sprintPlanGetCurrent,
       COMMAND_CENTER_WS_METHODS.sprintPlanGetOriginal,
       COMMAND_CENTER_WS_METHODS.sprintPlanListHistory,
+      COMMAND_CENTER_WS_METHODS.ccnBindingGet,
+      COMMAND_CENTER_WS_METHODS.ccnPreviewUrl,
     ]) {
       expect(scopes.get(method)).toBe(AuthCommandCenterReadScope);
     }
@@ -76,6 +78,9 @@ describe("Command Center RPC authorization", () => {
       COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport,
       COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask,
       COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict,
+      COMMAND_CENTER_WS_METHODS.ccnBindingPut,
+      COMMAND_CENTER_WS_METHODS.ccnScan,
+      COMMAND_CENTER_WS_METHODS.ccnClipExport,
     ]) {
       expect(scopes.get(method)).toBe(AuthCommandCenterOperateScope);
     }

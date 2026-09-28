@@ -1,4 +1,4 @@
-import { ItemId, SpaceId, type Run, type Space } from "@command-center/core";
+import { ArtifactId, ItemId, SpaceId, type Run, type Space } from "@command-center/core";
 import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import { managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
@@ -53,6 +53,7 @@ import {
   type InboxReplyIntent,
   type InboxTab,
   classifyInboxMutationResult,
+  ccnClipReview,
   inboxDraftAfterAcknowledgedReply,
   inboxPendingReplyAfterAttempt,
   inboxPendingReplyForSubmit,
@@ -877,6 +878,19 @@ function InboxDetailPane({
     reportFailure: false,
   });
   const reopen = useAtomCommand(commandCenterEnvironment.reopenInboxItem, { reportFailure: false });
+  const getCcnPreviewUrl = useAtomCommand(commandCenterEnvironment.ccnPreviewUrl, {
+    reportFailure: false,
+  });
+  const [ccnPreview, setCcnPreview] = useState<{
+    readonly artifactId: string;
+    readonly url: string;
+  } | null>(null);
+  const [ccnPreviewBusy, setCcnPreviewBusy] = useState(false);
+  const [ccnPreviewError, setCcnPreviewError] = useState<string | null>(null);
+  useEffect(() => {
+    setCcnPreview(null);
+    setCcnPreviewError(null);
+  }, [environmentId, space.id, itemId]);
 
   const applyResult = useCallback(
     (nextDetail: CommandCenterInboxDetail) => {
@@ -1035,6 +1049,7 @@ function InboxDetailPane({
   }
 
   const currentRevision = detail.currentRevision;
+  const ccnReview = ccnClipReview(detail.item.metadata, detail.item.artifactIds);
   const starterEvidence = {
     source: detail.item.provenance.kind,
     subjectId: detail.item.provenance.sourceRef ?? detail.state.subject.id,
@@ -1132,6 +1147,88 @@ function InboxDetailPane({
           </h1>
           {detail.item.description ? (
             <p className="mt-2 leading-6 text-muted-foreground">{detail.item.description}</p>
+          ) : null}
+          {ccnReview !== null ? (
+            <section
+              className="mt-4 rounded-xl border border-border/60 bg-muted/15 p-4"
+              aria-label="CCN clip review"
+            >
+              <p className="font-medium">Prepared clip · semantic review required</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {ccnReview.performerName} · recording {ccnReview.recordingId} (
+                {ccnReview.recordingVersion}) ·
+                {` ${ccnReview.startSeconds}–${ccnReview.endSeconds}s of ${ccnReview.sourceDurationSeconds}s`}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  render={
+                    <Link
+                      to="/sprint-plan"
+                      search={{
+                        spaceId: space.id,
+                        planId: ccnReview.planId,
+                        taskId: ccnReview.taskId,
+                        view: "current",
+                      }}
+                    />
+                  }
+                >
+                  Open Plan task <ExternalLinkIcon className="size-3" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={ccnPreviewBusy}
+                  onClick={async () => {
+                    setCcnPreviewBusy(true);
+                    setCcnPreviewError(null);
+                    try {
+                      const result = await getCcnPreviewUrl({
+                        environmentId,
+                        input: {
+                          spaceId: SpaceId.make(space.id),
+                          artifactId: ArtifactId.make(ccnReview.artifactId),
+                        },
+                      });
+                      if (result._tag !== "Success") throw squashAtomCommandFailure(result);
+                      setCcnPreview({
+                        artifactId: ccnReview.artifactId,
+                        url: result.value.relativeUrl,
+                      });
+                    } catch (failure) {
+                      setCcnPreviewError(
+                        failure instanceof Error ? failure.message : "Clip preview is unavailable.",
+                      );
+                    } finally {
+                      setCcnPreviewBusy(false);
+                    }
+                  }}
+                >
+                  {ccnPreviewBusy ? "Loading…" : "Preview clip"}
+                </Button>
+              </div>
+              {ccnPreviewError !== null ? (
+                <p role="alert" className="mt-2 text-sm text-destructive">
+                  {ccnPreviewError}
+                </p>
+              ) : null}
+              {ccnPreview?.artifactId === ccnReview.artifactId ? (
+                <video
+                  className="mt-3 w-full rounded-lg bg-black"
+                  controls
+                  preload="metadata"
+                  src={ccnPreview.url}
+                >
+                  Your browser cannot play this clip.
+                </video>
+              ) : null}
+              <p className="mt-2 text-xs text-muted-foreground">
+                Video format and range are verified. Confirm the performer and bit before using this
+                clip; this does not complete the Plan task.
+              </p>
+            </section>
           ) : null}
           <div className="mt-3 flex flex-wrap gap-2">
             {threadId !== undefined ? (

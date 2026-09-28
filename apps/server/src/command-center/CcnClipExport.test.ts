@@ -237,6 +237,11 @@ it.effect("registers one artifact and receipt for an exact request", () =>
           startSeconds: 0.1,
           endSeconds: 1.1,
         };
+        yield* sql`UPDATE command_center_runs SET state = 'succeeded' WHERE id = 'run-a'`;
+        expect(yield* exporter.exportClip(request).pipe(Effect.flip)).toMatchObject({
+          reason: "validation",
+        });
+        yield* sql`UPDATE command_center_runs SET state = 'running' WHERE id = 'run-a'`;
         const first = yield* exporter.exportClip(request);
         const replay = yield* exporter.exportClip(request);
         expect(first.duplicate).toBe(false);
@@ -253,6 +258,13 @@ it.effect("registers one artifact and receipt for an exact request", () =>
         SELECT COUNT(*) AS count FROM command_center_artifacts
       `;
         expect(artifacts[0]?.count).toBe(1);
+        const review = yield* sql<{ readonly status: string; readonly linksJson: string }>`
+        SELECT status, links_json AS "linksJson" FROM command_center_items
+        WHERE space_id = 'space-a' AND title = 'Review CCN clip for task-a'
+      `;
+        expect(review).toHaveLength(1);
+        expect(review[0]?.status).toBe("review");
+        expect(review[0]?.linksJson).toBe(canonicalJson([first.artifactId]));
       });
       yield* program.pipe(Effect.provide(SqlitePersistenceMemory));
     } finally {

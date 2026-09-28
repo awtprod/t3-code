@@ -28,6 +28,7 @@ import { OtlpTracer } from "effect/unstable/observability";
 
 import * as ServerConfig from "./config.ts";
 import { ASSET_ROUTE_PREFIX, resolveAsset } from "./assets/AssetAccess.ts";
+import { ccnByteRange, resolveCcnPreview } from "./command-center/CcnArtifactAccess.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { traceRelayRequest } from "./cloud/traceRelayRequest.ts";
@@ -226,6 +227,46 @@ export const assetRouteLayer = HttpRouter.add(
     }).pipe(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
     );
+  }),
+);
+
+export const ccnArtifactRouteLayer = HttpRouter.add(
+  "GET",
+  "/api/ccn/artifacts/*",
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const url = HttpServerRequest.toURL(request);
+    if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
+    const suffix = url.value.pathname.slice("/api/ccn/artifacts/".length);
+    const match = /^([^/]+)\/(ccn-clip-[a-f0-9]{48})\.mp4$/u.exec(suffix);
+    if (!match) return HttpServerResponse.text("Not Found", { status: 404 });
+    const asset = yield* resolveCcnPreview(match[1]!, match[2]!);
+    if (asset === null) return HttpServerResponse.text("Not Found", { status: 404 });
+    const range = ccnByteRange(request.headers.range, asset.sizeBytes);
+    if (range.status === 416) {
+      return HttpServerResponse.empty({
+        status: 416,
+        headers: {
+          "Accept-Ranges": "bytes",
+          "Content-Range": range.contentRange!,
+          "Cache-Control": "private, no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
+    return yield* HttpServerResponse.file(asset.file, {
+      status: range.status,
+      offset: range.offset,
+      bytesToRead: range.bytesToRead,
+      headers: {
+        "Accept-Ranges": "bytes",
+        "Content-Type": "video/mp4",
+        "Content-Disposition": "inline",
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        ...(range.contentRange === undefined ? {} : { "Content-Range": range.contentRange }),
+      },
+    }).pipe(Effect.orElseSucceed(() => HttpServerResponse.text("Not Found", { status: 404 })));
   }),
 );
 

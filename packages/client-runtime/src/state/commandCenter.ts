@@ -182,6 +182,16 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       tag: COMMAND_CENTER_WS_METHODS.sprintPlanList,
       staleTimeMs: 1_000,
     }),
+    ccnPreviewUrl: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:ccn-preview-url",
+      tag: COMMAND_CENTER_WS_METHODS.ccnPreviewUrl,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.artifactId]),
+      },
+    }),
     previewSprintPlanImport: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:sprint-plan-preview-import",
       tag: COMMAND_CENTER_WS_METHODS.sprintPlanPreviewImport,

@@ -138,11 +138,15 @@ export const makeCcnClipExporter = Effect.fn("CcnClipExport.make")(function* (de
     }
     const runs = yield* sql<{ readonly startedAt: string | null }>`
       SELECT started_at AS "startedAt" FROM command_center_runs
-      WHERE id = ${input.runId} AND space_id = ${input.spaceId} LIMIT 1
+      WHERE id = ${input.runId} AND space_id = ${input.spaceId}
+        AND kind = 'automation' AND state = 'running' LIMIT 1
     `;
     if (runs[0]?.startedAt === undefined || runs[0]?.startedAt === null) {
       return yield* Effect.fail(
-        new CcnClipExportError("validation", "A started Run in the same Space is required."),
+        new CcnClipExportError(
+          "validation",
+          "A running automation Run in the same Space is required.",
+        ),
       );
     }
     const [taskCount, runCount, dayCount] = yield* Effect.all([
@@ -206,18 +210,53 @@ export const makeCcnClipExporter = Effect.fn("CcnClipExport.make")(function* (de
       renderProfile: "h264-aac-v1",
       semanticStatus: rendered.semanticStatus,
     });
-    yield* sql`
-      INSERT INTO command_center_ccn_exports (
-        request_id, request_digest, space_id, plan_id, task_id, binding_id,
-        binding_version, plan_version, run_id, artifact_id, content_digest,
-        size_bytes, provenance_json, created_at
-      ) VALUES (
-        ${input.requestId}, ${requestDigest}, ${input.spaceId}, ${input.planId},
-        ${input.taskId}, ${binding.id}, ${binding.version}, ${input.planVersion},
-        ${input.runId}, ${rendered.artifact.id}, ${rendered.artifact.contentDigest},
-        ${rendered.sizeBytes}, ${provenance}, ${rendered.artifact.createdAt}
-      )
-    `;
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const now = new Date().toISOString();
+        yield* sql`
+        INSERT INTO command_center_ccn_exports (
+          request_id, request_digest, space_id, plan_id, task_id, binding_id,
+          binding_version, plan_version, run_id, artifact_id, content_digest,
+          size_bytes, provenance_json, created_at
+        ) VALUES (
+          ${input.requestId}, ${requestDigest}, ${input.spaceId}, ${input.planId},
+          ${input.taskId}, ${binding.id}, ${binding.version}, ${input.planVersion},
+          ${input.runId}, ${rendered.artifact.id}, ${rendered.artifact.contentDigest},
+          ${rendered.sizeBytes}, ${provenance}, ${now}
+        )
+      `;
+        const itemId = `ccn-review:${sha256(rendered.artifact.id)}`;
+        yield* sql`
+        INSERT INTO command_center_items (
+          id, space_id, kind, status, title, body, priority, due_at,
+          source_json, links_json, metadata_json, created_at, updated_at
+        ) VALUES (
+          ${itemId}, ${input.spaceId}, 'task', 'review',
+          ${`Review CCN clip for ${input.taskId}`},
+          ${`Performer: ${binding.performerName}. Recording: ${binding.recordingId} (${binding.recordingVersion}). Range: ${input.startSeconds}–${input.endSeconds} seconds. Video stream verified; semantic fit requires human review. Sprint Plan task ${input.taskId} remains incomplete.`},
+          'normal', NULL,
+          ${canonicalJson({ kind: "automation", sourceRef: `ccn-preparation:${input.planId}:${input.taskId}`, capturedAt: now })},
+          ${canonicalJson([rendered.artifact.id])},
+          ${canonicalJson({
+            ccn: {
+              kind: "clip-review",
+              planId: input.planId,
+              taskId: input.taskId,
+              performerId: binding.performerId,
+              performerName: binding.performerName,
+              recordingId: binding.recordingId,
+              recordingVersion: binding.recordingVersion,
+              startSeconds: input.startSeconds,
+              endSeconds: input.endSeconds,
+              sourceDurationSeconds: rendered.sourceDurationSeconds,
+              semanticStatus: rendered.semanticStatus,
+            },
+          })},
+          ${now}, ${now}
+        )
+      `;
+      }),
+    );
     return {
       artifactId: rendered.artifact.id,
       contentDigest: rendered.artifact.contentDigest,
@@ -370,7 +409,11 @@ async function hashFile(file: string): Promise<string> {
   return hash.digest("hex");
 }
 
-async function resolveSource(binding: CcnRecordingBinding, config: CcnClipExportConfig) {
+async function resolveSource(
+  binding: CcnRecordingBinding,
+  config: CcnClipExportConfig,
+  verifyDigest = true,
+) {
   const root = config.approvedRoots[binding.rootId];
   if (root === undefined)
     throw new CcnClipExportError("source", "Approved recording root is unavailable.");
@@ -404,11 +447,24 @@ async function resolveSource(binding: CcnRecordingBinding, config: CcnClipExport
   ) {
     throw new CcnClipExportError("source", "Recording is not a bounded regular file.");
   }
-  const sourceDigest = await hashFile(canonicalSource);
-  if (sourceDigest !== binding.sourceSha256) {
+  const sourceDigest = verifyDigest ? await hashFile(canonicalSource) : binding.sourceSha256;
+  if (verifyDigest && sourceDigest !== binding.sourceSha256) {
     throw new CcnClipExportError("source", "Recording checksum changed after binding.");
   }
   return { canonicalSource, info, sourceDigest };
+}
+
+/** Availability preflight; the exporter repeats full checksum verification before rendering. */
+export async function isCcnBindingSourceReady(
+  binding: CcnRecordingBinding,
+  config: CcnClipExportConfig,
+): Promise<boolean> {
+  try {
+    await resolveSource(binding, config, false);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function renderBoundCcnClip(

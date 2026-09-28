@@ -37,6 +37,11 @@ import {
   CommandCenterSprintPlanPatchTaskResult,
   CommandCenterSprintPlanPreviewImportResult,
   CommandCenterSprintPlanResolveDateConflictResult,
+  CommandCenterCcnBindingGetResult,
+  CommandCenterCcnBindingPutResult,
+  CommandCenterCcnScanResult,
+  CommandCenterCcnClipExportResult,
+  CommandCenterCcnPreviewUrlResult,
   type DiscoveredLocalServerList,
   type OrchestrationCommand,
   type GitActionProgressEvent,
@@ -159,6 +164,10 @@ import * as RelayClient from "@t3tools/shared/relayClient";
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterInbox from "./command-center/Inbox.ts";
 import * as SprintPlan from "./command-center/SprintPlan.ts";
+import * as CcnPreparation from "./command-center/CcnPreparation.ts";
+import * as CcnClipExport from "./command-center/CcnClipExport.ts";
+import { loadCcnClipConfig } from "./command-center/CcnConfig.ts";
+import { issueCcnPreviewUrl } from "./command-center/CcnArtifactAccess.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
 import * as Observations from "./command-center/Observations.ts";
 import { refreshCommandCenterConnection } from "./command-center/ConnectionRefresh.ts";
@@ -178,6 +187,11 @@ import { ProjectionTurnUsageRepository } from "./persistence/Services/Projection
 import { ProjectionTurnUsageRepositoryLive } from "./persistence/Layers/ProjectionTurnUsage.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+const decodeCcnBindingGet = Schema.decodeUnknownEffect(CommandCenterCcnBindingGetResult);
+const decodeCcnBindingPut = Schema.decodeUnknownEffect(CommandCenterCcnBindingPutResult);
+const decodeCcnScan = Schema.decodeUnknownEffect(CommandCenterCcnScanResult);
+const decodeCcnClipExport = Schema.decodeUnknownEffect(CommandCenterCcnClipExportResult);
+const decodeCcnPreviewUrl = Schema.decodeUnknownEffect(CommandCenterCcnPreviewUrlResult);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const EDITOR_DISCOVERY_TIMEOUT = Duration.seconds(5);
@@ -596,6 +610,48 @@ const makeWsRpcLayer = (
         id: currentSession.subject,
         kind: "user",
       };
+      const ccnError = (cause: unknown) => {
+        if (cause instanceof CommandCenterError) return cause;
+        if (cause instanceof CcnPreparation.CcnPreparationError) {
+          return new CommandCenterError({
+            reason: cause.reason === "not-found" ? "not_found" : cause.reason,
+            message: cause.message,
+            cause,
+          });
+        }
+        if (cause instanceof CcnClipExport.CcnClipExportError) {
+          return new CommandCenterError({
+            reason: cause.reason === "validation" ? "validation" : "connector",
+            message: cause.message,
+            cause,
+          });
+        }
+        return new CommandCenterError({
+          reason: "config",
+          message: "CCN preparation is unavailable.",
+          cause,
+        });
+      };
+      const withVerifiedCcn = <A, E, R>(spaceId: string, operation: Effect.Effect<A, E, R>) =>
+        commandCenter
+          .refreshInboxSpaceProjection(spaceId)
+          .pipe(Effect.andThen(operation), Effect.mapError(ccnError));
+      const ccnConfig = Effect.tryPromise({
+        try: () => loadCcnClipConfig(config),
+        catch: (cause) =>
+          new CommandCenterError({
+            reason: "config",
+            message: "CCN recording roots could not be loaded.",
+            cause,
+          }),
+      });
+      const ccnPreparation = Effect.gen(function* () {
+        const clipConfig = yield* ccnConfig;
+        return yield* CcnPreparation.makeCcnPreparation({
+          sourceReady: (binding) =>
+            Effect.promise(() => CcnClipExport.isCcnBindingSourceReady(binding, clipConfig)),
+        });
+      });
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1634,6 +1690,88 @@ const makeWsRpcLayer = (
                 service.listHistory(input),
                 Schema.decodeUnknownEffect(CommandCenterSprintPlanListHistoryResult),
               ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.ccnBindingGet]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.ccnBindingGet,
+            withVerifiedCcn(
+              input.spaceId,
+              Effect.gen(function* () {
+                const service = yield* ccnPreparation;
+                return yield* decodeCcnBindingGet({
+                  binding: yield* service.getBinding(input),
+                });
+              }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.ccnBindingPut]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.ccnBindingPut,
+            withVerifiedCcn(
+              input.spaceId,
+              Effect.gen(function* () {
+                const clipConfig = yield* ccnConfig;
+                if (!Object.hasOwn(clipConfig.approvedRoots, input.rootId)) {
+                  return yield* Effect.fail(
+                    new CommandCenterError({
+                      reason: "config",
+                      message: "The CCN recording root is not configured.",
+                    }),
+                  );
+                }
+                const service = yield* ccnPreparation;
+                return yield* decodeCcnBindingPut(yield* service.putBinding(input));
+              }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.ccnScan]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.ccnScan,
+            withVerifiedCcn(
+              input.spaceId,
+              Effect.gen(function* () {
+                const service = yield* ccnPreparation;
+                return yield* decodeCcnScan(yield* service.scan(input));
+              }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.ccnClipExport]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.ccnClipExport,
+            withVerifiedCcn(
+              input.spaceId,
+              Effect.gen(function* () {
+                const clipConfig = yield* ccnConfig;
+                const service = yield* CcnClipExport.makeCcnClipExporter({
+                  config: clipConfig,
+                  commandCenter,
+                });
+                return yield* decodeCcnClipExport(yield* service.exportClip(input));
+              }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.ccnPreviewUrl]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.ccnPreviewUrl,
+            withVerifiedCcn(
+              input.spaceId,
+              Effect.gen(function* () {
+                const issued = yield* issueCcnPreviewUrl(input);
+                if (issued === null)
+                  return yield* Effect.fail(
+                    new CommandCenterError({
+                      reason: "not_found",
+                      message: "CCN clip Artifact is unavailable in this Space.",
+                    }),
+                  );
+                return yield* decodeCcnPreviewUrl(issued);
+              }),
             ),
             { "rpc.aggregate": "command-center" },
           ),

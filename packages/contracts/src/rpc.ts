@@ -296,6 +296,18 @@ import {
   CommandCenterSprintPlanResolveDateConflictResult,
 } from "./commandCenterSprintPlan.ts";
 import {
+  CommandCenterCcnBindingGetInput,
+  CommandCenterCcnBindingGetResult,
+  CommandCenterCcnBindingPutInput,
+  CommandCenterCcnBindingPutResult,
+  CommandCenterCcnScanInput,
+  CommandCenterCcnScanResult,
+  CommandCenterCcnClipExportInput,
+  CommandCenterCcnClipExportResult,
+  CommandCenterCcnPreviewUrlInput,
+  CommandCenterCcnPreviewUrlResult,
+} from "./commandCenterCcn.ts";
+import {
   CommandCenterEventEnvelope,
   CommandCenterEventPage,
   CommandCenterEventReplayInput,
@@ -650,6 +662,32 @@ export const WsCommandCenterSprintPlanListHistoryRpc = Rpc.make(
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
+
+export const WsCommandCenterCcnBindingGetRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.ccnBindingGet, {
+  payload: CommandCenterCcnBindingGetInput,
+  success: CommandCenterCcnBindingGetResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsCommandCenterCcnBindingPutRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.ccnBindingPut, {
+  payload: CommandCenterCcnBindingPutInput,
+  success: CommandCenterCcnBindingPutResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsCommandCenterCcnScanRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.ccnScan, {
+  payload: CommandCenterCcnScanInput,
+  success: CommandCenterCcnScanResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsCommandCenterCcnClipExportRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.ccnClipExport, {
+  payload: CommandCenterCcnClipExportInput,
+  success: CommandCenterCcnClipExportResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsCommandCenterCcnPreviewUrlRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.ccnPreviewUrl, {
+  payload: CommandCenterCcnPreviewUrlInput,
+  success: CommandCenterCcnPreviewUrlResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
 
 export const WsCommandCenterRunsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.runsQuery, {
   payload: CommandCenterRunsQueryInput,
@@ -1601,6 +1639,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterSprintPlanPatchTaskRpc,
   WsCommandCenterSprintPlanResolveDateConflictRpc,
   WsCommandCenterSprintPlanListHistoryRpc,
+  WsCommandCenterCcnBindingGetRpc,
+  WsCommandCenterCcnBindingPutRpc,
+  WsCommandCenterCcnScanRpc,
+  WsCommandCenterCcnClipExportRpc,
+  WsCommandCenterCcnPreviewUrlRpc,
   WsCommandCenterRunsQueryRpc,
   WsCommandCenterAutomationsQueryRpc,
   WsCommandCenterAutomationDefinitionGetRpc,

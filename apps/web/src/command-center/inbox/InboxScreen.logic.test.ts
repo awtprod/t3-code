@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   classifyInboxMutationResult,
+  ccnClipReview,
   inboxDraftStorageKey,
   inboxDraftAfterAcknowledgedReply,
   inboxPendingReplyAfterAttempt,
@@ -40,6 +41,26 @@ const scope = {
 };
 
 describe("Inbox route and draft logic", () => {
+  it("shows CCN review controls only for a bounded, coherent prepared clip", () => {
+    const artifactId = `ccn-clip-${"a".repeat(48)}`;
+    const ccn = {
+      kind: "clip-review",
+      semanticStatus: "unverified",
+      planId: "plan-a",
+      taskId: "task-a",
+      performerId: "performer-a",
+      performerName: "Performer A",
+      recordingId: "recording-a",
+      recordingVersion: "v1",
+      startSeconds: 1,
+      endSeconds: 3,
+      sourceDurationSeconds: 10,
+    };
+    expect(ccnClipReview({ ccn }, [artifactId])).toMatchObject({ artifactId, taskId: "task-a" });
+    expect(ccnClipReview({ ccn: { ...ccn, endSeconds: 11 } }, [artifactId])).toBeNull();
+    expect(ccnClipReview({ ccn }, ["../other.mp4"])).toBeNull();
+    expect(ccnClipReview({ ccn: { ...ccn, semanticStatus: "verified" } }, [artifactId])).toBeNull();
+  });
   it("bounds URL values and defaults unsupported tabs to actionable", () => {
     expect(
       validateInboxSearch({ environment: " env-1 ", space: "space-1", item: 4, tab: "unknown" }),

@@ -33,6 +33,63 @@ export interface InboxPendingReply {
 
 export type InboxMutationOutcome = "success" | "conflict" | "rejected" | "ambiguous";
 
+export interface CcnClipReview {
+  readonly artifactId: string;
+  readonly planId: string;
+  readonly taskId: string;
+  readonly performerId: string;
+  readonly performerName: string;
+  readonly recordingId: string;
+  readonly recordingVersion: string;
+  readonly startSeconds: number;
+  readonly endSeconds: number;
+  readonly sourceDurationSeconds: number;
+}
+
+export function ccnClipReview(
+  metadata: Readonly<Record<string, unknown>>,
+  artifactIds: readonly string[],
+): CcnClipReview | null {
+  const value = metadata.ccn;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const artifactId = artifactIds[0];
+  if (
+    row.kind !== "clip-review" ||
+    row.semanticStatus !== "unverified" ||
+    typeof artifactId !== "string" ||
+    !/^ccn-clip-[a-f0-9]{48}$/u.test(artifactId) ||
+    !["planId", "taskId", "performerId", "performerName", "recordingId", "recordingVersion"].every(
+      (key) =>
+        typeof row[key] === "string" &&
+        (row[key] as string).length > 0 &&
+        (row[key] as string).length <= 200,
+    ) ||
+    typeof row.startSeconds !== "number" ||
+    typeof row.endSeconds !== "number" ||
+    typeof row.sourceDurationSeconds !== "number" ||
+    !Number.isFinite(row.startSeconds) ||
+    !Number.isFinite(row.endSeconds) ||
+    !Number.isFinite(row.sourceDurationSeconds) ||
+    row.startSeconds < 0 ||
+    row.endSeconds <= row.startSeconds ||
+    row.endSeconds > row.sourceDurationSeconds
+  )
+    return null;
+  return {
+    artifactId,
+    planId: row.planId as string,
+    taskId: row.taskId as string,
+    performerId: row.performerId as string,
+    performerName: row.performerName as string,
+    recordingId: row.recordingId as string,
+    recordingVersion: row.recordingVersion as string,
+    startSeconds: row.startSeconds,
+    endSeconds: row.endSeconds,
+    sourceDurationSeconds: row.sourceDurationSeconds,
+  };
+}
+
 const MAX_ROUTE_VALUE_CHARS = 200;
 const DRAFT_STORAGE_PREFIX = "t3.commandCenter.inboxDraft.v1";
 const PENDING_REPLY_STORAGE_PREFIX = "t3.commandCenter.inboxPendingReply.v1";
