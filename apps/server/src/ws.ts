@@ -645,6 +645,22 @@ const makeWsRpcLayer = (
       const googleConnectionSetup = yield* Effect.serviceOption(
         GoogleConnectionSetup.GoogleConnectionSetup,
       );
+      const publishConnections = yield* Effect.serviceOption(PublishConnections.PublishConnections);
+      const withPublishConnections = <A>(
+        use: (
+          service: PublishConnections.PublishConnections["Service"],
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        Option.match(publishConnections, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "connector",
+                message: "Publishing connections are unavailable in this environment.",
+              }),
+            ),
+          onSome: use,
+        });
       const withCommandCenterInbox = <A>(
         use: (
           service: CommandCenterInbox.CommandCenterInbox["Service"],
