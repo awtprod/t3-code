@@ -79,6 +79,7 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { SandboxSettleCleanupReactorLive } from "./orchestration/Layers/SandboxSettleCleanupReactor.ts";
+import { SubagentDelegationReactorLive } from "./orchestration/Layers/SubagentDelegationReactor.ts";
 import { SandboxLifecycleReactorLive } from "./orchestration/Layers/SandboxLifecycleReactor.ts";
 import { SandboxRuntimeManagerLive } from "./sandbox/SandboxRuntimeManager.ts";
 import * as ThreadSettlementReactor from "./orchestration/ThreadSettlementReactor.ts";
@@ -380,6 +381,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(SandboxLifecycleReactorLive),
   Layer.provideMerge(SandboxSettleCleanupReactorLive),
+  Layer.provideMerge(SubagentDelegationReactorLive),
   Layer.provideMerge(ThreadSettlementReactor.layer),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),

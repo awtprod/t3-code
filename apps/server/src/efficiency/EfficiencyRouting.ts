@@ -443,3 +443,34 @@ export function resolveInteractiveEfficiency(
 
   return withDecision(input.command, decision);
 }
+
+/**
+ * Whether a routed selection is one the thread's already-bound session cannot
+ * serve: a different provider driver, or a model change on a provider that
+ * needs a new thread for one. The provider command reactor rejects both, so
+ * such a turn runs in a subagent thread instead. Unknown instances return
+ * false and keep today's behaviour.
+ */
+export function routedSelectionNeedsSubagent(input: {
+  readonly thread: OrchestrationThreadShell;
+  readonly selection: ModelSelection;
+  readonly providers: ReadonlyArray<ServerProvider>;
+}): boolean {
+  const session = input.thread.session;
+  if (session === null) return false;
+  const boundInstanceId = session.providerInstanceId ?? input.thread.modelSelection.instanceId;
+  const bound = input.providers.find((provider) => provider.instanceId === boundInstanceId);
+  const routed = input.providers.find(
+    (provider) => provider.instanceId === input.selection.instanceId,
+  );
+  if (bound === undefined || routed === undefined) return false;
+  if (bound.driver !== routed.driver) return true;
+  const modelChanges =
+    boundInstanceId !== input.selection.instanceId ||
+    input.thread.modelSelection.model !== input.selection.model;
+  return (
+    modelChanges &&
+    (bound.requiresNewThreadForModelChange === true ||
+      routed.requiresNewThreadForModelChange === true)
+  );
+}

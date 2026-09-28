@@ -4,10 +4,14 @@ import {
   type EfficiencyDecision,
   EventId,
   MessageId,
+  type ModelSelection,
   OrchestrationDispatchCommandError,
   type OrchestrationCommand,
   type OrchestrationThreadShell,
-  type ThreadId,
+  type ServerProvider,
+  SUBAGENT_STARTED_ACTIVITY_KIND,
+  ThreadId,
+  ThreadSubagentDelegation,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -24,6 +28,7 @@ import * as ServerConfig from "../config.ts";
 import {
   interactiveTurnMatchesRule,
   resolveInteractiveEfficiency,
+  routedSelectionNeedsSubagent,
   type TierJudgmentInput,
 } from "../efficiency/EfficiencyRouting.ts";
 import { Judge } from "../efficiency/Judge.ts";
@@ -57,6 +62,9 @@ import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isSandboxGitBaseUnavailableError = Schema.is(SandboxGitBaseUnavailableError);
+const decodeSubagentDelegation = Schema.decodeUnknownOption(ThreadSubagentDelegation);
+/** How many of a parent's most recent subagents are considered for reuse. */
+const REUSABLE_SUBAGENT_LOOKBACK = 5;
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
@@ -452,10 +460,89 @@ export const make = Effect.gen(function* () {
       );
   };
 
+  /**
+   * The most recent live subagent of `parentThreadId` already on exactly
+   * `selection`'s instance and model and not mid-turn, so a follow-up routed the
+   * same way continues that conversation instead of starting a fresh one.
+   * Best-effort: a lookup failure just starts a new subagent.
+   */
+  const findReusableSubagent = (parentThreadId: ThreadId, selection: ModelSelection) =>
+    Effect.gen(function* () {
+      const parent = Option.getOrUndefined(
+        yield* projectionSnapshotQuery.getThreadDetailById(parentThreadId),
+      );
+      if (parent === undefined) return undefined;
+      const childIds = [
+        ...new Set(
+          parent.activities
+            .filter((activity) => activity.kind === SUBAGENT_STARTED_ACTIVITY_KIND)
+            .flatMap((activity) =>
+              Option.toArray(decodeSubagentDelegation(activity.payload)).map(
+                (delegation) => delegation.childThreadId,
+              ),
+            )
+            .toReversed(),
+        ),
+      ].slice(0, REUSABLE_SUBAGENT_LOOKBACK);
+      for (const childId of childIds) {
+        const child = Option.getOrUndefined(
+          yield* projectionSnapshotQuery.getThreadShellById(childId),
+        );
+        if (child === undefined || child.archivedAt !== null) continue;
+        if (child.latestTurn?.state === "running") continue;
+        const instanceId = child.session?.providerInstanceId ?? child.modelSelection.instanceId;
+        if (instanceId === selection.instanceId && child.modelSelection.model === selection.model) {
+          return childId;
+        }
+      }
+      return undefined;
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logDebug("subagent reuse lookup failed", { error }).pipe(Effect.as(undefined)),
+      ),
+    );
+
+  /**
+   * A routed turn the thread's bound session cannot serve (see
+   * `routedSelectionNeedsSubagent`) becomes a `thread.turn.delegate`: the parent
+   * records the message and the subagent reactor runs the turn in a child
+   * thread on the routed model.
+   */
+  const delegateToSubagentIfNeeded = (
+    command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+    thread: OrchestrationThreadShell,
+    providers: ReadonlyArray<ServerProvider>,
+  ): Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError> =>
+    Effect.gen(function* () {
+      const decision = command.efficiencyDecision;
+      if (decision === undefined || command.bootstrap !== undefined) return command;
+      if (!routedSelectionNeedsSubagent({ thread, selection: decision.modelSelection, providers }))
+        return command;
+      const reusable = yield* findReusableSubagent(thread.id, decision.modelSelection);
+      const childThreadId = reusable ?? ThreadId.make(yield* randomUUID);
+      return {
+        type: "thread.turn.delegate",
+        commandId: command.commandId,
+        threadId: command.threadId,
+        message: command.message,
+        delegation: {
+          childThreadId,
+          reuseChild: reusable !== undefined,
+          messageId: command.message.messageId,
+          modelSelection: decision.modelSelection,
+          efficiencyDecision: decision,
+          interactionMode: command.interactionMode,
+        },
+        createdAt: command.createdAt,
+      } satisfies OrchestrationCommand;
+    });
+
   const resolveEfficiency = (
     command: OrchestrationCommand,
   ): Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError> => {
     if (command.type !== "thread.turn.start") return Effect.succeed(command);
+    // Already routed (a subagent's child turn carries its parent's decision).
+    if (command.efficiencyDecision !== undefined) return Effect.succeed(command);
     return Effect.gen(function* () {
       const thread = command.bootstrap?.createThread
         ? undefined
@@ -488,7 +575,7 @@ export const make = Effect.gen(function* () {
       const route = judging ? yield* loadRouteContext(thread) : undefined;
       const tierJudgment =
         route === undefined ? undefined : yield* resolveTierJudgment(command, thread, route);
-      return resolveInteractiveEfficiency({
+      const resolved = resolveInteractiveEfficiency({
         command,
         ...(thread === undefined ? {} : { thread }),
         settings: settings.efficiency,
@@ -496,6 +583,9 @@ export const make = Effect.gen(function* () {
         ...(tierJudgment === undefined ? {} : { tierJudgment }),
         ...(route?.priorDecision === undefined ? {} : { priorDecision: route.priorDecision }),
       }).command;
+      return thread === undefined
+        ? resolved
+        : yield* delegateToSubagentIfNeeded(resolved, thread, providers);
     }).pipe(
       Effect.mapError((cause) =>
         toDispatchCommandError(cause, "Failed to resolve token-efficiency routing"),
