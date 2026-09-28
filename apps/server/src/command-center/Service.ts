@@ -1203,7 +1203,9 @@ export const layer = Layer.effect(
       return yield* Effect.forEach(rows, decodeMemoryRow);
     });
 
-    const listAllMemories = Effect.fn("CommandCenter.listAllMemories")(function* () {
+    const listAllMemories = Effect.fn("CommandCenter.listAllMemories")(function* (
+      spaceId?: string,
+    ) {
       const rows = yield* sql<MemoryRow>`
         SELECT m.id, m.space_id AS "spaceId", m.repository_ref AS "repositoryRef", m.kind,
           m.status, m.content, m.confidence, m.provenance_json AS "provenanceJson",
@@ -1211,6 +1213,7 @@ export const layer = Layer.effect(
           m.created_at AS "createdAt", m.updated_at AS "updatedAt"
         FROM command_center_memories m
         JOIN command_center_spaces s ON s.id = m.space_id AND s.lifecycle = 'active'
+        WHERE ${spaceId ?? null} IS NULL OR m.space_id = ${spaceId ?? null}
         ORDER BY m.updated_at DESC
         LIMIT 500
       `;
@@ -1571,14 +1574,18 @@ export const layer = Layer.effect(
     const queryMemories = Effect.fn("CommandCenter.queryMemories")(
       function* (input: CommandCenterMemoryQueryInput) {
         yield* bootstrap;
-        const memories = yield* listAllMemories();
+        const memories = yield* listAllMemories(input.spaceId);
+        const now = DateTime.formatIso(yield* DateTime.now);
         return {
           memories: takeLimit(
             memories.filter(
               (memory) =>
                 (input.spaceId === undefined || memory.spaceId === input.spaceId) &&
                 (input.repositoryId === undefined || memory.repositoryId === input.repositoryId) &&
-                isIncluded(memory.status, input.statuses),
+                (input.statuses === undefined
+                  ? memory.status === "approved" &&
+                    (memory.expiresAt === undefined || memory.expiresAt > now)
+                  : isIncluded(memory.status, input.statuses)),
             ),
             input.limit,
           ),
@@ -2945,7 +2952,16 @@ export const layer = Layer.effect(
         status: "approved" | "candidate",
         confidence: number,
       ) {
-        yield* requireConfiguredSpace(input.spaceId);
+        const configuredSpace = yield* requireConfiguredSpace(input.spaceId);
+        if (
+          input.repositoryId !== undefined &&
+          !configuredSpace.repositories.some((repository) => repository.id === input.repositoryId)
+        ) {
+          return yield* new CommandCenterError({
+            reason: "not_found",
+            message: "The Memory repository is not configured in this Space.",
+          });
+        }
         const existing = yield* sql<MemoryRow>`
         SELECT id, space_id AS "spaceId", repository_ref AS "repositoryRef", kind, status,
           content, confidence, provenance_json AS "provenanceJson",
@@ -2955,10 +2971,21 @@ export const layer = Layer.effect(
       `;
         if (existing[0] !== undefined) {
           const stored = yield* decodeMemoryRow(existing[0]);
-          if (stored.spaceId !== input.spaceId) {
+          if (
+            stored.spaceId !== input.spaceId ||
+            stored.repositoryId !== input.repositoryId ||
+            stored.content !== input.content ||
+            stored.kind !== input.kind ||
+            stored.provenance.sourceRef !== input.sourceRef ||
+            (status === "candidate" &&
+              (stored.confidence !== confidence ||
+                stored.expiresAt !== ("expiresAt" in input ? input.expiresAt : undefined) ||
+                stored.contradictionOf !==
+                  ("contradictionOf" in input ? input.contradictionOf : undefined)))
+          ) {
             return yield* new CommandCenterError({
               reason: "conflict",
-              message: "The Memory request id is already bound to a different Space.",
+              message: "The Memory request id is already bound to different content or scope.",
             });
           }
           if (stored.status === "candidate") {
@@ -2981,6 +3008,14 @@ export const layer = Layer.effect(
             sourceRef: input.sourceRef,
             capturedAt: now,
           },
+          ...(status === "candidate" && "expiresAt" in input && input.expiresAt !== undefined
+            ? { expiresAt: input.expiresAt }
+            : {}),
+          ...(status === "candidate" &&
+          "contradictionOf" in input &&
+          input.contradictionOf !== undefined
+            ? { contradictionOf: input.contradictionOf }
+            : {}),
           createdAt: now,
           updatedAt: now,
         }).pipe(Effect.mapError((cause) => persistenceError("Could not store Memory.", cause)));
@@ -2989,12 +3024,13 @@ export const layer = Layer.effect(
             yield* sql`
             INSERT INTO command_center_memories (
               id, space_id, repository_ref, scope, kind, content, status, confidence,
-              provenance_json, created_at, updated_at
+              provenance_json, expires_at, contradiction_of, created_at, updated_at
             ) VALUES (
               ${memory.id}, ${memory.spaceId}, ${memory.repositoryId ?? null},
               ${memory.repositoryId === undefined ? "space" : "repository"}, ${memory.kind},
               ${memory.content}, ${memory.status}, ${memory.confidence},
-              ${stringify(memory.provenance)}, ${memory.createdAt}, ${memory.updatedAt}
+              ${stringify(memory.provenance)}, ${memory.expiresAt ?? null},
+              ${memory.contradictionOf ?? null}, ${memory.createdAt}, ${memory.updatedAt}
             )
           `;
             if (status === "candidate") {
@@ -3017,8 +3053,80 @@ export const layer = Layer.effect(
     );
 
     const remember = (input: CommandCenterMemoryRememberInput) => storeMemory(input, "approved", 1);
-    const proposeMemory = (input: CommandCenterMemoryProposeInput) =>
-      storeMemory(input, "candidate", input.confidence);
+    const proposeMemory = Effect.fn("CommandCenter.proposeMemory")(
+      function* (input: CommandCenterMemoryProposeInput) {
+        if (input.evidence === undefined)
+          return yield* storeMemory(input, "candidate", input.confidence);
+        const evidence = input.evidence;
+        const revisions = yield* sql<{
+          readonly spaceId: string;
+          readonly observationId: string;
+          readonly version: number;
+          readonly revisionKind: string;
+          readonly actorKind: string;
+          readonly retired: number;
+        }>`
+          SELECT space_id AS "spaceId", observation_id AS "observationId", version,
+            revision_kind AS "revisionKind", actor_kind AS "actorKind", retired
+          FROM command_center_observation_revisions
+          WHERE revision_id = ${evidence.revisionId}
+          LIMIT 1
+        `;
+        const revision = revisions[0];
+        if (
+          revision === undefined ||
+          revision.spaceId !== input.spaceId ||
+          revision.observationId !== evidence.observationId ||
+          revision.revisionKind !== "corrected" ||
+          revision.actorKind !== "user" ||
+          revision.retired !== 0
+        ) {
+          return yield* new CommandCenterError({
+            reason: "validation",
+            message: "A reviewed lesson needs an explicit correction in the same Space.",
+          });
+        }
+        if (
+          input.expiresAt !== undefined &&
+          input.expiresAt <= DateTime.formatIso(yield* DateTime.now)
+        ) {
+          return yield* new CommandCenterError({
+            reason: "validation",
+            message: "The lesson expiry must be in the future.",
+          });
+        }
+        if (input.contradictionOf !== undefined) {
+          const conflicts = yield* sql<{ readonly id: string }>`
+            SELECT id FROM command_center_memories
+            WHERE id = ${input.contradictionOf} AND space_id = ${input.spaceId}
+              AND repository_ref IS ${input.repositoryId ?? null} AND status = 'approved'
+            LIMIT 1
+          `;
+          if (conflicts.length === 0) {
+            return yield* new CommandCenterError({
+              reason: "validation",
+              message: "The conflicting approved Memory is not in this scope.",
+            });
+          }
+        }
+        const normalized = input.content.trim().replace(/\s+/gu, " ").toLowerCase();
+        const memoryId = `lesson:${yield* digest(
+          stringify([input.spaceId, input.repositoryId ?? null, evidence.revisionId, normalized]),
+        )}`;
+        return yield* storeMemory(
+          {
+            ...input,
+            requestId: memoryId,
+            sourceRef: `observation/${encodeURIComponent(evidence.observationId)}/version/${revision.version}/revision/${encodeURIComponent(evidence.revisionId)}`,
+          },
+          "candidate",
+          input.confidence,
+        );
+      },
+      Effect.mapError((cause) =>
+        isCommandCenterError(cause) ? cause : persistenceError("Could not propose Memory.", cause),
+      ),
+    );
 
     const reviewMemory = Effect.fn("CommandCenter.reviewMemory")(
       function* (input: CommandCenterMemoryReviewInput) {
@@ -3043,21 +3151,37 @@ export const layer = Layer.effect(
             message: "The Memory candidate was not found in the requested scope.",
           });
         }
-        const nextStatus = input.decision === "approve" ? "approved" : "rejected";
+        const nextStatus =
+          input.decision === "approve"
+            ? "approved"
+            : input.decision === "expire"
+              ? "expired"
+              : "rejected";
         if (row.status === nextStatus) return yield* decodeMemoryRow(row);
-        if (row.status !== "candidate") {
+        if (
+          (input.decision === "expire" &&
+            row.status !== "approved" &&
+            row.status !== "candidate") ||
+          (input.decision !== "expire" && row.status !== "candidate")
+        ) {
           return yield* new CommandCenterError({
             reason: "conflict",
             message: "The Memory candidate has already been reviewed.",
           });
         }
         const now = DateTime.formatIso(yield* DateTime.now);
+        if (input.decision === "approve" && row.expiresAt !== null && row.expiresAt <= now) {
+          return yield* new CommandCenterError({
+            reason: "conflict",
+            message: "The Memory candidate has expired; expire it instead of approving it.",
+          });
+        }
         const wonDecision = yield* sql.withTransaction(
           Effect.gen(function* () {
             const decided = yield* sql<{ readonly id: string }>`
               UPDATE command_center_memories
               SET status = ${nextStatus}, updated_at = ${now}
-              WHERE id = ${row.id} AND status = 'candidate'
+              WHERE id = ${row.id} AND status = ${row.status}
               RETURNING id
             `;
             if (decided.length === 0) return false;

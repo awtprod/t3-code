@@ -333,6 +333,11 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       tag: COMMAND_CENTER_WS_METHODS.memorySearch,
       staleTimeMs: 1_000,
     }),
+    memories: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:memories",
+      tag: COMMAND_CENTER_WS_METHODS.memoryQuery,
+      staleTimeMs: 1_000,
+    }),
     observationsList: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:observations-list",
       tag: COMMAND_CENTER_WS_METHODS.observationsList,
@@ -476,6 +481,15 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       concurrency: {
         mode: "serial",
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.memoryId]),
+      },
+    }),
+    proposeMemory: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:propose-memory",
+      tag: COMMAND_CENTER_WS_METHODS.memoryPropose,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.spaceId]),
       },
     }),
     googleRead: createEnvironmentRpcCommand(runtime, {

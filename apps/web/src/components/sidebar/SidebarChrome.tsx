@@ -9,6 +9,7 @@ import {
   InboxIcon,
   ListChecksIcon,
   ListFilterIcon,
+  LightbulbIcon,
   SettingsIcon,
   SquarePenIcon,
   WorkflowIcon,
@@ -165,6 +166,12 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       label: "Observations",
       icon: ListFilterIcon,
       active: pathname.startsWith("/observations"),
+    },
+    {
+      to: "/lessons" as const,
+      label: "Lessons",
+      icon: LightbulbIcon,
+      active: pathname.startsWith("/lessons"),
     },
   ];
 

@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import {
   ObservationId,
   ObservationMutationId,
@@ -35,6 +35,8 @@ type Search = {
   environment?: string | undefined;
   space?: string | undefined;
   observation?: string | undefined;
+  revision?: string | undefined;
+  version?: number | undefined;
 };
 
 function message(failure: unknown): string {
@@ -148,7 +150,9 @@ function ObservationsRouteView() {
             spaceId: SpaceId.make(space.id),
             observationId: ObservationId.make(selectedId),
             limit: HISTORY_SIZE,
-            ...(historyBefore === undefined ? {} : { beforeVersion: historyBefore }),
+            ...(historyBefore === undefined && search.version === undefined
+              ? {}
+              : { beforeVersion: historyBefore ?? (search.version ?? 0) + 1 }),
           },
         }),
   );
@@ -193,6 +197,8 @@ function ObservationsRouteView() {
         environment: environmentId ?? undefined,
         space: space?.id,
         observation: search.observation,
+        revision: search.revision,
+        version: search.version,
         ...next,
       },
       replace: true,
@@ -213,7 +219,7 @@ function ObservationsRouteView() {
     lastListQueryRef.current = listKey;
     list.refresh();
   }, [listKey, list.refresh]);
-  const historyKey = `${environmentId}:${space?.id}:${selectedId}:${historyBefore ?? "latest"}`;
+  const historyKey = `${environmentId}:${space?.id}:${selectedId}:${historyBefore ?? search.version ?? "latest"}`;
   useEffect(() => {
     if (lastHistoryQueryRef.current === historyKey) return;
     lastHistoryQueryRef.current = historyKey;
@@ -238,7 +244,11 @@ function ObservationsRouteView() {
           input,
         });
         if (result._tag !== "Success") throw squashAtomCommandFailure(result);
-        setSearch({ observation: result.value.observationId });
+        setSearch({
+          observation: result.value.observationId,
+          revision: undefined,
+          version: undefined,
+        });
       } else {
         if (!Array.isArray(parsed)) throw new Error("Import must be a JSON array of observations.");
         const result = await importBatch({
@@ -252,7 +262,11 @@ function ObservationsRouteView() {
           }),
         });
         if (result._tag !== "Success") throw squashAtomCommandFailure(result);
-        setSearch({ observation: result.value.observations[0]?.observationId });
+        setSearch({
+          observation: result.value.observations[0]?.observationId,
+          revision: undefined,
+          version: undefined,
+        });
       }
       setEditorMode(null);
       setEditorText("");
@@ -320,6 +334,8 @@ function ObservationsRouteView() {
                   environment: event.target.value,
                   space: undefined,
                   observation: undefined,
+                  revision: undefined,
+                  version: undefined,
                 })
               }
             >
@@ -335,7 +351,14 @@ function ObservationsRouteView() {
             <select
               className="block h-10 w-full rounded-md border bg-background px-3"
               value={space?.id ?? ""}
-              onChange={(event) => setSearch({ space: event.target.value, observation: undefined })}
+              onChange={(event) =>
+                setSearch({
+                  space: event.target.value,
+                  observation: undefined,
+                  revision: undefined,
+                  version: undefined,
+                })
+              }
             >
               {spaces.map((entry) => (
                 <option key={entry.id} value={entry.id}>
@@ -398,7 +421,13 @@ function ObservationsRouteView() {
                   key={row.observation.id}
                   snapshot={row}
                   selected={selectedId === row.observation.id}
-                  onSelect={() => setSearch({ observation: row.observation.id })}
+                  onSelect={() =>
+                    setSearch({
+                      observation: row.observation.id,
+                      revision: undefined,
+                      version: undefined,
+                    })
+                  }
                 />
               ))}
               {list.data?.nextCursor ? (
@@ -608,7 +637,11 @@ function ObservationsRouteView() {
                       </p>
                     ) : null}
                     {historyRows.map((revision) => (
-                      <div key={revision.revisionId} className="rounded-lg border p-3 text-sm">
+                      <div
+                        key={revision.revisionId}
+                        id={revision.revisionId}
+                        className={`rounded-lg border p-3 text-sm ${search.revision === revision.revisionId ? "border-primary bg-primary/5" : ""}`}
+                      >
                         <p className="font-medium capitalize">
                           Revision {revision.version} · {revision.revisionKind}
                         </p>
@@ -617,6 +650,21 @@ function ObservationsRouteView() {
                           {new Date(revision.revisedAt).toLocaleString()} · {revision.actor.kind} ·{" "}
                           {revision.revisionReason ?? "Initial record"}
                         </p>
+                        {revision.revisionKind === "corrected" && revision.actor.kind === "user" ? (
+                          <Link
+                            className="mt-2 inline-block underline"
+                            to="/lessons"
+                            search={{
+                              environment: environmentId ?? undefined,
+                              space: space.id,
+                              observation: revision.observation.id,
+                              revision: revision.revisionId,
+                              version: revision.version,
+                            }}
+                          >
+                            Propose a lesson from this correction
+                          </Link>
+                        ) : null}
                       </div>
                     ))}
                     {history.data?.length === HISTORY_SIZE &&
@@ -652,6 +700,13 @@ export const Route = createFileRoute("/_chat/observations")({
     environment: typeof search.environment === "string" ? search.environment : undefined,
     space: typeof search.space === "string" ? search.space : undefined,
     observation: typeof search.observation === "string" ? search.observation : undefined,
+    revision: typeof search.revision === "string" ? search.revision : undefined,
+    version:
+      typeof search.version === "number" &&
+      Number.isSafeInteger(search.version) &&
+      search.version > 0
+        ? search.version
+        : undefined,
   }),
   component: ObservationsRouteView,
 });
