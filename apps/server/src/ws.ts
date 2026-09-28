@@ -169,6 +169,7 @@ import { DESKTOP_RENDERER_ORIGINS } from "./httpCors.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as Observations from "./command-center/Observations.ts";
 import { refreshCommandCenterConnection } from "./command-center/ConnectionRefresh.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
@@ -613,6 +614,29 @@ const makeWsRpcLayer = (
       const relayClient = yield* RelayClient.RelayClient;
       const commandCenter = yield* CommandCenterService.CommandCenterService;
       const commandCenterEvents = yield* CommandCenterEventStream.CommandCenterEventStream;
+      const observations = yield* Effect.serviceOption(Observations.ObservationService);
+      const observationActor = { kind: "user", id: currentSession.sessionId } as const;
+      const observationError = (cause: Observations.ObservationError) =>
+        new CommandCenterError({
+          reason: cause.reason === "not-found" ? "not_found" : cause.reason,
+          message: cause.message,
+          cause,
+        });
+      const withObservations = <A>(
+        use: (
+          service: Observations.ObservationServiceShape,
+        ) => Effect.Effect<A, Observations.ObservationError>,
+      ) =>
+        Option.match(observations, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "config",
+                message: "Observations are unavailable in this environment.",
+              }),
+            ),
+          onSome: (service) => use(service).pipe(Effect.mapError(observationError)),
+        });
       const automationDefinitionConfig =
         yield* AutomationDefinitionConfig.AutomationDefinitionConfig;
       const automationScheduleInterpreter = yield* Effect.serviceOption(
@@ -1935,6 +1959,43 @@ const makeWsRpcLayer = (
               };
             }),
             { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsList]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsList,
+            withObservations((service) => service.list(input)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsGet]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsGet,
+            withObservations((service) => service.get(input)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsHistory]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsHistory,
+            withObservations((service) => service.history(input)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsCreateManual]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsCreateManual,
+            withObservations((service) => service.createManual(input, observationActor)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsImport]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsImport,
+            withObservations((service) =>
+              service.importBatch(input.spaceId, input.request, observationActor),
+            ),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsCorrect]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsCorrect,
+            withObservations((service) => service.correct(input, observationActor)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsRetire]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsRetire,
+            withObservations((service) => service.retire(input, observationActor)),
           ),
         [COMMAND_CENTER_WS_METHODS.windowsMediaRoots]: () =>
           observeRpcEffect(

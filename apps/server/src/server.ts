@@ -149,6 +149,7 @@ import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as Observations from "./command-center/Observations.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
@@ -497,6 +498,7 @@ const AutomationScopedShellLayerLive = AutomationScopedShell.AutomationScopedShe
 const CommandCenterBaseLayerLive = Layer.mergeAll(
   CommandCenterService.runtimeLayer,
   CommandCenterEventStream.layer,
+  Observations.layer,
   MemorySearchIndex.layer,
   GoogleReadConnectorLayerLive,
   WindowsMediaConnectorLayerLive,

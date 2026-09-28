@@ -59,6 +59,12 @@ export const CommandCenterObservationImportRequest = Schema.Struct({
 export type CommandCenterObservationImportRequest =
   typeof CommandCenterObservationImportRequest.Type;
 
+export const CommandCenterObservationImportInput = Schema.Struct({
+  spaceId: SpaceId,
+  request: CommandCenterObservationImportRequest,
+});
+export type CommandCenterObservationImportInput = typeof CommandCenterObservationImportInput.Type;
+
 export const CommandCenterObservationCorrectionRequest = Schema.Struct({
   mutationId: ObservationMutationId,
   spaceId: SpaceId,
@@ -136,3 +142,8 @@ export const CommandCenterObservationListPage = Schema.Struct({
   nextCursor: Schema.NullOr(CommandCenterObservationListCursor),
 });
 export type CommandCenterObservationListPage = typeof CommandCenterObservationListPage.Type;
+
+export const CommandCenterObservationHistoryPage = Schema.Array(ObservationSnapshot).check(
+  Schema.isMaxLength(COMMAND_CENTER_OBSERVATION_LIST_MAX_LIMIT),
+);
+export type CommandCenterObservationHistoryPage = typeof CommandCenterObservationHistoryPage.Type;
