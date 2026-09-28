@@ -27,6 +27,7 @@ const detail = {
       finishedAt: "2026-09-28T12:00:01.000Z",
       error: null,
       usefulResultRef: null,
+      preparationResult: null,
     },
   ],
 } as CommandCenterResponsibilityDetail;
