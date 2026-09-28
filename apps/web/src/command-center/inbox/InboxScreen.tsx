@@ -197,14 +197,18 @@ function InboxSpaceList({
     setCursor(undefined);
     setPreviousItems([]);
   }, [scopeKey]);
-  const lastRefreshTokenRef = useRef(refreshToken);
+  const lastRefreshTokenRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (lastRefreshTokenRef.current === refreshToken) return;
+    if (cursor !== undefined) {
+      setCursor(undefined);
+      setPreviousItems([]);
+      return;
+    }
     lastRefreshTokenRef.current = refreshToken;
-    setCursor(undefined);
     setPreviousItems([]);
     query.refresh();
-  }, [query.refresh, refreshToken]);
+  }, [cursor, query.refresh, refreshToken]);
   const items = useMemo(
     () => mergeSummaries(previousItems, query.data?.items ?? []),
     [previousItems, query.data?.items],
