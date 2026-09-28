@@ -167,6 +167,20 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.itemId]),
       },
     }),
+    approveInboxDraft: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-draft-approve",
+      tag: COMMAND_CENTER_WS_METHODS.inboxDraftApprove,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    getInboxDraftReceipt: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:inbox-draft-receipt",
+      tag: COMMAND_CENTER_WS_METHODS.inboxDraftReceipt,
+    }),
     createItem: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:create-item",
       tag: COMMAND_CENTER_WS_METHODS.itemCreate,

@@ -77,6 +77,9 @@ export interface ProspectNotificationFailure {
 }
 
 export interface AutomationNodeExecutorDependencies {
+  readonly executeInboxDraft?: (
+    context: AutomationNodeExecutionContext,
+  ) => Effect.Effect<Schema.Json, string>;
   readonly startAgentRun: (
     input: AutomationAgentRunRequest,
   ) => Effect.Effect<AutomationAgentRunLinkedResult, AutomationAgentRunFailure>;
@@ -368,6 +371,23 @@ const executeConnectorWrite = Effect.fn("AutomationNodeExecutor.connectorWrite")
   context: AutomationNodeExecutionContext,
   dependencies: AutomationNodeExecutorDependencies,
 ) {
+  if (context.node.config.source === "inbox.accepted") {
+    if (
+      context.node.config.operation !== "gmail.draft.create" ||
+      dependencies.executeInboxDraft === undefined
+    ) {
+      return permanentFailure("The accepted Inbox draft executor is unavailable.");
+    }
+    const result = yield* dependencies.executeInboxDraft(context).pipe(
+      Effect.match({
+        onFailure: (error) => ({ ok: false as const, error }),
+        onSuccess: (output) => ({ ok: true as const, output }),
+      }),
+    );
+    return result.ok
+      ? ({ type: "succeeded", output: result.output } as const)
+      : permanentFailure(result.error);
+  }
   const connectionId = context.node.config.connectionId;
   if (typeof connectionId !== "string" || connectionId.trim().length === 0) {
     return permanentFailure(`Connector write node '${context.node.id}' requires a connectionId.`);

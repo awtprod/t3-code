@@ -57,6 +57,8 @@ export const COMMAND_CENTER_WS_METHODS = {
   inboxUnsnooze: "cc.inbox.unsnooze",
   inboxDismiss: "cc.inbox.dismiss",
   inboxReopen: "cc.inbox.reopen",
+  inboxDraftApprove: "cc.inbox.draft.approve",
+  inboxDraftReceipt: "cc.inbox.draft.receipt",
   runsQuery: "cc.runs.query",
   automationsQuery: "cc.automations.query",
   automationDefinitionGet: "cc.automations.definition.get",

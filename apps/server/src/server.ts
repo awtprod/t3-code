@@ -152,6 +152,7 @@ import * as CommandCenterInbox from "./command-center/Inbox.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as InboxGmailDrafts from "./command-center/InboxGmailDrafts.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
@@ -509,9 +510,18 @@ const CommandCenterBaseLayerLive = Layer.mergeAll(
   AutomationScopedShellLayerLive,
 );
 
+const InboxGmailDraftsLayerLive = InboxGmailDrafts.layer.pipe(
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(CommandCenterConfigLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
 const CommandCenterCoreLayerLive = Layer.mergeAll(
   CommandCenterBaseLayerLive,
-  AutomationRuns.safeRuntimeLayer.pipe(Layer.provide(CommandCenterBaseLayerLive)),
+  InboxGmailDraftsLayerLive,
+  AutomationRuns.safeRuntimeLayer.pipe(
+    Layer.provide(Layer.mergeAll(CommandCenterBaseLayerLive, InboxGmailDraftsLayerLive)),
+  ),
 );
 
 const AutomationRunsLayerLive = AutomationRuns.layer.pipe(

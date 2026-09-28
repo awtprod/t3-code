@@ -116,6 +116,8 @@ it.effect("admits due schedules and exact Space-scoped webhook routes at committ
     get: () => Effect.die("unused"),
     recoverDue: () => Effect.die("unused"),
     decideApproval: () => Effect.die("unused"),
+    approveInboxDraft: () => Effect.die("unused"),
+    getInboxDraftReceipt: () => Effect.die("unused"),
   } satisfies AutomationRunsShape);
   const testLayer = layer.pipe(
     Layer.provide(Layer.succeed(CommandCenterService, service)),
