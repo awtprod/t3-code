@@ -22,7 +22,7 @@ const T0 = DateTime.toEpochMillis(DateTime.makeUnsafe("2026-09-27T00:00:00.000Z"
 const fetchImpl: FetchLike = async (input) => {
   const path = new URL(String(input)).pathname;
   if (path.endsWith("/me")) {
-    return new Response(JSON.stringify({ user_id: "1784", username: "ccn_clips" }));
+    return new Response(JSON.stringify({ user_id: "1784", username: "example_clips" }));
   }
   return new Response(JSON.stringify({ access_token: "IGAA-new", expires_in: 5_184_000 }));
 };
@@ -93,7 +93,7 @@ describe("PublishConnections", () => {
         sessionId: begun.sessionId,
         credential: "IGAA-pasted",
       });
-      expect(connected).toMatchObject({ state: "connected", accountLabel: "@ccn_clips" });
+      expect(connected).toMatchObject({ state: "connected", accountLabel: "@example_clips" });
       expect((yield* publish.query)[1]).toMatchObject({ state: "connected" });
 
       // A completed session cannot be replayed.

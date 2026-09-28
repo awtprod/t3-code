@@ -1,6 +1,6 @@
 // @effect-diagnostics globalFetch:off globalTimers:off preferSchemaOverJson:off
 /**
- * Ported verbatim from ccn-web-app `lib/instagram/client.ts` (config import and
+ * Ported verbatim from an earlier app's `lib/instagram/client.ts` (config import and
  * exactOptionalPropertyTypes-compatible error fields are the only changes).
  *
  * Typed client for the Instagram Graph API using "Instagram API with Instagram

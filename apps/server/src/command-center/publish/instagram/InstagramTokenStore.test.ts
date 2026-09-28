@@ -52,7 +52,7 @@ const graph = (route: GraphRoute) => {
 const okGraph = (options: { readonly refresh?: "ok" | "fail" } = {}) =>
   graph((call) => {
     if (call.path === "/me") {
-      return { status: 200, body: { user_id: "17841400000000000", username: "ccn_clips" } };
+      return { status: 200, body: { user_id: "17841400000000000", username: "example_clips" } };
     }
     if (call.path === "/refresh_access_token") {
       return options.refresh === "fail"
@@ -118,7 +118,7 @@ describe("InstagramTokenStore", () => {
         state: "connected",
         setupMode: "paste-token",
         accountId: "17841400000000000",
-        accountLabel: "@ccn_clips",
+        accountLabel: "@example_clips",
         expiresAt: iso(T0 + 60 * DAY_MS),
         lastRefreshedAt: iso(T0),
       });
@@ -134,13 +134,13 @@ describe("InstagramTokenStore", () => {
         version: 1,
         accessToken: REFRESHED,
         igUserId: "17841400000000000",
-        username: "ccn_clips",
+        username: "example_clips",
         tokenExpiresAtMs: T0 + 60 * DAY_MS,
       });
       expect(Option.getOrThrow(yield* store.activeCredential)).toEqual({
         accessToken: REFRESHED,
         igUserId: "17841400000000000",
-        username: "ccn_clips",
+        username: "example_clips",
       });
     }).pipe(Effect.provide(storeLayer(fetchImpl)));
   });

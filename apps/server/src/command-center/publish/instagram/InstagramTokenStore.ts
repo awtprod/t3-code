@@ -11,7 +11,7 @@ import { InstagramApiError, InstagramClient, type FetchLike } from "./client.ts"
 
 /**
  * Persistence + lifecycle for the single Instagram publishing account of this environment.
- * Replaces ccn-web-app `lib/instagram/token-store.ts` (Supabase) with one JSON secret in
+ * Replaces the earlier app's `lib/instagram/token-store.ts` (Supabase) with one JSON secret in
  * `ServerSecretStore`. T3 has no cron, so refresh is lazy: every read that needs the token
  * refreshes it first when it is within the refresh threshold of expiry.
  */

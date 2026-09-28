@@ -1,5 +1,5 @@
 /**
- * Instagram integration configuration. Ported from ccn-web-app `lib/instagram/config.ts`.
+ * Instagram integration configuration. Ported from an earlier app's `lib/instagram/config.ts`.
  *
  * Connecting an account never publishes. The publishing kill-switch below is the guard the
  * publish path checks before it ever calls media_publish; it defaults OFF.
