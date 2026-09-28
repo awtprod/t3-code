@@ -49,7 +49,7 @@ it.layer(NodeSqliteClient.layerMemory())("YouTube Analytics ingestion", (it) => 
           observation: {
             id: "youtube-manual-source",
             spaceId,
-            subjectId: "viewhook-clips",
+            subjectId: "synthetic-video-subject-001",
             channelId,
             contentId: videoId,
             cohortId: "published-2026-08",
