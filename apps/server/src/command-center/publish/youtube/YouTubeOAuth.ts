@@ -20,8 +20,16 @@ import * as NodeCrypto from "node:crypto";
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export const YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload";
+export const YOUTUBE_ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly";
+export const YOUTUBE_READ_SCOPE = "https://www.googleapis.com/auth/youtube.readonly";
 /** `openid email` lets the connection show which Google account authorized it. */
-export const YOUTUBE_OAUTH_SCOPES = [YOUTUBE_UPLOAD_SCOPE, "openid", "email"] as const;
+export const YOUTUBE_OAUTH_SCOPES = [
+  YOUTUBE_UPLOAD_SCOPE,
+  YOUTUBE_ANALYTICS_SCOPE,
+  YOUTUBE_READ_SCOPE,
+  "openid",
+  "email",
+] as const;
 export const YOUTUBE_OAUTH_REDIRECT_URI = "http://127.0.0.1/oauth2/callback";
 
 export const GOOGLE_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -103,6 +111,7 @@ export function createYouTubeAuthorizationRequest(
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", YOUTUBE_OAUTH_SCOPES.join(" "));
   url.searchParams.set("access_type", "offline");
+  url.searchParams.set("include_granted_scopes", "true");
   url.searchParams.set("prompt", "consent");
   url.searchParams.set("state", state);
   url.searchParams.set("code_challenge", codeChallenge);
@@ -231,6 +240,11 @@ export async function revokeYouTubeToken(input: {
 /** True when the space-delimited granted scope list includes youtube.upload. */
 export function grantsYouTubeUpload(scope: string | undefined): boolean {
   return scope === undefined ? false : scope.split(/\s+/u).includes(YOUTUBE_UPLOAD_SCOPE);
+}
+
+export function grantsYouTubeAnalytics(scope: string | undefined): boolean {
+  const granted = new Set(scope?.split(/\s+/u) ?? []);
+  return granted.has(YOUTUBE_ANALYTICS_SCOPE) && granted.has(YOUTUBE_READ_SCOPE);
 }
 
 /**

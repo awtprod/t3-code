@@ -1,4 +1,5 @@
 import {
+  COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
   AuthCommandCenterApproveScope,
   AuthCommandCenterOperateScope,
   AuthCommandCenterReadScope,
@@ -78,6 +79,7 @@ export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.observationsImport, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.observationsCorrect, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.observationsRetire, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD, AuthCommandCenterOperateScope],
 ] as const satisfies ReadonlyArray<readonly [string, AuthEnvironmentScope]>;
 
 const COMMAND_CENTER_RPC_METHODS = new Set<string>(

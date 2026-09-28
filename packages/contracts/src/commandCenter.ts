@@ -525,6 +525,13 @@ export const CommandCenterPublishConnection = Schema.Struct({
   expiresAt: Schema.optional(Timestamp),
   lastRefreshedAt: Schema.optional(Timestamp),
   detail: Schema.optional(TrimmedNonEmptyString),
+  analytics: Schema.optional(
+    Schema.Struct({
+      state: Schema.Literals(["needs-consent", "permission-granted", "verified", "error"]),
+      detail: TrimmedNonEmptyString,
+      verifiedAt: Schema.optional(Timestamp),
+    }),
+  ),
 });
 export type CommandCenterPublishConnection = typeof CommandCenterPublishConnection.Type;
 

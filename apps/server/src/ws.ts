@@ -32,6 +32,7 @@ import {
   EventId,
   MessageId,
   COMMAND_CENTER_WS_METHODS,
+  COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
   CommandCenterError,
   CommandCenterResponsibilityError,
   CommandCenterEventStreamError,
@@ -192,6 +193,7 @@ import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
 import * as PublishConnections from "./command-center/publish/PublishConnections.ts";
+import * as YouTubeAnalytics from "./command-center/publish/youtube/YouTubeAnalytics.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
@@ -629,6 +631,7 @@ const makeWsRpcLayer = (
       const sprintPlan = yield* Effect.serviceOption(SprintPlan.SprintPlanService);
       const commandCenterEvents = yield* CommandCenterEventStream.CommandCenterEventStream;
       const observations = yield* Effect.serviceOption(Observations.ObservationService);
+      const youtubeAnalytics = yield* Effect.serviceOption(YouTubeAnalytics.YouTubeAnalytics);
       const observationActor = { kind: "user", id: currentSession.sessionId } as const;
       const observationError = (cause: Observations.ObservationError) =>
         new CommandCenterError({
@@ -2317,6 +2320,21 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.observationsRetire,
             withObservations((service) => service.retire(input, observationActor)),
+          ),
+        [COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+            Option.match(youtubeAnalytics, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "config",
+                    message: "YouTube Analytics is unavailable in this environment.",
+                  }),
+                ),
+              onSome: (service) => service.fetch(input),
+            }),
+            { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.windowsMediaRoots]: () =>
           observeRpcEffect(
