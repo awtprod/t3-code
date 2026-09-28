@@ -57,6 +57,7 @@ const decodeEvidenceJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(CommandCenterInboxCandidateCreateInput.fields.evidence),
 );
 const decodeUnknownJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const isCommandCenterError = Schema.is(CommandCenterError);
 
 const persistenceError = (message: string, cause?: unknown) =>
@@ -562,14 +563,14 @@ export const make = Effect.gen(function* () {
     commandKind: string,
     input: Input,
     context: InboxActorContext,
-    apply: (state: ItemStateRow, now: string) => Effect.Effect<void, unknown>,
+    apply: (state: ItemStateRow, now: string) => Effect.Effect<void, Error>,
   ): Effect.Effect<MutationResult, CommandCenterError> =>
     sql
       .withTransaction(
         Effect.gen(function* () {
           const state = yield* loadItemState(input.spaceId, input.itemId);
           const requestDigest = yield* digest(
-            JSON.stringify({ commandKind, input, actorSubject: context.subject }),
+            encodeUnknownJson({ commandKind, input, actorSubject: context.subject }),
           );
           const receiptRows = yield* sql<MutationReceiptRow>`
           SELECT item_id AS "itemId", space_id AS "spaceId", command_kind AS "commandKind",
@@ -638,7 +639,7 @@ export const make = Effect.gen(function* () {
               persistenceError("Inbox mutation result could not be serialized.", cause),
             ),
           );
-          const receiptJson = JSON.stringify({
+          const receiptJson = encodeUnknownJson({
             resultVersion: result.detail.state.version,
             ...(commandKind === "cc.inbox.comment"
               ? { createdDiscussionId: `comment:${input.mutationId}` }
@@ -821,8 +822,8 @@ export const make = Effect.gen(function* () {
           ) VALUES (
             ${`revision:${input.mutationId}`}, ${input.itemId}, ${revision},
             ${state.currentRevisionId}, 'candidate', ${input.source},
-            ${JSON.stringify(input.payload)}, ${JSON.stringify(input.preview)},
-            ${JSON.stringify(input.evidence)}, ${context.subject}, ${now}
+            ${encodeUnknownJson(input.payload)}, ${encodeUnknownJson(input.preview)},
+            ${encodeUnknownJson(input.evidence)}, ${context.subject}, ${now}
           )
         `;
       }),
