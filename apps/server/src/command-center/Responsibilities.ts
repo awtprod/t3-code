@@ -89,6 +89,8 @@ export interface ResponsibilityStatus {
   readonly watchedSources: ReadonlyArray<string>;
   readonly authority: null;
   readonly limits: null;
+  readonly authorityExplanation: string;
+  readonly limitsExplanation: string;
   readonly paused: boolean;
   readonly pauseActor: string | null;
   readonly pauseReason: string | null;
@@ -144,6 +146,10 @@ export interface ResponsibilityDependencies {
     readonly automationId: string;
     readonly spaceId: string;
   }) => Effect.Effect<ResponsibilityConfigIdentity, ResponsibilityError>;
+  readonly listConfiguredAutomations: () => Effect.Effect<
+    ReadonlyArray<ResponsibilityConfigIdentity>,
+    ResponsibilityError
+  >;
   readonly now: Effect.Effect<string>;
 }
 
@@ -165,6 +171,8 @@ interface ResponsibilityRow {
   readonly name: string;
   readonly owner: string;
   readonly enabled: number;
+  readonly commitSha: string;
+  readonly definitionDigest: string;
   readonly definitionJson: string;
   readonly paused: number | null;
   readonly pauseActor: string | null;
@@ -274,6 +282,7 @@ export const make = Effect.fn("Responsibilities.make")(function* (
     return yield* sql<ResponsibilityRow>`
       SELECT automation.id AS "automationId", automation.space_id AS "spaceId",
         automation.name, space.owner_id AS owner, automation.enabled,
+        automation.commit_sha AS "commitSha", automation.definition_digest AS "definitionDigest",
         automation.definition_json AS "definitionJson",
         control.paused, control.actor AS "pauseActor", control.reason AS "pauseReason",
         control.revision AS "pauseVersion",
@@ -410,6 +419,8 @@ export const make = Effect.fn("Responsibilities.make")(function* (
       watchedSources: watchedSources(automation),
       authority: null,
       limits: null,
+      authorityExplanation: "No separate authority is configured for this Automation.",
+      limitsExplanation: "No per-Automation limits are configured.",
       paused,
       pauseActor: row.pauseActor,
       pauseReason: row.pauseReason,
@@ -432,11 +443,23 @@ export const make = Effect.fn("Responsibilities.make")(function* (
   const list = Effect.fn("Responsibilities.list")(
     function* (rawInput: unknown) {
       const input = yield* decodeListInput(rawInput).pipe(Effect.mapError(validationError));
+      const configured = yield* dependencies.listConfiguredAutomations();
       const rows = yield* readRows({
         ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
         limit: input.limit ?? 50,
       });
-      return yield* Effect.forEach(rows, statusFromRow);
+      return yield* Effect.forEach(
+        rows.filter((row) =>
+          configured.some(
+            (identity) =>
+              identity.spaceId === row.spaceId &&
+              identity.automationId === row.automationId &&
+              identity.configCommitSha === row.commitSha &&
+              identity.definitionDigest === row.definitionDigest,
+          ),
+        ),
+        statusFromRow,
+      );
     },
     Effect.mapError((cause) =>
       isResponsibilityError(cause)
@@ -503,6 +526,19 @@ export const make = Effect.fn("Responsibilities.make")(function* (
         return yield* new ResponsibilityError({
           code: "not-found",
           message: "The Responsibility was not found in the requested Space.",
+        });
+      }
+      const identity = yield* dependencies.validateAutomation({
+        spaceId: input.spaceId,
+        automationId: input.automationId,
+      });
+      if (
+        identity.configCommitSha !== row.commitSha ||
+        identity.definitionDigest !== row.definitionDigest
+      ) {
+        return yield* new ResponsibilityError({
+          code: "config-unavailable",
+          message: "The Responsibility's committed Automation is no longer current.",
         });
       }
       return {

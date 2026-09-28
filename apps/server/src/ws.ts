@@ -33,6 +33,7 @@ import {
   MessageId,
   COMMAND_CENTER_WS_METHODS,
   CommandCenterError,
+  CommandCenterResponsibilityError,
   CommandCenterEventStreamError,
   type DiscoveredLocalServerList,
   type EditorId,
@@ -172,6 +173,7 @@ import * as CommandCenterEventStream from "./command-center/EventStream.ts";
 import { refreshCommandCenterConnection } from "./command-center/ConnectionRefresh.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as Responsibilities from "./command-center/Responsibilities.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
 import * as AutomationScheduleInterpreter from "./command-center/automation/ScheduleInterpreter.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
@@ -619,6 +621,25 @@ const makeWsRpcLayer = (
         AutomationScheduleInterpreter.AutomationScheduleInterpreter,
       );
       const commandCenterAutomationRuns = yield* AutomationRuns.AutomationRuns;
+      const commandCenterResponsibilities = yield* Effect.serviceOption(
+        Responsibilities.Responsibilities,
+      );
+      const responsibilityUnavailable = () =>
+        new Responsibilities.ResponsibilityError({
+          code: "config-unavailable",
+          message: "Responsibility controls are unavailable in this environment.",
+        });
+      const responsibilityRpcError = (cause: Responsibilities.ResponsibilityError) =>
+        new CommandCenterResponsibilityError({ code: cause.code, message: cause.message });
+      const responsibilityCall = <A>(
+        operation: (
+          service: Responsibilities.ResponsibilitiesShape,
+        ) => Effect.Effect<A, Responsibilities.ResponsibilityError>,
+      ) =>
+        Option.match(commandCenterResponsibilities, {
+          onNone: () => Effect.fail(responsibilityUnavailable()),
+          onSome: operation,
+        }).pipe(Effect.mapError(responsibilityRpcError));
       const commandCenterAutomationTriggers = yield* AutomationTriggerCoordinator.make;
       const commandCenterMemorySearch = yield* MemorySearchIndex.MemorySearchIndex;
       const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
@@ -1555,6 +1576,36 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.automationsQuery,
             commandCenter.queryAutomations(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.responsibilitiesList]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.responsibilitiesList,
+            responsibilityCall((service) => service.list(input)).pipe(
+              Effect.map((responsibilities) => ({ responsibilities })),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.responsibilityGet]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.responsibilityGet,
+            responsibilityCall((service) => service.get(input)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.responsibilityPause]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.responsibilityPause,
+            responsibilityCall((service) =>
+              service.setPause({ ...input, paused: true, actor: currentSessionId }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.responsibilityResume]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.responsibilityResume,
+            responsibilityCall((service) =>
+              service.setPause({ ...input, paused: false, actor: currentSessionId }),
+            ),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.automationDefinitionGet]: (input) =>

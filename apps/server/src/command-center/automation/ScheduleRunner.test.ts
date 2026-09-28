@@ -6,7 +6,6 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
-import migration072 from "../../persistence/Migrations/072_CommandCenterResponsibilities.ts";
 import { CommandCenterService, type CommandCenterServiceShape } from "../Service.ts";
 import { canonicalJson } from "./Digest.ts";
 import {
@@ -129,7 +128,6 @@ function testLayer(input: {
   } satisfies AutomationTriggerCoordinatorShape);
   const persistence = Layer.effectDiscard(
     Effect.gen(function* () {
-      yield* migration072;
       const sql = yield* SqlClient.SqlClient;
       yield* sql`
         INSERT INTO command_center_spaces (

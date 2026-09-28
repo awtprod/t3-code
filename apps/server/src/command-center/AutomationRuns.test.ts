@@ -7,7 +7,6 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import migration072 from "../persistence/Migrations/072_CommandCenterResponsibilities.ts";
 import { AutomationRuns, layer as automationRunsLayer } from "./AutomationRuns.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
@@ -182,9 +181,7 @@ function testLayer(options: { readonly executeNode?: AutomationNodeExecutor } = 
     defaultMaxAttempts: 1,
   });
   const dependencies = Layer.mergeAll(commandCenterLayer, durableRuntimeLayer, eventStreamLayer);
-  const persistence = Layer.effectDiscard(migration072).pipe(
-    Layer.provideMerge(SqlitePersistenceMemory),
-  );
+  const persistence = SqlitePersistenceMemory;
   return automationRunsLayer.pipe(
     Layer.provideMerge(dependencies),
     Layer.provideMerge(persistence),
