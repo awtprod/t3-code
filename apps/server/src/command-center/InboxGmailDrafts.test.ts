@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ItemId, SpaceId } from "@command-center/core";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -144,6 +145,14 @@ it.effect("pins the exact accepted draft, account and capability across executio
 
     yield* drafts.claim(input.mutationId);
     expect((yield* Effect.flip(drafts.claim(input.mutationId))).reason).toBe("conflict");
+    const sql = yield* SqlClient.SqlClient;
+    expect(
+      Exit.isFailure(
+        yield* Effect.exit(sql`
+      UPDATE command_center_items SET body = 'Changed during Gmail creation' WHERE id = ${itemId}
+    `),
+      ),
+    ).toBe(true);
     yield* drafts.uncertain(input.mutationId, "unverified response");
     expect(
       (yield* Effect.flip(
@@ -167,5 +176,37 @@ it.effect("rejects a stale accepted version before approval", () =>
     expect(
       (yield* Effect.flip(drafts.approve({ ...input, expectedVersion: 0 }, "andrew"))).reason,
     ).toBe("conflict");
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("rejects changed recipient and a version race before the draft claim", () =>
+  Effect.gen(function* () {
+    accountAlias = "original@example.com";
+    capability = true;
+    yield* seed;
+    const drafts = yield* InboxGmailDrafts;
+    const sql = yield* SqlClient.SqlClient;
+    const approved = yield* drafts.approve(input, "andrew");
+    yield* sql`
+      UPDATE command_center_inbox_revisions
+      SET payload_json = replace(payload_json, 'recipient@example.com', 'other@example.com')
+      WHERE id = 'revision-a'
+    `;
+    expect(
+      (yield* Effect.flip(
+        drafts.loadForExecution({
+          mutationId: input.mutationId,
+          spaceId,
+          payloadDigest: approved.payloadDigest,
+        }),
+      )).reason,
+    ).toBe("conflict");
+    yield* sql`
+      UPDATE command_center_inbox_revisions
+      SET payload_json = replace(payload_json, 'other@example.com', 'recipient@example.com')
+      WHERE id = 'revision-a'
+    `;
+    yield* sql`UPDATE command_center_inbox_state SET version = 2 WHERE item_id = ${itemId}`;
+    expect((yield* Effect.flip(drafts.claim(input.mutationId))).reason).toBe("conflict");
   }).pipe(Effect.provide(testLayer)),
 );

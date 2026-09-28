@@ -619,7 +619,7 @@ export const layer = Layer.effect(
         return yield* new CommandCenterError({
           reason: "validation",
           message:
-            "Exactly one committed manual Inbox Gmail draft automation is required in this Space.",
+            "This Space needs exactly one enabled Inbox Gmail draft approval flow before a draft can be created.",
         });
       }
       const template = templates[0]!;

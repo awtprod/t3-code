@@ -27,6 +27,8 @@ Creating a candidate does not replace the current proposal. Review its exact str
 
 Some Inbox items cannot be executed yet. In that case, Inbox explains the limitation and continues to support discussion and revision instead of showing an approval button that cannot work.
 
+For an accepted Gmail draft proposal backed by current local Item evidence, **Approve draft** is a separate action. It creates the exact addressed draft in the connected Gmail account and never sends it. Pending candidates, change requests, closed Items, and stale evidence block approval. Inbox shows the resulting Gmail draft ID when verified. If Gmail's response is inconclusive, Inbox shows a reconciliation state and will not automatically attempt another draft; check Gmail Drafts before taking further action.
+
 ## Snooze, dismiss, and reopen
 
 Snoozing requires a future wake time. Snoozed items remain available in the Snoozed view and can be unsnoozed at any time. Dismissed items move to Recent and retain their discussion and proposal history. Reopening a dismissed item returns it to Actionable; it does not repeat any external action that may already have happened.

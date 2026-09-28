@@ -1,4 +1,5 @@
 import {
+  ConnectionId,
   Item,
   ItemId,
   NonNegativeInt,
@@ -271,10 +272,14 @@ export const CommandCenterInboxDraftApproveInput = Schema.Struct({
 export type CommandCenterInboxDraftApproveInput = typeof CommandCenterInboxDraftApproveInput.Type;
 
 export const CommandCenterInboxDraftReceipt = Schema.Struct({
+  mutationId: MutationId,
   itemId: ItemId,
   spaceId: SpaceId,
+  expectedVersion: NonNegativeInt,
   revisionId: TrimmedNonEmptyString,
   payloadDigest: TrimmedNonEmptyString,
+  connectionId: ConnectionId,
+  accountAlias: TrimmedNonEmptyString,
   status: Schema.Literals(["approved", "creating", "created", "uncertain"]),
   draftId: Schema.optional(TrimmedNonEmptyString),
   messageId: Schema.optional(TrimmedNonEmptyString),

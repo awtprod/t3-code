@@ -46,4 +46,14 @@ export default Effect.gen(function* () {
     )
     BEGIN SELECT RAISE(ABORT, 'Gmail draft creation is awaiting reconciliation'); END
   `;
+  yield* sql`
+    CREATE TRIGGER command_center_inbox_gmail_drafts_no_item_edit_during_create
+    BEFORE UPDATE OF status, title, body, priority, due_at, source_json, links_json, metadata_json
+    ON command_center_items
+    WHEN EXISTS (
+      SELECT 1 FROM command_center_inbox_gmail_drafts draft
+      WHERE draft.item_id = OLD.id AND draft.status = 'creating'
+    )
+    BEGIN SELECT RAISE(ABORT, 'Gmail draft creation is awaiting reconciliation'); END
+  `;
 });

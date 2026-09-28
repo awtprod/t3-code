@@ -745,6 +745,17 @@ function InboxDetailPane({
     (detailQuery.data === null || optimisticDetail.state.version >= detailQuery.data.state.version)
       ? optimisticDetail
       : detailQuery.data;
+  const hasGmailDraftProposal =
+    detail?.currentRevision?.payload.kind === "prepared-action" &&
+    detail.currentRevision.payload.actionKind === "gmail.draft.create";
+  const draftReceiptQuery = useEnvironmentQuery(
+    hasGmailDraftProposal
+      ? commandCenterEnvironment.getInboxDraftReceipt({
+          environmentId,
+          input: { spaceId: SpaceId.make(space.id), itemId: ItemId.make(itemId) },
+        })
+      : null,
+  );
   useEffect(() => {
     setOptimisticDetail(null);
   }, [environmentId, itemId, space.id]);
@@ -801,6 +812,12 @@ function InboxDetailPane({
   const [submitting, setSubmitting] = useState<string | null>(null);
   const mutationInFlightRef = useRef(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [draftApprovalError, setDraftApprovalError] = useState<string | null>(null);
+  const draftApprovalRequestRef = useRef<{ revisionId: string; mutationId: string } | null>(null);
+  useEffect(() => {
+    setDraftApprovalError(null);
+    draftApprovalRequestRef.current = null;
+  }, [environmentId, itemId, space.id, detail?.currentRevision?.id]);
   const [rejectedReply, setRejectedReply] = useState<InboxPendingReply | null>(null);
   const comment = useAtomCommand(commandCenterEnvironment.commentOnInboxItem, {
     reportFailure: false,
@@ -812,6 +829,9 @@ function InboxDetailPane({
     reportFailure: false,
   });
   const acceptCandidate = useAtomCommand(commandCenterEnvironment.acceptInboxCandidate, {
+    reportFailure: false,
+  });
+  const approveInboxDraft = useAtomCommand(commandCenterEnvironment.approveInboxDraft, {
     reportFailure: false,
   });
   const discardCandidate = useAtomCommand(commandCenterEnvironment.discardInboxCandidate, {
@@ -1008,6 +1028,72 @@ function InboxDetailPane({
         detail.nextRevisionBeforeSequence !== undefined
       : nextOlder !== undefined;
   const disabled = submitting !== null;
+  const isGmailDraft =
+    currentRevision?.payload.kind === "prepared-action" &&
+    currentRevision.payload.actionKind === "gmail.draft.create";
+  const currentDraftReceipt =
+    draftReceiptQuery.data?.revisionId === currentRevision?.id ? draftReceiptQuery.data : null;
+  const draftApprovalBlockedReason =
+    !isGmailDraft || currentRevision === undefined
+      ? null
+      : detail.state.lifecycle !== "open"
+        ? "Reopen this item before approving its draft."
+        : detail.item.status === "done" || detail.item.status === "canceled"
+          ? "This Item is closed."
+          : currentDraftReceipt?.status === "approved" &&
+              currentDraftReceipt.expectedVersion !== detail.state.version
+            ? "This Item changed after draft approval. Review the latest proposal."
+            : detail.state.unresolvedChangeRequestCount > 0 || detail.state.candidateCount > 0
+              ? "Resolve change requests and review pending candidates first."
+              : currentRevision.evidence.source !== "command-center-item" ||
+                  currentRevision.evidence.subjectId !== detail.item.id ||
+                  currentRevision.evidence.version !== detail.item.updatedAt
+                ? "This draft needs current local Item evidence before approval."
+                : currentRevision.payload.target.kind !== detail.state.subject.kind ||
+                    currentRevision.payload.target.id !== detail.state.subject.id
+                  ? "The draft target no longer matches this Inbox subject."
+                  : null;
+  const approveDraft = async () => {
+    if (
+      currentRevision === undefined ||
+      draftApprovalBlockedReason !== null ||
+      (currentDraftReceipt !== null && currentDraftReceipt.status !== "approved") ||
+      mutationInFlightRef.current
+    )
+      return;
+    const savedRequest = draftApprovalRequestRef.current;
+    const mutationId =
+      currentDraftReceipt?.mutationId ??
+      (savedRequest?.revisionId === currentRevision.id
+        ? savedRequest.mutationId
+        : `web:${randomUUID()}`);
+    draftApprovalRequestRef.current = { revisionId: currentRevision.id, mutationId };
+    mutationInFlightRef.current = true;
+    setSubmitting("approve-draft");
+    setDraftApprovalError(null);
+    try {
+      const result = await approveInboxDraft({
+        environmentId,
+        input: {
+          spaceId: SpaceId.make(space.id),
+          itemId: ItemId.make(itemId),
+          mutationId,
+          expectedVersion: currentDraftReceipt?.expectedVersion ?? detail.state.version,
+          revisionId: currentRevision.id,
+        },
+      });
+      draftReceiptQuery.refresh();
+      if (result._tag !== "Success") {
+        setDraftApprovalError(mutationError(result));
+      }
+    } catch (failure) {
+      draftReceiptQuery.refresh();
+      setDraftApprovalError(mutationError(failure));
+    } finally {
+      mutationInFlightRef.current = false;
+      setSubmitting(null);
+    }
+  };
   const submitFeedback = async () => {
     if ((pendingReply === null && draft.text.trim().length === 0) || disabled) return;
     const submitted = inboxPendingReplyForSubmit({
@@ -1310,15 +1396,100 @@ function InboxDetailPane({
               />
             </>
           )}
-          <div className="mt-4 rounded-xl border border-border/60 bg-muted/15 p-3 text-sm text-muted-foreground">
-            {detail.state.approval.reason === "changes-requested"
-              ? "Approval is blocked until every change request is resolved."
-              : detail.state.approval.reason === "candidate-pending"
-                ? "Review the pending candidate before the proposal can move forward."
-                : detail.state.approval.reason === "no-current-proposal"
-                  ? "There is no proposal to approve."
-                  : "Execution is not available for this item. Comments and proposal revisions remain available."}
-          </div>
+          {isGmailDraft && currentRevision !== undefined ? (
+            <div className="mt-4 rounded-xl border border-border/60 bg-muted/15 p-3 text-sm">
+              <p className="font-medium">Gmail draft approval</p>
+              <p className="mt-1 text-muted-foreground">
+                Accepting a revision only selects its proposal. Approve draft creates the exact
+                addressed draft in the connected Gmail account; it never sends mail.
+              </p>
+              {currentDraftReceipt?.status === "created" ? (
+                <p className="mt-2" role="status">
+                  Draft created · ID{" "}
+                  <code className="break-all">{currentDraftReceipt.draftId}</code>
+                </p>
+              ) : currentDraftReceipt?.status === "uncertain" ? (
+                <p className="mt-2 text-destructive-foreground" role="alert">
+                  Gmail did not return a verified outcome. Check Drafts and reconcile this item
+                  before trying again. {currentDraftReceipt.error}
+                </p>
+              ) : currentDraftReceipt !== null ? (
+                <p className="mt-2 text-muted-foreground" role="status">
+                  {currentDraftReceipt.status === "creating"
+                    ? "Draft creation started. If this persists, check Gmail Drafts; the Run will not retry an uncertain result."
+                    : "Draft approved and waiting for its Run."}
+                </p>
+              ) : null}
+              {currentDraftReceipt !== null ? (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Approved account {currentDraftReceipt.accountAlias} · connection{" "}
+                  {currentDraftReceipt.connectionId}
+                </p>
+              ) : null}
+              {draftApprovalBlockedReason !== null ? (
+                <p className="mt-2 text-muted-foreground">{draftApprovalBlockedReason}</p>
+              ) : null}
+              {draftReceiptQuery.error !== null ? (
+                <p className="mt-2 text-destructive-foreground" role="alert">
+                  Could not check draft status. Reload this status before approving.
+                </p>
+              ) : null}
+              {draftApprovalError !== null ? (
+                <p className="mt-2 text-destructive-foreground" role="alert">
+                  {draftApprovalError} Check draft status before another action.
+                </p>
+              ) : null}
+              {draftReceiptQuery.error !== null || draftApprovalError !== null ? (
+                <Button
+                  className="mt-3"
+                  onClick={draftReceiptQuery.refresh}
+                  size="sm"
+                  variant="outline"
+                >
+                  <RefreshCwIcon /> Check draft status
+                </Button>
+              ) : null}
+              <Button
+                className="mt-3"
+                disabled={
+                  disabled ||
+                  draftApprovalBlockedReason !== null ||
+                  draftReceiptQuery.isPending ||
+                  draftReceiptQuery.error !== null ||
+                  (currentDraftReceipt !== null && currentDraftReceipt.status !== "approved")
+                }
+                onClick={() => void approveDraft()}
+                size="sm"
+              >
+                <CheckIcon />{" "}
+                {submitting === "approve-draft"
+                  ? "Approving…"
+                  : currentDraftReceipt?.status === "approved"
+                    ? "Continue approved draft"
+                    : "Approve draft"}
+              </Button>
+            </div>
+          ) : (
+            <div className="mt-4 rounded-xl border border-border/60 bg-muted/15 p-3 text-sm text-muted-foreground">
+              {detail.state.approval.reason === "changes-requested"
+                ? "Approval is blocked until every change request is resolved."
+                : detail.state.approval.reason === "candidate-pending"
+                  ? "Review the pending candidate before the proposal can move forward."
+                  : detail.state.approval.reason === "no-current-proposal"
+                    ? "There is no proposal to approve."
+                    : "Execution is not available for this item. Comments and proposal revisions remain available."}
+            </div>
+          )}
+          {draftReceiptQuery.data !== null &&
+          draftReceiptQuery.data.revisionId !== currentRevision?.id ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Previous Gmail draft revision {draftReceiptQuery.data.revisionId}:{" "}
+              {draftReceiptQuery.data.status}
+              {draftReceiptQuery.data.draftId === undefined
+                ? ""
+                : ` · draft ID ${draftReceiptQuery.data.draftId}`}
+            </p>
+          ) : null}
         </section>
 
         {candidates.length > 0 ? (

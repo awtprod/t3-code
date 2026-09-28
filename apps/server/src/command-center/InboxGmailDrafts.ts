@@ -46,6 +46,7 @@ type ProposalRow = {
   readonly itemStatus: string;
   readonly itemTitle: string;
   readonly itemBody: string | null;
+  readonly lifecycle: string;
   readonly version: number;
   readonly subjectKind: string;
   readonly subjectId: string;
@@ -141,7 +142,7 @@ export const layer = Layer.effect(
       const rows = yield* sql<ProposalRow>`
         SELECT item.id AS "itemId", item.space_id AS "spaceId", item.updated_at AS "itemUpdatedAt",
           item.status AS "itemStatus", item.title AS "itemTitle", item.body AS "itemBody",
-          inbox.version, inbox.subject_kind AS "subjectKind", inbox.subject_id AS "subjectId",
+          inbox.version, inbox.lifecycle, inbox.subject_kind AS "subjectKind", inbox.subject_id AS "subjectId",
           inbox.current_revision_id AS "currentRevisionId", revision.status AS "revisionStatus",
           revision.payload_json AS "payloadJson", revision.evidence_json AS "evidenceJson",
           (SELECT COUNT(*) FROM command_center_inbox_discussion discussion
@@ -169,6 +170,7 @@ export const layer = Layer.effect(
       if (
         row.currentRevisionId === null ||
         row.revisionStatus !== "current" ||
+        row.lifecycle !== "open" ||
         row.unresolvedChanges > 0 ||
         row.candidateCount > 0 ||
         row.itemStatus === "done" ||
@@ -237,10 +239,14 @@ export const layer = Layer.effect(
 
     const asReceipt = Effect.fn("InboxGmailDrafts.asReceipt")(function* (row: DraftRow) {
       return yield* decodeReceipt({
+        mutationId: row.mutationId,
         itemId: row.itemId,
         spaceId: row.spaceId,
+        expectedVersion: row.expectedVersion,
         revisionId: row.revisionId,
         payloadDigest: row.payloadDigest,
+        connectionId: row.connectionId,
+        accountAlias: row.accountAlias,
         status: row.status,
         ...(row.draftId === null ? {} : { draftId: row.draftId }),
         ...(row.messageId === null ? {} : { messageId: row.messageId }),
@@ -373,6 +379,25 @@ export const layer = Layer.effect(
         UPDATE command_center_inbox_gmail_drafts SET status = 'creating',
           updated_at = ${DateTime.formatIso(yield* DateTime.now)}
         WHERE mutation_id = ${mutationId} AND status = 'approved'
+          AND EXISTS (
+            SELECT 1 FROM command_center_inbox_state inbox
+            JOIN command_center_items item ON item.id = inbox.item_id
+            WHERE inbox.item_id = command_center_inbox_gmail_drafts.item_id
+              AND inbox.space_id = command_center_inbox_gmail_drafts.space_id
+              AND inbox.current_revision_id = command_center_inbox_gmail_drafts.revision_id
+              AND inbox.version = command_center_inbox_gmail_drafts.expected_version
+              AND inbox.lifecycle = 'open'
+              AND item.status NOT IN ('done', 'canceled')
+              AND NOT EXISTS (
+                SELECT 1 FROM command_center_inbox_discussion discussion
+                WHERE discussion.item_id = inbox.item_id AND discussion.kind = 'change-request'
+                  AND discussion.resolved_at IS NULL
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM command_center_inbox_revisions candidate
+                WHERE candidate.item_id = inbox.item_id AND candidate.status = 'candidate'
+              )
+          )
         RETURNING mutation_id AS "mutationId"
       `;
       if (updated.length !== 1)
