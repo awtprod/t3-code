@@ -1385,6 +1385,82 @@ it.effect("records digest-addressed Artifacts and enforces exact Space and Run s
   }).pipe(Effect.provide(makeTestLayer())),
 );
 
+it.effect("hydrates each Run with its deterministically ordered, Space-scoped Artifacts", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    const linkedCommand = decodeCommand({
+      commandId: "run-artifacts-linked",
+      text: "Summarize the current status",
+      spaceId: systemSpace.id,
+    });
+    const linked = yield* service.submitCommand(linkedCommand, providers);
+    const second = yield* service.submitCommand(
+      decodeCommand({
+        commandId: "run-artifacts-second",
+        text: "Summarize another status",
+        spaceId: systemSpace.id,
+      }),
+      providers,
+    );
+    const empty = yield* service.submitCommand(
+      decodeCommand({
+        commandId: "run-artifacts-empty",
+        text: "Summarize an empty status",
+        spaceId: systemSpace.id,
+      }),
+      providers,
+    );
+    const otherSpace = yield* service.submitCommand(
+      decodeCommand({
+        commandId: "run-artifacts-other-space",
+        text: "Summarize the sample application",
+        spaceId: studioSpace.id,
+      }),
+      providers,
+    );
+
+    yield* sql`
+      INSERT INTO command_center_artifacts (
+        id, space_id, run_id, kind, title, uri, content_digest,
+        provenance_json, metadata_json, created_at
+      ) VALUES
+        ('run-artifact-b', ${systemSpace.id}, ${linked.run.id}, 'report', 'Later report', NULL,
+          ${"b".repeat(64)}, '{}', '{}', '2026-01-01T00:00:02.000Z'),
+        ('run-artifact-a', ${systemSpace.id}, ${linked.run.id}, 'report', 'Earlier report', NULL,
+          ${"a".repeat(64)}, '{}', '{}', '2026-01-01T00:00:01.000Z'),
+        ('run-artifact-second', ${systemSpace.id}, ${second.run.id}, 'report', 'Second report', NULL,
+          ${"c".repeat(64)}, '{}', '{}', ${fixtureTimestamp}),
+        ('run-artifact-other-space', ${studioSpace.id}, ${otherSpace.run.id}, 'report',
+          'Other Space report', NULL, ${"d".repeat(64)}, '{}', '{}', ${fixtureTimestamp}),
+        ('run-artifact-unlinked', ${systemSpace.id}, NULL, 'report', 'Unlinked report', NULL,
+          ${"e".repeat(64)}, '{}', '{}', ${fixtureTimestamp}),
+        ('run-artifact-wrong-space', ${studioSpace.id}, ${linked.run.id}, 'report',
+          'Wrong Space report', NULL, ${"f".repeat(64)}, '{}', '{}', ${fixtureTimestamp})
+    `;
+
+    const systemRuns = (yield* service.queryRuns({ spaceId: systemSpace.id })).runs;
+    const studioRuns = (yield* service.queryRuns({ spaceId: studioSpace.id })).runs;
+    const duplicate = yield* service.submitCommand(linkedCommand, providers);
+
+    expect(systemRuns.find((run) => run.id === linked.run.id)?.artifactIds).toEqual([
+      "run-artifact-a",
+      "run-artifact-b",
+    ]);
+    expect(systemRuns.find((run) => run.id === second.run.id)?.artifactIds).toEqual([
+      "run-artifact-second",
+    ]);
+    expect(systemRuns.find((run) => run.id === empty.run.id)?.artifactIds).toEqual([]);
+    expect(studioRuns.find((run) => run.id === otherSpace.run.id)?.artifactIds).toEqual([
+      "run-artifact-other-space",
+    ]);
+    expect(duplicate).toMatchObject({
+      duplicate: true,
+      run: { id: linked.run.id, artifactIds: ["run-artifact-a", "run-artifact-b"] },
+    });
+  }).pipe(Effect.provide(makeTestLayer())),
+);
+
 it.effect("rejects an approval decision when its payload digest does not match", () =>
   Effect.gen(function* () {
     const service = yield* CommandCenterService;
