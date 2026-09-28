@@ -205,7 +205,6 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const writeLock = yield* Semaphore.make(1);
   const atomicTargetExchange = yield* makeAtomicTargetExchange();
-  const atomicAuthoringPreflight = yield* Effect.cached(atomicTargetExchange.preflight());
   let verifiedAuthoringGitExecutable: string | undefined;
 
   /** Publish service-owned bytes through pinned dirfds and RENAME_NOREPLACE. */
@@ -1013,7 +1012,7 @@ export const make = Effect.gen(function* () {
 
   const readAuthoringHealth = (configDirectory: string) =>
     readPinnedBranch(configDirectory).pipe(
-      Effect.andThen(atomicAuthoringPreflight),
+      Effect.andThen(atomicTargetExchange.preflight()),
       Effect.as({ status: "available" as const }),
       Effect.catch((cause) =>
         Effect.succeed({ status: "unavailable" as const, message: cause.message }),

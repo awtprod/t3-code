@@ -9,6 +9,7 @@ import {
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -359,6 +360,31 @@ it.layer(NodeServices.layer)("automation private config editing", (it) => {
         status: "unavailable",
         message: expect.stringContaining("Linux renameat2 support is required"),
       });
+    }),
+  );
+
+  it.effect("retries authoring preflight after its first caller is interrupted", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture;
+      const preflightEntered = yield* Deferred.make<void>();
+      let holdFirstPreflight = true;
+      fixture.storeControl.beforeRun = (input) => {
+        if (input.args[0] !== "-I" || input.args[1] !== "-S" || !holdFirstPreflight) {
+          return Effect.void;
+        }
+        holdFirstPreflight = false;
+        return Deferred.succeed(preflightEntered, undefined).pipe(Effect.andThen(Effect.never));
+      };
+
+      const first = yield* fixture.store.authoringHealth.pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* Deferred.await(preflightEntered);
+      yield* Fiber.interrupt(first);
+
+      const retry = yield* Effect.exit(fixture.store.authoringHealth);
+      expect(Exit.isSuccess(retry)).toBe(true);
+      if (Exit.isSuccess(retry)) expect(retry.value).toEqual({ status: "available" });
     }),
   );
 
