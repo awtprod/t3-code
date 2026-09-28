@@ -149,6 +149,7 @@ import { decideWebSocketOrigin } from "./auth/websocketOrigin.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "./httpCors.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import * as CommandCenterService from "./command-center/Service.ts";
+import * as CommandCenterInbox from "./command-center/Inbox.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
 import { refreshCommandCenterConnection } from "./command-center/ConnectionRefresh.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
@@ -472,6 +473,7 @@ const makeWsRpcLayer = (
       const usage = yield* UsageService.UsageService;
       const relayClient = yield* RelayClient.RelayClient;
       const commandCenter = yield* CommandCenterService.CommandCenterService;
+      const commandCenterInbox = yield* Effect.serviceOption(CommandCenterInbox.CommandCenterInbox);
       const commandCenterEvents = yield* CommandCenterEventStream.CommandCenterEventStream;
       const automationDefinitionConfig =
         yield* AutomationDefinitionConfig.AutomationDefinitionConfig;
@@ -485,6 +487,30 @@ const makeWsRpcLayer = (
       const googleConnectionSetup = yield* Effect.serviceOption(
         GoogleConnectionSetup.GoogleConnectionSetup,
       );
+      const withCommandCenterInbox = <A>(
+        use: (
+          service: CommandCenterInbox.CommandCenterInbox["Service"],
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        Option.match(commandCenterInbox, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "config",
+                message: "Command Center Inbox is unavailable in this environment.",
+              }),
+            ),
+          onSome: use,
+        });
+      const withVerifiedCommandCenterInbox = <A>(
+        spaceId: CommandCenterSpaceIdType | undefined,
+        use: (
+          service: CommandCenterInbox.CommandCenterInbox["Service"],
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        commandCenter
+          .refreshInboxSpaceProjection(spaceId)
+          .pipe(Effect.andThen(withCommandCenterInbox(use)));
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1335,6 +1361,101 @@ const makeWsRpcLayer = (
           observeRpcEffect(COMMAND_CENTER_WS_METHODS.itemsQuery, commandCenter.queryItems(input), {
             "rpc.aggregate": "command-center",
           }),
+        [COMMAND_CENTER_WS_METHODS.inboxQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxQuery,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) => inbox.query(input)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxDetail]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxDetail,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) => inbox.detail(input)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxComment]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxComment,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.comment(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxRequestChanges]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxRequestChanges,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.requestChanges(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxCandidateCreate]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxCandidateCreate,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.createCandidate(
+                { ...input, source: "direct" },
+                { subject: currentSession.subject },
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxCandidateAccept]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.acceptCandidate(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.discardCandidate(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxChangeRequestResolve]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxChangeRequestResolve,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.resolveChangeRequest(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxSnooze]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxSnooze,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.snooze(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxUnsnooze]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxUnsnooze,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.unsnooze(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxDismiss]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxDismiss,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.dismiss(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxReopen]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxReopen,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.reopen(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
         [COMMAND_CENTER_WS_METHODS.runsQuery]: (input) =>
           observeRpcEffect(COMMAND_CENTER_WS_METHODS.runsQuery, commandCenter.queryRuns(input), {
             "rpc.aggregate": "command-center",
