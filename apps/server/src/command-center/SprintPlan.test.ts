@@ -161,6 +161,63 @@ it.effect("keeps the exact baseline immutable and isolates one task field edit",
   }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect("lists only Space-scoped summaries with stable keyset pagination", () =>
+  Effect.gen(function* () {
+    const service = yield* setup("list");
+    for (const planId of ["plan-a", "plan-b", "plan-c"]) {
+      yield* service.applyImport(
+        {
+          planId,
+          spaceId: "space-list",
+          sourceJson: sourceFixture(),
+          provenance: { sourceRef: `fixture://${planId}` },
+          expectedVersion: 0,
+          mutationId: `import-${planId}`,
+        },
+        actor,
+      );
+    }
+    yield* service.applyImport(
+      {
+        planId: "other-plan",
+        spaceId: "other-list",
+        sourceJson: sourceFixture(),
+        provenance: { sourceRef: "fixture://other-plan" },
+        expectedVersion: 0,
+        mutationId: "import-other-plan",
+      },
+      actor,
+    );
+
+    const first = yield* service.list({ spaceId: "space-list", limit: 2 });
+    expect(first.plans.map((plan) => plan.id)).toEqual(["plan-c", "plan-b"]);
+    expect(first.plans[0]).toMatchObject({
+      spaceId: "space-list",
+      version: 1,
+      sourceVersion: 2,
+    });
+    expect(first.plans[0]).not.toHaveProperty("sourceJson");
+    expect(first.plans[0]).not.toHaveProperty("current");
+    expect(first.nextCursor).toEqual({
+      updatedAt: first.plans[1]!.updatedAt,
+      planId: "plan-b",
+    });
+    if (first.nextCursor === undefined) {
+      return;
+    }
+
+    const second = yield* service.list({
+      spaceId: "space-list",
+      limit: 2,
+      cursor: first.nextCursor,
+    });
+    expect(second).toEqual({ plans: [expect.objectContaining({ id: "plan-a" })] });
+    expect((yield* service.list({ spaceId: "other-list" })).plans).toEqual([
+      expect.objectContaining({ id: "other-plan", spaceId: "other-list" }),
+    ]);
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("requires reasons, exact before values, current versions, and matching Space", () =>
   Effect.gen(function* () {
     const service = yield* setup("guards");

@@ -289,6 +289,19 @@ export const CommandCenterSprintPlanApplyImportInput = Schema.Struct({
 export type CommandCenterSprintPlanApplyImportInput =
   typeof CommandCenterSprintPlanApplyImportInput.Type;
 
+export const CommandCenterSprintPlanListCursor = Schema.Struct({
+  updatedAt: IsoTimestamp,
+  planId: Identifier,
+});
+export type CommandCenterSprintPlanListCursor = typeof CommandCenterSprintPlanListCursor.Type;
+
+export const CommandCenterSprintPlanListInput = Schema.Struct({
+  spaceId: Identifier,
+  cursor: Schema.optionalKey(CommandCenterSprintPlanListCursor),
+  limit: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
+});
+export type CommandCenterSprintPlanListInput = typeof CommandCenterSprintPlanListInput.Type;
+
 export const CommandCenterSprintPlanGetInput = Schema.Struct({
   planId: Identifier,
   spaceId: Identifier,
@@ -383,6 +396,24 @@ export const CommandCenterSprintPlanDateResolution = Schema.Struct({
 });
 export type CommandCenterSprintPlanDateResolution =
   typeof CommandCenterSprintPlanDateResolution.Type;
+
+export const CommandCenterSprintPlanSummary = Schema.Struct({
+  id: Identifier,
+  spaceId: Identifier,
+  version: PositiveSafeInt,
+  sourceVersion: PositiveSafeInt,
+  sourceUpdatedAt: IsoTimestamp,
+  sourceSha256: Sha256,
+  createdAt: IsoTimestamp,
+  updatedAt: IsoTimestamp,
+});
+export type CommandCenterSprintPlanSummary = typeof CommandCenterSprintPlanSummary.Type;
+
+export const CommandCenterSprintPlanListResult = Schema.Struct({
+  plans: Schema.Array(CommandCenterSprintPlanSummary).check(Schema.isMaxLength(100)),
+  nextCursor: Schema.optionalKey(CommandCenterSprintPlanListCursor),
+});
+export type CommandCenterSprintPlanListResult = typeof CommandCenterSprintPlanListResult.Type;
 
 export const CommandCenterSprintPlanSnapshot = Schema.Struct({
   id: Identifier,
