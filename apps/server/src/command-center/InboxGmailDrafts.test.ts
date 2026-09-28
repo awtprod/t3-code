@@ -4,6 +4,7 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -12,6 +13,7 @@ import { InboxGmailDrafts, layer as draftsLayer } from "./InboxGmailDrafts.ts";
 import { CommandCenterService, type CommandCenterServiceShape } from "./Service.ts";
 
 const now = "2026-09-28T00:00:00.000Z";
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const spaceId = SpaceId.make("space-a");
 const itemId = ItemId.make("item-a");
 let accountAlias = "original@example.com";
@@ -62,7 +64,7 @@ const seed = Effect.gen(function* () {
       '{"kind":"user","capturedAt":"2026-09-28T00:00:00.000Z"}', '[]', '{}', ${now}, ${now}
     )
   `;
-  const payload = JSON.stringify({
+  const payload = encodeJson({
     kind: "prepared-action",
     actionKind: "gmail.draft.create",
     target: { kind: "command-center-item", id: itemId },
@@ -75,7 +77,7 @@ const seed = Effect.gen(function* () {
       body: "Exact body",
     },
   });
-  const evidence = JSON.stringify({
+  const evidence = encodeJson({
     source: "command-center-item",
     subjectId: itemId,
     version: now,

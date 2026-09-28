@@ -23,6 +23,8 @@ const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unkno
 const decodeProposal = Schema.decodeUnknownEffect(CommandCenterInboxProposalPayload);
 const decodeDraft = Schema.decodeUnknownEffect(GoogleDraftCreateRequest);
 const decodeReceipt = Schema.decodeUnknownEffect(CommandCenterInboxDraftReceipt);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const isCommandCenterError = Schema.is(CommandCenterError);
 
 const DRAFT_REQUEST_KEYS = new Set([
   "spaceId",
@@ -83,7 +85,7 @@ function digest(value: string): string {
 
 function itemDigest(row: ProposalRow): string {
   return digest(
-    JSON.stringify([row.itemId, row.itemUpdatedAt, row.itemStatus, row.itemTitle, row.itemBody]),
+    encodeJson([row.itemId, row.itemUpdatedAt, row.itemStatus, row.itemTitle, row.itemBody]),
   );
 }
 
@@ -284,7 +286,7 @@ export const layer = Layer.effect(
       actorSubject: string,
     ) {
       const requestDigest = digest(
-        JSON.stringify([
+        encodeJson([
           input.spaceId,
           input.itemId,
           input.revisionId,
@@ -436,7 +438,7 @@ export const layer = Layer.effect(
     const safe = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       effect.pipe(
         Effect.mapError((error) =>
-          error instanceof CommandCenterError
+          isCommandCenterError(error)
             ? error
             : invalid("The Gmail draft state could not be read or written."),
         ),

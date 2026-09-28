@@ -22,6 +22,8 @@ export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.inboxRequestChanges, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.inboxCandidateCreate, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.inboxCandidateAccept, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.inboxDraftApprove, AuthCommandCenterApproveScope],
+  [COMMAND_CENTER_WS_METHODS.inboxDraftReceipt, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.inboxChangeRequestResolve, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.inboxSnooze, AuthCommandCenterOperateScope],

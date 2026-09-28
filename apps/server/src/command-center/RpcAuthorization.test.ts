@@ -38,6 +38,9 @@ describe("Command Center RPC authorization", () => {
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.itemsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxDetail)).toBe(AuthCommandCenterReadScope);
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxDraftReceipt)).toBe(
+      AuthCommandCenterReadScope,
+    );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.runsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationDefinitionGet)).toBe(
@@ -97,6 +100,9 @@ describe("Command Center RPC authorization", () => {
     );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.memoryReview)).toBe(AuthCommandCenterOperateScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.approvalDecide)).toBe(
+      AuthCommandCenterApproveScope,
+    );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxDraftApprove)).toBe(
       AuthCommandCenterApproveScope,
     );
   });
