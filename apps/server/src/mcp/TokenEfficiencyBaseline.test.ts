@@ -2,8 +2,8 @@ import { expect, it } from "@effect/vitest";
 import { Tool } from "effect/unstable/ai";
 
 import {
-  CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
-  CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  codexDefaultModeDeveloperInstructions,
+  codexPlanModeDeveloperInstructions,
 } from "../provider/CodexDeveloperInstructions.ts";
 import { COMMAND_CENTER_CONTEXT_LIMITS } from "../command-center/RunDispatcher.ts";
 import { CommandCenterToolkit } from "./toolkits/command-center/tools.ts";
@@ -15,8 +15,8 @@ it("records the committed static-context baseline", () => {
   const tools = groups.flatMap((group) => Object.values(group.tools));
   const baseline = {
     collaborationInstructions: {
-      defaultBytes: Buffer.byteLength(CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS),
-      planBytes: Buffer.byteLength(CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS),
+      defaultBytes: Buffer.byteLength(codexDefaultModeDeveloperInstructions(true)),
+      planBytes: Buffer.byteLength(codexPlanModeDeveloperInstructions(true)),
     },
     mcp: {
       toolCount: tools.length,
@@ -34,8 +34,15 @@ it("records the committed static-context baseline", () => {
     },
   };
   expect(baseline).toEqual({
-    collaborationInstructions: { defaultBytes: 2_071, planBytes: 10_302 },
-    mcp: { toolCount: 36, schemaBytes: 23_519, toolkitCounts: [14, 13, 9] },
+    // 2026-09: +94 bytes to route default-mode questions through
+    // `request_user_input` when the tool is listed (plain-text fallback
+    // remains for the tool-unavailable case).
+    collaborationInstructions: { defaultBytes: 2_165, planBytes: 10_302 },
+    // 2026-09: +1,938 bytes for the optional `database` selector on the nine
+    // Supabase tools (multi-database projects).
+    // 2026-09: +76 bytes for the `prospect.evaluate`/`prospect.notify`
+    // automation node configs (review-only prospect queue).
+    mcp: { toolCount: 36, schemaBytes: 25_533, toolkitCounts: [14, 13, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

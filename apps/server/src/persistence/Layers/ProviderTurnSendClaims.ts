@@ -65,12 +65,64 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
         WHERE NOT EXISTS (
           SELECT 1 FROM provider_turn_send_barriers
           WHERE thread_id = ${request.threadId}
-            AND canceled_through_sequence >= ${request.requestSequence}
+            AND canceled_through_sequence >= COALESCE(
+              (
+                SELECT recovery.root_request_sequence
+                FROM provider_restart_recoveries AS recovery
+                JOIN orchestration_command_receipts AS receipt
+                  ON receipt.command_id = recovery.command_id
+                 AND receipt.status = 'accepted'
+                WHERE recovery.thread_id = ${request.threadId}
+                  AND recovery.message_id = ${request.messageId}
+                  AND receipt.result_sequence = ${request.requestSequence}
+              ),
+              ${request.requestSequence}
+            )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM command_center_runs AS run
+          JOIN provider_restart_recoveries AS recovery
+            ON recovery.thread_id = run.thread_id
+           AND recovery.message_id = ${request.messageId}
+          JOIN orchestration_command_receipts AS receipt
+            ON receipt.command_id = recovery.command_id
+           AND receipt.status = 'accepted'
+           AND receipt.result_sequence = ${request.requestSequence}
+          WHERE run.thread_id = ${request.threadId}
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM provider_restart_recoveries AS recovery
+          JOIN orchestration_command_receipts AS receipt
+            ON receipt.command_id = recovery.command_id
+           AND receipt.status = 'accepted'
+          JOIN projection_turns AS newer
+            ON newer.thread_id = recovery.thread_id
+           AND newer.pending_message_id = recovery.message_id
+           AND newer.turn_id IS NULL
+           AND newer.state = 'pending'
+           AND newer.checkpoint_turn_count IS NULL
+           AND newer.request_sequence > recovery.original_request_sequence
+           AND newer.request_sequence <> ${request.requestSequence}
+          WHERE recovery.thread_id = ${request.threadId}
+            AND recovery.message_id = ${request.messageId}
+            AND receipt.result_sequence = ${request.requestSequence}
         )
         ON CONFLICT (thread_id, message_id) DO UPDATE SET
           request_sequence = excluded.request_sequence,
           claimed_at = excluded.claimed_at
         WHERE excluded.request_sequence > provider_turn_send_claims.request_sequence
+          AND NOT EXISTS (
+            SELECT 1
+            FROM provider_restart_recoveries AS recovery
+            JOIN orchestration_command_receipts AS receipt
+              ON receipt.command_id = recovery.command_id
+             AND receipt.status = 'accepted'
+            WHERE recovery.thread_id = ${request.threadId}
+              AND recovery.message_id = ${request.messageId}
+              AND receipt.result_sequence = ${request.requestSequence}
+          )
       `,
   });
 
@@ -102,7 +154,49 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
           AND NOT EXISTS (
             SELECT 1 FROM provider_turn_send_barriers AS barrier
             WHERE barrier.thread_id = ${threadId}
-              AND barrier.canceled_through_sequence >= claim.request_sequence
+              AND barrier.canceled_through_sequence >= COALESCE(
+                (
+                  SELECT recovery.root_request_sequence
+                  FROM provider_restart_recoveries AS recovery
+                  JOIN orchestration_command_receipts AS receipt
+                    ON receipt.command_id = recovery.command_id
+                   AND receipt.status = 'accepted'
+                  WHERE recovery.thread_id = claim.thread_id
+                    AND recovery.message_id = claim.message_id
+                    AND receipt.result_sequence = claim.request_sequence
+                ),
+                claim.request_sequence
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM command_center_runs AS run
+            JOIN provider_restart_recoveries AS recovery
+              ON recovery.thread_id = run.thread_id
+             AND recovery.message_id = claim.message_id
+            JOIN orchestration_command_receipts AS receipt
+              ON receipt.command_id = recovery.command_id
+             AND receipt.status = 'accepted'
+             AND receipt.result_sequence = claim.request_sequence
+            WHERE run.thread_id = claim.thread_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM provider_restart_recoveries AS recovery
+            JOIN orchestration_command_receipts AS receipt
+              ON receipt.command_id = recovery.command_id
+             AND receipt.status = 'accepted'
+            JOIN projection_turns AS newer
+              ON newer.thread_id = recovery.thread_id
+             AND newer.pending_message_id = recovery.message_id
+             AND newer.turn_id IS NULL
+             AND newer.state = 'pending'
+             AND newer.checkpoint_turn_count IS NULL
+             AND newer.request_sequence > recovery.original_request_sequence
+             AND newer.request_sequence <> claim.request_sequence
+            WHERE recovery.thread_id = claim.thread_id
+              AND recovery.message_id = claim.message_id
+              AND receipt.result_sequence = claim.request_sequence
           )
       `,
   });
@@ -127,7 +221,18 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
         SELECT canceled_through_sequence AS "canceledThroughSequence"
         FROM provider_turn_send_barriers
         WHERE thread_id = ${threadId}
-          AND canceled_through_sequence >= ${requestSequence}
+          AND canceled_through_sequence >= COALESCE(
+            (
+              SELECT recovery.root_request_sequence
+              FROM provider_restart_recoveries AS recovery
+              JOIN orchestration_command_receipts AS receipt
+                ON receipt.command_id = recovery.command_id
+               AND receipt.status = 'accepted'
+              WHERE recovery.thread_id = ${threadId}
+                AND receipt.result_sequence = ${requestSequence}
+            ),
+            ${requestSequence}
+          )
       `,
   });
 

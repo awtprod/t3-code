@@ -103,7 +103,9 @@ const classifyNonZeroExit = (command: string, stderr: string): VcsProcessExitFai
   if (
     normalized.includes("api rate limit") ||
     normalized.includes("rate limit exceeded") ||
-    normalized.includes("secondary rate limit")
+    normalized.includes("secondary rate limit") ||
+    normalized.includes("too many requests") ||
+    normalized.includes("http 429")
   ) {
     return "rate-limited";
   }
@@ -184,7 +186,9 @@ export const make = Effect.gen(function* () {
       .run({
         command,
         args:
-          protectedExecutable?.name === "git" ? hardenedHostGitArguments(input.args) : input.args,
+          protectedExecutable?.name === "git"
+            ? hardenedHostGitArguments(input.args, { safeDirectory: input.cwd })
+            : input.args,
         cwd: input.cwd,
         ...(input.spawnCwd !== undefined ? { spawnCwd: input.spawnCwd } : {}),
         ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),

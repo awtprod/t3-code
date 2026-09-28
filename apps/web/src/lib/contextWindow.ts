@@ -99,6 +99,7 @@ export function deriveLatestContextWindowSnapshot(
           ? payload.costKind
           : null,
       compactsAutomatically: asBoolean(payload?.compactsAutomatically) ?? false,
+      autoCompactThreshold: asFiniteNumber(payload?.autoCompactThreshold),
       updatedAt: activity.createdAt,
     };
   }

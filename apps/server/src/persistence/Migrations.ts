@@ -73,6 +73,11 @@ import Migration0061 from "./Migrations/061_ProjectionThreadsPinOrderKey.ts";
 import Migration0062 from "./Migrations/062_ProjectionProjectsDefaultThreadEnvMode.ts";
 import Migration0063 from "./Migrations/063_ProjectionProjectFaviconPath.ts";
 import Migration0064 from "./Migrations/064_ProjectionThreadSandbox.ts";
+import Migration0065 from "./Migrations/065_AuthSessionClientConnection.ts";
+import Migration0066 from "./Migrations/066_ProjectionThreadLinkedPullRequest.ts";
+import Migration0067 from "./Migrations/067_ProjectionThreadsUnsettledAt.ts";
+import Migration0068 from "./Migrations/068_ProviderRestartRecovery.ts";
+import Migration0069 from "./Migrations/069_WebPushSubscriptions.ts";
 import Migration0070 from "./Migrations/070_CommandCenterInbox.ts";
 import Migration0071 from "./Migrations/071_CommandCenterSprintPlans.ts";
 import Migration0073 from "./Migrations/073_CommandCenterObservations.ts";
@@ -149,6 +154,11 @@ export const migrationEntries = [
   [62, "ProjectionProjectsDefaultThreadEnvMode", Migration0062],
   [63, "ProjectionProjectFaviconPath", Migration0063],
   [64, "ProjectionThreadSandbox", Migration0064],
+  [65, "AuthSessionClientConnection", Migration0065],
+  [66, "ProjectionThreadLinkedPullRequest", Migration0066],
+  [67, "ProjectionThreadsUnsettledAt", Migration0067],
+  [68, "ProviderRestartRecovery", Migration0068],
+  [69, "WebPushSubscriptions", Migration0069],
   [70, "CommandCenterInbox", Migration0070],
   [71, "CommandCenterSprintPlans", Migration0071],
   [73, "CommandCenterObservations", Migration0073],

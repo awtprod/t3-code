@@ -2,11 +2,15 @@ import {
   RelayAgentActivityPublishProofPayload,
   RelayAgentActivityPublishProofInvalidReason,
   type RelayAgentActivityPublishRequest,
+  RelayProspectNotificationPublishProofPayload,
+  RelayProspectNotificationPublishProofInvalidReason,
+  type RelayProspectNotificationPublishRequest,
 } from "@t3tools/contracts/relay";
 import {
   decodeRelayJwt,
   normalizeRelayIssuer,
   RELAY_ACTIVITY_PUBLISH_TYP,
+  RELAY_PROSPECT_NOTIFICATION_PUBLISH_TYP,
   verifyRelayJwt,
 } from "@t3tools/shared/relayJwt";
 import { stableStringify } from "@t3tools/shared/relaySigning";
@@ -67,9 +71,50 @@ export class EnvironmentPublishPublicKeyMissing extends Schema.TaggedErrorClass<
   }
 }
 
+export class EnvironmentProspectPublishSignatureExpired extends Schema.TaggedErrorClass<EnvironmentProspectPublishSignatureExpired>()(
+  "EnvironmentProspectPublishSignatureExpired",
+  {
+    environmentId: Schema.String,
+    itemId: Schema.String,
+    expiresAt: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Environment '${this.environmentId}' prospect publish signature for item '${this.itemId}' expired at ${this.expiresAt}`;
+  }
+}
+
+export class EnvironmentProspectPublishSignatureInvalid extends Schema.TaggedErrorClass<EnvironmentProspectPublishSignatureInvalid>()(
+  "EnvironmentProspectPublishSignatureInvalid",
+  {
+    environmentId: Schema.String,
+    itemId: Schema.String,
+    reason: RelayProspectNotificationPublishProofInvalidReason,
+    stage: Schema.Literals([
+      "decode_token",
+      "verify_proof",
+      "validate_claims",
+      "validate_expiration",
+      "generate_replay_thumbprint",
+      "consume_nonce",
+    ]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Environment '${this.environmentId}' prospect publish signature for item '${this.itemId}' is invalid during ${this.stage}: ${this.reason}`;
+  }
+}
+
 export type EnvironmentPublishSignatureError =
   | EnvironmentPublishSignatureExpired
   | EnvironmentPublishSignatureInvalid
+  | EnvironmentPublishPublicKeyMissing
+  | DpopProofs.DpopProofReplayPersistenceError;
+
+export type EnvironmentProspectPublishSignatureError =
+  | EnvironmentProspectPublishSignatureExpired
+  | EnvironmentProspectPublishSignatureInvalid
   | EnvironmentPublishPublicKeyMissing
   | DpopProofs.DpopProofReplayPersistenceError;
 
@@ -82,10 +127,18 @@ export class EnvironmentPublishSignatures extends Context.Service<
       readonly threadId: string;
       readonly request: RelayAgentActivityPublishRequest;
     }) => Effect.Effect<void, EnvironmentPublishSignatureError>;
+    readonly verifyProspectNotification: (input: {
+      readonly environmentId: string;
+      readonly environmentPublicKey: string;
+      readonly request: RelayProspectNotificationPublishRequest;
+    }) => Effect.Effect<void, EnvironmentProspectPublishSignatureError>;
   }
 >()("t3code-relay/environments/EnvironmentPublishSignatures") {}
 
 const decodeProof = Schema.decodeUnknownEffect(RelayAgentActivityPublishProofPayload);
+const decodeProspectProof = Schema.decodeUnknownEffect(
+  RelayProspectNotificationPublishProofPayload,
+);
 
 function environmentPublishReplayThumbprintData(input: {
   readonly environmentId: string;
@@ -211,6 +264,123 @@ const make = Effect.gen(function* () {
         return yield* new EnvironmentPublishSignatureInvalid({
           environmentId: input.environmentId,
           threadId: input.threadId,
+          reason: "replayed_nonce",
+          stage: "consume_nonce",
+        });
+      }
+    }),
+    verifyProspectNotification: Effect.fn(
+      "relay.environment_publish_signatures.verify_prospect_notification",
+    )(function* (input) {
+      const itemId = input.request.notification.itemId;
+      yield* Effect.annotateCurrentSpan({
+        "relay.environment_id": input.environmentId,
+        "relay.prospect.item_id": itemId,
+      });
+      const now = yield* DateTime.now;
+      const nowEpochSeconds = Math.floor(now.epochMilliseconds / 1_000);
+      const decoded = yield* Effect.try({
+        try: () => decodeRelayJwt(input.request.proof),
+        catch: (cause) =>
+          new EnvironmentProspectPublishSignatureInvalid({
+            environmentId: input.environmentId,
+            itemId,
+            reason: "invalid_signature_or_payload",
+            stage: "decode_token",
+            cause,
+          }),
+      });
+      if (typeof decoded.exp === "number" && decoded.exp <= nowEpochSeconds) {
+        return yield* new EnvironmentProspectPublishSignatureExpired({
+          environmentId: input.environmentId,
+          itemId,
+          expiresAt: DateTime.formatIso(DateTime.makeUnsafe(decoded.exp * 1_000)),
+        });
+      }
+      const proof = yield* verifyRelayJwt({
+        publicKey: input.environmentPublicKey,
+        token: input.request.proof,
+        typ: RELAY_PROSPECT_NOTIFICATION_PUBLISH_TYP,
+        issuer: `t3-env:${input.environmentId}`,
+        audience: normalizeRelayIssuer(config.relayIssuer),
+        nowEpochSeconds,
+        maxTokenAge: "5 minutes",
+      }).pipe(
+        Effect.flatMap(decodeProspectProof),
+        Effect.mapError(
+          (cause) =>
+            new EnvironmentProspectPublishSignatureInvalid({
+              environmentId: input.environmentId,
+              itemId,
+              reason: "invalid_signature_or_payload",
+              stage: "verify_proof",
+              cause,
+            }),
+        ),
+      );
+      if (
+        proof.environmentId !== input.environmentId ||
+        proof.itemId !== itemId ||
+        proof.sub !== input.environmentId ||
+        proof.notification.environmentId !== input.environmentId ||
+        proof.notification.itemId !== itemId ||
+        stableStringify(proof.notification) !== stableStringify(input.request.notification)
+      ) {
+        return yield* new EnvironmentProspectPublishSignatureInvalid({
+          environmentId: input.environmentId,
+          itemId,
+          reason: "invalid_signature_or_payload",
+          stage: "validate_claims",
+        });
+      }
+      if (proof.iat > nowEpochSeconds || proof.exp <= proof.iat || proof.exp - proof.iat > 5 * 60) {
+        return yield* new EnvironmentProspectPublishSignatureInvalid({
+          environmentId: input.environmentId,
+          itemId,
+          reason: "invalid_signature_or_payload",
+          stage: "validate_expiration",
+        });
+      }
+      const expiresAt = DateTime.make(proof.exp * 1_000);
+      if (expiresAt._tag === "None") {
+        return yield* new EnvironmentProspectPublishSignatureInvalid({
+          environmentId: input.environmentId,
+          itemId,
+          reason: "invalid_signature_or_payload",
+          stage: "validate_expiration",
+        });
+      }
+      const thumbprint = yield* crypto
+        .digest(
+          "SHA-256",
+          environmentPublishReplayThumbprintData({
+            environmentId: input.environmentId,
+            environmentPublicKey: input.environmentPublicKey,
+          }),
+        )
+        .pipe(
+          Effect.map(formatEnvironmentPublishReplayThumbprint),
+          Effect.mapError(
+            (cause) =>
+              new EnvironmentProspectPublishSignatureInvalid({
+                environmentId: input.environmentId,
+                itemId,
+                reason: "invalid_signature_or_payload",
+                stage: "generate_replay_thumbprint",
+                cause,
+              }),
+          ),
+        );
+      const consumedNonce = yield* proofReplay.consume({
+        thumbprint,
+        jti: proof.jti,
+        iat: proof.iat,
+        expiresAt: expiresAt.value,
+      });
+      if (!consumedNonce) {
+        return yield* new EnvironmentProspectPublishSignatureInvalid({
+          environmentId: input.environmentId,
+          itemId,
           reason: "replayed_nonce",
           stage: "consume_nonce",
         });

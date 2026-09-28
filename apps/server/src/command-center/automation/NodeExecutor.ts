@@ -1,4 +1,4 @@
-import { SpaceId, type ItemKind, type ItemPriority } from "@command-center/core";
+import { ItemId, SpaceId, type ItemKind, type ItemPriority } from "@command-center/core";
 import {
   GoogleReadRequest,
   GoogleDraftCreateRequest,
@@ -20,8 +20,15 @@ import type {
 } from "./AutomationScopedShell.ts";
 import {
   parseAutomationAgentRunNodeConfig,
+  parseAutomationProspectEvaluateNodeConfig,
+  parseAutomationProspectNotifyNodeConfig,
   parseAutomationScopedShellNodeConfig,
 } from "./Definition.ts";
+import type {
+  ProspectEvaluationError,
+  ProspectEvaluationRequest,
+  ProspectEvaluationResult,
+} from "../ProspectEvaluation.ts";
 import type { AutomationNodeExecutionContext, AutomationNodeExecutionOutcome } from "./Runtime.ts";
 
 const decodeGoogleReadRequest = Schema.decodeUnknownEffect(GoogleReadRequest);
@@ -33,6 +40,8 @@ const UNSAFE_PATH_SEGMENTS = new Set(["__proto__", "prototype", "constructor"]);
 const TEMPLATE_PATTERN = /\{\{\s*([^{}]+?)\s*\}\}/gu;
 const EXACT_TEMPLATE_PATTERN = /^\{\{\s*([^{}]+?)\s*\}\}$/u;
 const MAX_FOREACH_ITEMS = 500;
+const MAX_PROSPECT_NOTIFICATION_ITEMS = 10;
+const PROSPECT_ITEM_PREFIX = "prospect-review:";
 
 type JsonObject = Readonly<Record<string, Schema.Json>>;
 type AutomationGoogleReadRequest = Exclude<
@@ -48,6 +57,23 @@ export interface AutomationItemCreateRequest {
   readonly title: string;
   readonly description?: string;
   readonly dueAt?: string;
+}
+
+export interface ProspectNotificationRequest {
+  readonly spaceId: ReturnType<typeof SpaceId.make>;
+  readonly itemIds: ReadonlyArray<ReturnType<typeof ItemId.make>>;
+}
+
+export interface ProspectNotificationResult {
+  readonly status: "noop" | "queued" | "skipped" | "partial";
+  readonly queuedCount: number;
+  readonly skippedCount: number;
+  readonly failedCount: number;
+}
+
+export interface ProspectNotificationFailure {
+  readonly message: string;
+  readonly retryable: boolean;
 }
 
 export interface AutomationNodeExecutorDependencies {
@@ -67,6 +93,12 @@ export interface AutomationNodeExecutorDependencies {
   readonly runScopedShell: (
     input: AutomationScopedShellRequest,
   ) => Effect.Effect<AutomationScopedShellResult, AutomationScopedShellError>;
+  readonly evaluateProspects: (
+    input: ProspectEvaluationRequest,
+  ) => Effect.Effect<ProspectEvaluationResult, ProspectEvaluationError>;
+  readonly notifyProspects?: (
+    input: ProspectNotificationRequest,
+  ) => Effect.Effect<ProspectNotificationResult, ProspectNotificationFailure>;
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
@@ -487,6 +519,149 @@ const executeScopedShell = Effect.fn("AutomationNodeExecutor.scopedShell")(funct
   return { type: "succeeded", output } as const;
 });
 
+const executeProspectEvaluation = Effect.fn("AutomationNodeExecutor.prospectEvaluation")(function* (
+  context: AutomationNodeExecutionContext,
+  dependencies: AutomationNodeExecutorDependencies,
+) {
+  const parsed = parseAutomationProspectEvaluateNodeConfig(context.node.config);
+  if (!parsed.ok) {
+    return permanentFailure(
+      `Prospect evaluation node '${context.node.id}' has invalid config: ${parsed.message}`,
+    );
+  }
+  const evaluated = yield* dependencies
+    .evaluateProspects({
+      profile: parsed.config.profile,
+      limit: parsed.config.limit,
+      spaceId: context.spaceId,
+      executionId: context.executionId,
+      nodeId: String(context.node.id),
+    })
+    .pipe(
+      Effect.match({
+        onFailure: (error) => ({ _tag: "Left" as const, error }),
+        onSuccess: (value) => ({ _tag: "Right" as const, value }),
+      }),
+    );
+  if (evaluated._tag === "Left") {
+    return evaluated.error.retryable
+      ? ({ type: "retry", error: evaluated.error.message } as const)
+      : permanentFailure(evaluated.error.message);
+  }
+  return { type: "succeeded", output: evaluated.value as unknown as Schema.Json } as const;
+});
+
+function directActionableProspectItemIds(
+  context: AutomationNodeExecutionContext,
+):
+  | { readonly ok: true; readonly itemIds: ReadonlyArray<ReturnType<typeof ItemId.make>> }
+  | { readonly ok: false; readonly outcome: AutomationNodeExecutionOutcome } {
+  const outputs = Object.values(context.predecessorOutputs);
+  if (outputs.length === 0) {
+    return {
+      ok: false,
+      outcome: permanentFailure(
+        `Prospect notification node '${context.node.id}' requires direct predecessor output.`,
+      ),
+    };
+  }
+
+  const unique = new Set<string>();
+  for (const output of outputs) {
+    if (!isJsonObject(output) || !Array.isArray(output.actionableItemIds)) {
+      return {
+        ok: false,
+        outcome: permanentFailure(
+          `Prospect notification node '${context.node.id}' requires actionableItemIds from every direct predecessor.`,
+        ),
+      };
+    }
+    if (output.actionableItemIds.length > MAX_PROSPECT_NOTIFICATION_ITEMS) {
+      return {
+        ok: false,
+        outcome: permanentFailure(
+          `Prospect notification node '${context.node.id}' exceeds the ${MAX_PROSPECT_NOTIFICATION_ITEMS}-Item safety limit.`,
+        ),
+      };
+    }
+    for (const value of output.actionableItemIds) {
+      if (
+        typeof value !== "string" ||
+        value !== value.trim() ||
+        !value.startsWith(PROSPECT_ITEM_PREFIX) ||
+        value.length === PROSPECT_ITEM_PREFIX.length
+      ) {
+        return {
+          ok: false,
+          outcome: permanentFailure(
+            `Prospect notification node '${context.node.id}' received a malformed prospect Item ID.`,
+          ),
+        };
+      }
+      unique.add(value);
+      if (unique.size > MAX_PROSPECT_NOTIFICATION_ITEMS) {
+        return {
+          ok: false,
+          outcome: permanentFailure(
+            `Prospect notification node '${context.node.id}' exceeds the ${MAX_PROSPECT_NOTIFICATION_ITEMS}-Item safety limit.`,
+          ),
+        };
+      }
+    }
+  }
+  return { ok: true, itemIds: [...unique].map((value) => ItemId.make(value)) };
+}
+
+const executeProspectNotification = Effect.fn("AutomationNodeExecutor.prospectNotification")(
+  function* (
+    context: AutomationNodeExecutionContext,
+    dependencies: AutomationNodeExecutorDependencies,
+  ) {
+    const parsed = parseAutomationProspectNotifyNodeConfig(context.node.config);
+    if (!parsed.ok) {
+      return permanentFailure(
+        `Prospect notification node '${context.node.id}' has invalid config: ${parsed.message}`,
+      );
+    }
+    const validated = directActionableProspectItemIds(context);
+    if (!validated.ok) return validated.outcome;
+    if (context.spaceId.trim().length === 0 || context.spaceId !== context.spaceId.trim()) {
+      return permanentFailure(
+        `Prospect notification node '${context.node.id}' has an invalid Space context.`,
+      );
+    }
+    if (validated.itemIds.length === 0) {
+      return {
+        type: "succeeded",
+        output: {
+          status: "noop",
+          queuedCount: 0,
+          skippedCount: 0,
+          failedCount: 0,
+        },
+      } as const;
+    }
+    if (dependencies.notifyProspects === undefined) {
+      return permanentFailure("Prospect notification delivery is not configured on this server.");
+    }
+
+    const notified = yield* dependencies
+      .notifyProspects({ spaceId: SpaceId.make(context.spaceId), itemIds: validated.itemIds })
+      .pipe(
+        Effect.match({
+          onFailure: (error) => ({ _tag: "Left" as const, error }),
+          onSuccess: (value) => ({ _tag: "Right" as const, value }),
+        }),
+      );
+    if (notified._tag === "Left") {
+      return notified.error.retryable
+        ? ({ type: "retry", error: notified.error.message } as const)
+        : permanentFailure(notified.error.message);
+    }
+    return { type: "succeeded", output: notified.value as unknown as Schema.Json } as const;
+  },
+);
+
 /**
  * V1 executor for deterministic local nodes and explicitly scoped services.
  * Agent work enters the same durable routing, approval, isolation, and Run
@@ -512,6 +687,10 @@ export function makeSafeAutomationNodeExecutor(dependencies: AutomationNodeExecu
         return executeAgentRun(context, dependencies);
       case "shell.scoped":
         return executeScopedShell(context, dependencies);
+      case "prospect.evaluate":
+        return executeProspectEvaluation(context, dependencies);
+      case "prospect.notify":
+        return executeProspectNotification(context, dependencies);
       case "delay":
       case "approval":
         return Effect.succeed(
@@ -522,7 +701,16 @@ export function makeSafeAutomationNodeExecutor(dependencies: AutomationNodeExecu
 }
 
 export const AUTOMATION_V1_NODE_POLICY = {
-  automatic: ["condition", "transform", "foreach", "item.mutate", "connector.read", "shell.scoped"],
+  automatic: [
+    "condition",
+    "transform",
+    "foreach",
+    "item.mutate",
+    "connector.read",
+    "shell.scoped",
+    "prospect.evaluate",
+    "prospect.notify",
+  ],
   routed: ["agent.run"],
   runtimeManaged: ["delay", "approval"],
   blocked: [],

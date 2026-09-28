@@ -44,6 +44,8 @@ import {
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProviderTurnSendClaimRepository } from "../../persistence/Services/ProviderTurnSendClaims.ts";
 import { ProviderTurnSendClaimRepositoryLive } from "../../persistence/Layers/ProviderTurnSendClaims.ts";
+import { ProviderRestartRecoveryRepository } from "../../persistence/Services/ProviderRestartRecovery.ts";
+import { ProviderRestartRecoveryRepositoryLive } from "../../persistence/Layers/ProviderRestartRecovery.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -64,6 +66,7 @@ import { canReplaceThreadTitle } from "../threadTitles.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
+const TASK_TITLE_ACTIVITY_KINDS = ["task.started", "task.progress"] as const;
 
 // Fallback when the in-memory description cache no longer has the task name
 // (server restart, session-exit sweep, TTL/capacity eviction): earlier
@@ -711,7 +714,7 @@ function sessionStatusAllowsActiveTurn(
 
 function requestKindFromCanonicalRequestType(
   requestType: string | undefined,
-): "command" | "file-read" | "file-change" | undefined {
+): "command" | "file-read" | "file-change" | "mcp-elicitation" | undefined {
   switch (requestType) {
     case "command_execution_approval":
     case "exec_command_approval":
@@ -725,6 +728,8 @@ function requestKindFromCanonicalRequestType(
     // stamps on the request itself.
     case "permissions_approval":
       return "file-change";
+    case "mcp_elicitation_approval":
+      return "mcp-elicitation";
     default:
       return undefined;
   }
@@ -807,12 +812,16 @@ export function runtimeEventToActivities(
                   ? "File-read approval requested"
                   : requestKind === "file-change"
                     ? "File-change approval requested"
-                    : "Approval requested",
+                    : requestKind === "mcp-elicitation"
+                      ? "App access approval requested"
+                      : "Approval requested",
           payload: {
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
             requestType: event.payload.requestType,
             ...(event.payload.detail ? { detail: event.payload.detail } : {}),
+            ...(event.payload.appName ? { appName: event.payload.appName } : {}),
+            ...(event.payload.options ? { options: event.payload.options } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1222,6 +1231,7 @@ export function runtimeEventToActivities(
           summary: event.payload.title ?? "Tool updated",
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { toolCallId: event.itemId } : {}),
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(normalizeSubagentActivityData(event)
@@ -1253,6 +1263,8 @@ export function runtimeEventToActivities(
           summary: event.payload.title ?? "Tool",
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { toolCallId: event.itemId } : {}),
+            ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(normalizeSubagentActivityData(event)
               ? { data: normalizeSubagentActivityData(event) }
@@ -1283,6 +1295,8 @@ export function runtimeEventToActivities(
           summary: `${event.payload.title ?? "Tool"} started`,
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId !== undefined ? { toolCallId: event.itemId } : {}),
+            ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(normalizeSubagentActivityData(event)
               ? { data: normalizeSubagentActivityData(event) }
@@ -1365,6 +1379,7 @@ const make = Effect.gen(function* () {
   const providerSessionDirectory = yield* ProviderSessionDirectory;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerTurnSendClaimRepository = yield* ProviderTurnSendClaimRepository;
+  const providerRestartRecoveryRepository = yield* ProviderRestartRecoveryRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const projectionTurnUsageRepository = yield* ProjectionTurnUsageRepository;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
@@ -1463,9 +1478,12 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (threadId: ThreadId) {
+  const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (
+    threadId: ThreadId,
+    activityKinds: ReadonlyArray<string> = [],
+  ) {
     return yield* projectionSnapshotQuery
-      .getThreadDetailById(threadId)
+      .getThreadDetailById(threadId, { activityKinds })
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
@@ -2181,6 +2199,10 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEventUnprotected = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
+      if (event.type === "content.delta" && event.payload.streamKind !== "assistant_text") {
+        return;
+      }
+
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 
@@ -2197,9 +2219,17 @@ const make = Effect.gen(function* () {
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
-      const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-        threadId: thread.id,
-      });
+      const pendingTurnStart =
+        event.type === "session.started" ||
+        event.type === "session.state.changed" ||
+        event.type === "session.exited" ||
+        event.type === "thread.started" ||
+        event.type === "turn.started" ||
+        event.type === "turn.completed"
+          ? yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+              threadId: thread.id,
+            })
+          : Option.none();
       const hasPendingTurnStart =
         Option.isSome(pendingTurnStart) && thread.session?.status === "starting";
 
@@ -3782,7 +3812,7 @@ const make = Effect.gen(function* () {
       if (event.type === "task.completed") {
         taskTitle = yield* lookupTaskDescription(thread.id, event.payload.taskId);
         if (!taskTitle) {
-          const threadDetail = yield* getLoadedThreadDetail();
+          const threadDetail = yield* resolveThreadDetail(thread.id, TASK_TITLE_ACTIVITY_KINDS);
           taskTitle = findTaskTitleInActivities(threadDetail?.activities, event.payload.taskId);
         }
       }
@@ -3898,86 +3928,180 @@ const make = Effect.gen(function* () {
 
       const reconciledAt = DateTime.formatIso(yield* DateTime.now);
 
-      // Report each stranded placeholder in the transcript, THEN clear it. The
-      // session-set dispatched below cannot clear it — the pending row carries
-      // no turn id, so the turns projector's settle path (which only touches
-      // rows with a concrete turnId) leaves it untouched.
-      //
-      // The order is the point. Clearing alone makes an accepted user message
-      // disappear: the reactor does not replay historical domain events when it
-      // subscribes, so nothing will ever drive this start again, and with the
-      // row gone the UI shows no turn at all — not a failed one, not a pending
-      // one. The user's message stays in the transcript (`thread.message-sent`
-      // was appended when it was accepted) with no visible reason why it never
-      // ran. The activity below is that reason, and it is appended FIRST so a
-      // dispatch failure leaves the row in place rather than clearing it
-      // silently — a stuck pending row is recoverable on the next boot; a
-      // vanished one is not.
-      //
-      // The turn is reported, not re-issued. Reconciliation runs on every boot
-      // with no durable attempt budget across restarts, so auto-driving here
-      // would re-send on each boot for as long as the provider keeps dying
-      // before its first turn — the crash loop that `AUTO_RESUME_MAX_ATTEMPTS`
-      // bounds in-process but cannot bound across them. Surfacing the outcome
-      // puts the retry back in the user's hands, one click away, with no loop.
+      const reportAndClearPendingOrphan = Effect.fn("reportAndClearPendingOrphan")(function* (
+        threadId: ThreadId,
+        pending: ProjectionPendingTurnStart,
+      ) {
+        const commandUuid = yield* crypto.randomUUIDv4;
+        const activityId = EventId.make(
+          `reconcile-pending-orphan:${threadId}:${pending.requestSequence}:${commandUuid}`,
+        );
+        // Keep the conservative historical outcome whenever durable evidence
+        // cannot prove a send was impossible. The activity lands first: if it
+        // fails, the pending row remains available for a later reconciliation.
+        yield* orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(
+            `server:reconcile-pending-orphan-activity:${threadId}:${pending.requestSequence}:${commandUuid}`,
+          ),
+          threadId,
+          activity: {
+            id: activityId,
+            tone: "error",
+            kind: "provider.turn.start.orphaned",
+            summary: "Turn never reported starting; the provider session ended first",
+            payload: {
+              detail:
+                `This turn was accepted, but the provider session ended before it ` +
+                `ever reported starting. It is not known whether the provider ` +
+                `received it — it may have begun work that was never reported ` +
+                `back. Check for any effects above before re-sending.`,
+            },
+            turnId: null,
+            createdAt: reconciledAt,
+          },
+          createdAt: reconciledAt,
+        });
+        yield* projectionTurnRepository.deletePendingTurnStart({
+          threadId,
+          requestSequence: pending.requestSequence,
+        });
+      });
+
+      // Kept in sync with the identical constant in serverRuntimeStartup.ts.
+      // reconcileProviderSessions settles every orphaned session to "error"
+      // early in startup; this later turn-level pass keeps that same error
+      // surface (rather than downgrading it to "stopped") while additionally
+      // recording the stranded turn's terminal `interrupted` transition.
+      const ORPHANED_PROVIDER_SESSION_ERROR =
+        "Provider session did not survive a server restart. Send a new message to continue.";
+
       yield* Effect.forEach(
-        // Flattened to one entry per stranded placeholder: each queued message
-        // gets its own activity and is cleared only after that activity is
-        // recorded, so a failure part-way through leaves the remaining rows
-        // intact for the next boot rather than dropping them unreported.
         pendingOnlyOrphans.flatMap((entry) =>
           entry.pending.map((pending) => ({ thread: entry.thread, pending })),
         ),
         ({ thread, pending }) =>
           Effect.gen(function* () {
-            const commandUuid = yield* crypto.randomUUIDv4;
-            const activityId = EventId.make(
-              `reconcile-pending-orphan:${thread.id}:${pending.requestSequence}:${commandUuid}`,
+            // Human-decision holds are intentionally not crossed by automatic
+            // recovery. They retain the previous explicit orphan outcome.
+            if (thread.hasPendingApprovals || thread.hasPendingUserInput) {
+              yield* reportAndClearPendingOrphan(thread.id, pending);
+              return;
+            }
+
+            // Hydrating the typed detail proves that the original user message
+            // (including its attachments) still exists and is decodable. A
+            // missing message is conservative cleanup; a failed read is an
+            // operational error, so the row is retained rather than erased.
+            const threadDetail = yield* resolveThreadDetail(thread.id);
+            const originalMessage = threadDetail?.messages.find(
+              (message) => message.id === pending.messageId && message.role === "user",
             );
-            yield* orchestrationEngine.dispatch({
-              type: "thread.activity.append",
-              commandId: CommandId.make(
-                `server:reconcile-pending-orphan-activity:${thread.id}:${pending.requestSequence}:${commandUuid}`,
-              ),
+            if (originalMessage === undefined) {
+              yield* reportAndClearPendingOrphan(thread.id, pending);
+              return;
+            }
+
+            // The pending row is not send evidence. Only absence from the
+            // durable provider claim table proves the adapter was never called.
+            const hasEverClaimed = yield* providerTurnSendClaimRepository.hasEverClaimed({
               threadId: thread.id,
-              activity: {
-                id: activityId,
-                tone: "error",
-                kind: "provider.turn.start.orphaned",
-                summary: "Turn never reported starting; the provider session ended first",
-                payload: {
-                  // Deliberately does NOT claim the turn was never sent. The
-                  // placeholder is cleared by `turn.started` being PROJECTED,
-                  // not by `sendTurn` returning, so its survival proves only
-                  // that no start was ever reported back. The provider may have
-                  // received the turn and begun work before dying — that window
-                  // is exactly where a crash is most likely. Telling the user
-                  // "nothing reached the provider" and to re-send would be
-                  // asserting more than this process knows, and acting on it
-                  // could duplicate side effects.
-                  detail:
-                    `This turn was accepted, but the provider session ended before it ` +
-                    `ever reported starting. It is not known whether the provider ` +
-                    `received it — it may have begun work that was never reported ` +
-                    `back. Check for any effects above before re-sending.`,
-                },
-                // No concrete turn exists — the pending row never got an id.
-                turnId: null,
-                createdAt: reconciledAt,
-              },
-              createdAt: reconciledAt,
+              messageId: pending.messageId,
             });
-            // Clears just the placeholder that was reported. The others in this
-            // thread's queue are reported by their own iterations; clearing by
-            // thread here would delete them before their activity is written.
+            if (hasEverClaimed) {
+              yield* reportAndClearPendingOrphan(thread.id, pending);
+              return;
+            }
+
+            // reserve re-checks the pending row, message, cancellation barrier,
+            // human holds, superseding same-message work, send-claim absence,
+            // Command Center Run exclusion, and durable two-attempt budget in
+            // the same SQLite statement. This is only thread-level recovery of
+            // proven-unsent interactive work; restoring Run authorization and
+            // recovering Command Center Runs belongs to their lifecycle.
+            const reservation = yield* providerRestartRecoveryRepository.reserve({
+              threadId: thread.id,
+              messageId: pending.messageId,
+              originalRequestSequence: pending.requestSequence,
+              reservedAt: reconciledAt,
+            });
+            if (reservation._tag === "ineligible") {
+              yield* reportAndClearPendingOrphan(thread.id, pending);
+              return;
+            }
+
+            // The command identity and timestamp are persisted with the
+            // reservation. If the process dies before or after dispatch, the
+            // next runtime sends the exact command again and the durable command
+            // receipt returns the original result without appending a duplicate
+            // turn-start event or user message.
+            const dispatchResult = yield* orchestrationEngine.dispatch({
+              // A reconstructed engine intentionally hydrates a lightweight
+              // command model without message bodies, so thread.turn.resume
+              // cannot find this durable message after restart. Re-submit the
+              // validated message under its existing id instead. The message
+              // projection upserts that id (preserving its original createdAt),
+              // so the transcript still contains exactly one user message.
+              type: "thread.turn.start",
+              commandId: reservation.reservation.commandId,
+              threadId: thread.id,
+              message: {
+                messageId: pending.messageId,
+                role: "user",
+                text: originalMessage.text,
+                attachments: [...(originalMessage.attachments ?? [])],
+              },
+              ...(pending.modelSelection !== null
+                ? { modelSelection: pending.modelSelection }
+                : {}),
+              ...(pending.efficiencyDecision !== null && pending.efficiencyDecision !== undefined
+                ? { efficiencyDecision: pending.efficiencyDecision }
+                : {}),
+              routingMode: thread.routingMode,
+              ...(thread.efficiencyTier !== undefined
+                ? { efficiencyTier: thread.efficiencyTier }
+                : {}),
+              ...(pending.sourceProposedPlanThreadId !== null &&
+              pending.sourceProposedPlanId !== null
+                ? {
+                    sourceProposedPlan: {
+                      threadId: pending.sourceProposedPlanThreadId,
+                      planId: pending.sourceProposedPlanId,
+                    },
+                  }
+                : {}),
+              runtimeMode: thread.runtimeMode,
+              interactionMode: thread.interactionMode,
+              createdAt: reservation.reservation.reservedAt,
+            });
+
+            // Do not clear the original until both the replacement event and
+            // its recovery metadata are durable. Any error before this point
+            // leaves the original row and reservation for the next boot.
+            yield* providerRestartRecoveryRepository.complete({
+              threadId: thread.id,
+              messageId: pending.messageId,
+              originalRequestSequence: pending.requestSequence,
+              replacementRequestSequence: dispatchResult.sequence,
+              dispatchedAt: reconciledAt,
+            });
             yield* projectionTurnRepository.deletePendingTurnStart({
               threadId: thread.id,
               requestSequence: pending.requestSequence,
             });
+
+            yield* Effect.logInfo("provider-runtime.restart-recovery.reissued-pending-turn", {
+              threadId: thread.id,
+              messageId: pending.messageId,
+              originalRequestSequence: pending.requestSequence,
+              replacementRequestSequence: dispatchResult.sequence,
+              attempt: reservation.reservation.attempt,
+            });
           }).pipe(
             Effect.catchCause((cause) =>
-              Effect.logWarning("failed to report and clear orphaned pending turn start", {
+              Effect.logWarning("failed to reconcile orphaned pending turn start", {
                 threadId: thread.id,
+                messageId: pending.messageId,
                 requestSequence: pending.requestSequence,
                 cause: Cause.pretty(cause),
               }),
@@ -4005,7 +4129,7 @@ const make = Effect.gen(function* () {
               threadId: thread.id,
               session: {
                 threadId: thread.id,
-                status: "stopped",
+                status: "error",
                 providerName: thread.session?.providerName ?? null,
                 ...(thread.session?.providerInstanceId !== undefined
                   ? { providerInstanceId: thread.session.providerInstanceId }
@@ -4015,7 +4139,7 @@ const make = Effect.gen(function* () {
                   : {}),
                 runtimeMode: thread.session?.runtimeMode ?? thread.runtimeMode,
                 activeTurnId: null,
-                lastError: thread.session?.lastError ?? null,
+                lastError: ORPHANED_PROVIDER_SESSION_ERROR,
                 updatedAt: reconciledAt,
               },
               pendingTurnStartAdoption: "none",
@@ -4072,6 +4196,7 @@ export const ProviderRuntimeIngestionLive = Layer.effect(
     Layer.mergeAll(
       ProjectionTurnRepositoryLive,
       ProviderTurnSendClaimRepositoryLive,
+      ProviderRestartRecoveryRepositoryLive,
       ProjectionTurnUsageRepositoryLive,
     ),
   ),

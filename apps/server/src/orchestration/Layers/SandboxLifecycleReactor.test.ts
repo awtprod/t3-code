@@ -992,14 +992,15 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
         Layer.provide(NodeServices.layer),
         Layer.provide(
           Layer.mock(GitWorkflowService)({
-            localStatus: () => Effect.succeed({ isRepo: true, refName: "main" } as never),
-            resolveRemoteTrackingCommit: () =>
+            // A status read that fails is still fatal: a missing upstream is
+            // not, since the base then comes from the local checkout's HEAD.
+            localStatus: () =>
               Effect.fail(
                 new GitCommandError({
-                  operation: "resolveRemoteTrackingCommit",
+                  operation: "localStatus",
                   command: "git",
                   cwd: "/tmp/project",
-                  detail: "git rev-parse failed: no upstream for 'main'",
+                  detail: "git status failed: index is corrupt",
                 }),
               ),
           }),
@@ -1062,7 +1063,7 @@ it.layer(NodeServices.layer)("manual sandbox lifecycle provisioning", (it) => {
       const failure = dispatched.find((command) => command.type === "sandbox.operation.fail");
       if (failure?.type !== "sandbox.operation.fail") throw new Error("expected failure command");
       expect(failure.failure.message).toBe(
-        "Git command failed in resolveRemoteTrackingCommit (/tmp/project): git rev-parse failed: no upstream for 'main'",
+        "Git command failed in localStatus (/tmp/project): git status failed: index is corrupt",
       );
     }),
   );

@@ -1,13 +1,19 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
 import {
+  ChatAttachment,
+  ChatFileAttachment,
+  ChatImageAttachment,
+  ChatWindowsFileAttachment,
   ClientOrchestrationCommand,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   ModelSelection,
   OrchestrationCommand,
+  OrchestrationDispatchCommandError,
   OrchestrationEvent,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetTurnDiffInput,
@@ -19,12 +25,15 @@ import {
   OrchestrationThread,
   OrchestrationThreadShell,
   ProjectCreateCommand,
+  OrchestrationMessage,
+  ThreadMessageSentPayload,
   ThreadMetaUpdatedPayload,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
   isProviderSendTurnSupportedImageMimeType,
+  PROVIDER_SEND_TURN_MAX_FILE_BYTES,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -35,10 +44,12 @@ const decodeProjectCreateCommand = Schema.decodeUnknownEffect(ProjectCreateComma
 const decodeProjectCreatedPayload = Schema.decodeUnknownEffect(ProjectCreatedPayload);
 const decodeProjectMetaUpdatedPayload = Schema.decodeUnknownEffect(ProjectMetaUpdatedPayload);
 const decodeThreadTurnStartCommand = Schema.decodeUnknownEffect(ThreadTurnStartCommand);
+const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
+const decodeOrchestrationMessage = Schema.decodeUnknownEffect(OrchestrationMessage);
+const decodeThreadMessageSentPayload = Schema.decodeUnknownEffect(ThreadMessageSentPayload);
 const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
   ThreadTurnStartRequestedPayload,
 );
-const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeOrchestrationLatestTurn = Schema.decodeUnknownEffect(OrchestrationLatestTurn);
 const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(OrchestrationProposedPlan);
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
@@ -56,6 +67,19 @@ const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPaylo
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+const decodeDispatchCommandError = Schema.decodeUnknownEffect(OrchestrationDispatchCommandError);
+
+it.effect("decodes a dispatch error after its bootstrap thread was deleted", () =>
+  Effect.gen(function* () {
+    const error = yield* decodeDispatchCommandError({
+      _tag: "OrchestrationDispatchCommandError",
+      message: "Failed to create worktree.",
+      bootstrapThreadDisposition: "deleted",
+    });
+
+    assert.strictEqual(error.bootstrapThreadDisposition, "deleted");
+  }),
+);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {
@@ -226,6 +250,212 @@ it.effect("decodes thread.turn.start defaults for provider and runtime mode", ()
     assert.strictEqual(parsed.modelSelection, undefined);
     assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
     assert.strictEqual(parsed.interactionMode, DEFAULT_PROVIDER_INTERACTION_MODE);
+  }),
+);
+
+it.effect("accepts inline images, uploaded images, and uploaded files from clients", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeClientOrchestrationCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-attachments",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-attachments",
+        role: "user",
+        text: "hello",
+        attachments: [
+          {
+            type: "image",
+            name: "legacy.png",
+            mimeType: "image/png",
+            sizeBytes: 3,
+            dataUrl: "data:image/png;base64,YWJj",
+          },
+          {
+            type: "image",
+            id: "pending-00000000-0000-4000-8000-000000000001",
+            name: "uploaded.png",
+            mimeType: "image/png",
+            sizeBytes: 3,
+          },
+          {
+            type: "file",
+            id: "pending-00000000-0000-4000-8000-000000000002-pdf",
+            name: "report.pdf",
+            mimeType: "application/pdf",
+            sizeBytes: 3,
+          },
+        ],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    if (command.type !== "thread.turn.start") {
+      assert.fail(`Expected thread.turn.start, received ${command.type}.`);
+    }
+    assert.strictEqual(command.message.attachments.length, 3);
+    assert.strictEqual("dataUrl" in command.message.attachments[0]!, true);
+    assert.strictEqual("id" in command.message.attachments[1]!, true);
+    assert.strictEqual(command.message.attachments[2]!.type, "file");
+  }),
+);
+
+// Attachments ride on persisted events and thread streams with no client
+// version negotiation. A type this build does not know must decode instead of
+// failing the whole message.
+it.effect("tolerates attachment types from newer builds when decoding messages", () =>
+  Effect.gen(function* () {
+    const futureAttachment = {
+      type: "somethingnew",
+      id: "thread-1-00000000-0000-4000-8000-000000000003-glb",
+      name: "scene.glb",
+      mimeType: "model/gltf-binary",
+      sizeBytes: 12,
+    };
+
+    const message = yield* decodeOrchestrationMessage({
+      id: "message-1",
+      role: "user",
+      text: "look at this",
+      attachments: [futureAttachment],
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(message.attachments?.length, 1);
+    assert.strictEqual(message.attachments?.[0]!.type, "somethingnew");
+
+    const payload = yield* decodeThreadMessageSentPayload({
+      threadId: "thread-1",
+      messageId: "message-1",
+      role: "user",
+      text: "look at this",
+      attachments: [futureAttachment],
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(payload.attachments?.[0]!.type, "somethingnew");
+  }),
+);
+
+// The tolerant member must not catch malformed known attachments: a file over
+// the size cap or an image with a bad mime has to fail its own schema, not
+// slide through the open one with those constraints unchecked.
+it.effect("rejects malformed known attachment types instead of tolerating them", () =>
+  Effect.gen(function* () {
+    const base = {
+      id: "thread-1-00000000-0000-4000-8000-000000000003-pdf",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+    };
+    const decode = (attachment: unknown) =>
+      decodeOrchestrationMessage({
+        id: "message-1",
+        role: "user",
+        text: "look at this",
+        attachments: [attachment],
+        turnId: null,
+        streaming: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    const oversizedFile = yield* Effect.exit(
+      decode({ ...base, type: "file", sizeBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES + 1 }),
+    );
+    assert.strictEqual(Exit.isFailure(oversizedFile), true);
+
+    const badMimeImage = yield* Effect.exit(
+      decode({ ...base, type: "image", mimeType: "application/pdf", sizeBytes: 12 }),
+    );
+    assert.strictEqual(Exit.isFailure(badMimeImage), true);
+  }),
+);
+
+const windowsFileAttachment = {
+  type: "windows-file",
+  id: "wf-00000000-0000-4000-8000-000000000001",
+  name: "Take 3 (final).mov",
+  mimeType: "video/quicktime",
+  sizeBytes: 5_368_709_120,
+  host: "editing-pc",
+  path: "C:\\Media\\Clips ñ\\Take 3 (final).mov",
+};
+
+it.effect("round-trips a windows-file reference attachment", () =>
+  Effect.gen(function* () {
+    const decoded = yield* Schema.decodeUnknownEffect(ChatAttachment)(windowsFileAttachment);
+    assert.strictEqual(decoded.type, "windows-file");
+    assert.deepStrictEqual(decoded, windowsFileAttachment);
+    const encoded = yield* Schema.encodeEffect(ChatAttachment)(decoded);
+    assert.deepStrictEqual(encoded, windowsFileAttachment);
+    // No bytes and no upload id ride on the reference.
+    assert.strictEqual("dataUrl" in decoded, false);
+
+    const command = yield* decodeThreadTurnStartCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-windows-file",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-windows-file",
+        role: "user",
+        text: "open this in Resolve",
+        attachments: [windowsFileAttachment],
+      },
+      runtimeMode: DEFAULT_RUNTIME_MODE,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.deepStrictEqual(command.message.attachments[0], windowsFileAttachment);
+  }),
+);
+
+it.effect("rejects malformed windows-file references instead of tolerating them", () =>
+  Effect.gen(function* () {
+    const decode = (attachment: unknown) =>
+      Effect.exit(Schema.decodeUnknownEffect(ChatAttachment)(attachment));
+    for (const bad of [
+      { ...windowsFileAttachment, path: "relative\\clip.mov" },
+      { ...windowsFileAttachment, path: 'C:\\a"b.mov' },
+      { ...windowsFileAttachment, path: "C:\\a" + "\n" + "b.mov" },
+      { ...windowsFileAttachment, host: "editing-pc; rm -rf /" },
+    ]) {
+      assert.strictEqual(Exit.isFailure(yield* decode(bad)), true);
+    }
+  }),
+);
+
+// A client built before windows-file existed decodes it through its open
+// fallback member (which excluded only image/file) instead of failing the
+// whole message.
+it.effect("old clients decode a windows-file reference via the unknown fallback", () =>
+  Effect.gen(function* () {
+    const OldUnknown = Schema.Struct({
+      type: Schema.String.check(Schema.isPattern(/^(?!(?:image|file)$)/)),
+      id: Schema.String,
+      name: Schema.String,
+      mimeType: Schema.String,
+      sizeBytes: Schema.Number,
+    });
+    const OldChatAttachment = Schema.Union([ChatImageAttachment, ChatFileAttachment, OldUnknown]);
+    const OldMessage = Schema.Struct({
+      id: Schema.String,
+      attachments: Schema.Array(OldChatAttachment),
+    });
+    const decoded = yield* Schema.decodeUnknownEffect(OldMessage)({
+      id: "message-1",
+      attachments: [windowsFileAttachment],
+    });
+    assert.strictEqual(decoded.attachments.length, 1);
+    assert.strictEqual(decoded.attachments[0]!.type, "windows-file");
+    assert.strictEqual(decoded.attachments[0]!.name, windowsFileAttachment.name);
+    // And ChatWindowsFileAttachment is a distinct, strict member on new builds.
+    assert.strictEqual(Schema.is(ChatWindowsFileAttachment)(windowsFileAttachment), true);
   }),
 );
 
@@ -652,6 +882,28 @@ it.effect("accepts a title regeneration intent in thread.meta.update", () =>
     assert.strictEqual(parsed.type, "thread.meta.update");
     if (parsed.type === "thread.meta.update") {
       assert.strictEqual(parsed.regenerateTitle, true);
+    }
+  }),
+);
+
+it.effect("accepts a linked pull request in thread.meta.update", () =>
+  Effect.gen(function* () {
+    const linkedPullRequest = {
+      projectId: "project-1",
+      repository: "pingdotgg/t3code",
+      number: 42,
+      url: "https://github.com/pingdotgg/t3code/pull/42",
+    };
+    const parsed = yield* decodeOrchestrationCommand({
+      type: "thread.meta.update",
+      commandId: "cmd-link-pull-request",
+      threadId: "thread-1",
+      linkedPullRequest,
+    });
+
+    assert.strictEqual(parsed.type, "thread.meta.update");
+    if (parsed.type === "thread.meta.update") {
+      assert.deepStrictEqual(parsed.linkedPullRequest, linkedPullRequest);
     }
   }),
 );

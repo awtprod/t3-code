@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import {
   RelayAgentActivityAggregateState,
   RelayAgentAwarenessPhase,
+  RelayProspectNotification,
   type RelayDeliveryKind,
 } from "@t3tools/contracts/relay";
 import { stableStringify } from "@t3tools/shared/relaySigning";
@@ -37,7 +38,7 @@ const ApnsDeliveryJobContext = {
   deviceId: Schema.String,
 };
 
-export const ApnsNotificationPayload = Schema.Struct({
+export const ApnsThreadNotificationPayload = Schema.Struct({
   title: Schema.String,
   body: Schema.String,
   environmentId: Schema.String,
@@ -49,7 +50,19 @@ export const ApnsNotificationPayload = Schema.Struct({
   phase: Schema.optional(RelayAgentAwarenessPhase),
   updatedAt: Schema.optional(Schema.String),
 });
+export type ApnsThreadNotificationPayload = typeof ApnsThreadNotificationPayload.Type;
+
+export const ApnsNotificationPayload = Schema.Union([
+  ApnsThreadNotificationPayload,
+  RelayProspectNotification,
+]);
 export type ApnsNotificationPayload = typeof ApnsNotificationPayload.Type;
+
+export function isProspectNotificationPayload(
+  notification: ApnsNotificationPayload,
+): notification is typeof RelayProspectNotification.Type {
+  return "type" in notification && notification.type === "prospect";
+}
 
 // Alert copy attached to a Live Activity update/end push. Its presence makes
 // the update "alerting": iOS wakes the screen, plays the haptic, and briefly
@@ -338,6 +351,15 @@ function validatePayloadShape(payload: ApnsDeliveryJobPayload): ApnsDeliveryJobI
           jobId: payload.jobId,
           userId: payload.target.userId,
           deviceId: payload.target.deviceId,
+        });
+      }
+      if (
+        payload.kind === "push_notification" &&
+        isProspectNotificationPayload(payload.notification)
+      ) {
+        return new ApnsDeliveryJobQueuePayloadInvalid({
+          receivedType: "prospect push_notification",
+          cause: "Prospect notifications are browser-only.",
         });
       }
       return null;

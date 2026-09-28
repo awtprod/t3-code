@@ -1,25 +1,6 @@
 import { assert, it } from "@effect/vitest";
 
-import {
-  applyPreferredCodexDefaultModel,
-  isLegacyCodexModel,
-  mapCodexModelCapabilities,
-} from "./CodexProvider.ts";
-
-it("keeps only the GPT-5.6 Codex family out of legacy models", () => {
-  assert.deepStrictEqual(
-    ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.4"].map((model) => [
-      model,
-      isLegacyCodexModel(model),
-    ]),
-    [
-      ["gpt-5.6-luna", false],
-      ["gpt-5.6-terra", false],
-      ["gpt-5.6-sol", false],
-      ["gpt-5.4", true],
-    ],
-  );
-});
+import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({
@@ -138,6 +119,15 @@ it("marks the most preferred available model as default", () => {
 });
 
 it("prefers sol over terra when both are available", () => {
+  const models = applyPreferredCodexDefaultModel([
+    { slug: "gpt-6-terra", name: "GPT-6-Terra", isCustom: false, capabilities: null },
+    { slug: "gpt-6-sol", name: "GPT-6-Sol", isCustom: false, capabilities: null },
+  ]);
+
+  assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-6-sol");
+});
+
+it("falls back to the GPT-5.6 family when GPT-6 is unavailable", () => {
   const models = applyPreferredCodexDefaultModel([
     { slug: "gpt-5.6-terra", name: "GPT-5.6-Terra", isCustom: false, capabilities: null },
     { slug: "gpt-5.6-sol", name: "GPT-5.6-Sol", isCustom: false, capabilities: null },

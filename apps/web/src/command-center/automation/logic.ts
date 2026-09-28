@@ -154,6 +154,8 @@ const NODE_ID_STEMS: Record<AutomationEditorNodeKind, string> = {
   foreach: "foreach",
   "shell.scoped": "shell",
   transform: "transform",
+  "prospect.evaluate": "evaluate-prospects",
+  "prospect.notify": "notify-prospects",
 };
 
 const NODE_DEFAULT_CONFIG: Partial<
@@ -320,6 +322,9 @@ function guidedConfigProblem(
       return config.approvalKey === undefined || nonEmptyString(config.approvalKey)
         ? undefined
         : "Enter a decision key.";
+    case "prospect.evaluate":
+    case "prospect.notify":
+      return undefined;
   }
 }
 

@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 
 export const DatabaseToolErrorReason = Schema.Literals([
   "not-configured",
+  "ambiguous",
   "credential-missing",
   "read-only",
   "remote-unavailable",
@@ -18,6 +19,9 @@ export class DatabaseToolError extends Schema.TaggedErrorClass<DatabaseToolError
 ) {}
 
 export const SupabaseToolProxyResult = Schema.Struct({
+  connectionId: Schema.String,
+  /** Display name of the database the call ran against (label or project ref). */
+  database: Schema.String,
   projectRef: Schema.String,
   readOnly: Schema.Boolean,
   result: Schema.Unknown,

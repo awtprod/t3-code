@@ -202,6 +202,12 @@ function makeAgentActivityPublisher(
 ): AgentActivityPublisher.AgentActivityPublisher["Service"] {
   return {
     publish: () => Effect.succeed({ ok: true, deliveries: [] }),
+    publishProspectNotification: () =>
+      Effect.succeed({
+        status: "queued",
+        idempotencyKey: "prospect-notification-double",
+        deliveries: [],
+      }),
     replayForLiveActivityRegistration: () => Effect.succeed(null),
     ...overrides,
   };

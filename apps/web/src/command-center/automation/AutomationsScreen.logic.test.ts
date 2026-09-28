@@ -1,3 +1,4 @@
+import { AutomationNodeId } from "@command-center/core";
 import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -170,6 +171,25 @@ describe("automations route state", () => {
 });
 
 describe("committed automation projection", () => {
+  it("preserves server-managed prospect nodes without making them addable", () => {
+    const definition = projectAutomationForEditor({
+      ...SAMPLE_AUTOMATION,
+      nodes: [
+        ...SAMPLE_AUTOMATION.nodes,
+        {
+          id: AutomationNodeId.make("evaluate"),
+          kind: "prospect.evaluate",
+          config: { profile: "prospect", limit: 3 },
+          position: { x: 680, y: 120 },
+        },
+      ],
+    });
+
+    expect(definition.nodes.slice(-1)).toEqual([
+      { id: "evaluate", kind: "prospect.evaluate", config: { profile: "prospect", limit: 3 } },
+    ]);
+  });
+
   it("maps the entity API shape to the editor without inventing editable policy", () => {
     const definition = projectAutomationForEditor(SAMPLE_AUTOMATION);
 

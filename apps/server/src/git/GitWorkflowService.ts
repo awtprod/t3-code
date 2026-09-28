@@ -87,9 +87,16 @@ export class GitWorkflowService extends Context.Service<
       },
       GitCommandError
     >;
+    readonly resolveCommit: (input: {
+      readonly cwd: string;
+      readonly revision: string;
+    }) => Effect.Effect<{ readonly commitSha: string }, GitCommandError>;
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
     ) => Effect.Effect<void, GitCommandError>;
+    readonly pruneWorktrees: (input: {
+      readonly cwd: string;
+    }) => Effect.Effect<void, GitCommandError>;
     readonly createRef: (
       input: VcsCreateRefInput,
     ) => Effect.Effect<VcsCreateRefResult, GitCommandError>;
@@ -103,6 +110,48 @@ export class GitWorkflowService extends Context.Service<
     }) => Effect.Effect<{ readonly branch: string }, GitManagerServiceError>;
   }
 >()("@awtprod/command-center/git/GitWorkflowService") {}
+
+export const resolveWorktreeBaseRef = Effect.fn("GitWorkflowService.resolveWorktreeBaseRef")(
+  function* (
+    git: Pick<
+      GitWorkflowService["Service"],
+      "remoteExists" | "fetchRemote" | "resolveRemoteTrackingCommit"
+    >,
+    input: {
+      readonly projectCwd: string;
+      readonly baseBranch: string;
+      readonly startFromOrigin?: boolean | undefined;
+    },
+  ) {
+    if (!input.startFromOrigin) return input.baseBranch;
+
+    return yield* Effect.gen(function* () {
+      const hasOrigin = yield* git.remoteExists({
+        cwd: input.projectCwd,
+        remoteName: "origin",
+      });
+      if (!hasOrigin) return input.baseBranch;
+      yield* git.fetchRemote({ cwd: input.projectCwd, remoteName: "origin" });
+      const remoteBase = yield* git.resolveRemoteTrackingCommit({
+        cwd: input.projectCwd,
+        refName: input.baseBranch,
+        fallbackRemoteName: "origin",
+      });
+      return remoteBase.commitSha;
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning(
+          "failed to refresh origin while preparing worktree; using local base branch",
+          {
+            cwd: input.projectCwd,
+            baseBranch: input.baseBranch,
+            detail: error.message,
+          },
+        ).pipe(Effect.as(input.baseBranch)),
+      ),
+    );
+  },
+);
 
 function nonRepositoryLocalStatus(): VcsStatusLocalResult {
   return {
@@ -321,9 +370,17 @@ export const make = Effect.gen(function* () {
       ensureGitCommand("GitWorkflowService.resolveRemoteTrackingCommit", input.cwd).pipe(
         Effect.andThen(git.resolveRemoteTrackingCommit(input)),
       ),
+    resolveCommit: (input) =>
+      ensureGitCommand("GitWorkflowService.resolveCommit", input.cwd).pipe(
+        Effect.andThen(git.resolveCommit(input)),
+      ),
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
         Effect.andThen(git.removeWorktree(input)),
+      ),
+    pruneWorktrees: (input) =>
+      ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(
+        Effect.andThen(git.pruneWorktrees(input)),
       ),
     createRef: (input) =>
       ensureGitCommand("GitWorkflowService.createRef", input.cwd).pipe(

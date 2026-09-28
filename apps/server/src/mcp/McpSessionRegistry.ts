@@ -149,7 +149,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const spaceId = request.spaceId ?? registeredScope?.spaceId;
       const repositoryId = request.repositoryId ?? registeredScope?.repositoryId;
       const capabilities = new Set<McpInvocationContext.McpCapability>(
-        request.capabilities ?? registeredScope?.capabilities ?? ["preview"],
+        registeredScope?.capabilities ?? request.capabilities ?? ["preview"],
       );
       if (request.databaseAccess !== undefined) capabilities.add("database.read");
       if (request.databaseAccess === "write") capabilities.add("database.write");
@@ -179,6 +179,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerInstanceId: scope.providerInstanceId,
           endpoint,
           authorizationHeader: `Bearer ${rawToken}`,
+          capabilities: new Set(capabilities),
         },
       };
     },

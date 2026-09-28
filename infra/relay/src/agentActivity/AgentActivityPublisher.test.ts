@@ -1,4 +1,8 @@
-import type { RelayAgentActivityState, RelayDeliveryResult } from "@t3tools/contracts/relay";
+import type {
+  RelayAgentActivityState,
+  RelayDeliveryResult,
+  RelayProspectNotification,
+} from "@t3tools/contracts/relay";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -98,6 +102,7 @@ function makeApnsDeliveries(
     sendForTarget: () => Effect.succeed(null),
     sendPushNotificationForTarget: () => Effect.succeed(null),
     sendWebPushForUser: () => Effect.succeed([]),
+    sendProspectWebPushForUser: () => Effect.succeed([]),
     sendLiveActivity: () =>
       Effect.succeed({
         deviceId: "device",
@@ -130,6 +135,148 @@ function makeApnsDeliveries(
 }
 
 describe("AgentActivityPublisher", () => {
+  const prospectNotification = {
+    type: "prospect",
+    itemId: "prospect-review:lead-1",
+    spaceId: "space-1",
+    evaluationId: "evaluation-1",
+    environmentId: "env" as RelayProspectNotification["environmentId"],
+    title: "New prospect",
+    body: "Review it.",
+    deepLink: "/prospects/prospect-review%3Alead-1",
+  } satisfies RelayProspectNotification;
+
+  it.effect(
+    "queues prospect web push only for opted-in delivery users without activity writes",
+    () => {
+      let activityWrites = 0;
+      let liveActivityReads = 0;
+      const deliveredUsers: string[] = [];
+      return Effect.gen(function* () {
+        const publisher = yield* AgentActivityPublisher.AgentActivityPublisher;
+        const result = yield* publisher.publishProspectNotification({
+          environmentId: "env",
+          environmentPublicKey: "environment-public-key",
+          notification: prospectNotification,
+        });
+        expect(deliveredUsers).toEqual(["enabled-user"]);
+        expect(activityWrites).toBe(0);
+        expect(liveActivityReads).toBe(0);
+        expect(result).toMatchObject({
+          status: "queued",
+          idempotencyKey: "prospect:prospect-review%3Alead-1:evaluation-1",
+          deliveries: [{ deviceId: "browser-1", kind: "web_push", queued: true }],
+        });
+      }).pipe(
+        Effect.provide(
+          AgentActivityPublisher.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.succeed(
+                  AgentActivityRows.AgentActivityRows,
+                  makeAgentActivityRows({
+                    upsert: () => Effect.sync(() => void (activityWrites += 1)),
+                    remove: () => Effect.sync(() => void (activityWrites += 1)),
+                    listForUser: () => Effect.sync(() => ((activityWrites += 1), [])),
+                  }),
+                ),
+                Layer.succeed(
+                  EnvironmentLinks.EnvironmentLinks,
+                  makeEnvironmentLinks({
+                    listDeliveryUsersForEnvironment: () =>
+                      Effect.succeed([
+                        {
+                          userId: "enabled-user",
+                          notificationsEnabled: true,
+                          liveActivitiesEnabled: true,
+                        },
+                        {
+                          userId: "disabled-user",
+                          notificationsEnabled: false,
+                          liveActivitiesEnabled: true,
+                        },
+                      ]),
+                  }),
+                ),
+                Layer.succeed(
+                  LiveActivities.LiveActivities,
+                  makeLiveActivities({
+                    listTargets: () => Effect.sync(() => ((liveActivityReads += 1), [])),
+                  }),
+                ),
+                Layer.succeed(
+                  ApnsDeliveries.ApnsDeliveries,
+                  makeApnsDeliveries({
+                    sendProspectWebPushForUser: ({ userId }) =>
+                      Effect.sync(() => {
+                        deliveredUsers.push(userId);
+                        return [
+                          {
+                            deviceId: "browser-1",
+                            kind: "web_push" as const,
+                            ok: true,
+                            queued: true,
+                            apnsStatus: null,
+                            apnsReason: null,
+                            apnsId: null,
+                          },
+                        ];
+                      }),
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+  );
+
+  it.effect("reports a failed logical prospect job when browser queueing fails", () =>
+    Effect.gen(function* () {
+      const publisher = yield* AgentActivityPublisher.AgentActivityPublisher;
+      expect(
+        yield* publisher.publishProspectNotification({
+          environmentId: "env",
+          environmentPublicKey: "environment-public-key",
+          notification: prospectNotification,
+        }),
+      ).toMatchObject({
+        status: "failed",
+        deliveries: [{ ok: false, queued: false, apnsReason: "queue_failed:send" }],
+      });
+    }).pipe(
+      Effect.provide(
+        AgentActivityPublisher.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(AgentActivityRows.AgentActivityRows, makeAgentActivityRows()),
+              Layer.succeed(EnvironmentLinks.EnvironmentLinks, makeEnvironmentLinks()),
+              Layer.succeed(LiveActivities.LiveActivities, makeLiveActivities()),
+              Layer.succeed(
+                ApnsDeliveries.ApnsDeliveries,
+                makeApnsDeliveries({
+                  sendProspectWebPushForUser: () =>
+                    Effect.succeed([
+                      {
+                        deviceId: "browser-1",
+                        kind: "web_push",
+                        ok: false,
+                        queued: false,
+                        apnsStatus: null,
+                        apnsReason: "queue_failed:send",
+                        apnsId: null,
+                      },
+                    ]),
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
   it.effect("replays the latest aggregate when a Live Activity token registers", () => {
     const registeredTarget: LiveActivities.TargetRow = {
       ...target("device-1"),

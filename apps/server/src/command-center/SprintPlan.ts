@@ -254,7 +254,7 @@ export interface SprintPlanServiceShape {
 }
 
 export class SprintPlanService extends Context.Service<SprintPlanService, SprintPlanServiceShape>()(
-  "@awtprod/command-center/command-center/SprintPlan",
+  "@awtprod/command-center/command-center/SprintPlan/SprintPlanService",
 ) {}
 
 interface PlanRow {
@@ -475,7 +475,9 @@ const mergeImport = (
 
 const validateCalendarDate = (value: string): boolean => {
   const time = Date.parse(`${value}T00:00:00.000Z`);
-  return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value;
+  return (
+    Number.isFinite(time) && DateTime.formatIso(DateTime.makeUnsafe(time)).slice(0, 10) === value
+  );
 };
 
 const validateFieldPatch = Effect.fn("SprintPlan.validateFieldPatch")(
@@ -909,15 +911,15 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
     );
     const decisionKeys = new Set<string>();
     for (const choice of conflictDecisions) {
-      const key = JSON.stringify([choice.taskId, choice.field]);
+      const key = stringify([choice.taskId, choice.field]);
       if (decisionKeys.has(key)) {
         return yield* validationError(`Duplicate decision for ${choice.taskId}.${choice.field}.`);
       }
       decisionKeys.add(key);
     }
     const canonicalDecisions = [...conflictDecisions].sort((left, right) => {
-      const leftKey = JSON.stringify([left.taskId, left.field]);
-      const rightKey = JSON.stringify([right.taskId, right.field]);
+      const leftKey = stringify([left.taskId, left.field]);
+      const rightKey = stringify([right.taskId, right.field]);
       return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
     });
     const incoming = yield* parseSource(input.sourceJson);
@@ -1052,15 +1054,12 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
     ]);
     const merged = mergeImport(baseline.source, current.source, incoming.source);
     const conflictsByKey = new Map(
-      merged.conflicts.map((conflict) => [
-        JSON.stringify([conflict.taskId, conflict.field]),
-        conflict,
-      ]),
+      merged.conflicts.map((conflict) => [stringify([conflict.taskId, conflict.field]), conflict]),
     );
     if (
       canonicalDecisions.length !== merged.conflicts.length ||
       canonicalDecisions.some(
-        (choice) => !conflictsByKey.has(JSON.stringify([choice.taskId, choice.field])),
+        (choice) => !conflictsByKey.has(stringify([choice.taskId, choice.field])),
       )
     ) {
       return yield* conflictError(
@@ -1069,7 +1068,7 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
     }
     const mergedTasks = taskIndex(merged.current);
     for (const choice of canonicalDecisions) {
-      const conflict = conflictsByKey.get(JSON.stringify([choice.taskId, choice.field]))!;
+      const conflict = conflictsByKey.get(stringify([choice.taskId, choice.field]))!;
       if (choice.decision === "keep-current") {
         const task = mergedTasks.get(choice.taskId);
         if (task === undefined) {

@@ -1,0 +1,156 @@
+name: Desktop Windows Build
+
+# On-demand full desktop build for Windows. Produces the standard (non-remote-only)
+# Command Center NSIS installer: a bundled local backend plus the "Desktop
+# execution" / primary-backend controls. Unsigned; intended for installing on
+# your own PCs. Installs per-user over an existing Command Center install.
+#
+# Runs on GitHub-hosted Windows runners so it does not depend on the Blacksmith
+# pool that release.yml uses. Artifacts stay attached to the workflow run; no
+# release or tag is created.
+#
+# Unlike release.yml this does not bundle the Linux node-pty prebuild, so the
+# packaged WSL backend is not usable; the native Windows backend is unaffected.
+#
+# Also runs on pull requests that change this file, which both self-tests the
+# workflow and registers it with GitHub so it can be dispatched before merge.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/desktop-windows-build.yml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp into the app (defaults to apps/server/package.json)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # node-pty's Windows build requests Spectre-mitigated MSVC libraries, which
+      # the hosted Visual Studio image does not install by default.
+      - name: Install Spectre-mitigated MSVC libs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+
+      - id: version
+        name: Align package versions
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${VERSION_INPUT#v}"
+          if [[ -z "$version" ]]; then
+            version="$(node -p "require('./apps/server/package.json').version")"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version: $version" >&2
+            exit 1
+          fi
+          node scripts/update-release-package-versions.ts "$version"
+          # Public T3 Connect identifiers, same as official builds. Not secrets.
+          cp .env.example .env
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - id: build
+        name: Build unsigned Windows installer
+        shell: bash
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          vp run dist:desktop:artifact \
+            --platform win \
+            --target nsis \
+            --arch x64 \
+            --build-version "$BUILD_VERSION" \
+            --verbose
+
+          shopt -s nullglob
+          exe_files=(release/*.exe)
+          if (( ${#exe_files[@]} != 1 )); then
+            printf 'Expected one installer, found %s.\n' "${#exe_files[@]}" >&2
+            exit 1
+          fi
+          exe_name="$(basename "${exe_files[0]}")"
+          if [[ "$exe_name" == Command-Center-Remote-* ]]; then
+            echo "Built the remote-only variant by mistake: $exe_name" >&2
+            exit 1
+          fi
+          echo "exe_name=$exe_name" >> "$GITHUB_OUTPUT"
+          sha256sum release/*.exe | tee release/SHA256SUMS.txt
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: command-center-windows-x64
+          path: |
+            release/*.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summary
+        shell: bash
+        env:
+          EXE_NAME: ${{ steps.build.outputs.exe_name }}
+          BUILD_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            echo "### Windows x64 build"
+            echo
+            echo "- Artifact: \`command-center-windows-x64\`"
+            echo "- File: \`$EXE_NAME\`"
+            echo "- Version: \`$BUILD_VERSION\`"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo
+            echo "Unsigned build: SmartScreen will warn on first run (More info → Run anyway)."
+          } >> "$GITHUB_STEP_SUMMARY"
