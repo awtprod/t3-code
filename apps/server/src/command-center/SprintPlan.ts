@@ -122,6 +122,25 @@ export interface SprintPlanHistoryPage {
   readonly nextBeforeSequence?: number;
 }
 
+export interface SprintPlanSummary {
+  readonly id: string;
+  readonly spaceId: string;
+  readonly version: number;
+  readonly sourceVersion: number;
+  readonly sourceUpdatedAt: string;
+  readonly sourceSha256: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface SprintPlanListPage {
+  readonly plans: ReadonlyArray<SprintPlanSummary>;
+  readonly nextCursor?: {
+    readonly updatedAt: string;
+    readonly planId: string;
+  };
+}
+
 export interface SprintPlanApplyImportInput {
   readonly planId: string;
   readonly spaceId: string;
@@ -165,6 +184,14 @@ export class SprintPlanServiceError extends Schema.TaggedErrorClass<SprintPlanSe
 ) {}
 
 export interface SprintPlanServiceShape {
+  readonly list: (input: {
+    readonly spaceId: string;
+    readonly cursor?: {
+      readonly updatedAt: string;
+      readonly planId: string;
+    };
+    readonly limit?: number;
+  }) => Effect.Effect<SprintPlanListPage, SprintPlanServiceError>;
   readonly previewImport: (input: {
     readonly planId: string;
     readonly spaceId: string;
@@ -209,6 +236,17 @@ interface PlanRow {
   readonly sourceVersion: number;
   readonly currentImportId: string;
   readonly currentJson: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+interface PlanSummaryRow {
+  readonly id: string;
+  readonly spaceId: string;
+  readonly version: number;
+  readonly sourceVersion: number;
+  readonly sourceUpdatedAt: string;
+  readonly sourceSha256: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -265,6 +303,13 @@ interface MutationReceiptRow {
 const Identifier = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(256));
 const Reason = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(4_096));
 const IsoDate = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/u));
+const IsoTimestamp = Schema.String.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u),
+  Schema.makeFilter(
+    (value) => Number.isFinite(Date.parse(value)) || "Expected a valid UTC timestamp.",
+  ),
+);
 const Actor = Schema.Struct({ id: Identifier, kind: Schema.Literals(["user", "agent", "system"]) });
 const MutationProvenance = Schema.Struct({
   kind: Schema.Literals(["manual", "import", "approved-adjustment", "inbox-adjustment"]),
@@ -294,6 +339,7 @@ const decodeDateConflict = Schema.decodeUnknownEffect(DateConflict);
 const decodeIdentifier = Schema.decodeUnknownEffect(Identifier);
 const decodeReason = Schema.decodeUnknownEffect(Reason);
 const decodeIsoDate = Schema.decodeUnknownEffect(IsoDate);
+const decodeIsoTimestamp = Schema.decodeUnknownEffect(IsoTimestamp);
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Json));
 const isServiceError = Schema.is(SprintPlanServiceError);
 const textEncoder = new TextEncoder();
@@ -590,6 +636,72 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
       updatedAt: row.updatedAt,
     } satisfies SprintPlanSnapshot;
   });
+
+  const list = Effect.fn("SprintPlan.list")(function* (input: {
+    readonly spaceId: string;
+    readonly cursor?: {
+      readonly updatedAt: string;
+      readonly planId: string;
+    };
+    readonly limit?: number;
+  }) {
+    yield* decodeIdentifier(input.spaceId).pipe(
+      Effect.mapError((cause) => validationError("Invalid sprint plan Space identifier.", cause)),
+    );
+    if (
+      input.limit !== undefined &&
+      (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100)
+    ) {
+      return yield* validationError("List limit must be an integer between 1 and 100.");
+    }
+    if (input.cursor !== undefined) {
+      yield* Effect.all([
+        decodeIsoTimestamp(input.cursor.updatedAt),
+        decodeIdentifier(input.cursor.planId),
+      ]).pipe(
+        Effect.mapError((cause) => validationError("Invalid sprint plan list cursor.", cause)),
+      );
+    }
+    const limit = input.limit ?? 25;
+    const rows =
+      input.cursor === undefined
+        ? yield* sql<PlanSummaryRow>`
+            SELECT p.id, p.space_id AS "spaceId", p.version,
+              p.source_version AS "sourceVersion", i.source_updated_at AS "sourceUpdatedAt",
+              i.source_sha256 AS "sourceSha256", p.created_at AS "createdAt",
+              p.updated_at AS "updatedAt"
+            FROM command_center_sprint_plans p
+            JOIN command_center_sprint_plan_imports i
+              ON i.id = p.current_import_id AND i.plan_id = p.id
+            WHERE p.space_id = ${input.spaceId}
+            ORDER BY p.updated_at DESC, p.id DESC
+            LIMIT ${limit + 1}
+          `
+        : yield* sql<PlanSummaryRow>`
+            SELECT p.id, p.space_id AS "spaceId", p.version,
+              p.source_version AS "sourceVersion", i.source_updated_at AS "sourceUpdatedAt",
+              i.source_sha256 AS "sourceSha256", p.created_at AS "createdAt",
+              p.updated_at AS "updatedAt"
+            FROM command_center_sprint_plans p
+            JOIN command_center_sprint_plan_imports i
+              ON i.id = p.current_import_id AND i.plan_id = p.id
+            WHERE p.space_id = ${input.spaceId}
+              AND (
+                p.updated_at < ${input.cursor.updatedAt}
+                OR (p.updated_at = ${input.cursor.updatedAt} AND p.id < ${input.cursor.planId})
+              )
+            ORDER BY p.updated_at DESC, p.id DESC
+            LIMIT ${limit + 1}
+          `;
+    const plans = rows.slice(0, limit);
+    const last = plans[plans.length - 1];
+    return {
+      plans,
+      ...(rows.length > limit && last !== undefined
+        ? { nextCursor: { updatedAt: last.updatedAt, planId: last.id } }
+        : {}),
+    } satisfies SprintPlanListPage;
+  }, Effect.mapError(persistenceError));
 
   const get = Effect.fn("SprintPlan.get")(function* (input: {
     readonly planId: string;
@@ -1252,6 +1364,7 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
   }, Effect.mapError(persistenceError));
 
   return SprintPlanService.of({
+    list,
     previewImport,
     applyImport,
     get,
