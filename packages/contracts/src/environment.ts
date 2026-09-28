@@ -82,6 +82,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands regenerateTitle on thread.meta.update. Absent on
       older servers, so clients hide the action instead of sending it. */
   threadTitleRegeneration: Schema.optionalKey(Schema.Boolean),
+  /** Server can browse a configured remote Windows host over SSH
+      (cc.windowsMedia.roots / cc.windowsMedia.list) and accepts windows-file
+      reference attachments. Absent on servers without the picker backend. */
+  windowsMedia: Schema.optionalKey(Schema.Boolean),
   /** Server persists a pull request reference on thread.meta.update. */
   threadPullRequestLinking: Schema.optionalKey(Schema.Boolean),
   /** The update path clients should offer for this server. Absent on

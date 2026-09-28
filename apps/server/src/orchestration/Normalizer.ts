@@ -142,6 +142,11 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       canonicalCommand.message.attachments,
       (attachment) =>
         Effect.gen(function* () {
+          // A windows-file reference carries no bytes and no upload to claim;
+          // its schema already validated the host and path.
+          if (attachment.type === "windows-file") {
+            return attachment;
+          }
           if (!("dataUrl" in attachment)) {
             const claim = planAttachmentClaim({
               attachmentsDir: serverConfig.attachmentsDir,

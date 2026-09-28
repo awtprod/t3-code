@@ -2,7 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { ThreadId } from "@t3tools/contracts";
 
-import { resolveViewedImageAsset, workEntryViewedImagePath } from "./presentation.js";
+import {
+  resolveVideoClipAsset,
+  resolveViewedImageAsset,
+  workEntryVideoPath,
+  workEntryViewedImagePath,
+} from "./presentation.js";
 
 describe("workEntryViewedImagePath", () => {
   const entry = { label: "Read", tone: "tool" } as const;
@@ -83,5 +88,163 @@ describe("resolveViewedImageAsset", () => {
       srcFragment: "#mark",
     });
     expect(resolveViewedImageAsset("https://example.com/logo.png", { threadId })).toBeNull();
+  });
+});
+
+describe("workEntryVideoPath", () => {
+  const tool = { label: "Tool", tone: "tool" } as const;
+
+  it("surfaces videos the agent read or changed", () => {
+    expect(
+      workEntryVideoPath({ ...tool, requestKind: "file-read", detail: " out/clip.mp4 " }),
+    ).toBe("out/clip.mp4");
+    expect(
+      workEntryVideoPath({
+        ...tool,
+        itemType: "file_change",
+        changedFiles: ["notes.md", "renders/a.webm", "renders/b.mov"],
+      }),
+    ).toBe("renders/b.mov");
+  });
+
+  it("surfaces the output of a completed ffmpeg render", () => {
+    const render = {
+      ...tool,
+      itemType: "command_execution",
+      toolLifecycleStatus: "completed",
+      command: `ffmpeg -y -i "raw/take 1.mov" -vf scale=1080:-2 'out/final clip.mp4' 2>&1 | tail -5`,
+    } as const;
+    expect(workEntryVideoPath(render)).toBe("out/final clip.mp4");
+    expect(workEntryVideoPath({ ...render, toolLifecycleStatus: "inProgress" })).toBeNull();
+    expect(workEntryVideoPath({ ...render, toolLifecycleStatus: "failed" })).toBeNull();
+    expect(workEntryVideoPath({ ...render, toolLifecycleStatus: "declined" })).toBeNull();
+    expect(workEntryVideoPath({ ...render, command: "ls out/final.mp4 raw/take.mov" })).toBeNull();
+    expect(
+      workEntryVideoPath({
+        ...render,
+        command: "HandBrakeCLI -i in.mov -o out/hb.mp4 --preset Fast",
+      }),
+    ).toBe("out/hb.mp4");
+    expect(
+      workEntryVideoPath({ ...render, command: "ffmpeg -i a.mov out.mp4 > /tmp/log.mp4" }),
+    ).toBe("out.mp4");
+  });
+
+  it("never mistakes an ffmpeg input for the rendered output", () => {
+    const render = {
+      ...tool,
+      itemType: "command_execution",
+      toolLifecycleStatus: "completed",
+    } as const;
+    for (const command of [
+      "ffmpeg -i in.mp4 -f null -",
+      "ffmpeg -i in.mp4 frames/%04d.png",
+      "ffmpeg -i a.mp4 -i b.mov out.mkv",
+      "ffmpeg -i a.mp4 -i b.mov -filter_complex hstack -y out.mkv 2>&1",
+      "ffprobe -i clip.mp4 && ffmpeg -hide_banner -i clip.mp4",
+      "ffmpeg -i clip.mp4 clip.mp4",
+      "melt a.mp4 b.mp4 -consumer avformat:out.mp4",
+      "ffmpeg -i in.mov rtmp://live.example/app/stream.mp4",
+    ]) {
+      expect(workEntryVideoPath({ ...render, command }), command).toBeNull();
+    }
+  });
+
+  it("ignores unexpanded shell words and ambiguous relative outputs", () => {
+    const render = {
+      ...tool,
+      itemType: "command_execution",
+      toolLifecycleStatus: "completed",
+    } as const;
+    for (const command of [
+      `for f in *.mp4; do ffmpeg -i "$f" "\${f%.mp4}.webm"; done`,
+      "ffmpeg -i in.mov out/$NAME.mp4",
+      "ffmpeg -i in.mov `date +%s`.mp4",
+      "ffmpeg -i in.mov out/*.mp4",
+      "ffmpeg -i in.mov out/clip-{a,b}.mp4",
+      "ffmpeg -i in.mov 'out/clip?.mp4'",
+      "cd renders && ffmpeg -i in.mov out.mp4",
+    ]) {
+      expect(workEntryVideoPath({ ...render, command }), command).toBeNull();
+    }
+    expect(
+      workEntryVideoPath({ ...render, command: "cd renders && ffmpeg -i in.mov /work/out.mp4" }),
+    ).toBe("/work/out.mp4");
+  });
+
+  it("prefers a changed video file over the command line", () => {
+    expect(
+      workEntryVideoPath({
+        ...tool,
+        itemType: "command_execution",
+        toolLifecycleStatus: "completed",
+        command: "ffmpeg -i a.mp4 -i b.mov renders/guess.mp4",
+        changedFiles: ["renders/real.webm"],
+      }),
+    ).toBe("renders/real.webm");
+    expect(
+      workEntryVideoPath({
+        ...tool,
+        itemType: "file_change",
+        changedFiles: ["renders/final.mp4", "renders/odd.mp4#x"],
+      }),
+    ).toBe("renders/final.mp4");
+  });
+
+  it("ignores non-video and multi-line entries", () => {
+    expect(workEntryVideoPath({ ...tool, requestKind: "file-read", detail: "a.png" })).toBeNull();
+    expect(
+      workEntryVideoPath({ ...tool, requestKind: "file-read", detail: "a.mp4\nb.mp4" }),
+    ).toBeNull();
+    expect(workEntryVideoPath({ ...tool, detail: "a.mp4" })).toBeNull();
+  });
+});
+
+describe("resolveVideoClipAsset", () => {
+  const threadId = ThreadId.make("thread-1");
+
+  it("resolves workspace clips to workspace-file resources", () => {
+    expect(
+      resolveVideoClipAsset("out/clip.mp4", { threadId, workspaceRoot: "/workspace" }),
+    ).toEqual({
+      resource: { _tag: "workspace-file", threadId, path: "/workspace/out/clip.mp4" },
+      name: "clip.mp4",
+    });
+  });
+
+  it("gives attachment clips an inline video mime", () => {
+    const attachmentId =
+      "11111111-1111-4111-8111-111111111111-22222222-2222-4222-8222-222222222222";
+    expect(
+      resolveVideoClipAsset(`/var/lib/t3/userdata/attachments/${attachmentId}.webm`, {
+        threadId,
+      }),
+    ).toEqual({
+      resource: {
+        _tag: "attachment",
+        attachmentId,
+        fileName: `${attachmentId}.webm`,
+        mimeType: "video/webm",
+      },
+      name: `${attachmentId}.webm`,
+    });
+  });
+
+  it("rejects non-video and remote sources", () => {
+    expect(resolveVideoClipAsset("out/a.png", { threadId, workspaceRoot: "/w" })).toBeNull();
+    expect(resolveVideoClipAsset("https://example.com/a.mp4", { threadId })).toBeNull();
+  });
+
+  it("classifies the exact path the server will resolve", () => {
+    // Markdown URLs drop `?query`/`#fragment` before signing, so the video
+    // mime is judged on the stripped path the server receives.
+    expect(
+      resolveVideoClipAsset("out/clip.mp4?v=2#t=5", { threadId, workspaceRoot: "/w" }),
+    ).toEqual({
+      resource: { _tag: "workspace-file", threadId, path: "/w/out/clip.mp4" },
+      name: "clip.mp4",
+    });
+    // A `#` that would cut the name to a non-video is never tiled.
+    expect(resolveVideoClipAsset("out/a#b.mp4", { threadId, workspaceRoot: "/w" })).toBeNull();
   });
 });

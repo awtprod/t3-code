@@ -238,6 +238,14 @@ import {
   CommandCenterGoogleConnectionSetupCompleteResult,
   CommandCenterGoogleConnectionRemoveInput,
   CommandCenterGoogleConnectionRemoveResult,
+  CommandCenterPublishConnectionRemoveInput,
+  CommandCenterPublishConnectionRemoveResult,
+  CommandCenterPublishConnectionSetupBeginInput,
+  CommandCenterPublishConnectionSetupBeginResult,
+  CommandCenterPublishConnectionSetupCompleteInput,
+  CommandCenterPublishConnectionSetupCompleteResult,
+  CommandCenterPublishConnectionsQueryInput,
+  CommandCenterPublishConnectionsQueryResult,
   CommandCenterConnectionsQueryInput,
   CommandCenterConnectionsQueryResult,
   CommandCenterError,
@@ -262,6 +270,10 @@ import {
   CommandCenterSpacesSyncInput,
   CommandCenterSpacesSyncResult,
   GoogleReadRequest,
+  CommandCenterWindowsMediaListInput,
+  CommandCenterWindowsMediaListResult,
+  CommandCenterWindowsMediaRootsInput,
+  CommandCenterWindowsMediaRootsResult,
   GoogleReadResult,
 } from "./commandCenter.ts";
 import {
@@ -569,6 +581,42 @@ export const WsCommandCenterGoogleConnectionRemoveRpc = Rpc.make(
   },
 );
 
+export const WsCommandCenterPublishConnectionsQueryRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.publishConnectionsQuery,
+  {
+    payload: CommandCenterPublishConnectionsQueryInput,
+    success: CommandCenterPublishConnectionsQueryResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterPublishConnectionSetupBeginRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin,
+  {
+    payload: CommandCenterPublishConnectionSetupBeginInput,
+    success: CommandCenterPublishConnectionSetupBeginResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterPublishConnectionSetupCompleteRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete,
+  {
+    payload: CommandCenterPublishConnectionSetupCompleteInput,
+    success: CommandCenterPublishConnectionSetupCompleteResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterPublishConnectionRemoveRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.publishConnectionRemove,
+  {
+    payload: CommandCenterPublishConnectionRemoveInput,
+    success: CommandCenterPublishConnectionRemoveResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsCommandCenterMemoryQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.memoryQuery, {
   payload: CommandCenterMemoryQueryInput,
   success: CommandCenterMemoryQueryResult,
@@ -649,6 +697,24 @@ export const WsCommandCenterGoogleReadRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.g
   success: GoogleReadResult,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
+
+export const WsCommandCenterWindowsMediaListRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.windowsMediaList,
+  {
+    payload: CommandCenterWindowsMediaListInput,
+    success: CommandCenterWindowsMediaListResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterWindowsMediaRootsRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.windowsMediaRoots,
+  {
+    payload: CommandCenterWindowsMediaRootsInput,
+    success: CommandCenterWindowsMediaRootsResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
@@ -1378,6 +1444,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterGoogleConnectionSetupBeginRpc,
   WsCommandCenterGoogleConnectionSetupCompleteRpc,
   WsCommandCenterGoogleConnectionRemoveRpc,
+  WsCommandCenterPublishConnectionsQueryRpc,
+  WsCommandCenterPublishConnectionSetupBeginRpc,
+  WsCommandCenterPublishConnectionSetupCompleteRpc,
+  WsCommandCenterPublishConnectionRemoveRpc,
   WsCommandCenterMemoryQueryRpc,
   WsCommandCenterMemorySearchRpc,
   WsCommandCenterItemCreateRpc,
@@ -1390,6 +1460,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterAutomationRunGetRpc,
   WsCommandCenterAutomationWebhookAdmitRpc,
   WsCommandCenterGoogleReadRpc,
+  WsCommandCenterWindowsMediaListRpc,
+  WsCommandCenterWindowsMediaRootsRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

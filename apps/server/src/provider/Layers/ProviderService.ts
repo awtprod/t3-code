@@ -10,6 +10,7 @@
  * @module ProviderServiceLive
  */
 import {
+  ChatWindowsFileAttachment,
   ModelSelection,
   NonNegativeInt,
   ThreadId,
@@ -42,6 +43,10 @@ import * as SchemaIssue from "effect/SchemaIssue";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  readWindowsMediaSettings,
+  windowsFileAttachmentPathLine,
+} from "../../command-center/WindowsMediaConfig.ts";
 import * as ServerConfig from "../../config.ts";
 import {
   increment,
@@ -77,6 +82,7 @@ import {
 } from "../../sandbox/SandboxCredentialProxy.ts";
 import { commandCenterProviderIsolationIssue } from "../security/CommandCenterProviderIsolation.ts";
 const isModelSelection = Schema.is(ModelSelection);
+const isWindowsFileAttachment = Schema.is(ChatWindowsFileAttachment);
 
 export { resolveProviderInstanceGitHubIdentity };
 
@@ -262,6 +268,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const sandboxBindingOwner = makeSandboxProviderBindingOwner();
   const analytics = yield* Effect.service(AnalyticsService.AnalyticsService);
   const serverConfig = yield* ServerConfig.ServerConfig;
+  const windowsMediaSettings = yield* readWindowsMediaSettings;
   const eventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
   // Options-provided logger wins (test overrides); otherwise we take whatever
   // the `ProviderEventLoggers` tag exposes — `undefined` means "no canonical
@@ -938,7 +945,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     // sends generic files as file parts, the others send images only and rely
     // on the path line for everything else. Unresolvable ids are skipped here
     // and surface as adapter errors when the file is read.
+    // A windows-file reference has no local bytes: it gets a line naming the
+    // Windows path, its host, and the exact scp pull command instead.
     const attachmentPathLines = attachments.flatMap((attachment) => {
+      if (isWindowsFileAttachment(attachment)) {
+        return [
+          windowsFileAttachmentPathLine({
+            name: attachment.name,
+            host: attachment.host,
+            path: attachment.path,
+            sshConfigPath: windowsMediaSettings.sshConfigPath,
+          }),
+        ];
+      }
       const attachmentPath = resolveAttachmentPath({
         attachmentsDir: serverConfig.attachmentsDir,
         attachment,

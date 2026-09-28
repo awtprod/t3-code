@@ -176,7 +176,9 @@ import * as AutomationTriggerCoordinator from "./command-center/automation/Trigg
 import * as AutomationScheduleInterpreter from "./command-center/automation/ScheduleInterpreter.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
+import * as PublishConnections from "./command-center/publish/PublishConnections.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
@@ -620,9 +622,39 @@ const makeWsRpcLayer = (
       const commandCenterAutomationTriggers = yield* AutomationTriggerCoordinator.make;
       const commandCenterMemorySearch = yield* MemorySearchIndex.MemorySearchIndex;
       const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
+      const windowsMediaConnector = yield* WindowsMediaConnector.WindowsMediaConnector;
+      const toWindowsMediaError = (cause: WindowsMediaConnector.WindowsMediaConnectorError) =>
+        new CommandCenterError({
+          reason:
+            cause.reason === "invalid_path" || cause.reason === "forbidden"
+              ? "validation"
+              : cause.reason === "not_found"
+                ? "not_found"
+                : cause.reason === "disabled"
+                  ? "config"
+                  : "connector",
+          message: cause.message,
+          cause,
+        });
       const googleConnectionSetup = yield* Effect.serviceOption(
         GoogleConnectionSetup.GoogleConnectionSetup,
       );
+      const publishConnections = yield* Effect.serviceOption(PublishConnections.PublishConnections);
+      const withPublishConnections = <A>(
+        use: (
+          service: PublishConnections.PublishConnections["Service"],
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        Option.match(publishConnections, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "connector",
+                message: "Publishing connections are unavailable in this environment.",
+              }),
+            ),
+          onSome: use,
+        });
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1690,6 +1722,36 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "command-center" },
           ),
+        [COMMAND_CENTER_WS_METHODS.publishConnectionsQuery]: (_input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.publishConnectionsQuery,
+            withPublishConnections((service) =>
+              service.query.pipe(Effect.map((connections) => ({ connections }))),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin,
+            withPublishConnections((service) => service.begin(input)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete,
+            withPublishConnections((service) =>
+              service.complete(input).pipe(Effect.map((connection) => ({ connection }))),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.publishConnectionRemove]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.publishConnectionRemove,
+            withPublishConnections((service) =>
+              service.remove(input).pipe(Effect.map((connection) => ({ connection }))),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
         [COMMAND_CENTER_WS_METHODS.memoryQuery]: (input) =>
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.memoryQuery,
@@ -1872,6 +1934,18 @@ const makeWsRpcLayer = (
                 sizeBytes: exported.sizeBytes,
               };
             }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.windowsMediaRoots]: () =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.windowsMediaRoots,
+            windowsMediaConnector.roots().pipe(Effect.mapError(toWindowsMediaError)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.windowsMediaList]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.windowsMediaList,
+            windowsMediaConnector.list(input.path).pipe(Effect.mapError(toWindowsMediaError)),
             { "rpc.aggregate": "command-center" },
           ),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>

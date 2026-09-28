@@ -217,6 +217,32 @@ export const ChatFileAttachment = Schema.Struct({
 export type ChatFileAttachment = typeof ChatFileAttachment.Type;
 
 /**
+ * A reference to a file that lives on a remote Windows host (reached over SSH
+ * by its ssh-config alias). Carries no bytes and no upload id: the agent gets
+ * the path plus a pull hint and acts on the file where it lives (the Resolve
+ * MCP opens it in place; `scp` copies it when a local copy is needed).
+ */
+export const WINDOWS_FILE_ATTACHMENT_PATH_MAX_CHARS = 4096;
+export const ChatWindowsFileAttachment = Schema.Struct({
+  type: Schema.Literal("windows-file"),
+  id: ChatAttachmentId,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  sizeBytes: NonNegativeInt,
+  /** ssh-config Host alias, e.g. "editing-pc". Restricted so it is safe to echo into a command hint. */
+  host: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(100),
+    Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  ),
+  /** Absolute Windows path (drive-letter or UNC). No quotes or control characters. */
+  path: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(WINDOWS_FILE_ATTACHMENT_PATH_MAX_CHARS),
+    Schema.isPattern(/^(?:[A-Za-z]:\\|\\\\)[^"\u0000-\u001f]*$/),
+  ),
+});
+export type ChatWindowsFileAttachment = typeof ChatWindowsFileAttachment.Type;
+
+/**
  * Catch-all for attachment types this build does not know. Attachments ride on
  * persisted events and thread streams, so a newer server or client must be able
  * to introduce a type without making older readers fail to decode the whole
@@ -224,12 +250,13 @@ export type ChatFileAttachment = typeof ChatFileAttachment.Type;
  * them as unsupported. Mirrors how `OrchestrationThreadActivity` keeps `kind`
  * open. The known discriminators are excluded so a malformed image or file
  * attachment fails its own schema instead of sliding through here with its
- * size and mime constraints unchecked.
+ * size and mime constraints unchecked (likewise a malformed windows-file
+ * reference).
  */
 export const ChatUnknownAttachment = Schema.Struct({
   type: TrimmedNonEmptyString.check(
     Schema.isMaxLength(50),
-    Schema.isPattern(/^(?!(?:image|file)$)/),
+    Schema.isPattern(/^(?!(?:image|file|windows-file)$)/),
   ),
   id: ChatAttachmentId,
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
@@ -252,6 +279,7 @@ export type UploadChatImageAttachment = typeof UploadChatImageAttachment.Type;
 export const ChatAttachment = Schema.Union([
   ChatImageAttachment,
   ChatFileAttachment,
+  ChatWindowsFileAttachment,
   ChatUnknownAttachment,
 ]);
 export type ChatAttachment = typeof ChatAttachment.Type;

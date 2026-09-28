@@ -73,6 +73,10 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 
+// The Windows media picker has no built-in host; configure one for the path-line test.
+process.env.CC_WINDOWS_MEDIA_SSH_CONFIG ??= "/etc/cc/ssh_config";
+process.env.CC_WINDOWS_MEDIA_SSH_ALIAS ??= "editing-pc";
+
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
   Layer.provide(NodeServices.layer),
@@ -1582,6 +1586,35 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const fileOnlyInput = routing.codex.sendTurn.mock.calls[0]?.[0] as ProviderSendTurnInput;
       assert.include(fileOnlyInput.input ?? "", '[Attached file "report.pdf" is saved at: ');
       assert.deepEqual(fileOnlyInput.attachments, [fileAttachment]);
+
+      // A windows-file reference has no local bytes: the agent gets the
+      // Windows path, its host, and the exact scp pull command.
+      const windowsFile = {
+        type: "windows-file" as const,
+        id: "wf-12345678-1234-1234-1234-123456789abc",
+        name: "Timeline 1.mov",
+        mimeType: "video/quicktime",
+        sizeBytes: 372874603,
+        host: "editing-pc",
+        path: "C:\\Timeline 1.mov",
+      };
+      routing.codex.sendTurn.mockClear();
+      yield* provider.sendTurn({
+        threadId: session.threadId,
+        input: "cut a short from this",
+        attachments: [windowsFile],
+      });
+      const windowsInput = routing.codex.sendTurn.mock.calls[0]?.[0] as ProviderSendTurnInput;
+      assert.include(
+        windowsInput.input ?? "",
+        '[Referenced Windows file "Timeline 1.mov" lives on host editing-pc at: C:\\Timeline 1.mov',
+      );
+      assert.include(
+        windowsInput.input ?? "",
+        "scp -F '/etc/cc/ssh_config' 'editing-pc:C:/Timeline 1.mov' <dest>]",
+      );
+      assert.notInclude(windowsInput.input ?? "", "is saved at");
+      assert.deepEqual(windowsInput.attachments, [windowsFile]);
 
       yield* provider.stopSession({ threadId: session.threadId });
     }),
