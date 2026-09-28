@@ -6,8 +6,10 @@ import {
   TrimmedNonEmptyString,
 } from "@command-center/core";
 import * as Schema from "effect/Schema";
+import { COMMAND_CENTER_WS_METHODS } from "./commandCenter.ts";
 
-export const COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD = "cc.youtube.analytics.fetch";
+export const COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD =
+  COMMAND_CENTER_WS_METHODS.youtubeAnalyticsFetch;
 
 const YouTubeId = TrimmedNonEmptyString.check(Schema.isPattern(/^[A-Za-z0-9_-]{11,24}$/u));
 

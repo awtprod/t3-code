@@ -107,6 +107,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   observationsImport: "cc.observations.import",
   observationsCorrect: "cc.observations.correct",
   observationsRetire: "cc.observations.retire",
+  youtubeAnalyticsFetch: "cc.youtube.analytics.fetch",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
