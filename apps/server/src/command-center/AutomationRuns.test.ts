@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import migration072 from "../persistence/Migrations/072_CommandCenterResponsibilities.ts";
 import { AutomationRuns, layer as automationRunsLayer } from "./AutomationRuns.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
@@ -181,9 +182,12 @@ function testLayer(options: { readonly executeNode?: AutomationNodeExecutor } = 
     defaultMaxAttempts: 1,
   });
   const dependencies = Layer.mergeAll(commandCenterLayer, durableRuntimeLayer, eventStreamLayer);
+  const persistence = Layer.effectDiscard(migration072).pipe(
+    Layer.provideMerge(SqlitePersistenceMemory),
+  );
   return automationRunsLayer.pipe(
     Layer.provideMerge(dependencies),
-    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(persistence),
     Layer.provideMerge(NodeServices.layer),
   );
 }
@@ -276,6 +280,40 @@ it.effect("hides automation execution status across Space boundaries", () =>
       .get({ executionId: started.id, spaceId: SpaceId.make("space-b") })
       .pipe(Effect.flip);
     expect(error).toMatchObject({ reason: "not_found" });
+  }).pipe(Effect.provide(testLayer())),
+);
+
+it.effect("blocks manual admission while operationally paused", () =>
+  Effect.gen(function* () {
+    const runs = yield* AutomationRuns;
+    const commandCenter = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    // Materialize the committed definition before applying its operational control.
+    yield* commandCenter.queryAutomations({ spaceId: space.id });
+    yield* sql`
+      INSERT INTO command_center_responsibility_controls (
+        space_id, automation_id, paused, actor, reason, revision, changed_at
+      ) VALUES (
+        ${space.id}, ${automation.id}, 1, 'andrew', 'manual hold', 1, ${now}
+      )
+    `;
+
+    const error = yield* runs
+      .start({
+        automationId: automation.id,
+        spaceId: space.id,
+        idempotencyKey: "paused-manual",
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+      })
+      .pipe(Effect.flip);
+    expect(error).toMatchObject({ reason: "validation" });
+    expect(error.message).toContain("paused");
+    expect(
+      yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM command_center_automation_executions
+      `,
+    ).toEqual([{ count: 0 }]);
   }).pipe(Effect.provide(testLayer())),
 );
 
