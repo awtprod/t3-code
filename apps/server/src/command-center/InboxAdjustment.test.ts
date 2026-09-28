@@ -3,6 +3,7 @@ import { ItemId, SpaceId } from "@command-center/core";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -16,6 +17,7 @@ const planId = "adjustment-plan";
 const itemId = ItemId.make("adjustment-item");
 const actor = { subject: "andrew" };
 const instant = "2026-09-21T12:00:00.000Z";
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const policy = {
   id: "fixture-channel-policy",
   version: 1,
@@ -30,7 +32,7 @@ const policy = {
   requiredCompleteness: "complete",
 } as const;
 
-const sourceJson = JSON.stringify({
+const sourceJson = encodeJson({
   version: 2,
   updated: "2026-09-21T12:00:00.000Z",
   fixtureMetadata: { retained: true },
@@ -73,7 +75,7 @@ const setup = Effect.fn("InboxAdjustmentTest.setup")(function* (withPolicy: bool
       id, slug, name, kind, lifecycle, policy_json, created_at, updated_at
     ) VALUES (
       ${spaceId}, ${spaceId}, 'Adjustment fixture', 'business', 'active',
-      ${withPolicy ? JSON.stringify({ observationEligibility: policy }) : "{}"},
+      ${withPolicy ? encodeJson({ observationEligibility: policy }) : "{}"},
       ${instant}, ${instant}
     )
   `;
