@@ -710,7 +710,7 @@ const makeWsRpcLayer = (
         operation.pipe(
           Effect.flatMap(decode),
           Effect.mapError((cause) =>
-            cause instanceof SprintPlan.SprintPlanServiceError
+            Schema.is(SprintPlan.SprintPlanServiceError)(cause)
               ? cause
               : invalidSprintPlanOutput(cause),
           ),
