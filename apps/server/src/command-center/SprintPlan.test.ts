@@ -1,0 +1,584 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+
+import type { SprintPlanSource } from "@command-center/core";
+
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import Migration071 from "../persistence/Migrations/071_CommandCenterSprintPlans.ts";
+import {
+  SprintPlanServiceError,
+  makeSprintPlanService,
+  type SprintPlanActor,
+} from "./SprintPlan.ts";
+
+const testLayer = Layer.mergeAll(SqlitePersistenceMemory, NodeServices.layer);
+const actor: SprintPlanActor = { id: "andrew", kind: "user" };
+
+const sourceFixture = (overrides?: {
+  readonly firstNote?: string;
+  readonly secondText?: string;
+  readonly updated?: string;
+}) =>
+  JSON.stringify(
+    {
+      version: 2,
+      updated: overrides?.updated ?? "2026-09-27T19:40:38.746Z",
+      fixtureMetadata: { retained: true },
+      score: [
+        {
+          id: "apv",
+          label: "Average viewed",
+          start: "",
+          now: "",
+          target: "Set at launch",
+        },
+      ],
+      weeks: [
+        {
+          id: "w1",
+          num: 1,
+          start: "2026-10-26",
+          end: "2026-11-01",
+          range: "Oct 26 – Nov 1",
+          tue: "Synthetic Tuesday",
+          fri: "Synthetic Friday",
+          optionalMetadata: ["kept", "in-order"],
+          tasks: [
+            {
+              id: "task-a",
+              text: "Post Saturday 31 October",
+              owner: "Production",
+              day: "Wed 10/28",
+              note: overrides?.firstNote ?? "Original note",
+              done: false,
+            },
+            {
+              id: "task-b",
+              text: overrides?.secondText ?? "Prepare the follow-up",
+              owner: "Both",
+              day: "Thu 10/29",
+              note: "",
+              done: true,
+            },
+          ],
+        },
+      ],
+    },
+    null,
+    2,
+  );
+
+const setup = Effect.fn("SprintPlanTest.setup")(function* (suffix: string) {
+  const sql = yield* SqlClient.SqlClient;
+  yield* Migration071;
+  yield* sql`
+    INSERT INTO command_center_spaces (id, slug, name, kind, created_at, updated_at)
+    VALUES (
+      ${`space-${suffix}`}, ${`space-${suffix}`}, ${`Space ${suffix}`}, 'business',
+      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+    )
+  `;
+  yield* sql`
+    INSERT INTO command_center_spaces (id, slug, name, kind, created_at, updated_at)
+    VALUES (
+      ${`other-${suffix}`}, ${`other-${suffix}`}, ${`Other ${suffix}`}, 'business',
+      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+    )
+  `;
+  return yield* makeSprintPlanService();
+});
+
+it.effect("keeps the exact baseline immutable and isolates one task field edit", () =>
+  Effect.gen(function* () {
+    const service = yield* setup("isolation");
+    const sourceJson = sourceFixture();
+    const imported = yield* service.applyImport(
+      {
+        planId: "plan-isolation",
+        spaceId: "space-isolation",
+        sourceJson,
+        provenance: { sourceRef: "fixture://synthetic-plan", originalFileName: "plan.json" },
+        expectedVersion: 0,
+        mutationId: "import-isolation",
+      },
+      actor,
+    );
+    const edited = yield* service.patchTask(
+      {
+        planId: imported.id,
+        spaceId: imported.spaceId,
+        taskId: "task-a",
+        field: "note",
+        before: "Original note",
+        after: "Andrew's corrected note",
+        reason: "Use the reviewed wording",
+        expectedVersion: 1,
+        mutationId: "patch-isolation",
+        provenance: { kind: "manual", sourceRef: "inbox:item-1" },
+      },
+      actor,
+    );
+
+    expect(edited.sourceJson).toBe(sourceJson);
+    expect(edited.sourceSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(edited.provenance).toEqual({
+      sourceRef: "fixture://synthetic-plan",
+      originalFileName: "plan.json",
+    });
+    expect(edited.baseline.weeks[0]?.tasks[0]?.note).toBe("Original note");
+    expect(edited.current.weeks[0]?.tasks[0]?.note).toBe("Andrew's corrected note");
+    expect(edited.current.weeks[0]?.tasks[1]).toEqual(edited.baseline.weeks[0]?.tasks[1]);
+    expect(edited.current.score[0]).toEqual({
+      id: "apv",
+      label: "Average viewed",
+      start: "",
+      now: "",
+      target: "Set at launch",
+    });
+    expect(edited.current.fixtureMetadata).toEqual({ retained: true });
+    expect(edited.baselineNormalized.dateConflicts).toHaveLength(1);
+
+    const history = yield* service.listHistory({
+      planId: edited.id,
+      spaceId: edited.spaceId,
+      limit: 1,
+    });
+    expect(history.entries).toEqual([
+      expect.objectContaining({
+        operation: "task-patch",
+        taskId: "task-a",
+        field: "note",
+        before: "Original note",
+        after: "Andrew's corrected note",
+        reason: "Use the reviewed wording",
+        actor,
+      }),
+    ]);
+    expect(history.nextBeforeSequence).toBeDefined();
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("requires reasons, exact before values, current versions, and matching Space", () =>
+  Effect.gen(function* () {
+    const service = yield* setup("guards");
+    yield* service.applyImport(
+      {
+        planId: "plan-guards",
+        spaceId: "space-guards",
+        sourceJson: sourceFixture(),
+        provenance: { sourceRef: "fixture://guards" },
+        expectedVersion: 0,
+        mutationId: "import-guards",
+      },
+      actor,
+    );
+
+    const noReason = yield* service
+      .patchTask(
+        {
+          planId: "plan-guards",
+          spaceId: "space-guards",
+          taskId: "task-a",
+          field: "owner",
+          before: "Production",
+          after: "Both",
+          expectedVersion: 1,
+          mutationId: "patch-no-reason",
+          provenance: { kind: "manual" },
+        },
+        actor,
+      )
+      .pipe(Effect.flip);
+    expect(noReason).toMatchObject({ reason: "validation" });
+
+    const wrongBefore = yield* service
+      .patchTask(
+        {
+          planId: "plan-guards",
+          spaceId: "space-guards",
+          taskId: "task-a",
+          field: "owner",
+          before: "PJ",
+          after: "Both",
+          reason: "Reassign",
+          expectedVersion: 1,
+          mutationId: "patch-wrong-before",
+          provenance: { kind: "manual" },
+        },
+        actor,
+      )
+      .pipe(Effect.flip);
+    expect(wrongBefore).toMatchObject({ reason: "conflict" });
+
+    const stale = yield* service
+      .patchTask(
+        {
+          planId: "plan-guards",
+          spaceId: "space-guards",
+          taskId: "task-a",
+          field: "owner",
+          before: "Production",
+          after: "Both",
+          reason: "Reassign",
+          expectedVersion: 0,
+          mutationId: "patch-stale",
+          provenance: { kind: "manual" },
+        },
+        actor,
+      )
+      .pipe(Effect.flip);
+    expect(stale).toMatchObject({ reason: "conflict" });
+
+    const wrongSpace = yield* service
+      .get({ planId: "plan-guards", spaceId: "other-guards" })
+      .pipe(Effect.flip);
+    expect(wrongSpace).toMatchObject({ reason: "conflict" });
+    const wrongOriginalSpace = yield* service
+      .getOriginal({ planId: "plan-guards", spaceId: "other-guards" })
+      .pipe(Effect.flip);
+    expect(wrongOriginalSpace).toMatchObject({ reason: "conflict" });
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("makes mutations idempotent and rejects mutation ID reuse with different content", () =>
+  Effect.gen(function* () {
+    const service = yield* setup("idempotency");
+    yield* service.applyImport(
+      {
+        planId: "plan-idempotency",
+        spaceId: "space-idempotency",
+        sourceJson: sourceFixture(),
+        provenance: { sourceRef: "fixture://idempotency" },
+        expectedVersion: 0,
+        mutationId: "import-idempotency",
+      },
+      actor,
+    );
+    const noOpImport = {
+      planId: "plan-idempotency",
+      spaceId: "space-idempotency",
+      sourceJson: sourceFixture(),
+      provenance: { sourceRef: "fixture://idempotency" },
+      expectedVersion: 1,
+      mutationId: "noop-import-idempotency",
+    } as const;
+    expect((yield* service.applyImport(noOpImport, actor)).version).toBe(1);
+    const reboundNoOp = yield* service
+      .applyImport(
+        {
+          ...noOpImport,
+          sourceJson: sourceFixture({ updated: "2026-09-28T00:00:00.000Z" }),
+        },
+        actor,
+      )
+      .pipe(Effect.flip);
+    expect(reboundNoOp).toMatchObject({ reason: "conflict" });
+    const patch = {
+      planId: "plan-idempotency",
+      spaceId: "space-idempotency",
+      taskId: "task-a",
+      field: "text" as const,
+      before: "Post Saturday 31 October",
+      after: "Post the reviewed synthetic clip",
+      reason: "Accept reviewed copy",
+      expectedVersion: 1,
+      mutationId: "patch-idempotency",
+      provenance: { kind: "approved-adjustment" as const, evidenceRef: "evidence-1" },
+    };
+    const first = yield* service.patchTask(patch, actor);
+    const replay = yield* service.patchTask(patch, actor);
+    expect(first.version).toBe(2);
+    expect(replay.version).toBe(2);
+
+    const mismatch = yield* service
+      .patchTask({ ...patch, after: "Different content" }, actor)
+      .pipe(Effect.flip);
+    expect(mismatch).toMatchObject({ reason: "conflict" });
+
+    const history = yield* service.listHistory({
+      planId: patch.planId,
+      spaceId: patch.spaceId,
+      limit: 100,
+    });
+    expect(history.entries.filter((entry) => entry.mutationId === patch.mutationId)).toHaveLength(
+      1,
+    );
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("records reversible manual completion without changing the imported check", () =>
+  Effect.gen(function* () {
+    const service = yield* setup("completion");
+    yield* service.applyImport(
+      {
+        planId: "plan-completion",
+        spaceId: "space-completion",
+        sourceJson: sourceFixture(),
+        provenance: { sourceRef: "fixture://completion" },
+        expectedVersion: 0,
+        mutationId: "import-completion",
+      },
+      actor,
+    );
+    yield* service.patchTask(
+      {
+        planId: "plan-completion",
+        spaceId: "space-completion",
+        taskId: "task-b",
+        field: "done",
+        before: true,
+        after: false,
+        expectedVersion: 1,
+        mutationId: "completion-off",
+        provenance: { kind: "manual", sourceRef: "plan-view" },
+      },
+      actor,
+    );
+    const reversed = yield* service.patchTask(
+      {
+        planId: "plan-completion",
+        spaceId: "space-completion",
+        taskId: "task-b",
+        field: "done",
+        before: false,
+        after: true,
+        expectedVersion: 2,
+        mutationId: "completion-on",
+        provenance: { kind: "manual", sourceRef: "plan-view" },
+      },
+      actor,
+    );
+    expect(reversed.baseline.weeks[0]?.tasks[1]?.done).toBe(true);
+    expect(reversed.current.weeks[0]?.tasks[1]?.done).toBe(true);
+    const history = yield* service.listHistory({
+      planId: reversed.id,
+      spaceId: reversed.spaceId,
+      limit: 10,
+    });
+    expect(
+      history.entries
+        .filter((entry) => entry.field === "done")
+        .map((entry) => [entry.before, entry.after, entry.actor, entry.provenance]),
+    ).toEqual([
+      [false, true, actor, { kind: "manual", sourceRef: "plan-view" }],
+      [true, false, actor, { kind: "manual", sourceRef: "plan-view" }],
+    ]);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("previews import conflicts and preserves local edits instead of overwriting", () =>
+  Effect.gen(function* () {
+    const service = yield* setup("conflict");
+    const originalSourceJson = sourceFixture();
+    const originalImport = yield* service.applyImport(
+      {
+        planId: "plan-conflict",
+        spaceId: "space-conflict",
+        sourceJson: originalSourceJson,
+        provenance: { sourceRef: "fixture://conflict-v1", originalFileName: "plan-a.json" },
+        expectedVersion: 0,
+        mutationId: "import-conflict-v1",
+      },
+      actor,
+    );
+    yield* service.patchTask(
+      {
+        planId: "plan-conflict",
+        spaceId: "space-conflict",
+        taskId: "task-a",
+        field: "note",
+        before: "Original note",
+        after: "Local edit",
+        reason: "Keep local reviewed wording",
+        expectedVersion: 1,
+        mutationId: "patch-conflict-local",
+        provenance: { kind: "manual" },
+      },
+      actor,
+    );
+    const conflictingSource = sourceFixture({
+      firstNote: "Incoming edit",
+      updated: "2026-09-28T00:00:00.000Z",
+    });
+    const preview = yield* service.previewImport({
+      planId: "plan-conflict",
+      spaceId: "space-conflict",
+      sourceJson: conflictingSource,
+    });
+    expect(preview.conflicts).toEqual([
+      {
+        taskId: "task-a",
+        field: "note",
+        baseline: "Original note",
+        current: "Local edit",
+        incoming: "Incoming edit",
+        reason: "both-changed",
+      },
+    ]);
+    const rejected = yield* service
+      .applyImport(
+        {
+          planId: "plan-conflict",
+          spaceId: "space-conflict",
+          sourceJson: conflictingSource,
+          provenance: { sourceRef: "fixture://conflict-v2" },
+          expectedVersion: 2,
+          mutationId: "import-conflict-v2",
+        },
+        actor,
+      )
+      .pipe(Effect.flip);
+    expect(rejected).toMatchObject({ reason: "conflict" });
+    const preserved = yield* service.get({
+      planId: "plan-conflict",
+      spaceId: "space-conflict",
+    });
+    expect(preserved.version).toBe(2);
+    expect(preserved.current.weeks[0]?.tasks[0]?.note).toBe("Local edit");
+    expect(preserved.baseline.weeks[0]?.tasks[0]?.note).toBe("Original note");
+
+    const compatibleSource = sourceFixture({
+      secondText: "Updated source follow-up",
+      updated: "2026-09-29T00:00:00.000Z",
+    });
+    const applied = yield* service.applyImport(
+      {
+        planId: "plan-conflict",
+        spaceId: "space-conflict",
+        sourceJson: compatibleSource,
+        provenance: { sourceRef: "fixture://compatible-v2" },
+        expectedVersion: 2,
+        mutationId: "import-compatible-v2",
+      },
+      actor,
+    );
+    expect(applied.version).toBe(3);
+    expect(applied.baseline.weeks[0]?.tasks[0]?.note).toBe("Original note");
+    expect(applied.current.weeks[0]?.tasks[0]?.note).toBe("Local edit");
+    expect(applied.current.weeks[0]?.tasks[1]?.text).toBe("Updated source follow-up");
+
+    const original = yield* service.getOriginal({
+      planId: "plan-conflict",
+      spaceId: "space-conflict",
+    });
+    expect(original.sourceJson).toBe(originalSourceJson);
+    expect(original.sourceSha256).toBe(originalImport.sourceSha256);
+    expect(original.provenance).toEqual({
+      sourceRef: "fixture://conflict-v1",
+      originalFileName: "plan-a.json",
+    });
+    expect(original.original.weeks[0]?.tasks[0]?.note).toBe("Original note");
+    expect(original.originalNormalized.weeks[0]?.tasks[1]?.sourceChecked).toBe(true);
+    expect(original.originalNormalized.dateConflicts).toHaveLength(1);
+
+    const current = yield* service.get({
+      planId: "plan-conflict",
+      spaceId: "space-conflict",
+    });
+    expect(current.sourceJson).toBe(compatibleSource);
+    expect(current.baseline.weeks[0]?.tasks[1]?.text).toBe("Updated source follow-up");
+    expect(current.current.weeks[0]?.tasks[0]?.note).toBe("Local edit");
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("resolves source date conflicts separately with a reason and exact history", () =>
+  Effect.gen(function* () {
+    const service = yield* setup("date-resolution");
+    yield* service.applyImport(
+      {
+        planId: "plan-date-resolution",
+        spaceId: "space-date-resolution",
+        sourceJson: sourceFixture(),
+        provenance: { sourceRef: "fixture://date-resolution" },
+        expectedVersion: 0,
+        mutationId: "import-date-resolution",
+      },
+      actor,
+    );
+    const resolved = yield* service.resolveDateConflict(
+      {
+        planId: "plan-date-resolution",
+        spaceId: "space-date-resolution",
+        taskId: "task-a",
+        resolvedDate: "2026-10-31",
+        reason: "The text date is authoritative",
+        expectedVersion: 1,
+        mutationId: "resolve-date-resolution",
+        provenance: { kind: "manual", sourceRef: "clarification-1" },
+      },
+      actor,
+    );
+    expect(resolved.current.weeks[0]?.tasks[0]?.day).toBe("Wed 10/28");
+    expect(resolved.dateResolutions).toEqual([
+      expect.objectContaining({
+        taskId: "task-a",
+        resolvedDate: "2026-10-31",
+        reason: "The text date is authoritative",
+        actor,
+      }),
+    ]);
+    const history = yield* service.listHistory({
+      planId: resolved.id,
+      spaceId: resolved.spaceId,
+      limit: 10,
+    });
+    expect(history.entries[0]).toMatchObject({
+      operation: "date-resolution",
+      field: "dateResolution",
+      after: "2026-10-31",
+      reason: "The text date is authoritative",
+    });
+    expect(history.entries[0]).not.toHaveProperty("before");
+
+    const clarified = yield* service.patchTask(
+      {
+        planId: resolved.id,
+        spaceId: resolved.spaceId,
+        taskId: "task-a",
+        field: "day",
+        before: "Wed 10/28",
+        after: "Sat 10/31",
+        reason: "Apply the recorded clarification to the current plan",
+        expectedVersion: 2,
+        mutationId: "patch-date-resolution",
+        provenance: { kind: "manual", sourceRef: "clarification-1" },
+      },
+      actor,
+    );
+    expect(clarified.baseline.weeks[0]?.tasks[0]?.day).toBe("Wed 10/28");
+    expect(clarified.current.weeks[0]?.tasks[0]?.day).toBe("Sat 10/31");
+    expect(clarified.dateResolutions).toEqual([]);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("rejects malformed service imports without persisting a plan", () =>
+  Effect.gen(function* () {
+    const service = yield* setup("malformed");
+    const malformed = JSON.parse(sourceFixture()) as SprintPlanSource;
+    const mutable = malformed as unknown as { weeks: Array<{ tasks: Array<{ done: unknown }> }> };
+    mutable.weeks[0]!.tasks[0]!.done = "yes";
+    const error = yield* service
+      .applyImport(
+        {
+          planId: "plan-malformed",
+          spaceId: "space-malformed",
+          sourceJson: JSON.stringify(malformed),
+          provenance: { sourceRef: "fixture://malformed" },
+          expectedVersion: 0,
+          mutationId: "import-malformed",
+        },
+        actor,
+      )
+      .pipe(Effect.flip);
+    expect(error).toBeInstanceOf(SprintPlanServiceError);
+    expect(error).toMatchObject({ reason: "validation" });
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM command_center_sprint_plans WHERE id = 'plan-malformed'
+    `;
+    expect(rows).toEqual([{ count: 0 }]);
+  }).pipe(Effect.provide(testLayer)),
+);
