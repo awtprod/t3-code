@@ -35,8 +35,27 @@ export const AutomationFileNodeKind = Schema.Literals([
   "shell.scoped",
   "prospect.evaluate",
   "prospect.notify",
+  "repository.checks",
 ]);
 export type AutomationFileNodeKind = typeof AutomationFileNodeKind.Type;
+
+const RepositoryChecksNodeConfig = Schema.Struct({ repositoryId: RepositoryId });
+const decodeRepositoryChecksNodeConfig = Schema.decodeUnknownExit(RepositoryChecksNodeConfig);
+
+export function parseRepositoryChecksNodeConfig(input: unknown) {
+  if (
+    input === null ||
+    typeof input !== "object" ||
+    Array.isArray(input) ||
+    Object.keys(input).some((key) => key !== "repositoryId")
+  ) {
+    return { ok: false as const, message: "Repository checks require only repositoryId." };
+  }
+  const decoded = decodeRepositoryChecksNodeConfig(input);
+  return Exit.isFailure(decoded)
+    ? { ok: false as const, message: formatSchemaError(decoded.cause) }
+    : { ok: true as const, config: decoded.value };
+}
 
 const JsonObject = Schema.Record(Schema.String, Schema.Json);
 export const AUTOMATION_DEFINITION_SCHEMA_VERSION = 1 as const;
@@ -392,6 +411,17 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
         issues.push({
           code: "node.config.invalid",
           message: config.message,
+          path: ["nodes", index, "config"],
+          nodeIds: [node.id],
+        });
+      }
+    }
+    if (node.kind === "repository.checks") {
+      const config = parseRepositoryChecksNodeConfig(node.config);
+      if (!config.ok || decoded.definition.trigger.kind !== "schedule") {
+        issues.push({
+          code: "node.config.invalid",
+          message: config.ok ? "Repository checks require a schedule trigger." : config.message,
           path: ["nodes", index, "config"],
           nodeIds: [node.id],
         });
