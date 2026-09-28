@@ -5,11 +5,16 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 
 import * as ServerConfig from "../config.ts";
 import { canonicalJson } from "./automation/Digest.ts";
 import { loadCcnClipConfig } from "./CcnConfig.ts";
+
+class InvalidCcnConfigTestError extends Data.TaggedError("InvalidCcnConfigTestError")<{
+  readonly cause: unknown;
+}> {}
 
 it.effect("keeps CCN roots disabled until a bounded operator file is present", () =>
   Effect.gen(function* () {
@@ -33,24 +38,24 @@ it.effect("keeps CCN roots disabled until a bounded operator file is present", (
       expect(
         yield* Effect.tryPromise({
           try: () => loadCcnClipConfig(located),
-          catch: () => new Error("Invalid roots file"),
+          catch: (cause) => new InvalidCcnConfigTestError({ cause }),
         }).pipe(Effect.flip),
-      ).toBeInstanceOf(Error);
+      ).toBeInstanceOf(InvalidCcnConfigTestError);
       yield* Effect.promise(() => NodeFSP.writeFile(file, "x".repeat(32 * 1024 + 1)));
       expect(
         yield* Effect.tryPromise({
           try: () => loadCcnClipConfig(located),
-          catch: () => new Error("Oversized roots file"),
+          catch: (cause) => new InvalidCcnConfigTestError({ cause }),
         }).pipe(Effect.flip),
-      ).toBeInstanceOf(Error);
+      ).toBeInstanceOf(InvalidCcnConfigTestError);
       yield* Effect.promise(() => NodeFSP.rm(file));
       yield* Effect.promise(() => NodeFSP.symlink(NodePath.join(directory, "missing"), file));
       expect(
         yield* Effect.tryPromise({
           try: () => loadCcnClipConfig(located),
-          catch: () => new Error("Inaccessible roots file"),
+          catch: (cause) => new InvalidCcnConfigTestError({ cause }),
         }).pipe(Effect.flip),
-      ).toBeInstanceOf(Error);
+      ).toBeInstanceOf(InvalidCcnConfigTestError);
     } finally {
       yield* Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true }));
     }

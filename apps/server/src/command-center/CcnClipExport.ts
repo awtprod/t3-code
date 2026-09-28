@@ -4,7 +4,6 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeTimers from "node:timers";
 
 import { Artifact, type Artifact as ArtifactType } from "@command-center/core";
 import * as DateTime from "effect/DateTime";
@@ -313,49 +312,41 @@ async function runCommand(
   timeoutMs: number,
   signal?: AbortSignal,
 ) {
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  signal?.addEventListener("abort", onAbort, { once: true });
-  if (signal?.aborted) controller.abort();
-  const timer = NodeTimers.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await new Promise<string>((resolve, reject) => {
-      const child = NodeChildProcess.spawn(binary, args, {
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-        signal: controller.signal,
-      });
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      const fail = (error: Error) => {
-        if (settled) return;
-        settled = true;
-        child.kill("SIGKILL");
-        reject(error);
-      };
-      child.on("error", (error) => fail(error));
-      child.stdout.on("data", (chunk: Buffer) => {
-        stdout += chunk.toString("utf8");
-        if (Buffer.byteLength(stdout) > MAX_PROBE_OUTPUT)
-          fail(new Error("Process output exceeded its limit."));
-      });
-      child.stderr.on("data", (chunk: Buffer) => {
-        stderr += chunk.toString("utf8");
-        if (Buffer.byteLength(stderr) > MAX_PROBE_OUTPUT)
-          fail(new Error("Process error output exceeded its limit."));
-      });
-      child.on("close", (code) => {
-        if (settled) return;
-        settled = true;
-        if (code === 0) resolve(stdout);
-        else reject(new Error(`Process exited ${code}: ${stderr.slice(0, 500)}`));
-      });
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const commandSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  return await new Promise<string>((resolve, reject) => {
+    const child = NodeChildProcess.spawn(binary, args, {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      signal: commandSignal,
     });
-  } finally {
-    NodeTimers.clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
-  }
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(error);
+    };
+    child.on("error", (error) => fail(error));
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      if (Buffer.byteLength(stdout) > MAX_PROBE_OUTPUT)
+        fail(new Error("Process output exceeded its limit."));
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+      if (Buffer.byteLength(stderr) > MAX_PROBE_OUTPUT)
+        fail(new Error("Process error output exceeded its limit."));
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`Process exited ${code}: ${stderr.slice(0, 500)}`));
+    });
+  });
 }
 
 async function probeVideo(binary: string, file: string, signal?: AbortSignal): Promise<number> {

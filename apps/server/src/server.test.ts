@@ -1027,6 +1027,7 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = servedRoutesLayer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
       // The tier-judgment dispatcher resolves the Judge; the harness uses a
       // disabled Judge so behavior matches the pre-feature path.
       Layer.provide(Judge.layerTest),

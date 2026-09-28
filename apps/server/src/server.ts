@@ -808,7 +808,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     attachmentUploadRouteLayer,
     staticAndDevRouteLayer,
     webhookHttpRouteLayer,
-    websocketRpcRouteLayer,
+    websocketRpcRouteLayer.pipe(Layer.provide(PersistenceLayerLive)),
   ),
   McpHttpServer.layer.pipe(
     Layer.provide(SupabaseMcpConnector.layer),
