@@ -8,6 +8,7 @@ import {
   type AuthClientMetadata,
   type AuthClientSession,
   type AuthCreatePairingCredentialInput,
+  AuthDraftScopeId,
   type AuthEnvironmentScope,
   type AuthPairingLink,
   type AuthPairingCredentialResult,
@@ -19,12 +20,14 @@ import {
   DpopFailureReason,
   type DpopFailureReason as DpopFailureReasonType,
 } from "@t3tools/contracts";
+import { sha256 } from "@noble/hashes/sha2";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -68,6 +71,30 @@ export interface AuthenticatedSession {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt?: DateTime.DateTime;
+}
+
+const draftScopeEncoder = new TextEncoder();
+
+/**
+ * DPoP access tokens rotate independently of the client proof key. Bind the
+ * local-draft scope to both the authenticated subject and that key so rotation
+ * is stable. A relay account is bound separately by the client because the
+ * same browser proof key can be used by multiple relay accounts.
+ */
+export function draftScopeIdForAuthenticatedSession(
+  session: Pick<AuthenticatedSession, "sessionId" | "subject" | "proofKeyThumbprint">,
+): AuthDraftScopeId {
+  if (session.proofKeyThumbprint === undefined) {
+    return AuthDraftScopeId.make(session.sessionId);
+  }
+  const identity = JSON.stringify([
+    "t3.inbox-draft-scope.dpop.v1",
+    session.subject,
+    session.proofKeyThumbprint,
+  ]);
+  return AuthDraftScopeId.make(
+    `dpop:${Encoding.encodeBase64Url(sha256(draftScopeEncoder.encode(identity)))}`,
+  );
 }
 
 const serverAuthInternalErrorContext = {
@@ -679,7 +706,7 @@ export const make = Effect.gen(function* () {
           ({
             authenticated: true,
             auth: descriptor,
-            draftScopeId: session.sessionId,
+            draftScopeId: draftScopeIdForAuthenticatedSession(session),
             scopes: session.scopes,
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
