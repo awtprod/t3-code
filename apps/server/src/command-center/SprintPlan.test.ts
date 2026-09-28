@@ -541,6 +541,286 @@ it.effect("previews import conflicts and preserves local edits instead of overwr
   }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect(
+  "applies exact Keep current and Use incoming decisions without changing either source",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* setup("decisions");
+      const originalJson = sourceFixture();
+      const incomingJson = sourceFixture({
+        firstNote: "Incoming note",
+        updated: "2026-09-28T00:00:00.000Z",
+      });
+      for (const [suffix, decision, expectedNote] of [
+        ["keep", "keep-current", "Local note"],
+        ["incoming", "use-incoming", "Incoming note"],
+      ] as const) {
+        const planId = `plan-decisions-${suffix}`;
+        yield* service.applyImport(
+          {
+            planId,
+            spaceId: "space-decisions",
+            sourceJson: originalJson,
+            provenance: { sourceRef: `fixture://${suffix}-a` },
+            expectedVersion: 0,
+            mutationId: `import-${suffix}-a`,
+          },
+          actor,
+        );
+        yield* service.patchTask(
+          {
+            planId,
+            spaceId: "space-decisions",
+            taskId: "task-a",
+            field: "note",
+            before: "Original note",
+            after: "Local note",
+            reason: "Reviewed local note",
+            expectedVersion: 1,
+            mutationId: `patch-${suffix}`,
+            provenance: { kind: "manual" },
+          },
+          actor,
+        );
+        const input = {
+          planId,
+          spaceId: "space-decisions",
+          sourceJson: incomingJson,
+          provenance: { sourceRef: `fixture://${suffix}-b` },
+          expectedVersion: 2,
+          mutationId: `import-${suffix}-b`,
+          conflictDecisions: [{ taskId: "task-a", field: "note" as const, decision }],
+        };
+        const applied = yield* service.applyImport(input, actor);
+        expect(applied.version).toBe(3);
+        expect(applied.current.weeks[0]?.tasks[0]?.note).toBe(expectedNote);
+        expect(applied.baseline.weeks[0]?.tasks[0]?.note).toBe("Incoming note");
+        expect(applied.sourceJson).toBe(incomingJson);
+        expect(
+          (yield* service.getOriginal({ planId, spaceId: "space-decisions" })).sourceJson,
+        ).toBe(originalJson);
+        expect((yield* service.applyImport(input, actor)).version).toBe(3);
+        const changedChoice = yield* service
+          .applyImport(
+            {
+              ...input,
+              conflictDecisions: [
+                {
+                  taskId: "task-a",
+                  field: "note",
+                  decision:
+                    decision === "keep-current"
+                      ? ("use-incoming" as const)
+                      : ("keep-current" as const),
+                },
+              ],
+            },
+            actor,
+          )
+          .pipe(Effect.flip);
+        expect(changedChoice).toMatchObject({ reason: "conflict" });
+        const history = yield* service.listHistory({ planId, spaceId: "space-decisions" });
+        expect(
+          history.entries.filter((entry) => entry.mutationId === input.mutationId),
+        ).toHaveLength(1);
+        expect(history.entries[0]?.after).toMatchObject({
+          decisionCount: 1,
+          decisions: input.conflictDecisions,
+        });
+        const sql = yield* SqlClient.SqlClient;
+        const auditRows = yield* sql<{ readonly payloadJson: string }>`
+        SELECT payload_json AS "payloadJson" FROM command_center_audit_events
+        WHERE event_id = ${`sprint-plan:${input.mutationId}`} LIMIT 1
+      `;
+        expect(JSON.parse(auditRows[0]!.payloadJson)).toMatchObject({
+          conflictDecisions: input.conflictDecisions,
+        });
+      }
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "rejects missing, extra, stale, duplicate and unsupported removal decisions atomically",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* setup("decision-guards");
+      yield* service.applyImport(
+        {
+          planId: "plan-decision-guards",
+          spaceId: "space-decision-guards",
+          sourceJson: sourceFixture(),
+          provenance: { sourceRef: "fixture://guards-a" },
+          expectedVersion: 0,
+          mutationId: "guards-import-a",
+        },
+        actor,
+      );
+      yield* service.patchTask(
+        {
+          planId: "plan-decision-guards",
+          spaceId: "space-decision-guards",
+          taskId: "task-a",
+          field: "note",
+          before: "Original note",
+          after: "Local note",
+          reason: "Local review",
+          expectedVersion: 1,
+          mutationId: "guards-patch",
+          provenance: { kind: "manual" },
+        },
+        actor,
+      );
+      const incoming = sourceFixture({
+        firstNote: "Incoming note",
+        updated: "2026-09-28T00:00:00.000Z",
+      });
+      const base = {
+        planId: "plan-decision-guards",
+        spaceId: "space-decision-guards",
+        sourceJson: incoming,
+        provenance: { sourceRef: "fixture://guards-b" },
+        expectedVersion: 2,
+      } as const;
+      for (const [mutationId, choices] of [
+        ["missing", []],
+        [
+          "extra",
+          [
+            { taskId: "task-a", field: "note", decision: "keep-current" },
+            { taskId: "task-b", field: "note", decision: "use-incoming" },
+          ],
+        ],
+        [
+          "duplicate",
+          [
+            { taskId: "task-a", field: "note", decision: "keep-current" },
+            { taskId: "task-a", field: "note", decision: "keep-current" },
+          ],
+        ],
+      ] as const) {
+        const rejected = yield* service
+          .applyImport({ ...base, mutationId, conflictDecisions: choices }, actor)
+          .pipe(Effect.flip);
+        expect(rejected.reason).toMatch(/conflict|validation/u);
+        expect((yield* service.get({ planId: base.planId, spaceId: base.spaceId })).version).toBe(
+          2,
+        );
+      }
+      const stale = yield* service
+        .applyImport(
+          {
+            ...base,
+            expectedVersion: 1,
+            mutationId: "stale",
+            conflictDecisions: [{ taskId: "task-a", field: "note", decision: "keep-current" }],
+          },
+          actor,
+        )
+        .pipe(Effect.flip);
+      expect(stale).toMatchObject({ reason: "conflict" });
+
+      const removed = JSON.parse(incoming) as { weeks: Array<{ tasks: Array<{ id: string }> }> };
+      removed.weeks[0]!.tasks = removed.weeks[0]!.tasks.filter((task) => task.id !== "task-a");
+      const removedJson = JSON.stringify(removed);
+      const preview = yield* service.previewImport({
+        planId: base.planId,
+        spaceId: base.spaceId,
+        sourceJson: removedJson,
+      });
+      expect(preview.conflicts[0]?.reason).toBe("locally-edited-task-removed");
+      const unsupported = yield* service
+        .applyImport(
+          {
+            ...base,
+            sourceJson: removedJson,
+            mutationId: "removed-keep",
+            conflictDecisions: [{ taskId: "task-a", field: "note", decision: "keep-current" }],
+          },
+          actor,
+        )
+        .pipe(Effect.flip);
+      expect(unsupported).toMatchObject({
+        reason: "conflict",
+        message: expect.stringContaining("correcting the source"),
+      });
+      const applied = yield* service.applyImport(
+        {
+          ...base,
+          sourceJson: removedJson,
+          mutationId: "removed-incoming",
+          conflictDecisions: [{ taskId: "task-a", field: "note", decision: "use-incoming" }],
+        },
+        actor,
+      );
+      expect(applied.current.weeks[0]?.tasks.some((task) => task.id === "task-a")).toBe(false);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("keeps 217 unrelated tasks identical when resolving one conflict", () =>
+  Effect.gen(function* () {
+    const service = yield* setup("many-tasks");
+    const original = JSON.parse(sourceFixture()) as {
+      weeks: Array<{ tasks: Array<Record<string, unknown>> }>;
+      updated: string;
+    };
+    const extras = Array.from({ length: 217 }, (_, index) => ({
+      id: `extra-${index}`,
+      text: `Synthetic task ${index}`,
+      owner: "Both",
+      day: "Mon",
+      note: `Note ${index}`,
+      done: index % 2 === 0,
+    }));
+    original.weeks[0]!.tasks.push(...extras);
+    const originalJson = JSON.stringify(original);
+    yield* service.applyImport(
+      {
+        planId: "plan-many",
+        spaceId: "space-many-tasks",
+        sourceJson: originalJson,
+        provenance: { sourceRef: "fixture://many-a" },
+        expectedVersion: 0,
+        mutationId: "many-import-a",
+      },
+      actor,
+    );
+    yield* service.patchTask(
+      {
+        planId: "plan-many",
+        spaceId: "space-many-tasks",
+        taskId: "task-a",
+        field: "note",
+        before: "Original note",
+        after: "Local note",
+        reason: "Reviewed",
+        expectedVersion: 1,
+        mutationId: "many-patch",
+        provenance: { kind: "manual" },
+      },
+      actor,
+    );
+    const incoming = structuredClone(original);
+    incoming.updated = "2026-09-28T00:00:00.000Z";
+    incoming.weeks[0]!.tasks[0]!.note = "Incoming note";
+    const incomingJson = JSON.stringify(incoming);
+    const applied = yield* service.applyImport(
+      {
+        planId: "plan-many",
+        spaceId: "space-many-tasks",
+        sourceJson: incomingJson,
+        provenance: { sourceRef: "fixture://many-b" },
+        expectedVersion: 2,
+        mutationId: "many-import-b",
+        conflictDecisions: [{ taskId: "task-a", field: "note", decision: "keep-current" }],
+      },
+      actor,
+    );
+    expect(applied.current.weeks[0]?.tasks.slice(2)).toEqual(extras);
+    expect(applied.current.weeks[0]?.tasks[0]?.note).toBe("Local note");
+    expect(applied.sourceJson).toBe(incomingJson);
+  }).pipe(Effect.provide(testLayer)),
+);
+
 it.effect("resolves source date conflicts separately with a reason and exact history", () =>
   Effect.gen(function* () {
     const service = yield* setup("date-resolution");

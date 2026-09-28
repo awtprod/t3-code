@@ -3,6 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import type { CommandCenterSprintPlanSource } from "@t3tools/contracts";
 
 import {
+  completeImportDecisions,
+  conflictDecisionKey,
   nextPlanWeeks,
   planCarryovers,
   planOwners,
@@ -52,5 +54,43 @@ describe("sprint plan task selection", () => {
     expect(nextPlanWeeks(source, "2026-09-28").map((week) => week.id)).toEqual(["w2"]);
     expect(planOwners(source)).toEqual(["Both", "Production"]);
     expect(planProgress(source)).toEqual({ done: 1, total: 3 });
+  });
+});
+
+describe("import decisions", () => {
+  it("requires one safe explicit choice per previewed conflict", () => {
+    const conflicts = [
+      {
+        taskId: "a",
+        field: "note",
+        baseline: "A",
+        current: "B",
+        incoming: "C",
+        reason: "both-changed",
+      },
+      {
+        taskId: "b",
+        field: "day",
+        baseline: "Mon",
+        current: "Tue",
+        reason: "locally-edited-task-removed",
+      },
+    ] as const;
+    expect(completeImportDecisions(conflicts, {})).toBeNull();
+    expect(
+      completeImportDecisions(conflicts, {
+        [conflictDecisionKey("a", "note")]: "keep-current",
+        [conflictDecisionKey("b", "day")]: "keep-current",
+      }),
+    ).toBeNull();
+    expect(
+      completeImportDecisions(conflicts, {
+        [conflictDecisionKey("a", "note")]: "keep-current",
+        [conflictDecisionKey("b", "day")]: "use-incoming",
+      }),
+    ).toEqual([
+      { taskId: "a", field: "note", decision: "keep-current" },
+      { taskId: "b", field: "day", decision: "use-incoming" },
+    ]);
   });
 });
