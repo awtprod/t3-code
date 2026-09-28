@@ -9,6 +9,12 @@ import {
   shouldRefreshOnInterval,
 } from "./useLiveRefresh";
 
+describe("live refresh cadence", () => {
+  it("waits five minutes between automatic host reads", () => {
+    expect(LIVE_REFRESH_INTERVAL_MS).toBe(5 * 60_000);
+  });
+});
+
 describe("shouldLiveRefresh", () => {
   const at = (now: number, lastRefreshedAt: number, visible = true) =>
     shouldLiveRefresh({ visible, now, lastRefreshedAt });
@@ -85,6 +91,10 @@ describe("shouldRefreshOnInterval", () => {
     expect(tick(LIVE_REFRESH_INTERVAL_MS, LIVE_REFRESH_INTERVAL_MS - 1_000)).toBe(true);
   });
 
+  it("reads on the first interval after an untouched mount", () => {
+    expect(tick(LIVE_REFRESH_INTERVAL_MS + 1_000, 0)).toBe(true);
+  });
+
   it("stops reading for a window left showing on a desk nobody is at", () => {
     expect(tick(LIVE_REFRESH_IDLE_AFTER_MS + 60_000, 0)).toBe(false);
   });
@@ -95,6 +105,6 @@ describe("shouldRefreshOnInterval", () => {
 
   it("starts reading again once the reader touches the window", () => {
     const away = LIVE_REFRESH_IDLE_AFTER_MS + 60_000;
-    expect(tick(away + LIVE_REFRESH_INTERVAL_MS, away)).toBe(true);
+    expect(tick(away + LIVE_REFRESH_MIN_INTERVAL_MS, away)).toBe(true);
   });
 });

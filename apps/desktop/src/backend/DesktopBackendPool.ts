@@ -100,6 +100,7 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import { isRemoteOnlyDesktopBuild } from "../app/remoteOnlyBuild.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 
 const { logWarning: logBackendPoolWarning } =
@@ -176,7 +177,8 @@ export type BackendInstanceFactoryRequirements =
   | ChildProcessSpawner.ChildProcessSpawner
   | HttpClient.HttpClient
   | DesktopObservability.DesktopBackendOutputLogFactory
-  | DesktopTelemetryPublisher.DesktopTelemetryPublisher;
+  | DesktopTelemetryPublisher.DesktopTelemetryPublisher
+  | DesktopWslEnvironment.DesktopWslEnvironment;
 
 interface ActiveRegisteredInstance {
   readonly _tag: "Active";

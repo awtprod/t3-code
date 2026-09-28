@@ -96,7 +96,12 @@ describe("VcsProcess.run", () => {
         extendEnv: false,
       });
 
-      expect(calls[0]?.args).toEqual([...HOST_GIT_HARDENED_CONFIG_ARGS, ...baseInput.args]);
+      expect(calls[0]?.args).toEqual([
+        ...HOST_GIT_HARDENED_CONFIG_ARGS,
+        "-c",
+        `safe.directory=${baseInput.cwd}`,
+        ...baseInput.args,
+      ]);
       expect(calls[0]?.extendEnv).toBe(false);
       expect(calls[0]?.env).not.toHaveProperty("GIT_CONFIG_COUNT");
       expect(calls[0]?.env).not.toHaveProperty("GIT_DIR");
@@ -232,6 +237,24 @@ describe("VcsProcess.run", () => {
       });
       expect(error.message).not.toContain(providerStderr);
       expect(error.message).not.toContain("secret-value");
+    }).pipe(provideLive),
+  );
+
+  it.effect("classifies HTTP 429 responses as rate limits", () =>
+    Effect.gen(function* () {
+      const providerStderr = "HTTP 429: Too Many Requests. request-id=secret-value";
+      const error = yield* run({
+        operation: "test.rate-limit",
+        command: "node",
+        args: ["-e", "process.stderr.write(process.argv[1]); process.exit(1)", providerStderr],
+        cwd: process.cwd(),
+      }).pipe(Effect.flip);
+
+      expect(error).toMatchObject({
+        detail: "API rate limit exceeded.",
+        failureKind: "rate-limited",
+      });
+      expect(error.message).not.toContain(providerStderr);
     }).pipe(provideLive),
   );
 

@@ -60,6 +60,10 @@ describe("Command Center RPC authorization", () => {
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.memoryQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.memorySearch)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationRunGet)).toBe(AuthCommandCenterReadScope);
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.windowsMediaList)).toBe(AuthCommandCenterReadScope);
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.windowsMediaRoots)).toBe(
+      AuthCommandCenterReadScope,
+    );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.commandSubmit)).toBe(AuthCommandCenterOperateScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.runStart)).toBe(AuthCommandCenterOperateScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.spacesSync)).toBe(AuthCommandCenterOperateScope);

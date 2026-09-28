@@ -9,6 +9,7 @@ import {
   PUBLIC_BASELINE_FILE,
   advancePublicBaseline,
   planUpstreamSync,
+  syncBranchName,
   validateUpstreamRef,
 } from "./upstreamSync.ts";
 
@@ -21,7 +22,7 @@ afterEach(() => {
 });
 
 describe("planUpstreamSync", () => {
-  it("keeps the publishing workflow dispatch-only", () => {
+  it("keeps the publishing workflow on a schedule or manual dispatch, never on pushes or PRs", () => {
     const workflow = NodeFS.readFileSync(
       NodePath.resolve(import.meta.dirname, "../../.github/workflows/upstream-sync.yml"),
       "utf8",
@@ -31,8 +32,9 @@ describe("planUpstreamSync", () => {
     expect(triggerStart).toBeGreaterThan(-1);
     expect(triggerEnd).toBeGreaterThan(triggerStart);
     const triggers = workflow.slice(triggerStart, triggerEnd);
+    expect(triggers).toContain("schedule:");
     expect(triggers).toContain("workflow_dispatch:");
-    expect(triggers).not.toMatch(/\n\s+(?:push|pull_request|schedule|workflow_call):/);
+    expect(triggers).not.toMatch(/\n\s+(?:push|pull_request|pull_request_target|workflow_call):/);
   });
 
   it("plans an exact descendant ref without changing the repository", () => {
@@ -49,11 +51,63 @@ describe("planUpstreamSync", () => {
       currentBaseline: fixture.baseline,
       baseCommit: fixture.custom,
       targetCommit: fixture.target,
+      mergeBase: fixture.baseline,
       status: "needs-sync",
-      branchName: `upstream-sync/${fixture.target.slice(0, 12)}`,
+      branchName: "upstream-sync/v1.1.0",
     });
     expect(NodeFS.readFileSync(fixture.baselinePath, "utf8")).toBe(`${fixture.baseline}\n`);
     expect(git(fixture.repositoryPath, ["branch", "--show-current"])).toBe("main");
+  });
+
+  it("plans a tracked branch without an expected commit and names one branch per ref", () => {
+    const fixture = makeRepository();
+    git(fixture.repositoryPath, ["update-ref", "refs/remotes/upstream/main", fixture.target]);
+
+    const plan = planUpstreamSync({
+      repositoryPath: fixture.repositoryPath,
+      upstreamRef: "refs/remotes/upstream/main",
+      initialBaseline: fixture.baseline,
+    });
+
+    expect(plan).toMatchObject({
+      targetCommit: fixture.target,
+      mergeBase: fixture.baseline,
+      status: "needs-sync",
+      branchName: "upstream-sync/main",
+    });
+    expect(syncBranchName("refs/tags/v0.0.39")).toBe("upstream-sync/v0.0.39");
+    expect(() => syncBranchName("main")).toThrow("exact refs/tags");
+  });
+
+  it("accepts a pinned baseline that is a fork merge commit rather than an upstream commit", () => {
+    // After a sync the baseline pins the merge commit on main, which upstream never contains. The
+    // next target must still be accepted as long as it descends from the original T3 Code baseline.
+    const fixture = makeRepository();
+    git(fixture.repositoryPath, ["merge", "--no-ff", "--no-edit", fixture.target]);
+    const syncMerge = git(fixture.repositoryPath, ["rev-parse", "HEAD"]);
+    advancePublicBaseline(fixture.repositoryPath, syncMerge, { initialBaseline: fixture.baseline });
+    git(fixture.repositoryPath, ["commit", "-am", "advance baseline"]);
+
+    git(fixture.repositoryPath, ["checkout", "upstream"]);
+    NodeFS.writeFileSync(NodePath.join(fixture.repositoryPath, "upstream2.txt"), "next\n");
+    git(fixture.repositoryPath, ["add", "upstream2.txt"]);
+    git(fixture.repositoryPath, ["commit", "-m", "upstream next"]);
+    const next = git(fixture.repositoryPath, ["rev-parse", "HEAD"]);
+    git(fixture.repositoryPath, ["tag", "v1.2.0", next]);
+    git(fixture.repositoryPath, ["checkout", "main"]);
+
+    const plan = planUpstreamSync({
+      repositoryPath: fixture.repositoryPath,
+      upstreamRef: "refs/tags/v1.2.0",
+      initialBaseline: fixture.baseline,
+    });
+    expect(plan).toMatchObject({
+      currentBaseline: syncMerge,
+      targetCommit: next,
+      mergeBase: fixture.target,
+      status: "needs-sync",
+      branchName: "upstream-sync/v1.2.0",
+    });
   });
 
   it("reports a no-op when the exact upstream target is already contained", () => {
@@ -98,7 +152,7 @@ describe("planUpstreamSync", () => {
         expectedCommit: divergent,
         initialBaseline: fixture.baseline,
       }),
-    ).toThrow("does not descend from the currently pinned public baseline");
+    ).toThrow("does not descend from the original T3 Code baseline");
   });
 
   it("requires safe exact upstream namespaces and a clean worktree", () => {

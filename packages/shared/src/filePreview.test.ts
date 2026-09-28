@@ -4,6 +4,8 @@ import {
   isWorkspaceBrowserPreviewPath,
   isWorkspaceImagePreviewPath,
   isWorkspacePreviewEntryPath,
+  isWorkspaceVideoPreviewPath,
+  workspaceVideoPreviewMimeType,
 } from "./filePreview.ts";
 
 describe("workspace file previews", () => {
@@ -31,6 +33,29 @@ describe("workspace file previews", () => {
     "rejects non-preview path %s",
     (path) => {
       expect(isWorkspacePreviewEntryPath(path)).toBe(false);
+    },
+  );
+
+  it.each([
+    ["clip.mp4", "video/mp4"],
+    ["renders/final.MOV", "video/quicktime"],
+    ["renders/odd#1?.webm", "video/webm"],
+    ["b.m4v", "video/mp4"],
+    ["c.ogv", "video/ogg"],
+  ])("recognizes video preview path %s", (path, mimeType) => {
+    expect(isWorkspaceVideoPreviewPath(path)).toBe(true);
+    expect(workspaceVideoPreviewMimeType(path)).toBe(mimeType);
+    // Videos stay out of the generic preview-entry set (file search, panel).
+    expect(isWorkspacePreviewEntryPath(path)).toBe(false);
+  });
+
+  // Filesystem paths: `?`/`#` are literal filename characters, never stripped,
+  // so client classification matches the exact file the server resolves.
+  it.each(["clip.mp4.txt", "clip.mkv", "mp4", "notes.md", "a.webm?v=2", "data.mp4#x", "a.mp4?/b"])(
+    "rejects non-video path %s",
+    (path) => {
+      expect(isWorkspaceVideoPreviewPath(path)).toBe(false);
+      expect(workspaceVideoPreviewMimeType(path)).toBeNull();
     },
   );
 });

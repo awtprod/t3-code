@@ -296,6 +296,38 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.connectionId]),
       },
     }),
+    publishConnections: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:publish-connections",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionsQuery,
+      staleTimeMs: 5_000,
+    }),
+    beginPublishConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:publish-connection-setup-begin",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.provider]),
+      },
+    }),
+    completePublishConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:publish-connection-setup-complete",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sessionId]),
+      },
+    }),
+    removePublishConnection: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:publish-connection-remove",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionRemove,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.provider]),
+      },
+    }),
     eventReplay: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:event-replay",
       tag: COMMAND_CENTER_WS_METHODS.eventsReplay,
@@ -441,6 +473,26 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       tag: COMMAND_CENTER_WS_METHODS.googleRead,
       scheduler: commandScheduler,
       concurrency: { mode: "parallel" },
+    }),
+    // Windows media picker: read-only browse of the configured Windows host.
+    // "latest" per environment so fast folder clicks drop stale listings.
+    windowsMediaRoots: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:windows-media-roots",
+      tag: COMMAND_CENTER_WS_METHODS.windowsMediaRoots,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId }) => JSON.stringify([environmentId, "roots"]),
+      },
+    }),
+    windowsMediaList: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:windows-media-list",
+      tag: COMMAND_CENTER_WS_METHODS.windowsMediaList,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId }) => JSON.stringify([environmentId, "list"]),
+      },
     }),
   };
 }

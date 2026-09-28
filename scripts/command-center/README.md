@@ -108,6 +108,7 @@ the hardened user-systemd example in `examples/systemd/`.
 
 ## Upstream sync
 
-`upstream-sync.ts plan` verifies an exact upstream ref and full expected commit against the pinned
-public baseline without fetching or writing Git state. The dispatch-only GitHub workflow owns merge,
-verification, branch push, and draft PR creation. See `docs/operations/upstream-sync.md`.
+`upstream-sync.ts plan` verifies an exact upstream ref (and, optionally, the full commit it must
+resolve to) against the pinned public baseline without fetching or writing Git state. The daily
+GitHub workflow owns conflict detection, merge, verification, branch push, and PR creation. See
+`docs/operations/upstream-sync.md`.

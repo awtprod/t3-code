@@ -3,6 +3,7 @@ import type {
   RelayAgentActivityState,
 } from "@t3tools/contracts/relay";
 import * as NodeCryptoLayer from "@effect/platform-node/NodeCrypto";
+import * as Cloudflare from "alchemy/Cloudflare";
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
@@ -184,6 +185,7 @@ function makeLayer(input: {
   }>;
   readonly webPushSendResult?: WebPushClient.WebPushDeliveryResult;
   readonly invalidatedEndpoints?: Array<string>;
+  readonly queueSendFailure?: boolean;
 }) {
   return ApnsDeliveries.layer.pipe(
     Layer.provide(ApnsClient.layer),
@@ -226,9 +228,16 @@ function makeLayer(input: {
         } satisfies AgentActivityRows.AgentActivityRows["Service"]),
         Layer.succeed(ApnsDeliveryQueue.ApnsDeliveryQueueSender, {
           send: (body) =>
-            Effect.sync(() => {
-              input.queuedJobs?.push(body);
-            }),
+            input.queueSendFailure
+              ? Effect.fail(
+                  new Cloudflare.Queues.SendError({
+                    message: "queue unavailable",
+                    cause: new Error("queue unavailable"),
+                  }),
+                )
+              : Effect.sync(() => {
+                  input.queuedJobs?.push(body);
+                }),
         }),
         Layer.succeed(DeliveryAttempts.DeliveryAttempts, {
           record: (attempt) =>
@@ -1765,6 +1774,115 @@ describe("ApnsDeliveries", () => {
     }).pipe(Effect.provide(makeLayer({ attempts, webPushSends })));
   });
 
+  it.effect("queues prospect pushes only for globally opted-in browser subscriptions", () => {
+    const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
+    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const target = {
+      userId: "dev:julius",
+      deviceId: "web-device-1",
+      endpoint: "https://push.example.test/subscription/prospect",
+      p256dh: "p256dh-key",
+      auth: "auth-secret",
+      preferences: {
+        liveActivitiesEnabled: false,
+        notificationsEnabled: true,
+        notifyOnApproval: false,
+        notifyOnInput: false,
+        notifyOnCompletion: false,
+        notifyOnFailure: false,
+      },
+    } satisfies WebPushSubscriptions.WebPushTarget;
+    return Effect.gen(function* () {
+      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const results = yield* deliveries.sendProspectWebPushForUser({
+        userId: "dev:julius",
+        notification: {
+          type: "prospect",
+          itemId: "prospect-review:lead-1",
+          spaceId: "space-1",
+          evaluationId: "evaluation-1",
+          environmentId: state.environmentId,
+          title: "New prospect",
+          body: "Review it.",
+          deepLink: "/prospects/prospect-review%3Alead-1",
+        },
+      });
+      expect(results).toMatchObject([{ deviceId: "web-device-1", queued: true }]);
+      expect(queuedJobs[0]?.payload.notification).toMatchObject({
+        type: "prospect",
+        itemId: "prospect-review:lead-1",
+      });
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          attempts,
+          queuedJobs,
+          webPushTargets: [
+            target,
+            {
+              ...target,
+              deviceId: "web-device-muted",
+              preferences: { ...target.preferences, notificationsEnabled: false },
+            },
+          ],
+        }),
+      ),
+    );
+  });
+
+  it.effect("turns a prospect queue failure into an observable failed receipt", () => {
+    const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
+    return Effect.gen(function* () {
+      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      expect(
+        yield* deliveries.sendProspectWebPushForUser({
+          userId: "dev:julius",
+          notification: {
+            type: "prospect",
+            itemId: "prospect-review:lead-1",
+            spaceId: "space-1",
+            evaluationId: "evaluation-1",
+            environmentId: state.environmentId,
+            title: "New prospect",
+            body: "Review it.",
+            deepLink: "/prospects/prospect-review%3Alead-1",
+          },
+        }),
+      ).toMatchObject([
+        {
+          deviceId: "web-device-1",
+          ok: false,
+          queued: false,
+          apnsReason: "queue_failed:send",
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          attempts,
+          queueSendFailure: true,
+          webPushTargets: [
+            {
+              userId: "dev:julius",
+              deviceId: "web-device-1",
+              endpoint: "https://push.example.test/subscription/prospect",
+              p256dh: "p256dh-key",
+              auth: "auth-secret",
+              preferences: {
+                liveActivitiesEnabled: false,
+                notificationsEnabled: true,
+                notifyOnApproval: true,
+                notifyOnInput: true,
+                notifyOnCompletion: true,
+                notifyOnFailure: true,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+  });
+
   it.effect("drops the stored subscription after a permanent web push rejection", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
     const invalidatedEndpoints: Array<string> = [];
@@ -1777,13 +1895,14 @@ describe("ApnsDeliveries", () => {
       webPushAuth: "auth-secret",
       aggregate: null,
       notification: {
-        title: "Thread",
-        body: "Working: Project",
+        type: "prospect",
+        itemId: "prospect-review:lead-1",
+        spaceId: "space-1",
+        evaluationId: "evaluation-1",
         environmentId: state.environmentId,
-        threadId: state.threadId,
-        deepLink: "/",
-        phase: state.phase,
-        updatedAt: state.updatedAt,
+        title: "New prospect",
+        body: "Review it.",
+        deepLink: "/prospects/prospect-review%3Alead-1",
       },
       createdAt: "1970-01-01T00:00:00.000Z",
       expiresAt: "1970-01-01T00:10:00.000Z",

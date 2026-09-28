@@ -1,20 +1,25 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { AuthSessionId, EnvironmentId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as AuthSessions from "../persistence/AuthSessions.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 
-const makeServerConfigLayer = (
-  overrides?: Partial<Pick<ServerConfig.ServerConfig["Service"], "desktopBootstrapToken">>,
-) =>
+const makeServerConfigLayer = (overrides?: Partial<ServerConfig.ServerConfig["Service"]>) =>
   Layer.effect(
     ServerConfig.ServerConfig,
     Effect.gen(function* () {
@@ -26,14 +31,79 @@ const makeServerConfigLayer = (
     }),
   ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-auth-session-test-" })));
 
+const makeServerEnvironmentLayer = (environmentId: EnvironmentId) =>
+  Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+    getEnvironmentId: Effect.succeed(environmentId),
+  });
+
 const makeSessionStoreLayer = (
-  overrides?: Partial<Pick<ServerConfig.ServerConfig["Service"], "desktopBootstrapToken">>,
+  overrides?: Partial<ServerConfig.ServerConfig["Service"]>,
+  environmentId = EnvironmentId.make("test-environment"),
 ) =>
   SessionStore.layer.pipe(
     Layer.provide(SqlitePersistenceMemory),
     Layer.provide(ServerSecretStore.layer),
+    Layer.provide(makeServerEnvironmentLayer(environmentId)),
     Layer.provide(makeServerConfigLayer(overrides)),
   );
+
+const makeSessionStoreWithRepositoryLayer = (
+  repository: AuthSessions.AuthSessionRepository["Service"],
+) =>
+  Layer.effect(SessionStore.SessionStore, SessionStore.make).pipe(
+    Layer.provide(Layer.succeed(AuthSessions.AuthSessionRepository, repository)),
+    Layer.provide(ServerSecretStore.layer),
+    Layer.provide(SqlitePersistenceMemory),
+    Layer.provide(makeServerEnvironmentLayer(EnvironmentId.make("test-environment"))),
+    Layer.provide(makeServerConfigLayer()),
+  );
+
+const connectionSessionId = AuthSessionId.make("connection-test-session");
+const connectionSessionRecord = (
+  lastConnectedAt: DateTime.Utc | null,
+): AuthSessions.AuthSessionRecord => ({
+  sessionId: connectionSessionId,
+  subject: "connection-test",
+  scopes: ["orchestration:read"],
+  method: "bearer-access-token",
+  client: {
+    label: null,
+    ipAddress: null,
+    userAgent: null,
+    deviceType: "unknown",
+    os: null,
+    browser: null,
+  },
+  issuedAt: DateTime.makeUnsafe(0),
+  expiresAt: DateTime.makeUnsafe("2100-01-01T00:00:00.000Z"),
+  lastConnectedAt,
+  revokedAt: null,
+});
+
+const makeConnectionRepositoryHarness = (connectionFailure?: PersistenceSqlError) =>
+  Effect.gen(function* () {
+    const writes = yield* Ref.make<ReadonlyArray<AuthSessions.SetAuthSessionConnectionInput>>([]);
+    const lastConnectedAt = yield* Ref.make<DateTime.Utc | null>(null);
+    const readRecord = Ref.get(lastConnectedAt).pipe(Effect.map(connectionSessionRecord));
+    const repository = AuthSessions.AuthSessionRepository.of({
+      create: () => Effect.void,
+      getById: () => readRecord.pipe(Effect.map(Option.some)),
+      listActive: () => readRecord.pipe(Effect.map((record) => [record])),
+      revoke: () => Effect.succeed(false),
+      revokeAllExcept: () => Effect.succeed([]),
+      setConnection: (input) =>
+        Ref.update(writes, (current) => [...current, input]).pipe(
+          Effect.andThen(
+            connectionFailure === undefined
+              ? input.lastConnectedAt === null
+                ? Effect.void
+                : Ref.set(lastConnectedAt, input.lastConnectedAt)
+              : Effect.fail(connectionFailure),
+          ),
+        ),
+    });
+    return { repository, writes };
+  });
 
 const repositoryFailure = new PersistenceSqlError({
   operation: "AuthSessionRepository.getById:query",
@@ -46,7 +116,7 @@ const failingSessionLookupRepositoryLayer = Layer.succeed(AuthSessions.AuthSessi
   listActive: () => Effect.succeed([]),
   revoke: () => Effect.fail(repositoryFailure),
   revokeAllExcept: () => Effect.fail(repositoryFailure),
-  setLastConnectedAt: () => Effect.void,
+  setConnection: () => Effect.void,
 });
 
 const failingSessionLookupCredentialLayer = Layer.effect(
@@ -56,10 +126,32 @@ const failingSessionLookupCredentialLayer = Layer.effect(
   Layer.provide(failingSessionLookupRepositoryLayer),
   Layer.provide(ServerSecretStore.layer),
   Layer.provide(SqlitePersistenceMemory),
+  Layer.provide(makeServerEnvironmentLayer(EnvironmentId.make("test-environment"))),
   Layer.provide(makeServerConfigLayer()),
 );
 
 it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
+  it.effect("keys remote cookies by environment identity instead of state directory", () =>
+    Effect.gen(function* () {
+      const cookieName = (stateDir: string, environmentId: EnvironmentId) =>
+        Effect.gen(function* () {
+          const sessions = yield* SessionStore.SessionStore;
+          return sessions.cookieName;
+        }).pipe(
+          Effect.provide(
+            makeSessionStoreLayer({ mode: "web", host: "192.168.1.50", stateDir }, environmentId),
+          ),
+        );
+
+      const original = yield* cookieName("/srv/t3-one", EnvironmentId.make("environment-one"));
+      const moved = yield* cookieName("/srv/t3-moved", EnvironmentId.make("environment-one"));
+      const other = yield* cookieName("/srv/t3-one", EnvironmentId.make("environment-two"));
+
+      expect(moved).toBe(original);
+      expect(other).not.toBe(original);
+    }),
+  );
+
   it.effect("issues and verifies signed browser session tokens", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionStore.SessionStore;
@@ -277,6 +369,71 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
     }).pipe(Effect.provide(makeSessionStoreLayer())),
   );
 
+  it.effect("consolidates connection metadata into one repository write per connect", () =>
+    Effect.gen(function* () {
+      const { repository, writes } = yield* makeConnectionRepositoryHarness();
+
+      yield* Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+
+        yield* TestClock.adjust(Duration.seconds(1));
+        yield* sessions.markConnected(connectionSessionId, {
+          surface: "mobile",
+          appVersion: "1.2.0",
+        });
+        const afterFirstConnect = yield* Ref.get(writes);
+
+        expect(afterFirstConnect).toHaveLength(1);
+        expect(afterFirstConnect[0]).toMatchObject({
+          sessionId: connectionSessionId,
+          surface: "mobile",
+          appVersion: "1.2.0",
+        });
+        expect(afterFirstConnect[0]?.lastConnectedAt).not.toBeNull();
+        const firstConnectedAt = afterFirstConnect[0]?.lastConnectedAt;
+
+        yield* TestClock.adjust(Duration.seconds(1));
+        yield* sessions.markConnected(connectionSessionId, { appVersion: "1.3.0" });
+        const afterConcurrentConnect = yield* Ref.get(writes);
+
+        expect(afterConcurrentConnect).toHaveLength(2);
+        expect(afterConcurrentConnect[1]).toEqual({
+          sessionId: connectionSessionId,
+          lastConnectedAt: null,
+          surface: null,
+          appVersion: "1.3.0",
+        });
+
+        yield* sessions.markConnected(connectionSessionId);
+        expect(yield* Ref.get(writes)).toHaveLength(2);
+
+        yield* sessions.markDisconnected(connectionSessionId);
+        yield* sessions.markDisconnected(connectionSessionId);
+        yield* sessions.markDisconnected(connectionSessionId);
+        expect((yield* sessions.listActive())[0]?.connected).toBe(false);
+
+        yield* TestClock.adjust(Duration.seconds(1));
+        yield* sessions.markConnected(connectionSessionId);
+        const afterReconnect = yield* Ref.get(writes);
+
+        expect(afterReconnect).toHaveLength(3);
+        expect(afterReconnect[2]).toMatchObject({
+          sessionId: connectionSessionId,
+          surface: null,
+          appVersion: null,
+        });
+        expect(afterReconnect[2]?.lastConnectedAt).not.toBeNull();
+        expect(afterReconnect[2]?.lastConnectedAt?.toString()).not.toBe(
+          firstConnectedAt?.toString(),
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.merge(makeSessionStoreWithRepositoryLayer(repository), TestClock.layer()),
+        ),
+      );
+    }),
+  );
+
   it.effect("persists lastConnectedAt on first connect and updates it after reconnect", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionStore.SessionStore;
@@ -317,5 +474,78 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
       expect(afterReconnect[0]?.lastConnectedAt).not.toBeNull();
       expect(afterReconnect[0]?.lastConnectedAt?.toString()).not.toBe(firstConnectedAt?.toString());
     }).pipe(Effect.provide(Layer.merge(makeSessionStoreLayer(), TestClock.layer()))),
+  );
+  it.effect("retains partial connection metadata in SQLite", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const sql = yield* SqlClient.SqlClient;
+      const issued = yield* sessions.issue({
+        subject: "client-connection-test",
+        method: "bearer-access-token",
+      });
+      const readRow = sql<{
+        readonly surface: string | null;
+        readonly appVersion: string | null;
+        readonly lastConnectedAt: string | null;
+      }>`
+        SELECT
+          client_surface AS "surface",
+          client_app_version AS "appVersion",
+          last_connected_at AS "lastConnectedAt"
+        FROM auth_sessions
+        WHERE session_id = ${issued.sessionId}
+      `;
+
+      yield* TestClock.adjust(Duration.seconds(1));
+      yield* sessions.markConnected(issued.sessionId, {
+        surface: "mobile",
+        appVersion: "1.2.0",
+      });
+      const first = (yield* readRow)[0];
+      expect(first).toMatchObject({ surface: "mobile", appVersion: "1.2.0" });
+      expect(first?.lastConnectedAt).not.toBeNull();
+
+      // A partial report (old or minimal client) must not null out stored data.
+      yield* TestClock.adjust(Duration.seconds(1));
+      yield* sessions.markConnected(issued.sessionId, { appVersion: "1.3.0" });
+      const second = (yield* readRow)[0];
+      expect(second).toEqual({
+        surface: "mobile",
+        appVersion: "1.3.0",
+        lastConnectedAt: first?.lastConnectedAt,
+      });
+
+      yield* sessions.markConnected(issued.sessionId);
+      expect((yield* readRow)[0]).toEqual(second);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(makeSessionStoreLayer(), SqlitePersistenceMemory, TestClock.layer()),
+      ),
+    ),
+  );
+
+  it.effect("cleans up an acquired connection when the connection write fails", () =>
+    Effect.gen(function* () {
+      const connectionFailure = new PersistenceSqlError({
+        operation: "AuthSessionRepository.setConnection:query",
+        detail: "sqlite is unavailable",
+      });
+      const { repository, writes } = yield* makeConnectionRepositoryHarness(connectionFailure);
+      const useEntered = yield* Deferred.make<void>();
+
+      yield* Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+
+        yield* Effect.acquireUseRelease(
+          sessions.markConnected(connectionSessionId, { surface: "web" }),
+          () => Deferred.succeed(useEntered, undefined),
+          () => sessions.markDisconnected(connectionSessionId),
+        );
+        yield* Deferred.await(useEntered);
+
+        expect(yield* Ref.get(writes)).toHaveLength(1);
+        expect((yield* sessions.listActive())[0]?.connected).toBe(false);
+      }).pipe(Effect.provide(makeSessionStoreWithRepositoryLayer(repository)));
+    }),
   );
 });

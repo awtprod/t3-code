@@ -56,6 +56,10 @@ export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.googleConnectionSetupBegin, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.googleConnectionSetupComplete, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.googleConnectionRemove, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.publishConnectionsQuery, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.publishConnectionRemove, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.memoryQuery, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.memorySearch, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.itemCreate, AuthCommandCenterOperateScope],
@@ -74,6 +78,8 @@ export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.observationsImport, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.observationsCorrect, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.observationsRetire, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.windowsMediaList, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.windowsMediaRoots, AuthCommandCenterReadScope],
 ] as const satisfies ReadonlyArray<readonly [string, AuthEnvironmentScope]>;
 
 const COMMAND_CENTER_RPC_METHODS = new Set<string>(

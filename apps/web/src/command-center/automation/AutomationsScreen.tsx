@@ -315,7 +315,7 @@ export function AutomationsScreen({
                     }
                     onEnvironmentChange?.(nextEnvironmentId);
                   }}
-                  title={
+                  aria-description={
                     hasUnsavedChanges
                       ? "Switching environments will ask before discarding unsaved changes"
                       : "Automations are stored and run by this environment"

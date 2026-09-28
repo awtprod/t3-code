@@ -4,7 +4,7 @@
 - `vp run dev:server` — Starts just the WebSocket server. The server process runs on Bun (`@effect/platform-bun` + `BunPtyAdapter`), but task running uses `vp run`.
 - `vp run dev:web` — Starts just the Vite dev server for the web app.
 - Dev commands implicitly use `~/.command-center/dev`, keeping development state separate from `~/.command-center/userdata`. An explicit runtime directory stores state under `<path>/userdata`; the base directory remains available for caches, worktrees, and other shared data.
-- `upstream:plan` validates an exact, fetched T3 Code ref and full commit against the pinned public baseline. It is read-only; the manually dispatched upstream-sync workflow owns branch and draft-PR creation.
+- `upstream:plan` validates an exact, fetched T3 Code ref (optionally pinned to a full commit) against the pinned public baseline. It is read-only; the daily upstream-sync workflow owns conflict checks, branch, and PR creation.
 - `operations:rollback-manifest` previews or explicitly writes a private, digest-bound rollback manifest. It never controls services or routing and refuses to overwrite an existing file.
 - `operations:preflight` verifies backups, rollback snapshots, runtime isolation, disk space, loopback binding, and candidate health. Any failed check returns `cutover-refused`; the command cannot perform cutover.
 - Web dev commands do not auto-open a browser. Open the one-time pairing URL printed by the server so the first browser navigation is authenticated. Set `T3CODE_NO_BROWSER=0` only when interactive auto-open is intentional.

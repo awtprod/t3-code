@@ -2,7 +2,6 @@ import { autoAnimate } from "@formkit/auto-animate";
 import { useAtomValue } from "@effect/atom-react";
 import {
   canSnooze,
-  effectiveSettled,
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
@@ -919,7 +918,6 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                   <button
                     type="button"
                     aria-label="Dismiss Woke notification"
-                    title="Dismiss Woke notification"
                     onClick={handleAcknowledgeWokeClick}
                     className="inline-flex cursor-pointer items-center gap-1 rounded-sm text-xs font-medium text-amber-700 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring dark:text-amber-300"
                   >
@@ -1029,7 +1027,6 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                   <button
                     type="button"
                     aria-label="Unpin thread"
-                    title="Unpin thread"
                     onClick={handleUnpinClick}
                     className="inline-flex cursor-pointer items-center rounded-sm text-muted-foreground/65 outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                   >
@@ -1065,7 +1062,6 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                       <button
                         type="button"
                         aria-label="Dismiss Woke notification"
-                        title="Dismiss Woke notification"
                         onClick={handleAcknowledgeWokeClick}
                         className={cn(
                           "inline-flex cursor-pointer items-center gap-1 rounded-sm font-medium outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring",
@@ -1315,7 +1311,6 @@ export default function SidebarV2() {
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const autoSettleAfterDays = useClientSettings((s) => s.sidebarAutoSettleAfterDays);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -1757,10 +1752,7 @@ export default function SidebarV2() {
           // arise from stale or raced writes.)
         } else if (thread.pinnedAt != null) {
           pinned.push(thread);
-        } else if (
-          supportsSettlement &&
-          effectiveSettled(thread, { now, autoSettleAfterDays, changeRequestState })
-        ) {
+        } else if (supportsSettlement && thread.settledOverride === "settled") {
           settled.push(thread);
         } else {
           active.push(thread);
@@ -1781,7 +1773,6 @@ export default function SidebarV2() {
         snoozeNow: preciseNow,
       };
     }, [
-      autoSettleAfterDays,
       changeRequestStateByKey,
       nowMinute,
       scopedProjectKeys,
@@ -2981,7 +2972,6 @@ export default function SidebarV2() {
                               <button
                                 type="button"
                                 aria-label={`Project actions for ${project.displayName}`}
-                                title={`Project actions for ${project.displayName}`}
                                 className="ml-auto inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground/55 outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                                 onPointerDown={(event) => event.stopPropagation()}
                                 onClick={(event) => {
@@ -3335,7 +3325,6 @@ export default function SidebarV2() {
                       variant="ghost"
                       className="size-4 shrink-0 rounded-sm"
                       aria-label="Copy project path"
-                      title="Copy project path"
                       onClick={() =>
                         copyPathToClipboard(member.workspaceRoot, { path: member.workspaceRoot })
                       }

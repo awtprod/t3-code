@@ -1,9 +1,12 @@
 import {
   CommandId,
   type ClientOrchestrationCommand,
+  type EfficiencyDecision,
   EventId,
+  MessageId,
   OrchestrationDispatchCommandError,
   type OrchestrationCommand,
+  type OrchestrationThreadShell,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -18,14 +21,32 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
-import { resolveInteractiveEfficiency } from "../efficiency/EfficiencyRouting.ts";
+import {
+  interactiveTurnMatchesRule,
+  resolveInteractiveEfficiency,
+  type TierJudgmentInput,
+} from "../efficiency/EfficiencyRouting.ts";
+import { Judge } from "../efficiency/Judge.ts";
+import {
+  buildTierJudgmentRequest,
+  findRouteContext,
+  tierJudgmentFromAnswers,
+} from "../efficiency/TierJudgment.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import { ProjectionThreadMessageRepositoryLive } from "../persistence/Layers/ProjectionThreadMessages.ts";
+import { ProjectionTurnRepositoryLive } from "../persistence/Layers/ProjectionTurns.ts";
+import { ProjectionThreadMessageRepository } from "../persistence/Services/ProjectionThreadMessages.ts";
+import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
 import {
   resolveSandboxImage,
   resolveSandboxPreviewProxyImage,
 } from "../sandbox/SandboxRuntimeManager.ts";
+import {
+  resolveSandboxGitBase,
+  SandboxGitBaseUnavailableError,
+} from "../sandbox/sandboxGitBase.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { normalizeDispatchCommand } from "./Normalizer.ts";
@@ -35,6 +56,7 @@ import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.t
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+const isSandboxGitBaseUnavailableError = Schema.is(SandboxGitBaseUnavailableError);
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
@@ -86,6 +108,17 @@ export interface OrchestrationCommandDispatcherShape {
   readonly dispatchNormalized: (
     command: OrchestrationCommand,
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
+  /**
+   * Token-efficiency routing for a normalized command, without dispatching it.
+   * An auto-routed `thread.turn.start` comes back carrying its
+   * `efficiencyDecision` (and the decided model / tier on any bootstrap
+   * `createThread`); every other command is returned unchanged. The WebSocket
+   * transport dispatches through its own bootstrap path, so it calls this
+   * first rather than `dispatchNormalized`.
+   */
+  readonly resolve: (
+    command: OrchestrationCommand,
+  ) => Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError>;
 }
 
 /**
@@ -104,6 +137,9 @@ export const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerRegistry = yield* ProviderRegistry;
   const serverSettings = yield* ServerSettingsService;
+  const judge = yield* Judge;
+  const projectionTurns = yield* ProjectionTurnRepository;
+  const projectionMessages = yield* ProjectionThreadMessageRepository;
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const projectFileLoader = yield* T3ProjectFileLoader;
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -312,24 +348,16 @@ export const make = Effect.gen(function* () {
         }
 
         if (bootstrap?.prepareWorktree) {
-          let worktreeBaseRef = bootstrap.prepareWorktree.baseBranch;
-          if (bootstrap.prepareWorktree.startFromOrigin) {
-            yield* gitWorkflow.fetchRemote({
-              cwd: bootstrap.prepareWorktree.projectCwd,
-              remoteName: "origin",
-            });
-            const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
-              cwd: bootstrap.prepareWorktree.projectCwd,
-              refName: bootstrap.prepareWorktree.baseBranch,
-              fallbackRemoteName: "origin",
-            });
-            worktreeBaseRef = resolvedRemoteBase.commitSha;
-          }
+          const prepareWorktree = bootstrap.prepareWorktree;
+          const worktreeBaseRef = yield* GitWorkflowService.resolveWorktreeBaseRef(
+            gitWorkflow,
+            prepareWorktree,
+          );
           const worktree = yield* gitWorkflow.createWorktree({
-            cwd: bootstrap.prepareWorktree.projectCwd,
+            cwd: prepareWorktree.projectCwd,
             refName: worktreeBaseRef,
-            newRefName: bootstrap.prepareWorktree.branch,
-            baseRefName: bootstrap.prepareWorktree.baseBranch,
+            newRefName: prepareWorktree.branch,
+            baseRefName: prepareWorktree.baseBranch,
             path: null,
           });
           targetWorktreePath = worktree.worktree.path;
@@ -356,6 +384,74 @@ export const make = Effect.gen(function* () {
       );
     });
 
+  /**
+   * The thread's current route: the latest turn's decision (for sticky
+   * routing), the text of the message that started the route, and the turn
+   * count. Best-effort — a lookup failure only drops the context.
+   */
+  const loadRouteContext = (
+    thread: OrchestrationThreadShell | undefined,
+  ): Effect.Effect<{
+    readonly priorTurnCount: number;
+    readonly priorDecision?: EfficiencyDecision;
+    readonly taskMessage?: string;
+  }> =>
+    Effect.gen(function* () {
+      const latestTurnId = thread?.latestTurn?.turnId;
+      if (thread === undefined || latestTurnId === undefined) return { priorTurnCount: 0 };
+      const turns = yield* projectionTurns.listByThreadId({ threadId: thread.id });
+      const context = findRouteContext(turns, latestTurnId);
+      const taskMessage =
+        context.taskMessageId === undefined
+          ? undefined
+          : Option.getOrUndefined(
+              yield* projectionMessages.getByMessageId({
+                messageId: MessageId.make(context.taskMessageId),
+              }),
+            )?.text;
+      return {
+        priorTurnCount: Math.max(1, turns.filter((turn) => turn.turnId !== null).length),
+        ...(context.priorDecision === undefined ? {} : { priorDecision: context.priorDecision }),
+        ...(taskMessage === undefined ? {} : { taskMessage }),
+      };
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logDebug("efficiency route context unavailable", { error }).pipe(
+          Effect.as({ priorTurnCount: thread?.latestTurn ? 1 : 0 }),
+        ),
+      ),
+    );
+
+  const resolveTierJudgment = (
+    command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+    thread: OrchestrationThreadShell | undefined,
+    route: { readonly priorTurnCount: number; readonly taskMessage?: string },
+  ): Effect.Effect<TierJudgmentInput | undefined> => {
+    const projectId = command.bootstrap?.createThread?.projectId ?? thread?.projectId;
+    const threadTitle = thread?.title ?? command.bootstrap?.createThread?.title;
+    return judge
+      .ask(
+        buildTierJudgmentRequest({
+          message: command.message.text,
+          attachmentCount: command.message.attachments.length,
+          interactionMode: command.interactionMode,
+          ...(projectId === undefined ? {} : { projectId }),
+          priorTurnCount: route.priorTurnCount,
+          ...(threadTitle === undefined ? {} : { threadTitle }),
+          ...(route.taskMessage === undefined ? {} : { taskMessage: route.taskMessage }),
+        }),
+        { threadId: command.threadId },
+      )
+      .pipe(
+        Effect.map((result) => tierJudgmentFromAnswers(result.answers, result.model)),
+        Effect.catchTag("JudgeError", (error) =>
+          Effect.logDebug("tier judgment skipped", { reason: error.reason }).pipe(
+            Effect.as(undefined),
+          ),
+        ),
+      );
+  };
+
   const resolveEfficiency = (
     command: OrchestrationCommand,
   ): Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError> => {
@@ -375,11 +471,30 @@ export const make = Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings;
       if (!settings.efficiency.enabled) return command;
       const providers = yield* providerRegistry.getProviders;
+      // An explicit rule always wins over a judgment, so skip the judge
+      // round-trip (its latency and cost) entirely when a rule already matches
+      // this turn — the judgment would only be recorded and discarded.
+      const ruleMatches = interactiveTurnMatchesRule({
+        settings: settings.efficiency,
+        projectId: command.bootstrap?.createThread?.projectId ?? thread?.projectId,
+        interactionMode: command.interactionMode,
+        attachmentCount: command.message.attachments.length,
+      });
+      // Resolve an optional judgment first. Any judge error (or a disabled
+      // judge) leaves `tierJudgment` undefined, so routing proceeds exactly as
+      // it does today (a prior decision is only reused on a judged
+      // continuation).
+      const judging = !ruleMatches && settings.efficiency.tierJudgment.enabled && judge.enabled;
+      const route = judging ? yield* loadRouteContext(thread) : undefined;
+      const tierJudgment =
+        route === undefined ? undefined : yield* resolveTierJudgment(command, thread, route);
       return resolveInteractiveEfficiency({
         command,
         ...(thread === undefined ? {} : { thread }),
         settings: settings.efficiency,
         providers,
+        ...(tierJudgment === undefined ? {} : { tierJudgment }),
+        ...(route?.priorDecision === undefined ? {} : { priorDecision: route.priorDecision }),
       }).command;
     }).pipe(
       Effect.mapError((cause) =>
@@ -424,28 +539,16 @@ export const make = Effect.gen(function* () {
         resolveSandboxPreviewProxyImage() === undefined
       )
         return resolvedCommand;
-      const local = yield* gitWorkflow
-        .localStatus({ cwd: project.workspaceRoot })
-        .pipe(
-          Effect.mapError((cause) =>
-            toDispatchCommandError(cause, "Failed to inspect sandbox Git base"),
-          ),
-        );
-      if (!local.isRepo || local.refName === null)
-        return yield* new OrchestrationDispatchCommandError({
-          message: "Isolated threads require a Git repository with a selected branch.",
-        });
-      const base = yield* gitWorkflow
-        .resolveRemoteTrackingCommit({
-          cwd: project.workspaceRoot,
-          refName: local.refName,
-          fallbackRemoteName: "origin",
-        })
-        .pipe(
-          Effect.mapError((cause) =>
-            toDispatchCommandError(cause, "Failed to resolve immutable sandbox Git base"),
-          ),
-        );
+      const base = yield* resolveSandboxGitBase({
+        gitWorkflow,
+        cwd: project.workspaceRoot,
+      }).pipe(
+        Effect.mapError((cause) =>
+          isSandboxGitBaseUnavailableError(cause)
+            ? new OrchestrationDispatchCommandError({ message: cause.message })
+            : toDispatchCommandError(cause, "Failed to resolve the sandbox Git base"),
+        ),
+      );
       const sandboxFields = {
         sandboxConfig: {
           ...(projectFile?.sandbox?.limits === undefined
@@ -496,7 +599,15 @@ export const make = Effect.gen(function* () {
       Effect.flatMap(dispatchNormalized),
     );
 
-  return OrchestrationCommandDispatcher.of({ dispatch, dispatchNormalized });
+  return OrchestrationCommandDispatcher.of({
+    dispatch,
+    dispatchNormalized,
+    resolve: resolveEfficiency,
+  });
 });
 
-export const layer = Layer.effect(OrchestrationCommandDispatcher, make);
+export const layer = Layer.effect(OrchestrationCommandDispatcher, make).pipe(
+  Layer.provide(
+    Layer.mergeAll(ProjectionTurnRepositoryLive, ProjectionThreadMessageRepositoryLive),
+  ),
+);

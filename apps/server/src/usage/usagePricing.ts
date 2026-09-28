@@ -44,6 +44,9 @@ function finiteNumber(value: unknown): number | null {
  * Entries without both an input and an output rate are dropped: a half-priced
  * model would silently under-report cost, which is worse than reporting the
  * model as unpriced.
+ *
+ * Entries keep their full normalized key; a bare name is aliased only when no
+ * canonical entry exists and every qualified entry has the same rate.
  */
 export function parseRateTable(document: unknown): RateTable {
   const table = new Map<string, ModelRate>();
@@ -56,7 +59,9 @@ export function parseRateTable(document: unknown): RateTable {
     const output = finiteNumber(entry.output_cost_per_token);
     if (input === null || output === null) continue;
 
-    table.set(normalizeModelName(name), {
+    const key = normalizeRateKey(name);
+    if (key.length === 0) continue;
+    table.set(key, {
       inputCostPerToken: input,
       outputCostPerToken: output,
       // Anthropic bills cache reads at a discount and cache writes at a
@@ -66,20 +71,52 @@ export function parseRateTable(document: unknown): RateTable {
       cacheCreationCostPerToken: finiteNumber(entry.cache_creation_input_token_cost) ?? input,
     });
   }
+
+  // `null` marks a bare name claimed at conflicting rates: no alias for it.
+  const aliasCandidates = new Map<string, ModelRate | null>();
+  for (const [key, rate] of table) {
+    const alias = bareModelName(key);
+    if (alias.length === 0 || alias === key || table.has(alias)) continue;
+    const held = aliasCandidates.get(alias);
+    if (held === undefined) {
+      aliasCandidates.set(alias, rate);
+    } else if (held !== null && !sameRate(held, rate)) {
+      aliasCandidates.set(alias, null);
+    }
+  }
+  for (const [alias, rate] of aliasCandidates) {
+    if (rate !== null) table.set(alias, rate);
+  }
+
   return table;
+}
+
+function sameRate(a: ModelRate, b: ModelRate): boolean {
+  return (
+    a.inputCostPerToken === b.inputCostPerToken &&
+    a.outputCostPerToken === b.outputCostPerToken &&
+    a.cacheReadCostPerToken === b.cacheReadCostPerToken &&
+    a.cacheCreationCostPerToken === b.cacheCreationCostPerToken
+  );
+}
+
+function normalizeRateKey(model: string): string {
+  return model.trim().toLowerCase();
 }
 
 /**
  * Canonicalises a model name for lookup.
  *
- * Strips a `provider/` prefix (LiteLLM publishes both `claude-opus-5` and
- * `anthropic/claude-opus-5`) and lowercases, since transcripts are inconsistent
- * about casing.
+ * Strips a `provider/` prefix and lowercases, since transcripts are
+ * inconsistent about casing.
  */
 export function normalizeModelName(model: string): string {
-  const trimmed = model.trim().toLowerCase();
-  const slash = trimmed.lastIndexOf("/");
-  return slash === -1 ? trimmed : trimmed.slice(slash + 1);
+  return bareModelName(normalizeRateKey(model));
+}
+
+function bareModelName(key: string): string {
+  const slash = key.lastIndexOf("/");
+  return slash === -1 ? key : key.slice(slash + 1);
 }
 
 /**
@@ -98,10 +135,50 @@ const UNPRICEABLE_MODELS = new Set([
   "fable",
 ]);
 
+/**
+ * Rates for models the LiteLLM table doesn't carry.
+ *
+ * OpenCode passthrough models (slug `provider/model`) never report a per-message
+ * cost in their transcripts, so they depend entirely on the rate table. When
+ * LiteLLM has no entry for the slug they price as `unpriced` ($0.00). This map
+ * fills those gaps with published list prices. It is a fallback only: a real
+ * LiteLLM entry always wins, so these go stale gracefully once upstream carries
+ * the model.
+ *
+ * Keys are normalized full slugs (`normalizeRateKey`). Values are USD per token.
+ */
+const LOCAL_RATE_OVERRIDES: RateTable = new Map<string, ModelRate>([
+  // TypeSafe System One judge model (`jev-latest`): $0.042 / 1M input tokens,
+  // output free. Early-access list price. https://docs.typesafe.ai/models
+  [
+    "jev-latest",
+    {
+      inputCostPerToken: 0.042 / 1_000_000,
+      outputCostPerToken: 0,
+      cacheReadCostPerToken: 0.042 / 1_000_000,
+      cacheCreationCostPerToken: 0.042 / 1_000_000,
+    },
+  ],
+  // z.ai GLM-5.3-Flash, direct Z.ai API list price (launch promo expired
+  // 2026-09-09): $0.15 / 1M input, $0.50 / 1M output, $0.03 / 1M cached input.
+  // https://docs.z.ai / z.ai pricing. No separate cache-write price is
+  // published, so cache creation is priced as plain input.
+  [
+    "z-ai/glm-5.3-flash",
+    {
+      inputCostPerToken: 0.15 / 1_000_000,
+      outputCostPerToken: 0.5 / 1_000_000,
+      cacheReadCostPerToken: 0.03 / 1_000_000,
+      cacheCreationCostPerToken: 0.15 / 1_000_000,
+    },
+  ],
+]);
+
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
-  const normalized = normalizeModelName(model);
-  if (normalized.length === 0 || UNPRICEABLE_MODELS.has(normalized)) return null;
-  return table.get(normalized) ?? null;
+  const key = normalizeRateKey(model);
+  const bareName = bareModelName(key);
+  if (bareName.length === 0 || UNPRICEABLE_MODELS.has(bareName)) return null;
+  return table.get(key) ?? LOCAL_RATE_OVERRIDES.get(key) ?? null;
 }
 
 export interface PricedUsage {

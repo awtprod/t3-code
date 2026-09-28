@@ -9,9 +9,14 @@ import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
+import { SandboxLifecycleReactor } from "../Services/SandboxLifecycleReactor.ts";
+import { SandboxSettleCleanupReactor } from "../Services/SandboxSettleCleanupReactor.ts";
+import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
+import { LocalWebPushNotifier } from "../../webPush/LocalWebPushNotifier.ts";
 
 describe("OrchestrationReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<OrchestrationReactor, never> | null = null;
@@ -23,7 +28,7 @@ describe("OrchestrationReactor", () => {
     runtime = null;
   });
 
-  it("starts provider ingestion, provider command, checkpoint, and thread deletion reactors", async () => {
+  it("starts every orchestration reactor", async () => {
     const started: string[] = [];
 
     runtime = ManagedRuntime.make(
@@ -62,7 +67,39 @@ describe("OrchestrationReactor", () => {
               started.push("thread-deletion-reactor");
               return Effect.void;
             },
+            drainThrough: () => Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(SandboxLifecycleReactor, {
+            start: () => {
+              started.push("sandbox-lifecycle-reactor");
+              return Effect.void;
+            },
             drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(SandboxSettleCleanupReactor, {
+            start: () => {
+              started.push("sandbox-settle-cleanup-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(ThreadSettlementReactor.ThreadSettlementReactor, {
+            start: () => {
+              started.push("thread-settlement-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.mock(OrchestrationEngineService)({
+            latestSequence: Effect.succeed(0),
           }),
         ),
         Layer.provideMerge(
@@ -70,6 +107,16 @@ describe("OrchestrationReactor", () => {
             publishThread: () => Effect.void,
             start: () => {
               started.push("agent-awareness-relay");
+              return Effect.void;
+            },
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(LocalWebPushNotifier, {
+            processThread: () => Effect.void,
+            seedFromSnapshot: Effect.void,
+            start: () => {
+              started.push("local-web-push-notifier");
               return Effect.void;
             },
           }),
@@ -86,7 +133,11 @@ describe("OrchestrationReactor", () => {
       "provider-command-reactor",
       "checkpoint-reactor",
       "thread-deletion-reactor",
+      "sandbox-lifecycle-reactor",
+      "sandbox-settle-cleanup-reactor",
+      "thread-settlement-reactor",
       "agent-awareness-relay",
+      "local-web-push-notifier",
     ]);
 
     await Effect.runPromise(Scope.close(scope, Exit.void));

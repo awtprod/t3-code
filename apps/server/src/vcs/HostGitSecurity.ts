@@ -401,8 +401,17 @@ export function hardenedHostGitEnvironment(
   };
 }
 
-export function hardenedHostGitArguments(args: ReadonlyArray<string>): ReadonlyArray<string> {
-  return [...HOST_GIT_HARDENED_CONFIG_ARGS, ...args];
+export function hardenedHostGitArguments(
+  args: ReadonlyArray<string>,
+  options: { readonly safeDirectory?: string } = {},
+): ReadonlyArray<string> {
+  return [
+    ...HOST_GIT_HARDENED_CONFIG_ARGS,
+    ...(options.safeDirectory === undefined
+      ? []
+      : ["-c", `safe.directory=${options.safeDirectory}`]),
+    ...args,
+  ];
 }
 
 /**

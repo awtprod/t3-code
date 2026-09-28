@@ -20,6 +20,26 @@ export type ThreadRoutingMode = typeof ThreadRoutingMode.Type;
 export const EfficiencyWorkload = Schema.Literals(["interactive", "automation"]);
 export type EfficiencyWorkload = typeof EfficiencyWorkload.Type;
 
+/**
+ * What an auto-routed turn is for, as judged by the tier-judgment request.
+ * Candidates may list the kinds they specialize in (see
+ * {@link EfficiencyTierCandidate.taskKinds}).
+ */
+export const TaskKind = Schema.Literals([
+  "review",
+  "debug",
+  "implement",
+  "refactor",
+  "design",
+  "question",
+  "docs",
+  "ops",
+  "research",
+  "creative",
+  "other",
+]);
+export type TaskKind = typeof TaskKind.Type;
+
 export const EfficiencyTierCandidate = Schema.Struct({
   candidateId: EfficiencyCandidateId,
   tier: EfficiencyTier,
@@ -27,6 +47,12 @@ export const EfficiencyTierCandidate = Schema.Struct({
   model: TrimmedNonEmptyString,
   options: Schema.optional(ProviderOptionSelections),
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * Task kinds this candidate specializes in. Absent (or empty) = a general
+   * candidate. A specialist is only ever picked for a confidently judged kind
+   * it lists, ahead of the tier's general candidates; never as a general one.
+   */
+  taskKinds: Schema.optional(Schema.Array(TaskKind)),
 });
 export type EfficiencyTierCandidate = typeof EfficiencyTierCandidate.Type;
 
@@ -72,6 +98,95 @@ export const EfficiencyExperiment = Schema.Struct({
 );
 export type EfficiencyExperiment = typeof EfficiencyExperiment.Type;
 
+/**
+ * Judge transport. `off` is the safe default: no judge model is called and every
+ * consumer falls through to today's deterministic behavior. `typesafe` speaks the
+ * TypeSafe System One protocol; `openai-compatible` posts to a `/chat/completions`
+ * endpoint (the host's cliproxyapi gateway by default).
+ */
+export const JudgeTransport = Schema.Literals(["off", "typesafe", "openai-compatible"]);
+export type JudgeTransport = typeof JudgeTransport.Type;
+
+/**
+ * Judge model configuration. Additive and fully defaulted so existing settings
+ * JSON decodes to a disabled judge. `model` and `apiKeyEnv` carry the TypeSafe
+ * defaults; the Judge service swaps them for the gateway defaults when
+ * `transport` is `openai-compatible` and the operator left them untouched (see
+ * `resolveJudgeConfig` in `apps/server/src/efficiency/Judge.ts`).
+ *
+ * `apiKeyEnv` is the NAME of the environment variable that holds the key, never a
+ * key value.
+ */
+export const EfficiencyJudgeSettings = Schema.Struct({
+  transport: JudgeTransport.pipe(Schema.withDecodingDefault(Effect.succeed("off" as const))),
+  baseUrl: Schema.optional(TrimmedNonEmptyString),
+  model: TrimmedNonEmptyString.pipe(Schema.withDecodingDefault(Effect.succeed("jev-latest"))),
+  apiKeyEnv: TrimmedNonEmptyString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("TYPESAFE_API_KEY")),
+  ),
+  timeoutMs: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(15000))),
+  maxStateChars: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(120000))),
+});
+export type EfficiencyJudgeSettings = typeof EfficiencyJudgeSettings.Type;
+
+/**
+ * Confidence-gated tier judgment. When `enabled`, an auto-routed turn asks the
+ * judge to score task complexity, classify its task kind, and say whether it
+ * continues the thread's current task. The mapped tier (and kind) only apply when
+ * `confidence >= minConfidence`; a continuation (`continuation >=
+ * continuationThreshold`) keeps the thread's current route instead.
+ */
+export const EfficiencyTierJudgmentSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  minConfidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.6)),
+  ),
+  continuationThreshold: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.8)),
+  ),
+});
+export type EfficiencyTierJudgmentSettings = typeof EfficiencyTierJudgmentSettings.Type;
+
+export const EfficiencySieveMode = Schema.Literals(["off", "shadow", "active"]);
+export type EfficiencySieveMode = typeof EfficiencySieveMode.Type;
+
+/**
+ * Tool-result sieve (winnow). Additive and defaulted; `mode: "off"` keeps every
+ * tool result byte-for-byte. `dropBelow < keepAbove` is enforced at the boundary
+ * so the "hide" band can never overlap the "keep/error gate" band. Slice B
+ * depends on this exact shape.
+ */
+export const EfficiencySieveSettings = Schema.Struct({
+  mode: EfficiencySieveMode.pipe(Schema.withDecodingDefault(Effect.succeed("off" as const))),
+  // May only narrow from the default. Bash stays opt-in (re-running has side
+  // effects) and is off by default.
+  tools: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(["Read", "Grep"])),
+  ),
+  minChars: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(1500))),
+  blockLines: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(25))),
+  maxBlocks: PositiveInt.pipe(Schema.withDecodingDefault(Effect.succeed(200))),
+  // Hide a block when P(needed) < dropBelow.
+  dropBelow: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.1)),
+  ),
+  // Error gate and the upper bound of the "uncertain" band.
+  keepAbove: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.5)),
+  ),
+  // Skip the rewrite unless at least this fraction of chars would be hidden.
+  minPruneRatio: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })).pipe(
+    Schema.withDecodingDefault(Effect.succeed(0.2)),
+  ),
+}).check(
+  Schema.makeFilter((sieve) =>
+    sieve.dropBelow < sieve.keepAbove
+      ? true
+      : "Tool-result sieve dropBelow must be strictly less than keepAbove",
+  ),
+);
+export type EfficiencySieveSettings = typeof EfficiencySieveSettings.Type;
+
 export const EfficiencySettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   defaultTier: EfficiencyTier.pipe(Schema.withDecodingDefault(Effect.succeed("economy"))),
@@ -79,28 +194,65 @@ export const EfficiencySettings = Schema.Struct({
     Schema.withDecodingDefault(
       Effect.succeed([
         {
-          candidateId: EfficiencyCandidateId.make("codex-economy-terra"),
+          candidateId: EfficiencyCandidateId.make("claude-economy-opus-5-5"),
           tier: "economy" as const,
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5.6-terra",
-          options: [{ id: "reasoningEffort", value: "low" }],
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "low" }],
           enabled: true,
         },
         {
-          candidateId: EfficiencyCandidateId.make("codex-balanced-terra"),
+          candidateId: EfficiencyCandidateId.make("claude-balanced-opus-5-5"),
           tier: "balanced" as const,
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5.6-terra",
-          options: [{ id: "reasoningEffort", value: "medium" }],
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "medium" }],
           enabled: true,
         },
         {
-          candidateId: EfficiencyCandidateId.make("codex-quality-sol"),
+          candidateId: EfficiencyCandidateId.make("claude-quality-opus-5-5"),
+          tier: "quality" as const,
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "high" }],
+          enabled: true,
+        },
+        // Task-kind specialists (see docs/internals/efficiency.md for why).
+        {
+          candidateId: EfficiencyCandidateId.make("claude-balanced-review-opus-4-8"),
+          tier: "balanced" as const,
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-8",
+          options: [{ id: "effort", value: "medium" }],
+          enabled: true,
+          taskKinds: ["review" as const],
+        },
+        {
+          candidateId: EfficiencyCandidateId.make("codex-quality-review-astra"),
           tier: "quality" as const,
           instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5.6-sol",
+          model: "gpt-6-astra",
           options: [{ id: "reasoningEffort", value: "high" }],
           enabled: true,
+          taskKinds: ["review" as const],
+        },
+        {
+          candidateId: EfficiencyCandidateId.make("claude-balanced-implement-opus-4-8"),
+          tier: "balanced" as const,
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-8",
+          options: [{ id: "effort", value: "medium" }],
+          enabled: true,
+          taskKinds: ["implement" as const],
+        },
+        {
+          candidateId: EfficiencyCandidateId.make("claude-quality-implement-opus-4-8"),
+          tier: "quality" as const,
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-8",
+          options: [{ id: "effort", value: "high" }],
+          enabled: true,
+          taskKinds: ["implement" as const],
         },
       ]),
     ),
@@ -111,6 +263,9 @@ export const EfficiencySettings = Schema.Struct({
   experiments: Schema.Array(EfficiencyExperiment).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  judge: EfficiencyJudgeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  tierJudgment: EfficiencyTierJudgmentSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  sieve: EfficiencySieveSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type EfficiencySettings = typeof EfficiencySettings.Type;
 
@@ -119,6 +274,33 @@ export const EfficiencyModelSelection = Schema.Struct({
   model: TrimmedNonEmptyString,
   options: Schema.optionalKey(ProviderOptionSelections),
 });
+
+/**
+ * Confidence-gated tier judgment recorded on a decision. `applied` is true only
+ * when the judgment actually overrode the static tier (no rule matched and
+ * `confidence >= minConfidence`); otherwise `reason` explains why it was kept for
+ * the log only. `score` is the probability-weighted rubric level (0..2).
+ *
+ * `kind`/`kindConfidence` are the judged task kind; `kindApplied` is true when a
+ * specialist candidate for that kind was routed. `continuation` is the judged
+ * probability that the message continues the current task; `sticky` is true
+ * when the thread's previous route was reused because of it (the kind fields are
+ * then inherited from that route). All five are additive and optional.
+ */
+export const EfficiencyTierJudgment = Schema.Struct({
+  score: Schema.Number,
+  confidence: Schema.Number,
+  tier: EfficiencyTier,
+  applied: Schema.Boolean,
+  reason: Schema.optional(TrimmedNonEmptyString),
+  model: TrimmedNonEmptyString,
+  kind: Schema.optional(TaskKind),
+  kindConfidence: Schema.optional(Schema.Number),
+  kindApplied: Schema.optional(Schema.Boolean),
+  continuation: Schema.optional(Schema.Number),
+  sticky: Schema.optional(Schema.Boolean),
+});
+export type EfficiencyTierJudgment = typeof EfficiencyTierJudgment.Type;
 
 export const EfficiencyDecision = Schema.Struct({
   tier: EfficiencyTier,
@@ -132,6 +314,7 @@ export const EfficiencyDecision = Schema.Struct({
   fallbackReason: Schema.optional(TrimmedNonEmptyString),
   retryOfTurnId: Schema.optional(TurnId),
   experimentArm: Schema.optional(Schema.Literals(["control", "challenger"])),
+  judgment: Schema.optional(EfficiencyTierJudgment),
 });
 export type EfficiencyDecision = typeof EfficiencyDecision.Type;
 

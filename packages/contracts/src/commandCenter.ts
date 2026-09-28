@@ -84,6 +84,10 @@ export const COMMAND_CENTER_WS_METHODS = {
   googleConnectionSetupBegin: "cc.connections.google.setup.begin",
   googleConnectionSetupComplete: "cc.connections.google.setup.complete",
   googleConnectionRemove: "cc.connections.google.remove",
+  publishConnectionsQuery: "cc.connections.publish.query",
+  publishConnectionSetupBegin: "cc.connections.publish.setup.begin",
+  publishConnectionSetupComplete: "cc.connections.publish.setup.complete",
+  publishConnectionRemove: "cc.connections.publish.remove",
   memoryQuery: "cc.memory.query",
   memorySearch: "cc.memory.search",
   itemCreate: "cc.items.create",
@@ -103,6 +107,8 @@ export const COMMAND_CENTER_WS_METHODS = {
   observationsImport: "cc.observations.import",
   observationsCorrect: "cc.observations.correct",
   observationsRetire: "cc.observations.retire",
+  windowsMediaList: "cc.windowsMedia.list",
+  windowsMediaRoots: "cc.windowsMedia.roots",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
@@ -302,6 +308,8 @@ export const CommandCenterAutomationSourceNodeKind = Schema.Literals([
   "delay",
   "approval",
   "shell.scoped",
+  "prospect.evaluate",
+  "prospect.notify",
 ]);
 
 /** Exact editable shape stored in the private configuration checkout. */
@@ -492,6 +500,86 @@ export const CommandCenterGoogleConnectionRemoveResult = Schema.Struct({
 });
 export type CommandCenterGoogleConnectionRemoveResult =
   typeof CommandCenterGoogleConnectionRemoveResult.Type;
+
+/** External accounts finished clips can be published to. One account per provider per environment. */
+export const CommandCenterPublishProvider = Schema.Literals(["youtube", "instagram"]);
+export type CommandCenterPublishProvider = typeof CommandCenterPublishProvider.Type;
+
+/**
+ * How a provider collects its credential during `complete`:
+ * - `paste-token`: the user pastes a long-lived access token (Instagram).
+ * - `oauth-redirect`: the user opens `authUrl`, approves, and pastes the 127.0.0.1 callback address (YouTube).
+ */
+export const CommandCenterPublishConnectionSetupMode = Schema.Literals([
+  "paste-token",
+  "oauth-redirect",
+]);
+export type CommandCenterPublishConnectionSetupMode =
+  typeof CommandCenterPublishConnectionSetupMode.Type;
+
+/** Browser-safe connection summary. Never carries a token. */
+export const CommandCenterPublishConnection = Schema.Struct({
+  provider: CommandCenterPublishProvider,
+  state: Schema.Literals(["connected", "disconnected", "unavailable"]),
+  setupMode: CommandCenterPublishConnectionSetupMode,
+  accountId: Schema.optional(TrimmedNonEmptyString),
+  accountLabel: Schema.optional(TrimmedNonEmptyString),
+  expiresAt: Schema.optional(Timestamp),
+  lastRefreshedAt: Schema.optional(Timestamp),
+  detail: Schema.optional(TrimmedNonEmptyString),
+});
+export type CommandCenterPublishConnection = typeof CommandCenterPublishConnection.Type;
+
+export const CommandCenterPublishConnectionsQueryInput = Schema.Struct({});
+export type CommandCenterPublishConnectionsQueryInput =
+  typeof CommandCenterPublishConnectionsQueryInput.Type;
+
+export const CommandCenterPublishConnectionsQueryResult = Schema.Struct({
+  connections: Schema.Array(CommandCenterPublishConnection),
+});
+export type CommandCenterPublishConnectionsQueryResult =
+  typeof CommandCenterPublishConnectionsQueryResult.Type;
+
+export const CommandCenterPublishConnectionSetupBeginInput = Schema.Struct({
+  provider: CommandCenterPublishProvider,
+});
+export type CommandCenterPublishConnectionSetupBeginInput =
+  typeof CommandCenterPublishConnectionSetupBeginInput.Type;
+
+export const CommandCenterPublishConnectionSetupBeginResult = Schema.Struct({
+  sessionId: TrimmedNonEmptyString,
+  provider: CommandCenterPublishProvider,
+  setupMode: CommandCenterPublishConnectionSetupMode,
+  authUrl: Schema.optional(TrimmedNonEmptyString),
+  expiresAt: Timestamp,
+});
+export type CommandCenterPublishConnectionSetupBeginResult =
+  typeof CommandCenterPublishConnectionSetupBeginResult.Type;
+
+export const CommandCenterPublishConnectionSetupCompleteInput = Schema.Struct({
+  sessionId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  credential: TrimmedNonEmptyString.check(Schema.isMaxLength(8 * 1024)),
+});
+export type CommandCenterPublishConnectionSetupCompleteInput =
+  typeof CommandCenterPublishConnectionSetupCompleteInput.Type;
+
+export const CommandCenterPublishConnectionSetupCompleteResult = Schema.Struct({
+  connection: CommandCenterPublishConnection,
+});
+export type CommandCenterPublishConnectionSetupCompleteResult =
+  typeof CommandCenterPublishConnectionSetupCompleteResult.Type;
+
+export const CommandCenterPublishConnectionRemoveInput = Schema.Struct({
+  provider: CommandCenterPublishProvider,
+});
+export type CommandCenterPublishConnectionRemoveInput =
+  typeof CommandCenterPublishConnectionRemoveInput.Type;
+
+export const CommandCenterPublishConnectionRemoveResult = Schema.Struct({
+  connection: CommandCenterPublishConnection,
+});
+export type CommandCenterPublishConnectionRemoveResult =
+  typeof CommandCenterPublishConnectionRemoveResult.Type;
 
 export const CommandCenterMemoryQueryInput = Schema.Struct({
   spaceId: Schema.optional(SpaceId),
@@ -844,3 +932,59 @@ export const GoogleDraftCreateResult = Schema.Struct({
   threadId: Schema.optional(TrimmedNonEmptyString),
 });
 export type GoogleDraftCreateResult = typeof GoogleDraftCreateResult.Type;
+
+/** Upper bounds that keep a Windows directory listing websocket-sized. */
+export const WINDOWS_MEDIA_MAX_ENTRIES = 2_000;
+export const WINDOWS_MEDIA_PATH_MAX_CHARS = 4_096;
+
+export const WindowsMediaPath = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(WINDOWS_MEDIA_PATH_MAX_CHARS),
+);
+export type WindowsMediaPath = typeof WindowsMediaPath.Type;
+
+export const WindowsMediaEntryKind = Schema.Literals(["dir", "video", "image", "audio", "other"]);
+export type WindowsMediaEntryKind = typeof WindowsMediaEntryKind.Type;
+
+export const CommandCenterWindowsMediaListInput = Schema.Struct({
+  path: WindowsMediaPath,
+});
+export type CommandCenterWindowsMediaListInput = typeof CommandCenterWindowsMediaListInput.Type;
+
+export const CommandCenterWindowsMediaEntry = Schema.Struct({
+  name: Schema.String,
+  /** Absolute Windows path of the entry, ready to send back as a list path or attach. */
+  path: Schema.String,
+  isDir: Schema.Boolean,
+  sizeBytes: Schema.Number,
+  /** ISO-8601 UTC last-write time, null when Windows did not report one. */
+  mtime: Schema.NullOr(Schema.String),
+  kind: WindowsMediaEntryKind,
+  mimeType: Schema.String,
+});
+export type CommandCenterWindowsMediaEntry = typeof CommandCenterWindowsMediaEntry.Type;
+
+export const CommandCenterWindowsMediaListResult = Schema.Struct({
+  host: Schema.String,
+  path: Schema.String,
+  /** Parent directory, or null at a drive/allowlisted root. */
+  parent: Schema.NullOr(Schema.String),
+  entries: Schema.Array(CommandCenterWindowsMediaEntry),
+  /** True when the directory held more entries than the listing cap. */
+  truncated: Schema.Boolean,
+});
+export type CommandCenterWindowsMediaListResult = typeof CommandCenterWindowsMediaListResult.Type;
+
+export const CommandCenterWindowsMediaRootsInput = Schema.Struct({});
+export type CommandCenterWindowsMediaRootsInput = typeof CommandCenterWindowsMediaRootsInput.Type;
+
+export const CommandCenterWindowsMediaRoot = Schema.Struct({
+  label: Schema.String,
+  path: Schema.String,
+});
+export type CommandCenterWindowsMediaRoot = typeof CommandCenterWindowsMediaRoot.Type;
+
+export const CommandCenterWindowsMediaRootsResult = Schema.Struct({
+  host: Schema.String,
+  roots: Schema.Array(CommandCenterWindowsMediaRoot),
+});
+export type CommandCenterWindowsMediaRootsResult = typeof CommandCenterWindowsMediaRootsResult.Type;

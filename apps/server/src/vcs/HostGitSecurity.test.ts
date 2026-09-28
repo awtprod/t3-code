@@ -46,6 +46,16 @@ describe("host Git process boundary", () => {
     ]);
   });
 
+  it("trusts only the workspace selected for the command", () => {
+    const safeDirectory = "/workspace-owned-by-another-user/repo";
+    expect(hardenedHostGitArguments(["status"], { safeDirectory })).toEqual([
+      ...HOST_GIT_HARDENED_CONFIG_ENTRIES.flatMap(([key, value]) => ["-c", `${key}=${value}`]),
+      "-c",
+      `safe.directory=${safeDirectory}`,
+      "status",
+    ]);
+  });
+
   it("requires a Git version with safe fsmonitor and fsync semantics for authoring", () => {
     expect(supportsHardenedHostGitAuthoring("git version 2.35.1")).toBe(false);
     expect(supportsHardenedHostGitAuthoring("git version 2.36.0")).toBe(true);

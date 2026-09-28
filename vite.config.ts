@@ -25,13 +25,12 @@ export default defineConfig({
     // their pinned upstream bytes and are already excluded from the formatter itself; exclude
     // them at the staged-file matcher too so large subtree syncs do not create empty formatter
     // invocations.
-    "{*,!(.repos)/**}": "vp fmt",
+    "{*,!(.repos)/**}": "vp fmt --no-error-on-unmatched-pattern",
   },
   fmt: {
     ignorePatterns: [
       ".reference",
       ".repos/**",
-      ".plans",
       ".alchemy",
       "dist",
       "dist-electron",
@@ -124,6 +123,8 @@ export default defineConfig({
       "t3code/no-global-process-runtime": "error",
       "t3code/no-inline-schema-compile": "warn",
       "t3code/no-manual-effect-runtime-in-tests": "error",
+      "t3code/no-mobile-uniwind-theme-escape-hatches": "error",
+      "t3code/no-native-title-tooltip": "error",
       "t3code/namespace-node-imports": "error",
     },
     options: {
