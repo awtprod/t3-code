@@ -103,6 +103,52 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
     }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
   );
 
+  it.effect("prefers a bearer token over a stale legacy cookie", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const bearer = yield* serverAuth.issueSession();
+      const verified = yield* serverAuth.authenticateHttpRequest({
+        cookies: { [sessions.legacyCookieName ?? "t3_session"]: "stale" },
+        headers: { authorization: `Bearer ${bearer.token}` },
+      } as never);
+
+      expect(verified.sessionId).toBe(bearer.sessionId);
+    }).pipe(Effect.provide(makeEnvironmentAuthLayer({ mode: "web", host: "192.168.1.50" }))),
+  );
+
+  it.effect("returns a stable draft scope for only the authenticated session", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const first = yield* serverAuth.issueSession({ subject: "first-user" });
+      const second = yield* serverAuth.issueSession({ subject: "second-user" });
+      const firstRequest = {
+        cookies: {},
+        headers: { authorization: `Bearer ${first.token}` },
+      } as never;
+      const secondRequest = {
+        cookies: {},
+        headers: { authorization: `Bearer ${second.token}` },
+      } as never;
+
+      const firstRead = yield* serverAuth.getSessionState(firstRequest);
+      const repeatedRead = yield* serverAuth.getSessionState(firstRequest);
+      const switchedRead = yield* serverAuth.getSessionState(secondRequest);
+      const unauthenticatedRead = yield* serverAuth.getSessionState({
+        cookies: {},
+        headers: {},
+      } as never);
+
+      expect(firstRead.authenticated).toBe(true);
+      expect(firstRead.draftScopeId).toBe(first.sessionId);
+      expect(repeatedRead.draftScopeId).toBe(first.sessionId);
+      expect(switchedRead.draftScopeId).toBe(second.sessionId);
+      expect(switchedRead.draftScopeId).not.toBe(firstRead.draftScopeId);
+      expect(unauthenticatedRead.authenticated).toBe(false);
+      expect(unauthenticatedRead.draftScopeId).toBeUndefined();
+    }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
+  );
+
   it.effect("does not exchange ordinary pairing grants for administrative access tokens", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;

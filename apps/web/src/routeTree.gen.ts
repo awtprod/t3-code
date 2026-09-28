@@ -15,6 +15,8 @@ import { Route as PairRouteImport } from './routes/pair'
 import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
+import { Route as ChatInboxRouteImport } from './routes/_chat.inbox'
+import { Route as ChatCommandRouteImport } from './routes/_chat.command'
 import { Route as SettingsUsageRouteImport } from './routes/settings.usage'
 import { Route as SettingsSourceControlRouteImport } from './routes/settings.source-control'
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
@@ -64,6 +66,16 @@ const ChatRoute = ChatRouteImport.update({
 const ChatIndexRoute = ChatIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatInboxRoute = ChatInboxRouteImport.update({
+  id: '/inbox',
+  path: '/inbox',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatCommandRoute = ChatCommandRouteImport.update({
+  id: '/command',
+  path: '/command',
   getParentRoute: () => ChatRoute,
 } as any)
 const SettingsUsageRoute = SettingsUsageRouteImport.update({
@@ -175,6 +187,8 @@ const ChatEnvironmentIdThreadIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
+  '/inbox': typeof ChatInboxRoute
+  '/command': typeof ChatCommandRoute
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
@@ -202,6 +216,8 @@ export interface FileRoutesByFullPath {
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
 }
 export interface FileRoutesByTo {
+  '/inbox': typeof ChatInboxRoute
+  '/command': typeof ChatCommandRoute
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
@@ -232,6 +248,8 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_chat': typeof ChatRouteWithChildren
+  '/_chat/inbox': typeof ChatInboxRoute
+  '/_chat/command': typeof ChatCommandRoute
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
   '/settings': typeof SettingsRouteWithChildren
@@ -263,6 +281,8 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/inbox'
+    | '/command'
     | '/connect'
     | '/pair'
     | '/settings'
@@ -290,6 +310,8 @@ export interface FileRouteTypes {
     | '/draft/$draftId'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/inbox'
+    | '/command'
     | '/connect'
     | '/pair'
     | '/settings'
@@ -319,6 +341,8 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_chat'
+    | '/_chat/inbox'
+    | '/_chat/command'
     | '/connect'
     | '/pair'
     | '/settings'
@@ -399,6 +423,20 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof ChatIndexRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/inbox': {
+      id: '/_chat/inbox'
+      path: '/inbox'
+      fullPath: '/inbox'
+      preLoaderRoute: typeof ChatInboxRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/command': {
+      id: '/_chat/command'
+      path: '/command'
+      fullPath: '/command'
+      preLoaderRoute: typeof ChatCommandRouteImport
       parentRoute: typeof ChatRoute
     }
     '/settings/usage': {
@@ -552,6 +590,8 @@ declare module '@tanstack/react-router' {
 }
 
 interface ChatRouteChildren {
+  ChatInboxRoute: typeof ChatInboxRoute
+  ChatCommandRoute: typeof ChatCommandRoute
   ChatAutomationsRoute: typeof ChatAutomationsRoute
   ChatNewRoute: typeof ChatNewRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
@@ -562,6 +602,8 @@ interface ChatRouteChildren {
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
+  ChatInboxRoute: ChatInboxRoute,
+  ChatCommandRoute: ChatCommandRoute,
   ChatAutomationsRoute: ChatAutomationsRoute,
   ChatNewRoute: ChatNewRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
