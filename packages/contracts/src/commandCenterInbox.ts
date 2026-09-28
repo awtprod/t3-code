@@ -54,8 +54,44 @@ const TaskPatchOperation = Schema.Struct({
   before: Schema.Json,
   after: Schema.Json,
 });
+const SprintPlanTaskPatchOperation = Schema.Struct({
+  taskId: ShortIdentity,
+  field: Schema.Literals(["text", "note", "day", "owner", "done"]),
+  before: Schema.Union([Schema.String, Schema.Boolean]),
+  after: Schema.Union([Schema.String, Schema.Boolean]),
+});
+const SprintPlanTaskPatch = Schema.Struct({
+  kind: Schema.Literal("sprint-plan-task-patch"),
+  target: Schema.Struct({ kind: Schema.Literal("sprint-plan"), id: ShortIdentity }),
+  expectedPlanVersion: NonNegativeInt,
+  operations: Schema.Array(SprintPlanTaskPatchOperation).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(100),
+    Schema.makeFilter((operations) => {
+      const pairs = new Set(
+        operations.map((operation) => `${operation.taskId}\u0000${operation.field}`),
+      );
+      return pairs.size === operations.length || "Task and field pairs must be unique.";
+    }),
+    Schema.makeFilter(
+      (operations) =>
+        operations.every(
+          ({ field, before, after }) =>
+            (field === "done"
+              ? typeof before === "boolean" && typeof after === "boolean"
+              : typeof before === "string" && typeof after === "string") && before !== after,
+        ) || "Each task patch needs distinct, correctly typed before and after values.",
+    ),
+  ),
+  reason: ExactMessage,
+  expectedBenefit: ExactMessage,
+  uncertainty: ExactMessage,
+  reviewAt: Timestamp,
+  preservedConstraints: Schema.Array(ExactMessage).check(Schema.isMaxLength(32)),
+});
 
 export const CommandCenterInboxProposalPayload = Schema.Union([
+  SprintPlanTaskPatch,
   Schema.Struct({
     kind: Schema.Literal("task-patch"),
     target: ProposalTarget,
@@ -134,13 +170,20 @@ export const CommandCenterInboxRevision = Schema.Struct({
 export type CommandCenterInboxRevision = typeof CommandCenterInboxRevision.Type;
 
 export const CommandCenterInboxApprovalState = Schema.Struct({
-  supported: Schema.Literal(false),
-  eligible: Schema.Literal(false),
+  supported: Schema.Boolean,
+  eligible: Schema.Boolean,
   reason: Schema.Literals([
     "phase-a-no-executor",
     "no-current-proposal",
     "changes-requested",
     "candidate-pending",
+    "unsupported-proposal",
+    "already-applied",
+    "policy-not-configured",
+    "evidence-ineligible",
+    "evidence-stale",
+    "plan-stale",
+    "ready",
   ]),
 });
 export type CommandCenterInboxApprovalState = typeof CommandCenterInboxApprovalState.Type;
@@ -244,6 +287,16 @@ export const CommandCenterInboxCandidateMutationInput = Schema.Struct({
   ...CommandCenterInboxMutationBase.fields,
   candidateRevisionId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
 });
+export const CommandCenterInboxApproveAdjustmentInput = Schema.Struct({
+  spaceId: SpaceId,
+  itemId: ItemId,
+  mutationId: MutationId,
+  currentRevisionId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  expectedInboxVersion: NonNegativeInt,
+  expectedPlanVersion: NonNegativeInt,
+});
+export type CommandCenterInboxApproveAdjustmentInput =
+  typeof CommandCenterInboxApproveAdjustmentInput.Type;
 export type CommandCenterInboxCandidateMutationInput =
   typeof CommandCenterInboxCandidateMutationInput.Type;
 

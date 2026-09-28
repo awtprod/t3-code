@@ -1493,6 +1493,14 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "command-center" },
           ),
+        [COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.approveAdjustment(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
         [COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard]: (input) =>
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard,

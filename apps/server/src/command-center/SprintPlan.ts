@@ -170,6 +170,22 @@ export interface SprintPlanTaskPatchInput {
   readonly provenance: SprintPlanMutationProvenance;
 }
 
+export interface SprintPlanApprovedPatchInput {
+  readonly planId: string;
+  readonly spaceId: string;
+  readonly expectedVersion: number;
+  readonly mutationId: string;
+  readonly revisionId: string;
+  readonly evidenceRef: string;
+  readonly reason: string;
+  readonly operations: ReadonlyArray<{
+    readonly taskId: string;
+    readonly field: SprintPlanTaskField;
+    readonly before: string | boolean;
+    readonly after: string | boolean;
+  }>;
+}
+
 export interface SprintPlanDateResolutionInput {
   readonly planId: string;
   readonly spaceId: string;
@@ -191,6 +207,11 @@ export class SprintPlanServiceError extends Schema.TaggedErrorClass<SprintPlanSe
 ) {}
 
 export interface SprintPlanServiceShape {
+  /** Internal only: caller owns the SQL transaction and approval checks. */
+  readonly applyApprovedTaskFieldsInTransaction: (
+    input: SprintPlanApprovedPatchInput,
+    actor: SprintPlanActor,
+  ) => Effect.Effect<SprintPlanSnapshot, SprintPlanServiceError>;
   readonly list: (input: {
     readonly spaceId: string;
     readonly cursor?: {
@@ -1244,6 +1265,126 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
       .withPermits(1)(sql.withTransaction(patchTaskUnlocked(input, actor)))
       .pipe(Effect.mapError(persistenceError));
 
+  const applyApprovedTaskFieldsUnlocked = Effect.fn(
+    "SprintPlan.applyApprovedTaskFieldsInTransaction",
+  )(function* (input: SprintPlanApprovedPatchInput, actorInput: SprintPlanActor) {
+    if (input.operations.length < 1 || input.operations.length > 100) {
+      return yield* validationError("Approved adjustment must have 1 to 100 task fields.");
+    }
+    const actor = yield* decodeActor(actorInput);
+    const provenance = yield* decodeMutationProvenance({
+      kind: "inbox-adjustment",
+      sourceRef: input.revisionId,
+      evidenceRef: input.evidenceRef,
+    });
+    const pairs = new Set<string>();
+    for (const operation of input.operations) {
+      const pair = `${operation.taskId}\u0000${operation.field}`;
+      if (pairs.has(pair)) return yield* validationError("Adjustment repeats a task field.");
+      pairs.add(pair);
+      yield* validateFieldPatch({
+        planId: input.planId,
+        spaceId: input.spaceId,
+        expectedVersion: input.expectedVersion,
+        mutationId: input.mutationId,
+        reason: input.reason,
+        provenance,
+        ...operation,
+      });
+    }
+    const plan = yield* findPlan(input.planId, input.spaceId);
+    if (plan.version !== input.expectedVersion) {
+      return yield* conflictError("The sprint plan changed after this proposal was prepared.");
+    }
+    const current = mutableClone((yield* parseSource(plan.currentJson)).source);
+    const tasks = taskIndex(current);
+    for (const operation of input.operations) {
+      const task = tasks.get(operation.taskId);
+      if (task === undefined) return yield* conflictError(`Task '${operation.taskId}' is missing.`);
+      if (!equal(fieldValue(task, operation.field), operation.before)) {
+        return yield* conflictError(`Task '${operation.taskId}.${operation.field}' changed.`);
+      }
+      setFieldValue(task, operation.field, operation.after);
+    }
+    const validated = yield* parseSprintPlanSource(current).pipe(
+      Effect.mapError((cause) => validationError(cause.message, cause)),
+    );
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const nextVersion = plan.version + 1;
+    const updated = yield* sql<{ readonly version: number }>`
+      UPDATE command_center_sprint_plans
+      SET current_json = ${stringify(current)}, version = ${nextVersion}, updated_at = ${now}
+      WHERE id = ${input.planId} AND space_id = ${input.spaceId} AND version = ${plan.version}
+      RETURNING version
+    `;
+    if (updated.length !== 1)
+      return yield* conflictError("The sprint plan changed during approval.");
+    for (const operation of input.operations) {
+      if (operation.field !== "day" && operation.field !== "text") continue;
+      const conflict = validated.normalized.dateConflicts.find(
+        (candidate) => candidate.taskId === operation.taskId,
+      );
+      yield* sql`
+        DELETE FROM command_center_sprint_plan_date_resolutions
+        WHERE plan_id = ${input.planId} AND task_id = ${operation.taskId}
+          AND source_conflict_json <> ${conflict === undefined ? "null" : stringify(conflict)}
+      `;
+    }
+    const before = input.operations.map(({ taskId, field, before }) => ({
+      taskId,
+      field,
+      value: before,
+    }));
+    const after = input.operations.map(({ taskId, field, after }) => ({
+      taskId,
+      field,
+      value: after,
+    }));
+    const requestDigest = yield* digest(
+      stringify({ operation: "approved-task-patch", input, actor }),
+    );
+    yield* sql`
+      INSERT INTO command_center_sprint_plan_history (
+        mutation_id, plan_id, space_id, plan_version, operation, task_id, field,
+        before_json, after_json, reason, actor_json, provenance_json, request_digest, occurred_at
+      ) VALUES (
+        ${input.mutationId}, ${input.planId}, ${input.spaceId}, ${nextVersion}, 'task-patch',
+        ${null}, ${null}, ${stringify(before)}, ${stringify(after)}, ${input.reason.trim()},
+        ${stringify(actor)}, ${stringify(provenance)}, ${requestDigest}, ${now}
+      )
+    `;
+    yield* recordMutation({
+      mutationId: input.mutationId,
+      planId: input.planId,
+      spaceId: input.spaceId,
+      operation: "task-patch",
+      requestDigest,
+      planVersion: nextVersion,
+      occurredAt: now,
+    });
+    yield* audit.append({
+      eventId: `sprint-plan:${input.mutationId}`,
+      actorKind: actor.kind,
+      action: "cc.sprint-plan.adjustment.approved",
+      spaceId: input.spaceId,
+      payload: {
+        planId: input.planId,
+        planVersion: nextVersion,
+        revisionId: input.revisionId,
+        before,
+        after,
+        provenance,
+      },
+      occurredAt: now,
+    });
+    return yield* hydrate(yield* findPlan(input.planId, input.spaceId));
+  });
+
+  const applyApprovedTaskFieldsInTransaction = (
+    input: SprintPlanApprovedPatchInput,
+    actor: SprintPlanActor,
+  ) => applyApprovedTaskFieldsUnlocked(input, actor).pipe(Effect.mapError(persistenceError));
+
   const resolveDateConflictUnlocked = Effect.fn("SprintPlan.resolveDateConflictUnlocked")(
     function* (input: SprintPlanDateResolutionInput, actorInput: SprintPlanActor) {
       yield* decodeIdentifier(input.planId);
@@ -1434,6 +1575,7 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
   }, Effect.mapError(persistenceError));
 
   return SprintPlanService.of({
+    applyApprovedTaskFieldsInTransaction,
     list,
     previewImport,
     applyImport,

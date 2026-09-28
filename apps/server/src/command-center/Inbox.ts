@@ -1,6 +1,14 @@
-import { Item, type ItemId } from "@command-center/core";
+import {
+  Item,
+  ObservationEligibilityPolicy,
+  ObservationIsoInstant,
+  evaluateObservationEligibility,
+  type ItemId,
+} from "@command-center/core";
 import {
   CommandCenterError,
+  CommandCenterInboxApproveAdjustmentInput,
+  type CommandCenterInboxApproveAdjustmentInput as ApproveAdjustmentInput,
   CommandCenterInboxCandidateCreateInput,
   type CommandCenterInboxCandidateCreateInput as CandidateCreateInput,
   type CommandCenterInboxCandidateMutationInput as CandidateMutationInput,
@@ -31,6 +39,8 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { makeCommandCenterAuditLog } from "./AuditLog.ts";
+import { make as makeObservations } from "./Observations.ts";
+import { makeSprintPlanService } from "./SprintPlan.ts";
 
 const DEFAULT_HISTORY_LIMIT = 50;
 const DEFAULT_LIST_LIMIT = 50;
@@ -57,6 +67,11 @@ const decodeEvidenceJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(CommandCenterInboxCandidateCreateInput.fields.evidence),
 );
 const decodeUnknownJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const decodeEligibilityPolicy = Schema.decodeUnknownEffect(ObservationEligibilityPolicy);
+const decodeApproveAdjustment = Schema.decodeUnknownEffect(
+  CommandCenterInboxApproveAdjustmentInput,
+);
+const decodeObservationInstant = Schema.decodeUnknownEffect(ObservationIsoInstant);
 const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const isCommandCenterError = Schema.is(CommandCenterError);
 
@@ -184,6 +199,10 @@ export class CommandCenterInbox extends Context.Service<
       input: CandidateMutationInput,
       context: InboxActorContext,
     ) => Effect.Effect<MutationResult, CommandCenterError>;
+    readonly approveAdjustment: (
+      input: ApproveAdjustmentInput,
+      context: InboxActorContext,
+    ) => Effect.Effect<MutationResult, CommandCenterError>;
     readonly discardCandidate: (
       input: CandidateMutationInput,
       context: InboxActorContext,
@@ -215,6 +234,8 @@ export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const crypto = yield* Crypto.Crypto;
   const audit = yield* makeCommandCenterAuditLog;
+  const sprintPlan = yield* makeSprintPlanService();
+  const observations = yield* makeObservations;
   const textEncoder = new TextEncoder();
 
   const digest = Effect.fn("CommandCenterInbox.digest")(function* (value: string) {
@@ -332,6 +353,128 @@ export const make = Effect.gen(function* () {
     return rows[0];
   });
 
+  const assessAdjustment = Effect.fn("CommandCenterInbox.assessAdjustment")(function* (
+    row: ItemStateRow,
+    revisionRow: RevisionRow,
+    now: string,
+  ) {
+    const revision = yield* decodeRevisionRow(revisionRow);
+    if (revision.payload.kind !== "sprint-plan-task-patch") {
+      return {
+        supported: false as const,
+        eligible: false as const,
+        reason: "phase-a-no-executor" as const,
+      };
+    }
+    const payload = revision.payload;
+    if (row.subjectKind !== "sprint-plan" || row.subjectId !== payload.target.id) {
+      return { supported: true as const, eligible: false as const, reason: "plan-stale" as const };
+    }
+    const applied = yield* sql<{ readonly mutationId: string }>`
+      SELECT mutation_id AS "mutationId"
+      FROM command_center_sprint_plan_adjustment_approvals
+      WHERE item_id = ${row.itemId} AND revision_id = ${revision.id} LIMIT 1
+    `;
+    if (applied.length > 0) {
+      return {
+        supported: true as const,
+        eligible: false as const,
+        reason: "already-applied" as const,
+      };
+    }
+    const policyRows = yield* sql<{ readonly policyJson: string }>`
+      SELECT policy_json AS "policyJson" FROM command_center_spaces
+      WHERE id = ${row.spaceId} AND lifecycle = 'active' LIMIT 1
+    `;
+    const raw =
+      policyRows[0] === undefined
+        ? null
+        : yield* decodeJson(policyRows[0].policyJson, "Space policy");
+    const configured =
+      raw !== null && typeof raw === "object" && !Array.isArray(raw)
+        ? (raw as Record<string, unknown>).observationEligibility
+        : undefined;
+    if (configured === undefined) {
+      return {
+        supported: true as const,
+        eligible: false as const,
+        reason: "policy-not-configured" as const,
+      };
+    }
+    const policy = yield* decodeEligibilityPolicy(configured).pipe(
+      Effect.mapError((cause) => persistenceError("Stored observation policy is invalid.", cause)),
+    );
+    const source = revision.evidence.source;
+    if (!source.startsWith("observation:") || source.length <= "observation:".length) {
+      return {
+        supported: true as const,
+        eligible: false as const,
+        reason: "evidence-stale" as const,
+      };
+    }
+    const snapshot = yield* observations
+      .get({
+        spaceId: row.spaceId,
+        observationId: source.slice("observation:".length),
+      })
+      .pipe(
+        Effect.catch((cause) =>
+          cause.reason === "not-found"
+            ? Effect.succeed(null)
+            : Effect.fail(persistenceError("Observation evidence could not be read.", cause)),
+        ),
+      );
+    if (
+      snapshot === null ||
+      snapshot.observation.spaceId !== row.spaceId ||
+      snapshot.observation.planId !== payload.target.id ||
+      snapshot.observation.subjectId !== revision.evidence.subjectId ||
+      String(snapshot.version) !== revision.evidence.version ||
+      snapshot.revisionDigest !== revision.evidence.digest ||
+      (revision.evidence.observedAt !== undefined &&
+        revision.evidence.observedAt !== snapshot.observation.data.observedAt)
+    ) {
+      return {
+        supported: true as const,
+        eligible: false as const,
+        reason: "evidence-stale" as const,
+      };
+    }
+    const eligibility = evaluateObservationEligibility({
+      policy,
+      evidence: snapshot,
+      asOf: yield* decodeObservationInstant(now).pipe(
+        Effect.mapError((cause) => persistenceError("Current time is invalid.", cause)),
+      ),
+    });
+    if (snapshot.hasCollectionConflict || eligibility.status !== "eligible") {
+      return {
+        supported: true as const,
+        eligible: false as const,
+        reason: "evidence-ineligible" as const,
+      };
+    }
+    const current = yield* sprintPlan
+      .get({ planId: payload.target.id, spaceId: row.spaceId })
+      .pipe(
+        Effect.catch((cause) =>
+          cause.reason === "not-found" || cause.reason === "conflict"
+            ? Effect.succeed(null)
+            : Effect.fail(persistenceError("Sprint plan could not be read.", cause)),
+        ),
+      );
+    if (current === null || current.version !== payload.expectedPlanVersion) {
+      return { supported: true as const, eligible: false as const, reason: "plan-stale" as const };
+    }
+    return {
+      supported: true as const,
+      eligible: true as const,
+      reason: "ready" as const,
+      snapshot,
+      policyDigest: eligibility.policyDigest!,
+    };
+  });
+
   const hydrateState = Effect.fn("CommandCenterInbox.hydrateState")(function* (
     row: ItemStateRow,
     now: string,
@@ -362,6 +505,15 @@ export const make = Effect.gen(function* () {
           : count.candidateCount > 0
             ? ("candidate-pending" as const)
             : ("phase-a-no-executor" as const);
+    const approval =
+      approvalReason === "phase-a-no-executor" && row.currentRevisionId !== null
+        ? yield* Effect.gen(function* () {
+            const current = yield* loadRevision(row.currentRevisionId!, row.itemId);
+            if (current === undefined)
+              return yield* persistenceError("Current Inbox revision is missing.");
+            return yield* assessAdjustment(row, current, now);
+          })
+        : { supported: false as const, eligible: false as const, reason: approvalReason };
     return {
       itemId: row.itemId as ItemId,
       spaceId: row.spaceId as InboxState["spaceId"],
@@ -374,7 +526,11 @@ export const make = Effect.gen(function* () {
       ...(row.currentRevisionId === null ? {} : { currentRevisionId: row.currentRevisionId }),
       unresolvedChangeRequestCount: count.unresolvedChangeRequestCount,
       candidateCount: count.candidateCount,
-      approval: { supported: false, eligible: false, reason: approvalReason },
+      approval: {
+        supported: approval.supported,
+        eligible: approval.eligible,
+        reason: approval.reason,
+      },
       createdAt: row.stateCreatedAt,
       updatedAt: row.stateUpdatedAt,
     };
@@ -804,6 +960,32 @@ export const make = Effect.gen(function* () {
   const createCandidate: CommandCenterInbox["Service"]["createCandidate"] = (input, context) =>
     runMutation("cc.inbox.candidate.create", input, context, (state, now) =>
       Effect.gen(function* () {
+        if (input.payload.kind === "sprint-plan-task-patch") {
+          if (state.subjectKind === "command-center-item" && state.currentRevisionId === null) {
+            const prior = yield* sql<{ readonly id: string }>`
+              SELECT id FROM command_center_inbox_revisions WHERE item_id = ${input.itemId} LIMIT 1
+            `;
+            if (prior.length > 0)
+              return yield* conflictError("This Inbox item already has proposal history.");
+            yield* sprintPlan
+              .get({ planId: input.payload.target.id, spaceId: input.spaceId })
+              .pipe(
+                Effect.mapError(() =>
+                  conflictError("The proposal target is not a current plan in this Space."),
+                ),
+              );
+            yield* sql`
+              UPDATE command_center_inbox_state
+              SET subject_kind = 'sprint-plan', subject_id = ${input.payload.target.id}
+              WHERE item_id = ${input.itemId} AND space_id = ${input.spaceId}
+            `;
+          } else if (
+            state.subjectKind !== "sprint-plan" ||
+            state.subjectId !== input.payload.target.id
+          ) {
+            return yield* conflictError("The Inbox item is bound to a different subject.");
+          }
+        }
         const revisions = yield* sql<{ readonly revision: number }>`
           SELECT COALESCE(MAX(revision), 0) + 1 AS revision
           FROM command_center_inbox_revisions
@@ -873,6 +1055,117 @@ export const make = Effect.gen(function* () {
         }
       }),
     );
+
+  const approveAdjustment: CommandCenterInbox["Service"]["approveAdjustment"] = (raw, context) =>
+    Effect.gen(function* () {
+      const input = yield* decodeApproveAdjustment(raw).pipe(
+        Effect.mapError((cause) => validationError(`Invalid approval request: ${String(cause)}`)),
+      );
+      const normalized = { ...input, expectedVersion: input.expectedInboxVersion };
+      return yield* runMutation("cc.inbox.adjustment.approve", normalized, context, (state, now) =>
+        Effect.gen(function* () {
+          if (state.currentRevisionId !== input.currentRevisionId) {
+            return yield* conflictError("The accepted Inbox revision changed before approval.");
+          }
+          const currentState = yield* hydrateState(state, now);
+          if (currentState.unresolvedChangeRequestCount > 0 || currentState.candidateCount > 0) {
+            return yield* conflictError(
+              "The proposal has unresolved changes or a pending candidate.",
+            );
+          }
+          if (state.lifecycle !== "open") {
+            return yield* conflictError("Only an open Inbox item can be approved.");
+          }
+          const revisionRow = yield* loadRevision(input.currentRevisionId, input.itemId);
+          if (revisionRow?.status !== "current") {
+            return yield* conflictError("The accepted Inbox revision is no longer current.");
+          }
+          const revision = yield* decodeRevisionRow(revisionRow);
+          if (revision.payload.kind !== "sprint-plan-task-patch") {
+            return yield* conflictError("This proposal cannot edit a sprint plan.");
+          }
+          if (revision.payload.expectedPlanVersion !== input.expectedPlanVersion) {
+            return yield* conflictError("The proposal targets another sprint plan version.");
+          }
+          if (encodeUnknownJson(revision.payload) !== revisionRow.payloadJson) {
+            return yield* persistenceError(
+              "Stored proposal payload does not match its decoded body.",
+            );
+          }
+          const assessed = yield* assessAdjustment(state, revisionRow, now);
+          if (!assessed.eligible) {
+            return yield* conflictError(`Adjustment approval is blocked: ${assessed.reason}.`);
+          }
+          const payloadDigest = yield* digest(revisionRow.payloadJson);
+          const fingerprint = yield* digest(
+            encodeUnknownJson({
+              spaceId: input.spaceId,
+              planId: revision.payload.target.id,
+              evidenceRevisionId: assessed.snapshot.revisionId,
+              evidenceDigest: assessed.snapshot.revisionDigest,
+              period: assessed.snapshot.observation.data.period,
+              operations: [...revision.payload.operations].sort((a, b) =>
+                `${a.taskId}\u0000${a.field}`.localeCompare(`${b.taskId}\u0000${b.field}`),
+              ),
+            }),
+          );
+          const duplicate = yield* sql<{ readonly itemId: string }>`
+            SELECT item_id AS "itemId"
+            FROM command_center_sprint_plan_adjustment_approvals
+            WHERE proposal_fingerprint = ${fingerprint} LIMIT 1
+          `;
+          if (duplicate.length > 0) {
+            return yield* conflictError("This exact evidence and task diff was already approved.");
+          }
+          const before = revision.payload.operations.map(({ taskId, field, before }) => ({
+            taskId,
+            field,
+            value: before,
+          }));
+          const after = revision.payload.operations.map(({ taskId, field, after }) => ({
+            taskId,
+            field,
+            value: after,
+          }));
+          const plan = yield* sprintPlan
+            .applyApprovedTaskFieldsInTransaction(
+              {
+                planId: revision.payload.target.id,
+                spaceId: input.spaceId,
+                expectedVersion: input.expectedPlanVersion,
+                mutationId: input.mutationId,
+                revisionId: revision.id,
+                evidenceRef: assessed.snapshot.revisionId,
+                reason: revision.payload.reason,
+                operations: revision.payload.operations,
+              },
+              { id: context.subject, kind: "user" },
+            )
+            .pipe(
+              Effect.mapError((cause) =>
+                cause.reason === "conflict" || cause.reason === "validation"
+                  ? conflictError(cause.message)
+                  : persistenceError(cause.message, cause),
+              ),
+            );
+          yield* sql`
+            INSERT INTO command_center_sprint_plan_adjustment_approvals (
+              mutation_id, space_id, item_id, revision_id, plan_id,
+              before_plan_version, after_plan_version, payload_digest,
+              evidence_revision_id, evidence_digest, policy_digest, proposal_fingerprint,
+              approver_subject, diff_json, approved_at
+            ) VALUES (
+              ${input.mutationId}, ${input.spaceId}, ${input.itemId}, ${revision.id},
+              ${plan.id}, ${input.expectedPlanVersion}, ${plan.version}, ${payloadDigest},
+              ${assessed.snapshot.revisionId}, ${assessed.snapshot.revisionDigest},
+              ${assessed.policyDigest}, ${fingerprint}, ${context.subject},
+              ${encodeUnknownJson({ before, after })}, ${now}
+            )
+          `;
+          yield* bumpState(normalized, nextUpdatedAt(state.stateUpdatedAt, now));
+        }),
+      );
+    });
 
   const discardCandidate: CommandCenterInbox["Service"]["discardCandidate"] = (input, context) =>
     runMutation("cc.inbox.candidate.discard", input, context, (state, now) =>
@@ -987,6 +1280,7 @@ export const make = Effect.gen(function* () {
     requestChanges,
     createCandidate,
     acceptCandidate,
+    approveAdjustment,
     discardCandidate,
     resolveChangeRequest,
     snooze,
