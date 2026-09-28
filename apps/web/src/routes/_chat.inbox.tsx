@@ -17,9 +17,18 @@ const isItemId = Schema.is(ItemId);
 
 export const Route = createFileRoute("/_chat/inbox")({
   validateSearch: (search: Record<string, unknown>) => ({
-    environmentId: isEnvironmentId(search.environmentId) ? search.environmentId : undefined,
-    spaceId: isSpaceId(search.spaceId) ? search.spaceId : undefined,
-    itemId: isItemId(search.itemId) ? search.itemId : undefined,
+    tab: search.tab === "actionable" ? ("actionable" as const) : undefined,
+    environment: isEnvironmentId(search.environment)
+      ? search.environment
+      : isEnvironmentId(search.environmentId)
+        ? search.environmentId
+        : undefined,
+    space: isSpaceId(search.space)
+      ? search.space
+      : isSpaceId(search.spaceId)
+        ? search.spaceId
+        : undefined,
+    item: isItemId(search.item) ? search.item : isItemId(search.itemId) ? search.itemId : undefined,
   }),
   component: InboxRouteView,
 });
@@ -28,7 +37,7 @@ function InboxRouteView() {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { environments } = useEnvironments();
   const navigate = useNavigate();
-  const { environmentId: requestedEnvironmentId, spaceId, itemId } = Route.useSearch();
+  const { environment: requestedEnvironmentId, space: spaceId, item: itemId } = Route.useSearch();
   const environmentId = requestedEnvironmentId ?? primaryEnvironmentId;
   const environment = environments.find((entry) => entry.environmentId === environmentId);
   const [cursor, setCursor] = useState<CommandCenterInboxCursor | undefined>();
@@ -113,9 +122,10 @@ function InboxRouteView() {
                     }
                     to="/inbox"
                     search={{
-                      environmentId: environmentId ?? undefined,
-                      spaceId: state.spaceId,
-                      itemId: state.itemId,
+                      tab: "actionable",
+                      environment: environmentId ?? undefined,
+                      space: state.spaceId,
+                      item: state.itemId,
                     }}
                   >
                     <span className="block truncate text-sm font-medium">{item.title}</span>
@@ -224,9 +234,10 @@ function InboxRouteView() {
                     void navigate({
                       to: "/inbox",
                       search: {
-                        environmentId: environmentId ?? undefined,
-                        spaceId: undefined,
-                        itemId: undefined,
+                        tab: "actionable",
+                        environment: environmentId ?? undefined,
+                        space: undefined,
+                        item: undefined,
                       },
                     })
                   }

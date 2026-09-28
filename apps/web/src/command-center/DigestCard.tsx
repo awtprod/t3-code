@@ -106,9 +106,10 @@ export function DigestCard({ environmentId }: { readonly environmentId: Environm
                   className="block min-w-0 hover:underline"
                   to="/inbox"
                   search={{
-                    environmentId: environmentId ?? undefined,
-                    spaceId: item.spaceId,
-                    itemId: item.itemId,
+                    tab: "actionable",
+                    environment: environmentId ?? undefined,
+                    space: item.spaceId,
+                    item: item.itemId,
                   }}
                 >
                   <span className="block truncate text-sm font-medium">{item.title}</span>
