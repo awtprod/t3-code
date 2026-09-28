@@ -1,5 +1,6 @@
 import {
   ArrowLeftIcon,
+  CalendarDaysIcon,
   ChartNoAxesColumnIcon,
   CircleAlertIcon,
   CommandIcon,
@@ -126,6 +127,12 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       label: "Automations",
       icon: WorkflowIcon,
       active: pathname.startsWith("/automations"),
+    },
+    {
+      to: "/sprint-plan" as const,
+      label: "Sprint plan",
+      icon: CalendarDaysIcon,
+      active: pathname.startsWith("/sprint-plan"),
     },
   ];
 
