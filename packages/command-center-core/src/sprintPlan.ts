@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
@@ -119,6 +120,7 @@ export class SprintPlanValidationError extends Schema.TaggedErrorClass<SprintPla
     message: Schema.String,
   },
 ) {}
+const isSprintPlanValidationError = Schema.is(SprintPlanValidationError);
 
 const BoundedString = Schema.String.check(
   Schema.isMaxLength(SPRINT_PLAN_IMPORT_LIMITS.stringLength),
@@ -225,7 +227,10 @@ const assertBoundedJson: (root: unknown) => asserts root is SprintPlanJson = (ro
 
 const parseIsoDate = (value: string): number => {
   const time = Date.parse(`${value}T00:00:00.000Z`);
-  if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== value) {
+  if (
+    !Number.isFinite(time) ||
+    DateTime.formatIso(DateTime.makeUnsafe(time)).slice(0, 10) !== value
+  ) {
     fail(`Invalid calendar date '${value}'.`);
   }
   return time;
@@ -283,7 +288,8 @@ const isoFromParts = (year: number, month: number, day: number): string | undefi
     .toString()
     .padStart(2, "0")}`;
   const time = Date.parse(`${value}T00:00:00.000Z`);
-  return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value
+  return Number.isFinite(time) &&
+    DateTime.formatIso(DateTime.makeUnsafe(time)).slice(0, 10) === value
     ? value
     : undefined;
 };
@@ -345,8 +351,10 @@ const dateReferenceFromDay = (
 };
 
 const thanksgivingDate = (year: number): string => {
-  const first = new Date(Date.UTC(year, 10, 1));
-  const firstThursday = 1 + ((4 - first.getUTCDay() + 7) % 7);
+  const firstWeekDay = DateTime.toPartsUtc(
+    DateTime.makeUnsafe(`${year}-11-01T00:00:00.000Z`),
+  ).weekDay;
+  const firstThursday = 1 + ((4 - firstWeekDay + 7) % 7);
   return isoFromParts(year, 11, firstThursday + 21)!;
 };
 
@@ -389,7 +397,9 @@ const detectDateConflict = (
 ): { readonly scheduledDate?: string; readonly conflict?: SprintPlanDateConflict } => {
   const dayReference = dateReferenceFromDay(task.day, week);
   if (dayReference === undefined || dayReference.date === undefined) return {};
-  const actualDay = new Date(`${dayReference.date}T00:00:00.000Z`).getUTCDay();
+  const actualDay = DateTime.toPartsUtc(
+    DateTime.makeUnsafe(`${dayReference.date}T00:00:00.000Z`),
+  ).weekDay;
   if (dayReference.weekday !== undefined && actualDay !== dayReference.weekday) {
     return {
       conflict: {
@@ -498,7 +508,8 @@ const parse = (input: string | unknown): ParsedSprintPlanSource => {
   const updatedTime = Date.parse(source.updated);
   if (
     !Number.isFinite(updatedTime) ||
-    new Date(updatedTime).toISOString().slice(0, 10) !== source.updated.slice(0, 10)
+    DateTime.formatIso(DateTime.makeUnsafe(updatedTime)).slice(0, 10) !==
+      source.updated.slice(0, 10)
   ) {
     fail(`Invalid source update timestamp '${source.updated}'.`);
   }
@@ -536,7 +547,7 @@ export const parseSprintPlanSource = (input: string | unknown) =>
   Effect.try({
     try: () => parse(input),
     catch: (cause) =>
-      cause instanceof SprintPlanValidationError
+      isSprintPlanValidationError(cause)
         ? cause
         : new SprintPlanValidationError({ message: String(cause) }),
   });

@@ -1,11 +1,16 @@
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import {
   SPRINT_PLAN_IMPORT_LIMITS,
   SprintPlanValidationError,
   parseSprintPlanSource,
 } from "./sprintPlan.ts";
+
+const jsonString = Schema.fromJsonString(Schema.Unknown);
+const encodeJson = Schema.encodeSync(jsonString);
+const decodeJson = Schema.decodeUnknownSync(jsonString);
 
 const fixture = () => ({
   version: 2,
@@ -56,11 +61,11 @@ const fixture = () => ({
 
 it.effect("preserves the exact source JSON, ordering, metadata, and unknown score strings", () =>
   Effect.gen(function* () {
-    const sourceJson = JSON.stringify(fixture(), null, 2);
+    const sourceJson = encodeJson(fixture());
     const parsed = yield* parseSprintPlanSource(sourceJson);
 
     expect(parsed.sourceJson).toBe(sourceJson);
-    expect(JSON.parse(parsed.sourceJson)).toEqual(fixture());
+    expect(decodeJson(parsed.sourceJson)).toEqual(fixture());
     expect(parsed.source.score[0]?.now).toBe("");
     expect(parsed.source.score[0]?.target).toBe("Set at launch");
     expect(parsed.source.weeks[0]?.focus).toBe("Optional week metadata");
