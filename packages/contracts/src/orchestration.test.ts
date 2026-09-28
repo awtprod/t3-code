@@ -383,7 +383,7 @@ const windowsFileAttachment = {
   name: "Take 3 (final).mov",
   mimeType: "video/quicktime",
   sizeBytes: 5_368_709_120,
-  host: "jvl3rp2",
+  host: "editing-pc",
   path: "C:\\Media\\Clips ñ\\Take 3 (final).mov",
 };
 
@@ -423,7 +423,7 @@ it.effect("rejects malformed windows-file references instead of tolerating them"
       { ...windowsFileAttachment, path: "relative\\clip.mov" },
       { ...windowsFileAttachment, path: 'C:\\a"b.mov' },
       { ...windowsFileAttachment, path: "C:\\a" + "\n" + "b.mov" },
-      { ...windowsFileAttachment, host: "jvl3rp2; rm -rf /" },
+      { ...windowsFileAttachment, host: "editing-pc; rm -rf /" },
     ]) {
       assert.strictEqual(Exit.isFailure(yield* decode(bad)), true);
     }

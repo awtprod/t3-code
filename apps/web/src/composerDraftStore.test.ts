@@ -2601,7 +2601,7 @@ describe("composerDraftStore windows-file references", () => {
     name: "clip.mp4",
     mimeType: "video/mp4",
     sizeBytes: 1_234_567,
-    host: "jvl3rp2",
+    host: "editing-pc",
     path: "C:\\Media\\clip.mp4",
   };
 

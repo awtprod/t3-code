@@ -36,6 +36,8 @@ const makeHarness = (options: {
 }) => {
   const invocations: ProcessRunner.ProcessRunInput[] = [];
   const settings = makeWindowsMediaSettings({
+    sshConfigPath: "/etc/cc/ssh_config",
+    hostAlias: "editing-pc",
     ...(options.roots !== undefined ? { roots: options.roots } : {}),
     ...(options.enabled !== undefined ? { enabled: options.enabled } : {}),
   });
@@ -99,24 +101,39 @@ describe("normalizeWindowsPath", () => {
 });
 
 describe("settings", () => {
-  it("defaults to the explicit provider ssh config and jvl3rp2", () => {
-    const settings = makeWindowsMediaSettings({});
-    assert.equal(
-      settings.sshConfigPath,
-      "/var/lib/command-center/providers/claude/awtprod/.ssh/config",
-    );
-    assert.equal(settings.hostAlias, "jvl3rp2");
-    assert.equal(settings.roots, null);
+  it("stays off until both ssh values are configured", () => {
+    const unset = makeWindowsMediaSettings({});
+    assert.isFalse(unset.enabled);
+    assert.throws(() => makeWindowsMediaSettings({ hostAlias: "editing-pc" }));
+    assert.throws(() => makeWindowsMediaSettings({ sshConfigPath: "/etc/cc/ssh_config" }));
+    const settings = makeWindowsMediaSettings({
+      sshConfigPath: "/etc/cc/ssh_config",
+      hostAlias: "editing-pc",
+    });
     assert.isTrue(settings.enabled);
+    assert.equal(settings.sshConfigPath, "/etc/cc/ssh_config");
+    assert.equal(settings.hostAlias, "editing-pc");
+    assert.equal(settings.roots, null);
   });
 
   it("rejects ~ config paths and unsafe aliases, parses | separated roots", () => {
-    assert.throws(() => makeWindowsMediaSettings({ sshConfigPath: "~/.ssh/config" }));
-    assert.throws(() => makeWindowsMediaSettings({ hostAlias: "-oProxyCommand=x" }));
-    assert.deepEqual(makeWindowsMediaSettings({ roots: "c:/Clips| D:\\Footage\\ " }).roots, [
-      "C:\\Clips",
-      "D:\\Footage",
-    ]);
+    assert.throws(() =>
+      makeWindowsMediaSettings({ sshConfigPath: "~/.ssh/config", hostAlias: "editing-pc" }),
+    );
+    assert.throws(() =>
+      makeWindowsMediaSettings({
+        sshConfigPath: "/etc/cc/ssh_config",
+        hostAlias: "-oProxyCommand=x",
+      }),
+    );
+    assert.deepEqual(
+      makeWindowsMediaSettings({
+        sshConfigPath: "/etc/cc/ssh_config",
+        hostAlias: "editing-pc",
+        roots: "c:/Clips| D:\\Footage\\ ",
+      }).roots,
+      ["C:\\Clips", "D:\\Footage"],
+    );
   });
 });
 
@@ -124,28 +141,25 @@ describe("windows-file path line", () => {
   it("carries the path, the host and a copy-pasteable scp command", () => {
     const line = windowsFileAttachmentPathLine({
       name: "Timeline 1.mov",
-      host: "jvl3rp2",
+      host: "editing-pc",
       path: "C:\\Timeline 1.mov",
-      sshConfigPath: "/var/lib/command-center/providers/claude/awtprod/.ssh/config",
+      sshConfigPath: "/etc/cc/ssh_config",
     });
-    assert.include(line, 'Referenced Windows file "Timeline 1.mov" lives on host jvl3rp2');
+    assert.include(line, 'Referenced Windows file "Timeline 1.mov" lives on host editing-pc');
     assert.include(line, "at: C:\\Timeline 1.mov");
     assert.include(line, "davinci-resolve MCP");
-    assert.include(
-      line,
-      "scp -F '/var/lib/command-center/providers/claude/awtprod/.ssh/config' 'jvl3rp2:C:/Timeline 1.mov' <dest>",
-    );
+    assert.include(line, "scp -F '/etc/cc/ssh_config' 'editing-pc:C:/Timeline 1.mov' <dest>");
   });
 
   it("single-quotes shell metacharacters in Windows file names", () => {
     assert.equal(
       windowsFileScpCommand({
         sshConfigPath: "/cfg",
-        host: "jvl3rp2",
+        host: "editing-pc",
         path: "C:\\it's $(x) `y`.mov",
         destination: ".",
       }),
-      "scp -F '/cfg' 'jvl3rp2:C:/it'\\''s $(x) `y`.mov' .",
+      "scp -F '/cfg' 'editing-pc:C:/it'\\''s $(x) `y`.mov' .",
     );
   });
 });
@@ -183,14 +197,14 @@ describe("WindowsMediaConnector", () => {
       assert.equal(invocation.command, "ssh");
       assert.deepEqual(invocation.args.slice(0, 9), [
         "-F",
-        "/var/lib/command-center/providers/claude/awtprod/.ssh/config",
+        "/etc/cc/ssh_config",
         "-o",
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=10",
         "-T",
         "--",
-        "jvl3rp2",
+        "editing-pc",
       ]);
       assert.equal(
         Buffer.from(invocation.stdin ?? "", "base64").toString("utf8"),
@@ -308,7 +322,7 @@ describe("WindowsMediaConnector", () => {
       const connector = yield* WindowsMediaConnector.WindowsMediaConnector;
       const result = yield* connector.roots();
       assert.deepEqual(result, {
-        host: "jvl3rp2",
+        host: "editing-pc",
         roots: [
           { label: "C:", path: "C:\\" },
           { label: "Media (F:)", path: "F:\\" },

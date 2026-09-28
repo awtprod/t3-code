@@ -63,7 +63,7 @@ describe("normalizeDispatchCommand attachments", () => {
         name: "Timeline 1.mov",
         mimeType: "video/quicktime",
         sizeBytes: 372874603,
-        host: "jvl3rp2",
+        host: "editing-pc",
         path: "C:\\Media\\Timeline 1.mov",
       };
       const command = turnStartCommand({ attachments: [] });

@@ -88,7 +88,7 @@ describe("draft -> turn mapping", () => {
   it("builds a windows-file reference from a picked entry and sends only the contract shape", () => {
     const picked = windowsFileAttachmentFromEntry({
       id: "wf-1",
-      host: "jvl3rp2",
+      host: "editing-pc",
       entry: entry("clip.mp4", "video", { sizeBytes: 5_000_000_000 }),
     });
     expect(picked).toEqual({
@@ -97,7 +97,7 @@ describe("draft -> turn mapping", () => {
       name: "clip.mp4",
       mimeType: "video/mp4",
       sizeBytes: 5_000_000_000,
-      host: "jvl3rp2",
+      host: "editing-pc",
       path: "C:\\Media\\clip.mp4",
     });
 

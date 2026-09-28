@@ -1015,7 +1015,10 @@ const buildAppUnderTest = (options?: {
           Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
           Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
           Layer.mock(WindowsMediaConnector.WindowsMediaConnector)({
-            settings: makeWindowsMediaSettings({}),
+            settings: makeWindowsMediaSettings({
+              sshConfigPath: "/etc/cc/ssh_config",
+              hostAlias: "editing-pc",
+            }),
             ...options?.layers?.windowsMediaConnector,
           }),
           orchestrationCommandDispatcherLayer,
@@ -3777,12 +3780,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           commandCenterReadiness: { requireReady: Effect.void },
           windowsMediaConnector: {
             roots: () =>
-              Effect.succeed({ host: "jvl3rp2", roots: [{ label: "C:", path: "C:\\" }] }),
+              Effect.succeed({ host: "editing-pc", roots: [{ label: "C:", path: "C:\\" }] }),
             list: (path) =>
               Effect.sync(() => {
                 listedPaths.push(path);
                 return {
-                  host: "jvl3rp2",
+                  host: "editing-pc",
                   path,
                   parent: "C:\\",
                   truncated: false,

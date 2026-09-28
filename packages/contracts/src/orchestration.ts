@@ -229,7 +229,7 @@ export const ChatWindowsFileAttachment = Schema.Struct({
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
   mimeType: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
   sizeBytes: NonNegativeInt,
-  /** ssh-config Host alias, e.g. "jvl3rp2". Restricted so it is safe to echo into a command hint. */
+  /** ssh-config Host alias, e.g. "editing-pc". Restricted so it is safe to echo into a command hint. */
   host: TrimmedNonEmptyString.check(
     Schema.isMaxLength(100),
     Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),

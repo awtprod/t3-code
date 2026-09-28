@@ -24,7 +24,7 @@ function deps(overrides: Partial<Parameters<typeof routeDroppedFiles>[1]> = {}) 
   return {
     enabled: true,
     getPathForFile: (file: File) => `C:\\Media\\${file.name}`,
-    listFolder: vi.fn(async () => ({ host: "jvl3rp2", entries: [entry("clip.mp4", 4)] })),
+    listFolder: vi.fn(async () => ({ host: "editing-pc", entries: [entry("clip.mp4", 4)] })),
     newId: () => `id-${++n}`,
     ...overrides,
   };
@@ -61,7 +61,7 @@ describe("routeDroppedFiles", () => {
         name: "clip.mp4",
         mimeType: "video/mp4",
         sizeBytes: 4,
-        host: "jvl3rp2",
+        host: "editing-pc",
         path: "C:\\Media\\clip.mp4",
       },
     ]);

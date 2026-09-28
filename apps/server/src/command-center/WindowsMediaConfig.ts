@@ -1,15 +1,17 @@
 /**
  * Settings and pure path helpers for the Windows media picker.
  *
- * The picker browses a remote Windows host (Andrew's desktop, where Resolve
- * runs) over SSH. Every value here is explicit and absolute: the server
+ * The picker browses a remote Windows host (e.g. the editing desktop where
+ * Resolve runs) over SSH. Every value here is explicit and absolute: the server
  * process HOME is not the provider HOME that owns the ssh config, so `~` is
  * never expanded.
  *
  * Environment:
  * - `CC_WINDOWS_MEDIA_ENABLED`     "false" disables the picker (default true).
- * - `CC_WINDOWS_MEDIA_SSH_CONFIG`  absolute path passed to `ssh -F`.
- * - `CC_WINDOWS_MEDIA_SSH_ALIAS`   ssh-config Host alias of the Windows box.
+ * - `CC_WINDOWS_MEDIA_SSH_CONFIG`  absolute path passed to `ssh -F`. Required.
+ * - `CC_WINDOWS_MEDIA_SSH_ALIAS`   ssh-config Host alias of the Windows box. Required.
+ *
+ * There are no defaults: the picker stays off until both SSH values are set.
  * - `CC_WINDOWS_MEDIA_ROOTS`       optional `|`-separated allowlist of absolute
  *                                  Windows directories (`|` cannot appear in a
  *                                  Windows path). Unset/empty = every drive.
@@ -19,10 +21,6 @@
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-
-export const DEFAULT_WINDOWS_MEDIA_SSH_CONFIG_PATH =
-  "/var/lib/command-center/providers/claude/awtprod/.ssh/config";
-export const DEFAULT_WINDOWS_MEDIA_SSH_ALIAS = "jvl3rp2";
 
 const SSH_ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 
@@ -142,8 +140,17 @@ export function makeWindowsMediaSettings(input: {
   readonly hostAlias?: string | undefined;
   readonly roots?: string | undefined;
 }): WindowsMediaSettings {
-  const sshConfigPath = input.sshConfigPath?.trim() || DEFAULT_WINDOWS_MEDIA_SSH_CONFIG_PATH;
-  const hostAlias = input.hostAlias?.trim() || DEFAULT_WINDOWS_MEDIA_SSH_ALIAS;
+  const sshConfigPath = input.sshConfigPath?.trim() ?? "";
+  const hostAlias = input.hostAlias?.trim() ?? "";
+  if (sshConfigPath.length === 0 && hostAlias.length === 0) {
+    // Not configured on this server: the picker is simply off.
+    return { enabled: false, sshConfigPath: "", hostAlias: "", roots: null };
+  }
+  if (sshConfigPath.length === 0 || hostAlias.length === 0) {
+    throw new WindowsMediaConfigError(
+      "Set both CC_WINDOWS_MEDIA_SSH_CONFIG and CC_WINDOWS_MEDIA_SSH_ALIAS to enable the picker.",
+    );
+  }
   if (!sshConfigPath.startsWith("/")) {
     throw new WindowsMediaConfigError(
       "CC_WINDOWS_MEDIA_SSH_CONFIG must be an absolute path (no ~ expansion).",
@@ -193,8 +200,10 @@ export const readWindowsMediaSettings: Effect.Effect<WindowsMediaSettings> = Eff
           cause: cause.message,
         }).pipe(
           Effect.as({
-            ...makeWindowsMediaSettings({}),
             enabled: false,
+            sshConfigPath: "",
+            hostAlias: "",
+            roots: null,
           } satisfies WindowsMediaSettings),
         ),
       ),
