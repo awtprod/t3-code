@@ -77,6 +77,7 @@ import Migration0070 from "./Migrations/070_CommandCenterInbox.ts";
 import Migration0071 from "./Migrations/071_CommandCenterSprintPlans.ts";
 import Migration0073 from "./Migrations/073_CommandCenterObservations.ts";
 import Migration0074 from "./Migrations/074_CommandCenterSprintPlanAdjustments.ts";
+import Migration0079 from "./Migrations/079_CommandCenterCcnPreparation.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -153,6 +154,7 @@ export const migrationEntries = [
   [71, "CommandCenterSprintPlans", Migration0071],
   [73, "CommandCenterObservations", Migration0073],
   [74, "CommandCenterSprintPlanAdjustments", Migration0074],
+  [79, "CommandCenterCcnPreparation", Migration0079],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
