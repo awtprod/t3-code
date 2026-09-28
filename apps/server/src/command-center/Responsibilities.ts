@@ -13,6 +13,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { makeCommandCenterAuditLog } from "./AuditLog.ts";
+import { preparationResultFromOutput } from "./automation/PreparationResult.ts";
 
 const BoundedId = TrimmedNonEmptyString.check(Schema.isMaxLength(200));
 const BoundedActor = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
@@ -77,6 +78,7 @@ export interface ResponsibilityHistoryEntry {
   readonly finishedAt: string | null;
   readonly error: string | null;
   readonly usefulResultRef: ResponsibilityResultReference | null;
+  readonly preparationResult: import("@t3tools/contracts").CommandCenterPreparationResult | null;
 }
 
 export interface ResponsibilityStatus {
@@ -103,6 +105,9 @@ export interface ResponsibilityStatus {
   readonly lastSuccessfulAt: string | null;
   readonly lastUsefulResultAt: string | null;
   readonly lastUsefulResultRef: ResponsibilityResultReference | null;
+  readonly lastPreparationResult:
+    | import("@t3tools/contracts").CommandCenterPreparationResult
+    | null;
   readonly currentExecutionId: string | null;
   readonly nextScheduledAt: string | null;
   readonly incidentId: string | null;
@@ -201,6 +206,7 @@ interface ResponsibilityRow {
   readonly artifactRunId: string | null;
   readonly artifactExecutionId: string | null;
   readonly artifactCreatedAt: string | null;
+  readonly lastOutputJson: string | null;
 }
 
 interface HistoryRow {
@@ -213,6 +219,7 @@ interface HistoryRow {
   readonly artifactId: string | null;
   readonly artifactRunId: string | null;
   readonly artifactCreatedAt: string | null;
+  readonly outputJson: string | null;
 }
 
 const decodeAutomation = Schema.decodeUnknownEffect(Automation);
@@ -300,7 +307,9 @@ export const make = Effect.fn("Responsibilities.make")(function* (
         incident.recovery_instruction AS "recoveryInstruction",
         incident.display_error AS "displayError", incident.resolved_at AS "resolvedAt",
         useful.id AS "artifactId", useful.run_id AS "artifactRunId",
-        useful.execution_id AS "artifactExecutionId", useful.created_at AS "artifactCreatedAt"
+        useful.execution_id AS "artifactExecutionId", useful.created_at AS "artifactCreatedAt",
+        CASE WHEN length(last_execution.output_json) <= 65536
+          THEN last_execution.output_json ELSE NULL END AS "lastOutputJson"
       FROM command_center_automations automation
       JOIN command_center_spaces space ON space.id = automation.space_id
         AND space.lifecycle = 'active'
@@ -343,6 +352,13 @@ export const make = Effect.fn("Responsibilities.make")(function* (
         ORDER BY artifact.created_at DESC, artifact.id DESC
         LIMIT 1
       )
+      LEFT JOIN command_center_automation_executions last_execution
+        ON last_execution.id = (
+          SELECT candidate.id FROM command_center_automation_executions candidate
+          WHERE candidate.space_id = automation.space_id
+            AND candidate.automation_id = automation.id AND candidate.state = 'succeeded'
+          ORDER BY candidate.finished_at DESC, candidate.id DESC LIMIT 1
+        )
       WHERE (${input.spaceId ?? null} IS NULL OR automation.space_id = ${input.spaceId ?? null})
         AND (${input.automationId ?? null} IS NULL OR automation.id = ${input.automationId ?? null})
       ORDER BY automation.name, automation.id
@@ -433,6 +449,7 @@ export const make = Effect.fn("Responsibilities.make")(function* (
       lastSuccessfulAt: row.lastSuccessfulAt,
       lastUsefulResultAt: row.artifactCreatedAt,
       lastUsefulResultRef: resultReference(row),
+      lastPreparationResult: preparationResultFromOutput(row.lastOutputJson),
       currentExecutionId: row.currentExecutionId,
       nextScheduledAt,
       incidentId: incident?.id ?? null,
@@ -477,7 +494,9 @@ export const make = Effect.fn("Responsibilities.make")(function* (
       SELECT execution.id AS "executionId", execution.work_identity AS "workIdentity",
         execution.state, execution.created_at AS "startedAt", execution.finished_at AS "finishedAt",
         execution.error, useful.id AS "artifactId", useful.run_id AS "artifactRunId",
-        useful.created_at AS "artifactCreatedAt"
+        useful.created_at AS "artifactCreatedAt",
+        CASE WHEN length(execution.output_json) <= 65536
+          THEN execution.output_json ELSE NULL END AS "outputJson"
       FROM command_center_automation_executions execution
       LEFT JOIN command_center_artifacts useful ON useful.id = (
         SELECT artifact.id
@@ -510,6 +529,8 @@ export const make = Effect.fn("Responsibilities.make")(function* (
               spaceId: input.spaceId,
               automationId: input.automationId,
             },
+      preparationResult:
+        row.state === "succeeded" ? preparationResultFromOutput(row.outputJson) : null,
     }));
   });
 

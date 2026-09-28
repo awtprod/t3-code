@@ -238,6 +238,26 @@ it.effect("keeps a successful empty check separate from an inspectable useful re
     });
     expect(empty.history[0]).toMatchObject({ usefulResultRef: null });
 
+    const preparation = {
+      kind: "preparation-result",
+      source: { id: "source-a", version: "v1", observedAt: now },
+      counts: { selected: 1, created: 1, reconciled: 0, skipped: 0, failed: 0 },
+      subjects: [{ id: "subject-a", evidence: ["evidence-a"], artifactIds: [] }],
+    };
+    yield* sql`
+      UPDATE command_center_automation_executions
+      SET output_json = ${canonicalJson({ read: preparation } as Schema.Json)}
+      WHERE id = 'execution-1'
+    `;
+    const prepared = yield* responsibilities.get({
+      spaceId: "space-a",
+      automationId: automation.id,
+      historyLimit: 10,
+    });
+    expect(prepared.lastPreparationResult).toEqual(preparation);
+    expect(prepared.history[0]?.preparationResult).toEqual(preparation);
+    expect(prepared.lastUsefulResultRef).toBeNull();
+
     yield* sql`
       INSERT INTO command_center_runs (
         id, command_id, space_id, kind, state, route_json, input_json,
