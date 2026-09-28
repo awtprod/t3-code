@@ -206,11 +206,10 @@ it.effect("rejects cross-Space access and stale writers while replaying one muta
       FROM command_center_inbox_mutation_receipts
       WHERE mutation_id = ${input.mutationId}
     `;
-    expect(
-      Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))(
-        receipts[0]?.receiptJson ?? "{}",
-      ),
-    ).toEqual({
+    const decodedReceipt = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(
+      receipts[0]?.receiptJson ?? "{}",
+    );
+    expect(decodedReceipt).toEqual({
       resultVersion: 1,
       createdDiscussionId: "comment:two-client-comment",
     });
