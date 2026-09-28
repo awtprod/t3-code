@@ -173,7 +173,7 @@ function LessonsRouteView() {
 
   return (
     <SidebarInset className="h-full min-h-0 overflow-auto bg-background text-foreground">
-      <main className="mx-auto w-full max-w-5xl space-y-5 p-4 pb-10 sm:p-6">
+      <main className="mx-auto w-full max-w-5xl space-y-5 p-4 pb-10 pt-14 sm:p-6">
         <header>
           <h1 className="text-2xl font-semibold sm:text-3xl">Reviewed lessons</h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -191,7 +191,7 @@ function LessonsRouteView() {
             >
               {environments.map((entry) => (
                 <option key={entry.environmentId} value={entry.environmentId}>
-                  {entry.environmentId}
+                  {entry.label}
                 </option>
               ))}
             </select>
