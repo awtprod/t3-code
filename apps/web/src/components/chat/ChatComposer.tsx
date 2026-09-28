@@ -4321,7 +4321,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         ref={attachmentInputRef}
                         type="file"
                         multiple
-                        className="hidden"
+                        // Visually hidden, not display:none: iOS Safari opens
+                        // the picker for a display:none input but can drop
+                        // the selection instead of firing change.
+                        className="sr-only"
+                        tabIndex={-1}
                         onChange={(event) => {
                           const files = Array.from(event.currentTarget.files ?? []);
                           event.currentTarget.value = "";
