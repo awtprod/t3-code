@@ -1,5 +1,7 @@
 import { ItemId, SpaceId, type Run, type Space } from "@command-center/core";
+import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
+import { managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import type {
   CommandCenterInboxCursor,
   CommandCenterInboxDetail,
@@ -29,6 +31,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as Option from "effect/Option";
 
 import { WorkspacePageHeader } from "../../components/WorkspacePageHeader";
 import { Badge } from "../../components/ui/badge";
@@ -38,6 +41,7 @@ import { Textarea } from "../../components/ui/textarea";
 import { cn, randomUUID } from "../../lib/utils";
 import { commandCenterEnvironment } from "../../state/commandCenter";
 import { useEnvironmentQuery } from "../../state/query";
+import { usePreparedConnection } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
   INBOX_COMMENT_MAX_CHARS,
@@ -48,16 +52,18 @@ import {
   type InboxPendingReply,
   type InboxReplyIntent,
   type InboxTab,
-  inboxItemBelongsInTab,
+  classifyInboxMutationResult,
   inboxDraftAfterAcknowledgedReply,
+  inboxPendingReplyAfterAttempt,
   inboxPendingReplyForSubmit,
-  inboxTabLifecycles,
   jsonEditorValue,
   linkedItemIds,
   mergeHistoryById,
   parseJsonEditorValue,
   readInboxDraft,
   readInboxPendingReply,
+  rebaseInboxPendingReply,
+  resolveInboxDraftScopeId,
   writeInboxDraft,
   writeInboxPendingReply,
 } from "./InboxScreen.logic";
@@ -114,6 +120,14 @@ function relativeFreshness(value: string | undefined): string {
 }
 
 function mutationError(failure: unknown): string {
+  if (
+    typeof failure !== "object" ||
+    failure === null ||
+    Reflect.get(failure, "_tag") !== "Failure" ||
+    Reflect.get(failure, "cause") === undefined
+  ) {
+    return "The Inbox change returned an invalid response. Retry with the same request.";
+  }
   const error = squashAtomCommandFailure(failure as never);
   if (error instanceof Error && error.message.trim().length > 0) return error.message;
   if (typeof error === "string" && error.trim().length > 0) return error;
@@ -169,7 +183,7 @@ function InboxSpaceList({
       environmentId,
       input: {
         spaceId: SpaceId.make(space.id),
-        lifecycles: [...inboxTabLifecycles(tab)],
+        view: tab,
         limit: INBOX_PAGE_SIZE,
         ...(cursor === undefined ? {} : { cursor }),
       },
@@ -191,16 +205,9 @@ function InboxSpaceList({
     setPreviousItems([]);
     query.refresh();
   }, [query.refresh, refreshToken]);
-  const queriedItems = useMemo(
+  const items = useMemo(
     () => mergeSummaries(previousItems, query.data?.items ?? []),
     [previousItems, query.data?.items],
-  );
-  const items = useMemo(
-    () =>
-      queriedItems.filter((summary) =>
-        inboxItemBelongsInTab(tab, summary.state.lifecycle, summary.item.status),
-      ),
-    [queriedItems, tab],
   );
 
   return (
@@ -235,15 +242,13 @@ function InboxSpaceList({
       ) : null}
       {!query.isPending && query.error === null && items.length === 0 ? (
         <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-          {query.data?.nextCursor !== undefined
-            ? "No matching items in this loaded page. Load more to continue."
-            : `Nothing ${
-                tab === "actionable"
-                  ? "needs attention"
-                  : tab === "snoozed"
-                    ? "is snoozed"
-                    : "is recent"
-              } in this Space.`}
+          {`Nothing ${
+            tab === "actionable"
+              ? "needs attention"
+              : tab === "snoozed"
+                ? "is snoozed"
+                : "is recent"
+          } in this Space.`}
         </div>
       ) : null}
       {items.map((summary) => (
@@ -294,7 +299,9 @@ function InboxSpaceList({
                         ? "Ready for review"
                         : tab === "snoozed"
                           ? `Wakes ${dateLabel(summary.state.snoozedUntil)}`
-                          : "Recently closed"}
+                          : summary.item.status === "done" || summary.item.status === "canceled"
+                            ? "Completed"
+                            : "Recently closed"}
                 </span>
                 <ChevronRightIcon className="size-4 transition-transform group-hover:translate-x-0.5" />
               </span>
@@ -306,7 +313,7 @@ function InboxSpaceList({
         <Button
           disabled={query.isPending}
           onClick={() => {
-            setPreviousItems(queriedItems);
+            setPreviousItems(items);
             setCursor(query.data?.nextCursor);
           }}
           size="sm"
@@ -790,6 +797,7 @@ function InboxDetailPane({
   const [submitting, setSubmitting] = useState<string | null>(null);
   const mutationInFlightRef = useRef(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [rejectedReply, setRejectedReply] = useState<InboxPendingReply | null>(null);
   const comment = useAtomCommand(commandCenterEnvironment.commentOnInboxItem, {
     reportFailure: false,
   });
@@ -831,7 +839,10 @@ function InboxDetailPane({
     async (
       label: string,
       operation: () => Promise<unknown>,
-      onFailure?: (message: string) => void,
+      onFailure?: (
+        message: string,
+        outcome: ReturnType<typeof classifyInboxMutationResult>,
+      ) => void,
     ): Promise<boolean> => {
       if (mutationInFlightRef.current) return false;
       mutationInFlightRef.current = true;
@@ -850,7 +861,14 @@ function InboxDetailPane({
         ) {
           const message = mutationError(result);
           setSaveError(message);
-          onFailure?.(message);
+          onFailure?.(
+            message,
+            typeof result === "object" &&
+              result !== null &&
+              Reflect.get(result, "_tag") === "Success"
+              ? "ambiguous"
+              : classifyInboxMutationResult(result),
+          );
           return false;
         }
         applyResult(
@@ -860,7 +878,7 @@ function InboxDetailPane({
       } catch (failure) {
         const message = mutationError(failure);
         setSaveError(message);
-        onFailure?.(message);
+        onFailure?.(message, "ambiguous");
         return false;
       } finally {
         mutationInFlightRef.current = false;
@@ -1006,12 +1024,17 @@ function InboxDetailPane({
       submitted.intent,
       async () =>
         (submitted.intent === "comment" ? comment : requestChanges)({ environmentId, input }),
-      (message) => {
-        if (isConflictMessage(message)) updatePendingReply(null);
+      (_message, outcome) => {
+        updatePendingReply(inboxPendingReplyAfterAttempt(submitted, outcome));
+        if (outcome === "conflict") {
+          setRejectedReply(submitted);
+          detailQuery.refresh();
+        }
       },
     );
     if (!succeeded) return;
     updatePendingReply(null);
+    setRejectedReply(null);
     const nextDraft = inboxDraftAfterAcknowledgedReply(draftRef.current, submitted);
     if (nextDraft !== draftRef.current) updateDraft(nextDraft);
   };
@@ -1121,7 +1144,11 @@ function InboxDetailPane({
               <option value="request-changes">Request changes</option>
             </select>
             <Button
-              disabled={disabled || (pendingReply === null && draft.text.trim().length === 0)}
+              disabled={
+                disabled ||
+                rejectedReply !== null ||
+                (pendingReply === null && draft.text.trim().length === 0)
+              }
               onClick={() => void submitFeedback()}
             >
               {submitting === (pendingReply?.intent ?? draft.intent) ? (
@@ -1139,8 +1166,9 @@ function InboxDetailPane({
           {pendingReply !== null ? (
             <div className="mt-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-3 text-sm">
               <p>
-                The previous response was not conclusive. Retry sends the exact same request ID,
-                version, intent, and submitted text. Any newer text in the editor stays untouched.
+                {rejectedReply === null
+                  ? "The previous response was not conclusive. Retry sends the exact same request ID, version, intent, and submitted text. Any newer text in the editor stays untouched."
+                  : "The server rejected this version after confirming the original request did not save. Review the latest item before resubmitting the original text."}
               </p>
               <p className="mt-2 text-xs font-semibold tracking-wide text-muted-foreground uppercase">
                 Pending {pendingReply.intent === "comment" ? "comment" : "change request"} · item
@@ -1149,19 +1177,27 @@ function InboxDetailPane({
               <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-sm">
                 {pendingReply.text}
               </pre>
-              <Button
-                className="mt-2"
-                disabled={disabled}
-                onClick={() => updatePendingReply(null)}
-                size="sm"
-                variant="ghost"
-              >
-                Stop retrying original
-              </Button>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Use this only after confirming the original did not save. The next save will be a
-                separate request using the current editor text.
-              </p>
+              {rejectedReply !== null ? (
+                <Button
+                  className="mt-2"
+                  disabled={disabled || detail.state.version <= rejectedReply.expectedVersion}
+                  onClick={() => {
+                    updatePendingReply(
+                      rebaseInboxPendingReply(
+                        rejectedReply,
+                        detail.state.version,
+                        `web:${randomUUID()}`,
+                      ),
+                    );
+                    setRejectedReply(null);
+                    setSaveError(null);
+                  }}
+                  size="sm"
+                  variant="outline"
+                >
+                  Resubmit against latest version
+                </Button>
+              ) : null}
             </div>
           ) : null}
           <p className="mt-2 text-xs leading-5 text-muted-foreground">
@@ -1625,6 +1661,15 @@ export function InboxScreen({
   onTabChange,
 }: InboxScreenProps) {
   const [refreshToken, setRefreshToken] = useState(0);
+  const preparedConnection = usePreparedConnection(environmentId);
+  const relaySession = useAtomValue(managedRelaySessionAtom);
+  const scopedDraftId = resolveInboxDraftScopeId({
+    serverScopeId: draftScopeId,
+    targetKind: Option.isSome(preparedConnection)
+      ? preparedConnection.value.target._tag
+      : undefined,
+    relayAccountId: relaySession?.accountId,
+  });
   const visibleSpaces =
     selectedSpaceId === undefined ? spaces : spaces.filter((space) => space.id === selectedSpaceId);
   const selectedSpace = spaces.find((space) => space.id === selectedSpaceId);
@@ -1746,10 +1791,10 @@ export function InboxScreen({
           <div className={cn("min-h-0", itemId === undefined && "hidden lg:block")}>
             {itemId !== undefined && selectedSpace !== undefined ? (
               <InboxDetailPane
-                draftScopeId={draftScopeId}
+                draftScopeId={scopedDraftId}
                 environmentId={environmentId}
                 itemId={itemId}
-                key={`${environmentId}:${draftScopeId ?? "memory-only"}:${selectedSpace.id}:${itemId}`}
+                key={`${environmentId}:${scopedDraftId ?? "memory-only"}:${selectedSpace.id}:${itemId}`}
                 onBack={() => onItemChange(undefined)}
                 onChanged={() => setRefreshToken((token) => token + 1)}
                 runs={runs}
