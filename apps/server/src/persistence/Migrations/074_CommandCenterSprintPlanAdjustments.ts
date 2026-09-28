@@ -5,6 +5,15 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
+    ALTER TABLE command_center_inbox_revisions
+    ADD COLUMN proposal_fingerprint TEXT
+  `;
+  yield* sql`
+    CREATE UNIQUE INDEX idx_command_center_inbox_revision_fingerprint
+    ON command_center_inbox_revisions(item_id, proposal_fingerprint)
+    WHERE proposal_fingerprint IS NOT NULL
+  `;
+  yield* sql`
     CREATE TABLE command_center_sprint_plan_adjustment_approvals (
       mutation_id TEXT PRIMARY KEY,
       space_id TEXT NOT NULL REFERENCES command_center_spaces(id),

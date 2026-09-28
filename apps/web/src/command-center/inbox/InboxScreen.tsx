@@ -74,6 +74,7 @@ export interface InboxEnvironmentOption {
 }
 
 interface InboxScreenProps {
+  readonly canApprove: boolean;
   readonly environmentId: EnvironmentId;
   readonly environmentOptions: ReadonlyArray<InboxEnvironmentOption>;
   readonly draftScopeId?: string | undefined;
@@ -371,13 +372,16 @@ function ProposalPayloadDetails({
         ) : null}
       </dl>
       <div className="mt-3 space-y-3">
-        {payload.kind === "task-patch"
-          ? payload.operations.map((operation, index) => (
+        {payload.kind !== "prepared-action"
+          ? payload.operations.map((operation) => (
               <div
                 className="rounded-lg border border-border/60 p-3"
-                key={`${operation.field}:${index}`}
+                key={`${"taskId" in operation ? `${operation.taskId}:` : ""}${operation.field}:${jsonEditorValue(operation.before)}:${jsonEditorValue(operation.after)}`}
               >
-                <p className="font-mono text-xs font-semibold break-all">{operation.field}</p>
+                <p className="font-mono text-xs font-semibold break-all">
+                  {"taskId" in operation ? `${operation.taskId} · ` : ""}
+                  {operation.field}
+                </p>
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   <div>
                     <p className="text-xs text-muted-foreground">Before</p>
@@ -404,6 +408,18 @@ function ProposalPayloadDetails({
             ))}
         {payload.kind === "prepared-action" && Object.keys(payload.parameters).length === 0 ? (
           <p className="text-xs text-muted-foreground">No parameters.</p>
+        ) : null}
+        {payload.kind === "sprint-plan-task-patch" ? (
+          <div className="space-y-1 rounded-lg border border-border/60 p-3 text-xs">
+            <p>Plan version: {payload.expectedPlanVersion}</p>
+            <p>Reason: {payload.reason}</p>
+            <p>Expected benefit: {payload.expectedBenefit}</p>
+            <p>Uncertainty: {payload.uncertainty}</p>
+            <p>Review on: {dateLabel(payload.reviewAt)}</p>
+            {payload.preservedConstraints.map((constraint) => (
+              <p key={constraint}>Preserve: {constraint}</p>
+            ))}
+          </div>
         ) : null}
       </div>
     </div>
@@ -436,7 +452,7 @@ function ProposalEditor({ current, disabled, onCreate }: ProposalEditorProps) {
   const [summary, setSummary] = useState(current.preview.summary);
   const initialValues = useMemo(
     () =>
-      current.payload.kind === "task-patch"
+      current.payload.kind !== "prepared-action"
         ? current.payload.operations.map((operation) => jsonEditorValue(operation.after))
         : Object.values(current.payload.parameters).map(jsonEditorValue),
     [current],
@@ -461,24 +477,45 @@ function ProposalEditor({ current, disabled, onCreate }: ProposalEditorProps) {
       return;
     }
     const parsedValues = parsed.map((entry) => (entry.ok ? entry.value : null));
+    if (
+      current.payload.kind === "sprint-plan-task-patch" &&
+      current.payload.operations.some((operation, index) => {
+        const value = parsedValues[index];
+        return (
+          (operation.field === "done" ? typeof value !== "boolean" : typeof value !== "string") ||
+          value === operation.before
+        );
+      })
+    ) {
+      setValidationError("Each sprint plan field needs a changed value of the correct type.");
+      return;
+    }
     const payload: CommandCenterInboxProposalPayload =
-      current.payload.kind === "task-patch"
+      current.payload.kind === "sprint-plan-task-patch"
         ? {
             ...current.payload,
             operations: current.payload.operations.map((operation, index) => ({
               ...operation,
-              after: parsedValues[index] as never,
+              after: parsedValues[index] as string | boolean,
             })),
           }
-        : {
-            ...current.payload,
-            parameters: Object.fromEntries(
-              Object.keys(current.payload.parameters).map((key, index) => [
-                key,
-                parsedValues[index] as never,
-              ]),
-            ),
-          };
+        : current.payload.kind === "task-patch"
+          ? {
+              ...current.payload,
+              operations: current.payload.operations.map((operation, index) => ({
+                ...operation,
+                after: parsedValues[index] as never,
+              })),
+            }
+          : {
+              ...current.payload,
+              parameters: Object.fromEntries(
+                Object.keys(current.payload.parameters).map((key, index) => [
+                  key,
+                  parsedValues[index] as never,
+                ]),
+              ),
+            };
     if (
       new TextEncoder().encode(JSON.stringify(payload)).byteLength >
       COMMAND_CENTER_INBOX_MAX_PROPOSAL_BYTES
@@ -507,9 +544,10 @@ function ProposalEditor({ current, disabled, onCreate }: ProposalEditorProps) {
     readonly value: string;
     readonly before?: string;
   }> =
-    current.payload.kind === "task-patch"
+    current.payload.kind !== "prepared-action"
       ? current.payload.operations.map((operation, index) => ({
-          label: operation.field,
+          label:
+            "taskId" in operation ? `${operation.taskId} · ${operation.field}` : operation.field,
           before: jsonEditorValue(operation.before),
           value: values[index] ?? "null",
         }))
@@ -711,6 +749,7 @@ function StarterProposalEditor({
 }
 
 interface InboxDetailPaneProps {
+  readonly canApprove: boolean;
   readonly environmentId: EnvironmentId;
   readonly draftScopeId?: string | undefined;
   readonly itemId: string;
@@ -721,6 +760,7 @@ interface InboxDetailPaneProps {
 }
 
 function InboxDetailPane({
+  canApprove,
   environmentId,
   draftScopeId,
   itemId,
@@ -800,6 +840,12 @@ function InboxDetailPane({
 
   const [submitting, setSubmitting] = useState<string | null>(null);
   const mutationInFlightRef = useRef(false);
+  const approvalAttemptRef = useRef<{
+    readonly revisionId: string;
+    readonly inboxVersion: number;
+    readonly planVersion: number;
+    readonly mutationId: string;
+  } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [rejectedReply, setRejectedReply] = useState<InboxPendingReply | null>(null);
   const comment = useAtomCommand(commandCenterEnvironment.commentOnInboxItem, {
@@ -812,6 +858,9 @@ function InboxDetailPane({
     reportFailure: false,
   });
   const acceptCandidate = useAtomCommand(commandCenterEnvironment.acceptInboxCandidate, {
+    reportFailure: false,
+  });
+  const approveAdjustment = useAtomCommand(commandCenterEnvironment.approveInboxAdjustment, {
     reportFailure: false,
   });
   const discardCandidate = useAtomCommand(commandCenterEnvironment.discardInboxCandidate, {
@@ -1287,27 +1336,29 @@ function InboxDetailPane({
                   {currentRevision.evidence.version}
                 </p>
               </div>
-              <ProposalEditor
-                current={currentRevision}
-                disabled={disabled}
-                onCreate={async ({ payload, preview }) => {
-                  return runMutation("create-candidate", async () =>
-                    createCandidate({
-                      environmentId,
-                      input: {
-                        spaceId: SpaceId.make(space.id),
-                        itemId: ItemId.make(itemId),
-                        mutationId: `web:${randomUUID()}`,
-                        expectedVersion: detail.state.version,
-                        source: "direct",
-                        payload,
-                        preview,
-                        evidence: currentRevision.evidence,
-                      },
-                    }),
-                  );
-                }}
-              />
+              {detail.state.approval.reason !== "already-applied" ? (
+                <ProposalEditor
+                  current={currentRevision}
+                  disabled={disabled}
+                  onCreate={async ({ payload, preview }) => {
+                    return runMutation("create-candidate", async () =>
+                      createCandidate({
+                        environmentId,
+                        input: {
+                          spaceId: SpaceId.make(space.id),
+                          itemId: ItemId.make(itemId),
+                          mutationId: `web:${randomUUID()}`,
+                          expectedVersion: detail.state.version,
+                          source: "direct",
+                          payload,
+                          preview,
+                          evidence: currentRevision.evidence,
+                        },
+                      }),
+                    );
+                  }}
+                />
+              ) : null}
             </>
           )}
           <div className="mt-4 rounded-xl border border-border/60 bg-muted/15 p-3 text-sm text-muted-foreground">
@@ -1317,8 +1368,69 @@ function InboxDetailPane({
                 ? "Review the pending candidate before the proposal can move forward."
                 : detail.state.approval.reason === "no-current-proposal"
                   ? "There is no proposal to approve."
-                  : "Execution is not available for this item. Comments and proposal revisions remain available."}
+                  : detail.state.approval.reason === "already-applied"
+                    ? "This exact revision was approved and applied to the sprint plan. A reversal needs a new candidate and a new approval."
+                    : detail.state.approval.reason === "policy-not-configured"
+                      ? "Approval is blocked until this Space has an observation eligibility policy."
+                      : detail.state.approval.reason === "evidence-stale"
+                        ? "Approval is blocked because the evidence identity no longer matches the current observation."
+                        : detail.state.approval.reason === "evidence-ineligible"
+                          ? "Approval is blocked because the current observation does not meet this Space's policy."
+                          : detail.state.approval.reason === "plan-stale"
+                            ? "Approval is blocked because the sprint plan changed. Prepare a new exact revision."
+                            : detail.state.approval.reason === "ready"
+                              ? "This accepted revision is eligible. Approve applies only the exact task fields shown above."
+                              : "Execution is not available for this item. Comments and proposal revisions remain available."}
           </div>
+          {currentRevision?.payload.kind === "sprint-plan-task-patch" &&
+          detail.state.approval.eligible ? (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <Button
+                disabled={disabled || !canApprove}
+                onClick={() => {
+                  const payload = currentRevision.payload;
+                  if (payload.kind !== "sprint-plan-task-patch") return;
+                  const previous = approvalAttemptRef.current;
+                  const attempt =
+                    previous?.revisionId === currentRevision.id &&
+                    previous.inboxVersion === detail.state.version &&
+                    previous.planVersion === payload.expectedPlanVersion
+                      ? previous
+                      : {
+                          revisionId: currentRevision.id,
+                          inboxVersion: detail.state.version,
+                          planVersion: payload.expectedPlanVersion,
+                          mutationId: `web:${randomUUID()}`,
+                        };
+                  approvalAttemptRef.current = attempt;
+                  void runMutation("approve-adjustment", async () =>
+                    approveAdjustment({
+                      environmentId,
+                      input: {
+                        spaceId: SpaceId.make(space.id),
+                        itemId: ItemId.make(itemId),
+                        mutationId: attempt.mutationId,
+                        currentRevisionId: attempt.revisionId,
+                        expectedInboxVersion: attempt.inboxVersion,
+                        expectedPlanVersion: attempt.planVersion,
+                      },
+                    }),
+                  ).then((succeeded) => {
+                    if (succeeded) approvalAttemptRef.current = null;
+                    else detailQuery.refresh();
+                  });
+                }}
+                size="sm"
+              >
+                <CheckIcon /> Approve exact task changes
+              </Button>
+              {!canApprove ? (
+                <p className="text-xs text-muted-foreground">
+                  This session lacks approval authority.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </section>
 
         {candidates.length > 0 ? (
@@ -1337,7 +1449,11 @@ function InboxDetailPane({
                 </p>
                 <ProposalHumanContext preview={candidate.preview} />
                 <ProposalPayloadDetails
-                  label="Exact effect if accepted"
+                  label={
+                    candidate.payload.kind === "sprint-plan-task-patch"
+                      ? "Exact proposed effect; accepting only selects it"
+                      : "Exact effect if accepted"
+                  }
                   payload={candidate.payload}
                 />
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -1650,6 +1766,7 @@ function SnoozeAndDismiss({
 }
 
 export function InboxScreen({
+  canApprove,
   environmentId,
   environmentOptions,
   draftScopeId,
@@ -1795,6 +1912,7 @@ export function InboxScreen({
           <div className={cn("min-h-0", itemId === undefined && "hidden lg:block")}>
             {itemId !== undefined && selectedSpace !== undefined ? (
               <InboxDetailPane
+                canApprove={canApprove}
                 draftScopeId={scopedDraftId}
                 environmentId={environmentId}
                 itemId={itemId}

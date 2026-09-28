@@ -242,6 +242,38 @@ export const make = Effect.gen(function* () {
     return Encoding.encodeHex(yield* crypto.digest("SHA-256", textEncoder.encode(value)));
   });
 
+  const proposalFingerprint = (input: {
+    readonly spaceId: string;
+    readonly planId: string;
+    readonly evidence: {
+      readonly source: string;
+      readonly subjectId: string;
+      readonly version: string;
+      readonly digest?: string | undefined;
+    };
+    readonly operations: ReadonlyArray<{
+      readonly taskId: string;
+      readonly field: string;
+      readonly before: string | boolean;
+      readonly after: string | boolean;
+    }>;
+  }) =>
+    digest(
+      encodeUnknownJson({
+        spaceId: input.spaceId,
+        planId: input.planId,
+        evidence: {
+          source: input.evidence.source,
+          subjectId: input.evidence.subjectId,
+          version: input.evidence.version,
+          digest: input.evidence.digest ?? null,
+        },
+        operations: [...input.operations].sort((a, b) =>
+          `${a.taskId}\u0000${a.field}`.localeCompare(`${b.taskId}\u0000${b.field}`),
+        ),
+      }),
+    );
+
   const decodeJson = Effect.fn("CommandCenterInbox.decodeJson")(function* (
     value: string,
     description: string,
@@ -454,16 +486,11 @@ export const make = Effect.gen(function* () {
         reason: "evidence-ineligible" as const,
       };
     }
-    const current = yield* sprintPlan
-      .get({ planId: payload.target.id, spaceId: row.spaceId })
-      .pipe(
-        Effect.catch((cause) =>
-          cause.reason === "not-found" || cause.reason === "conflict"
-            ? Effect.succeed(null)
-            : Effect.fail(persistenceError("Sprint plan could not be read.", cause)),
-        ),
-      );
-    if (current === null || current.version !== payload.expectedPlanVersion) {
+    const plans = yield* sql<{ readonly version: number }>`
+      SELECT version FROM command_center_sprint_plans
+      WHERE id = ${payload.target.id} AND space_id = ${row.spaceId} LIMIT 1
+    `;
+    if (plans[0]?.version !== payload.expectedPlanVersion) {
       return { supported: true as const, eligible: false as const, reason: "plan-stale" as const };
     }
     return {
@@ -960,6 +987,7 @@ export const make = Effect.gen(function* () {
   const createCandidate: CommandCenterInbox["Service"]["createCandidate"] = (input, context) =>
     runMutation("cc.inbox.candidate.create", input, context, (state, now) =>
       Effect.gen(function* () {
+        let fingerprint: string | null = null;
         if (input.payload.kind === "sprint-plan-task-patch") {
           if (state.subjectKind === "command-center-item" && state.currentRevisionId === null) {
             const prior = yield* sql<{ readonly id: string }>`
@@ -985,6 +1013,22 @@ export const make = Effect.gen(function* () {
           ) {
             return yield* conflictError("The Inbox item is bound to a different subject.");
           }
+          fingerprint = yield* proposalFingerprint({
+            spaceId: input.spaceId,
+            planId: input.payload.target.id,
+            evidence: input.evidence,
+            operations: input.payload.operations,
+          });
+          const existing = yield* sql<{ readonly id: string }>`
+            SELECT id FROM command_center_inbox_revisions
+            WHERE item_id = ${input.itemId} AND proposal_fingerprint = ${fingerprint}
+            LIMIT 1
+          `;
+          if (existing.length > 0) {
+            return yield* conflictError(
+              "This exact evidence and task diff already has an Inbox proposal.",
+            );
+          }
         }
         const revisions = yield* sql<{ readonly revision: number }>`
           SELECT COALESCE(MAX(revision), 0) + 1 AS revision
@@ -1000,12 +1044,13 @@ export const make = Effect.gen(function* () {
         yield* sql`
           INSERT INTO command_center_inbox_revisions (
             id, item_id, revision, predecessor_revision_id, status, source,
-            payload_json, preview_json, evidence_json, actor_subject, created_at
+            payload_json, preview_json, evidence_json, proposal_fingerprint,
+            actor_subject, created_at
           ) VALUES (
             ${`revision:${input.mutationId}`}, ${input.itemId}, ${revision},
             ${state.currentRevisionId}, 'candidate', ${input.source},
             ${encodeUnknownJson(input.payload)}, ${encodeUnknownJson(input.preview)},
-            ${encodeUnknownJson(input.evidence)}, ${context.subject}, ${now}
+            ${encodeUnknownJson(input.evidence)}, ${fingerprint}, ${context.subject}, ${now}
           )
         `;
       }),
@@ -1097,18 +1142,12 @@ export const make = Effect.gen(function* () {
             return yield* conflictError(`Adjustment approval is blocked: ${assessed.reason}.`);
           }
           const payloadDigest = yield* digest(revisionRow.payloadJson);
-          const fingerprint = yield* digest(
-            encodeUnknownJson({
-              spaceId: input.spaceId,
-              planId: revision.payload.target.id,
-              evidenceRevisionId: assessed.snapshot.revisionId,
-              evidenceDigest: assessed.snapshot.revisionDigest,
-              period: assessed.snapshot.observation.data.period,
-              operations: [...revision.payload.operations].sort((a, b) =>
-                `${a.taskId}\u0000${a.field}`.localeCompare(`${b.taskId}\u0000${b.field}`),
-              ),
-            }),
-          );
+          const fingerprint = yield* proposalFingerprint({
+            spaceId: input.spaceId,
+            planId: revision.payload.target.id,
+            evidence: revision.evidence,
+            operations: revision.payload.operations,
+          });
           const duplicate = yield* sql<{ readonly itemId: string }>`
             SELECT item_id AS "itemId"
             FROM command_center_sprint_plan_adjustment_approvals

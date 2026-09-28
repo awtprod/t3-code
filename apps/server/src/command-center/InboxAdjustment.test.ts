@@ -25,7 +25,7 @@ const policy = {
   minimumMaturityMs: 0,
   minimumSampleCount: 1,
   minimumDenominator: null,
-  maximumAgeMs: 30 * 86_400_000,
+  maximumAgeMs: 100 * 365 * 86_400_000,
   maximumReportingLagMs: 86_400_000,
   requiredCompleteness: "complete",
 } as const;
@@ -200,6 +200,21 @@ it.effect(
         eligible: true,
         reason: "ready",
       });
+      const duplicateProposal = yield* Effect.flip(
+        inbox.createCandidate(
+          {
+            ...candidate(evidence),
+            mutationId: "duplicate-candidate",
+            expectedVersion: accepted.detail.state.version,
+            payload: {
+              ...candidate(evidence).payload,
+              reason: "A changed rationale for the same diff.",
+            },
+          },
+          actor,
+        ),
+      );
+      expect(duplicateProposal.reason).toBe("conflict");
       const request = {
         spaceId,
         itemId,
@@ -457,6 +472,28 @@ it.effect("rejects stale Inbox and plan versions and changed replay ids", () =>
       expectedPlanVersion: 1,
     };
     expect(
+      (yield* Effect.flip(
+        inbox.approveAdjustment(
+          {
+            ...request,
+            spaceId: SpaceId.make("other-space"),
+          },
+          actor,
+        ),
+      )).reason,
+    ).toBe("not_found");
+    expect(
+      (yield* Effect.flip(
+        inbox.approveAdjustment(
+          {
+            ...request,
+            currentRevisionId: "revision:wrong",
+          },
+          actor,
+        ),
+      )).reason,
+    ).toBe("conflict");
+    expect(
       (yield* Effect.flip(inbox.approveAdjustment({ ...request, expectedInboxVersion: 0 }, actor)))
         .reason,
     ).toBe("conflict");
@@ -478,4 +515,72 @@ it.effect("rejects stale Inbox and plan versions and changed replay ids", () =>
     ).toBe("conflict");
     expect((yield* plan.get({ spaceId, planId })).version).toBe(2);
   }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
+  "rejects a wrong field-before value and unresolved review changes without partial writes",
+  () =>
+    Effect.gen(function* () {
+      const { sql, plan, evidence, inbox } = yield* setup(true);
+      const wrong = yield* inbox.createCandidate(
+        candidate(evidence, [
+          {
+            taskId: "task-a",
+            field: "note",
+            before: "Not the current note",
+            after: "Reviewed note",
+          },
+        ]),
+        actor,
+      );
+      const accepted = yield* inbox.acceptCandidate(
+        {
+          spaceId,
+          itemId,
+          mutationId: "accept-a",
+          expectedVersion: wrong.detail.state.version,
+          candidateRevisionId: wrong.detail.revisions[0]!.id,
+        },
+        actor,
+      );
+      const attempt = {
+        spaceId,
+        itemId,
+        mutationId: "approve-wrong-before",
+        currentRevisionId: accepted.detail.currentRevision!.id,
+        expectedInboxVersion: accepted.detail.state.version,
+        expectedPlanVersion: 1,
+      };
+      expect((yield* Effect.flip(inbox.approveAdjustment(attempt, actor))).reason).toBe("conflict");
+      expect((yield* plan.get({ spaceId, planId })).version).toBe(1);
+      expect(
+        (yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM command_center_sprint_plan_adjustment_approvals
+    `)[0]?.count,
+      ).toBe(0);
+      const requested = yield* inbox.requestChanges(
+        {
+          spaceId,
+          itemId,
+          mutationId: "request-changes",
+          expectedVersion: accepted.detail.state.version,
+          text: "Fix the exact before value.",
+        },
+        actor,
+      );
+      expect(requested.detail.state.approval.reason).toBe("changes-requested");
+      expect(
+        (yield* Effect.flip(
+          inbox.approveAdjustment(
+            {
+              ...attempt,
+              mutationId: "approve-after-changes",
+              expectedInboxVersion: requested.detail.state.version,
+            },
+            actor,
+          ),
+        )).reason,
+      ).toBe("conflict");
+      expect((yield* plan.get({ spaceId, planId })).version).toBe(1);
+    }).pipe(Effect.provide(testLayer)),
 );

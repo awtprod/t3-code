@@ -83,7 +83,7 @@ const SprintPlanTaskPatch = Schema.Struct({
         ) || "Each task patch needs distinct, correctly typed before and after values.",
     ),
   ),
-  reason: ExactMessage,
+  reason: ExactMessage.check(Schema.isMaxLength(4_096)),
   expectedBenefit: ExactMessage,
   uncertainty: ExactMessage,
   reviewAt: Timestamp,
