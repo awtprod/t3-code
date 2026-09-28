@@ -34,6 +34,7 @@ import { Route as SettingsAppearanceRouteImport } from './routes/settings.appear
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ConnectCallbackRouteImport } from './routes/connect_.callback'
 import { Route as ChatSprintPlanRouteImport } from './routes/_chat.sprint-plan'
+import { Route as ChatResponsibilitiesRouteImport } from './routes/_chat.responsibilities'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatProspectsRouteImport } from './routes/_chat.prospects'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
@@ -165,6 +166,11 @@ const ChatSprintPlanRoute = ChatSprintPlanRouteImport.update({
   path: '/sprint-plan',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatResponsibilitiesRoute = ChatResponsibilitiesRouteImport.update({
+  id: '/responsibilities',
+  path: '/responsibilities',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatPullRequestsRoute = ChatPullRequestsRouteImport.update({
   id: '/pull-requests',
   path: '/pull-requests',
@@ -210,6 +216,7 @@ export interface FileRoutesByFullPath {
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/sprint-plan': typeof ChatSprintPlanRoute
+  '/responsibilities': typeof ChatResponsibilitiesRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -241,6 +248,7 @@ export interface FileRoutesByTo {
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/sprint-plan': typeof ChatSprintPlanRoute
+  '/responsibilities': typeof ChatResponsibilitiesRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -275,6 +283,7 @@ export interface FileRoutesById {
   '/_chat/prospects': typeof ChatProspectsRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/_chat/sprint-plan': typeof ChatSprintPlanRoute
+  '/_chat/responsibilities': typeof ChatResponsibilitiesRoute
   '/connect_/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -310,6 +319,7 @@ export interface FileRouteTypes {
     | '/prospects'
     | '/pull-requests'
     | '/sprint-plan'
+    | '/responsibilities'
     | '/connect/callback'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -341,6 +351,7 @@ export interface FileRouteTypes {
     | '/prospects'
     | '/pull-requests'
     | '/sprint-plan'
+    | '/responsibilities'
     | '/connect/callback'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -374,6 +385,7 @@ export interface FileRouteTypes {
     | '/_chat/prospects'
     | '/_chat/pull-requests'
     | '/_chat/sprint-plan'
+    | '/_chat/responsibilities'
     | '/connect_/callback'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -582,6 +594,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSprintPlanRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/responsibilities': {
+      id: '/_chat/responsibilities'
+      path: '/responsibilities'
+      fullPath: '/responsibilities'
+      preLoaderRoute: typeof ChatResponsibilitiesRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/pull-requests': {
       id: '/_chat/pull-requests'
       path: '/pull-requests'
@@ -635,6 +654,7 @@ interface ChatRouteChildren {
   ChatProspectsRoute: typeof ChatProspectsRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatSprintPlanRoute: typeof ChatSprintPlanRoute
+  ChatResponsibilitiesRoute: typeof ChatResponsibilitiesRoute
   ChatIndexRoute: typeof ChatIndexRoute
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
@@ -648,6 +668,7 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatProspectsRoute: ChatProspectsRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatSprintPlanRoute: ChatSprintPlanRoute,
+  ChatResponsibilitiesRoute: ChatResponsibilitiesRoute,
   ChatIndexRoute: ChatIndexRoute,
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
