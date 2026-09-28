@@ -47,6 +47,12 @@ export interface SprintPlanImportConflict {
   readonly reason: "both-changed" | "locally-edited-task-removed";
 }
 
+export interface SprintPlanConflictDecision {
+  readonly taskId: string;
+  readonly field: SprintPlanTaskField;
+  readonly decision: "keep-current" | "use-incoming";
+}
+
 export interface SprintPlanImportPreview {
   readonly planId: string;
   readonly sourceSha256: string;
@@ -148,6 +154,7 @@ export interface SprintPlanApplyImportInput {
   readonly provenance: SprintPlanImportProvenance;
   readonly expectedVersion: number;
   readonly mutationId: string;
+  readonly conflictDecisions?: ReadonlyArray<SprintPlanConflictDecision>;
 }
 
 export interface SprintPlanTaskPatchInput {
@@ -320,6 +327,13 @@ const ImportProvenance = Schema.Struct({
   sourceRef: Identifier,
   originalFileName: Schema.optional(Identifier),
 });
+const ConflictDecisions = Schema.Array(
+  Schema.Struct({
+    taskId: Identifier,
+    field: Schema.Literals(["text", "note", "day", "owner", "done"]),
+    decision: Schema.Literals(["keep-current", "use-incoming"]),
+  }),
+).check(Schema.isMaxLength(SPRINT_PLAN_IMPORT_LIMITS.tasks * 5));
 const DateConflict = Schema.Struct({
   taskId: Identifier,
   weekId: Identifier,
@@ -335,6 +349,7 @@ const DateConflict = Schema.Struct({
 const decodeActor = Schema.decodeUnknownEffect(Actor);
 const decodeMutationProvenance = Schema.decodeUnknownEffect(MutationProvenance);
 const decodeImportProvenance = Schema.decodeUnknownEffect(ImportProvenance);
+const decodeConflictDecisions = Schema.decodeUnknownEffect(ConflictDecisions);
 const decodeDateConflict = Schema.decodeUnknownEffect(DateConflict);
 const decodeIdentifier = Schema.decodeUnknownEffect(Identifier);
 const decodeReason = Schema.decodeUnknownEffect(Reason);
@@ -866,6 +881,24 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
     }
     const actor = yield* decodeActor(actorInput);
     const provenance = yield* decodeImportProvenance(input.provenance);
+    const conflictDecisions = yield* decodeConflictDecisions(input.conflictDecisions ?? []).pipe(
+      Effect.mapError((cause) =>
+        validationError("Invalid bounded import conflict decisions.", cause),
+      ),
+    );
+    const decisionKeys = new Set<string>();
+    for (const choice of conflictDecisions) {
+      const key = JSON.stringify([choice.taskId, choice.field]);
+      if (decisionKeys.has(key)) {
+        return yield* validationError(`Duplicate decision for ${choice.taskId}.${choice.field}.`);
+      }
+      decisionKeys.add(key);
+    }
+    const canonicalDecisions = [...conflictDecisions].sort((left, right) => {
+      const leftKey = JSON.stringify([left.taskId, left.field]);
+      const rightKey = JSON.stringify([right.taskId, right.field]);
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    });
     const incoming = yield* parseSource(input.sourceJson);
     const sourceSha256 = yield* digest(input.sourceJson);
     const requestDigest = yield* digest(
@@ -876,6 +909,7 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
         sourceSha256,
         provenance,
         expectedVersion: input.expectedVersion,
+        ...(canonicalDecisions.length === 0 ? {} : { conflictDecisions: canonicalDecisions }),
         actor,
       }),
     );
@@ -895,6 +929,9 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
     `;
     const existing = rows[0];
     if (existing === undefined) {
+      if (canonicalDecisions.length > 0) {
+        return yield* conflictError("A new plan has no import conflicts to resolve.");
+      }
       if (input.expectedVersion !== 0) {
         return yield* conflictError(
           "Sprint plan version is stale; expected a new plan at version 0.",
@@ -973,6 +1010,9 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
       });
     }
     if (previousImport.sourceSha256 === sourceSha256) {
+      if (canonicalDecisions.length > 0) {
+        return yield* conflictError("An unchanged source has no import conflicts to resolve.");
+      }
       const now = DateTime.formatIso(yield* DateTime.now);
       yield* recordMutation({
         mutationId: input.mutationId,
@@ -990,11 +1030,36 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
       parseSource(existing.currentJson),
     ]);
     const merged = mergeImport(baseline.source, current.source, incoming.source);
-    if (merged.conflicts.length > 0) {
+    const conflictsByKey = new Map(
+      merged.conflicts.map((conflict) => [
+        JSON.stringify([conflict.taskId, conflict.field]),
+        conflict,
+      ]),
+    );
+    if (
+      canonicalDecisions.length !== merged.conflicts.length ||
+      canonicalDecisions.some(
+        (choice) => !conflictsByKey.has(JSON.stringify([choice.taskId, choice.field])),
+      )
+    ) {
       return yield* conflictError(
-        `Import has ${merged.conflicts.length} conflict(s) with current task edits.`,
+        `Import has ${merged.conflicts.length} current conflict(s); provide one exact decision for each and no extras.`,
       );
     }
+    const mergedTasks = taskIndex(merged.current);
+    for (const choice of canonicalDecisions) {
+      const conflict = conflictsByKey.get(JSON.stringify([choice.taskId, choice.field]))!;
+      if (choice.decision === "keep-current") {
+        const task = mergedTasks.get(choice.taskId);
+        if (task === undefined) {
+          return yield* conflictError(
+            `Task '${choice.taskId}' was removed by the incoming source; keeping its local edit requires correcting the source.`,
+          );
+        }
+        setFieldValue(task, choice.field, conflict.current);
+      }
+    }
+    const decisionDigest = yield* digest(stringify(canonicalDecisions));
     const validatedMerged = yield* parseSprintPlanSource(merged.current).pipe(
       Effect.mapError((cause) => validationError(cause.message, cause)),
     );
@@ -1024,7 +1089,7 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
       ) VALUES (
         ${input.mutationId}, ${input.planId}, ${input.spaceId}, ${nextVersion}, 'import',
         ${stringify({ sourceSha256: previousImport.sourceSha256, sourceVersion: previousImport.sourceVersion })},
-        ${stringify({ sourceSha256, sourceVersion: incoming.source.version })},
+        ${stringify({ sourceSha256, sourceVersion: incoming.source.version, decisionCount: canonicalDecisions.length, decisionDigest, ...(canonicalDecisions.length <= 100 ? { decisions: canonicalDecisions } : {}) })},
         ${stringify(actor)}, ${stringify({ kind: "import", sourceRef: provenance.sourceRef })},
         ${requestDigest}, ${now}
       )
@@ -1065,7 +1130,12 @@ export const makeSprintPlanService = Effect.fn("makeSprintPlanService")(function
       actorKind: actor.kind,
       action: "cc.sprint-plan.import",
       spaceId: input.spaceId,
-      payload: { planId: input.planId, planVersion: nextVersion, sourceSha256 },
+      payload: {
+        planId: input.planId,
+        planVersion: nextVersion,
+        sourceSha256,
+        conflictDecisions: canonicalDecisions,
+      },
       occurredAt: now,
     });
     return yield* hydrate(yield* findPlan(input.planId, input.spaceId));

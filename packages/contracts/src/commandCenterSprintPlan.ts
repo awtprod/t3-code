@@ -252,6 +252,14 @@ export const CommandCenterSprintPlanImportConflict = Schema.Struct({
 export type CommandCenterSprintPlanImportConflict =
   typeof CommandCenterSprintPlanImportConflict.Type;
 
+export const CommandCenterSprintPlanConflictDecision = Schema.Struct({
+  taskId: Identifier,
+  field: Schema.Literals(["text", "note", "day", "owner", "done"]),
+  decision: Schema.Literals(["keep-current", "use-incoming"]),
+});
+export type CommandCenterSprintPlanConflictDecision =
+  typeof CommandCenterSprintPlanConflictDecision.Type;
+
 export const CommandCenterSprintPlanPreviewImportInput = Schema.Struct({
   planId: Identifier,
   spaceId: Identifier,
@@ -285,6 +293,11 @@ export const CommandCenterSprintPlanApplyImportInput = Schema.Struct({
   provenance: CommandCenterSprintPlanImportProvenance,
   expectedVersion: SafeNonNegativeInt,
   mutationId: Identifier,
+  conflictDecisions: Schema.optionalKey(
+    Schema.Array(CommandCenterSprintPlanConflictDecision).check(
+      Schema.isMaxLength(SPRINT_PLAN_IMPORT_LIMITS.tasks * 5),
+    ),
+  ),
 });
 export type CommandCenterSprintPlanApplyImportInput =
   typeof CommandCenterSprintPlanApplyImportInput.Type;

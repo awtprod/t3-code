@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { SPRINT_PLAN_IMPORT_LIMITS } from "@command-center/core";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type {
+  CommandCenterSprintPlanConflictDecision,
   CommandCenterSprintPlanPreviewImportResult,
   CommandCenterSprintPlanSnapshot,
   EnvironmentId,
@@ -14,6 +15,8 @@ import { Input } from "../components/ui/input";
 import { SidebarInset } from "../components/ui/sidebar";
 import { Textarea } from "../components/ui/textarea";
 import {
+  completeImportDecisions,
+  conflictDecisionKey,
   nextPlanWeeks,
   planCarryovers,
   planOwners,
@@ -26,6 +29,7 @@ import { commandCenterEnvironment } from "../state/commandCenter";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
+import { randomUUID } from "../lib/utils";
 
 type PlanView = "current" | "original";
 type EditableField = "note" | "day" | "done";
@@ -36,12 +40,47 @@ function errorMessage(failure: unknown): string {
 }
 
 function nextMutationId(): string {
-  return `plan-ui:${crypto.randomUUID()}`;
+  return `plan-ui:${randomUUID()}`;
 }
 
 function StateCard({ children }: { readonly children: ReactNode }) {
   return (
     <section className="rounded-xl border border-border bg-card p-5 text-sm">{children}</section>
+  );
+}
+
+function ImportDecisionHistory({ after }: { readonly after: unknown }) {
+  if (after === null || typeof after !== "object" || Array.isArray(after)) return null;
+  const record = after as Record<string, unknown>;
+  const count = record.decisionCount;
+  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) return null;
+  const choices = Array.isArray(record.decisions) ? record.decisions : [];
+  return (
+    <div className="mt-1 text-muted-foreground">
+      <p>
+        {count} reviewed conflict decision{count === 1 ? "" : "s"}
+      </p>
+      {choices.length > 0 && (
+        <ul className="mt-1 list-inside list-disc">
+          {choices.map((choice) => {
+            if (choice === null || typeof choice !== "object") return null;
+            const item = choice as Record<string, unknown>;
+            if (
+              typeof item.taskId !== "string" ||
+              typeof item.field !== "string" ||
+              (item.decision !== "keep-current" && item.decision !== "use-incoming")
+            )
+              return null;
+            return (
+              <li key={conflictDecisionKey(item.taskId, item.field)}>
+                {item.taskId}.{item.field}:{" "}
+                {item.decision === "keep-current" ? "kept current" : "used incoming"}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -219,9 +258,14 @@ function SprintPlanRouteView() {
   const [importPlanId, setImportPlanId] = useState("");
   const [importJson, setImportJson] = useState("");
   const [preview, setPreview] = useState<CommandCenterSprintPlanPreviewImportResult | null>(null);
+  const [conflictDecisions, setConflictDecisions] = useState<
+    Record<string, CommandCenterSprintPlanConflictDecision["decision"]>
+  >({});
   const [importBusy, setImportBusy] = useState(false);
   const inFlight = useRef(false);
   const importRevision = useRef(0);
+  const importScope = JSON.stringify([spaceId, planId]);
+  const priorImportScope = useRef(importScope);
   const previewImport = useAtomCommand(commandCenterEnvironment.previewSprintPlanImport, {
     reportFailure: false,
   });
@@ -249,6 +293,14 @@ function SprintPlanRouteView() {
   const dateResolutions = new Map(
     current.data?.dateResolutions.map((resolution) => [resolution.taskId, resolution]),
   );
+
+  useEffect(() => {
+    if (priorImportScope.current === importScope) return;
+    priorImportScope.current = importScope;
+    importRevision.current++;
+    setPreview(null);
+    setConflictDecisions({});
+  }, [importScope]);
 
   useEffect(() => {
     if (tasks.length > 0 && taskPage * 100 >= tasks.length) {
@@ -303,6 +355,7 @@ function SprintPlanRouteView() {
     setOwner("all");
     setTaskPage(0);
     setPreview(null);
+    setConflictDecisions({});
     setImportPlanId("");
     importRevision.current++;
     select({ spaceId: next, planId: undefined, taskId: undefined });
@@ -313,6 +366,7 @@ function SprintPlanRouteView() {
     setOwner("all");
     setTaskPage(0);
     setPreview(null);
+    setConflictDecisions({});
     setImportPlanId(next);
     importRevision.current++;
     select({ planId: next, taskId: undefined });
@@ -321,6 +375,7 @@ function SprintPlanRouteView() {
   const readFile = async (file: File | undefined) => {
     const revision = ++importRevision.current;
     setPreview(null);
+    setConflictDecisions({});
     setActionError(null);
     setImportJson("");
     setImportFileName("");
@@ -357,6 +412,7 @@ function SprintPlanRouteView() {
     setImportBusy(true);
     setActionError(null);
     setPreview(null);
+    setConflictDecisions({});
     const revision = importRevision.current;
     try {
       const result = await previewImport({
@@ -377,11 +433,13 @@ function SprintPlanRouteView() {
     }
   };
   const applySource = async () => {
+    const choices =
+      preview === null ? null : completeImportDecisions(preview.conflicts, conflictDecisions);
     if (
       environmentId === null ||
       spaceId === undefined ||
       preview === null ||
-      preview.conflicts.length > 0 ||
+      choices === null ||
       preview.unchangedSource ||
       inFlight.current
     )
@@ -414,17 +472,21 @@ function SprintPlanRouteView() {
           },
           expectedVersion: preview.existingVersion ?? 0,
           mutationId: nextMutationId(),
+          conflictDecisions: choices,
         },
       });
       if (result._tag !== "Success") throw squashAtomCommandFailure(result);
       setActionNotice(`Imported source at plan version ${result.value.version}.`);
       setPreview(null);
+      setConflictDecisions({});
       setImportOpen(false);
       setHistoryCursor(undefined);
       select({ planId: result.value.id, view: "current" });
       refresh();
     } catch (failure) {
       setActionError(errorMessage(failure));
+      setPreview(null);
+      setConflictDecisions({});
     } finally {
       inFlight.current = false;
       setImportBusy(false);
@@ -595,6 +657,7 @@ function SprintPlanRouteView() {
                 onClick={() => {
                   importRevision.current++;
                   setPreview(null);
+                  setConflictDecisions({});
                   setImportOpen((open) => !open);
                 }}
                 variant="outline"
@@ -614,6 +677,9 @@ function SprintPlanRouteView() {
                     setPriorCursors(priorCursors.slice(0, -1));
                     setHistoryCursor(undefined);
                     setTaskPage(0);
+                    setPreview(null);
+                    setConflictDecisions({});
+                    importRevision.current++;
                     select({ planId: undefined, taskId: undefined });
                   }}
                   size="sm"
@@ -628,6 +694,9 @@ function SprintPlanRouteView() {
                     setCursor(list.data!.nextCursor);
                     setHistoryCursor(undefined);
                     setTaskPage(0);
+                    setPreview(null);
+                    setConflictDecisions({});
+                    importRevision.current++;
                     select({ planId: undefined, taskId: undefined });
                   }}
                   size="sm"
@@ -653,6 +722,7 @@ function SprintPlanRouteView() {
                       importRevision.current++;
                       setImportPlanId(event.target.value);
                       setPreview(null);
+                      setConflictDecisions({});
                     }}
                     placeholder={planId ?? `plan:${spaceId}`}
                     value={importPlanId}
@@ -676,7 +746,9 @@ function SprintPlanRouteView() {
                   {preview !== null && (
                     <Button
                       disabled={
-                        importBusy || preview.conflicts.length > 0 || preview.unchangedSource
+                        importBusy ||
+                        preview.unchangedSource ||
+                        completeImportDecisions(preview.conflicts, conflictDecisions) === null
                       }
                       onClick={() => void applySource()}
                     >
@@ -716,16 +788,19 @@ function SprintPlanRouteView() {
                     {preview.conflicts.length > 0 && (
                       <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-3">
                         <p className="font-medium">
-                          Reimport blocked: {preview.conflicts.length} field conflict
+                          Review {preview.conflicts.length} field conflict
                           {preview.conflicts.length === 1 ? "" : "s"}
                         </p>
                         <p className="mt-1 text-muted-foreground">
-                          The server requires an atomic conflict decision. Review these differences;
-                          the uploaded source and current plan remain unchanged.
+                          Choose how to resolve each field. Apply checks the current plan version
+                          and all conflicts together; the uploaded JSON stays exact.
                         </p>
                         <ul className="mt-2 space-y-2">
                           {preview.conflicts.map((conflict) => (
-                            <li key={`${conflict.taskId}:${conflict.field}`}>
+                            <li
+                              className="rounded-lg border border-border bg-background p-3"
+                              key={`${conflict.taskId}:${conflict.field}`}
+                            >
                               <strong>
                                 {conflict.taskId}.{conflict.field}
                               </strong>{" "}
@@ -734,6 +809,63 @@ function SprintPlanRouteView() {
                               {conflict.incoming === undefined
                                 ? "task removed"
                                 : String(conflict.incoming)}
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <Button
+                                  aria-pressed={
+                                    conflictDecisions[
+                                      conflictDecisionKey(conflict.taskId, conflict.field)
+                                    ] === "keep-current"
+                                  }
+                                  disabled={conflict.reason === "locally-edited-task-removed"}
+                                  onClick={() =>
+                                    setConflictDecisions((prior) => ({
+                                      ...prior,
+                                      [conflictDecisionKey(conflict.taskId, conflict.field)]:
+                                        "keep-current",
+                                    }))
+                                  }
+                                  size="sm"
+                                  variant={
+                                    conflictDecisions[
+                                      conflictDecisionKey(conflict.taskId, conflict.field)
+                                    ] === "keep-current"
+                                      ? "default"
+                                      : "outline"
+                                  }
+                                >
+                                  Keep current
+                                </Button>
+                                <Button
+                                  aria-pressed={
+                                    conflictDecisions[
+                                      conflictDecisionKey(conflict.taskId, conflict.field)
+                                    ] === "use-incoming"
+                                  }
+                                  onClick={() =>
+                                    setConflictDecisions((prior) => ({
+                                      ...prior,
+                                      [conflictDecisionKey(conflict.taskId, conflict.field)]:
+                                        "use-incoming",
+                                    }))
+                                  }
+                                  size="sm"
+                                  variant={
+                                    conflictDecisions[
+                                      conflictDecisionKey(conflict.taskId, conflict.field)
+                                    ] === "use-incoming"
+                                      ? "default"
+                                      : "outline"
+                                  }
+                                >
+                                  Use incoming
+                                </Button>
+                              </div>
+                              {conflict.reason === "locally-edited-task-removed" && (
+                                <p className="mt-2 text-muted-foreground">
+                                  The incoming source removed this task. To retain it, correct the
+                                  source and preview again.
+                                </p>
+                              )}
                             </li>
                           ))}
                         </ul>
@@ -1056,6 +1188,9 @@ function SprintPlanRouteView() {
                               <p className="break-words text-muted-foreground">
                                 {String(entry.before)} → {String(entry.after)}
                               </p>
+                            )}
+                            {entry.operation === "import" && (
+                              <ImportDecisionHistory after={entry.after} />
                             )}
                           </li>
                         ))}
