@@ -311,7 +311,7 @@ function ObservationsRouteView() {
 
   return (
     <SidebarInset className="h-full min-h-0 overflow-auto bg-background text-foreground">
-      <main className="mx-auto w-full max-w-7xl space-y-5 p-4 pb-10 sm:p-6">
+      <main className="mx-auto w-full max-w-7xl space-y-5 p-4 pb-10 pt-14 sm:p-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold sm:text-3xl">Observations</h1>
