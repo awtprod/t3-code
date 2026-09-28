@@ -31,6 +31,8 @@ export interface InboxPendingReply {
   readonly intent: InboxReplyIntent;
 }
 
+export type InboxMutationOutcome = "success" | "conflict" | "rejected" | "ambiguous";
+
 const MAX_ROUTE_VALUE_CHARS = 200;
 const DRAFT_STORAGE_PREFIX = "t3.commandCenter.inboxDraft.v1";
 const PENDING_REPLY_STORAGE_PREFIX = "t3.commandCenter.inboxPendingReply.v1";
@@ -66,6 +68,23 @@ export function resolveInboxEnvironmentId(input: {
     input.environmentIds[0] ??
     null
   );
+}
+
+export function resolveInboxDraftScopeId(input: {
+  readonly serverScopeId?: string | undefined;
+  readonly targetKind?:
+    | "PrimaryConnectionTarget"
+    | "BearerConnectionTarget"
+    | "RelayConnectionTarget"
+    | "SshConnectionTarget"
+    | undefined;
+  readonly relayAccountId?: string | undefined;
+}): string | undefined {
+  if (input.serverScopeId === undefined || input.targetKind === undefined) return undefined;
+  if (input.targetKind !== "RelayConnectionTarget") return input.serverScopeId;
+  return input.relayAccountId === undefined
+    ? undefined
+    : JSON.stringify(["relay", input.serverScopeId, input.relayAccountId]);
 }
 
 export function inboxDraftStorageKey(scope: InboxDraftScope): string {
@@ -164,21 +183,48 @@ export function inboxDraftAfterAcknowledgedReply(
     : current;
 }
 
-export function inboxTabLifecycles(tab: InboxTab): ReadonlyArray<"open" | "snoozed" | "dismissed"> {
-  if (tab === "snoozed") return ["snoozed"];
-  if (tab === "recent") return ["dismissed", "open"];
-  return ["open"];
+export function classifyInboxMutationResult(result: unknown): InboxMutationOutcome {
+  if (typeof result !== "object" || result === null) return "ambiguous";
+  if (Reflect.get(result, "_tag") === "Success") return "success";
+  if (Reflect.get(result, "_tag") !== "Failure") return "ambiguous";
+  const cause = Reflect.get(result, "cause");
+  if (typeof cause !== "object" || cause === null) return "ambiguous";
+  const reasons = Reflect.get(cause, "reasons");
+  if (!Array.isArray(reasons) || reasons.length === 0) return "ambiguous";
+  const failures = reasons.flatMap((reason: unknown) => {
+    if (typeof reason !== "object" || reason === null || Reflect.get(reason, "_tag") !== "Fail") {
+      return [];
+    }
+    return [Reflect.get(reason, "error")];
+  });
+  if (failures.length !== reasons.length) return "ambiguous";
+  if (failures.some((failure) => typeof failure !== "object" || failure === null)) {
+    return "ambiguous";
+  }
+  const tags = failures.map((failure) => Reflect.get(failure as object, "_tag"));
+  if (tags.every((tag) => tag === "CommandCenterError")) {
+    const reasons = failures.map((failure) => Reflect.get(failure as object, "reason"));
+    if (reasons.every((reason) => reason === "conflict")) return "conflict";
+    if (reasons.every((reason) => reason === "validation" || reason === "not_found")) {
+      return "rejected";
+    }
+  }
+  return tags.every((tag) => tag === "EnvironmentAuthorizationError") ? "rejected" : "ambiguous";
 }
 
-export function inboxItemBelongsInTab(
-  tab: InboxTab,
-  lifecycle: "open" | "snoozed" | "dismissed",
-  status: string,
-): boolean {
-  const completed = status === "done" || status === "canceled";
-  if (tab === "snoozed") return lifecycle === "snoozed";
-  if (tab === "recent") return lifecycle === "dismissed" || (lifecycle === "open" && completed);
-  return lifecycle === "open" && !completed;
+export function inboxPendingReplyAfterAttempt(
+  submitted: InboxPendingReply,
+  outcome: InboxMutationOutcome,
+): InboxPendingReply | null {
+  return outcome === "ambiguous" || outcome === "conflict" ? submitted : null;
+}
+
+export function rebaseInboxPendingReply(
+  rejected: InboxPendingReply,
+  expectedVersion: number,
+  mutationId: string,
+): InboxPendingReply {
+  return { ...rejected, expectedVersion, mutationId };
 }
 
 export function readInboxDraft(storage: Storage | null, scope: InboxDraftScope): InboxDraft {

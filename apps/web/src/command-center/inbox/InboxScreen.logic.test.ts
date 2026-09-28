@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  classifyInboxMutationResult,
   inboxDraftStorageKey,
   inboxDraftAfterAcknowledgedReply,
-  inboxItemBelongsInTab,
+  inboxPendingReplyAfterAttempt,
   inboxPendingReplyForSubmit,
   inboxPendingReplyStorageKey,
-  inboxTabLifecycles,
   mergeHistoryById,
   readInboxDraft,
   readInboxPendingReply,
+  resolveInboxDraftScopeId,
   resolveInboxEnvironmentId,
+  rebaseInboxPendingReply,
   validateInboxSearch,
   writeInboxDraft,
   writeInboxPendingReply,
@@ -61,6 +63,43 @@ describe("Inbox route and draft logic", () => {
         environmentIds: ["connected-environment"],
       }),
     ).toBe("temporarily-missing-environment");
+  });
+
+  it("uses a relay account only for a confirmed relay target", () => {
+    const serverScopeId = "dpop:stable-proof-scope";
+    expect(
+      resolveInboxDraftScopeId({
+        serverScopeId,
+        targetKind: "RelayConnectionTarget",
+        relayAccountId: "account-a",
+      }),
+    ).toBe(JSON.stringify(["relay", serverScopeId, "account-a"]));
+    expect(
+      resolveInboxDraftScopeId({
+        serverScopeId,
+        targetKind: "RelayConnectionTarget",
+        relayAccountId: "account-b",
+      }),
+    ).not.toBe(
+      resolveInboxDraftScopeId({
+        serverScopeId,
+        targetKind: "RelayConnectionTarget",
+        relayAccountId: "account-a",
+      }),
+    );
+    expect(
+      resolveInboxDraftScopeId({ serverScopeId, targetKind: "RelayConnectionTarget" }),
+    ).toBeUndefined();
+    expect(
+      resolveInboxDraftScopeId({ serverScopeId, relayAccountId: "account-a" }),
+    ).toBeUndefined();
+    expect(
+      resolveInboxDraftScopeId({
+        serverScopeId,
+        targetKind: "BearerConnectionTarget",
+        relayAccountId: "account-a",
+      }),
+    ).toBe(serverScopeId);
   });
 
   it("isolates exact drafts by environment, identity, Space, and item", () => {
@@ -148,16 +187,51 @@ describe("Inbox route and draft logic", () => {
     expect(readInboxPendingReply(storage, scope)).toBeNull();
   });
 
-  it("queries and classifies actionable, completed, dismissed, and snoozed items", () => {
-    expect(inboxTabLifecycles("actionable")).toEqual(["open"]);
-    expect(inboxTabLifecycles("recent")).toEqual(["dismissed", "open"]);
-    expect(inboxTabLifecycles("snoozed")).toEqual(["snoozed"]);
-    expect(inboxItemBelongsInTab("actionable", "open", "review")).toBe(true);
-    expect(inboxItemBelongsInTab("actionable", "open", "done")).toBe(false);
-    expect(inboxItemBelongsInTab("actionable", "open", "canceled")).toBe(false);
-    expect(inboxItemBelongsInTab("recent", "open", "done")).toBe(true);
-    expect(inboxItemBelongsInTab("recent", "dismissed", "review")).toBe(true);
-    expect(inboxItemBelongsInTab("snoozed", "snoozed", "waiting")).toBe(true);
+  it("keeps ambiguous replies retryable and rebases only an explicitly rejected conflict", () => {
+    const submitted = {
+      mutationId: "web:original",
+      expectedVersion: 7,
+      text: "Original submitted text",
+      intent: "request-changes" as const,
+    };
+    const ambiguous = { _tag: "Failure", cause: { reasons: [{ _tag: "Die" }] } };
+    expect(classifyInboxMutationResult(ambiguous)).toBe("ambiguous");
+    expect(
+      inboxPendingReplyForSubmit({
+        pending: inboxPendingReplyAfterAttempt(submitted, "ambiguous"),
+        draft: { text: "Newer text", intent: "comment" },
+        expectedVersion: 8,
+        mutationId: "web:must-not-be-used",
+      }),
+    ).toEqual(submitted);
+
+    const conflict = {
+      _tag: "Failure",
+      cause: {
+        reasons: [
+          {
+            _tag: "Fail",
+            error: { _tag: "CommandCenterError", reason: "conflict" },
+          },
+        ],
+      },
+    };
+    expect(classifyInboxMutationResult(conflict)).toBe("conflict");
+    expect(inboxPendingReplyAfterAttempt(submitted, "conflict")).toEqual(submitted);
+    expect(inboxPendingReplyAfterAttempt(submitted, "rejected")).toBeNull();
+    expect(
+      classifyInboxMutationResult({
+        _tag: "Failure",
+        cause: {
+          reasons: [{ _tag: "Fail", error: { _tag: "CommandCenterError", reason: "persistence" } }],
+        },
+      }),
+    ).toBe("ambiguous");
+    expect(rebaseInboxPendingReply(submitted, 8, "web:explicit-rebase")).toEqual({
+      ...submitted,
+      expectedVersion: 8,
+      mutationId: "web:explicit-rebase",
+    });
   });
 
   it("rejects malformed stored drafts and deduplicates overlapping history pages", () => {
