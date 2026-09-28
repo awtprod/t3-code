@@ -36,6 +36,8 @@ describe("Command Center RPC authorization", () => {
       AuthCommandCenterReadScope,
     );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.itemsQuery)).toBe(AuthCommandCenterReadScope);
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxQuery)).toBe(AuthCommandCenterReadScope);
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxDetail)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.runsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationDefinitionGet)).toBe(
@@ -55,6 +57,20 @@ describe("Command Center RPC authorization", () => {
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.runStart)).toBe(AuthCommandCenterOperateScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.spacesSync)).toBe(AuthCommandCenterOperateScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.itemUpdate)).toBe(AuthCommandCenterOperateScope);
+    for (const method of [
+      COMMAND_CENTER_WS_METHODS.inboxComment,
+      COMMAND_CENTER_WS_METHODS.inboxRequestChanges,
+      COMMAND_CENTER_WS_METHODS.inboxCandidateCreate,
+      COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
+      COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard,
+      COMMAND_CENTER_WS_METHODS.inboxChangeRequestResolve,
+      COMMAND_CENTER_WS_METHODS.inboxSnooze,
+      COMMAND_CENTER_WS_METHODS.inboxUnsnooze,
+      COMMAND_CENTER_WS_METHODS.inboxDismiss,
+      COMMAND_CENTER_WS_METHODS.inboxReopen,
+    ]) {
+      expect(scopes.get(method)).toBe(AuthCommandCenterOperateScope);
+    }
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationRunStart)).toBe(
       AuthCommandCenterOperateScope,
     );
