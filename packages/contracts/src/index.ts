@@ -2,6 +2,7 @@ export * from "./baseSchemas.ts";
 export * from "./commandCenter.ts";
 export * from "./commandCenterInbox.ts";
 export * from "./commandCenterSprintPlan.ts";
+export * from "./commandCenterResponsibilities.ts";
 export * from "./commandCenterEvents.ts";
 export * from "./background.ts";
 export * from "./auth.ts";

@@ -80,6 +80,7 @@ import Migration0068 from "./Migrations/068_ProviderRestartRecovery.ts";
 import Migration0069 from "./Migrations/069_WebPushSubscriptions.ts";
 import Migration0070 from "./Migrations/070_CommandCenterInbox.ts";
 import Migration0071 from "./Migrations/071_CommandCenterSprintPlans.ts";
+import Migration0072 from "./Migrations/072_CommandCenterResponsibilities.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -159,6 +160,7 @@ export const migrationEntries = [
   [69, "WebPushSubscriptions", Migration0069],
   [70, "CommandCenterInbox", Migration0070],
   [71, "CommandCenterSprintPlans", Migration0071],
+  [72, "CommandCenterResponsibilities", Migration0072],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

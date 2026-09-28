@@ -6,7 +6,6 @@ import type * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import migration072 from "../persistence/Migrations/072_CommandCenterResponsibilities.ts";
 import { canonicalJson } from "./automation/Digest.ts";
 import {
   Responsibilities,
@@ -19,6 +18,9 @@ const now = "2026-09-28T12:00:00.000Z";
 const commitSha = "1234567890abcdef1234567890abcdef12345678";
 const definitionDigest = `sha256:${"a".repeat(64)}`;
 let configuredEnabled = true;
+let configuredAvailable = true;
+let configHealthy = true;
+let configuredDigest = definitionDigest;
 
 const automation = {
   id: "daily-review",
@@ -42,27 +44,53 @@ const automation = {
   updatedAt: now,
 } as const;
 
-const persistence = Layer.effectDiscard(migration072).pipe(
-  Layer.provideMerge(SqlitePersistenceMemory),
-);
+const persistence = SqlitePersistenceMemory;
 
 const dependencies: ResponsibilityDependencies = {
   now: Effect.succeed(now),
-  validateAutomation: ({ automationId, spaceId }) =>
-    automationId === automation.id && spaceId === automation.spaceId
-      ? Effect.succeed({
-          automationId,
-          spaceId,
-          configCommitSha: commitSha,
-          definitionDigest,
-          enabled: configuredEnabled,
-        })
+  listConfiguredAutomations: () =>
+    configHealthy
+      ? Effect.succeed(
+          configuredAvailable
+            ? [
+                {
+                  automationId: automation.id,
+                  spaceId: automation.spaceId,
+                  configCommitSha: commitSha,
+                  definitionDigest: configuredDigest,
+                  enabled: configuredEnabled,
+                },
+              ]
+            : [],
+        )
       : Effect.fail(
           new ResponsibilityError({
-            code: "not-found",
-            message: "The configured Automation was not found.",
+            code: "config-unavailable",
+            message: "The committed configuration is unhealthy.",
           }),
         ),
+  validateAutomation: ({ automationId, spaceId }) =>
+    !configHealthy
+      ? Effect.fail(
+          new ResponsibilityError({
+            code: "config-unavailable",
+            message: "The committed configuration is unhealthy.",
+          }),
+        )
+      : configuredAvailable && automationId === automation.id && spaceId === automation.spaceId
+        ? Effect.succeed({
+            automationId,
+            spaceId,
+            configCommitSha: commitSha,
+            definitionDigest: configuredDigest,
+            enabled: configuredEnabled,
+          })
+        : Effect.fail(
+            new ResponsibilityError({
+              code: "not-found",
+              message: "The configured Automation was not found.",
+            }),
+          ),
 };
 
 const testLayer = responsibilitiesLayer(dependencies).pipe(
@@ -73,6 +101,9 @@ const testLayer = responsibilitiesLayer(dependencies).pipe(
 const seed = Effect.fn("ResponsibilitiesTest.seed")(function* () {
   const sql = yield* SqlClient.SqlClient;
   configuredEnabled = true;
+  configuredAvailable = true;
+  configHealthy = true;
+  configuredDigest = definitionDigest;
   yield* sql`
     INSERT INTO command_center_spaces (
       id, owner_id, slug, name, kind, created_at, updated_at
@@ -134,6 +165,16 @@ it.effect(
         .get({ spaceId: "space-b", automationId: automation.id })
         .pipe(Effect.flip);
       expect(wrongSpace).toMatchObject({ code: "not-found" });
+      const wrongSpacePause = yield* responsibilities
+        .setPause({
+          spaceId: "space-b",
+          automationId: automation.id,
+          paused: true,
+          actor: "andrew",
+          expectedVersion: 0,
+        })
+        .pipe(Effect.flip);
+      expect(wrongSpacePause).toMatchObject({ code: "not-found" });
 
       yield* sql`UPDATE command_center_automations SET enabled = 0 WHERE id = ${automation.id}`;
       configuredEnabled = false;
@@ -281,5 +322,78 @@ it.effect("strictly validates raw query bounds", () =>
     const responsibilities = yield* Responsibilities;
     const error = yield* responsibilities.list({ limit: 101 }).pipe(Effect.flip);
     expect(error).toMatchObject({ code: "validation" });
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("hides removed Automations and fails closed on unhealthy committed config", () =>
+  Effect.gen(function* () {
+    yield* seed();
+    const responsibilities = yield* Responsibilities;
+    const configured = yield* responsibilities.list({ spaceId: "space-a" });
+    expect(configured).toHaveLength(1);
+    expect(configured[0]).toMatchObject({
+      authority: null,
+      limits: null,
+      authorityExplanation: "No separate authority is configured for this Automation.",
+      limitsExplanation: "No per-Automation limits are configured.",
+    });
+    configuredAvailable = false;
+    expect(yield* responsibilities.list({ spaceId: "space-a" })).toEqual([]);
+    expect(
+      yield* responsibilities
+        .get({ spaceId: "space-a", automationId: automation.id })
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "not-found" });
+    expect(
+      yield* responsibilities
+        .setPause({
+          spaceId: "space-a",
+          automationId: automation.id,
+          paused: true,
+          actor: "andrew",
+          expectedVersion: 0,
+        })
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "not-found" });
+    configuredAvailable = true;
+    configuredDigest = `sha256:${"b".repeat(64)}`;
+    expect(yield* responsibilities.list({ spaceId: "space-a" })).toEqual([]);
+    expect(
+      yield* responsibilities
+        .get({ spaceId: "space-a", automationId: automation.id })
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "config-unavailable" });
+    expect(
+      yield* responsibilities
+        .setPause({
+          spaceId: "space-a",
+          automationId: automation.id,
+          paused: true,
+          actor: "andrew",
+          expectedVersion: 0,
+        })
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "conflict" });
+    configuredDigest = definitionDigest;
+    configHealthy = false;
+    expect(yield* responsibilities.list({ spaceId: "space-a" }).pipe(Effect.flip)).toMatchObject({
+      code: "config-unavailable",
+    });
+    expect(
+      yield* responsibilities
+        .get({ spaceId: "space-a", automationId: automation.id })
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "config-unavailable" });
+    expect(
+      yield* responsibilities
+        .setPause({
+          spaceId: "space-a",
+          automationId: automation.id,
+          paused: true,
+          actor: "andrew",
+          expectedVersion: 0,
+        })
+        .pipe(Effect.flip),
+    ).toMatchObject({ code: "config-unavailable" });
   }).pipe(Effect.provide(testLayer)),
 );

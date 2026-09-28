@@ -5,7 +5,6 @@ import type * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
-import migration072 from "../../persistence/Migrations/072_CommandCenterResponsibilities.ts";
 import { canonicalJson } from "./Digest.ts";
 import {
   type AutomationNodeExecutionContext,
@@ -100,10 +99,7 @@ function harness(
 }
 
 function testLayer(dependencies: AutomationRuntimeDependencies) {
-  const persistence = Layer.effectDiscard(migration072).pipe(
-    Layer.provideMerge(SqlitePersistenceMemory),
-  );
-  return automationRuntimeLayer(dependencies).pipe(Layer.provideMerge(persistence));
+  return automationRuntimeLayer(dependencies).pipe(Layer.provideMerge(SqlitePersistenceMemory));
 }
 
 const seedAutomation = Effect.fn("AutomationRuntimeTest.seedAutomation")(function* (

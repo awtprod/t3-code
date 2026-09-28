@@ -7,7 +7,6 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
-import migration072 from "../../persistence/Migrations/072_CommandCenterResponsibilities.ts";
 import { AutomationRuns, layer as automationRunsLayer } from "../AutomationRuns.ts";
 import { CommandCenterService, type CommandCenterServiceShape } from "../Service.ts";
 import { canonicalJson } from "./Digest.ts";
@@ -78,9 +77,7 @@ function recoveryTestLayer(input: {
       defaultRetryDelayMs: 1_000,
     }),
   );
-  const persistence = Layer.effectDiscard(migration072).pipe(
-    Layer.provideMerge(SqlitePersistenceMemory),
-  );
+  const persistence = SqlitePersistenceMemory;
   return automationRunsLayer.pipe(
     Layer.provideMerge(dependencies),
     Layer.provideMerge(persistence),

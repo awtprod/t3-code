@@ -338,6 +338,36 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       tag: COMMAND_CENTER_WS_METHODS.automationDefinitionGet,
       staleTimeMs: 1_000,
     }),
+    responsibilities: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:responsibilities",
+      tag: COMMAND_CENTER_WS_METHODS.responsibilitiesList,
+      staleTimeMs: 2_000,
+    }),
+    responsibility: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:responsibility",
+      tag: COMMAND_CENTER_WS_METHODS.responsibilityGet,
+      staleTimeMs: 2_000,
+    }),
+    pauseResponsibility: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:pause-responsibility",
+      tag: COMMAND_CENTER_WS_METHODS.responsibilityPause,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.automationId]),
+      },
+    }),
+    resumeResponsibility: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:resume-responsibility",
+      tag: COMMAND_CENTER_WS_METHODS.responsibilityResume,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.automationId]),
+      },
+    }),
     createAutomationDefinition: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:create-automation-definition",
       tag: COMMAND_CENTER_WS_METHODS.automationDefinitionCreate,
