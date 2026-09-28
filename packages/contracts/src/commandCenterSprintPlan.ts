@@ -1,4 +1,5 @@
 import { SPRINT_PLAN_IMPORT_LIMITS } from "@command-center/core";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
 const textEncoder = new TextEncoder();
@@ -57,7 +58,8 @@ const IsoDate = Schema.String.check(
   Schema.makeFilter((value) => {
     const time = Date.parse(`${value}T00:00:00.000Z`);
     return (
-      (Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value) ||
+      (Number.isFinite(time) &&
+        DateTime.formatIso(DateTime.makeUnsafe(time)).slice(0, 10) === value) ||
       "Expected a real calendar date."
     );
   }),

@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import type { SprintPlanSource } from "@command-center/core";
@@ -16,60 +17,58 @@ import {
 
 const testLayer = Layer.mergeAll(SqlitePersistenceMemory, NodeServices.layer);
 const actor: SprintPlanActor = { id: "andrew", kind: "user" };
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const sourceFixture = (overrides?: {
   readonly firstNote?: string;
   readonly secondText?: string;
   readonly updated?: string;
 }) =>
-  JSON.stringify(
-    {
-      version: 2,
-      updated: overrides?.updated ?? "2026-09-27T19:40:38.746Z",
-      fixtureMetadata: { retained: true },
-      score: [
-        {
-          id: "apv",
-          label: "Average viewed",
-          start: "",
-          now: "",
-          target: "Set at launch",
-        },
-      ],
-      weeks: [
-        {
-          id: "w1",
-          num: 1,
-          start: "2026-10-26",
-          end: "2026-11-01",
-          range: "Oct 26 – Nov 1",
-          tue: "Synthetic Tuesday",
-          fri: "Synthetic Friday",
-          optionalMetadata: ["kept", "in-order"],
-          tasks: [
-            {
-              id: "task-a",
-              text: "Post Saturday 31 October",
-              owner: "Production",
-              day: "Wed 10/28",
-              note: overrides?.firstNote ?? "Original note",
-              done: false,
-            },
-            {
-              id: "task-b",
-              text: overrides?.secondText ?? "Prepare the follow-up",
-              owner: "Both",
-              day: "Thu 10/29",
-              note: "",
-              done: true,
-            },
-          ],
-        },
-      ],
-    },
-    null,
-    2,
-  );
+  encodeJson({
+    version: 2,
+    updated: overrides?.updated ?? "2026-09-27T19:40:38.746Z",
+    fixtureMetadata: { retained: true },
+    score: [
+      {
+        id: "apv",
+        label: "Average viewed",
+        start: "",
+        now: "",
+        target: "Set at launch",
+      },
+    ],
+    weeks: [
+      {
+        id: "w1",
+        num: 1,
+        start: "2026-10-26",
+        end: "2026-11-01",
+        range: "Oct 26 – Nov 1",
+        tue: "Synthetic Tuesday",
+        fri: "Synthetic Friday",
+        optionalMetadata: ["kept", "in-order"],
+        tasks: [
+          {
+            id: "task-a",
+            text: "Post Saturday 31 October",
+            owner: "Production",
+            day: "Wed 10/28",
+            note: overrides?.firstNote ?? "Original note",
+            done: false,
+          },
+          {
+            id: "task-b",
+            text: overrides?.secondText ?? "Prepare the follow-up",
+            owner: "Both",
+            day: "Thu 10/29",
+            note: "",
+            done: true,
+          },
+        ],
+      },
+    ],
+  });
 
 const setup = Effect.fn("SprintPlanTest.setup")(function* (suffix: string) {
   const sql = yield* SqlClient.SqlClient;
@@ -632,7 +631,7 @@ it.effect(
         SELECT payload_json AS "payloadJson" FROM command_center_audit_events
         WHERE event_id = ${`sprint-plan:${input.mutationId}`} LIMIT 1
       `;
-        expect(JSON.parse(auditRows[0]!.payloadJson)).toMatchObject({
+        expect(decodeJson(auditRows[0]!.payloadJson)).toMatchObject({
           conflictDecisions: input.conflictDecisions,
         });
       }
@@ -719,9 +718,9 @@ it.effect(
         .pipe(Effect.flip);
       expect(stale).toMatchObject({ reason: "conflict" });
 
-      const removed = JSON.parse(incoming) as { weeks: Array<{ tasks: Array<{ id: string }> }> };
+      const removed = decodeJson(incoming) as { weeks: Array<{ tasks: Array<{ id: string }> }> };
       removed.weeks[0]!.tasks = removed.weeks[0]!.tasks.filter((task) => task.id !== "task-a");
-      const removedJson = JSON.stringify(removed);
+      const removedJson = encodeJson(removed);
       const preview = yield* service.previewImport({
         planId: base.planId,
         spaceId: base.spaceId,
@@ -759,7 +758,7 @@ it.effect(
 it.effect("keeps 217 unrelated tasks identical when resolving one conflict", () =>
   Effect.gen(function* () {
     const service = yield* setup("many-tasks");
-    const original = JSON.parse(sourceFixture()) as {
+    const original = decodeJson(sourceFixture()) as {
       weeks: Array<{ tasks: Array<Record<string, unknown>> }>;
       updated: string;
     };
@@ -772,7 +771,7 @@ it.effect("keeps 217 unrelated tasks identical when resolving one conflict", () 
       done: index % 2 === 0,
     }));
     original.weeks[0]!.tasks.push(...extras);
-    const originalJson = JSON.stringify(original);
+    const originalJson = encodeJson(original);
     yield* service.applyImport(
       {
         planId: "plan-many",
@@ -802,7 +801,7 @@ it.effect("keeps 217 unrelated tasks identical when resolving one conflict", () 
     const incoming = structuredClone(original);
     incoming.updated = "2026-09-28T00:00:00.000Z";
     incoming.weeks[0]!.tasks[0]!.note = "Incoming note";
-    const incomingJson = JSON.stringify(incoming);
+    const incomingJson = encodeJson(incoming);
     const applied = yield* service.applyImport(
       {
         planId: "plan-many",
@@ -894,7 +893,7 @@ it.effect("resolves source date conflicts separately with a reason and exact his
 it.effect("rejects malformed service imports without persisting a plan", () =>
   Effect.gen(function* () {
     const service = yield* setup("malformed");
-    const malformed = JSON.parse(sourceFixture()) as SprintPlanSource;
+    const malformed = decodeJson(sourceFixture()) as SprintPlanSource;
     const mutable = malformed as unknown as { weeks: Array<{ tasks: Array<{ done: unknown }> }> };
     mutable.weeks[0]!.tasks[0]!.done = "yes";
     const error = yield* service
@@ -902,7 +901,7 @@ it.effect("rejects malformed service imports without persisting a plan", () =>
         {
           planId: "plan-malformed",
           spaceId: "space-malformed",
-          sourceJson: JSON.stringify(malformed),
+          sourceJson: encodeJson(malformed),
           provenance: { sourceRef: "fixture://malformed" },
           expectedVersion: 0,
           mutationId: "import-malformed",
