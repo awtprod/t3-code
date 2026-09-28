@@ -8,6 +8,7 @@ import {
   GitPullRequestIcon,
   InboxIcon,
   ListChecksIcon,
+  ListFilterIcon,
   SettingsIcon,
   SquarePenIcon,
   WorkflowIcon,
@@ -158,6 +159,12 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       label: "Sprint plan",
       icon: CalendarDaysIcon,
       active: pathname.startsWith("/sprint-plan"),
+    },
+    {
+      to: "/observations" as const,
+      label: "Observations",
+      icon: ListFilterIcon,
+      active: pathname.startsWith("/observations"),
     },
   ];
 
