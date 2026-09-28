@@ -7,6 +7,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 
 import * as ServerConfig from "../config.ts";
 import { canonicalJson } from "./automation/Digest.ts";
@@ -61,8 +62,9 @@ it.effect("keeps CCN roots disabled until a bounded operator file is present", (
     }
   }).pipe(
     Effect.provide(
-      ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "ccn-config-test-" }),
+      ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "ccn-config-test-" }).pipe(
+        Layer.provideMerge(NodeServices.layer),
+      ),
     ),
-    Effect.provide(NodeServices.layer),
   ),
 );
