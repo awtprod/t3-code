@@ -100,6 +100,13 @@ export const COMMAND_CENTER_WS_METHODS = {
   googleRead: "cc.connections.google.read",
   windowsMediaList: "cc.windowsMedia.list",
   windowsMediaRoots: "cc.windowsMedia.roots",
+  observationsList: "cc.observations.list",
+  observationsGet: "cc.observations.get",
+  observationsHistory: "cc.observations.history",
+  observationsCreateManual: "cc.observations.createManual",
+  observationsImport: "cc.observations.import",
+  observationsCorrect: "cc.observations.correct",
+  observationsRetire: "cc.observations.retire",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(

@@ -71,6 +71,13 @@ export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.googleRead, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.windowsMediaList, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.windowsMediaRoots, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.observationsList, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.observationsGet, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.observationsHistory, AuthCommandCenterReadScope],
+  [COMMAND_CENTER_WS_METHODS.observationsCreateManual, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.observationsImport, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.observationsCorrect, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.observationsRetire, AuthCommandCenterOperateScope],
 ] as const satisfies ReadonlyArray<readonly [string, AuthEnvironmentScope]>;
 
 const COMMAND_CENTER_RPC_METHODS = new Set<string>(
