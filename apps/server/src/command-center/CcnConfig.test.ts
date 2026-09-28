@@ -8,6 +8,7 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import * as ServerConfig from "../config.ts";
+import { canonicalJson } from "./automation/Digest.ts";
 import { loadCcnClipConfig } from "./CcnConfig.ts";
 
 it.effect("keeps CCN roots disabled until a bounded operator file is present", () =>
@@ -21,25 +22,25 @@ it.effect("keeps CCN roots disabled until a bounded operator file is present", (
       expect((yield* Effect.promise(() => loadCcnClipConfig(located))).approvedRoots).toEqual({});
       const file = NodePath.join(directory, "ccn-recording-roots.json");
       yield* Effect.promise(() =>
-        NodeFSP.writeFile(file, JSON.stringify({ roots: [{ id: "root-a", path: directory }] })),
+        NodeFSP.writeFile(file, canonicalJson({ roots: [{ id: "root-a", path: directory }] })),
       );
       expect((yield* Effect.promise(() => loadCcnClipConfig(located))).approvedRoots).toEqual({
         "root-a": directory,
       });
       yield* Effect.promise(() =>
-        NodeFSP.writeFile(file, JSON.stringify({ roots: [{ id: "root-a", path: "relative" }] })),
+        NodeFSP.writeFile(file, canonicalJson({ roots: [{ id: "root-a", path: "relative" }] })),
       );
       expect(
         yield* Effect.tryPromise({
           try: () => loadCcnClipConfig(located),
-          catch: (cause) => cause,
+          catch: () => new Error("Invalid roots file"),
         }).pipe(Effect.flip),
       ).toBeInstanceOf(Error);
       yield* Effect.promise(() => NodeFSP.writeFile(file, "x".repeat(32 * 1024 + 1)));
       expect(
         yield* Effect.tryPromise({
           try: () => loadCcnClipConfig(located),
-          catch: (cause) => cause,
+          catch: () => new Error("Oversized roots file"),
         }).pipe(Effect.flip),
       ).toBeInstanceOf(Error);
       yield* Effect.promise(() => NodeFSP.rm(file));
@@ -47,7 +48,7 @@ it.effect("keeps CCN roots disabled until a bounded operator file is present", (
       expect(
         yield* Effect.tryPromise({
           try: () => loadCcnClipConfig(located),
-          catch: (cause) => cause,
+          catch: () => new Error("Inaccessible roots file"),
         }).pipe(Effect.flip),
       ).toBeInstanceOf(Error);
     } finally {

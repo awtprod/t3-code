@@ -804,7 +804,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     sandboxArtifactHttpRouteLayer,
     sandboxPreviewResolveHttpRouteLayer,
     assetRouteLayer,
-    ccnArtifactRouteLayer,
+    ccnArtifactRouteLayer.pipe(Layer.provide(PersistenceLayerLive)),
     attachmentUploadRouteLayer,
     staticAndDevRouteLayer,
     webhookHttpRouteLayer,

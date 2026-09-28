@@ -2,7 +2,9 @@
 import * as NodeCrypto from "node:crypto";
 
 import { parseSprintPlanSource } from "@command-center/core";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -137,7 +139,7 @@ export const makeCcnPreparation = Effect.fn("CcnPreparation.make")(function* (de
         const current = yield* getBinding(input);
         if ((current?.version ?? 0) !== input.expectedBindingVersion)
           return yield* conflict("Recording binding version changed.");
-        const now = new Date().toISOString();
+        const now = DateTime.formatIso(yield* DateTime.now);
         if (current === null) {
           yield* sql`
           INSERT INTO command_center_ccn_recording_bindings (
@@ -176,7 +178,7 @@ export const makeCcnPreparation = Effect.fn("CcnPreparation.make")(function* (de
     dueAt: string;
   }) {
     const id = blockedId(input);
-    const now = new Date().toISOString();
+    const now = DateTime.formatIso(yield* DateTime.now);
     const staleIds = BLOCK_CAUSES.filter((cause) => cause !== input.cause).map((cause) =>
       blockedId({ ...input, cause }),
     );
@@ -209,11 +211,11 @@ export const makeCcnPreparation = Effect.fn("CcnPreparation.make")(function* (de
     const input = yield* decodeScan(raw).pipe(
       Effect.mapError(() => validation("Invalid CCN preparation scan.")),
     );
-    const parsedToday = new Date(`${input.today}T00:00:00.000Z`);
+    const parsedToday = DateTime.make(`${input.today}T00:00:00.000Z`);
     if (
       new Set(input.taskIds).size !== input.taskIds.length ||
-      Number.isNaN(parsedToday.valueOf()) ||
-      parsedToday.toISOString().slice(0, 10) !== input.today
+      Option.isNone(parsedToday) ||
+      DateTime.formatIsoDateUtc(parsedToday.value) !== input.today
     ) {
       return yield* validation("CCN scan has repeated task IDs or an invalid date.");
     }
@@ -236,9 +238,9 @@ export const makeCcnPreparation = Effect.fn("CcnPreparation.make")(function* (de
     const resolution = new Map(
       plan.dateResolutions.map((entry) => [entry.taskId, entry.resolvedDate] as const),
     );
-    const cutoff = parsedToday;
-    cutoff.setUTCDate(cutoff.getUTCDate() + input.windowDays);
-    const cutoffIso = cutoff.toISOString().slice(0, 10);
+    const cutoffIso = DateTime.formatIsoDateUtc(
+      DateTime.add(parsedToday.value, { days: input.windowDays }),
+    );
     const candidates: Array<{
       taskId: string;
       workIdentity: string;
@@ -282,8 +284,9 @@ export const makeCcnPreparation = Effect.fn("CcnPreparation.make")(function* (de
       }
       if (binding === null)
         return yield* conflict("Recording binding vanished during preparation.");
+      const now = DateTime.formatIso(yield* DateTime.now);
       yield* sql`
-        UPDATE command_center_items SET status = 'canceled', updated_at = ${new Date().toISOString()}
+        UPDATE command_center_items SET status = 'canceled', updated_at = ${now}
         WHERE space_id = ${input.spaceId} AND id IN (
           ${blockedId({ ...input, taskId, cause: "missing-recording" })},
           ${blockedId({ ...input, taskId, cause: "source-unavailable" })},

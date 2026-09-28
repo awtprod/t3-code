@@ -4,8 +4,10 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as NodeTimers from "node:timers";
 
 import { Artifact, type Artifact as ArtifactType } from "@command-center/core";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -149,6 +151,7 @@ export const makeCcnClipExporter = Effect.fn("CcnClipExport.make")(function* (de
         ),
       );
     }
+    const today = DateTime.formatIsoDateUtc(yield* DateTime.now);
     const [taskCount, runCount, dayCount] = yield* Effect.all([
       sql<{ readonly count: number }>`
         SELECT COUNT(*) AS count FROM command_center_ccn_exports
@@ -160,7 +163,7 @@ export const makeCcnClipExporter = Effect.fn("CcnClipExport.make")(function* (de
       sql<{ readonly count: number }>`
         SELECT COUNT(*) AS count FROM command_center_ccn_exports
         WHERE space_id = ${input.spaceId}
-          AND substr(created_at, 1, 10) = ${new Date().toISOString().slice(0, 10)}
+          AND substr(created_at, 1, 10) = ${today}
       `,
     ]);
     if (
@@ -212,7 +215,7 @@ export const makeCcnClipExporter = Effect.fn("CcnClipExport.make")(function* (de
     });
     yield* sql.withTransaction(
       Effect.gen(function* () {
-        const now = new Date().toISOString();
+        const now = DateTime.formatIso(yield* DateTime.now);
         yield* sql`
         INSERT INTO command_center_ccn_exports (
           request_id, request_digest, space_id, plan_id, task_id, binding_id,
@@ -314,7 +317,7 @@ async function runCommand(
   const onAbort = () => controller.abort();
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) controller.abort();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = NodeTimers.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await new Promise<string>((resolve, reject) => {
       const child = NodeChildProcess.spawn(binary, args, {
@@ -350,7 +353,7 @@ async function runCommand(
       });
     });
   } finally {
-    clearTimeout(timer);
+    NodeTimers.clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
   }
 }

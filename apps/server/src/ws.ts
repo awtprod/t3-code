@@ -208,6 +208,8 @@ import { ProjectionTurnUsageRepository } from "./persistence/Services/Projection
 import { ProjectionTurnUsageRepositoryLive } from "./persistence/Layers/ProjectionTurnUsage.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
+const isCommandCenterError = Schema.is(CommandCenterError);
+const isCcnPreparationError = Schema.is(CcnPreparation.CcnPreparationError);
 const decodeCcnBindingGet = Schema.decodeUnknownEffect(CommandCenterCcnBindingGetResult);
 const decodeCcnBindingPut = Schema.decodeUnknownEffect(CommandCenterCcnBindingPutResult);
 const decodeCcnScan = Schema.decodeUnknownEffect(CommandCenterCcnScanResult);
@@ -765,8 +767,8 @@ const makeWsRpcLayer = (
         kind: "user",
       };
       const ccnError = (cause: unknown) => {
-        if (cause instanceof CommandCenterError) return cause;
-        if (cause instanceof CcnPreparation.CcnPreparationError) {
+        if (isCommandCenterError(cause)) return cause;
+        if (isCcnPreparationError(cause)) {
           return new CommandCenterError({
             reason: cause.reason === "not-found" ? "not_found" : cause.reason,
             message: cause.message,
