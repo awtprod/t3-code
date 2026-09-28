@@ -303,6 +303,41 @@ describe("Command Center sprint-plan wire inputs", () => {
     ).toThrow();
   });
 
+  it("bounds explicit import decisions and rejects malformed choices at the wire", () => {
+    const base = {
+      planId: "fall-plan",
+      spaceId: "charlotte-comedy",
+      sourceJson: JSON.stringify(source()),
+      provenance: { sourceRef: "artifact:sprint-plan" },
+      expectedVersion: 2,
+      mutationId: "import-decided",
+    };
+    const decode = Schema.decodeUnknownSync(CommandCenterSprintPlanApplyImportInput);
+    expect(
+      decode({
+        ...base,
+        conflictDecisions: [{ taskId: "publish-recap", field: "note", decision: "keep-current" }],
+      }).conflictDecisions,
+    ).toEqual([{ taskId: "publish-recap", field: "note", decision: "keep-current" }]);
+    expect(() =>
+      decode({
+        ...base,
+        conflictDecisions: [{ taskId: "publish-recap", field: "note", decision: "ignore" }],
+      }),
+    ).toThrow();
+    expect(() => decode({ ...base, conflictDecisions: "keep-current" })).toThrow();
+    expect(() =>
+      decode({
+        ...base,
+        conflictDecisions: Array.from({ length: 20_481 }, () => ({
+          taskId: "publish-recap",
+          field: "note",
+          decision: "use-incoming",
+        })),
+      }),
+    ).toThrow();
+  });
+
   it("enforces byte limits before import and exact field patch value types", () => {
     expect(() =>
       Schema.decodeUnknownSync(CommandCenterSprintPlanPreviewImportInput)({

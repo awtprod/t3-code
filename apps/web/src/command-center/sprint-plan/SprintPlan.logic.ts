@@ -1,4 +1,29 @@
-import type { CommandCenterSprintPlanSource } from "@t3tools/contracts";
+import type {
+  CommandCenterSprintPlanConflictDecision,
+  CommandCenterSprintPlanImportConflict,
+  CommandCenterSprintPlanSource,
+} from "@t3tools/contracts";
+
+export function conflictDecisionKey(taskId: string, field: string): string {
+  return JSON.stringify([taskId, field]);
+}
+
+export function completeImportDecisions(
+  conflicts: readonly CommandCenterSprintPlanImportConflict[],
+  selected: Readonly<Record<string, CommandCenterSprintPlanConflictDecision["decision"]>>,
+): readonly CommandCenterSprintPlanConflictDecision[] | null {
+  const decisions: CommandCenterSprintPlanConflictDecision[] = [];
+  for (const conflict of conflicts) {
+    const decision = selected[conflictDecisionKey(conflict.taskId, conflict.field)];
+    if (
+      decision === undefined ||
+      (decision === "keep-current" && conflict.reason === "locally-edited-task-removed")
+    )
+      return null;
+    decisions.push({ taskId: conflict.taskId, field: conflict.field, decision });
+  }
+  return decisions;
+}
 
 export type Task = CommandCenterSprintPlanSource["weeks"][number]["tasks"][number];
 export type Week = CommandCenterSprintPlanSource["weeks"][number];
