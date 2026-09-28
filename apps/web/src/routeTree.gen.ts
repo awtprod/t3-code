@@ -33,6 +33,7 @@ import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$proje
 import { Route as ConnectCallbackRouteImport } from './routes/connect_.callback'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatProspectsRouteImport } from './routes/_chat.prospects'
+import { Route as ChatObservationsRouteImport } from './routes/_chat.observations'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
 import { Route as ChatAutomationsRouteImport } from './routes/_chat.automations'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
@@ -157,6 +158,11 @@ const ChatProspectsRoute = ChatProspectsRouteImport.update({
   path: '/prospects',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatObservationsRoute = ChatObservationsRouteImport.update({
+  id: '/observations',
+  path: '/observations',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatNewRoute = ChatNewRouteImport.update({
   id: '/new',
   path: '/new',
@@ -187,6 +193,7 @@ export interface FileRoutesByFullPath {
   '/usage': typeof UsageRoute
   '/automations': typeof ChatAutomationsRoute
   '/new': typeof ChatNewRoute
+  '/observations': typeof ChatObservationsRoute
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/connect/callback': typeof ConnectCallbackRoute
@@ -215,6 +222,7 @@ export interface FileRoutesByTo {
   '/usage': typeof UsageRoute
   '/automations': typeof ChatAutomationsRoute
   '/new': typeof ChatNewRoute
+  '/observations': typeof ChatObservationsRoute
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/connect/callback': typeof ConnectCallbackRoute
@@ -246,6 +254,7 @@ export interface FileRoutesById {
   '/usage': typeof UsageRoute
   '/_chat/automations': typeof ChatAutomationsRoute
   '/_chat/new': typeof ChatNewRoute
+  '/_chat/observations': typeof ChatObservationsRoute
   '/_chat/prospects': typeof ChatProspectsRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/connect_/callback': typeof ConnectCallbackRoute
@@ -278,6 +287,7 @@ export interface FileRouteTypes {
     | '/usage'
     | '/automations'
     | '/new'
+    | '/observations'
     | '/prospects'
     | '/pull-requests'
     | '/connect/callback'
@@ -306,6 +316,7 @@ export interface FileRouteTypes {
     | '/usage'
     | '/automations'
     | '/new'
+    | '/observations'
     | '/prospects'
     | '/pull-requests'
     | '/connect/callback'
@@ -336,6 +347,7 @@ export interface FileRouteTypes {
     | '/usage'
     | '/_chat/automations'
     | '/_chat/new'
+    | '/_chat/observations'
     | '/_chat/prospects'
     | '/_chat/pull-requests'
     | '/connect_/callback'
@@ -539,6 +551,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatProspectsRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/observations': {
+      id: '/_chat/observations'
+      path: '/observations'
+      fullPath: '/observations'
+      preLoaderRoute: typeof ChatObservationsRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/new': {
       id: '/_chat/new'
       path: '/new'
@@ -573,6 +592,7 @@ declare module '@tanstack/react-router' {
 interface ChatRouteChildren {
   ChatAutomationsRoute: typeof ChatAutomationsRoute
   ChatNewRoute: typeof ChatNewRoute
+  ChatObservationsRoute: typeof ChatObservationsRoute
   ChatProspectsRoute: typeof ChatProspectsRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatIndexRoute: typeof ChatIndexRoute
@@ -583,6 +603,7 @@ interface ChatRouteChildren {
 const ChatRouteChildren: ChatRouteChildren = {
   ChatAutomationsRoute: ChatAutomationsRoute,
   ChatNewRoute: ChatNewRoute,
+  ChatObservationsRoute: ChatObservationsRoute,
   ChatProspectsRoute: ChatProspectsRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatIndexRoute: ChatIndexRoute,

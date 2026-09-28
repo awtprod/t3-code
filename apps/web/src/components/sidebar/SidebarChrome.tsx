@@ -6,6 +6,7 @@ import {
   ContactRoundIcon,
   GitPullRequestIcon,
   HomeIcon,
+  ListFilterIcon,
   SettingsIcon,
   SquarePenIcon,
   WorkflowIcon,
@@ -134,6 +135,12 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       label: "Prospects",
       icon: ContactRoundIcon,
       active: pathname.startsWith("/prospects"),
+    },
+    {
+      to: "/observations" as const,
+      label: "Observations",
+      icon: ListFilterIcon,
+      active: pathname.startsWith("/observations"),
     },
   ];
 
