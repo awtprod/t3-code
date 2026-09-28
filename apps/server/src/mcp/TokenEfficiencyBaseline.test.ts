@@ -42,7 +42,8 @@ it("records the committed static-context baseline", () => {
     // Supabase tools (multi-database projects).
     // 2026-09: +76 bytes for the `prospect.evaluate`/`prospect.notify`
     // automation node configs (review-only prospect queue).
-    mcp: { toolCount: 36, schemaBytes: 25_533, toolkitCounts: [14, 13, 9] },
+    // 2026-09: +40 bytes for the `repository.checks` source-node configuration.
+    mcp: { toolCount: 36, schemaBytes: 25_573, toolkitCounts: [14, 13, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,
