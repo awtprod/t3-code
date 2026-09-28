@@ -289,6 +289,7 @@ export const CommandCenterAutomationSourceNodeKind = Schema.Literals([
   "shell.scoped",
   "prospect.evaluate",
   "prospect.notify",
+  "repository.checks",
 ]);
 
 /** Exact editable shape stored in the private configuration checkout. */

@@ -192,6 +192,13 @@ const NODE_PRESENTATION: Record<AutomationEditorNodeKind, NodePresentation> = {
     icon: SparklesIcon,
     accentClassName: "bg-success/10 text-success-foreground",
   },
+  "repository.checks": {
+    label: "Required PR checks",
+    description: "Watch new required CI failures in one repository",
+    category: "Data",
+    icon: GitBranchIcon,
+    accentClassName: "bg-info/10 text-info-foreground",
+  },
 };
 
 const EMPTY_ISSUES: ReadonlyArray<AutomationEditorValidationIssue> = [];
@@ -246,6 +253,8 @@ function nodeSummary(node: AutomationEditorNode): string {
       return stringValue(config.profile) || "Choose a prospect profile";
     case "prospect.notify":
       return "Notify from the previous prospect evaluation";
+    case "repository.checks":
+      return stringValue(config.repositoryId) || "Repository needs setup";
   }
 }
 
@@ -1197,6 +1206,16 @@ function GuidedNodeFields({
         <Field help="Uses the previous prospect evaluation result." label="Prospect notification">
           <p className="text-sm text-muted-foreground">Server-managed step</p>
         </Field>
+      );
+    case "repository.checks":
+      return (
+        <StringInput
+          help="The exact repository ID bound to this Space; polling uses the authenticated GitHub remote."
+          label="Repository ID"
+          onChange={(value) => set({ repositoryId: value })}
+          readOnly={readOnly}
+          value={stringValue(config.repositoryId)}
+        />
       );
   }
 }

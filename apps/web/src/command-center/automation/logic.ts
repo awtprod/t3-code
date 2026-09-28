@@ -156,6 +156,7 @@ const NODE_ID_STEMS: Record<AutomationEditorNodeKind, string> = {
   transform: "transform",
   "prospect.evaluate": "evaluate-prospects",
   "prospect.notify": "notify-prospects",
+  "repository.checks": "repository-checks",
 };
 
 const NODE_DEFAULT_CONFIG: Partial<
@@ -325,6 +326,8 @@ function guidedConfigProblem(
     case "prospect.evaluate":
     case "prospect.notify":
       return undefined;
+    case "repository.checks":
+      return nonEmptyString(config.repositoryId) ? undefined : "Choose a repository in this Space.";
   }
 }
 
