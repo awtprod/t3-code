@@ -5,6 +5,8 @@ import {
   CommandCenterSprintPlanApplyImportInput,
   CommandCenterSprintPlanGetOriginalInput,
   CommandCenterSprintPlanGetOriginalResult,
+  CommandCenterSprintPlanListInput,
+  CommandCenterSprintPlanListResult,
   CommandCenterSprintPlanListHistoryResult,
   CommandCenterSprintPlanPatchTaskInput,
   CommandCenterSprintPlanPreviewImportInput,
@@ -218,9 +220,60 @@ describe("Command Center sprint-plan wire outputs", () => {
       }),
     ).toThrow();
   });
+
+  it("keeps plan discovery bounded and summary-only", () => {
+    const decoded = Schema.decodeUnknownSync(CommandCenterSprintPlanListResult)({
+      plans: [
+        {
+          id: "fall-plan",
+          spaceId: "charlotte-comedy",
+          version: 3,
+          sourceVersion: 2,
+          sourceUpdatedAt: "2026-09-27T19:40:38.746Z",
+          sourceSha256: "d".repeat(64),
+          sourceJson: JSON.stringify(source()),
+          current: source(),
+          createdAt: "2026-09-27T20:00:00.000Z",
+          updatedAt: "2026-09-28T01:00:00.000Z",
+        },
+      ],
+      nextCursor: {
+        updatedAt: "2026-09-28T01:00:00.000Z",
+        planId: "fall-plan",
+      },
+    });
+    expect(decoded.plans[0]).not.toHaveProperty("sourceJson");
+    expect(decoded.plans[0]).not.toHaveProperty("current");
+    expect(() =>
+      Schema.decodeUnknownSync(CommandCenterSprintPlanListResult)({
+        plans: Array.from({ length: 101 }, () => decoded.plans[0]),
+      }),
+    ).toThrow();
+  });
 });
 
 describe("Command Center sprint-plan wire inputs", () => {
+  it("requires a bounded Space-scoped keyset cursor for list discovery", () => {
+    expect(
+      Schema.decodeUnknownSync(CommandCenterSprintPlanListInput)({
+        spaceId: "charlotte-comedy",
+        cursor: { updatedAt: "2026-09-28T01:00:00.000Z", planId: "fall-plan" },
+        limit: 25,
+      }),
+    ).toEqual({
+      spaceId: "charlotte-comedy",
+      cursor: { updatedAt: "2026-09-28T01:00:00.000Z", planId: "fall-plan" },
+      limit: 25,
+    });
+    expect(() =>
+      Schema.decodeUnknownSync(CommandCenterSprintPlanListInput)({
+        spaceId: "charlotte-comedy",
+        cursor: { updatedAt: "not-a-date", planId: "fall-plan" },
+        limit: 101,
+      }),
+    ).toThrow();
+  });
+
   it("keeps getOriginal Space-scoped and strips forged public authority", () => {
     const decoded = Schema.decodeUnknownSync(CommandCenterSprintPlanGetOriginalInput)({
       planId: "fall-plan",
