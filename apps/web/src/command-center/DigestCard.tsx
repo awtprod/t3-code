@@ -96,6 +96,12 @@ export function DigestCard({ environmentId }: { readonly environmentId: Environm
       ) : null}
       {value?.snapshot ? (
         <>
+          {value.truncated ? (
+            <p className="mt-3 text-sm text-muted-foreground">
+              Showing {value.snapshot.items.length} of {value.totalCount} actionable changes. Open
+              Inbox to see the rest.
+            </p>
+          ) : null}
           <ul className="mt-3 space-y-2">
             {value.snapshot.items.map((item) => (
               <li

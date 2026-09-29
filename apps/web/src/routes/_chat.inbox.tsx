@@ -208,23 +208,23 @@ function InboxEnvironmentRoute({
       <div className="max-h-[40vh] shrink-0 overflow-y-auto border-b border-border/60 p-3 sm:p-4">
         <DigestCard environmentId={environmentId} />
       </div>
-        <InboxScreen
-          environmentId={environmentId}
-          environmentOptions={environmentOptions}
-          draftScopeId={draftScopeId}
-          itemId={selectedItemId}
-          onEnvironmentChange={(nextEnvironmentId) =>
-            updateSearch({ environment: nextEnvironmentId, space: undefined, item: undefined })
-          }
-          onItemChange={(item) => updateSearch({ item })}
-          onSelectItem={(space, item) => updateSearch({ space, item })}
-          onSpaceChange={(space) => updateSearch({ space, item: undefined })}
-          onTabChange={(tab) => updateSearch({ tab, item: undefined })}
-          runs={bootstrapQuery.data.runs}
-          selectedSpaceId={selectedSpaceId}
-          spaces={spaces}
-          tab={search.tab}
-        />
+      <InboxScreen
+        environmentId={environmentId}
+        environmentOptions={environmentOptions}
+        draftScopeId={draftScopeId}
+        itemId={selectedItemId}
+        onEnvironmentChange={(nextEnvironmentId) =>
+          updateSearch({ environment: nextEnvironmentId, space: undefined, item: undefined })
+        }
+        onItemChange={(item) => updateSearch({ item })}
+        onSelectItem={(space, item) => updateSearch({ space, item })}
+        onSpaceChange={(space) => updateSearch({ space, item: undefined })}
+        onTabChange={(tab) => updateSearch({ tab, item: undefined })}
+        runs={bootstrapQuery.data.runs}
+        selectedSpaceId={selectedSpaceId}
+        spaces={spaces}
+        tab={search.tab}
+      />
     </div>
   );
 }

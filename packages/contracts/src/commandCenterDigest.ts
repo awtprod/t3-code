@@ -52,6 +52,10 @@ export const CommandCenterDigestQueryResult = Schema.Struct({
     endAt: Timestamp,
   }),
   snapshot: Schema.NullOr(CommandCenterDigestSnapshot),
+  /** Actionable changes in the period; the snapshot lists at most the first 100 of them. */
+  totalCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** True when more actionable changes exist than the snapshot lists. */
+  truncated: Schema.Boolean,
   notification: Schema.Literals(["available", "seen", "empty", "quiet-hours"]),
 });
 export type CommandCenterDigestQueryResult = typeof CommandCenterDigestQueryResult.Type;

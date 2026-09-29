@@ -109,3 +109,43 @@ it.effect("quiet hours and empty periods do not create a fresh notification", ()
     expect(empty.snapshot).toBeNull();
   }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect("lists the first 100 of 101 actionable changes in stable order with the total", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const sql = yield* SqlClient.SqlClient;
+    // item-a and item-b come from the seed; 99 more make 101 actionable changes today.
+    for (let index = 0; index < 99; index += 1) {
+      const id = `item-c${String(index).padStart(3, "0")}`;
+      yield* sql`
+        INSERT INTO command_center_items (
+          id, space_id, kind, status, title, priority, source_json, links_json,
+          metadata_json, created_at, updated_at
+        ) VALUES (
+          ${id}, 'space-a', 'decision', 'review', ${`Review ${id}`}, 'high',
+          '{"kind":"user","capturedAt":"2026-09-28T12:00:00.000Z"}', '[]', '{}',
+          ${firstAt}, ${firstAt}
+        )
+      `;
+    }
+    const digest = yield* make({ now: Effect.succeed("2026-09-28T13:00:00.000Z") });
+    const result = yield* digest.query({ recipientSubject: subject, configTimezone: "UTC" });
+    expect(result.notification).toBe("available");
+    expect(result.totalCount).toBe(101);
+    expect(result.truncated).toBe(true);
+    const items = result.snapshot?.items ?? [];
+    expect(items).toHaveLength(100);
+    // Stable Space/item order: all of space-a (item-a, item-c000..item-c098) fills the page.
+    expect(items[0]?.itemId).toBe("item-a");
+    expect(items.at(-1)?.itemId).toBe("item-c098");
+    expect(items.some((item) => item.spaceId === "space-b")).toBe(false);
+
+    const repeated = yield* digest.query({ recipientSubject: subject, configTimezone: "UTC" });
+    expect(repeated.snapshot?.id).toBe(result.snapshot?.id);
+
+    const small = yield* make({ now: Effect.succeed("2026-09-29T13:00:00.000Z") });
+    const nextDay = yield* small.query({ recipientSubject: subject, configTimezone: "UTC" });
+    expect(nextDay.totalCount).toBe(0);
+    expect(nextDay.truncated).toBe(false);
+  }).pipe(Effect.provide(testLayer)),
+);

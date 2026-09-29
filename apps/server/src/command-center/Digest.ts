@@ -64,6 +64,7 @@ interface ItemRow {
   readonly kind: "decision" | "approval" | "alert" | "task" | "idea";
   readonly status: "captured" | "ready" | "in_progress" | "waiting" | "review";
   readonly updatedAt: string;
+  readonly totalCount: number;
 }
 
 export interface DigestDependencies {
@@ -168,7 +169,8 @@ export const make = Effect.fn("CommandCenterDigest.make")(function* (
       const rows = yield* sql<ItemRow>`
         SELECT inbox.space_id AS "spaceId", inbox.item_id AS "itemId",
           inbox.current_revision_id AS "revisionId", inbox.version AS "itemVersion",
-          item.title, item.kind, item.status, inbox.updated_at AS "updatedAt"
+          item.title, item.kind, item.status, inbox.updated_at AS "updatedAt",
+          COUNT(*) OVER () AS "totalCount"
         FROM command_center_inbox_state inbox
         JOIN command_center_items item ON item.id = inbox.item_id AND item.space_id = inbox.space_id
         JOIN command_center_spaces space ON space.id = inbox.space_id AND space.lifecycle = 'active'
@@ -179,16 +181,16 @@ export const make = Effect.fn("CommandCenterDigest.make")(function* (
             OR (inbox.lifecycle = 'snoozed' AND inbox.snoozed_until <= ${now}))
           AND (item.kind IN ('decision', 'approval', 'alert') OR item.status IN ('review', 'waiting'))
         ORDER BY inbox.space_id, inbox.item_id
-        LIMIT ${MAX_DIGEST_ITEMS + 1}
+        LIMIT ${MAX_DIGEST_ITEMS}
       `;
-      if (rows.length > MAX_DIGEST_ITEMS) {
-        return yield* failure(
-          "validation",
-          "More than 100 actionable Inbox changes need review; narrow the period before generating a digest.",
-        );
-      }
+      // A busy day keeps the digest usable: show the first page in stable Space/item order and
+      // report how many actionable changes exist in total.
+      const totalCount = Number(rows[0]?.totalCount ?? 0);
       const items = yield* decodeItems(
-        rows.map((row) => ({ ...row, title: row.title.slice(0, 500) })),
+        rows.map(({ totalCount: _totalCount, ...row }) => ({
+          ...row,
+          title: row.title.slice(0, 500),
+        })),
       ).pipe(Effect.mapError(() => failure("persistence", "An actionable Inbox item is invalid.")));
       const latest = yield* latestSnapshot(input.recipientSubject, period.startAt, period.endAt);
       const contentDigest = `sha256:${NodeCrypto.createHash("sha256")
@@ -266,6 +268,8 @@ export const make = Effect.fn("CommandCenterDigest.make")(function* (
         preferences,
         period: { localDate: period.localDate, startAt: period.startAt, endAt: period.endAt },
         snapshot,
+        totalCount,
+        truncated: totalCount > items.length,
         notification: quiet
           ? "quiet-hours"
           : snapshot === null
