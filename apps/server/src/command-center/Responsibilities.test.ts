@@ -185,7 +185,12 @@ it.effect(
         actor: "andrew",
         expectedVersion: 1,
       });
-      expect(resumed).toMatchObject({ paused: false, enabled: false, pauseVersion: 2 });
+      expect(resumed).toMatchObject({
+        paused: false,
+        enabled: false,
+        pauseVersion: 2,
+        health: "disabled",
+      });
       expect(resumed.nextScheduledAt).toBeNull();
 
       const audit = yield* sql<{ readonly action: string }>`
@@ -314,6 +319,43 @@ it.effect("keeps a successful empty check separate from an inspectable useful re
       state: "failed",
       usefulResultRef: { artifactId: "artifact-partial" },
     });
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("reports a checked Automation as disabled once its committed config disables it", () =>
+  Effect.gen(function* () {
+    yield* seed();
+    const responsibilities = yield* Responsibilities;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      INSERT INTO command_center_responsibility_status (
+        space_id, automation_id, last_checked_at, last_check_status,
+        last_successful_at, updated_at
+      ) VALUES ('space-a', ${automation.id}, ${now}, 'ok', ${now}, ${now})
+    `;
+
+    const enabled = yield* responsibilities.get({
+      spaceId: "space-a",
+      automationId: automation.id,
+    });
+    expect(enabled).toMatchObject({ enabled: true, paused: false, health: "healthy" });
+
+    yield* sql`UPDATE command_center_automations SET enabled = 0 WHERE id = ${automation.id}`;
+    configuredEnabled = false;
+
+    const disabled = yield* responsibilities.get({
+      spaceId: "space-a",
+      automationId: automation.id,
+    });
+    expect(disabled).toMatchObject({
+      enabled: false,
+      paused: false,
+      health: "disabled",
+      lastCheckStatus: "ok",
+      nextScheduledAt: null,
+    });
+    const listed = yield* responsibilities.list({ spaceId: "space-a" });
+    expect(listed.map((item) => item.health)).toEqual(["disabled"]);
   }).pipe(Effect.provide(testLayer)),
 );
 

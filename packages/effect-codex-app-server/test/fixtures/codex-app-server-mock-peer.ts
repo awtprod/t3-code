@@ -1,5 +1,17 @@
 import * as NodeOS from "node:os";
 
+// Simulate Codex dying during startup (e.g. disk full): write diagnostics to
+// stderr, optionally preceded by filler to exercise the bounded tail, then exit 1
+// before speaking any protocol.
+const startupFailureStderr = process.env.CODEX_APP_SERVER_TEST_STARTUP_FAILURE_STDERR;
+if (startupFailureStderr !== undefined) {
+  const fillerLines = Number(process.env.CODEX_APP_SERVER_TEST_STARTUP_FAILURE_FILLER_LINES ?? 0);
+  const filler = Number.isFinite(fillerLines) ? "filler diagnostic line\n".repeat(fillerLines) : "";
+  process.stderr.write(`${filler}${startupFailureStderr}`, () => {
+    process.exit(1);
+  });
+}
+
 let nextServerRequestId = 10_000;
 let pendingSkillsListRequestId: number | string | null = null;
 let pendingUserInputRequestId: number | null = null;
