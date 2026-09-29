@@ -296,4 +296,36 @@ tests("Observations", (it) => {
       assert.notStrictEqual(page.nextCursor, null);
     }),
   );
+
+  it.effect("scopes collection conflicts to the observation's channel", () =>
+    Effect.gen(function* () {
+      const spaceId = "space-channels";
+      const service = yield* setup(spaceId);
+      yield* create(service, spaceId, "observation-manual-a");
+      yield* service.ingestConnected(
+        { ...draft(spaceId, "observation-connected-b", "connected"), channelId: "channel-b" },
+        "connected-b-revision-1",
+        connector,
+      );
+      const manualA = yield* service.get({ spaceId, observationId: "observation-manual-a" });
+      const connectedB = yield* service.get({ spaceId, observationId: "observation-connected-b" });
+      assert.strictEqual(manualA.hasCollectionConflict, false);
+      assert.strictEqual(connectedB.hasCollectionConflict, false);
+
+      yield* service.ingestConnected(
+        draft(spaceId, "observation-connected-a", "connected"),
+        "connected-a-revision-1",
+        connector,
+      );
+      const manualAfter = yield* service.get({ spaceId, observationId: "observation-manual-a" });
+      const connectedA = yield* service.get({ spaceId, observationId: "observation-connected-a" });
+      const connectedBAfter = yield* service.get({
+        spaceId,
+        observationId: "observation-connected-b",
+      });
+      assert.strictEqual(manualAfter.hasCollectionConflict, true);
+      assert.strictEqual(connectedA.hasCollectionConflict, true);
+      assert.strictEqual(connectedBAfter.hasCollectionConflict, false);
+    }),
+  );
 });

@@ -909,6 +909,24 @@ export const WsCommandCenterGoogleReadRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.g
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
 
+export const WsCommandCenterWindowsMediaListRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.windowsMediaList,
+  {
+    payload: CommandCenterWindowsMediaListInput,
+    success: CommandCenterWindowsMediaListResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterWindowsMediaRootsRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.windowsMediaRoots,
+  {
+    payload: CommandCenterWindowsMediaRootsInput,
+    success: CommandCenterWindowsMediaRootsResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsCommandCenterObservationsListRpc = Rpc.make(
   COMMAND_CENTER_WS_METHODS.observationsList,
   {
@@ -962,24 +980,6 @@ export const WsCommandCenterObservationsRetireRpc = Rpc.make(
   {
     payload: CommandCenterObservationRetirementRequest,
     success: CommandCenterObservationMutationReceipt,
-    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
-  },
-);
-
-export const WsCommandCenterWindowsMediaListRpc = Rpc.make(
-  COMMAND_CENTER_WS_METHODS.windowsMediaList,
-  {
-    payload: CommandCenterWindowsMediaListInput,
-    success: CommandCenterWindowsMediaListResult,
-    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
-  },
-);
-
-export const WsCommandCenterWindowsMediaRootsRpc = Rpc.make(
-  COMMAND_CENTER_WS_METHODS.windowsMediaRoots,
-  {
-    payload: CommandCenterWindowsMediaRootsInput,
-    success: CommandCenterWindowsMediaRootsResult,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
@@ -1749,6 +1749,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterAutomationRunGetRpc,
   WsCommandCenterAutomationWebhookAdmitRpc,
   WsCommandCenterGoogleReadRpc,
+  WsCommandCenterWindowsMediaListRpc,
+  WsCommandCenterWindowsMediaRootsRpc,
   WsCommandCenterObservationsListRpc,
   WsCommandCenterObservationsGetRpc,
   WsCommandCenterObservationsHistoryRpc,
@@ -1756,8 +1758,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterObservationsImportRpc,
   WsCommandCenterObservationsCorrectRpc,
   WsCommandCenterObservationsRetireRpc,
-  WsCommandCenterWindowsMediaListRpc,
-  WsCommandCenterWindowsMediaRootsRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

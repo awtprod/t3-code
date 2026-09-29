@@ -199,7 +199,6 @@ import { ProjectionTurnUsageRepository } from "./persistence/Services/Projection
 import { ProjectionTurnUsageRepositoryLive } from "./persistence/Layers/ProjectionTurnUsage.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
-const isSprintPlanServiceError = Schema.is(SprintPlan.SprintPlanServiceError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
@@ -676,6 +675,22 @@ const makeWsRpcLayer = (
       const googleConnectionSetup = yield* Effect.serviceOption(
         GoogleConnectionSetup.GoogleConnectionSetup,
       );
+      const publishConnections = yield* Effect.serviceOption(PublishConnections.PublishConnections);
+      const withPublishConnections = <A>(
+        use: (
+          service: PublishConnections.PublishConnections["Service"],
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        Option.match(publishConnections, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "connector",
+                message: "Publishing connections are unavailable in this environment.",
+              }),
+            ),
+          onSome: use,
+        });
       const withCommandCenterInbox = <A>(
         use: (
           service: CommandCenterInbox.CommandCenterInbox["Service"],
@@ -719,7 +734,9 @@ const makeWsRpcLayer = (
         operation.pipe(
           Effect.flatMap(decode),
           Effect.mapError((cause) =>
-            isSprintPlanServiceError(cause) ? cause : invalidSprintPlanOutput(cause),
+            Schema.is(SprintPlan.SprintPlanServiceError)(cause)
+              ? cause
+              : invalidSprintPlanOutput(cause),
           ),
         );
       const withVerifiedSprintPlan = <A>(
@@ -749,22 +766,6 @@ const makeWsRpcLayer = (
         id: currentSession.subject,
         kind: "user",
       };
-      const publishConnections = yield* Effect.serviceOption(PublishConnections.PublishConnections);
-      const withPublishConnections = <A>(
-        use: (
-          service: PublishConnections.PublishConnections["Service"],
-        ) => Effect.Effect<A, CommandCenterError>,
-      ) =>
-        Option.match(publishConnections, {
-          onNone: () =>
-            Effect.fail(
-              new CommandCenterError({
-                reason: "connector",
-                message: "Publishing connections are unavailable in this environment.",
-              }),
-            ),
-          onSome: use,
-        });
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(

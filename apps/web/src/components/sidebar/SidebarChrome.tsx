@@ -7,6 +7,7 @@ import {
   ContactRoundIcon,
   GitPullRequestIcon,
   InboxIcon,
+  ListFilterIcon,
   SettingsIcon,
   SquarePenIcon,
   WorkflowIcon,
@@ -141,16 +142,22 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       active: pathname.startsWith("/automations"),
     },
     {
+      to: "/prospects" as const,
+      label: "Prospects",
+      icon: ContactRoundIcon,
+      active: pathname.startsWith("/prospects"),
+    },
+    {
       to: "/sprint-plan" as const,
       label: "Sprint plan",
       icon: CalendarDaysIcon,
       active: pathname.startsWith("/sprint-plan"),
     },
     {
-      to: "/prospects" as const,
-      label: "Prospects",
-      icon: ContactRoundIcon,
-      active: pathname.startsWith("/prospects"),
+      to: "/observations" as const,
+      label: "Observations",
+      icon: ListFilterIcon,
+      active: pathname.startsWith("/observations"),
     },
   ];
 

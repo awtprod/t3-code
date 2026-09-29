@@ -95,6 +95,8 @@ export const COMMAND_CENTER_WS_METHODS = {
   automationRunGet: "cc.automations.run.get",
   automationWebhookAdmit: "cc.automations.webhook.admit",
   googleRead: "cc.connections.google.read",
+  windowsMediaList: "cc.windowsMedia.list",
+  windowsMediaRoots: "cc.windowsMedia.roots",
   observationsList: "cc.observations.list",
   observationsGet: "cc.observations.get",
   observationsHistory: "cc.observations.history",
@@ -102,8 +104,6 @@ export const COMMAND_CENTER_WS_METHODS = {
   observationsImport: "cc.observations.import",
   observationsCorrect: "cc.observations.correct",
   observationsRetire: "cc.observations.retire",
-  windowsMediaList: "cc.windowsMedia.list",
-  windowsMediaRoots: "cc.windowsMedia.roots",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(

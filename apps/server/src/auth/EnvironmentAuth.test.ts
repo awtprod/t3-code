@@ -105,6 +105,20 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
     }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
   );
 
+  it.effect("prefers a bearer token over a stale legacy cookie", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const bearer = yield* serverAuth.issueSession();
+      const verified = yield* serverAuth.authenticateHttpRequest({
+        cookies: { [sessions.legacyCookieName ?? "t3_session"]: "stale" },
+        headers: { authorization: `Bearer ${bearer.token}` },
+      } as never);
+
+      expect(verified.sessionId).toBe(bearer.sessionId);
+    }).pipe(Effect.provide(makeEnvironmentAuthLayer({ mode: "web", host: "192.168.1.50" }))),
+  );
+
   it.effect("returns a session-scoped draft identity for bearer auth and none without auth", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
@@ -156,20 +170,6 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
     expect(first).not.toContain("proof-key-a");
     expect(first).not.toContain("rotated-session-a");
   });
-
-  it.effect("prefers a bearer token over a stale legacy cookie", () =>
-    Effect.gen(function* () {
-      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
-      const sessions = yield* SessionStore.SessionStore;
-      const bearer = yield* serverAuth.issueSession();
-      const verified = yield* serverAuth.authenticateHttpRequest({
-        cookies: { [sessions.legacyCookieName ?? "t3_session"]: "stale" },
-        headers: { authorization: `Bearer ${bearer.token}` },
-      } as never);
-
-      expect(verified.sessionId).toBe(bearer.sessionId);
-    }).pipe(Effect.provide(makeEnvironmentAuthLayer({ mode: "web", host: "192.168.1.50" }))),
-  );
 
   it.effect("does not exchange ordinary pairing grants for administrative access tokens", () =>
     Effect.gen(function* () {

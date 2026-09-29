@@ -34,6 +34,7 @@ import { Route as ConnectCallbackRouteImport } from './routes/connect_.callback'
 import { Route as ChatSprintPlanRouteImport } from './routes/_chat.sprint-plan'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatProspectsRouteImport } from './routes/_chat.prospects'
+import { Route as ChatObservationsRouteImport } from './routes/_chat.observations'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
 import { Route as ChatInboxRouteImport } from './routes/_chat.inbox'
 import { Route as ChatCommandRouteImport } from './routes/_chat.command'
@@ -165,6 +166,11 @@ const ChatProspectsRoute = ChatProspectsRouteImport.update({
   path: '/prospects',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatObservationsRoute = ChatObservationsRouteImport.update({
+  id: '/observations',
+  path: '/observations',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatNewRoute = ChatNewRouteImport.update({
   id: '/new',
   path: '/new',
@@ -207,6 +213,7 @@ export interface FileRoutesByFullPath {
   '/command': typeof ChatCommandRoute
   '/inbox': typeof ChatInboxRoute
   '/new': typeof ChatNewRoute
+  '/observations': typeof ChatObservationsRoute
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/sprint-plan': typeof ChatSprintPlanRoute
@@ -238,6 +245,7 @@ export interface FileRoutesByTo {
   '/command': typeof ChatCommandRoute
   '/inbox': typeof ChatInboxRoute
   '/new': typeof ChatNewRoute
+  '/observations': typeof ChatObservationsRoute
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/sprint-plan': typeof ChatSprintPlanRoute
@@ -272,6 +280,7 @@ export interface FileRoutesById {
   '/_chat/command': typeof ChatCommandRoute
   '/_chat/inbox': typeof ChatInboxRoute
   '/_chat/new': typeof ChatNewRoute
+  '/_chat/observations': typeof ChatObservationsRoute
   '/_chat/prospects': typeof ChatProspectsRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/_chat/sprint-plan': typeof ChatSprintPlanRoute
@@ -307,6 +316,7 @@ export interface FileRouteTypes {
     | '/command'
     | '/inbox'
     | '/new'
+    | '/observations'
     | '/prospects'
     | '/pull-requests'
     | '/sprint-plan'
@@ -338,6 +348,7 @@ export interface FileRouteTypes {
     | '/command'
     | '/inbox'
     | '/new'
+    | '/observations'
     | '/prospects'
     | '/pull-requests'
     | '/sprint-plan'
@@ -371,6 +382,7 @@ export interface FileRouteTypes {
     | '/_chat/command'
     | '/_chat/inbox'
     | '/_chat/new'
+    | '/_chat/observations'
     | '/_chat/prospects'
     | '/_chat/pull-requests'
     | '/_chat/sprint-plan'
@@ -582,6 +594,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatProspectsRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/observations': {
+      id: '/_chat/observations'
+      path: '/observations'
+      fullPath: '/observations'
+      preLoaderRoute: typeof ChatObservationsRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/new': {
       id: '/_chat/new'
       path: '/new'
@@ -632,6 +651,7 @@ interface ChatRouteChildren {
   ChatCommandRoute: typeof ChatCommandRoute
   ChatInboxRoute: typeof ChatInboxRoute
   ChatNewRoute: typeof ChatNewRoute
+  ChatObservationsRoute: typeof ChatObservationsRoute
   ChatProspectsRoute: typeof ChatProspectsRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatSprintPlanRoute: typeof ChatSprintPlanRoute
@@ -645,6 +665,7 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatCommandRoute: ChatCommandRoute,
   ChatInboxRoute: ChatInboxRoute,
   ChatNewRoute: ChatNewRoute,
+  ChatObservationsRoute: ChatObservationsRoute,
   ChatProspectsRoute: ChatProspectsRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatSprintPlanRoute: ChatSprintPlanRoute,
