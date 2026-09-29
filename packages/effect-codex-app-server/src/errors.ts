@@ -145,18 +145,47 @@ export class CodexAppServerSpawnError extends Schema.TaggedErrorClass<CodexAppSe
   }
 }
 
+const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
+const ANSI_ESCAPE_REGEX = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;?]*[A-Za-z]`, "g");
+const STDERR_SUMMARY_MAX_LINES = 5;
+const STDERR_SUMMARY_MAX_CHARS = 500;
+
+/**
+ * Condense a raw stderr tail into a single readable line for error messages:
+ * the last few non-empty lines, ANSI colour codes removed, joined with " | ",
+ * and capped from the front so the final (usually most specific) line survives.
+ */
+export const summarizeCodexStderrTail = (stderrTail: string | undefined): string | undefined => {
+  if (stderrTail === undefined) return undefined;
+  const lines = stderrTail
+    .replaceAll(ANSI_ESCAPE_REGEX, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) return undefined;
+  const summary = lines.slice(-STDERR_SUMMARY_MAX_LINES).join(" | ");
+  return summary.length > STDERR_SUMMARY_MAX_CHARS
+    ? `...${summary.slice(summary.length - (STDERR_SUMMARY_MAX_CHARS - 3))}`
+    : summary;
+};
+
 export class CodexAppServerProcessExitedError extends Schema.TaggedErrorClass<CodexAppServerProcessExitedError>()(
   "CodexAppServerProcessExitedError",
   {
     code: Schema.optional(Schema.Number),
     pid: Schema.optionalKey(Schema.Int),
+    /** Last few KB of the child's stderr, captured when the exit was observed. */
+    stderrTail: Schema.optionalKey(Schema.String),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message() {
-    return this.code === undefined
-      ? "Codex App Server process exited"
-      : `Codex App Server process exited with code ${this.code}`;
+    const base =
+      this.code === undefined
+        ? "Codex App Server process exited"
+        : `Codex App Server process exited with code ${this.code}`;
+    const stderrSummary = summarizeCodexStderrTail(this.stderrTail);
+    return stderrSummary === undefined ? base : `${base}: ${stderrSummary}`;
   }
 }
 
