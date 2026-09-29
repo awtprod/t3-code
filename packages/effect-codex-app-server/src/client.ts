@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -16,7 +17,7 @@ import {
   encodeOptionalPayload,
   runHandler,
 } from "./_internal/shared.ts";
-import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
+import { makeChildStdio, makeStderrTail, makeTerminationError } from "./_internal/stdio.ts";
 
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
@@ -255,15 +256,67 @@ export const layer = (
   options: CodexAppServerClientOptions = {},
 ): Layer.Layer<CodexAppServerClient> => Layer.effect(CodexAppServerClient, make(stdio, options));
 
+export interface CodexAppServerChildProcessClientOptions extends CodexAppServerClientOptions {
+  /**
+   * Receives the child's stderr as decoded UTF-8 text, chunk by chunk.
+   *
+   * The client is the only reader of `handle.stderr`: a Node child's stderr is
+   * a single readable, so a second independent reader would split chunks with
+   * this one and both would see a partial log. Consumers that also need stderr
+   * (e.g. to surface log lines) must subscribe through this callback.
+   */
+  readonly onStderr?: (text: string) => Effect.Effect<void>;
+}
+
+/**
+ * How long to wait, once the child has exited, for its stderr pipe to reach
+ * EOF before building the exit error. Bounded because a grandchild that
+ * inherited the pipe can keep it open after Codex itself is gone.
+ */
+const STDERR_SETTLE_TIMEOUT = "250 millis";
+
 export const layerChildProcess = (
   handle: ChildProcessSpawner.ChildProcessHandle,
-  options: CodexAppServerClientOptions = {},
+  options: CodexAppServerChildProcessClientOptions = {},
 ): Layer.Layer<CodexAppServerClient> =>
   Layer.effect(CodexAppServerClient, makeChildProcessClient(handle, options));
 
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
-)(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
-  yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
-  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+)(function* (
+  handle: ChildProcessSpawner.ChildProcessHandle,
+  options: CodexAppServerChildProcessClientOptions,
+) {
+  const { onStderr, ...clientOptions } = options;
+  // Keep draining stderr for the life of the client so the child never blocks
+  // on a full pipe, and retain a bounded tail so an exit at startup (e.g. disk
+  // full) reports Codex's own diagnostics instead of a bare exit code.
+  const stderrTail = makeStderrTail();
+  const stderrDecoder = new TextDecoder();
+  const stderrDrained = yield* Deferred.make<void>();
+  const acceptStderr = (text: string): Effect.Effect<void> => {
+    if (text.length === 0) return Effect.void;
+    stderrTail.append(text);
+    return onStderr ? onStderr(text) : Effect.void;
+  };
+  yield* Stream.runForEach(handle.stderr, (chunk) =>
+    Effect.suspend(() => acceptStderr(stderrDecoder.decode(chunk, { stream: true }))),
+  ).pipe(
+    Effect.ignore,
+    Effect.andThen(Effect.suspend(() => acceptStderr(stderrDecoder.decode()))),
+    Effect.ensuring(Deferred.succeed(stderrDrained, undefined)),
+    Effect.forkScoped,
+  );
+
+  const readStderrTail = Deferred.await(stderrDrained).pipe(
+    Effect.timeout(STDERR_SETTLE_TIMEOUT),
+    Effect.ignore,
+    Effect.andThen(Effect.sync(() => stderrTail.read())),
+  );
+
+  return yield* make(
+    makeChildStdio(handle),
+    clientOptions,
+    makeTerminationError(handle, readStderrTail),
+  );
 });

@@ -277,6 +277,38 @@ import {
   GoogleReadResult,
 } from "./commandCenter.ts";
 import {
+  CommandCenterInboxCandidateCreateInput,
+  CommandCenterInboxCandidateMutationInput,
+  CommandCenterInboxCommentInput,
+  CommandCenterInboxDetail,
+  CommandCenterInboxDetailInput,
+  CommandCenterInboxMutationResult,
+  CommandCenterInboxQueryInput,
+  CommandCenterInboxQueryResult,
+  CommandCenterInboxRequestChangesInput,
+  CommandCenterInboxResolveChangeRequestInput,
+  CommandCenterInboxSimpleMutationInput,
+  CommandCenterInboxSnoozeInput,
+} from "./commandCenterInbox.ts";
+import {
+  CommandCenterSprintPlanApplyImportInput,
+  CommandCenterSprintPlanApplyImportResult,
+  CommandCenterSprintPlanGetInput,
+  CommandCenterSprintPlanGetOriginalInput,
+  CommandCenterSprintPlanGetOriginalResult,
+  CommandCenterSprintPlanGetResult,
+  CommandCenterSprintPlanListHistoryInput,
+  CommandCenterSprintPlanListHistoryResult,
+  CommandCenterSprintPlanListInput,
+  CommandCenterSprintPlanListResult,
+  CommandCenterSprintPlanPatchTaskInput,
+  CommandCenterSprintPlanPatchTaskResult,
+  CommandCenterSprintPlanPreviewImportInput,
+  CommandCenterSprintPlanPreviewImportResult,
+  CommandCenterSprintPlanResolveDateConflictInput,
+  CommandCenterSprintPlanResolveDateConflictResult,
+} from "./commandCenterSprintPlan.ts";
+import {
   CommandCenterEventEnvelope,
   CommandCenterEventPage,
   CommandCenterEventReplayInput,
@@ -481,6 +513,162 @@ export const WsCommandCenterItemsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.i
   success: CommandCenterItemsQueryResult,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
+
+export const WsCommandCenterInboxQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.inboxQuery, {
+  payload: CommandCenterInboxQueryInput,
+  success: CommandCenterInboxQueryResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterInboxDetailRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.inboxDetail, {
+  payload: CommandCenterInboxDetailInput,
+  success: CommandCenterInboxDetail,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterInboxCommentRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.inboxComment, {
+  payload: CommandCenterInboxCommentInput,
+  success: CommandCenterInboxMutationResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterInboxRequestChangesRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxRequestChanges,
+  {
+    payload: CommandCenterInboxRequestChangesInput,
+    success: CommandCenterInboxMutationResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxCandidateCreateRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxCandidateCreate,
+  {
+    payload: CommandCenterInboxCandidateCreateInput,
+    success: CommandCenterInboxMutationResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxCandidateAcceptRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
+  {
+    payload: CommandCenterInboxCandidateMutationInput,
+    success: CommandCenterInboxMutationResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxCandidateDiscardRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard,
+  {
+    payload: CommandCenterInboxCandidateMutationInput,
+    success: CommandCenterInboxMutationResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxChangeRequestResolveRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxChangeRequestResolve,
+  {
+    payload: CommandCenterInboxResolveChangeRequestInput,
+    success: CommandCenterInboxMutationResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxSnoozeRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.inboxSnooze, {
+  payload: CommandCenterInboxSnoozeInput,
+  success: CommandCenterInboxMutationResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterInboxUnsnoozeRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.inboxUnsnooze, {
+  payload: CommandCenterInboxSimpleMutationInput,
+  success: CommandCenterInboxMutationResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterInboxDismissRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.inboxDismiss, {
+  payload: CommandCenterInboxSimpleMutationInput,
+  success: CommandCenterInboxMutationResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterInboxReopenRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.inboxReopen, {
+  payload: CommandCenterInboxSimpleMutationInput,
+  success: CommandCenterInboxMutationResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterSprintPlanListRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.sprintPlanList, {
+  payload: CommandCenterSprintPlanListInput,
+  success: CommandCenterSprintPlanListResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterSprintPlanPreviewImportRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanPreviewImport,
+  {
+    payload: CommandCenterSprintPlanPreviewImportInput,
+    success: CommandCenterSprintPlanPreviewImportResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanApplyImportRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport,
+  {
+    payload: CommandCenterSprintPlanApplyImportInput,
+    success: CommandCenterSprintPlanApplyImportResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanGetCurrentRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanGetCurrent,
+  {
+    payload: CommandCenterSprintPlanGetInput,
+    success: CommandCenterSprintPlanGetResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanGetOriginalRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanGetOriginal,
+  {
+    payload: CommandCenterSprintPlanGetOriginalInput,
+    success: CommandCenterSprintPlanGetOriginalResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanPatchTaskRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask,
+  {
+    payload: CommandCenterSprintPlanPatchTaskInput,
+    success: CommandCenterSprintPlanPatchTaskResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanResolveDateConflictRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict,
+  {
+    payload: CommandCenterSprintPlanResolveDateConflictInput,
+    success: CommandCenterSprintPlanResolveDateConflictResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanListHistoryRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanListHistory,
+  {
+    payload: CommandCenterSprintPlanListHistoryInput,
+    success: CommandCenterSprintPlanListHistoryResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsCommandCenterRunsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.runsQuery, {
   payload: CommandCenterRunsQueryInput,
@@ -1476,6 +1664,26 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterSpacesQueryRpc,
   WsCommandCenterSpacesSyncRpc,
   WsCommandCenterItemsQueryRpc,
+  WsCommandCenterInboxQueryRpc,
+  WsCommandCenterInboxDetailRpc,
+  WsCommandCenterInboxCommentRpc,
+  WsCommandCenterInboxRequestChangesRpc,
+  WsCommandCenterInboxCandidateCreateRpc,
+  WsCommandCenterInboxCandidateAcceptRpc,
+  WsCommandCenterInboxCandidateDiscardRpc,
+  WsCommandCenterInboxChangeRequestResolveRpc,
+  WsCommandCenterInboxSnoozeRpc,
+  WsCommandCenterInboxUnsnoozeRpc,
+  WsCommandCenterInboxDismissRpc,
+  WsCommandCenterInboxReopenRpc,
+  WsCommandCenterSprintPlanListRpc,
+  WsCommandCenterSprintPlanPreviewImportRpc,
+  WsCommandCenterSprintPlanApplyImportRpc,
+  WsCommandCenterSprintPlanGetCurrentRpc,
+  WsCommandCenterSprintPlanGetOriginalRpc,
+  WsCommandCenterSprintPlanPatchTaskRpc,
+  WsCommandCenterSprintPlanResolveDateConflictRpc,
+  WsCommandCenterSprintPlanListHistoryRpc,
   WsCommandCenterRunsQueryRpc,
   WsCommandCenterAutomationsQueryRpc,
   WsCommandCenterResponsibilitiesListRpc,
