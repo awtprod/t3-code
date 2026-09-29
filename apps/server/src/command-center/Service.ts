@@ -489,6 +489,22 @@ const decodeMemoryRow = Effect.fn("CommandCenter.decodeMemoryRow")(function* (ro
   }).pipe(Effect.mapError((cause) => persistenceError("Stored Memory is invalid.", cause)));
 });
 
+const LESSON_EVIDENCE_SOURCE_REF = /^observation\/([^/]+)\/version\/\d+\/revision\/([^/]+)$/u;
+
+/** Returns the Observation revision a correction-backed lesson was proposed from, if any. */
+const lessonEvidenceRef = (sourceRef: string | undefined) => {
+  const [, observationId, revisionId] = LESSON_EVIDENCE_SOURCE_REF.exec(sourceRef ?? "") ?? [];
+  if (observationId === undefined || revisionId === undefined) return undefined;
+  try {
+    return {
+      observationId: decodeURIComponent(observationId),
+      revisionId: decodeURIComponent(revisionId),
+    };
+  } catch {
+    return undefined;
+  }
+};
+
 export interface CommandCenterServiceShape {
   readonly bootstrap: Effect.Effect<CommandCenterBootstrap, CommandCenterError>;
   readonly syncConfiguration: (input?: {
@@ -3176,8 +3192,29 @@ export const layer = Layer.effect(
             message: "The Memory candidate has expired; expire it instead of approving it.",
           });
         }
+        // Approval must still rest on the current correction. Reject and expire stay allowed so
+        // a stale lesson can always be cleared out of review.
+        const evidence =
+          input.decision === "approve"
+            ? lessonEvidenceRef((yield* decodeMemoryRow(row)).provenance.sourceRef)
+            : undefined;
         const wonDecision = yield* sql.withTransaction(
           Effect.gen(function* () {
+            if (evidence !== undefined) {
+              const current = yield* sql<{ readonly id: string }>`
+                SELECT id FROM command_center_observations
+                WHERE space_id = ${row.spaceId} AND id = ${evidence.observationId}
+                  AND current_revision_id = ${evidence.revisionId} AND retired_at IS NULL
+                LIMIT 1
+              `;
+              if (current.length === 0) {
+                return yield* new CommandCenterError({
+                  reason: "conflict",
+                  message:
+                    "The lesson's Observation was corrected again or retired; reject this lesson instead.",
+                });
+              }
+            }
             const decided = yield* sql<{ readonly id: string }>`
               UPDATE command_center_memories
               SET status = ${nextStatus}, updated_at = ${now}
