@@ -507,9 +507,16 @@ export const make = Effect.gen(function* () {
    * `routedSelectionNeedsSubagent`) becomes a `thread.turn.delegate`: the parent
    * records the message and the subagent reactor runs the turn in a child
    * thread on the routed model.
+   *
+   * Accepting a proposed plan (`sourceProposedPlan`) and retrying a turn
+   * (`retryOfTurnId`) are bound to this thread: the plan and the retried turn
+   * live in its session, and a fresh child has neither. Those turns skip the
+   * routed model and run unrouted (`unrouted`) on the thread's own provider,
+   * exactly as a manual turn would.
    */
   const delegateToSubagentIfNeeded = (
     command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+    unrouted: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
     thread: OrchestrationThreadShell,
     providers: ReadonlyArray<ServerProvider>,
   ): Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError> =>
@@ -518,6 +525,8 @@ export const make = Effect.gen(function* () {
       if (decision === undefined || command.bootstrap !== undefined) return command;
       if (!routedSelectionNeedsSubagent({ thread, selection: decision.modelSelection, providers }))
         return command;
+      if (command.sourceProposedPlan !== undefined || command.retryOfTurnId !== undefined)
+        return unrouted;
       const reusable = yield* findReusableSubagent(thread.id, decision.modelSelection);
       const childThreadId = reusable ?? ThreadId.make(yield* randomUUID);
       return {
@@ -585,7 +594,7 @@ export const make = Effect.gen(function* () {
       }).command;
       return thread === undefined
         ? resolved
-        : yield* delegateToSubagentIfNeeded(resolved, thread, providers);
+        : yield* delegateToSubagentIfNeeded(resolved, command, thread, providers);
     }).pipe(
       Effect.mapError((cause) =>
         toDispatchCommandError(cause, "Failed to resolve token-efficiency routing"),

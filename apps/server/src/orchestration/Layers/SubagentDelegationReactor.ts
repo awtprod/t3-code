@@ -20,6 +20,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -49,6 +50,14 @@ const CONTEXT_MESSAGE_CHARS = 1_500;
 const REPORT_CHARS = 8_000;
 /** Longest slice of the parent title a subagent thread's title keeps. */
 const TITLE_CHARS = 80;
+/**
+ * Extra attempts at posting a report into the parent after the first fails.
+ * A failure is most likely a contended write, so a short backoff usually
+ * clears it; if every attempt fails the report stays pending and the child's
+ * next session or checkpoint event tries again.
+ */
+const REPORT_APPEND_RETRIES = 3;
+const REPORT_APPEND_BACKOFF = Schedule.exponential("100 millis");
 
 /**
  * The first message of a new subagent: who handed the task over, the recent
@@ -106,9 +115,10 @@ export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
 
   /**
-   * Children with a delegated turn in flight, keyed by child thread. In memory
-   * only: a server restart mid-turn drops the report-back, while the parent's
-   * `routing.subagent-started` activity still names the child thread.
+   * Children with a delegated turn in flight or a report not yet posted, keyed
+   * by child thread. An entry is removed only once its report is in the
+   * parent. In memory only: a server restart drops the report-back, while the
+   * parent's `routing.subagent-started` activity still names the child thread.
    */
   const pendingReports = new Map<
     ThreadId,
@@ -257,7 +267,6 @@ export const make = Effect.gen(function* () {
     }
     const report = subagentReport(child, pending.since);
     if (report === undefined) return;
-    pendingReports.delete(childThreadId);
     const outcome =
       report.state === "completed"
         ? "finished"
@@ -277,7 +286,8 @@ export const make = Effect.gen(function* () {
             ? `No reply. See subagent thread ${childThreadId}.`
             : truncate(report.text, REPORT_CHARS),
       },
-    });
+    }).pipe(Effect.retry({ times: REPORT_APPEND_RETRIES, schedule: REPORT_APPEND_BACKOFF }));
+    pendingReports.delete(childThreadId);
   });
 
   const processEvent = (event: ActivityAppendedEvent | ChildTurnEvent) =>

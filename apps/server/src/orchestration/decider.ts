@@ -170,6 +170,35 @@ function withEventBase(
 type PlannedOrchestrationEvent = Omit<OrchestrationEvent, "sequence">;
 
 /**
+ * Refuses to start agent work for a thread while a human holds its sandbox
+ * takeover lease or its sandbox is mid-transition. Shared by every command
+ * that records a user message and hands it to an agent (`thread.turn.start`
+ * and its subagent twin `thread.turn.delegate`), so neither path can run an
+ * agent the other would refuse.
+ */
+const requireThreadAcceptsAgentTurn = Effect.fn("requireThreadAcceptsAgentTurn")(function* (
+  thread: OrchestrationThread,
+  commandType: OrchestrationCommand["type"],
+) {
+  if (thread.sandbox?.controller.kind === "human") {
+    return yield* sandboxInvariant(
+      commandType,
+      `thread ${thread.id} is controlled by an active human takeover lease`,
+    );
+  }
+  if (
+    thread.sandbox != null &&
+    !RE_PROVISIONABLE_SANDBOX_LIFECYCLES.has(thread.sandbox.lifecycle) &&
+    thread.sandbox.lifecycle !== "ready"
+  ) {
+    return yield* sandboxInvariant(
+      commandType,
+      `thread ${thread.id} sandbox is ${thread.sandbox.lifecycle}`,
+    );
+  }
+});
+
+/**
  * A user message is real activity and resets ANY override: it wakes an
  * explicitly settled thread, and it clears a keep-active pin back to neutral
  * so the thread can auto-settle again after this burst of work goes stale. A
@@ -1012,22 +1041,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      if (targetThread.sandbox?.controller.kind === "human") {
-        return yield* sandboxInvariant(
-          command.type,
-          `thread ${command.threadId} is controlled by an active human takeover lease`,
-        );
-      }
-      if (
-        targetThread.sandbox != null &&
-        !RE_PROVISIONABLE_SANDBOX_LIFECYCLES.has(targetThread.sandbox.lifecycle) &&
-        targetThread.sandbox.lifecycle !== "ready"
-      ) {
-        return yield* sandboxInvariant(
-          command.type,
-          `thread ${command.threadId} sandbox is ${targetThread.sandbox.lifecycle}`,
-        );
-      }
+      yield* requireThreadAcceptsAgentTurn(targetThread, command.type);
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1112,6 +1126,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      yield* requireThreadAcceptsAgentTurn(targetThread, command.type);
       const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
