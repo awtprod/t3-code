@@ -33,6 +33,7 @@ import { Route as SettingsArchivedRouteImport } from './routes/settings.archived
 import { Route as SettingsAppearanceRouteImport } from './routes/settings.appearance'
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ConnectCallbackRouteImport } from './routes/connect_.callback'
+import { Route as ChatSprintPlanRouteImport } from './routes/_chat.sprint-plan'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatProspectsRouteImport } from './routes/_chat.prospects'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
@@ -159,6 +160,11 @@ const ConnectCallbackRoute = ConnectCallbackRouteImport.update({
   path: '/connect/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ChatSprintPlanRoute = ChatSprintPlanRouteImport.update({
+  id: '/sprint-plan',
+  path: '/sprint-plan',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatPullRequestsRoute = ChatPullRequestsRouteImport.update({
   id: '/pull-requests',
   path: '/pull-requests',
@@ -203,6 +209,7 @@ export interface FileRoutesByFullPath {
   '/new': typeof ChatNewRoute
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
+  '/sprint-plan': typeof ChatSprintPlanRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -233,6 +240,7 @@ export interface FileRoutesByTo {
   '/new': typeof ChatNewRoute
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
+  '/sprint-plan': typeof ChatSprintPlanRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -266,6 +274,7 @@ export interface FileRoutesById {
   '/_chat/new': typeof ChatNewRoute
   '/_chat/prospects': typeof ChatProspectsRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
+  '/_chat/sprint-plan': typeof ChatSprintPlanRoute
   '/connect_/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -300,6 +309,7 @@ export interface FileRouteTypes {
     | '/new'
     | '/prospects'
     | '/pull-requests'
+    | '/sprint-plan'
     | '/connect/callback'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -330,6 +340,7 @@ export interface FileRouteTypes {
     | '/new'
     | '/prospects'
     | '/pull-requests'
+    | '/sprint-plan'
     | '/connect/callback'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -362,6 +373,7 @@ export interface FileRouteTypes {
     | '/_chat/new'
     | '/_chat/prospects'
     | '/_chat/pull-requests'
+    | '/_chat/sprint-plan'
     | '/connect_/callback'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -563,6 +575,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConnectCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_chat/sprint-plan': {
+      id: '/_chat/sprint-plan'
+      path: '/sprint-plan'
+      fullPath: '/sprint-plan'
+      preLoaderRoute: typeof ChatSprintPlanRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/pull-requests': {
       id: '/_chat/pull-requests'
       path: '/pull-requests'
@@ -615,6 +634,7 @@ interface ChatRouteChildren {
   ChatNewRoute: typeof ChatNewRoute
   ChatProspectsRoute: typeof ChatProspectsRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
+  ChatSprintPlanRoute: typeof ChatSprintPlanRoute
   ChatIndexRoute: typeof ChatIndexRoute
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
@@ -627,6 +647,7 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatNewRoute: ChatNewRoute,
   ChatProspectsRoute: ChatProspectsRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
+  ChatSprintPlanRoute: ChatSprintPlanRoute,
   ChatIndexRoute: ChatIndexRoute,
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,

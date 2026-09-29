@@ -79,6 +79,7 @@ import Migration0067 from "./Migrations/067_ProjectionThreadsUnsettledAt.ts";
 import Migration0068 from "./Migrations/068_ProviderRestartRecovery.ts";
 import Migration0069 from "./Migrations/069_WebPushSubscriptions.ts";
 import Migration0070 from "./Migrations/070_CommandCenterInbox.ts";
+import Migration0071 from "./Migrations/071_CommandCenterSprintPlans.ts";
 import Migration0077 from "./Migrations/077_CommandCenterInboxGmailDrafts.ts";
 
 /**
@@ -158,6 +159,7 @@ export const migrationEntries = [
   [68, "ProviderRestartRecovery", Migration0068],
   [69, "WebPushSubscriptions", Migration0069],
   [70, "CommandCenterInbox", Migration0070],
+  [71, "CommandCenterSprintPlans", Migration0071],
   [77, "CommandCenterInboxGmailDrafts", Migration0077],
 ] as const;
 
