@@ -11,6 +11,7 @@
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -178,6 +179,65 @@ export const makeMigrationLoader = (throughId?: number) =>
  */
 const run = Migrator.make({});
 
+/** Table the effect Migrator records applied migrations in (its default). */
+export const MIGRATIONS_TABLE = "effect_sql_migrations";
+
+/**
+ * Registered migration IDs that the Migrator would silently never run.
+ *
+ * The Migrator only runs registered migrations whose ID is greater than the
+ * highest applied ID. A migration registered with a lower ID after a higher
+ * one was already applied (e.g. two branches numbered ahead of each other and
+ * merged/deployed out of order) is therefore skipped forever. Gaps in the
+ * registry are irrelevant: only registered-but-unapplied IDs below the highest
+ * applied ID are returned.
+ */
+export const findSkippedMigrationIds = (
+  registeredIds: ReadonlyArray<number>,
+  appliedIds: ReadonlyArray<number>,
+): ReadonlyArray<number> => {
+  if (appliedIds.length === 0) return [];
+  const applied = new Set(appliedIds);
+  const maxApplied = Math.max(...appliedIds);
+  return registeredIds.filter((id) => id < maxApplied && !applied.has(id)).sort((a, b) => a - b);
+};
+
+/**
+ * Fail before running migrations if any registered migration would be skipped
+ * because a higher-numbered migration is already recorded as applied.
+ */
+export const assertNoSkippedMigrations = Effect.fn("assertNoSkippedMigrations")(function* (
+  registeredIds: ReadonlyArray<number>,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const fail = (cause: unknown) =>
+    new Migrator.MigrationError({
+      kind: "BadState",
+      message: `Failed to read applied migrations from ${MIGRATIONS_TABLE}`,
+      cause,
+    });
+  const tables = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${MIGRATIONS_TABLE}
+  `.pipe(Effect.mapError(fail));
+  if (tables.length === 0) return;
+  const rows = yield* sql<{ readonly migration_id: number }>`
+    SELECT migration_id FROM ${sql(MIGRATIONS_TABLE)}
+  `.withoutTransform.pipe(Effect.mapError(fail));
+  const appliedIds = rows.map((row) => Number(row.migration_id));
+  const skipped = findSkippedMigrationIds(registeredIds, appliedIds);
+  if (skipped.length === 0) return;
+  const maxApplied = Math.max(...appliedIds);
+  return yield* new Migrator.MigrationError({
+    kind: "BadState",
+    message:
+      `Refusing to start: registered migration(s) ${skipped.join(", ")} have not been applied, ` +
+      `but migration ${maxApplied} (a higher ID) already has been. The migrator only runs IDs ` +
+      `above the latest applied one, so these would be skipped forever. They were most likely ` +
+      `registered after a higher-numbered migration was already applied to this database ` +
+      `(out-of-order merge or deploy). Renumber them above ${maxApplied} or apply them manually.`,
+  });
+});
+
 export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
 }
@@ -195,6 +255,11 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  yield* assertNoSkippedMigrations(
+    migrationEntries
+      .map(([id]) => id)
+      .filter((id) => toMigrationInclusive === undefined || id <= toMigrationInclusive),
+  );
   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
