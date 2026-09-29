@@ -1284,11 +1284,19 @@ const make = Effect.gen(function* () {
       readonly payloadDigest: string;
       readonly payloadJson: string;
     }>`
-        SELECT id, status, expires_at AS "expiresAt",
-          payload_digest AS "payloadDigest", payload_json AS "payloadJson"
-        FROM command_center_approvals
-        WHERE run_id = ${run.id}
-        ORDER BY requested_at DESC
+        SELECT approval.id,
+          CASE WHEN EXISTS (
+            SELECT 1
+            FROM command_center_inbox_discussion discussion
+            WHERE discussion.item_id = approval.item_id
+              AND discussion.kind = 'change-request'
+              AND discussion.resolved_at IS NULL
+          ) THEN 'canceled' ELSE approval.status END AS status,
+          approval.expires_at AS "expiresAt",
+          approval.payload_digest AS "payloadDigest", approval.payload_json AS "payloadJson"
+        FROM command_center_approvals approval
+        WHERE approval.run_id = ${run.id}
+        ORDER BY approval.requested_at DESC
         LIMIT 1
       `.pipe(
       Effect.mapError((cause) =>
@@ -1918,6 +1926,13 @@ const make = Effect.gen(function* () {
               AND approval.run_id = ${input.runId}
               AND approval.status = 'approved'
               AND approval.payload_digest = ${input.payloadDigest}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM command_center_inbox_discussion discussion
+                WHERE discussion.item_id = approval.item_id
+                  AND discussion.kind = 'change-request'
+                  AND discussion.resolved_at IS NULL
+              )
               AND approval.id = (
                 SELECT latest.id
                 FROM command_center_approvals latest

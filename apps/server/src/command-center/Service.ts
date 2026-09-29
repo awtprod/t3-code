@@ -494,6 +494,9 @@ export interface CommandCenterServiceShape {
   readonly syncConfiguration: (input?: {
     readonly force?: boolean;
   }) => Effect.Effect<LoadedCommandCenterConfig, CommandCenterError>;
+  readonly refreshInboxSpaceProjection: (
+    spaceId?: string,
+  ) => Effect.Effect<void, CommandCenterError>;
   readonly querySpaces: (
     input: CommandCenterSpacesQueryInput,
   ) => Effect.Effect<{ readonly spaces: ReadonlyArray<SpaceType> }, CommandCenterError>;
@@ -1005,6 +1008,25 @@ export const layer = Layer.effect(
       }
       return space;
     });
+
+    const refreshInboxSpaceProjection = Effect.fn("CommandCenter.refreshInboxSpaceProjection")(
+      function* (spaceId?: string) {
+        const loaded = yield* syncConfig(true);
+        if (loaded.health.status !== "loaded") {
+          return yield* new CommandCenterError({
+            reason: "config",
+            message:
+              "Private Command Center configuration is unavailable; Inbox access is disabled.",
+          });
+        }
+        if (spaceId !== undefined && !loaded.spaces.some((space) => space.id === spaceId)) {
+          return yield* new CommandCenterError({
+            reason: "not_found",
+            message: `Space '${spaceId}' is not present in the active private configuration.`,
+          });
+        }
+      },
+    );
 
     const listSpaces = Effect.fn("CommandCenter.listSpaces")(function* () {
       const rows = yield* sql<SpaceRow>`
@@ -2224,6 +2246,15 @@ export const layer = Layer.effect(
                 AND state = 'queued'
                 AND thread_id IS NULL
                 AND execution_authorized_at IS NULL
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM command_center_approvals approval
+                  JOIN command_center_inbox_discussion discussion
+                    ON discussion.item_id = approval.item_id
+                  WHERE approval.run_id = ${input.runId}
+                    AND discussion.kind = 'change-request'
+                    AND discussion.resolved_at IS NULL
+                )
               RETURNING id, space_id AS "spaceId"
             `;
             const row = rows[0];
@@ -2245,10 +2276,20 @@ export const layer = Layer.effect(
         const rows = yield* sql<{
           readonly state: string;
           readonly executionAuthorizedAt: string | null;
+          readonly blockedByChangeRequest: number;
         }>`
-          SELECT state, execution_authorized_at AS "executionAuthorizedAt"
-          FROM command_center_runs
-          WHERE id = ${input.runId}
+          SELECT run.state, run.execution_authorized_at AS "executionAuthorizedAt",
+            EXISTS (
+              SELECT 1
+              FROM command_center_approvals approval
+              JOIN command_center_inbox_discussion discussion
+                ON discussion.item_id = approval.item_id
+              WHERE approval.run_id = run.id
+                AND discussion.kind = 'change-request'
+                AND discussion.resolved_at IS NULL
+            ) AS "blockedByChangeRequest"
+          FROM command_center_runs run
+          WHERE run.id = ${input.runId}
           LIMIT 1
         `;
         const current = rows[0];
@@ -2256,6 +2297,12 @@ export const layer = Layer.effect(
           return yield* new CommandCenterError({
             reason: "not_found",
             message: "Run was not found.",
+          });
+        }
+        if (current.blockedByChangeRequest === 1) {
+          return yield* new CommandCenterError({
+            reason: "conflict",
+            message: "Run execution is blocked by an unresolved Inbox change request.",
           });
         }
         if (current.executionAuthorizedAt !== null) {
@@ -3098,12 +3145,19 @@ export const layer = Layer.effect(
               "Private Command Center configuration is unavailable; Approval decisions are disabled.",
           });
         }
-        const rows = yield* sql<ApprovalRow>`
+        const rows = yield* sql<ApprovalRow & { readonly hasUnresolvedChangeRequest: number }>`
         SELECT a.id, a.item_id AS "itemId", a.run_id AS "runId", r.space_id AS "spaceId",
           a.action_kind AS "actionKind", a.risk, a.payload_digest AS "payloadDigest",
           a.payload_json AS "payloadJson", a.status, a.idempotency_key AS "idempotencyKey",
           a.requested_at AS "requestedAt", a.expires_at AS "expiresAt",
-          a.decided_at AS "decidedAt", a.decision_note AS "decisionNote"
+          a.decided_at AS "decidedAt", a.decision_note AS "decisionNote",
+          EXISTS (
+            SELECT 1
+            FROM command_center_inbox_discussion discussion
+            WHERE discussion.item_id = a.item_id
+              AND discussion.kind = 'change-request'
+              AND discussion.resolved_at IS NULL
+          ) AS "hasUnresolvedChangeRequest"
         FROM command_center_approvals a
         JOIN command_center_runs r ON r.id = a.run_id
         WHERE a.id = ${input.approvalId}
@@ -3119,6 +3173,12 @@ export const layer = Layer.effect(
           return yield* new CommandCenterError({
             reason: "not_found",
             message: "Approval was not found in an active configured Space.",
+          });
+        }
+        if (row.hasUnresolvedChangeRequest === 1) {
+          return yield* new CommandCenterError({
+            reason: "conflict",
+            message: "Approval is blocked by an unresolved Inbox change request.",
           });
         }
         const storedPayloadDigest = yield* digest(row.payloadJson);
@@ -3296,6 +3356,7 @@ export const layer = Layer.effect(
     return CommandCenterService.of({
       bootstrap,
       syncConfiguration: (input) => syncConfig(input?.force ?? true),
+      refreshInboxSpaceProjection,
       querySpaces,
       queryItems,
       queryRuns,

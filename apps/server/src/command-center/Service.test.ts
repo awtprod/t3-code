@@ -6,6 +6,7 @@ import {
   CAPABILITY_NAMES,
   Artifact,
   Connection,
+  ItemId,
   ProviderAvailability,
   Space,
   type ProviderAvailability as ProviderAvailabilityType,
@@ -27,6 +28,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
+import { make as makeInbox } from "./Inbox.ts";
 import {
   CommandCenterService,
   itemNeedsYou,
@@ -1565,6 +1567,315 @@ it.effect("replays the same approval decision without dispatching it twice", () 
   }).pipe(Effect.provide(makeTestLayer(approvalGatedConfig))),
 );
 
+it.effect("invalidates a requested approval when Inbox changes are requested", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    const inbox = yield* makeInbox;
+    yield* service.submitCommand(
+      decodeCommand({
+        commandId: "command-inbox-change-request",
+        text: "Summarize the reviewed application",
+        spaceId: studioSpace.id,
+      }),
+      providers,
+    );
+    const approval = (yield* service.bootstrap).approvals[0];
+    expect(approval).toBeDefined();
+    if (approval === undefined) return;
+    const approvalRows = yield* sql<{ readonly itemId: string }>`
+      SELECT item_id AS "itemId"
+      FROM command_center_approvals
+      WHERE id = ${approval.id}
+    `;
+    const rawItemId = approvalRows[0]?.itemId;
+    expect(rawItemId).toBeDefined();
+    if (rawItemId === undefined) return;
+    const itemId = ItemId.make(rawItemId);
+
+    yield* inbox.requestChanges(
+      {
+        spaceId: studioSpace.id,
+        itemId,
+        mutationId: "approval-change-request",
+        expectedVersion: 0,
+        text: "Change the reviewed payload before approval.",
+      },
+      { subject: "approval-reviewer" },
+    );
+
+    const blockedWhileOutstanding = yield* service
+      .decideApproval(
+        decodeApprovalDecision({
+          approvalId: approval.id,
+          payloadDigest: approval.payloadDigest,
+          decision: "approved",
+        }),
+      )
+      .pipe(Effect.flip);
+    expect(blockedWhileOutstanding).toMatchObject({ reason: "conflict" });
+
+    yield* inbox.createCandidate(
+      {
+        spaceId: studioSpace.id,
+        itemId,
+        mutationId: "replacement-candidate",
+        expectedVersion: 1,
+        source: "direct",
+        payload: {
+          kind: "prepared-action",
+          actionKind: "replacement.fixture",
+          target: { kind: "item", id: itemId },
+          parameters: { replacement: true },
+        },
+        preview: { summary: "Replacement proposal" },
+        evidence: { source: "reviewer", subjectId: itemId, version: "2" },
+      },
+      { subject: "approval-reviewer" },
+    );
+    yield* inbox.acceptCandidate(
+      {
+        spaceId: studioSpace.id,
+        itemId,
+        mutationId: "replacement-accept",
+        expectedVersion: 2,
+        candidateRevisionId: "revision:replacement-candidate",
+      },
+      { subject: "approval-reviewer" },
+    );
+    yield* inbox.resolveChangeRequest(
+      {
+        spaceId: studioSpace.id,
+        itemId,
+        mutationId: "replacement-resolve",
+        expectedVersion: 3,
+        changeRequestId: "change-request:approval-change-request",
+      },
+      { subject: "approval-reviewer" },
+    );
+
+    const blockedAfterResolution = yield* service
+      .decideApproval(
+        decodeApprovalDecision({
+          approvalId: approval.id,
+          payloadDigest: approval.payloadDigest,
+          decision: "approved",
+        }),
+      )
+      .pipe(Effect.flip);
+    expect(blockedAfterResolution).toMatchObject({ reason: "conflict" });
+    const persisted = yield* sql<{
+      readonly approvalStatus: string;
+      readonly runState: string;
+      readonly executionAuthorizedAt: string | null;
+    }>`
+      SELECT approval.status AS "approvalStatus", run.state AS "runState",
+        run.execution_authorized_at AS "executionAuthorizedAt"
+      FROM command_center_approvals approval
+      JOIN command_center_runs run ON run.id = approval.run_id
+      WHERE approval.id = ${approval.id}
+    `;
+    expect(persisted).toEqual([
+      { approvalStatus: "canceled", runState: "canceled", executionAuthorizedAt: null },
+    ]);
+  }).pipe(Effect.provide(makeTestLayer(approvalGatedConfig))),
+);
+
+it.effect("prevents an approved queued Run from starting after its change request resolves", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    const inbox = yield* makeInbox;
+    const submitted = yield* service.submitCommand(
+      decodeCommand({
+        commandId: "command-inbox-approval-race",
+        text: "Summarize the application before a racing review",
+        spaceId: studioSpace.id,
+      }),
+      providers,
+    );
+    const approval = (yield* service.bootstrap).approvals[0];
+    expect(approval).toBeDefined();
+    if (approval === undefined) return;
+    const approvalRows = yield* sql<{ readonly itemId: string }>`
+      SELECT item_id AS "itemId"
+      FROM command_center_approvals
+      WHERE id = ${approval.id}
+    `;
+    const rawItemId = approvalRows[0]?.itemId;
+    expect(rawItemId).toBeDefined();
+    if (rawItemId === undefined) return;
+    const itemId = ItemId.make(rawItemId);
+
+    yield* service.decideApproval(
+      decodeApprovalDecision({
+        approvalId: approval.id,
+        payloadDigest: approval.payloadDigest,
+        decision: "approved",
+      }),
+    );
+    const versionAfterApproval = (yield* inbox.detail({ spaceId: studioSpace.id, itemId })).state
+      .version;
+    yield* inbox.requestChanges(
+      {
+        spaceId: studioSpace.id,
+        itemId,
+        mutationId: "approval-race-change-request",
+        expectedVersion: versionAfterApproval,
+        text: "Stop before dispatch and revise this proposal.",
+      },
+      { subject: "approval-reviewer" },
+    );
+
+    const authorizationError = yield* service
+      .authorizeRunExecution({ runId: submitted.run.id, actorKind: "user" })
+      .pipe(Effect.flip);
+    expect(authorizationError).toMatchObject({ reason: "conflict" });
+    expect((yield* service.bootstrap).approvals[0]?.status).toBe("canceled");
+
+    const versionAfterRequest = (yield* inbox.detail({ spaceId: studioSpace.id, itemId })).state
+      .version;
+    yield* inbox.resolveChangeRequest(
+      {
+        spaceId: studioSpace.id,
+        itemId,
+        mutationId: "approval-race-resolve",
+        expectedVersion: versionAfterRequest,
+        changeRequestId: "change-request:approval-race-change-request",
+      },
+      { subject: "approval-reviewer" },
+    );
+    const replayAfterResolution = yield* service
+      .decideApproval(
+        decodeApprovalDecision({
+          approvalId: approval.id,
+          payloadDigest: approval.payloadDigest,
+          decision: "approved",
+        }),
+      )
+      .pipe(Effect.flip);
+    expect(replayAfterResolution).toMatchObject({ reason: "conflict" });
+
+    const lateClaims = yield* sql<{ readonly id: string }>`
+      UPDATE command_center_runs
+      SET state = 'running', thread_id = 'too-late-to-claim'
+      WHERE id = ${submitted.run.id} AND state = 'queued' AND thread_id IS NULL
+        AND execution_authorized_at IS NOT NULL
+      RETURNING id
+    `;
+    expect(lateClaims).toEqual([]);
+
+    const persisted = yield* sql<{
+      readonly approvalStatus: string;
+      readonly runState: string;
+      readonly executionAuthorizedAt: string | null;
+    }>`
+      SELECT approval.status AS "approvalStatus", run.state AS "runState",
+        run.execution_authorized_at AS "executionAuthorizedAt"
+      FROM command_center_approvals approval
+      JOIN command_center_runs run ON run.id = approval.run_id
+      WHERE approval.id = ${approval.id}
+    `;
+    expect(persisted).toEqual([
+      { approvalStatus: "canceled", runState: "canceled", executionAuthorizedAt: null },
+    ]);
+  }).pipe(Effect.provide(makeTestLayer(approvalGatedConfig))),
+);
+
+it.effect("preserves approved authorization history for running and completed Runs", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    const inbox = yield* makeInbox;
+
+    for (const runState of ["running", "succeeded"] as const) {
+      const submitted = yield* service.submitCommand(
+        decodeCommand({
+          commandId: `command-inbox-history-${runState}`,
+          text: `Review authorization history for ${runState} work`,
+          spaceId: studioSpace.id,
+        }),
+        providers,
+      );
+      const approvalRows = yield* sql<{
+        readonly id: string;
+        readonly itemId: string;
+        readonly payloadDigest: string;
+      }>`
+        SELECT id, item_id AS "itemId", payload_digest AS "payloadDigest"
+        FROM command_center_approvals
+        WHERE run_id = ${submitted.run.id}
+        LIMIT 1
+      `;
+      const approval = approvalRows[0];
+      expect(approval).toBeDefined();
+      if (approval === undefined) return;
+      yield* service.decideApproval(
+        decodeApprovalDecision({
+          approvalId: approval.id,
+          payloadDigest: approval.payloadDigest,
+          decision: "approved",
+        }),
+      );
+      const approvedRows = yield* sql<{
+        readonly decidedAt: string;
+        readonly decisionNote: string | null;
+      }>`
+        SELECT decided_at AS "decidedAt", decision_note AS "decisionNote"
+        FROM command_center_approvals
+        WHERE id = ${approval.id}
+      `;
+      const approved = approvedRows[0];
+      expect(approved).toBeDefined();
+      if (approved === undefined) return;
+      yield* sql`
+        UPDATE command_center_runs
+        SET state = ${runState}, thread_id = ${`thread-${runState}`},
+          finished_at = ${runState === "succeeded" ? fixtureTimestamp : null}
+        WHERE id = ${submitted.run.id}
+      `;
+
+      const itemId = ItemId.make(approval.itemId);
+      const expectedVersion = (yield* inbox.detail({ spaceId: studioSpace.id, itemId })).state
+        .version;
+      yield* inbox.requestChanges(
+        {
+          spaceId: studioSpace.id,
+          itemId,
+          mutationId: `approval-history-${runState}`,
+          expectedVersion,
+          text: `Follow up without rewriting ${runState} authorization history.`,
+        },
+        { subject: "approval-reviewer" },
+      );
+
+      const persisted = yield* sql<{
+        readonly approvalStatus: string;
+        readonly decidedAt: string;
+        readonly decisionNote: string | null;
+        readonly persistedRunState: string;
+        readonly threadId: string | null;
+      }>`
+        SELECT approval.status AS "approvalStatus", approval.decided_at AS "decidedAt",
+          approval.decision_note AS "decisionNote", run.state AS "persistedRunState",
+          run.thread_id AS "threadId"
+        FROM command_center_approvals approval
+        JOIN command_center_runs run ON run.id = approval.run_id
+        WHERE approval.id = ${approval.id}
+      `;
+      expect(persisted).toEqual([
+        {
+          approvalStatus: "approved",
+          decidedAt: approved.decidedAt,
+          decisionNote: approved.decisionNote,
+          persistedRunState: runState,
+          threadId: `thread-${runState}`,
+        },
+      ]);
+    }
+  }).pipe(Effect.provide(makeTestLayer(approvalGatedConfig))),
+);
+
 it.effect("expires stale approvals and removes them from Needs You", () =>
   Effect.gen(function* () {
     const service = yield* CommandCenterService;
@@ -1859,6 +2170,32 @@ it.effect("archives removed Spaces, hides their projections, and denies scoped r
   }).pipe(Effect.provide(makeTestLayerFrom(Effect.sync(() => currentConfig))));
 });
 
+it.effect("force-refreshes Inbox Space access against config revocation and config health", () => {
+  let currentConfig: LoadedCommandCenterConfig = loadedConfig;
+
+  return Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* service.refreshInboxSpaceProjection(studioSpace.id);
+
+    currentConfig = {
+      ...loadedConfig,
+      spaces: loadedConfig.spaces.filter((space) => space.id !== studioSpace.id),
+    };
+    const revoked = yield* service.refreshInboxSpaceProjection(studioSpace.id).pipe(Effect.flip);
+    expect(revoked).toMatchObject({ reason: "not_found" });
+    expect(
+      yield* sql<{ readonly lifecycle: string }>`
+        SELECT lifecycle FROM command_center_spaces WHERE id = ${studioSpace.id}
+      `,
+    ).toEqual([{ lifecycle: "archived" }]);
+
+    currentConfig = unavailableConfig("invalid");
+    const unavailable = yield* service.refreshInboxSpaceProjection().pipe(Effect.flip);
+    expect(unavailable).toMatchObject({ reason: "config" });
+  }).pipe(Effect.provide(makeTestLayerFrom(Effect.sync(() => currentConfig))));
+});
+
 for (const unavailableStatus of ["missing", "invalid"] as const) {
   it.effect(
     `${unavailableStatus} private config keeps the last projection and denies scoped writes without data loss`,
@@ -2007,6 +2344,62 @@ it.effect("updates an exact-space Item with CAS semantics and emits one typed ev
       kind: "task",
       status: "in_progress",
     });
+  }).pipe(Effect.provide(makeTestLayer())),
+);
+
+it.effect("invalidates a stale Inbox candidate after the legacy Item update path", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const inbox = yield* makeInbox;
+    const created = yield* service.createItem({
+      requestId: "item-inbox-version-bridge",
+      spaceId: studioSpace.id,
+      kind: "decision",
+      priority: "normal",
+      title: "Review bridge behavior",
+    });
+    yield* inbox.createCandidate(
+      {
+        spaceId: studioSpace.id,
+        itemId: created.id,
+        mutationId: "bridge-candidate",
+        expectedVersion: 0,
+        source: "direct",
+        payload: {
+          kind: "task-patch",
+          target: { kind: "item", id: created.id },
+          operations: [{ field: "title", before: created.title, after: "Candidate title" }],
+        },
+        preview: { summary: "Candidate title update" },
+        evidence: { source: "reviewer", subjectId: created.id, version: "1" },
+      },
+      { subject: "bridge-reviewer" },
+    );
+
+    yield* service.updateItem(
+      decodeItemUpdate({
+        itemId: created.id,
+        spaceId: created.spaceId,
+        expectedUpdatedAt: created.updatedAt,
+        patch: { title: "Legacy path title" },
+      }),
+    );
+    const staleAcceptance = yield* inbox
+      .acceptCandidate(
+        {
+          spaceId: studioSpace.id,
+          itemId: created.id,
+          mutationId: "bridge-stale-accept",
+          expectedVersion: 1,
+          candidateRevisionId: "revision:bridge-candidate",
+        },
+        { subject: "bridge-reviewer" },
+      )
+      .pipe(Effect.flip);
+    expect(staleAcceptance).toMatchObject({ reason: "conflict" });
+    expect(
+      (yield* inbox.detail({ spaceId: studioSpace.id, itemId: created.id })).state.version,
+    ).toBe(2);
   }).pipe(Effect.provide(makeTestLayer())),
 );
 
