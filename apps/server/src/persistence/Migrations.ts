@@ -78,6 +78,8 @@ import Migration0066 from "./Migrations/066_ProjectionThreadLinkedPullRequest.ts
 import Migration0067 from "./Migrations/067_ProjectionThreadsUnsettledAt.ts";
 import Migration0068 from "./Migrations/068_ProviderRestartRecovery.ts";
 import Migration0069 from "./Migrations/069_WebPushSubscriptions.ts";
+import Migration0070 from "./Migrations/070_CommandCenterInbox.ts";
+import Migration0071 from "./Migrations/071_CommandCenterSprintPlans.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -155,6 +157,8 @@ export const migrationEntries = [
   [67, "ProjectionThreadsUnsettledAt", Migration0067],
   [68, "ProviderRestartRecovery", Migration0068],
   [69, "WebPushSubscriptions", Migration0069],
+  [70, "CommandCenterInbox", Migration0070],
+  [71, "CommandCenterSprintPlans", Migration0071],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
