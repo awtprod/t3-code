@@ -1804,10 +1804,12 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
-    const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
-      Layer.build,
-      Effect.provideService(Scope.Scope, runtimeScope),
-    );
+    // The client is the sole reader of the child's stderr (it keeps a tail for
+    // exit errors); it forwards decoded text here for the log-line handler below.
+    const stderrText = yield* Queue.unbounded<string>();
+    const clientContext = yield* CodexClient.layerChildProcess(child, {
+      onStderr: (text) => Queue.offer(stderrText, text).pipe(Effect.asVoid),
+    }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
     );
@@ -2914,8 +2916,7 @@ export const makeCodexSessionRuntime = (
     );
 
     const stderrRemainderRef = yield* Ref.make("");
-    yield* child.stderr.pipe(
-      Stream.decodeText(),
+    yield* Stream.fromQueue(stderrText).pipe(
       Stream.runForEach((chunk) =>
         Ref.modify(stderrRemainderRef, (current) => {
           const combined = current + chunk;

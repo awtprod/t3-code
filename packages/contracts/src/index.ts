@@ -1,6 +1,7 @@
 export * from "./baseSchemas.ts";
 export * from "./commandCenter.ts";
 export * from "./commandCenterInbox.ts";
+export * from "./commandCenterSprintPlan.ts";
 export * from "./commandCenterDigest.ts";
 export * from "./commandCenterEvents.ts";
 export * from "./background.ts";

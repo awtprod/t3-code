@@ -291,6 +291,24 @@ import {
   CommandCenterInboxSnoozeInput,
 } from "./commandCenterInbox.ts";
 import {
+  CommandCenterSprintPlanApplyImportInput,
+  CommandCenterSprintPlanApplyImportResult,
+  CommandCenterSprintPlanGetInput,
+  CommandCenterSprintPlanGetOriginalInput,
+  CommandCenterSprintPlanGetOriginalResult,
+  CommandCenterSprintPlanGetResult,
+  CommandCenterSprintPlanListHistoryInput,
+  CommandCenterSprintPlanListHistoryResult,
+  CommandCenterSprintPlanListInput,
+  CommandCenterSprintPlanListResult,
+  CommandCenterSprintPlanPatchTaskInput,
+  CommandCenterSprintPlanPatchTaskResult,
+  CommandCenterSprintPlanPreviewImportInput,
+  CommandCenterSprintPlanPreviewImportResult,
+  CommandCenterSprintPlanResolveDateConflictInput,
+  CommandCenterSprintPlanResolveDateConflictResult,
+} from "./commandCenterSprintPlan.ts";
+import {
   CommandCenterDigestMarkViewedInput,
   CommandCenterDigestPreferences,
   CommandCenterDigestPreferencesUpdateInput,
@@ -603,6 +621,75 @@ export const WsCommandCenterInboxReopenRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.
   success: CommandCenterInboxMutationResult,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
+
+export const WsCommandCenterSprintPlanListRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.sprintPlanList, {
+  payload: CommandCenterSprintPlanListInput,
+  success: CommandCenterSprintPlanListResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterSprintPlanPreviewImportRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanPreviewImport,
+  {
+    payload: CommandCenterSprintPlanPreviewImportInput,
+    success: CommandCenterSprintPlanPreviewImportResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanApplyImportRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport,
+  {
+    payload: CommandCenterSprintPlanApplyImportInput,
+    success: CommandCenterSprintPlanApplyImportResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanGetCurrentRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanGetCurrent,
+  {
+    payload: CommandCenterSprintPlanGetInput,
+    success: CommandCenterSprintPlanGetResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanGetOriginalRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanGetOriginal,
+  {
+    payload: CommandCenterSprintPlanGetOriginalInput,
+    success: CommandCenterSprintPlanGetOriginalResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanPatchTaskRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask,
+  {
+    payload: CommandCenterSprintPlanPatchTaskInput,
+    success: CommandCenterSprintPlanPatchTaskResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanResolveDateConflictRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict,
+  {
+    payload: CommandCenterSprintPlanResolveDateConflictInput,
+    success: CommandCenterSprintPlanResolveDateConflictResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSprintPlanListHistoryRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.sprintPlanListHistory,
+  {
+    payload: CommandCenterSprintPlanListHistoryInput,
+    success: CommandCenterSprintPlanListHistoryResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsCommandCenterRunsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.runsQuery, {
   payload: CommandCenterRunsQueryInput,
@@ -1577,6 +1664,14 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterInboxUnsnoozeRpc,
   WsCommandCenterInboxDismissRpc,
   WsCommandCenterInboxReopenRpc,
+  WsCommandCenterSprintPlanListRpc,
+  WsCommandCenterSprintPlanPreviewImportRpc,
+  WsCommandCenterSprintPlanApplyImportRpc,
+  WsCommandCenterSprintPlanGetCurrentRpc,
+  WsCommandCenterSprintPlanGetOriginalRpc,
+  WsCommandCenterSprintPlanPatchTaskRpc,
+  WsCommandCenterSprintPlanResolveDateConflictRpc,
+  WsCommandCenterSprintPlanListHistoryRpc,
   WsCommandCenterRunsQueryRpc,
   WsCommandCenterAutomationsQueryRpc,
   WsCommandCenterAutomationDefinitionGetRpc,
