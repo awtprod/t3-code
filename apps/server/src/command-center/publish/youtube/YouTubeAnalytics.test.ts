@@ -19,6 +19,47 @@ const videoId = "AbCdEf12345";
 const period = { startDate: "2026-09-01", endDate: "2026-09-07" };
 const decodeInput = Schema.decodeUnknownEffect(CommandCenterYouTubeAnalyticsFetchInput);
 
+const manualSource = {
+  id: "youtube-manual-source",
+  spaceId,
+  subjectId: "synthetic-video-subject-001",
+  channelId,
+  contentId: videoId,
+  cohortId: "published-2026-08",
+  contentKind: "short-form",
+  source: { identity: "manual-video-source", revision: "1" },
+  metric: {
+    kind: "average-view-percentage",
+    unit: "percent",
+    definition: "Manually copied average view percentage.",
+  },
+  collectionMethod: "manual",
+  data: {
+    value: 55,
+    observedAt: "2026-09-07T00:00:00.000Z",
+    collectedAt: "2026-09-08T00:00:00.000Z",
+    period: { start: "2026-09-01", end: "2026-09-07", timeZone: "America/Los_Angeles" },
+    publishedAt: "2026-08-27T00:00:00.000Z",
+    sampleCount: 100,
+    denominator: { kind: "views", value: 100 },
+    completeness: { status: "complete" },
+    reportingLagMs: 86_400_000,
+    freshThrough: "2026-09-07T00:00:00.000Z",
+    metadata: {},
+  },
+};
+
+const tokens = YouTubeTokenStore.of({
+  summary: Effect.die("unused"),
+  begin: Effect.die("unused"),
+  disconnect: Effect.die("unused"),
+  accessToken: Effect.die("unused"),
+  analyticsAccessToken: Effect.succeed("test-access-token"),
+  recordAnalyticsCheck: () => Effect.void,
+  invalidateAccessToken: Effect.void,
+  recordChannel: () => Effect.die("unused"),
+});
+
 it.layer(NodeSqliteClient.layerMemory())("YouTube Analytics ingestion", (it) => {
   it("maps freshness through the end of a Pacific reporting day", () => {
     assert.strictEqual(pacificDayEnd("2026-03-08"), "2026-03-09T06:59:59.999Z");
@@ -46,35 +87,7 @@ it.layer(NodeSqliteClient.layerMemory())("YouTube Analytics ingestion", (it) => 
         {
           mutationId: "manual-youtube-seed",
           expectedVersion: 0,
-          observation: {
-            id: "youtube-manual-source",
-            spaceId,
-            subjectId: "synthetic-video-subject-001",
-            channelId,
-            contentId: videoId,
-            cohortId: "published-2026-08",
-            contentKind: "short-form",
-            source: { identity: "manual-video-source", revision: "1" },
-            metric: {
-              kind: "average-view-percentage",
-              unit: "percent",
-              definition: "Manually copied average view percentage.",
-            },
-            collectionMethod: "manual",
-            data: {
-              value: 55,
-              observedAt: "2026-09-07T00:00:00.000Z",
-              collectedAt: "2026-09-08T00:00:00.000Z",
-              period: { start: "2026-09-01", end: "2026-09-07", timeZone: "America/Los_Angeles" },
-              publishedAt: "2026-08-27T00:00:00.000Z",
-              sampleCount: 100,
-              denominator: { kind: "views", value: 100 },
-              completeness: { status: "complete" },
-              reportingLagMs: 86_400_000,
-              freshThrough: "2026-09-07T00:00:00.000Z",
-              metadata: {},
-            },
-          },
+          observation: manualSource,
         },
         { kind: "user", id: "test" },
       );
@@ -90,16 +103,6 @@ it.layer(NodeSqliteClient.layerMemory())("YouTube Analytics ingestion", (it) => 
           rows: reportRows,
         });
       };
-      const tokens = YouTubeTokenStore.of({
-        summary: Effect.die("unused"),
-        begin: Effect.die("unused"),
-        disconnect: Effect.die("unused"),
-        accessToken: Effect.die("unused"),
-        analyticsAccessToken: Effect.succeed("test-access-token"),
-        recordAnalyticsCheck: () => Effect.void,
-        invalidateAccessToken: Effect.void,
-        recordChannel: () => Effect.die("unused"),
-      });
       const analytics = yield* makeAnalytics({ fetchImpl }).pipe(
         Effect.provideService(ObservationService, observations),
         Effect.provideService(YouTubeTokenStore, tokens),
@@ -158,3 +161,100 @@ it.layer(NodeSqliteClient.layerMemory())("YouTube Analytics ingestion", (it) => 
     }),
   );
 });
+
+it.layer(NodeSqliteClient.layerMemory())(
+  "YouTube Analytics source changes during a fetch",
+  (it) => {
+    it.effect("writes nothing when the source is corrected or retired mid-fetch", () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(
+          DateTime.toEpochMillis(DateTime.makeUnsafe("2026-09-28T00:00:00.000Z")),
+        );
+        const sql = yield* SqlClient.SqlClient;
+        yield* baseMigration;
+        yield* observationMigration;
+        yield* sql`
+        INSERT INTO command_center_spaces (
+          id, slug, name, kind, instructions, policy_json, model_defaults_json,
+          connections_json, repositories_json, aliases_json, lifecycle, created_at, updated_at
+        ) VALUES (
+          ${spaceId}, ${spaceId}, ${spaceId}, 'business', '', '{}', '{}', '[]', '[]', '[]',
+          'active', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'
+        )
+      `;
+        const observations = yield* makeObservations;
+        const user = { kind: "user", id: "test" } as const;
+        const seed = yield* observations.createManual(
+          { mutationId: "manual-youtube-seed", expectedVersion: 0, observation: manualSource },
+          user,
+        );
+        // The token store records the successful check after the report arrives and before any
+        // observation is written, so a source change injected there lands mid-fetch.
+        let duringFetch: Effect.Effect<void> = Effect.void;
+        const fetchImpl = async () =>
+          Response.json({
+            kind: "youtubeAnalytics#resultTable",
+            columnHeaders: ["day", "views", "averageViewDuration", "averageViewPercentage"].map(
+              (name) => ({ name }),
+            ),
+            rows: [["2026-09-07", 20, 16, 70]],
+          });
+        const analytics = yield* makeAnalytics({ fetchImpl }).pipe(
+          Effect.provideService(ObservationService, observations),
+          Effect.provideService(
+            YouTubeTokenStore,
+            YouTubeTokenStore.of({ ...tokens, recordAnalyticsCheck: () => duringFetch }),
+          ),
+        );
+        const countObservations = sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM command_center_observations
+      `.pipe(Effect.map((rows) => rows[0]?.count));
+        const fetchFrom = (revisionId: string) =>
+          decodeInput({
+            spaceId,
+            sourceObservationId: seed.observationId,
+            expectedSourceRevisionId: revisionId,
+            channelId,
+            videoId,
+            ...period,
+          }).pipe(Effect.orDie, Effect.flatMap(analytics.fetch), Effect.flip);
+
+        duringFetch = observations
+          .correct(
+            {
+              mutationId: "correct-during-fetch",
+              spaceId,
+              observationId: seed.observationId,
+              expectedVersion: seed.version,
+              reason: "The manual copy used the wrong period.",
+              data: { ...manualSource.data, value: 56 },
+            },
+            user,
+          )
+          .pipe(Effect.asVoid, Effect.orDie);
+        assert.strictEqual((yield* fetchFrom(seed.revisionId)).reason, "conflict");
+        assert.strictEqual(yield* countObservations, 1);
+
+        const corrected = yield* observations.get({ spaceId, observationId: seed.observationId });
+        assert.strictEqual(corrected.observation.data.value, 56);
+        duringFetch = observations
+          .retire(
+            {
+              mutationId: "retire-during-fetch",
+              spaceId,
+              observationId: seed.observationId,
+              expectedVersion: corrected.version,
+              reason: "The manual source is no longer trusted.",
+            },
+            user,
+          )
+          .pipe(Effect.asVoid, Effect.orDie);
+        assert.strictEqual((yield* fetchFrom(corrected.revisionId)).reason, "conflict");
+        assert.strictEqual(yield* countObservations, 1);
+        assert.isTrue(
+          (yield* observations.get({ spaceId, observationId: seed.observationId })).retired,
+        );
+      }),
+    );
+  },
+);

@@ -257,42 +257,64 @@ export const make = Effect.fn("YouTubeAnalytics.make")(function* (
         },
       };
     };
-    const ids: Array<typeof input.sourceObservationId> = [];
-    let deduplicated = true;
-    for (const metric of ["average-view-percentage", "average-view-duration"] as const) {
-      const observation = build(metric);
-      const existing = yield* existingSource(
-        input.spaceId,
-        observation.source.identity,
-        observation.source.revision,
-      );
-      if (existing !== undefined) {
-        ids.push(existing.id as typeof input.sourceObservationId);
-        continue;
-      }
-      const mutationId = `youtube-analytics:${digest([
-        observation.source.identity,
-        observation.source.revision,
-      ])}`;
-      const stored = yield* observations
-        .ingestConnected(observation, mutationId, { kind: "connector", id: "youtube-analytics" })
-        .pipe(
-          Effect.mapError((cause) => error("connector", cause.message, cause)),
-          Effect.result,
-        );
-      if (stored._tag === "Failure") {
-        const raced = yield* existingSource(
+    const ingestReport = Effect.gen(function* () {
+      const ids: Array<typeof input.sourceObservationId> = [];
+      let deduplicated = true;
+      for (const metric of ["average-view-percentage", "average-view-duration"] as const) {
+        const observation = build(metric);
+        const existing = yield* existingSource(
           input.spaceId,
           observation.source.identity,
           observation.source.revision,
         );
-        if (raced === undefined) return yield* stored.failure;
-        ids.push(raced.id as typeof input.sourceObservationId);
-      } else {
-        ids.push(stored.success.observationId);
-        deduplicated = deduplicated && stored.success.deduplicated;
+        if (existing !== undefined) {
+          ids.push(existing.id as typeof input.sourceObservationId);
+          continue;
+        }
+        const mutationId = `youtube-analytics:${digest([
+          observation.source.identity,
+          observation.source.revision,
+        ])}`;
+        const stored = yield* observations
+          .ingestConnected(observation, mutationId, { kind: "connector", id: "youtube-analytics" })
+          .pipe(
+            Effect.mapError((cause) => error("connector", cause.message, cause)),
+            Effect.result,
+          );
+        if (stored._tag === "Failure") {
+          const raced = yield* existingSource(
+            input.spaceId,
+            observation.source.identity,
+            observation.source.revision,
+          );
+          if (raced === undefined) return yield* stored.failure;
+          ids.push(raced.id as typeof input.sourceObservationId);
+        } else {
+          ids.push(stored.success.observationId);
+          deduplicated = deduplicated && stored.success.deduplicated;
+        }
       }
-    }
+      return { ids, deduplicated };
+    });
+    // The report is fetched outside any transaction, so recheck the source before writing: both
+    // derived observations land together, or neither does if the source moved meanwhile.
+    const { ids, deduplicated } = yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const current = yield* sql<{ readonly id: string }>`
+          SELECT id FROM command_center_observations
+          WHERE space_id = ${input.spaceId} AND id = ${input.sourceObservationId}
+            AND current_revision_id = ${source.revisionId} AND retired_at IS NULL
+          LIMIT 1
+        `;
+        if (current.length === 0) {
+          return yield* error(
+            "conflict",
+            "The source Observation was corrected or retired while YouTube Analytics was loading; reload it and try again.",
+          );
+        }
+        return yield* ingestReport;
+      }),
+    );
     return {
       observationIds: ids,
       status: report.status,
