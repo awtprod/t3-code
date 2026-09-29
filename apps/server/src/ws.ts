@@ -34,6 +34,14 @@ import {
   COMMAND_CENTER_WS_METHODS,
   CommandCenterError,
   CommandCenterEventStreamError,
+  CommandCenterSprintPlanApplyImportResult,
+  CommandCenterSprintPlanGetOriginalResult,
+  CommandCenterSprintPlanGetResult,
+  CommandCenterSprintPlanListHistoryResult,
+  CommandCenterSprintPlanListResult,
+  CommandCenterSprintPlanPatchTaskResult,
+  CommandCenterSprintPlanPreviewImportResult,
+  CommandCenterSprintPlanResolveDateConflictResult,
   type DiscoveredLocalServerList,
   type EditorId,
   type FileManagerRevealKind,
@@ -168,6 +176,8 @@ import { decideWebSocketOrigin } from "./auth/websocketOrigin.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "./httpCors.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import * as CommandCenterService from "./command-center/Service.ts";
+import * as CommandCenterInbox from "./command-center/Inbox.ts";
+import * as SprintPlan from "./command-center/SprintPlan.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
 import * as Observations from "./command-center/Observations.ts";
 import { refreshCommandCenterConnection } from "./command-center/ConnectionRefresh.ts";
@@ -613,6 +623,8 @@ const makeWsRpcLayer = (
       const usage = yield* UsageService.UsageService;
       const relayClient = yield* RelayClient.RelayClient;
       const commandCenter = yield* CommandCenterService.CommandCenterService;
+      const commandCenterInbox = yield* Effect.serviceOption(CommandCenterInbox.CommandCenterInbox);
+      const sprintPlan = yield* Effect.serviceOption(SprintPlan.SprintPlanService);
       const commandCenterEvents = yield* CommandCenterEventStream.CommandCenterEventStream;
       const observations = yield* Effect.serviceOption(Observations.ObservationService);
       const observationActor = { kind: "user", id: currentSession.sessionId } as const;
@@ -679,6 +691,81 @@ const makeWsRpcLayer = (
             ),
           onSome: use,
         });
+      const withCommandCenterInbox = <A>(
+        use: (
+          service: CommandCenterInbox.CommandCenterInbox["Service"],
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        Option.match(commandCenterInbox, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "config",
+                message: "Command Center Inbox is unavailable in this environment.",
+              }),
+            ),
+          onSome: use,
+        });
+      const withVerifiedCommandCenterInbox = <A>(
+        spaceId: CommandCenterSpaceIdType | undefined,
+        use: (
+          service: CommandCenterInbox.CommandCenterInbox["Service"],
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        commandCenter
+          .refreshInboxSpaceProjection(spaceId)
+          .pipe(Effect.andThen(withCommandCenterInbox(use)));
+      const toSprintPlanError = (cause: SprintPlan.SprintPlanServiceError) =>
+        new CommandCenterError({
+          reason: cause.reason === "not-found" ? "not_found" : cause.reason,
+          message: cause.message,
+          cause,
+        });
+      const invalidSprintPlanOutput = (cause: unknown) =>
+        new CommandCenterError({
+          reason: "persistence",
+          message: "Stored sprint plan data did not match the wire contract.",
+          cause,
+        });
+      const validateSprintPlanOutput = <A>(
+        operation: Effect.Effect<unknown, SprintPlan.SprintPlanServiceError>,
+        decode: (value: unknown) => Effect.Effect<A, unknown>,
+      ) =>
+        operation.pipe(
+          Effect.flatMap(decode),
+          Effect.mapError((cause) =>
+            Schema.is(SprintPlan.SprintPlanServiceError)(cause)
+              ? cause
+              : invalidSprintPlanOutput(cause),
+          ),
+        );
+      const withVerifiedSprintPlan = <A>(
+        spaceId: string,
+        use: (
+          service: SprintPlan.SprintPlanService["Service"],
+        ) => Effect.Effect<A, SprintPlan.SprintPlanServiceError | CommandCenterError>,
+      ) =>
+        commandCenter.refreshInboxSpaceProjection(spaceId).pipe(
+          Effect.andThen(
+            Option.match(sprintPlan, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "config",
+                    message: "Sprint plans are unavailable in this environment.",
+                  }),
+                ),
+              onSome: use,
+            }),
+          ),
+          Effect.catchTags({
+            SprintPlanServiceError: (cause) => Effect.fail(toSprintPlanError(cause)),
+          }),
+        );
+      const sprintPlanActor: SprintPlan.SprintPlanActor = {
+        id: currentSession.subject,
+        kind: "user",
+      };
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1571,6 +1658,189 @@ const makeWsRpcLayer = (
           observeRpcEffect(COMMAND_CENTER_WS_METHODS.itemsQuery, commandCenter.queryItems(input), {
             "rpc.aggregate": "command-center",
           }),
+        [COMMAND_CENTER_WS_METHODS.inboxQuery]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxQuery,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) => inbox.query(input)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxDetail]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxDetail,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) => inbox.detail(input)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxComment]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxComment,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.comment(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxRequestChanges]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxRequestChanges,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.requestChanges(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxCandidateCreate]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxCandidateCreate,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.createCandidate(
+                { ...input, source: "direct" },
+                { subject: currentSession.subject },
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxCandidateAccept]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.acceptCandidate(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.discardCandidate(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxChangeRequestResolve]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxChangeRequestResolve,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.resolveChangeRequest(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxSnooze]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxSnooze,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.snooze(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxUnsnooze]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxUnsnooze,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.unsnooze(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxDismiss]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxDismiss,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.dismiss(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxReopen]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxReopen,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.reopen(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.sprintPlanList]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.sprintPlanList,
+            withVerifiedSprintPlan(input.spaceId, (service) =>
+              validateSprintPlanOutput(
+                service.list(input),
+                Schema.decodeUnknownEffect(CommandCenterSprintPlanListResult),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.sprintPlanPreviewImport]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.sprintPlanPreviewImport,
+            withVerifiedSprintPlan(input.spaceId, (service) =>
+              validateSprintPlanOutput(
+                service.previewImport(input),
+                Schema.decodeUnknownEffect(CommandCenterSprintPlanPreviewImportResult),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport,
+            withVerifiedSprintPlan(input.spaceId, (service) =>
+              validateSprintPlanOutput(
+                service.applyImport(input, sprintPlanActor),
+                Schema.decodeUnknownEffect(CommandCenterSprintPlanApplyImportResult),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.sprintPlanGetCurrent]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.sprintPlanGetCurrent,
+            withVerifiedSprintPlan(input.spaceId, (service) =>
+              validateSprintPlanOutput(
+                service.get(input),
+                Schema.decodeUnknownEffect(CommandCenterSprintPlanGetResult),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.sprintPlanGetOriginal]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.sprintPlanGetOriginal,
+            withVerifiedSprintPlan(input.spaceId, (service) =>
+              validateSprintPlanOutput(
+                service.getOriginal(input),
+                Schema.decodeUnknownEffect(CommandCenterSprintPlanGetOriginalResult),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask,
+            withVerifiedSprintPlan(input.spaceId, (service) =>
+              validateSprintPlanOutput(
+                service.patchTask(input, sprintPlanActor),
+                Schema.decodeUnknownEffect(CommandCenterSprintPlanPatchTaskResult),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict,
+            withVerifiedSprintPlan(input.spaceId, (service) =>
+              validateSprintPlanOutput(
+                service.resolveDateConflict(input, sprintPlanActor),
+                Schema.decodeUnknownEffect(CommandCenterSprintPlanResolveDateConflictResult),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.sprintPlanListHistory]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.sprintPlanListHistory,
+            withVerifiedSprintPlan(input.spaceId, (service) =>
+              validateSprintPlanOutput(
+                service.listHistory(input),
+                Schema.decodeUnknownEffect(CommandCenterSprintPlanListHistoryResult),
+              ),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
         [COMMAND_CENTER_WS_METHODS.runsQuery]: (input) =>
           observeRpcEffect(COMMAND_CENTER_WS_METHODS.runsQuery, commandCenter.queryRuns(input), {
             "rpc.aggregate": "command-center",

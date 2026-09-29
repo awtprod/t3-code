@@ -119,6 +119,58 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
     }).pipe(Effect.provide(makeEnvironmentAuthLayer({ mode: "web", host: "192.168.1.50" }))),
   );
 
+  it.effect("returns a session-scoped draft identity for bearer auth and none without auth", () =>
+    Effect.gen(function* () {
+      const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const first = yield* serverAuth.issueSession({ subject: "first-user" });
+      const second = yield* serverAuth.issueSession({ subject: "second-user" });
+      const firstRequest = {
+        cookies: {},
+        headers: { authorization: `Bearer ${first.token}` },
+      } as never;
+      const secondRequest = {
+        cookies: {},
+        headers: { authorization: `Bearer ${second.token}` },
+      } as never;
+
+      const firstRead = yield* serverAuth.getSessionState(firstRequest);
+      const repeatedRead = yield* serverAuth.getSessionState(firstRequest);
+      const switchedRead = yield* serverAuth.getSessionState(secondRequest);
+      const unauthenticatedRead = yield* serverAuth.getSessionState({
+        cookies: {},
+        headers: {},
+      } as never);
+
+      expect(firstRead.authenticated).toBe(true);
+      expect(firstRead.draftScopeId).toBe(first.sessionId);
+      expect(repeatedRead.draftScopeId).toBe(first.sessionId);
+      expect(switchedRead.draftScopeId).toBe(second.sessionId);
+      expect(switchedRead.draftScopeId).not.toBe(firstRead.draftScopeId);
+      expect(unauthenticatedRead.authenticated).toBe(false);
+      expect(unauthenticatedRead.draftScopeId).toBeUndefined();
+    }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
+  );
+
+  it("keeps DPoP draft identity stable across token sessions and isolates keys and subjects", () => {
+    const session = (sessionId: string, subject: string, proofKeyThumbprint: string) =>
+      EnvironmentAuth.draftScopeIdForAuthenticatedSession({
+        sessionId: sessionId as never,
+        subject,
+        proofKeyThumbprint,
+      });
+    const first = session("rotated-session-a", "one-time-token", "proof-key-a");
+    const rotated = session("rotated-session-b", "one-time-token", "proof-key-a");
+    const otherKey = session("rotated-session-c", "one-time-token", "proof-key-b");
+    const otherSubject = session("rotated-session-d", "different-subject", "proof-key-a");
+
+    expect(rotated).toBe(first);
+    expect(otherKey).not.toBe(first);
+    expect(otherSubject).not.toBe(first);
+    expect(first).not.toContain("one-time-token");
+    expect(first).not.toContain("proof-key-a");
+    expect(first).not.toContain("rotated-session-a");
+  });
+
   it.effect("does not exchange ordinary pairing grants for administrative access tokens", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;

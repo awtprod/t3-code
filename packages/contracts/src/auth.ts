@@ -354,9 +354,20 @@ export const AuthCreatePairingCredentialInput = Schema.Struct({
 });
 export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentialInput.Type;
 
+/**
+ * Opaque server identity used to isolate browser-local drafts. Relay clients
+ * also bind their authenticated account to this value before storing drafts.
+ *
+ * This remains an optional non-empty string on the wire so older servers and clients
+ * that used an auth session id continue to interoperate.
+ */
+export const AuthDraftScopeId = TrimmedNonEmptyString.pipe(Schema.brand("AuthDraftScopeId"));
+export type AuthDraftScopeId = typeof AuthDraftScopeId.Type;
+
 export const AuthSessionState = Schema.Struct({
   authenticated: Schema.Boolean,
   auth: ServerAuthDescriptor,
+  draftScopeId: Schema.optionalKey(AuthDraftScopeId),
   scopes: Schema.optionalKey(AuthEnvironmentScopes),
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
