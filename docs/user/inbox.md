@@ -34,3 +34,9 @@ Snoozing requires a future wake time. Snoozed items remain available in the Snoo
 Older discussion and proposal history is loaded in pages with **Load earlier history**.
 
 Threads and **New thread** remain available from the sidebar. The earlier command workspace is available under **Command**.
+
+## Supported surfaces
+
+Inbox, Responsibilities, Observations, Lessons, and Sprint Plan are part of the web app. The desktop app opens the same web interface, so these screens and their direct links work there too. On a phone, open Command Center in the mobile browser or the installed web app (PWA). The layouts support narrow screens.
+
+The native mobile app (iOS and Android) does not include these screens yet. It still shows threads, but it cannot open an Inbox link, reply to an item, review a proposal, or pause a Responsibility. Use the mobile browser for those tasks until native support ships.
