@@ -40,6 +40,7 @@ const PauseInput = Schema.Struct({
 
 export type ResponsibilityHealth =
   | "paused"
+  | "disabled"
   | "blocked"
   | "temporarily-failing"
   | "healthy"
@@ -407,15 +408,19 @@ export const make = Effect.fn("Responsibilities.make")(function* (
             displayError: boundedDisplayError(row.displayError) ?? "Automation execution failed.",
             resolvedAt: row.resolvedAt,
           } satisfies ResponsibilityIncident);
+    // A disabled Automation never runs, so an earlier successful check must not
+    // keep reporting it as healthy.
     const health: ResponsibilityHealth = paused
       ? "paused"
-      : incident?.state === "blocked"
-        ? "blocked"
-        : incident?.state === "transient"
-          ? "temporarily-failing"
-          : row.lastCheckStatus === "ok"
-            ? "healthy"
-            : "unknown";
+      : row.enabled !== 1
+        ? "disabled"
+        : incident?.state === "blocked"
+          ? "blocked"
+          : incident?.state === "transient"
+            ? "temporarily-failing"
+            : row.lastCheckStatus === "ok"
+              ? "healthy"
+              : "unknown";
     const now = yield* dependencies.now;
     const nextScheduledAt =
       automation.trigger.type === "schedule" && row.enabled === 1 && !paused

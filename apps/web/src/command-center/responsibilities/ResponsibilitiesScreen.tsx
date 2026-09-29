@@ -21,6 +21,7 @@ import { cn } from "~/lib/utils";
 
 const healthLabel: Record<CommandCenterResponsibilityStatus["health"], string> = {
   paused: "Paused",
+  disabled: "Disabled",
   blocked: "Blocked",
   "temporarily-failing": "Retrying",
   healthy: "Healthy",
@@ -42,7 +43,8 @@ function HealthPill({ health }: { readonly health: CommandCenterResponsibilitySt
         "inline-flex min-h-7 items-center rounded-full border px-2.5 text-xs font-medium",
         health === "healthy" &&
           "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-        health === "paused" && "border-muted-foreground/25 bg-muted text-muted-foreground",
+        (health === "paused" || health === "disabled") &&
+          "border-muted-foreground/25 bg-muted text-muted-foreground",
         health === "blocked" && "border-destructive/30 bg-destructive/10 text-destructive",
         health === "temporarily-failing" &&
           "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",

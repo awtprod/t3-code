@@ -31,10 +31,13 @@ import { Route as SettingsArchivedRouteImport } from './routes/settings.archived
 import { Route as SettingsAppearanceRouteImport } from './routes/settings.appearance'
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ConnectCallbackRouteImport } from './routes/connect_.callback'
+import { Route as ChatSprintPlanRouteImport } from './routes/_chat.sprint-plan'
 import { Route as ChatResponsibilitiesRouteImport } from './routes/_chat.responsibilities'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatProspectsRouteImport } from './routes/_chat.prospects'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
+import { Route as ChatInboxRouteImport } from './routes/_chat.inbox'
+import { Route as ChatCommandRouteImport } from './routes/_chat.command'
 import { Route as ChatAutomationsRouteImport } from './routes/_chat.automations'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
@@ -148,6 +151,11 @@ const ConnectCallbackRoute = ConnectCallbackRouteImport.update({
   path: '/connect/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ChatSprintPlanRoute = ChatSprintPlanRouteImport.update({
+  id: '/sprint-plan',
+  path: '/sprint-plan',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatResponsibilitiesRoute = ChatResponsibilitiesRouteImport.update({
   id: '/responsibilities',
   path: '/responsibilities',
@@ -166,6 +174,16 @@ const ChatProspectsRoute = ChatProspectsRouteImport.update({
 const ChatNewRoute = ChatNewRouteImport.update({
   id: '/new',
   path: '/new',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatInboxRoute = ChatInboxRouteImport.update({
+  id: '/inbox',
+  path: '/inbox',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatCommandRoute = ChatCommandRouteImport.update({
+  id: '/command',
+  path: '/command',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatAutomationsRoute = ChatAutomationsRouteImport.update({
@@ -192,10 +210,13 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRouteWithChildren
   '/usage': typeof UsageRoute
   '/automations': typeof ChatAutomationsRoute
+  '/command': typeof ChatCommandRoute
+  '/inbox': typeof ChatInboxRoute
   '/new': typeof ChatNewRoute
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/responsibilities': typeof ChatResponsibilitiesRoute
+  '/sprint-plan': typeof ChatSprintPlanRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -221,10 +242,13 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRouteWithChildren
   '/usage': typeof UsageRoute
   '/automations': typeof ChatAutomationsRoute
+  '/command': typeof ChatCommandRoute
+  '/inbox': typeof ChatInboxRoute
   '/new': typeof ChatNewRoute
   '/prospects': typeof ChatProspectsRoute
   '/pull-requests': typeof ChatPullRequestsRoute
   '/responsibilities': typeof ChatResponsibilitiesRoute
+  '/sprint-plan': typeof ChatSprintPlanRoute
   '/connect/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -253,10 +277,13 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRouteWithChildren
   '/usage': typeof UsageRoute
   '/_chat/automations': typeof ChatAutomationsRoute
+  '/_chat/command': typeof ChatCommandRoute
+  '/_chat/inbox': typeof ChatInboxRoute
   '/_chat/new': typeof ChatNewRoute
   '/_chat/prospects': typeof ChatProspectsRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRoute
   '/_chat/responsibilities': typeof ChatResponsibilitiesRoute
+  '/_chat/sprint-plan': typeof ChatSprintPlanRoute
   '/connect_/callback': typeof ConnectCallbackRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/appearance': typeof SettingsAppearanceRoute
@@ -286,10 +313,13 @@ export interface FileRouteTypes {
     | '/settings'
     | '/usage'
     | '/automations'
+    | '/command'
+    | '/inbox'
     | '/new'
     | '/prospects'
     | '/pull-requests'
     | '/responsibilities'
+    | '/sprint-plan'
     | '/connect/callback'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -315,10 +345,13 @@ export interface FileRouteTypes {
     | '/settings'
     | '/usage'
     | '/automations'
+    | '/command'
+    | '/inbox'
     | '/new'
     | '/prospects'
     | '/pull-requests'
     | '/responsibilities'
+    | '/sprint-plan'
     | '/connect/callback'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -346,10 +379,13 @@ export interface FileRouteTypes {
     | '/settings'
     | '/usage'
     | '/_chat/automations'
+    | '/_chat/command'
+    | '/_chat/inbox'
     | '/_chat/new'
     | '/_chat/prospects'
     | '/_chat/pull-requests'
     | '/_chat/responsibilities'
+    | '/_chat/sprint-plan'
     | '/connect_/callback'
     | '/projects/$projectKey'
     | '/settings/appearance'
@@ -537,6 +573,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConnectCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_chat/sprint-plan': {
+      id: '/_chat/sprint-plan'
+      path: '/sprint-plan'
+      fullPath: '/sprint-plan'
+      preLoaderRoute: typeof ChatSprintPlanRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/responsibilities': {
       id: '/_chat/responsibilities'
       path: '/responsibilities'
@@ -565,6 +608,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatNewRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/inbox': {
+      id: '/_chat/inbox'
+      path: '/inbox'
+      fullPath: '/inbox'
+      preLoaderRoute: typeof ChatInboxRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/command': {
+      id: '/_chat/command'
+      path: '/command'
+      fullPath: '/command'
+      preLoaderRoute: typeof ChatCommandRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/automations': {
       id: '/_chat/automations'
       path: '/automations'
@@ -591,10 +648,13 @@ declare module '@tanstack/react-router' {
 
 interface ChatRouteChildren {
   ChatAutomationsRoute: typeof ChatAutomationsRoute
+  ChatCommandRoute: typeof ChatCommandRoute
+  ChatInboxRoute: typeof ChatInboxRoute
   ChatNewRoute: typeof ChatNewRoute
   ChatProspectsRoute: typeof ChatProspectsRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRoute
   ChatResponsibilitiesRoute: typeof ChatResponsibilitiesRoute
+  ChatSprintPlanRoute: typeof ChatSprintPlanRoute
   ChatIndexRoute: typeof ChatIndexRoute
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
@@ -602,10 +662,13 @@ interface ChatRouteChildren {
 
 const ChatRouteChildren: ChatRouteChildren = {
   ChatAutomationsRoute: ChatAutomationsRoute,
+  ChatCommandRoute: ChatCommandRoute,
+  ChatInboxRoute: ChatInboxRoute,
   ChatNewRoute: ChatNewRoute,
   ChatProspectsRoute: ChatProspectsRoute,
   ChatPullRequestsRoute: ChatPullRequestsRoute,
   ChatResponsibilitiesRoute: ChatResponsibilitiesRoute,
+  ChatSprintPlanRoute: ChatSprintPlanRoute,
   ChatIndexRoute: ChatIndexRoute,
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
