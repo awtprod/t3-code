@@ -26,6 +26,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { resolveGoogleDraftAttachmentPaths } from "./AutomationRuns.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
 import { make as makeInbox } from "./Inbox.ts";
@@ -1384,6 +1385,87 @@ it.effect("records digest-addressed Artifacts and enforces exact Space and Run s
       })
       .pipe(Effect.flip);
     expect(wrongRunScope).toMatchObject({ reason: "not_found" });
+  }).pipe(Effect.provide(makeTestLayer())),
+);
+
+it.effect("attaches an older export beyond the recent Artifact page and rejects other Spaces", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    const olderExport = decodeArtifact({
+      id: "artifact-older-export",
+      spaceId: systemSpace.id,
+      kind: "export",
+      name: "Quarterly report.pdf",
+      locator: "cc-artifact://artifact-older-export",
+      mimeType: "application/pdf",
+      contentDigest: "b".repeat(64),
+      provenance: {
+        kind: "connector",
+        sourceRef: "google-drive:older-export",
+        capturedAt: fixtureTimestamp,
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    yield* service.recordArtifact({ artifact: olderExport, sizeBytes: 7, format: "pdf" });
+    const [stored] = yield* sql<{ readonly metadataJson: string; readonly provenanceJson: string }>`
+      SELECT metadata_json AS "metadataJson", provenance_json AS "provenanceJson"
+      FROM command_center_artifacts WHERE id = ${olderExport.id}
+    `;
+    if (stored === undefined) throw new Error("The older export was not stored.");
+    // 501 newer Artifacts push the older export out of the bounded recent-Artifacts page.
+    for (let index = 0; index < 501; index += 1) {
+      const id = `artifact-newer-${String(index).padStart(3, "0")}`;
+      yield* sql`
+        INSERT INTO command_center_artifacts (
+          id, space_id, run_id, kind, title, uri, content_digest,
+          provenance_json, metadata_json, created_at
+        ) VALUES (
+          ${id}, ${systemSpace.id}, NULL, 'export', ${`${id}.pdf`}, ${`cc-artifact://${id}`},
+          ${"c".repeat(64)}, ${stored.provenanceJson}, ${stored.metadataJson},
+          '2026-06-01T00:00:00.000Z'
+        )
+      `;
+    }
+    yield* sql`
+      INSERT INTO command_center_artifacts (
+        id, space_id, run_id, kind, title, uri, content_digest,
+        provenance_json, metadata_json, created_at
+      ) VALUES (
+        'artifact-other-space', ${studioSpace.id}, NULL, 'export', 'Other space.pdf',
+        'cc-artifact://artifact-other-space', ${"d".repeat(64)}, ${stored.provenanceJson},
+        ${stored.metadataJson}, '2026-06-01T00:00:00.000Z'
+      )
+    `;
+
+    const recentPage = yield* service.queryArtifacts({ spaceId: systemSpace.id, limit: 500 });
+    expect(recentPage.artifacts.some((artifact) => artifact.id === olderExport.id)).toBe(false);
+
+    const byId = yield* service.getArtifactsByIds({
+      spaceId: systemSpace.id,
+      artifactIds: [olderExport.id, "artifact-other-space", "artifact-missing"],
+    });
+    expect(byId.artifacts.map((artifact) => artifact.id)).toEqual([olderExport.id]);
+
+    const join = (...parts: ReadonlyArray<string>) => parts.join("/");
+    expect(
+      yield* resolveGoogleDraftAttachmentPaths({
+        commandCenter: service,
+        path: { join },
+        attachmentsDir: "attachments",
+        spaceId: systemSpace.id,
+        attachmentArtifactIds: [olderExport.id],
+      }),
+    ).toEqual(["attachments/exports/artifact-older-export.pdf"]);
+    expect(
+      yield* resolveGoogleDraftAttachmentPaths({
+        commandCenter: service,
+        path: { join },
+        attachmentsDir: "attachments",
+        spaceId: systemSpace.id,
+        attachmentArtifactIds: [olderExport.id, "artifact-other-space"],
+      }).pipe(Effect.flip),
+    ).toBe("A Gmail draft attachment is not available in this Space.");
   }).pipe(Effect.provide(makeTestLayer())),
 );
 

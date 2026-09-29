@@ -158,6 +158,58 @@ export class AutomationRuns extends Context.Service<AutomationRuns, AutomationRu
   "@awtprod/command-center/command-center/AutomationRuns",
 ) {}
 
+/**
+ * Resolve the server-owned export files a Gmail draft may attach. The requested Artifact ids are
+ * looked up directly with Space scope, so an older export stays attachable no matter how many
+ * newer Artifacts the Space holds, while an id from another Space is still rejected.
+ */
+export const resolveGoogleDraftAttachmentPaths = Effect.fn(
+  "AutomationRuns.resolveGoogleDraftAttachmentPaths",
+)(function* (input: {
+  readonly commandCenter: Pick<
+    CommandCenterService.CommandCenterService["Service"],
+    "getArtifactsByIds"
+  >;
+  readonly path: Pick<Path.Path, "join">;
+  readonly attachmentsDir: string;
+  readonly spaceId: SpaceId;
+  readonly attachmentArtifactIds: ReadonlyArray<string>;
+}) {
+  const requestedArtifactIds = input.attachmentArtifactIds;
+  const found =
+    requestedArtifactIds.length === 0
+      ? []
+      : (yield* input.commandCenter.getArtifactsByIds({
+          spaceId: input.spaceId,
+          artifactIds: requestedArtifactIds,
+        })).artifacts;
+  const foundById = new Map(
+    found
+      .filter((artifact) => artifact.spaceId === input.spaceId)
+      .map((artifact) => [artifact.id as string, artifact] as const),
+  );
+  const artifacts = requestedArtifactIds.flatMap((artifactId) => {
+    const artifact = foundById.get(artifactId);
+    return artifact === undefined ? [] : [artifact];
+  });
+  if (artifacts.length !== requestedArtifactIds.length) {
+    return yield* Effect.fail("A Gmail draft attachment is not available in this Space.");
+  }
+  const paths = artifacts.map((artifact) => {
+    const extension = artifact.name.split(".").at(-1);
+    return extension !== undefined &&
+      /^[a-z0-9]{1,10}$/iu.test(extension) &&
+      artifact.kind === "export" &&
+      artifact.locator === `cc-artifact://${artifact.id}`
+      ? input.path.join(input.attachmentsDir, "exports", `${artifact.id}.${extension}`)
+      : undefined;
+  });
+  if (paths.some((attachmentPath) => attachmentPath === undefined)) {
+    return yield* Effect.fail("Gmail drafts may attach only server-owned export artifacts.");
+  }
+  return paths.filter((attachmentPath): attachmentPath is string => attachmentPath !== undefined);
+});
+
 export const layer = Layer.effect(
   AutomationRuns,
   Effect.gen(function* () {
@@ -766,31 +818,13 @@ export const safeRuntimeLayer = Layer.unwrap(
           `The requested Google connection does not grant ${requiredCapability}.`,
         );
       }
-      const artifacts =
-        input.attachmentArtifactIds === undefined
-          ? []
-          : (yield* commandCenter.queryArtifacts({
-              spaceId: input.spaceId,
-              limit: 500,
-            })).artifacts.filter((artifact) => input.attachmentArtifactIds!.includes(artifact.id));
-      if (artifacts.length !== (input.attachmentArtifactIds?.length ?? 0)) {
-        return yield* Effect.fail("A Gmail draft attachment is not available in this Space.");
-      }
-      const paths = artifacts.map((artifact) => {
-        const extension = artifact.name.split(".").at(-1);
-        return extension !== undefined &&
-          /^[a-z0-9]{1,10}$/iu.test(extension) &&
-          artifact.kind === "export" &&
-          artifact.locator === `cc-artifact://${artifact.id}`
-          ? path.join(serverConfig.attachmentsDir, "exports", `${artifact.id}.${extension}`)
-          : undefined;
+      return yield* resolveGoogleDraftAttachmentPaths({
+        commandCenter,
+        path,
+        attachmentsDir: serverConfig.attachmentsDir,
+        spaceId: input.spaceId,
+        attachmentArtifactIds: input.attachmentArtifactIds ?? [],
       });
-      if (paths.some((attachmentPath) => attachmentPath === undefined)) {
-        return yield* Effect.fail("Gmail drafts may attach only server-owned export artifacts.");
-      }
-      return paths.filter(
-        (attachmentPath): attachmentPath is string => attachmentPath !== undefined,
-      );
     });
 
     const executeInboxDraft = Effect.fn("AutomationRuns.executeInboxDraft")(

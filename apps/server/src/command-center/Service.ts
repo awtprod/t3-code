@@ -518,6 +518,15 @@ export interface CommandCenterServiceShape {
   readonly queryArtifacts: (
     input: CommandCenterArtifactsQueryInput,
   ) => Effect.Effect<{ readonly artifacts: ReadonlyArray<ArtifactType> }, CommandCenterError>;
+  /**
+   * Resolve specific Artifacts by id within one Space. Unlike `queryArtifacts`, this is not
+   * bounded to the most recent page, so an older export stays addressable. Ids that do not exist
+   * or belong to another Space are omitted rather than returned.
+   */
+  readonly getArtifactsByIds: (input: {
+    readonly spaceId: CommandCenterArtifactsQueryInput["spaceId"];
+    readonly artifactIds: ReadonlyArray<string>;
+  }) => Effect.Effect<{ readonly artifacts: ReadonlyArray<ArtifactType> }, CommandCenterError>;
   readonly queryConnections: (
     input: CommandCenterConnectionsQueryInput,
   ) => Effect.Effect<
@@ -1549,6 +1558,30 @@ export const layer = Layer.effect(
       },
       Effect.mapError((cause) =>
         isCommandCenterError(cause) ? cause : persistenceError("Could not query Artifacts.", cause),
+      ),
+    );
+
+    const getArtifactsByIds = Effect.fn("CommandCenter.getArtifactsByIds")(
+      function* (input: {
+        readonly spaceId: CommandCenterArtifactsQueryInput["spaceId"];
+        readonly artifactIds: ReadonlyArray<string>;
+      }) {
+        yield* syncConfig(false);
+        const artifactIds = [...new Set(input.artifactIds)];
+        if (artifactIds.length === 0) return { artifacts: [] };
+        const rows = yield* sql<ArtifactRow>`
+          SELECT a.id, a.space_id AS "spaceId", a.run_id AS "runId", a.kind, a.title, a.uri,
+            a.content_digest AS "contentDigest", a.provenance_json AS "provenanceJson",
+            a.metadata_json AS "metadataJson", a.created_at AS "createdAt"
+          FROM command_center_artifacts a
+          JOIN command_center_spaces s ON s.id = a.space_id AND s.lifecycle = 'active'
+          WHERE a.space_id = ${input.spaceId}
+            AND ${sql.in("a.id", artifactIds)}
+        `;
+        return { artifacts: yield* Effect.forEach(rows, decodeArtifactRow) };
+      },
+      Effect.mapError((cause) =>
+        isCommandCenterError(cause) ? cause : persistenceError("Could not load Artifacts.", cause),
       ),
     );
 
@@ -3363,6 +3396,7 @@ export const layer = Layer.effect(
       queryAutomations,
       queryApprovals,
       queryArtifacts,
+      getArtifactsByIds,
       queryConnections,
       queryMemories,
       submitCommand,
