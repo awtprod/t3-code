@@ -6,6 +6,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
+  makeClosedPullRequestReconciler,
   makeRepositoryCheckRecorder,
   type RepositoryCheckObservation,
 } from "./RepositoryChecks.ts";
@@ -116,5 +117,115 @@ it.effect("records one failing required check per head across repeated polls", (
       SELECT status FROM command_center_items WHERE status != 'done'
     `;
     expect(current).toHaveLength(1);
+  }).pipe(Effect.provide(SqlitePersistenceMemory)),
+);
+
+it.effect("retires Inbox items for PRs confirmed closed after leaving the open list", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const timestamp = "2026-09-28T00:00:00.000Z";
+    const repositoryKey = "github.com/t3tools/t3code";
+    const spaceId = SpaceId.make("coding");
+    yield* sql`
+      INSERT INTO command_center_spaces (id, slug, name, kind, created_at, updated_at)
+      VALUES ('coding', 'coding', 'Coding', 'business', ${timestamp}, ${timestamp})
+    `;
+    // PR 7 closed, PR 9 cannot be looked up at first, PR 8 is open on another page, and PR 10 is
+    // on the polled page. Older observations are looked up first.
+    const seeded = [
+      { prNumber: 7, observedAt: "2026-09-28T01:00:00.000Z" },
+      { prNumber: 9, observedAt: "2026-09-28T02:00:00.000Z" },
+      { prNumber: 8, observedAt: "2026-09-28T03:00:00.000Z" },
+      { prNumber: 10, observedAt: "2026-09-28T00:30:00.000Z" },
+    ];
+    for (const { prNumber, observedAt } of seeded) {
+      const itemId = `repository-check:pr-${prNumber}`;
+      yield* sql`
+        INSERT INTO command_center_items (
+          id, space_id, kind, status, title, body, priority, created_at, updated_at
+        ) VALUES (
+          ${itemId}, 'coding', 'decision', 'captured', ${`Required CI failed on PR #${prNumber}`},
+          NULL, 'high', ${timestamp}, ${timestamp}
+        )
+      `;
+      yield* sql`
+        INSERT INTO command_center_repository_check_signals (
+          repository_key, space_id, repository_id, pr_number, head_sha,
+          check_name, bucket, completed_at, item_id, observed_at
+        ) VALUES (
+          ${repositoryKey}, 'coding', 't3code', ${prNumber}, ${"a".repeat(40)},
+          'required/build', 'fail', ${timestamp}, ${itemId}, ${observedAt}
+        )
+      `;
+    }
+    const states = new Map<number, string>([
+      [7, "CLOSED"],
+      [8, "OPEN"],
+    ]);
+    const lookups: Array<number> = [];
+    const reconcile = makeClosedPullRequestReconciler({
+      sql,
+      lookupState: (prNumber) => {
+        lookups.push(prNumber);
+        const state = states.get(prNumber);
+        return state === undefined ? Effect.fail("GitHub read failed.") : Effect.succeed(state);
+      },
+      retireItem: (input) =>
+        sql`
+          UPDATE command_center_items SET status = 'done'
+          WHERE id = ${input.itemId} AND space_id = ${input.spaceId}
+            AND updated_at = ${input.expectedUpdatedAt}
+        `.pipe(
+          Effect.asVoid,
+          Effect.mapError(
+            (cause) =>
+              new CommandCenterError({
+                reason: "persistence",
+                message: "Test update failed.",
+                cause,
+              }),
+          ),
+        ),
+    });
+    const activeItems = sql<{ readonly id: string }>`
+      SELECT id FROM command_center_items WHERE status NOT IN ('done', 'canceled') ORDER BY id
+    `;
+
+    expect(
+      yield* reconcile({
+        repositoryKey,
+        spaceId,
+        polledPrNumbers: [10],
+        observedAt: "2026-09-28T04:00:00.000Z",
+      }),
+    ).toBe(1);
+    // The lookup error on PR 9 retires nothing and stops further lookups for this poll.
+    expect(lookups).toEqual([7, 9]);
+    expect((yield* activeItems).map((row) => row.id)).toEqual([
+      "repository-check:pr-10",
+      "repository-check:pr-8",
+      "repository-check:pr-9",
+    ]);
+
+    states.set(9, "MERGED");
+    lookups.length = 0;
+    expect(
+      yield* reconcile({
+        repositoryKey,
+        spaceId,
+        polledPrNumbers: [10],
+        observedAt: "2026-09-28T05:00:00.000Z",
+      }),
+    ).toBe(1);
+    expect(lookups).toEqual([9, 8]);
+    expect((yield* activeItems).map((row) => row.id)).toEqual([
+      "repository-check:pr-10",
+      "repository-check:pr-8",
+    ]);
+    const touched = yield* sql<{ readonly observedAt: string }>`
+      SELECT observed_at AS "observedAt" FROM command_center_repository_check_signals
+      WHERE pr_number = 8
+    `;
+    expect(touched).toEqual([{ observedAt: "2026-09-28T05:00:00.000Z" }]);
   }).pipe(Effect.provide(SqlitePersistenceMemory)),
 );

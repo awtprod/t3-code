@@ -20,6 +20,9 @@ import * as SourceControlRateLimit from "../sourceControl/SourceControlRateLimit
 const MAX_OPEN_PRS = 10;
 const MAX_PAGES = 20;
 const MAX_CHECKS_PER_PR = 50;
+/** Stored PRs with active signals, missing from the polled open page, whose state one poll checks. */
+const MAX_CLOSED_PR_LOOKUPS = 5;
+const MAX_ACTIVE_SIGNALS_PER_PR = 100;
 const COMMAND_TIMEOUT_MS = 5_000;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 
@@ -57,6 +60,12 @@ type SignalRow = {
 type OldItemRow = { readonly itemId: string; readonly updatedAt: string; readonly status: string };
 type ActiveSignalRow = OldItemRow & { readonly headSha: string; readonly checkName: string };
 type CursorRow = { readonly nextPage: number };
+type ActivePullRequestRow = { readonly prNumber: number };
+type RetireItem = (input: {
+  readonly itemId: string;
+  readonly spaceId: ReturnType<typeof SpaceId.make>;
+  readonly expectedUpdatedAt: string;
+}) => Effect.Effect<void, CommandCenterError>;
 
 export interface RepositoryCheckObservation {
   readonly repositoryKey: string;
@@ -94,11 +103,7 @@ export function makeRepositoryCheckRecorder(dependencies: {
   readonly createItem: (
     input: CommandCenterItemCreateInput,
   ) => Effect.Effect<{ readonly id: string }, CommandCenterError>;
-  readonly retireItem: (input: {
-    readonly itemId: string;
-    readonly spaceId: ReturnType<typeof SpaceId.make>;
-    readonly expectedUpdatedAt: string;
-  }) => Effect.Effect<void, CommandCenterError>;
+  readonly retireItem: RetireItem;
 }) {
   const { sql, createItem, retireItem } = dependencies;
   return Effect.fn("RepositoryChecks.record")(function* (observation: RepositoryCheckObservation) {
@@ -176,6 +181,90 @@ export function makeRepositoryCheckRecorder(dependencies: {
   });
 }
 
+/** Retire every active Inbox item raised for one PR, e.g. once GitHub reports it closed. */
+function retireActivePullRequestSignals(
+  dependencies: { readonly sql: SqlClient.SqlClient; readonly retireItem: RetireItem },
+  input: {
+    readonly repositoryKey: string;
+    readonly spaceId: ReturnType<typeof SpaceId.make>;
+    readonly prNumber: number;
+  },
+) {
+  return Effect.gen(function* () {
+    const active = yield* dependencies.sql<OldItemRow>`
+      SELECT DISTINCT i.id AS "itemId", i.updated_at AS "updatedAt", i.status
+      FROM command_center_repository_check_signals s
+      JOIN command_center_items i ON i.id = s.item_id
+      WHERE s.repository_key = ${input.repositoryKey} AND s.pr_number = ${input.prNumber}
+        AND i.status NOT IN ('done', 'canceled')
+      LIMIT ${MAX_ACTIVE_SIGNALS_PER_PR}
+    `;
+    for (const item of active) {
+      yield* dependencies.retireItem({
+        itemId: item.itemId,
+        spaceId: input.spaceId,
+        expectedUpdatedAt: item.updatedAt,
+      });
+    }
+    return active.length;
+  });
+}
+
+/**
+ * The open-PR list only returns open PRs, so a PR that closes while its required check is failing
+ * would otherwise keep its Inbox item forever. Each poll looks up a bounded number of stored PRs
+ * with active signals that were not on the polled page, least recently observed first, and
+ * retires their items only once GitHub confirms the PR is closed or merged. A lookup error never
+ * retires anything and ends the lookups for this poll.
+ */
+export function makeClosedPullRequestReconciler(dependencies: {
+  readonly sql: SqlClient.SqlClient;
+  readonly lookupState: (prNumber: number) => Effect.Effect<string, string>;
+  readonly retireItem: RetireItem;
+}) {
+  const { sql, lookupState } = dependencies;
+  return Effect.fn("RepositoryChecks.reconcileClosedPullRequests")(function* (input: {
+    readonly repositoryKey: string;
+    readonly spaceId: ReturnType<typeof SpaceId.make>;
+    readonly polledPrNumbers: ReadonlyArray<number>;
+    readonly observedAt: string;
+  }) {
+    const polled = new Set(input.polledPrNumbers);
+    const stored = yield* sql<ActivePullRequestRow>`
+      SELECT s.pr_number AS "prNumber"
+      FROM command_center_repository_check_signals s
+      JOIN command_center_items i ON i.id = s.item_id
+      WHERE s.repository_key = ${input.repositoryKey} AND s.space_id = ${input.spaceId}
+        AND i.status NOT IN ('done', 'canceled')
+      GROUP BY s.pr_number
+      ORDER BY MAX(s.observed_at) ASC, s.pr_number ASC
+      LIMIT ${polled.size + MAX_CLOSED_PR_LOOKUPS}
+    `;
+    const candidates = stored
+      .filter((row) => !polled.has(row.prNumber))
+      .slice(0, MAX_CLOSED_PR_LOOKUPS);
+    let retired = 0;
+    for (const candidate of candidates) {
+      const state = yield* lookupState(candidate.prNumber).pipe(Effect.option);
+      if (state._tag === "None") break;
+      if (state.value === "CLOSED" || state.value === "MERGED") {
+        retired += yield* retireActivePullRequestSignals(dependencies, {
+          repositoryKey: input.repositoryKey,
+          spaceId: input.spaceId,
+          prNumber: candidate.prNumber,
+        });
+        continue;
+      }
+      // Still open (on another page): rotate it behind PRs that have not been checked yet.
+      yield* sql`
+        UPDATE command_center_repository_check_signals SET observed_at = ${input.observedAt}
+        WHERE repository_key = ${input.repositoryKey} AND pr_number = ${candidate.prNumber}
+      `;
+    }
+    return retired;
+  });
+}
+
 export const layer = Layer.effect(
   RepositoryChecks,
   Effect.gen(function* () {
@@ -183,18 +272,19 @@ export const layer = Layer.effect(
     const commandCenter = yield* CommandCenter.CommandCenterService;
     const github = yield* GitHubCli.GitHubCli;
     const rateLimit = yield* SourceControlRateLimit.SourceControlRateLimit;
+    const retireItem: RetireItem = (input) =>
+      commandCenter
+        .updateItem({
+          itemId: ItemId.make(input.itemId),
+          spaceId: input.spaceId,
+          expectedUpdatedAt: input.expectedUpdatedAt,
+          patch: { status: "done" },
+        })
+        .pipe(Effect.asVoid);
     const record = makeRepositoryCheckRecorder({
       sql,
       createItem: commandCenter.createItem,
-      retireItem: (input) =>
-        commandCenter
-          .updateItem({
-            itemId: ItemId.make(input.itemId),
-            spaceId: input.spaceId,
-            expectedUpdatedAt: input.expectedUpdatedAt,
-            patch: { status: "done" },
-          })
-          .pipe(Effect.asVoid),
+      retireItem,
     });
 
     const poll = Effect.fn("RepositoryChecks.poll")(
@@ -332,6 +422,14 @@ export const layer = Layer.effect(
               "headRefOid,state",
             ]),
           ).pipe(Effect.mapError(() => "GitHub returned invalid current-head data."));
+          if (current.state === "CLOSED" || current.state === "MERGED") {
+            // Closed between the list read and this read: retire its signals now.
+            yield* retireActivePullRequestSignals(
+              { sql, retireItem },
+              { repositoryKey, spaceId: input.spaceId, prNumber: pr.number },
+            );
+            continue;
+          }
           if (current.state !== "OPEN" || current.headRefOid !== pr.headRefOid) continue;
           const active = yield* sql<ActiveSignalRow>`
           SELECT s.head_sha AS "headSha", s.check_name AS "checkName",
@@ -371,6 +469,30 @@ export const layer = Layer.effect(
             if (wasCreated) created += 1;
           }
         }
+        const reconcileClosed = makeClosedPullRequestReconciler({
+          sql,
+          retireItem,
+          lookupState: (prNumber) =>
+            command([
+              "pr",
+              "view",
+              String(prNumber),
+              "--repo",
+              nameWithOwner,
+              "--json",
+              "headRefOid,state",
+            ]).pipe(
+              Effect.flatMap(decodeCurrentHead),
+              Effect.map((current) => current.state),
+              Effect.mapError(() => "GitHub PR state lookup failed."),
+            ),
+        });
+        yield* reconcileClosed({
+          repositoryKey,
+          spaceId: input.spaceId,
+          polledPrNumbers: prs.map((pr) => pr.number),
+          observedAt: DateTime.formatIso(yield* DateTime.now),
+        });
         yield* rateLimit.recordSuccess({ ...rateKey, lease });
         const nextPage = rawPrs.length < MAX_OPEN_PRS || page >= MAX_PAGES ? 1 : page + 1;
         yield* sql`
