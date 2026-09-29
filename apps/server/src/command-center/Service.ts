@@ -227,6 +227,16 @@ interface RunRow {
   readonly finishedAt: string | null;
 }
 
+interface HydratedRunRow extends RunRow {
+  readonly artifactIdsJson: string;
+}
+
+interface RunArtifactIdsRow {
+  readonly runId: string;
+  readonly spaceId: string;
+  readonly artifactIdsJson: string;
+}
+
 interface ApprovalRow {
   readonly id: string;
   readonly itemId: string | null;
@@ -368,7 +378,7 @@ const decodeItemRow = Effect.fn("CommandCenter.decodeItemRow")(function* (row: I
   }).pipe(Effect.mapError((cause) => persistenceError("Stored Item is invalid.", cause)));
 });
 
-const decodeRunRow = Effect.fn("CommandCenter.decodeRunRow")(function* (row: RunRow) {
+const decodeRunRow = Effect.fn("CommandCenter.decodeRunRow")(function* (row: HydratedRunRow) {
   const route = (yield* parseJson(row.routeJson, "Run route")) as Partial<RouteDecisionType>;
   return yield* decodeRun({
     id: row.id,
@@ -382,7 +392,7 @@ const decodeRunRow = Effect.fn("CommandCenter.decodeRunRow")(function* (row: Run
     threadId: row.threadId ?? undefined,
     providerId: route.providerId ?? undefined,
     modelId: route.modelId ?? undefined,
-    artifactIds: [],
+    artifactIds: yield* parseJson(row.artifactIdsJson, "Run artifact ids"),
     createdAt: row.startedAt,
     startedAt: row.state === "queued" ? undefined : row.startedAt,
     finishedAt: row.finishedAt ?? undefined,
@@ -1050,7 +1060,41 @@ export const layer = Layer.effect(
         ORDER BY r.started_at DESC
         LIMIT 100
       `;
-      return yield* Effect.forEach(rows, decodeRunRow);
+      return yield* hydrateRunRows(rows);
+    });
+
+    const hydrateRunRows = Effect.fn("CommandCenter.hydrateRunRows")(function* (
+      rows: ReadonlyArray<RunRow>,
+    ) {
+      if (rows.length === 0) return [];
+
+      const artifactRows = yield* sql<RunArtifactIdsRow>`
+        SELECT artifact.run_id AS "runId", artifact.space_id AS "spaceId",
+          json_group_array(artifact.id) AS "artifactIdsJson"
+        FROM (
+          SELECT a.id, a.run_id, a.space_id
+          FROM command_center_artifacts a
+          WHERE ${sql.in(
+            "a.run_id",
+            rows.map((row) => row.id),
+          )}
+          ORDER BY a.run_id, a.space_id, a.created_at, a.id
+        ) artifact
+        GROUP BY artifact.run_id, artifact.space_id
+      `;
+      const artifactIdsByRunAndSpace = new Map<string, Map<string, string>>();
+      for (const artifactRow of artifactRows) {
+        const bySpace = artifactIdsByRunAndSpace.get(artifactRow.runId) ?? new Map();
+        bySpace.set(artifactRow.spaceId, artifactRow.artifactIdsJson);
+        artifactIdsByRunAndSpace.set(artifactRow.runId, bySpace);
+      }
+
+      return yield* Effect.forEach(rows, (row) =>
+        decodeRunRow({
+          ...row,
+          artifactIdsJson: artifactIdsByRunAndSpace.get(row.id)?.get(row.spaceId) ?? "[]",
+        }),
+      );
     });
 
     const hydrateCommandReceiptRun = Effect.fn("CommandCenter.hydrateCommandReceiptRun")(function* (
@@ -1076,7 +1120,10 @@ export const layer = Layer.effect(
         Effect.flatMap(decodeRouteDecision),
         Effect.mapError((cause) => persistenceError("Stored Run route is invalid.", cause)),
       );
-      const run = yield* decodeRunRow(row);
+      const run = (yield* hydrateRunRows([row]))[0];
+      if (run === undefined) {
+        return yield* persistenceError("Stored command receipt is missing its canonical Run.");
+      }
       if (
         row.commandId !== commandId ||
         run.commandId !== receipt.run.commandId ||
