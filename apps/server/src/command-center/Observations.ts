@@ -191,6 +191,7 @@ export const make = Effect.gen(function* () {
           AND other.subject_id = ${observation.subjectId}
           AND other.metric_kind = ${observation.metric.kind}
           AND other.content_kind = ${observation.contentKind}
+          AND COALESCE(other.channel_id, '') = ${observation.channelId ?? ""}
           AND COALESCE(other.cohort_id, '') = ${observation.cohortId ?? ""}
           AND COALESCE(other.content_id, '') = ${observation.contentId ?? ""}
           AND other.collection_method != ${observation.collectionMethod}
