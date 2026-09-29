@@ -1,10 +1,13 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ItemId, SpaceId } from "@command-center/core";
 import { expect, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { make as makeInbox } from "./Inbox.ts";
@@ -585,4 +588,59 @@ it.effect(
       ).toBe("conflict");
       expect((yield* plan.get({ spaceId, planId })).version).toBe(1);
     }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("approves once a snooze elapses but rejects while it is still snoozed", () =>
+  Effect.gen(function* () {
+    const { plan, evidence, inbox } = yield* setup(true);
+    const created = yield* inbox.createCandidate(candidate(evidence), actor);
+    const accepted = yield* inbox.acceptCandidate(
+      {
+        spaceId,
+        itemId,
+        mutationId: "accept-a",
+        expectedVersion: created.detail.state.version,
+        candidateRevisionId: created.detail.revisions[0]!.id,
+      },
+      actor,
+    );
+    const wakeAt = DateTime.formatIso(
+      DateTime.makeUnsafe((yield* Clock.currentTimeMillis) + 60 * 60 * 1000),
+    );
+    const snoozed = yield* inbox.snooze(
+      {
+        spaceId,
+        itemId,
+        mutationId: "snooze-a",
+        expectedVersion: accepted.detail.state.version,
+        wakeAt,
+      },
+      actor,
+    );
+    expect(snoozed.detail.state.lifecycle).toBe("snoozed");
+    const request = {
+      spaceId,
+      itemId,
+      currentRevisionId: accepted.detail.currentRevision!.id,
+      expectedInboxVersion: snoozed.detail.state.version,
+      expectedPlanVersion: 1,
+    };
+    const early = yield* Effect.flip(
+      inbox.approveAdjustment({ ...request, mutationId: "approve-while-snoozed" }, actor),
+    );
+    expect(early.reason).toBe("conflict");
+    expect((yield* plan.get({ spaceId, planId })).version).toBe(1);
+
+    yield* TestClock.adjust("2 hours");
+    const woken = yield* inbox.detail({ spaceId: spaceId as never, itemId: itemId as never });
+    expect(woken.state.lifecycle).toBe("open");
+    expect(woken.state.version).toBe(snoozed.detail.state.version);
+    const approved = yield* inbox.approveAdjustment(
+      { ...request, mutationId: "approve-after-wake" },
+      actor,
+    );
+    expect(approved.duplicate).toBe(false);
+    expect(approved.detail.state.version).toBe(snoozed.detail.state.version + 1);
+    expect((yield* plan.get({ spaceId, planId })).version).toBe(2);
+  }).pipe(Effect.provide(testLayer)),
 );

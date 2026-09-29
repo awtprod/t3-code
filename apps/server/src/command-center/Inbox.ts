@@ -1118,7 +1118,8 @@ export const make = Effect.gen(function* () {
               "The proposal has unresolved changes or a pending candidate.",
             );
           }
-          if (state.lifecycle !== "open") {
+          // An elapsed snooze reads as open everywhere else, so approval uses the same view.
+          if (currentState.lifecycle !== "open") {
             return yield* conflictError("Only an open Inbox item can be approved.");
           }
           const revisionRow = yield* loadRevision(input.currentRevisionId, input.itemId);
