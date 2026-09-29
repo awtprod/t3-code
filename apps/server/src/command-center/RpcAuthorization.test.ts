@@ -38,6 +38,15 @@ describe("Command Center RPC authorization", () => {
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.itemsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxDetail)).toBe(AuthCommandCenterReadScope);
+    for (const method of [
+      COMMAND_CENTER_WS_METHODS.sprintPlanList,
+      COMMAND_CENTER_WS_METHODS.sprintPlanPreviewImport,
+      COMMAND_CENTER_WS_METHODS.sprintPlanGetCurrent,
+      COMMAND_CENTER_WS_METHODS.sprintPlanGetOriginal,
+      COMMAND_CENTER_WS_METHODS.sprintPlanListHistory,
+    ]) {
+      expect(scopes.get(method)).toBe(AuthCommandCenterReadScope);
+    }
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.runsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationDefinitionGet)).toBe(
@@ -68,6 +77,9 @@ describe("Command Center RPC authorization", () => {
       COMMAND_CENTER_WS_METHODS.inboxUnsnooze,
       COMMAND_CENTER_WS_METHODS.inboxDismiss,
       COMMAND_CENTER_WS_METHODS.inboxReopen,
+      COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport,
+      COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask,
+      COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict,
     ]) {
       expect(scopes.get(method)).toBe(AuthCommandCenterOperateScope);
     }

@@ -167,6 +167,66 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.itemId]),
       },
     }),
+    sprintPlans: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:sprint-plans",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanList,
+      staleTimeMs: 1_000,
+    }),
+    previewSprintPlanImport: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:sprint-plan-preview-import",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanPreviewImport,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.planId]),
+      },
+    }),
+    applySprintPlanImport: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:sprint-plan-apply-import",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.planId]),
+      },
+    }),
+    sprintPlanCurrent: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:sprint-plan-current",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanGetCurrent,
+      staleTimeMs: 1_000,
+    }),
+    sprintPlanOriginal: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:sprint-plan-original",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanGetOriginal,
+      staleTimeMs: 5_000,
+    }),
+    patchSprintPlanTask: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:sprint-plan-patch-task",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.planId]),
+      },
+    }),
+    resolveSprintPlanDateConflict: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:sprint-plan-resolve-date-conflict",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.planId]),
+      },
+    }),
+    sprintPlanHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:sprint-plan-history",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanListHistory,
+      staleTimeMs: 1_000,
+    }),
     createItem: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:create-item",
       tag: COMMAND_CENTER_WS_METHODS.itemCreate,
