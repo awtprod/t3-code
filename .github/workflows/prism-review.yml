@@ -48,7 +48,7 @@ jobs:
           PRISM_DISTRIBUTED_MAX_WORKERS: "3"
           PRISM_GITHUB_TOKEN: ${{ github.token }}
           PRISM_OPENAI_BASE_URL: http://127.0.0.1:8317/v1
-          PRISM_MODEL: glm-5.3-flash
+          PRISM_MODEL: gpt-6.1-sol
           PRISM_REASONING_EFFORT: high
           PRISM_PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
         run: node "$HOME/prism-review/scripts/run-local-action.mjs"
@@ -93,7 +93,7 @@ jobs:
           PRISM_GITHUB_TOKEN: ${{ github.token }}
           PRISM_OPENAI_API_KEY: ${{ secrets.PRISM_REVIEW_API_KEY }}
           PRISM_OPENAI_BASE_URL: http://127.0.0.1:8317/v1
-          PRISM_MODEL: glm-5.3-flash
+          PRISM_MODEL: gpt-6.1-sol
           PRISM_REASONING_EFFORT: high
           PRISM_PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
         run: node "$HOME/prism-review/scripts/run-local-action.mjs"
@@ -142,7 +142,7 @@ jobs:
           PRISM_GITHUB_TOKEN: ${{ github.token }}
           PRISM_OPENAI_API_KEY: ${{ secrets.PRISM_REVIEW_API_KEY }}
           PRISM_OPENAI_BASE_URL: http://127.0.0.1:8317/v1
-          PRISM_MODEL: glm-5.3-flash
+          PRISM_MODEL: gpt-6.1-sol
           PRISM_REASONING_EFFORT: high
           PRISM_PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
         run: node "$HOME/prism-review/scripts/run-local-action.mjs"
