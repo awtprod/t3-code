@@ -1,6 +1,7 @@
 name: Deploy T3 Connect relay
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -17,6 +18,8 @@ concurrency:
 jobs:
   deploy_relay:
     name: Deploy production relay
+    # Repository-level opt-in: unset or false keeps forks from provisioning infrastructure.
+    if: ${{ vars.ENABLE_RELAY_DEPLOY == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     environment:
