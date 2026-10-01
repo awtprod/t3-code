@@ -114,11 +114,22 @@ the URL manually.
 
 ### Deployment CI
 
-The relay is versioned separately from client releases. `.github/workflows/deploy-relay.yml` deploys
-the shared Alchemy `prod` stage on every push to `main`. Stable and nightly release builds both
-resolve their static public config from the same
-`production` GitHub environment. Pull requests do not deploy relay stages. Developers can
-deploy personal non-production stages locally with any stage name other than `prod`.
+The relay is versioned separately from client releases. Deployment through
+`.github/workflows/deploy-relay.yml` is **disabled by default**. Local or Tailscale-only forks do not
+need to deploy a relay or configure its infrastructure credentials.
+
+To intentionally operate a production relay, first complete the deployment setup below, then set
+the **repository-level Actions variable** `ENABLE_RELAY_DEPLOY` to `true`. An environment-level
+variable cannot enable the job because its guard is evaluated before the `production` environment
+is entered. With this opt-in, pushes to `main` deploy the shared Alchemy `prod` stage. The workflow
+can also be run manually with **Run workflow**, selecting `main`; manual runs require the same
+opt-in and other branches are skipped. Leave the variable unset or set it to `false` to disable
+both automatic and manual workflow deployment. The local deployment commands above remain
+available for intentional setup.
+
+Stable and nightly release builds both resolve their static public config from the same
+`production` GitHub environment. Pull requests do not deploy relay stages. Developers can deploy
+personal non-production stages locally with any stage name other than `prod`.
 
 The repository must define these Actions variables shared by relay deployments:
 
