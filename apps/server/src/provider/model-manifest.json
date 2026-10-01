@@ -403,7 +403,7 @@
         {
           "slug": "claude-sonnet-5-5",
           "name": "Claude Sonnet 5.5",
-          "aliases": ["sonnet", "sonnet-5.5", "claude-sonnet-5.5"],
+          "aliases": ["sonnet-5.5", "claude-sonnet-5.5"],
           "status": "current",
           "badge": "new",
           "profile": "sonnet-5",
@@ -412,7 +412,7 @@
         {
           "slug": "claude-sonnet-5",
           "name": "Claude Sonnet 5",
-          "aliases": ["sonnet-5", "claude-sonnet-5.0", "claude-sonnet-5-0"],
+          "aliases": ["sonnet", "sonnet-5", "claude-sonnet-5.0", "claude-sonnet-5-0"],
           "status": "current",
           "profile": "sonnet-5"
         },

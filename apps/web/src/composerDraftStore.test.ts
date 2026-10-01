@@ -2187,6 +2187,36 @@ describe("composerDraftStore model seed migration", () => {
     await useComposerDraftStore.persist.clearStorage();
   });
 
+  it.each([
+    ["sonnet", "claude-sonnet-5"],
+    ["sonnet-5.5", "claude-sonnet-5-5"],
+    ["claude-sonnet-5.5", "claude-sonnet-5-5"],
+  ])("normalizes the legacy Claude alias %s without changing its model", (alias, canonical) => {
+    const merge = useComposerDraftStore.persist.getOptions().merge;
+    if (!merge) throw new Error("Expected composer draft persistence merge");
+    const hydrated = merge(
+      {
+        draftsByThreadId: {
+          [typedThreadId]: {
+            prompt: "Continue this draft",
+            provider: "claudeAgent",
+            model: alias,
+          },
+        },
+        stickyProvider: "claudeAgent",
+        stickyModel: alias,
+      },
+      useComposerDraftStore.getState(),
+    );
+
+    expect(
+      hydrated.draftsByThreadKey[typedThreadId]?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
+    ).toEqual(modelSelection(CLAUDE_AGENT_DRIVER, canonical));
+    expect(hydrated.stickyModelSelectionByProvider[CLAUDE_AGENT_INSTANCE]).toEqual(
+      modelSelection(CLAUDE_AGENT_DRIVER, canonical),
+    );
+  });
+
   it.each([1, 2])(
     "keeps the legacy sticky Codex selection when v%s storage omitted the provider",
     async (version) => {
