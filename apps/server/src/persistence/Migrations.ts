@@ -211,22 +211,41 @@ export const findMigrationSequenceViolations = (
   registeredIds: ReadonlyArray<number>,
   retiredIds: ReadonlyArray<number> = RETIRED_MIGRATION_IDS,
 ): ReadonlyArray<string> => {
-  const retired = new Set(retiredIds);
   const violations: Array<string> = [];
+  const invalid = registeredIds.filter((id) => !Number.isSafeInteger(id) || id < 1);
+  if (invalid.length > 0) {
+    return invalid.map((id) => `migration ID ${String(id)} is not a positive integer`);
+  }
+  const retired = new Set(retiredIds);
   for (let index = 1; index < registeredIds.length; index++) {
     const previous = registeredIds[index - 1]!;
     const current = registeredIds[index]!;
     if (current <= previous) {
       violations.push(`migration ${current} is registered after ${previous}`);
-      continue;
-    }
-    for (let missing = previous + 1; missing < current; missing++) {
-      if (retired.has(missing)) continue;
-      violations.push(`migration ${missing} is missing between ${previous} and ${current}`);
     }
   }
   for (const id of registeredIds) {
     if (retired.has(id)) violations.push(`migration ${id} reuses a retired ID`);
+  }
+  // Gaps are judged on the sorted IDs so an out-of-order entry is reported
+  // once (above), not again as "missing". Ranges keep a typo'd huge ID cheap.
+  const sorted = [...new Set(registeredIds)].toSorted((left, right) => left - right);
+  let expected = 1;
+  for (const id of sorted) {
+    let start = expected;
+    while (start < id) {
+      while (start < id && retired.has(start)) start++;
+      if (start >= id) break;
+      let end = start;
+      while (end + 1 < id && !retired.has(end + 1)) end++;
+      violations.push(
+        start === end
+          ? `migration ${start} is missing before ${id}`
+          : `migrations ${start}-${end} are missing before ${id}`,
+      );
+      start = end + 1;
+    }
+    expected = id + 1;
   }
   return violations;
 };

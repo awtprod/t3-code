@@ -28,35 +28,47 @@ const seedApplied = (ids: ReadonlyArray<number>) =>
   });
 
 describe("findMigrationSequenceViolations", () => {
-  it("accepts the registered migrations: strictly increasing, gaps only at retired IDs", () => {
+  const prefix = (last: number) =>
+    Array.from({ length: last }, (_, index) => index + 1).filter((id) => id < 57 || id > 60);
+
+  it("accepts the registered migrations: 1.., strictly increasing, gaps only at retired IDs", () => {
     assert.deepStrictEqual(findMigrationSequenceViolations(migrationEntries.map(([id]) => id)), []);
   });
 
   it("allows the retired 57-60 gap", () => {
-    assert.deepStrictEqual(findMigrationSequenceViolations([55, 56, 61, 62]), []);
+    assert.deepStrictEqual(findMigrationSequenceViolations(prefix(62)), []);
   });
 
   it("rejects a migration registered before a lower-numbered one has landed", () => {
-    assert.deepStrictEqual(findMigrationSequenceViolations([70, 71, 73, 74]), [
-      "migration 72 is missing between 71 and 73",
+    assert.deepStrictEqual(findMigrationSequenceViolations([...prefix(71), 73, 74]), [
+      "migration 72 is missing before 73",
     ]);
-    assert.deepStrictEqual(findMigrationSequenceViolations([71, 72, 73, 77]), [
-      "migration 74 is missing between 73 and 77",
-      "migration 75 is missing between 73 and 77",
-      "migration 76 is missing between 73 and 77",
+    assert.deepStrictEqual(findMigrationSequenceViolations([...prefix(73), 77]), [
+      "migrations 74-76 are missing before 77",
     ]);
   });
 
-  it("rejects out-of-order, duplicate and retired registrations", () => {
-    assert.deepStrictEqual(findMigrationSequenceViolations([71, 73, 72]), [
-      "migration 72 is missing between 71 and 73",
+  it("reports out-of-order entries once, not as missing", () => {
+    assert.deepStrictEqual(findMigrationSequenceViolations([...prefix(71), 73, 72]), [
       "migration 72 is registered after 73",
     ]);
-    assert.deepStrictEqual(findMigrationSequenceViolations([71, 71]), [
+    assert.deepStrictEqual(findMigrationSequenceViolations([...prefix(71), 71]), [
       "migration 71 is registered after 71",
     ]);
-    assert.deepStrictEqual(findMigrationSequenceViolations([56, 58, 61]), [
+  });
+
+  it("rejects retired, missing-start, non-integer and huge typo'd IDs without hanging", () => {
+    assert.deepStrictEqual(findMigrationSequenceViolations([...prefix(56), 58, 61]), [
       "migration 58 reuses a retired ID",
+    ]);
+    assert.deepStrictEqual(findMigrationSequenceViolations([2, 3]), [
+      "migration 1 is missing before 2",
+    ]);
+    assert.deepStrictEqual(findMigrationSequenceViolations([1, Number.NaN]), [
+      "migration ID NaN is not a positive integer",
+    ]);
+    assert.deepStrictEqual(findMigrationSequenceViolations([...prefix(77), 20_261_002]), [
+      "migrations 78-20261001 are missing before 20261002",
     ]);
   });
 });

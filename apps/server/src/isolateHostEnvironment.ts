@@ -11,18 +11,23 @@
  * it explicitly.
  */
 const HOST_ENVIRONMENT_VARIABLES = [
-  "COMMAND_CENTER_HOME",
-  "COMMAND_CENTER_CONFIG_DIR",
-  "COMMAND_CENTER_GITHUB_IDENTITY",
-  "COMMAND_CENTER_GITHUB_PROVISIONING_IDENTITY",
   "T3CODE_HOME",
   "T3CODE_WEB_PUSH_SUBJECT",
-  "CC_WINDOWS_MEDIA_SSH_CONFIG",
-  "CC_WINDOWS_MEDIA_SSH_ALIAS",
+  "T3CODE_RESOURCE_MONITOR_PATH",
+  "T3_SERVICE_LAUNCHER_CONTEXT",
+  "T3_BOOT_SERVICE_UNIT",
+  "CLAUDE_CONFIG_DIR",
 ] as const;
 
-/** Every variable with this prefix configures the host's sandbox runtime. */
-const HOST_ENVIRONMENT_PREFIXES = ["T3_SANDBOX_"] as const;
+/**
+ * Every variable with one of these prefixes describes the host Command Center:
+ * its home, private config, GitHub identities and gog binary; the Windows
+ * media bridge; and the sandbox runtime.
+ */
+const HOST_ENVIRONMENT_PREFIXES = ["COMMAND_CENTER_", "CC_WINDOWS_MEDIA_", "T3_SANDBOX_"] as const;
+
+/** Set once the host variables are cleared, so a test can prove the setup ran. */
+export const HOST_ENVIRONMENT_ISOLATED = "T3_SERVER_TEST_HOST_ENVIRONMENT_ISOLATED";
 
 for (const name of HOST_ENVIRONMENT_VARIABLES) {
   delete process.env[name];
@@ -32,3 +37,4 @@ for (const name of Object.keys(process.env)) {
     delete process.env[name];
   }
 }
+process.env[HOST_ENVIRONMENT_ISOLATED] = "1";

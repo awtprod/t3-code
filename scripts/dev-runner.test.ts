@@ -349,6 +349,27 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
+    it.effect("keeps a config dir exported without a launcher home", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "serve",
+          baseEnv: { COMMAND_CENTER_CONFIG_DIR: "/srv/operator-config" },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: "/srv/operator-data",
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+          tailscaleServe: undefined,
+        });
+
+        assert.equal(env.COMMAND_CENTER_CONFIG_DIR, "/srv/operator-config");
+      }),
+    );
+
     it.effect("strips inherited service-launcher context", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({

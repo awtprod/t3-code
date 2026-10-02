@@ -1085,24 +1085,25 @@ function InboxDetailPane({
   const draftApprovalBlockedReason =
     !isGmailDraft || currentRevision === undefined
       ? null
-      : !canApprove
-        ? "This session lacks approval authority."
-        : detail.state.lifecycle !== "open"
-          ? "Reopen this item before approving its draft."
-          : detail.item.status === "done" || detail.item.status === "canceled"
-            ? "This Item is closed."
-            : currentDraftReceipt?.status === "approved" &&
-                currentDraftReceipt.expectedVersion !== detail.state.version
-              ? "This Item changed after draft approval. Review the latest proposal."
-              : detail.state.unresolvedChangeRequestCount > 0 || detail.state.candidateCount > 0
-                ? "Resolve change requests and review pending candidates first."
-                : currentRevision.evidence.source !== "command-center-item" ||
-                    currentRevision.evidence.subjectId !== detail.item.id ||
-                    currentRevision.evidence.version !== detail.item.updatedAt
-                  ? "This draft needs current local Item evidence before approval."
-                  : currentRevision.payload.target.kind !== detail.state.subject.kind ||
-                      currentRevision.payload.target.id !== detail.state.subject.id
-                    ? "The draft target no longer matches this Inbox subject."
+      : detail.state.lifecycle !== "open"
+        ? "Reopen this item before approving its draft."
+        : detail.item.status === "done" || detail.item.status === "canceled"
+          ? "This Item is closed."
+          : currentDraftReceipt?.status === "approved" &&
+              currentDraftReceipt.expectedVersion !== detail.state.version
+            ? "This Item changed after draft approval. Review the latest proposal."
+            : detail.state.unresolvedChangeRequestCount > 0 || detail.state.candidateCount > 0
+              ? "Resolve change requests and review pending candidates first."
+              : currentRevision.evidence.source !== "command-center-item" ||
+                  currentRevision.evidence.subjectId !== detail.item.id ||
+                  currentRevision.evidence.version !== detail.item.updatedAt
+                ? "This draft needs current local Item evidence before approval."
+                : currentRevision.payload.target.kind !== detail.state.subject.kind ||
+                    currentRevision.payload.target.id !== detail.state.subject.id
+                  ? "The draft target no longer matches this Inbox subject."
+                  : !canApprove &&
+                      (currentDraftReceipt === null || currentDraftReceipt.status === "approved")
+                    ? "This session lacks approval authority."
                     : null;
   const approveDraft = async () => {
     if (
