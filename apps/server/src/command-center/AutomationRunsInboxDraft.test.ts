@@ -309,17 +309,22 @@ bothClocks(
       const runs = yield* AutomationRuns;
       // Three clicks race the first approval through the runtime and audit.
       const racing = yield* Effect.all(
-        [1, 2, 3].map(() => Effect.exit(runs.approveInboxDraft(approval(), "andrew"))),
+        [1, 2, 3].map(() =>
+          runs.approveInboxDraft(approval(), "andrew").pipe(
+            Effect.match({
+              onFailure: (error) => ({ ok: false as const, error }),
+              onSuccess: (value) => ({ ok: true as const, value }),
+            }),
+          ),
+        ),
         { concurrency: "unbounded" },
       );
-      const succeeded = racing.flatMap((exit) => (exit._tag === "Success" ? [exit.value] : []));
+      const succeeded = racing.flatMap((result) => (result.ok ? [result.value] : []));
       expect(succeeded.length).toBeGreaterThan(0);
-      for (const exit of racing) {
-        if (exit._tag === "Failure") {
-          // A loser may only see the approval as already in progress.
-          expect(String(exit.cause)).not.toContain("already bound to different content");
-          expect(String(exit.cause)).toMatch(/conflict|already|not waiting/iu);
-        }
+      for (const result of racing) {
+        // A losing click may only be refused as already in progress, never by
+        // a persistence (audit) failure.
+        if (!result.ok) expect(result.error.reason).toBe("conflict");
       }
       // A click that joins an approval another click is completing may see
       // the receipt before the draft exists; none may see a second draft.

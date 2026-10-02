@@ -64,7 +64,7 @@ function recoveryTestLayer(input: {
   const commandCenter = CommandCenterService.of({
     queryAutomations: () => Effect.succeed({ automations: [input.automation] }),
     queryApprovals: () => Effect.succeed({ approvals: [] }),
-    recordAutomationEvent: () => Effect.void,
+    recordAutomationEvent: () => Effect.succeed({ projected: true }),
     getAutomationApprovalBinding: () => Effect.succeed(null),
     ensureAutomationApproval: () => Effect.die("approval nodes are not used in this test"),
   } as unknown as CommandCenterServiceShape);

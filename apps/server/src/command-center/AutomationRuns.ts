@@ -220,10 +220,8 @@ export const layer = Layer.effect(
     const sql = yield* SqlClient.SqlClient;
     const inspectAgentRun = makeAutomationAgentRunInspector(sql);
 
-    const record = Effect.fn("AutomationRuns.record")(function* (
-      snapshot: AutomationRuntime.AutomationExecutionSnapshot,
-    ) {
-      yield* commandCenter.recordAutomationEvent({
+    const recordSnapshot = (snapshot: AutomationRuntime.AutomationExecutionSnapshot) =>
+      commandCenter.recordAutomationEvent({
         executionId: snapshot.id,
         automationId: snapshot.automationId,
         spaceId: snapshot.spaceId,
@@ -243,6 +241,15 @@ export const layer = Layer.effect(
         finishedAt: snapshot.finishedAt,
         ...(snapshot.error === null ? {} : { error: snapshot.error }),
       });
+
+    const record = Effect.fn("AutomationRuns.record")(function* (
+      snapshot: AutomationRuntime.AutomationExecutionSnapshot,
+    ) {
+      // A superseded snapshot is still audited, but it must not drive the
+      // Run projection or approval gates: whoever wrote the newer runtime row
+      // records that row.
+      const { projected } = yield* recordSnapshot(snapshot);
+      if (!projected) return;
       if (snapshot.state === "waiting_approval") {
         const waiting = snapshot.checkpoints.filter(
           (checkpoint) => checkpoint.state === "waiting_approval" && checkpoint.resumeKey !== null,

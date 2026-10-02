@@ -187,13 +187,10 @@ it.effect("keeps history written with the older per-state identity and stays ver
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("ignores a snapshot older than the persisted runtime execution", () =>
+const seedRuntimeExecution = (state: string, updatedAt: string) =>
   Effect.gen(function* () {
-    const service = yield* CommandCenterService;
     const sql = yield* SqlClient.SqlClient;
-    yield* service.queryConnections({ spaceId: space.id });
-    // The durable runtime has already moved on to a later transition.
-    const later = "2026-09-28T00:00:05.000Z";
+    yield* (yield* CommandCenterService).queryConnections({ spaceId: space.id });
     yield* sql`
       INSERT INTO command_center_automation_executions (
         id, automation_id, idempotency_key, space_id, config_commit_sha, definition_digest,
@@ -201,20 +198,51 @@ it.effect("ignores a snapshot older than the persisted runtime execution", () =>
       ) VALUES (
         'execution-a', 'automation-a', 'key-a', ${space.id},
         '1234567890abcdef1234567890abcdef12345678', ${`sha256:${"c".repeat(64)}`},
-        '{}', '{}', 'succeeded', ${fixtureTime}, ${later}, ${later}
+        '{}', '{}', ${state}, ${fixtureTime}, ${updatedAt}, NULL
       )
     `;
-    yield* service.recordAutomationEvent(
-      transition({ state: "succeeded", approvalState: "succeeded", updatedAt: later }),
+  });
+
+const projectedState = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql<{ readonly state: string }>`
+    SELECT state FROM command_center_runs WHERE id = 'execution-a'
+  `;
+  return rows[0]?.state;
+});
+
+it.effect("audits a superseded snapshot but never projects it over the current run", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    // The durable runtime already moved on to a later transition.
+    const later = "2026-09-28T00:00:05.000Z";
+    yield* seedRuntimeExecution("waiting_approval", later);
+    const current = yield* service.recordAutomationEvent(
+      transition({ state: "waiting_approval", updatedAt: later }),
     );
     // A slow replay of the earlier queued snapshot arrives afterwards.
-    yield* service.recordAutomationEvent(transition());
-    const run = yield* sql<{ readonly state: string }>`
-      SELECT state FROM command_center_runs WHERE id = 'execution-a'
-    `;
-    expect(run[0]?.state).toBe("succeeded");
+    const replay = yield* service.recordAutomationEvent(transition());
+    expect(current).toEqual({ projected: true });
+    expect(replay).toEqual({ projected: false });
+    expect(yield* projectedState).toBe("waiting_approval");
+    // Both transitions really happened; neither is dropped from history.
     expect((yield* executionEvents).map((event) => event.eventId.split(":")[2])).toEqual([
-      "succeeded",
+      "waiting_approval",
+      "queued",
     ]);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("never projects an earlier snapshot from the same millisecond", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    // Resume, run and finish all stamped with one instant.
+    yield* seedRuntimeExecution("waiting_approval", fixtureTime);
+    yield* service.recordAutomationEvent(
+      transition({ state: "waiting_approval", approvalState: "succeeded" }),
+    );
+    const earlier = yield* service.recordAutomationEvent(transition());
+    expect(earlier).toEqual({ projected: false });
+    expect(yield* projectedState).toBe("waiting_approval");
   }).pipe(Effect.provide(testLayer)),
 );

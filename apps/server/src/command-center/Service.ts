@@ -647,7 +647,10 @@ export interface CommandCenterServiceShape {
     }>;
     readonly finishedAt: string | null;
     readonly error?: string;
-  }) => Effect.Effect<void, CommandCenterError>;
+  }) => Effect.Effect<
+    { readonly projected: boolean },
+    CommandCenterError
+  > /* projected: false when the snapshot is no longer the current runtime row */;
   readonly recordAutomationDefinitionCommit: (input: {
     readonly operation: "created" | "updated";
     readonly requestId?: string;
@@ -1943,20 +1946,11 @@ export const layer = Layer.effect(
           configCommitSha: input.configCommitSha,
           definitionDigest: input.definitionDigest,
         };
-        yield* sql.withTransaction(
+        return yield* sql.withTransaction(
           Effect.gen(function* () {
-            // A snapshot read before a newer transition was persisted (a slow
-            // replay, a concurrent resume, a status poll) must not move the
-            // projection backwards. Its producer, or the newer transition's,
-            // records the current state.
-            const runtimeRows = yield* sql<{ readonly updatedAt: string }>`
-              SELECT updated_at AS "updatedAt"
-              FROM command_center_automation_executions
-              WHERE id = ${input.executionId}
-              LIMIT 1
-            `;
-            const current = runtimeRows[0];
-            if (current !== undefined && current.updatedAt > input.updatedAt) return;
+            // The canonical Run row must exist before its audit events (they
+            // reference it). Creating it is never a regression; updating it
+            // is guarded below.
             yield* sql`
               INSERT INTO command_center_runs (
                 id, command_id, space_id, kind, state, route_json, input_json,
@@ -1967,12 +1961,10 @@ export const layer = Layer.effect(
                 ${input.output === null ? null : stringify(input.output)}, ${input.error ?? null},
                 ${input.createdAt}, ${input.finishedAt}
               )
-              ON CONFLICT(id) DO UPDATE SET
-                state = excluded.state,
-                result_json = excluded.result_json,
-                error = excluded.error,
-                finished_at = excluded.finished_at
+              ON CONFLICT(id) DO NOTHING
             `;
+            // Audit history is append-only and keyed per transition: every
+            // observed transition is appended (an exact replay is a no-op).
             yield* appendAudit({
               eventId: `automation-execution:${input.executionId}:${input.state}:${transitionKey}`,
               actorKind: "automation",
@@ -1982,6 +1974,40 @@ export const layer = Layer.effect(
               payload: { ...input, checkpoints },
               occurredAt: input.updatedAt,
             });
+            // The canonical Run projects only the current runtime row. A
+            // snapshot taken before a newer write (a slow replay, a concurrent
+            // resume, a status poll, even in the same millisecond) must not
+            // move it backwards; whoever holds the current row records it.
+            const runtimeRows = yield* sql<{
+              readonly state: string;
+              readonly updatedAt: string;
+              readonly finishedAt: string | null;
+              readonly error: string | null;
+            }>`
+              SELECT state, updated_at AS "updatedAt", finished_at AS "finishedAt", error
+              FROM command_center_automation_executions
+              WHERE id = ${input.executionId}
+              LIMIT 1
+            `;
+            const current = runtimeRows[0];
+            if (
+              current !== undefined &&
+              (current.state !== input.state ||
+                current.updatedAt !== input.updatedAt ||
+                current.finishedAt !== input.finishedAt ||
+                current.error !== (input.error ?? null))
+            ) {
+              return { projected: false };
+            }
+            yield* sql`
+              UPDATE command_center_runs
+              SET state = ${state},
+                result_json = ${input.output === null ? null : stringify(input.output)},
+                error = ${input.error ?? null},
+                finished_at = ${input.finishedAt}
+              WHERE id = ${input.executionId}
+            `;
+            return { projected: true };
           }),
         );
       },
