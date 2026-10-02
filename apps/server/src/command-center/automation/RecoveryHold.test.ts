@@ -28,6 +28,7 @@ const harness = (env: Readonly<Record<string, string>>) => {
       AutomationRuntime,
       AutomationRuntime.of({
         reconcileActiveSlots: () => Effect.succeed({ released: 0 }),
+        now: Effect.succeed("2026-09-28T00:00:00.000Z"),
       } as unknown as AutomationRuntimeShape),
     ),
     NodeServices.layer,
@@ -71,5 +72,18 @@ const harness = (env: Readonly<Record<string, string>>) => {
       yield* coordinator.tick();
       expect(calls.recoverDue).toBe(1);
     }).pipe(Effect.provide(layer)),
+  );
+}
+
+for (const value of ["TRUE", "enabled", "hold-please"]) {
+  const { calls, layer } = harness({ [AUTOMATION_RECOVERY_HOLD_ENV]: value });
+  it.effect(
+    `treats an unrecognised hold value (${value}) as held instead of failing to start`,
+    () =>
+      Effect.gen(function* () {
+        const coordinator = yield* make;
+        yield* coordinator.tick();
+        expect(calls.recoverDue).toBe(0);
+      }).pipe(Effect.provide(layer)),
   );
 }

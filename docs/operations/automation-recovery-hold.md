@@ -2,8 +2,8 @@
 
 Before the automation audit fix (#126), approving, declining, failing or recovering an
 approval-gated automation could fail with `CommandCenterAuditReplayConflictError`. Those failures
-left durable runtime executions that a newer build will pick up on its **first recovery tick, five
-seconds after start**. An approved Inbox Gmail draft run, for example, could then create its draft
+left durable runtime executions that a newer build will pick up on its **first recovery tick,
+immediately at start**. An approved Inbox Gmail draft run, for example, could then create its draft
 for an approval that previously showed an error.
 
 This runbook keeps that from happening by surprise. A human runs every step; nothing here is
@@ -11,9 +11,24 @@ automated. All inventory commands are read-only.
 
 ## 1. Set the hold before the new build starts
 
-`COMMAND_CENTER_AUTOMATION_RECOVERY_HOLD=true` makes the recovery coordinator resume nothing. It
-logs `command-center.automation.recovery-held` at start. New runs you start yourself, and approvals
-you decide yourself, still work; only the background resumption of existing executions is held.
+With `COMMAND_CENTER_AUTOMATION_RECOVERY_HOLD=true`, no path drives an execution that was created
+before the process started:
+
+- recovery ticks;
+- a new admission that coalesces onto an existing run, such as a schedule, a webhook, a manual run,
+  or approving a new Inbox Gmail draft;
+- applying a decision to an approval;
+- opening a run in the UI.
+
+Some things still happen while the hold is set:
+
+- **Decided approvals:** an approval you decide is recorded, and its run is marked queued, but it does
+  not run until the hold is lifted.
+- **New work:** executions created after the start run normally.
+- **Bookkeeping:** active slot bookkeeping continues.
+
+Unset, `false`, `0`, `no`, `off` and `n` mean not held. Any other value holds, so a typo fails
+closed rather than releasing anything or stopping the server from starting.
 
 On the server host, as root, before installing the new release:
 
@@ -32,7 +47,9 @@ release as usual, and confirm the log line:
 journalctl -u command-center --since -5min | grep -E 'recovery-(held|coordinator-started)'
 ```
 
-The coordinator-started line must show `"held":true`, followed by a `recovery-held` warning.
+The output must include the `command-center.automation.recovery-held` warning. The log's fields are
+printed on the lines after each message, so `grep -A4 recovery-coordinator-started` shows
+`held: true`.
 
 ## 2. Inventory what recovery would touch (read-only)
 
@@ -66,6 +83,13 @@ queries = {
         WHERE e.state = 'waiting_approval' AND NOT EXISTS (
           SELECT 1 FROM command_center_approvals a
           WHERE a.id = 'automation-approval:' || e.id || ':' || c.node_id)""",
+    # Waiting on a child agent Run; resolved and driven on, once the hold lifts.
+    "waiting on agent runs": """
+        SELECT e.id, e.automation_id, c.node_id, c.resume_key, e.updated_at
+        FROM command_center_automation_executions e
+        JOIN command_center_automation_node_checkpoints c
+          ON c.execution_id = e.id AND c.state = 'waiting_external'
+        WHERE e.state = 'waiting_external'""",
     # Steps interrupted mid-run. Unsafe kinds will be failed closed, not re-run.
     "interrupted steps": """
         SELECT c.execution_id, c.node_id, c.node_kind, c.attempt_count, c.started_at
@@ -87,16 +111,18 @@ for title, sql in queries.items():
 PY
 ```
 
-All five counts at zero means there is nothing to decide: go to step 4.
+All six counts at zero means there is nothing to decide: go to step 4.
 
 ## 3. Decide each listed execution
 
 For every row, decide with the people who own that automation. None of these actions are taken
 by the build on its own while the hold is set.
 
-- **Resumable executions and decided approvals:** if the work should still happen, leave it; it
-  resumes when the hold is lifted. If not, decline the approval or, for runs past their approval,
-  record the decision to cancel before lifting the hold.
+- **Requested approvals:** declining one cancels its run.
+- **Resumable executions, decided approvals, and agent waits:** there is currently **no supported way to
+  cancel a run that is already past its approval**. If such a run must not happen, keep the hold set
+  and raise it before lifting; do not edit the database by hand. If it should still happen, leave
+  it. It resumes when the hold is lifted.
 - **Unsettled Gmail drafts:** `approved` will create the draft when resumed. `creating` and
   `uncertain` are never retried automatically; check the account's Gmail Drafts and reconcile the
   Inbox item by hand.
@@ -114,15 +140,33 @@ systemctl restart command-center
 journalctl -u command-center --since -5min | grep -E 'recovery-(held|coordinator-started|tick)'
 ```
 
-The coordinator-started line must show `"held":false`, with no `recovery-held` warning.
-`recovery-tick` lines then report what was resumed.
+There must be no `recovery-held` warning. `recovery-tick` lines then report what was resumed.
+Afterwards, list any step that was failed closed, so its external effect can be checked:
+
+```bash
+sudo -u commandcenter python3 -c "
+import sqlite3
+db = sqlite3.connect('file:/var/lib/command-center/runtime/userdata/state.sqlite?mode=ro', uri=True)
+for row in db.execute(\"SELECT id, automation_id, finished_at, error FROM command_center_automation_executions WHERE state = 'failed' AND error LIKE '%outcome is unknown%' ORDER BY finished_at\"):
+    print(row)
+"
+```
 
 ## What the runtime guarantees, and what it cannot
 
 - **One executor per step:** a live lease is exclusive, even between two resumers that share an
-  owner name. A running step renews its lease every third of the 30 s lease. If renewal fails,
-  the step is stopped and nothing it produces is committed; every commit is fenced by the lease
-  token.
+  owner name.
+  - A running step renews its lease every third of the 30 s lease. A transient renewal error is
+    retried while the lease is valid.
+  - If the lease is lost, the step is asked to stop and nothing it produces is committed; every
+    commit is fenced by the lease token.
+  - Stopping is cooperative: a call that already left the process (for example a spawned CLI
+    request) may still complete.
+- **Requests and shutdown:** a step runs on the server's lifetime, so a closed browser tab or
+  cancelled request does not interrupt it. On shutdown, in-flight steps get up to 20 s to finish.
+  A step still running after that is interrupted; on restart it is re-run if safe, or failed
+  closed. Check the "interrupted steps" inventory and avoid restarting while long unsafe steps
+  run.
 - **Not exactly-once for external effects:** a worker that is killed, or stalls past its lease,
   after an external call left the process cannot be fenced after the fact. Only kinds that are
   safe to repeat are re-run after an interruption: pure steps, reads, executors keyed by the

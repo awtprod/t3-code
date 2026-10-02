@@ -5,6 +5,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -238,6 +239,8 @@ const startInput = (target: Automation, key: string) =>
       const finished = yield* Fiber.join(running);
       expect(duringStep).toBe(1);
       expect(report._tag).toBe("Success");
+      // Committed with the time the step finished, not when it started.
+      expect(finished.finishedAt).toBe(iso(harness.ms));
       expect(finished.state).toBe("succeeded");
       expect(harness.invocations).toHaveLength(1);
     }).pipe(Effect.provide(testLayer(harness))),
@@ -295,7 +298,8 @@ const executionIdFor = (key: string) =>
         expect(harness.interrupted).toBe(1);
         // The stalled worker finishing later cannot overwrite the decision.
         yield* Deferred.succeed(harness.gate, undefined);
-        yield* Fiber.join(running);
+        const staleExit = yield* Fiber.join(running);
+        expect(staleExit._tag).toBe("Failure");
         expect((yield* runs.get({ executionId, spaceId })).state).toBe("failed");
         expect(harness.invocations).toHaveLength(1);
       }).pipe(Effect.provide(testLayer(harness))),
@@ -319,7 +323,8 @@ const executionIdFor = (key: string) =>
       yield* awaitInvocations(harness, 2);
       yield* Deferred.succeed(harness.gate, undefined);
       yield* Fiber.join(recovering);
-      yield* Fiber.join(running);
+      // The stale worker's own commit is fenced by the lease token.
+      expect((yield* Fiber.join(running))._tag).toBe("Failure");
       const finished = yield* runs.get({ executionId, spaceId });
       expect(finished.state).toBe("succeeded");
       expect(finished.checkpoints.map((checkpoint) => checkpoint.attemptCount)).toEqual([1]);
@@ -402,5 +407,46 @@ const executionIdFor = (key: string) =>
       expect(replay).toMatchObject({ id: queued.id, state: "queued" });
       expect(harness.invocations).toEqual([]);
     }).pipe(Effect.provide(testLayer(harness))),
+  );
+}
+
+{
+  const harness = freshHarness();
+  it.effect("does not resume a run stranded before a held process started, on any path", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AutomationRuntime;
+      yield* (yield* CommandCenterService).queryAutomations({ spaceId });
+      // Stranded by the previous process: queued, never driven.
+      const stranded = yield* runtime.start({
+        automationId: longSafe.id,
+        expectedSpaceId: spaceId,
+        idempotencyKey: "stranded",
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+      });
+      yield* advance(harness, 1_000);
+      // The new process starts with the operator hold set.
+      const heldRuns = Layer.fresh(automationRunsLayer).pipe(
+        Layer.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({ env: { COMMAND_CENTER_AUTOMATION_RECOVERY_HOLD: "1" } }),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const runs = yield* AutomationRuns;
+        // A new admission coalesces onto the stranded run, and a status poll
+        // reads it; neither may drive it.
+        const coalesced = yield* runs.start(startInput(longSafe, "new-admission"));
+        expect(coalesced).toMatchObject({ id: stranded.id, state: "queued" });
+        yield* runs.get({ executionId: stranded.id, spaceId });
+        yield* runs.recoverDue({ owner: "tick" });
+        expect(harness.invocations).toEqual([]);
+        // Work started after the process came up still runs.
+        const fresh = yield* runs.start(startInput(longUnsafe, "after-start"));
+        expect(fresh.state).toBe("succeeded");
+        expect(harness.invocations).toEqual([`${fresh.id}:work`]);
+      }).pipe(Effect.provide(heldRuns));
+    }).pipe(Effect.provide(testLayer(harness, { invariants: false }))),
   );
 }

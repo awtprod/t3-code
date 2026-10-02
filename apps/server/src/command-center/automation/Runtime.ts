@@ -4,6 +4,7 @@ import {
   type AutomationNode as AutomationNodeType,
 } from "@command-center/core";
 import * as NodeCrypto from "node:crypto";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -238,6 +239,8 @@ export interface AutomationRuntimeShape {
   readonly start: (
     input: StartAutomationExecutionInput,
   ) => Effect.Effect<AutomationExecutionSnapshot, RuntimeFailure>;
+  /** The runtime's clock: the same source as execution timestamps. */
+  readonly now: Effect.Effect<string>;
   readonly get: (executionId: string) => Effect.Effect<AutomationExecutionSnapshot, RuntimeFailure>;
   readonly listRecoverable: (input?: {
     readonly limit?: number;
@@ -383,6 +386,24 @@ const decodeAutomation = Schema.decodeUnknownEffect(Automation);
 const decodeStartAutomationExecution = Schema.decodeUnknownEffect(StartAutomationExecution);
 const isCanonicalFailure = Schema.is(CanonicalFailure);
 const isFailureResolutionScope = Schema.is(FailureResolutionScope);
+
+/**
+ * Operator hold for automation recovery (default off). While set, executions
+ * created before this process started are not resumed by any path: recovery
+ * ticks, new admissions that coalesce onto them, or approval application.
+ * See docs/operations/automation-recovery-hold.md.
+ */
+export const AUTOMATION_RECOVERY_HOLD_ENV = "COMMAND_CENTER_AUTOMATION_RECOVERY_HOLD";
+
+/** Unset or false-like means not held; any other value holds (fails closed). */
+export const readAutomationRecoveryHold = Effect.gen(function* () {
+  const raw = yield* Config.string(AUTOMATION_RECOVERY_HOLD_ENV).pipe(
+    Config.withDefault(""),
+    Effect.orElseSucceed(() => "true"),
+  );
+  const value = raw.trim().toLowerCase();
+  return value !== "" && !["0", "false", "no", "off", "n"].includes(value);
+});
 
 /** Lease length for one automation drive; renewed while a step executes. */
 export const AUTOMATION_LEASE_TTL_MS = 30_000;
@@ -594,6 +615,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     AUTOMATION_LEASE_TTL_MS,
     3_600_000,
   );
+  const leaseRenewEveryMs = Math.max(1_000, Math.floor(leaseTtlMs / 3));
 
   const readExecutionRow = Effect.fn("AutomationRuntime.readExecutionRow")(function* (
     executionId: string,
@@ -1115,7 +1137,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     const expiresAt = addMilliseconds(now, ttlMs);
     const renewed = yield* sql<{ readonly generation: number }>`
       UPDATE command_center_automation_executions
-      SET lease_expires_at = ${expiresAt}, updated_at = ${now}
+      SET lease_expires_at = ${expiresAt}
       WHERE id = ${input.executionId} AND lease_owner = ${input.owner}
         AND lease_token = ${input.token} AND lease_expires_at > ${now}
         AND state NOT IN ('succeeded', 'failed', 'canceled')
@@ -1441,7 +1463,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   const advance = Effect.fn("AutomationRuntime.advance")(function* (
     input: AutomationLeaseCommandInput,
   ) {
-    const now = yield* dependencies.now;
+    let now = yield* dependencies.now;
     const execution = yield* readExecutionRow(input.executionId);
     yield* assertLease(execution, input, now);
     if (TERMINAL_EXECUTION_STATES.has(execution.state)) return yield* get(execution.id);
@@ -1645,6 +1667,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
         error:
           `Step '${node.id}' (${node.kind}) was interrupted while running and its outcome is unknown; ` +
           "it was not run again. Reconcile it manually before retrying.",
+        failure: { canonicalCode: "node-outcome-unknown", resource: node.kind, subject: node.id },
       };
     } else {
       const context = executorInput(execution, definition, node, checkpoint, checkpoints, runInput);
@@ -1665,13 +1688,40 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
       // Keep the lease while the step runs so recovery does not start a second
       // copy. If renewal fails the lease is gone: stop the step and commit
       // nothing (every commit is fenced by the lease token anyway).
+      // A transient renewal error (e.g. a busy database) is retried while the
+      // lease is still valid; only a lost lease, or reaching its expiry, stops
+      // the step.
       const heartbeat = Effect.gen(function* () {
+        let expiresAt = execution.leaseExpiresAt ?? now;
         while (true) {
-          yield* Effect.sleep(Duration.millis(Math.floor(leaseTtlMs / 3)));
-          yield* renewLease({ ...input, ttlMs: leaseTtlMs });
+          yield* Effect.sleep(Duration.millis(leaseRenewEveryMs));
+          const renewed = yield* renewLease({ ...input, ttlMs: leaseTtlMs }).pipe(
+            Effect.map((lease) => lease.expiresAt),
+            Effect.catch((error) =>
+              error._tag === "AutomationRuntimeError" && error.code === "lease-lost"
+                ? Effect.fail(error)
+                : Effect.gen(function* () {
+                    const current = yield* dependencies.now;
+                    if (addMilliseconds(current, leaseRenewEveryMs) >= expiresAt) {
+                      return yield* runtimeError(
+                        "lease-lost",
+                        "The automation execution lease could not be renewed before it expired.",
+                      );
+                    }
+                    yield* Effect.logWarning("command-center.automation.lease-renew-retry", {
+                      executionId: input.executionId,
+                      cause: error,
+                    });
+                    return expiresAt;
+                  }),
+            ),
+          );
+          expiresAt = renewed;
         }
       });
       outcome = yield* Effect.raceFirst(execute, heartbeat);
+      // Commit with the time the step finished, not when it started.
+      now = yield* dependencies.now;
     }
 
     switch (outcome.type) {
@@ -2025,6 +2075,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   });
 
   return AutomationRuntime.of({
+    now: dependencies.now,
     start,
     get,
     listRecoverable,

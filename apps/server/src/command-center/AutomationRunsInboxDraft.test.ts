@@ -9,6 +9,7 @@ import {
 } from "@command-center/core";
 import { expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -94,6 +95,8 @@ interface FakeState {
   resolutions: number;
   failNextCreate: boolean;
   hangNextCreate: boolean;
+  /** Released by the test to let a hung Gmail call finish. */
+  readonly hangGate: Deferred.Deferred<void>;
   readonly calls: Array<{
     readonly method: string;
     readonly request: unknown;
@@ -114,7 +117,13 @@ const makeFake = (state: FakeState): GoogleReadConnectorShape => {
     state.calls.push({ method: "createDraft", request, expectedAccountAlias });
     if (state.hangNextCreate) {
       state.hangNextCreate = false;
-      return Effect.never;
+      return Deferred.await(state.hangGate).pipe(
+        Effect.as({
+          operation: "gmail.draft.create" as const,
+          draftId: "draft-late",
+          messageId: "message-late",
+        }),
+      );
     }
     if (state.failNextCreate) {
       state.failNextCreate = false;
@@ -272,6 +281,7 @@ const freshState = (): FakeState => ({
   resolutions: 0,
   failNextCreate: false,
   hangNextCreate: false,
+  hangGate: Deferred.makeUnsafe<void>(),
   calls: [],
 });
 
@@ -461,14 +471,14 @@ const awaitGmailCall = <A, E>(state: FakeState, fiber: Fiber.Fiber<A, E>) =>
   });
 
 bothClocks(
-  "an approval interrupted inside the Gmail call is never drafted again by retries or restart recovery",
+  "an approval abandoned during the Gmail call, then a worker crash, never drafts twice",
   (state, layer) =>
     Effect.gen(function* () {
       yield* seed;
       state.hangNextCreate = true;
       const runs = yield* AutomationRuns;
-      // The connector never answers and the approving request is abandoned
-      // (client gone, process killed) while Gmail is in flight.
+      // Gmail is slow to answer and the approving request is abandoned (client
+      // gone). The drive is detached from the request, so the call continues.
       const inFlight = yield* runs.approveInboxDraft(approval(), "andrew").pipe(Effect.forkChild);
       yield* awaitGmailCall(state, inFlight);
       yield* Fiber.interrupt(inFlight);
@@ -479,7 +489,8 @@ bothClocks(
       expect(again.reason).toBe("conflict");
       expect(again.message).not.toContain("already bound to different content");
 
-      // The worker dies; after restart, recovery re-runs the draft node.
+      // The worker then dies mid-call; after restart, recovery re-runs the
+      // draft node, which refuses the claimed receipt instead of calling Gmail.
       const executionId = yield* crashBeforeDraftCheckpoint;
       const report = yield* runs.recoverDue({ owner: "restarted-worker" });
       expect(report).toMatchObject({ recovered: 1, failures: [] });
@@ -487,6 +498,14 @@ bothClocks(
       const recovered = yield* runs.get({ executionId, spaceId });
       expect(["waiting_retry", "failed"]).toContain(recovered.state);
       expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId }))?.status).toBe("creating");
+
+      // The first call finally answers: the stale worker's runtime commit is
+      // fenced, but the receipt records the draft that really exists.
+      yield* Deferred.succeed(state.hangGate, undefined);
+      for (let spin = 0; spin < 2_000; spin++) yield* Effect.yieldNow;
+      expect(state.calls.map((call) => call.method)).toEqual(["createDraft"]);
       expect(yield* countGmailReceipts).toBe(1);
+      const receipt = yield* runs.getInboxDraftReceipt({ spaceId, itemId });
+      expect(receipt).toMatchObject({ status: "created", draftId: "draft-late" });
     }).pipe(Effect.provide(layer(state))),
 );

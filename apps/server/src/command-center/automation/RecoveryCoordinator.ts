@@ -1,4 +1,3 @@
-import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
@@ -14,13 +13,13 @@ import * as AutomationRuntime from "./Runtime.ts";
 const DEFAULT_POLL_INTERVAL = Duration.seconds(5);
 const DEFAULT_BATCH_LIMIT = 50;
 
-/**
- * Operator hold: when true, recovery ticks resume nothing. Set it for a deploy
- * while stranded executions are inventoried and decided (see
- * docs/operations/automation-recovery-hold.md); unset it to resume recovery.
- */
-export const AUTOMATION_RECOVERY_HOLD_ENV = "COMMAND_CENTER_AUTOMATION_RECOVERY_HOLD";
-const emptyReport = { scanned: 0, recovered: 0, remaining: 0, failures: [] };
+export const AUTOMATION_RECOVERY_HOLD_ENV = AutomationRuntime.AUTOMATION_RECOVERY_HOLD_ENV;
+const emptyReport = (): AutomationRuns.AutomationRecoveryReport => ({
+  scanned: 0,
+  recovered: 0,
+  remaining: 0,
+  failures: [],
+});
 
 export interface AutomationRecoveryCoordinatorShape {
   readonly tick: () => Effect.Effect<AutomationRuns.AutomationRecoveryReport, never>;
@@ -40,11 +39,16 @@ export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const workerId = `recovery:${yield* crypto.randomUUIDv4.pipe(Effect.orDie)}`;
   const tickLock = yield* Semaphore.make(1);
-  const held = yield* Config.boolean(AUTOMATION_RECOVERY_HOLD_ENV).pipe(Config.withDefault(false));
+  // While the operator hold is set, ticks resume nothing (AutomationRuns also
+  // refuses to drive held executions on every other path). Slot bookkeeping
+  // still runs so admissions keep coalescing onto existing executions.
+  const held = yield* AutomationRuntime.readAutomationRecoveryHold;
 
   const tick: AutomationRecoveryCoordinatorShape["tick"] = () =>
     held
-      ? Effect.succeed(emptyReport)
+      ? runtime
+          .reconcileActiveSlots({ limit: DEFAULT_BATCH_LIMIT })
+          .pipe(Effect.ignore, Effect.as(emptyReport()))
       : tickLock.withPermits(1)(
           runs.recoverDue({ owner: workerId, limit: DEFAULT_BATCH_LIMIT }).pipe(
             Effect.tap(() => runtime.reconcileActiveSlots({ limit: DEFAULT_BATCH_LIMIT })),
@@ -60,7 +64,7 @@ export const make = Effect.gen(function* () {
             ),
             Effect.catch((cause) =>
               Effect.logWarning("command-center.automation.recovery-tick-failed", { cause }).pipe(
-                Effect.as(emptyReport),
+                Effect.as(emptyReport()),
               ),
             ),
           ),

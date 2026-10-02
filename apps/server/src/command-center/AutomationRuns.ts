@@ -11,6 +11,9 @@ import {
 import { ApprovalId, ItemId, SpaceId, type Approval as ApprovalType } from "@command-center/core";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -211,6 +214,9 @@ export const resolveGoogleDraftAttachmentPaths = Effect.fn(
   return paths.filter((attachmentPath): attachmentPath is string => attachmentPath !== undefined);
 });
 
+/** Bounded wait for in-flight drives on shutdown (systemd stops after 30 s). */
+const DRIVE_SHUTDOWN_DRAIN = Duration.seconds(20);
+
 export const layer = Layer.effect(
   AutomationRuns,
   Effect.gen(function* () {
@@ -218,6 +224,20 @@ export const layer = Layer.effect(
     const commandCenter = yield* CommandCenterService.CommandCenterService;
     const inboxDrafts = yield* InboxGmailDrafts.InboxGmailDrafts;
     const sql = yield* SqlClient.SqlClient;
+    // Drives run on the server's lifetime, not the request's: a client
+    // disconnect or RPC cancel must not interrupt a step mid-way (an unsafe
+    // step would then have to fail closed). On shutdown, in-flight drives get
+    // a bounded drain before they are interrupted.
+    const drives = yield* FiberSet.make<void, unknown>();
+    yield* Effect.addFinalizer(() =>
+      FiberSet.awaitEmpty(drives).pipe(Effect.timeoutOption(DRIVE_SHUTDOWN_DRAIN), Effect.asVoid),
+    );
+    // Operator hold: executions created before this process started are not
+    // resumed by any path while it is set.
+    const held = yield* AutomationRuntime.readAutomationRecoveryHold;
+    const startedAt = yield* runtime.now;
+    const isHeld = (snapshot: AutomationRuntime.AutomationExecutionSnapshot) =>
+      held && snapshot.createdAt < startedAt;
     const inspectAgentRun = makeAutomationAgentRunInspector(sql);
 
     const recordSnapshot = (snapshot: AutomationRuntime.AutomationExecutionSnapshot) =>
@@ -276,6 +296,7 @@ export const layer = Layer.effect(
       if (!["queued", "running", "waiting_retry", "waiting_delay"].includes(initial.state)) {
         return initial;
       }
+      if (isHeld(initial)) return initial;
       const acquired = yield* runtime
         .acquireLease({
           executionId: initial.id,
@@ -285,16 +306,19 @@ export const layer = Layer.effect(
         .pipe(
           Effect.map((lease) => ({ lease })),
           Effect.catchIf(
-            (cause) => isAutomationRuntimeError(cause) && cause.code === "lease-denied",
+            (cause) =>
+              isAutomationRuntimeError(cause) &&
+              (cause.code === "lease-denied" || cause.code === "invalid-state"),
             () => Effect.succeed(null),
           ),
         );
-      // Another worker holds the live lease and is driving this execution; it
-      // records the result. Report the current state instead of failing.
+      // Another worker holds the live lease and is driving this execution (or
+      // it already finished); it records the result. Report the current state
+      // instead of failing.
       if (acquired === null) return yield* runtime.get(initial.id);
       const lease = acquired.lease;
       const command = { executionId: initial.id, owner, token: lease.token };
-      yield* Effect.gen(function* () {
+      const drive = Effect.gen(function* () {
         let current = initial;
         for (let step = 0; step < 100; step += 1) {
           if (
@@ -313,6 +337,7 @@ export const layer = Layer.effect(
           }
         }
       }).pipe(Effect.ensuring(runtime.releaseLease(command).pipe(Effect.ignore)));
+      yield* Fiber.join(yield* FiberSet.run(drives)(drive));
       return yield* runtime.get(initial.id);
     });
 
@@ -545,7 +570,7 @@ export const layer = Layer.effect(
             SELECT 1 FROM command_center_approvals approval
             WHERE approval.id = 'automation-approval:' || execution.id || ':' || checkpoint.node_id
           )
-        ORDER BY execution.id
+        ORDER BY execution.updated_at, execution.id
         LIMIT ${input.limit ?? 50}
       `;
       const executionIds = [
