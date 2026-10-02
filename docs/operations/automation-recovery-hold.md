@@ -109,7 +109,10 @@ for title, sql in queries.items():
     try:
         rows = db.execute(sql).fetchall()
     except sqlite3.OperationalError as error:
-        # A table the running build has not created yet holds nothing to resume.
+        # Only a table the running build has not created yet is empty. Any
+        # other failure (e.g. "database is locked") means nothing was read.
+        if not str(error).startswith("no such table:"):
+            raise SystemExit(f"INVENTORY FAILED at '{title}': {error}. Do not lift the hold; rerun.")
         print(f"== {title}: 0 (not present yet: {error})")
         continue
     print(f"== {title}: {len(rows)}")
@@ -118,7 +121,8 @@ for title, sql in queries.items():
 PY
 ```
 
-All six counts at zero means there is nothing to decide: go to step 4.
+All six counts at zero, with no `INVENTORY FAILED` line and exit status 0, means there is nothing to
+decide: go to step 4. Any `INVENTORY FAILED` line means nothing was read; keep the hold and rerun.
 
 ## 3. Decide each listed execution
 
