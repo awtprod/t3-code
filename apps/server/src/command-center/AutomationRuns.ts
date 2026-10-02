@@ -276,11 +276,23 @@ export const layer = Layer.effect(
       if (!["queued", "running", "waiting_retry", "waiting_delay"].includes(initial.state)) {
         return initial;
       }
-      const lease = yield* runtime.acquireLease({
-        executionId: initial.id,
-        owner,
-        ttlMs: 30_000,
-      });
+      const acquired = yield* runtime
+        .acquireLease({
+          executionId: initial.id,
+          owner,
+          ttlMs: AutomationRuntime.AUTOMATION_LEASE_TTL_MS,
+        })
+        .pipe(
+          Effect.map((lease) => ({ lease })),
+          Effect.catchIf(
+            (cause) => isAutomationRuntimeError(cause) && cause.code === "lease-denied",
+            () => Effect.succeed(null),
+          ),
+        );
+      // Another worker holds the live lease and is driving this execution; it
+      // records the result. Report the current state instead of failing.
+      if (acquired === null) return yield* runtime.get(initial.id);
+      const lease = acquired.lease;
       const command = { executionId: initial.id, owner, token: lease.token };
       yield* Effect.gen(function* () {
         let current = initial;
@@ -520,11 +532,28 @@ export const layer = Layer.effect(
           }),
         ),
       ).pipe(Effect.map((groups) => groups.flat()));
+      // A process can also stop after the runtime reached waiting_approval
+      // but before the Run and its approval gate were projected. Nothing would
+      // ever show that gate, so recover it here.
+      const unprojectedGates = yield* sql<{ readonly id: string }>`
+        SELECT DISTINCT execution.id
+        FROM command_center_automation_executions execution
+        JOIN command_center_automation_node_checkpoints checkpoint
+          ON checkpoint.execution_id = execution.id AND checkpoint.state = 'waiting_approval'
+        WHERE execution.state = 'waiting_approval'
+          AND NOT EXISTS (
+            SELECT 1 FROM command_center_approvals approval
+            WHERE approval.id = 'automation-approval:' || execution.id || ':' || checkpoint.node_id
+          )
+        ORDER BY execution.id
+        LIMIT ${input.limit ?? 50}
+      `;
       const executionIds = [
         ...new Set([
           ...due.map((snapshot) => snapshot.id),
           ...waitingAgents.map((snapshot) => snapshot.id),
           ...waitingApprovalIds,
+          ...unprojectedGates.map((row) => row.id),
         ]),
       ];
       const results = yield* Effect.forEach(executionIds, (executionId) =>

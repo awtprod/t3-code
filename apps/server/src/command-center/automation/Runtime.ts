@@ -7,6 +7,7 @@ import * as NodeCrypto from "node:crypto";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -184,6 +185,8 @@ export interface AutomationRuntimeDependencies {
   readonly randomUUID: Effect.Effect<string>;
   readonly defaultMaxAttempts?: number;
   readonly defaultRetryDelayMs?: number;
+  /** Lease length callers acquire with; a running step renews it at a third. */
+  readonly leaseTtlMs?: number;
 }
 
 export interface StartAutomationExecutionInput {
@@ -381,6 +384,36 @@ const decodeStartAutomationExecution = Schema.decodeUnknownEffect(StartAutomatio
 const isCanonicalFailure = Schema.is(CanonicalFailure);
 const isFailureResolutionScope = Schema.is(FailureResolutionScope);
 
+/** Lease length for one automation drive; renewed while a step executes. */
+export const AUTOMATION_LEASE_TTL_MS = 30_000;
+
+/**
+ * Node kinds whose step may run again after its executor was interrupted
+ * (worker killed, or stalled past its lease) without risking a second external
+ * effect: pure steps, reads, and executors keyed by the durable per-attempt
+ * idempotency key or a deterministic command id. Anything else is failed
+ * closed with an "outcome is unknown" error for a human to reconcile; the
+ * runtime cannot fence an effect that already left the process.
+ */
+const REEXECUTION_SAFE_NODE_KINDS: ReadonlySet<string> = new Set([
+  "condition",
+  "transform",
+  "foreach",
+  "connector.read",
+  "item.mutate",
+  "agent.run",
+  "repository.checks",
+]);
+
+const isReexecutionSafe = (node: { readonly kind: string; readonly config: unknown }) =>
+  REEXECUTION_SAFE_NODE_KINDS.has(node.kind) ||
+  // The Inbox Gmail draft executor claims its receipt before calling Gmail and
+  // refuses a claimed or uncertain receipt, so a re-run cannot draft twice.
+  (node.kind === "connector.write" &&
+    typeof node.config === "object" &&
+    node.config !== null &&
+    (node.config as { readonly source?: unknown }).source === "inbox.accepted");
+
 const runtimeError = (code: AutomationRuntimeErrorCode, detail: string) =>
   new AutomationRuntimeError({ code, detail });
 
@@ -555,6 +588,11 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     dependencies.defaultRetryDelayMs,
     1_000,
     86_400_000,
+  );
+  const leaseTtlMs = positiveBoundedInteger(
+    dependencies.leaseTtlMs,
+    AUTOMATION_LEASE_TTL_MS,
+    3_600_000,
   );
 
   const readExecutionRow = Effect.fn("AutomationRuntime.readExecutionRow")(function* (
@@ -1035,21 +1073,9 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
         `Automation execution '${input.executionId}' is already ${current.state}.`,
       );
     }
-    if (
-      current.leaseOwner === input.owner &&
-      current.leaseToken !== null &&
-      current.leaseExpiresAt !== null &&
-      current.leaseExpiresAt > now
-    ) {
-      return {
-        executionId: current.id,
-        owner: current.leaseOwner,
-        token: current.leaseToken,
-        generation: current.leaseGeneration,
-        expiresAt: current.leaseExpiresAt,
-      };
-    }
-
+    // A live lease is exclusive, even for a caller using the same owner name:
+    // two fibers resuming one approval share that name, and handing both the
+    // same token would let both run the step.
     const token = yield* dependencies.randomUUID;
     const expiresAt = addMilliseconds(now, ttlMs);
     const claimed = yield* sql<{
@@ -1611,6 +1637,15 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
       // an approval captured for one revision from authorizing another.
       const approvalKey = `${execution.id}:${node.id}:${execution.definitionDigest}:${configuredApprovalKey}`;
       outcome = { type: "approval", approvalKey };
+    } else if (orphanedRunning !== undefined && !isReexecutionSafe(node)) {
+      // The previous executor of this step lost its lease mid-run. Its effect
+      // may or may not have happened; do not risk running it twice.
+      outcome = {
+        type: "failed",
+        error:
+          `Step '${node.id}' (${node.kind}) was interrupted while running and its outcome is unknown; ` +
+          "it was not run again. Reconcile it manually before retrying.",
+      };
     } else {
       const context = executorInput(execution, definition, node, checkpoint, checkpoints, runInput);
       const decodedPredecessors = yield* Effect.forEach(
@@ -1620,13 +1655,23 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
             ? Effect.map(parseJson(value), (decoded) => [key, decoded as Schema.Json] as const)
             : Effect.succeed([key, value] as const),
       );
-      outcome = yield* dependencies
+      const execute = dependencies
         .executeNode({ ...context, predecessorOutputs: Object.fromEntries(decodedPredecessors) })
         .pipe(
           Effect.catch((error) =>
             Effect.succeed({ type: "retry", error } satisfies AutomationNodeExecutionOutcome),
           ),
         );
+      // Keep the lease while the step runs so recovery does not start a second
+      // copy. If renewal fails the lease is gone: stop the step and commit
+      // nothing (every commit is fenced by the lease token anyway).
+      const heartbeat = Effect.gen(function* () {
+        while (true) {
+          yield* Effect.sleep(Duration.millis(Math.floor(leaseTtlMs / 3)));
+          yield* renewLease({ ...input, ttlMs: leaseTtlMs });
+        }
+      });
+      outcome = yield* Effect.raceFirst(execute, heartbeat);
     }
 
     switch (outcome.type) {
