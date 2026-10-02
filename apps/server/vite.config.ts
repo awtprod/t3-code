@@ -82,6 +82,8 @@ export default mergeConfig(
       // Under package-wide runs they can exceed the default budget on loaded CI hosts.
       hookTimeout: 120_000,
       testTimeout: 120_000,
+      // Strip the host Command Center's private paths and identities first.
+      setupFiles: ["./src/isolateHostEnvironment.ts"],
     },
   }),
 );

@@ -398,6 +398,10 @@ export function createDevRunnerEnv({
       // inherited launcher home must not redirect the child back to shared
       // state.
       delete output.COMMAND_CENTER_HOME;
+      // The same applies to the private config directory: an inherited one
+      // would point the isolated server at the launcher's real Spaces and
+      // Automations. The server then defaults to `<home>-config`.
+      delete output.COMMAND_CENTER_CONFIG_DIR;
     } else {
       delete output.T3CODE_HOME;
     }
@@ -793,7 +797,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     const baseDir = env.T3CODE_HOME ?? (yield* DEFAULT_T3_HOME);
 
     yield* Effect.logInfo(
-      `[dev-runner] mode=${input.mode} source=${source}${selectionSuffix} serverPort=${String(env.T3CODE_PORT)} webPort=${String(env.PORT)} baseDir=${baseDir}`,
+      `[dev-runner] mode=${input.mode} source=${source}${selectionSuffix} serverPort=${String(env.T3CODE_PORT)} webPort=${String(env.PORT)} baseDir=${baseDir} configDir=${env.COMMAND_CENTER_CONFIG_DIR ?? `${baseDir}-config`}`,
     );
 
     // deriveServerPaths (apps/server/src/config.ts) picks `dev/` vs `userdata/`
