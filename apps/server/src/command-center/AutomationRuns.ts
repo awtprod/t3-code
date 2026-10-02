@@ -764,6 +764,110 @@ export const failClosedRuntimeLayer = Layer.unwrap(
 );
 
 /**
+ * Gmail draft executors for the safe runtime. `prepareGoogleDraft` checks the
+ * Space-scoped connection grant and resolves attachments. `executeInboxDraft`
+ * runs the `connector.write` node of an Inbox Gmail draft approval flow: it
+ * re-binds the approved receipt, claims it, and makes exactly one
+ * `createDraft` call. A created receipt short-circuits; a failed or
+ * unverified response becomes `uncertain` and is never retried.
+ */
+export const makeGoogleDraftExecutors = (dependencies: {
+  readonly commandCenter: CommandCenterService.CommandCenterServiceShape;
+  readonly inboxDrafts: InboxGmailDrafts.InboxGmailDrafts["Service"];
+  readonly google: GoogleReadConnector.GoogleReadConnectorShape;
+  readonly path: Path.Path;
+  readonly attachmentsDir: string;
+}) => {
+  const { commandCenter, inboxDrafts, google, path, attachmentsDir } = dependencies;
+  const prepareGoogleDraft = Effect.fn("AutomationRuns.prepareGoogleDraft")(function* (
+    input: import("@t3tools/contracts").GoogleDraftCreateRequest,
+  ) {
+    const requiredCapability = googleCapabilityForDraft(input.operation);
+    const connections = (yield* commandCenter.queryConnections({ spaceId: input.spaceId }))
+      .connections;
+    const connection = connections.find(
+      (candidate) =>
+        candidate.id === input.connectionId &&
+        candidate.spaceId === input.spaceId &&
+        candidate.kind === "google" &&
+        candidate.capabilities.includes(requiredCapability),
+    );
+    if (connection === undefined) {
+      return yield* Effect.fail(
+        `The requested Google connection does not grant ${requiredCapability}.`,
+      );
+    }
+    return yield* resolveGoogleDraftAttachmentPaths({
+      commandCenter,
+      path,
+      attachmentsDir,
+      spaceId: input.spaceId,
+      attachmentArtifactIds: input.attachmentArtifactIds ?? [],
+    });
+  });
+
+  const executeInboxDraft = Effect.fn("AutomationRuns.executeInboxDraft")(
+    function* (context: import("./automation/Runtime.ts").AutomationNodeExecutionContext) {
+      const runInput = context.runInput;
+      const mutationId = runInput.mutationId;
+      const payloadDigest = runInput.payloadDigest;
+      if (typeof mutationId !== "string" || typeof payloadDigest !== "string") {
+        return yield* Effect.fail(
+          "The accepted Inbox draft Run has no immutable approval binding.",
+        );
+      }
+      const bound = yield* inboxDrafts.loadForExecution({
+        mutationId,
+        spaceId: context.spaceId,
+        payloadDigest,
+      });
+      if (bound.status === "created") return bound.receipt as unknown as Schema.Json;
+      const attachmentPaths = yield* prepareGoogleDraft(bound.request);
+      if (google.createDraft === undefined) {
+        return yield* Effect.fail("Gmail draft creation is not configured on this server.");
+      }
+      yield* inboxDrafts.claim(mutationId);
+      const drafted = yield* google
+        .createDraft(bound.request, attachmentPaths, bound.accountAlias)
+        .pipe(
+          Effect.match({
+            onFailure: (error) => ({ ok: false as const, error }),
+            onSuccess: (value) => ({ ok: true as const, value }),
+          }),
+        );
+      if (!drafted.ok) {
+        yield* inboxDrafts.uncertain(mutationId, drafted.error.message);
+        return yield* Effect.fail(
+          "Gmail draft creation needs reconciliation; no automatic retry will create another draft.",
+        );
+      }
+      const result = yield* decodeDraftResult(drafted.value).pipe(
+        Effect.match({
+          onFailure: () => ({ ok: false as const }),
+          onSuccess: (value) => ({ ok: true as const, value }),
+        }),
+      );
+      if (!result.ok) {
+        yield* inboxDrafts.uncertain(
+          mutationId,
+          "The Gmail draft response did not contain a verified draft ID.",
+        );
+        return yield* Effect.fail(
+          "Gmail draft creation needs reconciliation; the draft ID was not verified.",
+        );
+      }
+      return (yield* inboxDrafts.complete(mutationId, {
+        draftId: result.value.draftId,
+        ...(result.value.messageId === undefined ? {} : { messageId: result.value.messageId }),
+        ...(result.value.threadId === undefined ? {} : { threadId: result.value.threadId }),
+      })) as unknown as Schema.Json;
+    },
+    Effect.mapError((cause) => (typeof cause === "string" ? cause : cause.message)),
+  );
+  return { prepareGoogleDraft, executeInboxDraft };
+};
+
+/**
  * Runtime layer for the deliberately small v1 executor surface. Every external
  * operation is resolved through its Space-scoped service. Agent work uses the
  * durable Run dispatcher, and shell work receives only a server-resolved
@@ -802,91 +906,14 @@ export const safeRuntimeLayer = Layer.unwrap(
             .pipe(Effect.mapError((cause) => cause.message)),
       },
     });
-    const prepareGoogleDraft = Effect.fn("AutomationRuns.prepareGoogleDraft")(function* (
-      input: import("@t3tools/contracts").GoogleDraftCreateRequest,
-    ) {
-      const requiredCapability = googleCapabilityForDraft(input.operation);
-      const connections = (yield* commandCenter.queryConnections({ spaceId: input.spaceId }))
-        .connections;
-      const connection = connections.find(
-        (candidate) =>
-          candidate.id === input.connectionId &&
-          candidate.spaceId === input.spaceId &&
-          candidate.kind === "google" &&
-          candidate.capabilities.includes(requiredCapability),
-      );
-      if (connection === undefined) {
-        return yield* Effect.fail(
-          `The requested Google connection does not grant ${requiredCapability}.`,
-        );
-      }
-      return yield* resolveGoogleDraftAttachmentPaths({
-        commandCenter,
-        path,
-        attachmentsDir: serverConfig.attachmentsDir,
-        spaceId: input.spaceId,
-        attachmentArtifactIds: input.attachmentArtifactIds ?? [],
-      });
+    const { prepareGoogleDraft, executeInboxDraft } = makeGoogleDraftExecutors({
+      commandCenter,
+      inboxDrafts,
+      google,
+      path,
+      attachmentsDir: serverConfig.attachmentsDir,
     });
 
-    const executeInboxDraft = Effect.fn("AutomationRuns.executeInboxDraft")(
-      function* (context: import("./automation/Runtime.ts").AutomationNodeExecutionContext) {
-        const runInput = context.runInput;
-        const mutationId = runInput.mutationId;
-        const payloadDigest = runInput.payloadDigest;
-        if (typeof mutationId !== "string" || typeof payloadDigest !== "string") {
-          return yield* Effect.fail(
-            "The accepted Inbox draft Run has no immutable approval binding.",
-          );
-        }
-        const bound = yield* inboxDrafts.loadForExecution({
-          mutationId,
-          spaceId: context.spaceId,
-          payloadDigest,
-        });
-        if (bound.status === "created") return bound.receipt as unknown as Schema.Json;
-        const attachmentPaths = yield* prepareGoogleDraft(bound.request);
-        if (google.createDraft === undefined) {
-          return yield* Effect.fail("Gmail draft creation is not configured on this server.");
-        }
-        yield* inboxDrafts.claim(mutationId);
-        const drafted = yield* google
-          .createDraft(bound.request, attachmentPaths, bound.accountAlias)
-          .pipe(
-            Effect.match({
-              onFailure: (error) => ({ ok: false as const, error }),
-              onSuccess: (value) => ({ ok: true as const, value }),
-            }),
-          );
-        if (!drafted.ok) {
-          yield* inboxDrafts.uncertain(mutationId, drafted.error.message);
-          return yield* Effect.fail(
-            "Gmail draft creation needs reconciliation; no automatic retry will create another draft.",
-          );
-        }
-        const result = yield* decodeDraftResult(drafted.value).pipe(
-          Effect.match({
-            onFailure: () => ({ ok: false as const }),
-            onSuccess: (value) => ({ ok: true as const, value }),
-          }),
-        );
-        if (!result.ok) {
-          yield* inboxDrafts.uncertain(
-            mutationId,
-            "The Gmail draft response did not contain a verified draft ID.",
-          );
-          return yield* Effect.fail(
-            "Gmail draft creation needs reconciliation; the draft ID was not verified.",
-          );
-        }
-        return (yield* inboxDrafts.complete(mutationId, {
-          draftId: result.value.draftId,
-          ...(result.value.messageId === undefined ? {} : { messageId: result.value.messageId }),
-          ...(result.value.threadId === undefined ? {} : { threadId: result.value.threadId }),
-        })) as unknown as Schema.Json;
-      },
-      Effect.mapError((cause) => (typeof cause === "string" ? cause : cause.message)),
-    );
     const executeNode = makeSafeAutomationNodeExecutor({
       pollRepositoryChecks: repositoryChecks.poll,
       executeInboxDraft,
