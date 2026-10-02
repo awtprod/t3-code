@@ -11,6 +11,7 @@ import {
   shouldAutosaveAutomationDraft,
 } from "./AutomationsScreen.logic";
 import { SAMPLE_AUTOMATION, SAMPLE_SPACE } from "./AutomationsScreen.test-fixtures";
+import { AUTOMATION_EDITOR_ADDABLE_NODE_KINDS } from "./types";
 
 describe("automations route state", () => {
   it("keeps newer edits dirty when an older save finishes", () => {
@@ -171,6 +172,28 @@ describe("automations route state", () => {
 });
 
 describe("committed automation projection", () => {
+  it("preserves a committed repository check step without offering a new unbound step", () => {
+    const definition = projectAutomationForEditor({
+      ...SAMPLE_AUTOMATION,
+      nodes: [
+        {
+          id: AutomationNodeId.make("required-checks"),
+          kind: "repository.checks",
+          config: { repositoryId: "repo-a" },
+          position: { x: 80, y: 120 },
+        },
+      ],
+    });
+
+    expect(definition.nodes).toEqual([
+      {
+        id: "required-checks",
+        kind: "repository.checks",
+        config: { repositoryId: "repo-a" },
+      },
+    ]);
+    expect(AUTOMATION_EDITOR_ADDABLE_NODE_KINDS).not.toContain("repository.checks");
+  });
   it("preserves server-managed prospect nodes without making them addable", () => {
     const definition = projectAutomationForEditor({
       ...SAMPLE_AUTOMATION,

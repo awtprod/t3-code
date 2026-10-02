@@ -44,7 +44,8 @@ it("records the committed static-context baseline", () => {
     // automation node configs (review-only prospect queue).
     // 2026-09: +396 bytes for scoped correction evidence, expiry, and
     // contradiction fields on the existing memory proposal tool.
-    mcp: { toolCount: 36, schemaBytes: 25_929, toolkitCounts: [14, 13, 9] },
+    // 2026-09: +40 bytes for the `repository.checks` source-node configuration.
+    mcp: { toolCount: 36, schemaBytes: 25_969, toolkitCounts: [14, 13, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

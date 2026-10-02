@@ -23,6 +23,7 @@ import {
   parseAutomationProspectEvaluateNodeConfig,
   parseAutomationProspectNotifyNodeConfig,
   parseAutomationScopedShellNodeConfig,
+  parseRepositoryChecksNodeConfig,
 } from "./Definition.ts";
 import type {
   ProspectEvaluationError,
@@ -77,6 +78,10 @@ export interface ProspectNotificationFailure {
 }
 
 export interface AutomationNodeExecutorDependencies {
+  readonly pollRepositoryChecks?: (input: {
+    readonly spaceId: ReturnType<typeof SpaceId.make>;
+    readonly repositoryId: string;
+  }) => Effect.Effect<{ readonly scanned: number; readonly created: number }, string>;
   readonly startAgentRun: (
     input: AutomationAgentRunRequest,
   ) => Effect.Effect<AutomationAgentRunLinkedResult, AutomationAgentRunFailure>;
@@ -751,6 +756,23 @@ export function makeSafeAutomationNodeExecutor(dependencies: AutomationNodeExecu
         return executeProspectEvaluation(context, dependencies);
       case "prospect.notify":
         return executeProspectNotification(context, dependencies);
+      case "repository.checks": {
+        const parsed = parseRepositoryChecksNodeConfig(context.node.config);
+        if (!parsed.ok) return Effect.succeed(permanentFailure(parsed.message));
+        if (dependencies.pollRepositoryChecks === undefined)
+          return Effect.succeed(permanentFailure("Repository check polling is unavailable."));
+        return dependencies
+          .pollRepositoryChecks({
+            spaceId: SpaceId.make(context.spaceId),
+            repositoryId: parsed.config.repositoryId,
+          })
+          .pipe(
+            Effect.match({
+              onFailure: (error) => ({ type: "retry" as const, error }),
+              onSuccess: (output) => ({ type: "succeeded" as const, output }),
+            }),
+          );
+      }
       case "delay":
       case "approval":
         return Effect.succeed(
@@ -770,6 +792,7 @@ export const AUTOMATION_V1_NODE_POLICY = {
     "shell.scoped",
     "prospect.evaluate",
     "prospect.notify",
+    "repository.checks",
   ],
   routed: ["agent.run"],
   runtimeManaged: ["delay", "approval"],

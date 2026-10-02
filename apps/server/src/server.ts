@@ -158,6 +158,7 @@ import * as Observations from "./command-center/Observations.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as Responsibilities from "./command-center/Responsibilities.ts";
+import * as RepositoryChecks from "./command-center/RepositoryChecks.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
@@ -526,9 +527,20 @@ const CommandCenterBaseLayerLive = Layer.mergeAll(
   AutomationScopedShellLayerLive,
 );
 
+const RepositoryChecksLayerLive = RepositoryChecks.layer.pipe(
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(GitHubCli.layer),
+  Layer.provide(SourceControlRateLimit.layer),
+  Layer.provide(VcsProcess.layer),
+  Layer.provide(PersistenceLayerLive),
+);
+
 const CommandCenterCoreLayerLive = Layer.mergeAll(
   CommandCenterBaseLayerLive,
-  AutomationRuns.safeRuntimeLayer.pipe(Layer.provide(CommandCenterBaseLayerLive)),
+  RepositoryChecksLayerLive,
+  AutomationRuns.safeRuntimeLayer.pipe(
+    Layer.provide(Layer.mergeAll(CommandCenterBaseLayerLive, RepositoryChecksLayerLive)),
+  ),
 );
 
 const AutomationRunsLayerLive = AutomationRuns.layer.pipe(

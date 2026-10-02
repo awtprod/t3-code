@@ -15,6 +15,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as CommandCenterService from "./Service.ts";
+import * as RepositoryChecks from "./RepositoryChecks.ts";
 import * as CommandCenterCredentialStore from "./CredentialStore.ts";
 import { makeProspectEvaluationConnector } from "./ProspectEvaluation.ts";
 import * as ProspectNotificationRelay from "../relay/ProspectNotificationRelay.ts";
@@ -601,6 +602,7 @@ export const safeRuntimeLayer = Layer.unwrap(
     const path = yield* Path.Path;
     const scopedShell = yield* AutomationScopedShell.AutomationScopedShell;
     const prospectNotificationRelay = yield* ProspectNotificationRelay.ProspectNotificationRelay;
+    const repositoryChecks = yield* RepositoryChecks.RepositoryChecks;
     const credentials = yield* CommandCenterCredentialStore.make;
     const startAgentRun = yield* makeLiveAutomationAgentRunAdapter;
     const prospectEvaluation = makeProspectEvaluationConnector({
@@ -625,6 +627,7 @@ export const safeRuntimeLayer = Layer.unwrap(
       },
     });
     const executeNode = makeSafeAutomationNodeExecutor({
+      pollRepositoryChecks: repositoryChecks.poll,
       startAgentRun,
       evaluateProspects: prospectEvaluation.evaluate,
       notifyProspects: (input) =>
