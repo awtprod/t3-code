@@ -266,6 +266,92 @@ it.effect("admits only scoped read-only Google requests", () => {
   });
 });
 
+it.effect("emits bounded canonical metadata for connector credential and request faults", () => {
+  const execute = makeSafeAutomationNodeExecutor(
+    dependencies({
+      googleRead: () => Effect.fail("credential token unavailable"),
+    }),
+  );
+  return Effect.gen(function* () {
+    const credential = yield* execute(
+      context("connector.read", {
+        connectionId: "google-primary",
+        operation: "gmail.search",
+        query: "newer_than:7d",
+      }),
+    );
+    const malformed = yield* execute(
+      context("connector.read", {
+        connectionId: "google-primary",
+        operation: "gmail.send",
+      }),
+    );
+
+    expect(credential).toMatchObject({
+      type: "retry",
+      failure: {
+        canonicalCode: "connector-credential-unavailable",
+        resource: "google:gmail.search",
+        subject: "google-primary",
+      },
+    });
+    expect(malformed).toMatchObject({
+      type: "failed",
+      failure: {
+        canonicalCode: "connector-request-invalid",
+        resource: "automation-node",
+        subject: "node-1",
+      },
+    });
+  });
+});
+
+it.effect("keeps read and draft incident scopes separate on one Google connection", () => {
+  const readExecutor = makeSafeAutomationNodeExecutor(dependencies());
+  const draftExecutor = makeSafeAutomationNodeExecutor({
+    ...dependencies(),
+    googleDraft: () => Effect.succeed({ draftId: "draft-1" }),
+  });
+  const draftContext = context("connector.write", {
+    connectionId: "google-primary",
+    operation: "gmail.draft.create",
+    to: ["recipient@example.test"],
+    subject: "Review",
+    body: "Draft body",
+  });
+  return Effect.gen(function* () {
+    const blockedDraft = yield* readExecutor(draftContext);
+    const read = yield* readExecutor(
+      context("connector.read", {
+        connectionId: "google-primary",
+        operation: "gmail.search",
+        query: "newer_than:7d",
+      }),
+    );
+    const recoveredDraft = yield* draftExecutor(draftContext);
+    expect(blockedDraft).toMatchObject({
+      type: "failed",
+      failure: {
+        canonicalCode: "connector-capability-unavailable",
+        resource: "google:gmail.draft.create",
+        subject: "google-primary",
+      },
+    });
+    expect(read).toMatchObject({
+      type: "succeeded",
+      resolvedFailureScopes: expect.arrayContaining([
+        { resource: "google:gmail.search", subject: "google-primary" },
+      ]),
+    });
+    expect(recoveredDraft).toMatchObject({
+      type: "succeeded",
+      resolvedFailureScopes: expect.arrayContaining([
+        { resource: "google:gmail.draft.create", subject: "google-primary" },
+      ]),
+    });
+  });
+});
+
 it.effect("starts an agent child Run and durably waits for its terminal state", () => {
   const captured: AutomationAgentRunRequest[] = [];
   const execute = makeSafeAutomationNodeExecutor(

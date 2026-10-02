@@ -7,6 +7,7 @@ import {
   ContactRoundIcon,
   GitPullRequestIcon,
   InboxIcon,
+  ListChecksIcon,
   SettingsIcon,
   SquarePenIcon,
   WorkflowIcon,
@@ -139,6 +140,12 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       label: "Automations",
       icon: WorkflowIcon,
       active: pathname.startsWith("/automations"),
+    },
+    {
+      to: "/responsibilities" as const,
+      label: "Responsibilities",
+      icon: ListChecksIcon,
+      active: pathname.startsWith("/responsibilities"),
     },
     {
       to: "/prospects" as const,

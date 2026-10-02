@@ -2,6 +2,7 @@ import { EnvironmentHttpApi } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
@@ -153,6 +154,7 @@ import * as SprintPlan from "./command-center/SprintPlan.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as Responsibilities from "./command-center/Responsibilities.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
@@ -519,6 +521,67 @@ const AutomationRunsLayerLive = AutomationRuns.layer.pipe(
   Layer.provideMerge(CommandCenterCoreLayerLive),
 );
 
+const ResponsibilitiesLayerLive = Layer.effect(
+  Responsibilities.Responsibilities,
+  Effect.gen(function* () {
+    const commandCenter = yield* CommandCenterService.CommandCenterService;
+    const configured = Effect.fn("Responsibilities.configured")(function* () {
+      const config = yield* commandCenter.syncConfiguration({ force: true }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new Responsibilities.ResponsibilityError({
+              code: "config-unavailable",
+              message: "Could not verify the committed Automation configuration.",
+              cause,
+            }),
+        ),
+      );
+      if (config.health.status !== "loaded") {
+        return yield* new Responsibilities.ResponsibilityError({
+          code: "config-unavailable",
+          message: "The committed Automation configuration is unavailable.",
+        });
+      }
+      const activeSpaces = new Set(
+        config.spaces.filter((space) => space.lifecycle === "active").map((space) => space.id),
+      );
+      return config.automations.flatMap((automation) =>
+        activeSpaces.has(automation.spaceId) && automation.configCommit
+          ? [
+              {
+                automationId: automation.id,
+                spaceId: automation.spaceId,
+                configCommitSha: automation.configCommit,
+                definitionDigest: automation.definitionDigest,
+                enabled: automation.enabled,
+              },
+            ]
+          : [],
+      );
+    });
+    return yield* Responsibilities.make({
+      now: Effect.map(DateTime.now, DateTime.formatIso),
+      listConfiguredAutomations: configured,
+      validateAutomation: ({ automationId, spaceId }) =>
+        configured().pipe(
+          Effect.flatMap((automations) => {
+            const identity = automations.find(
+              (item) => item.automationId === automationId && item.spaceId === spaceId,
+            );
+            return identity
+              ? Effect.succeed(identity)
+              : Effect.fail(
+                  new Responsibilities.ResponsibilityError({
+                    code: "not-found",
+                    message: "The Responsibility is absent from committed configuration.",
+                  }),
+                );
+          }),
+        ),
+    });
+  }),
+).pipe(Layer.provideMerge(CommandCenterBaseLayerLive), Layer.provide(PersistenceLayerLive));
+
 const AutomationTriggerCoordinatorLayerLive = AutomationTriggerCoordinator.layer.pipe(
   Layer.provide(AutomationRunsLayerLive),
 );
@@ -612,6 +675,7 @@ const RunRecoveryCoordinatorLayerLive = RunRecoveryCoordinator.layer.pipe(
 );
 
 const CommandCenterLayerLive = Layer.mergeAll(
+  ResponsibilitiesLayerLive,
   AutomationScheduleInterpreterLayerLive,
   AutomationRunsLayerLive,
   AutomationTriggerCoordinatorLayerLive,

@@ -317,6 +317,15 @@ import {
   CommandCenterTimelinePage,
   CommandCenterTimelineQuery,
 } from "./commandCenterEvents.ts";
+import {
+  CommandCenterResponsibilitiesListInput,
+  CommandCenterResponsibilitiesListResult,
+  CommandCenterResponsibilityGetInput,
+  CommandCenterResponsibilityPauseInput,
+  CommandCenterResponsibilityStatus,
+  CommandCenterResponsibilityDetail,
+  CommandCenterResponsibilityError,
+} from "./commandCenterResponsibilities.ts";
 
 export const WS_METHODS = {
   // Project registry methods
@@ -673,6 +682,42 @@ export const WsCommandCenterAutomationsQueryRpc = Rpc.make(
     payload: CommandCenterAutomationsQueryInput,
     success: CommandCenterAutomationsQueryResult,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterResponsibilitiesListRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.responsibilitiesList,
+  {
+    payload: CommandCenterResponsibilitiesListInput,
+    success: CommandCenterResponsibilitiesListResult,
+    error: Schema.Union([CommandCenterResponsibilityError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterResponsibilityGetRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.responsibilityGet,
+  {
+    payload: CommandCenterResponsibilityGetInput,
+    success: CommandCenterResponsibilityDetail,
+    error: Schema.Union([CommandCenterResponsibilityError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterResponsibilityPauseRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.responsibilityPause,
+  {
+    payload: CommandCenterResponsibilityPauseInput,
+    success: CommandCenterResponsibilityStatus,
+    error: Schema.Union([CommandCenterResponsibilityError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterResponsibilityResumeRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.responsibilityResume,
+  {
+    payload: CommandCenterResponsibilityPauseInput,
+    success: CommandCenterResponsibilityStatus,
+    error: Schema.Union([CommandCenterResponsibilityError, EnvironmentAuthorizationError]),
   },
 );
 
@@ -1641,6 +1686,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterSprintPlanListHistoryRpc,
   WsCommandCenterRunsQueryRpc,
   WsCommandCenterAutomationsQueryRpc,
+  WsCommandCenterResponsibilitiesListRpc,
+  WsCommandCenterResponsibilityGetRpc,
+  WsCommandCenterResponsibilityPauseRpc,
+  WsCommandCenterResponsibilityResumeRpc,
   WsCommandCenterAutomationDefinitionGetRpc,
   WsCommandCenterAutomationDefinitionCreateRpc,
   WsCommandCenterAutomationDefinitionSaveRpc,

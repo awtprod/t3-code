@@ -247,6 +247,7 @@ it.effect("persists bounded retries and resumes only after the retry checkpoint"
   return Effect.gen(function* () {
     yield* seedAutomation(fixture);
     const runtime = yield* AutomationRuntime;
+    const sql = yield* SqlClient.SqlClient;
 
     const recover = yield* runtime.start({
       automationId: fixture.id,
@@ -268,6 +269,13 @@ it.effect("persists bounded retries and resumes only after the retry checkpoint"
       attemptCount: 2,
       maxAttempts: 2,
     });
+    expect(
+      yield* sql<{ readonly state: string; readonly count: number }>`
+        SELECT state, occurrence_count AS count
+        FROM command_center_responsibility_incidents
+        WHERE latest_execution_id = ${recover.id}
+      `,
+    ).toEqual([{ state: "resolved", count: 1 }]);
 
     const exhaust = yield* runtime.start({
       automationId: fixture.id,
@@ -601,5 +609,395 @@ it.effect("denies concurrent leases and fences an expired worker", () => {
     const fenced = yield* runtime.advance(first).pipe(Effect.flip);
     expect(fenced).toMatchObject({ code: "lease-lost" });
     expect(yield* runtime.advance(second)).toMatchObject({ state: "succeeded" });
+  }).pipe(Effect.provide(testLayer(runtimeHarness.dependencies)));
+});
+
+it.effect(
+  "admits one active execution across concurrent trigger identities and permits the next terminal check",
+  () => {
+    const fixture = automationFixture();
+    const runtimeHarness = harness(() => ({ type: "succeeded", output: { checked: true } }));
+
+    return Effect.gen(function* () {
+      yield* seedAutomation(fixture);
+      const runtime = yield* AutomationRuntime;
+      const starts = yield* Effect.all(
+        ["manual-overlap", "schedule-overlap"].map((idempotencyKey) =>
+          runtime.start({
+            automationId: fixture.id,
+            expectedSpaceId: "sample-space",
+            idempotencyKey,
+            expectedConfigCommitSha: commitSha,
+            expectedDefinitionDigest: definitionDigest,
+          }),
+        ),
+        { concurrency: "unbounded" },
+      );
+      expect(new Set(starts.map((execution) => execution.id)).size).toBe(1);
+
+      const lease = yield* runtime.acquireLease({
+        executionId: starts[0]!.id,
+        owner: "overlap-worker",
+        ttlMs: 60_000,
+      });
+      expect(yield* runtime.advance(lease)).toMatchObject({ state: "succeeded" });
+      expect(
+        (yield* runtime.start({
+          automationId: fixture.id,
+          expectedSpaceId: "sample-space",
+          idempotencyKey: "schedule-overlap",
+          expectedConfigCommitSha: commitSha,
+          expectedDefinitionDigest: definitionDigest,
+        })).id,
+      ).toBe(starts[0]!.id);
+
+      const next = yield* runtime.start({
+        automationId: fixture.id,
+        expectedSpaceId: "sample-space",
+        idempotencyKey: "next-legitimate-check",
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+      });
+      expect(next.id).not.toBe(starts[0]!.id);
+    }).pipe(Effect.provide(testLayer(runtimeHarness.dependencies)));
+  },
+);
+
+it.effect(
+  "blocks direct runtime admission while paused without canceling the current execution",
+  () => {
+    const fixture = automationFixture();
+    const runtimeHarness = harness(() => ({ type: "succeeded" }));
+
+    return Effect.gen(function* () {
+      yield* seedAutomation(fixture);
+      const runtime = yield* AutomationRuntime;
+      const sql = yield* SqlClient.SqlClient;
+      const previousCheck = "2025-12-31T23:00:00.000Z";
+      yield* sql`
+        INSERT INTO command_center_responsibility_status (
+          space_id, automation_id, last_checked_at, last_check_status, updated_at
+        ) VALUES ('sample-space', ${fixture.id}, ${previousCheck}, 'ok', ${previousCheck})
+      `;
+      const current = yield* runtime.start({
+        automationId: fixture.id,
+        idempotencyKey: "already-running",
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+      });
+      expect(
+        yield* sql<{ readonly checkedAt: string | null }>`
+          SELECT last_checked_at AS "checkedAt"
+          FROM command_center_responsibility_status
+          WHERE automation_id = ${fixture.id}
+        `,
+      ).toEqual([{ checkedAt: previousCheck }]);
+      yield* sql`
+      INSERT INTO command_center_responsibility_controls (
+        space_id, automation_id, paused, actor, reason, revision, changed_at
+      ) VALUES ('sample-space', ${fixture.id}, 1, 'andrew', 'hold', 1, ${initialNow})
+    `;
+
+      const blocked = yield* runtime
+        .start({
+          automationId: fixture.id,
+          idempotencyKey: "paused-direct",
+          expectedConfigCommitSha: commitSha,
+          expectedDefinitionDigest: definitionDigest,
+        })
+        .pipe(Effect.flip);
+      expect(blocked).toMatchObject({ code: "automation-paused" });
+      expect(yield* runtime.get(current.id)).toMatchObject({ state: "queued" });
+      expect(
+        yield* sql<{ readonly checkedAt: string | null; readonly admission: string }>`
+          SELECT last_checked_at AS "checkedAt", last_admission_status AS admission
+          FROM command_center_responsibility_status
+          WHERE automation_id = ${fixture.id}
+        `,
+      ).toEqual([{ checkedAt: previousCheck, admission: "paused" }]);
+
+      yield* sql`
+      UPDATE command_center_responsibility_controls
+      SET paused = 0, revision = 2
+      WHERE space_id = 'sample-space' AND automation_id = ${fixture.id}
+    `;
+      // Resume does not replay the blocked request; the pre-existing active slot
+      // remains the only work until it reaches a terminal state.
+      const resumed = yield* runtime.start({
+        automationId: fixture.id,
+        idempotencyKey: "after-resume",
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+      });
+      expect(resumed.id).toBe(current.id);
+    }).pipe(Effect.provide(testLayer(runtimeHarness.dependencies)));
+  },
+);
+
+it.effect(
+  "groups repeated permanent faults and resolves the same incident after correction",
+  () => {
+    const fixture = automationFixture();
+    let corrected = false;
+    const runtimeHarness = harness(() =>
+      corrected
+        ? { type: "succeeded", output: { corrected: true } }
+        : { type: "failed", error: "token /secret/path\ninvalid" },
+    );
+
+    return Effect.gen(function* () {
+      yield* seedAutomation(fixture);
+      const runtime = yield* AutomationRuntime;
+      const sql = yield* SqlClient.SqlClient;
+      for (const key of ["fault-one", "fault-two"]) {
+        const started = yield* runtime.start({
+          automationId: fixture.id,
+          idempotencyKey: key,
+          expectedConfigCommitSha: commitSha,
+          expectedDefinitionDigest: definitionDigest,
+        });
+        const lease = yield* runtime.acquireLease({
+          executionId: started.id,
+          owner: key,
+          ttlMs: 60_000,
+        });
+        expect(yield* runtime.advance(lease)).toMatchObject({ state: "failed" });
+      }
+
+      const incidents = yield* sql<{
+        readonly state: string;
+        readonly count: number;
+        readonly displayError: string;
+      }>`
+      SELECT state, occurrence_count AS count, display_error AS "displayError"
+      FROM command_center_responsibility_incidents
+    `;
+      expect(incidents).toEqual([
+        { state: "blocked", count: 2, displayError: "token /secret/path invalid" },
+      ]);
+      const items = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM command_center_items
+      WHERE id LIKE 'responsibility-incident:%'
+    `;
+      expect(items).toEqual([{ count: 1 }]);
+
+      corrected = true;
+      const correctedRun = yield* runtime.start({
+        automationId: fixture.id,
+        idempotencyKey: "fault-corrected",
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+      });
+      const correctedLease = yield* runtime.acquireLease({
+        executionId: correctedRun.id,
+        owner: "corrected",
+        ttlMs: 60_000,
+      });
+      yield* sql`
+        CREATE TRIGGER fail_responsibility_incident_resolution
+        BEFORE UPDATE ON command_center_responsibility_incidents
+        WHEN NEW.state = 'resolved'
+        BEGIN
+          SELECT RAISE(ABORT, 'forced incident resolution failure');
+        END
+      `;
+      yield* runtime.advance(correctedLease).pipe(Effect.flip);
+      expect(yield* runtime.get(correctedRun.id)).toMatchObject({
+        state: "running",
+        checkpoints: [expect.objectContaining({ state: "running" })],
+      });
+      expect(
+        yield* sql<{ readonly state: string }>`
+          SELECT state FROM command_center_responsibility_incidents
+        `,
+      ).toEqual([{ state: "blocked" }]);
+      yield* sql`DROP TRIGGER fail_responsibility_incident_resolution`;
+      expect(yield* runtime.advance(correctedLease)).toMatchObject({ state: "succeeded" });
+      expect(
+        yield* sql<{ readonly state: string; readonly resolvedAt: string | null }>`
+        SELECT state, resolved_at AS "resolvedAt"
+        FROM command_center_responsibility_incidents
+      `,
+      ).toEqual([{ state: "resolved", resolvedAt: initialNow }]);
+      expect(
+        yield* sql<{ readonly status: string }>`
+        SELECT status FROM command_center_items WHERE id LIKE 'responsibility-incident:%'
+      `,
+      ).toEqual([{ status: "done" }]);
+    }).pipe(Effect.provide(testLayer(runtimeHarness.dependencies)));
+  },
+);
+
+it.effect("rolls back the terminal projection when incident insertion fails", () => {
+  const fixture = automationFixture();
+  const runtimeHarness = harness(() => ({ type: "failed", error: "credential unavailable" }));
+
+  return Effect.gen(function* () {
+    yield* seedAutomation(fixture);
+    const runtime = yield* AutomationRuntime;
+    const sql = yield* SqlClient.SqlClient;
+    const started = yield* runtime.start({
+      automationId: fixture.id,
+      idempotencyKey: "incident-write-failure",
+      expectedConfigCommitSha: commitSha,
+      expectedDefinitionDigest: definitionDigest,
+    });
+    const lease = yield* runtime.acquireLease({
+      executionId: started.id,
+      owner: "worker",
+      ttlMs: 60_000,
+    });
+    yield* sql`
+      CREATE TRIGGER fail_responsibility_incident_insert
+      BEFORE INSERT ON command_center_responsibility_incidents
+      BEGIN
+        SELECT RAISE(ABORT, 'forced incident insert failure');
+      END
+    `;
+
+    yield* runtime.advance(lease).pipe(Effect.flip);
+    expect(yield* runtime.get(started.id)).toMatchObject({
+      state: "running",
+      checkpoints: [expect.objectContaining({ state: "running", attemptCount: 1 })],
+    });
+    expect(
+      yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM command_center_responsibility_active_slots
+        WHERE execution_id = ${started.id}
+      `,
+    ).toEqual([{ count: 1 }]);
+    expect(
+      yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM command_center_responsibility_incidents
+      `,
+    ).toEqual([{ count: 0 }]);
+
+    yield* sql`DROP TRIGGER fail_responsibility_incident_insert`;
+    expect(yield* runtime.advance(lease)).toMatchObject({ state: "failed" });
+    expect(runtimeHarness.invocations.map((invocation) => invocation.idempotencyKey)).toEqual([
+      `${started.id}:step:1`,
+      `${started.id}:step:1`,
+    ]);
+  }).pipe(Effect.provide(testLayer(runtimeHarness.dependencies)));
+});
+
+it.effect("separates canonical causes on one node and groups repeated occurrences", () => {
+  const fixture = automationFixture({
+    nodes: [{ id: "connector", kind: "connector.read" }],
+  });
+  const runtimeHarness = harness((context) =>
+    context.runInput.cause === "credential"
+      ? {
+          type: "failed",
+          error: "credential unavailable",
+          failure: {
+            canonicalCode: "connector-credential-unavailable",
+            resource: "google-connection",
+            subject: "connection-a",
+          },
+        }
+      : {
+          type: "failed",
+          error: "malformed request",
+          failure: {
+            canonicalCode: "connector-request-invalid",
+            resource: "automation-node",
+            subject: "connector",
+          },
+        },
+  );
+
+  return Effect.gen(function* () {
+    yield* seedAutomation(fixture);
+    const runtime = yield* AutomationRuntime;
+    const sql = yield* SqlClient.SqlClient;
+    for (const [index, cause] of ["credential", "malformed", "credential"].entries()) {
+      const started = yield* runtime.start({
+        automationId: fixture.id,
+        idempotencyKey: `canonical-${index}`,
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+        input: { cause },
+      });
+      const lease = yield* runtime.acquireLease({
+        executionId: started.id,
+        owner: `worker-${index}`,
+        ttlMs: 60_000,
+      });
+      expect(yield* runtime.advance(lease)).toMatchObject({ state: "failed" });
+    }
+
+    expect(
+      yield* sql<{ readonly code: string; readonly count: number }>`
+        SELECT canonical_code AS code, occurrence_count AS count
+        FROM command_center_responsibility_incidents
+        ORDER BY canonical_code
+      `,
+    ).toEqual([
+      { code: "connector-credential-unavailable", count: 2 },
+      { code: "connector-request-invalid", count: 1 },
+    ]);
+  }).pipe(Effect.provide(testLayer(runtimeHarness.dependencies)));
+});
+
+it.effect("read recovery keeps a draft fault open until draft recovery", () => {
+  const fixture = automationFixture({
+    nodes: [{ id: "connector", kind: "connector.read" }],
+  });
+  const runtimeHarness = harness((context) => {
+    const operation = context.runInput.operation;
+    if (operation === "draft-fault") {
+      return {
+        type: "failed",
+        error: "Gmail draft creation is not configured.",
+        failure: {
+          canonicalCode: "connector-capability-unavailable",
+          resource: "google:gmail.draft.create",
+          subject: "connection-a",
+        },
+      };
+    }
+    return {
+      type: "succeeded",
+      resolvedFailureScopes: [
+        {
+          resource: operation === "read" ? "google:gmail.search" : "google:gmail.draft.create",
+          subject: "connection-a",
+        },
+      ],
+    };
+  });
+
+  return Effect.gen(function* () {
+    yield* seedAutomation(fixture);
+    const runtime = yield* AutomationRuntime;
+    const sql = yield* SqlClient.SqlClient;
+    for (const [index, operation] of ["draft-fault", "read", "read", "draft-recovered"].entries()) {
+      const started = yield* runtime.start({
+        automationId: fixture.id,
+        idempotencyKey: `scope-${operation}-${index}`,
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+        input: { operation },
+      });
+      const lease = yield* runtime.acquireLease({
+        executionId: started.id,
+        owner: `worker-${operation}`,
+        ttlMs: 60_000,
+      });
+      yield* runtime.advance(lease);
+      const incident = yield* sql<{ readonly state: string }>`
+        SELECT state FROM command_center_responsibility_incidents
+        WHERE canonical_code = 'connector-capability-unavailable'
+      `;
+      expect(incident).toEqual([
+        { state: operation === "draft-recovered" ? "resolved" : "blocked" },
+      ]);
+      const item = yield* sql<{ readonly status: string }>`
+        SELECT status FROM command_center_items
+        WHERE id LIKE 'responsibility-incident:%'
+      `;
+      expect(item).toEqual([{ status: operation === "draft-recovered" ? "done" : "ready" }]);
+    }
   }).pipe(Effect.provide(testLayer(runtimeHarness.dependencies)));
 });

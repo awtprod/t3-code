@@ -77,9 +77,10 @@ function recoveryTestLayer(input: {
       defaultRetryDelayMs: 1_000,
     }),
   );
+  const persistence = SqlitePersistenceMemory;
   return automationRunsLayer.pipe(
     Layer.provideMerge(dependencies),
-    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(persistence),
     Layer.provideMerge(NodeServices.layer),
   );
 }
