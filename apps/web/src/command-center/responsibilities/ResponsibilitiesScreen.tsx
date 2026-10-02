@@ -1,5 +1,6 @@
 import type { Space } from "@command-center/core";
 import type {
+  CommandCenterPreparationResult,
   CommandCenterResponsibilityDetail,
   CommandCenterResponsibilityStatus,
 } from "@t3tools/contracts";
@@ -247,9 +248,11 @@ export function ResponsibilitiesScreen({
                       ? ` · ${selected.lastCheckStatus.replaceAll("-", " ")}`
                       : ""}
                   </Fact>
-                  <Fact label="Last useful result">{time(selected.lastUsefulResultAt)}</Fact>
+                  <Fact label="Last report or export">{time(selected.lastUsefulResultAt)}</Fact>
                   <Fact label="Source freshness">
-                    Not reported. Last check time does not prove source freshness.
+                    {selected.lastPreparationResult
+                      ? `Adapter reported ${time(selected.lastPreparationResult.source.observedAt)}; freshness is not independently verified.`
+                      : "Not reported. Last check time does not prove source freshness."}
                   </Fact>
                   <Fact label="Current run">{selected.currentExecutionId ?? "None"}</Fact>
                   <Fact label="Authority">
@@ -268,10 +271,63 @@ export function ResponsibilitiesScreen({
                   </div>
                 ) : (
                   <p className="mt-5 rounded-lg border bg-background p-3 text-sm text-muted-foreground">
-                    No inspectable useful result has been recorded yet. A successful empty check is
+                    No Run-backed report or export has been recorded. A successful empty check is
                     shown only under Last check.
                   </p>
                 )}
+
+                {selected.lastPreparationResult ? (
+                  <section
+                    className="mt-4 rounded-lg border bg-background p-3 text-sm"
+                    aria-label="Preparation result"
+                  >
+                    <p className="font-medium">Preparation result</p>
+                    <p className="mt-1 text-muted-foreground">
+                      Source {selected.lastPreparationResult.source.id} · version{" "}
+                      {selected.lastPreparationResult.source.version}
+                      {" · source reported "}
+                      {time(selected.lastPreparationResult.source.observedAt)}
+                    </p>
+                    <dl className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+                      {(
+                        [
+                          ["Selected", selected.lastPreparationResult.counts.selected],
+                          ["Created", selected.lastPreparationResult.counts.created],
+                          ["Reconciled", selected.lastPreparationResult.counts.reconciled],
+                          ["Skipped", selected.lastPreparationResult.counts.skipped],
+                          ["Failed", selected.lastPreparationResult.counts.failed],
+                        ] as const
+                      ).map(([label, count]) => (
+                        <Fact key={label} label={label}>
+                          {count}
+                        </Fact>
+                      ))}
+                    </dl>
+                    {selected.lastPreparationResult.subjects.length > 0 ? (
+                      <div className="mt-3 space-y-2 border-t pt-3">
+                        {selected.lastPreparationResult.subjects.map(
+                          (subject: CommandCenterPreparationResult["subjects"][number]) => (
+                            <div className="break-all" key={subject.id}>
+                              <p className="font-medium">Subject {subject.id}</p>
+                              <p className="text-muted-foreground">
+                                Evidence:{" "}
+                                {subject.evidence.length > 0
+                                  ? subject.evidence.join(", ")
+                                  : "none supplied"}
+                                {" · "}Artifacts:{" "}
+                                {subject.artifactIds.length > 0
+                                  ? subject.artifactIds.join(", ")
+                                  : "none supplied"}
+                              </p>
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-muted-foreground">No subject records supplied.</p>
+                    )}
+                  </section>
+                ) : null}
 
                 {selected.incident ? (
                   <div className="mt-5 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">

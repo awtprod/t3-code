@@ -243,6 +243,26 @@ it.effect("keeps a successful empty check separate from an inspectable useful re
     });
     expect(empty.history[0]).toMatchObject({ usefulResultRef: null });
 
+    const preparation = {
+      kind: "preparation-result",
+      source: { id: "source-a", version: "v1", observedAt: now },
+      counts: { selected: 1, created: 1, reconciled: 0, skipped: 0, failed: 0 },
+      subjects: [{ id: "subject-a", evidence: ["evidence-a"], artifactIds: [] }],
+    };
+    yield* sql`
+      UPDATE command_center_automation_executions
+      SET output_json = ${canonicalJson({ read: preparation } as Schema.Json)}
+      WHERE id = 'execution-1'
+    `;
+    const prepared = yield* responsibilities.get({
+      spaceId: "space-a",
+      automationId: automation.id,
+      historyLimit: 10,
+    });
+    expect(prepared.lastPreparationResult).toEqual(preparation);
+    expect(prepared.history[0]?.preparationResult).toEqual(preparation);
+    expect(prepared.lastUsefulResultRef).toBeNull();
+
     yield* sql`
       INSERT INTO command_center_runs (
         id, command_id, space_id, kind, state, route_json, input_json,
@@ -327,6 +347,25 @@ it.effect("reports a checked Automation as disabled once its committed config di
     yield* seed();
     const responsibilities = yield* Responsibilities;
     const sql = yield* SqlClient.SqlClient;
+    const preparation = {
+      kind: "preparation-result",
+      source: { id: "source-a", version: "v1", observedAt: now },
+      counts: { selected: 1, created: 1, reconciled: 0, skipped: 0, failed: 0 },
+      subjects: [{ id: "subject-a", evidence: ["evidence-a"], artifactIds: [] }],
+    };
+    yield* sql`
+      INSERT INTO command_center_automation_executions (
+        id, automation_id, idempotency_key, work_identity, space_id, config_commit_sha,
+        definition_digest, definition_json, input_json, state, output_json,
+        created_at, updated_at, finished_at
+      ) VALUES (
+        'execution-prepared', ${automation.id}, 'prepared-check',
+        'responsibility:v1:space-a:daily-review', 'space-a', ${commitSha},
+        ${definitionDigest}, ${canonicalJson(automation as unknown as Schema.Json)}, '{}',
+        'succeeded', ${canonicalJson({ read: preparation } as Schema.Json)},
+        ${now}, ${now}, ${now}
+      )
+    `;
     yield* sql`
       INSERT INTO command_center_responsibility_status (
         space_id, automation_id, last_checked_at, last_check_status,
@@ -354,6 +393,7 @@ it.effect("reports a checked Automation as disabled once its committed config di
       lastCheckStatus: "ok",
       nextScheduledAt: null,
     });
+    expect(disabled.lastPreparationResult).toEqual(preparation);
     const listed = yield* responsibilities.list({ spaceId: "space-a" });
     expect(listed.map((item) => item.health)).toEqual(["disabled"]);
   }).pipe(Effect.provide(testLayer)),
