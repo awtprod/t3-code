@@ -735,11 +735,20 @@ export function hasServerAcknowledgedLocalDispatch(input: {
   hasPendingApproval: boolean;
   hasPendingUserInput: boolean;
   threadError: string | null | undefined;
+  /** The server handed the latest user message to a subagent thread, so no
+   * turn or session change will follow on this thread. */
+  latestUserMessageDelegated?: boolean;
 }): boolean {
   if (!input.localDispatch) {
     return false;
   }
   if (input.hasPendingApproval || input.hasPendingUserInput || Boolean(input.threadError)) {
+    return true;
+  }
+  if (
+    input.latestUserMessageDelegated === true &&
+    input.localDispatch.latestUserMessageId !== input.latestUserMessageId
+  ) {
     return true;
   }
   if (input.phase === "connecting") {

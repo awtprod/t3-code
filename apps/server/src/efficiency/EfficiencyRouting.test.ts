@@ -12,6 +12,7 @@ import {
   type EfficiencySettings,
   type ModelSelection,
   type OrchestrationCommand,
+  type OrchestrationThreadShell,
   type ServerProvider,
   type TaskKind,
 } from "@t3tools/contracts";
@@ -20,6 +21,7 @@ import {
   fromCommandCenterSelection,
   interactiveTurnMatchesRule,
   resolveInteractiveEfficiency,
+  routedSelectionNeedsSubagent,
   toCommandCenterSelection,
 } from "./EfficiencyRouting.ts";
 
@@ -608,5 +610,101 @@ describe("sticky continuation routing", () => {
       contextThresholdPercent: 65,
       toolWarningThreshold: 6,
     });
+  });
+});
+
+describe("routedSelectionNeedsSubagent", () => {
+  const astra: ModelSelection = {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: "gpt-6-astra",
+  };
+  const boundThread = (session: OrchestrationThreadShell["session"]): OrchestrationThreadShell => ({
+    id: ThreadId.make("thread"),
+    projectId: ProjectId.make("project"),
+    title: "Review plan",
+    modelSelection: astra,
+    routingMode: "auto",
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    latestTurn: null,
+    createdAt: "2026-09-28T00:00:00.000Z",
+    updatedAt: "2026-09-28T00:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    session,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+  });
+  const opus: ModelSelection = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-opus-5-5",
+  };
+  const codexSession: OrchestrationThreadShell["session"] = {
+    threadId: ThreadId.make("thread"),
+    status: "ready",
+    providerName: "codex",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    runtimeMode: "full-access",
+    activeTurnId: null,
+    lastError: null,
+    updatedAt: "2026-09-28T00:00:00.000Z",
+  };
+
+  it("sends a routed turn on another driver to a subagent once the session is bound", () => {
+    expect(
+      routedSelectionNeedsSubagent({
+        thread: boundThread(codexSession),
+        selection: opus,
+        providers,
+      }),
+    ).toBe(true);
+  });
+
+  it("lets a thread with no session yet switch drivers in place", () => {
+    expect(
+      routedSelectionNeedsSubagent({
+        thread: boundThread(null),
+        selection: opus,
+        providers,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps same-driver model changes in the thread unless the provider forbids them", () => {
+    const sol: ModelSelection = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-6-sol",
+    };
+    const thread = boundThread(codexSession);
+    expect(routedSelectionNeedsSubagent({ thread, selection: sol, providers })).toBe(false);
+    expect(
+      routedSelectionNeedsSubagent({
+        thread,
+        selection: sol,
+        providers: [{ ...codex, requiresNewThreadForModelChange: true }, claude],
+      }),
+    ).toBe(true);
+    expect(
+      routedSelectionNeedsSubagent({
+        thread,
+        selection: astra,
+        providers: [{ ...codex, requiresNewThreadForModelChange: true }, claude],
+      }),
+    ).toBe(false);
+  });
+
+  it("leaves unknown provider instances to the existing error path", () => {
+    expect(
+      routedSelectionNeedsSubagent({
+        thread: boundThread(codexSession),
+        selection: { instanceId: ProviderInstanceId.make("gone"), model: "x" },
+        providers,
+      }),
+    ).toBe(false);
   });
 });

@@ -1026,6 +1026,43 @@ const ThreadTurnInterruptCommand = Schema.Struct({
 
 // Server-internal only: re-issues an interrupted turn for an existing user message
 // (no duplicate `thread.message-sent`) after a provider session exits mid-turn.
+/**
+ * A turn that auto routing sent to a different provider driver than the one
+ * the thread's session is bound to. Sessions cannot switch drivers, so the turn
+ * runs in a subagent thread (`childThreadId`) instead: the parent records the
+ * user message plus a `routing.subagent-started` activity carrying this
+ * payload, and the subagent reactor starts the child turn and reports its
+ * reply back to the parent.
+ */
+export const ThreadSubagentDelegation = Schema.Struct({
+  childThreadId: ThreadId,
+  /** True when the child is an earlier subagent of this parent being reused. */
+  reuseChild: Schema.Boolean,
+  messageId: MessageId,
+  modelSelection: ModelSelection,
+  efficiencyDecision: EfficiencyDecision,
+  interactionMode: ProviderInteractionMode,
+});
+export type ThreadSubagentDelegation = typeof ThreadSubagentDelegation.Type;
+
+/** Parent activity whose payload is a {@link ThreadSubagentDelegation}. */
+export const SUBAGENT_STARTED_ACTIVITY_KIND = "routing.subagent-started";
+/** Parent activity carrying the subagent's final reply. */
+export const SUBAGENT_REPORTED_ACTIVITY_KIND = "routing.subagent-reported";
+/** Parent activity recording that the subagent turn could not start. */
+export const SUBAGENT_FAILED_ACTIVITY_KIND = "routing.subagent-failed";
+/** Child activity linking a subagent thread back to its parent. */
+export const SUBAGENT_PARENT_ACTIVITY_KIND = "routing.subagent-parent";
+
+const ThreadTurnDelegateCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn.delegate"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  message: ThreadTurnStartCommand.fields.message,
+  delegation: ThreadSubagentDelegation,
+  createdAt: IsoDateTime,
+});
+
 export const ThreadTurnResumeCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.resume"),
   commandId: CommandId,
@@ -1596,6 +1633,7 @@ const SandboxBranchExportResultCommand = Schema.Struct({
 
 const InternalOrchestrationCommand = Schema.Union([
   ThreadTurnResumeCommand,
+  ThreadTurnDelegateCommand,
   ThreadAutoSettleCommand,
   ThreadSessionSetCommand,
   ThreadTurnStartFoldCommand,
