@@ -65,6 +65,26 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       tag: COMMAND_CENTER_WS_METHODS.inboxQuery,
       staleTimeMs: 1_000,
     }),
+    digest: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:digest",
+      tag: COMMAND_CENTER_WS_METHODS.digestQuery,
+      staleTimeMs: 30_000,
+    }),
+    updateDigestPreferences: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:digest-preferences-update",
+      tag: COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate,
+      scheduler: commandScheduler,
+      concurrency: { mode: "serial", key: ({ environmentId }) => JSON.stringify([environmentId]) },
+    }),
+    markDigestViewed: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:digest-mark-viewed",
+      tag: COMMAND_CENTER_WS_METHODS.digestMarkViewed,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.snapshotId]),
+      },
+    }),
     inboxDetail: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:inbox-detail",
       tag: COMMAND_CENTER_WS_METHODS.inboxDetail,

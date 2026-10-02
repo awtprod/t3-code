@@ -24,6 +24,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { commandCenterEnvironment } from "~/state/commandCenter";
 
 import { CommandCenterShell } from "./CommandCenterShell";
+import { DigestCard } from "./DigestCard";
 import {
   classifyCommandCenterExecutionTarget,
   resolveCommandCenterRouterEnvironmentId,
@@ -957,6 +958,7 @@ export function CommandCenterHome({
   return (
     <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <CommandCenterShell
+        digest={<DigestCard environmentId={environmentId} />}
         activeConversationId={activeConversationId}
         context={projection.context}
         conversationTitle="Command"

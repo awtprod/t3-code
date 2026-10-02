@@ -5,6 +5,7 @@ export * from "./commandCenterObservations.ts";
 export * from "./commandCenterInbox.ts";
 export * from "./commandCenterSprintPlan.ts";
 export * from "./commandCenterYouTubeAnalytics.ts";
+export * from "./commandCenterDigest.ts";
 export * from "./commandCenterEvents.ts";
 export * from "./background.ts";
 export * from "./auth.ts";

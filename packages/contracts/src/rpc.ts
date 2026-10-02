@@ -328,6 +328,14 @@ import {
   CommandCenterSprintPlanResolveDateConflictResult,
 } from "./commandCenterSprintPlan.ts";
 import {
+  CommandCenterDigestMarkViewedInput,
+  CommandCenterDigestPreferences,
+  CommandCenterDigestPreferencesUpdateInput,
+  CommandCenterDigestQueryInput,
+  CommandCenterDigestQueryResult,
+  CommandCenterDigestSnapshot,
+} from "./commandCenterDigest.ts";
+import {
   CommandCenterEventEnvelope,
   CommandCenterEventPage,
   CommandCenterEventReplayInput,
@@ -538,6 +546,28 @@ export const WsCommandCenterInboxQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.i
   success: CommandCenterInboxQueryResult,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
+
+export const WsCommandCenterDigestQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.digestQuery, {
+  payload: CommandCenterDigestQueryInput,
+  success: CommandCenterDigestQueryResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsCommandCenterDigestPreferencesUpdateRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate,
+  {
+    payload: CommandCenterDigestPreferencesUpdateInput,
+    success: CommandCenterDigestPreferences,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterDigestMarkViewedRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.digestMarkViewed,
+  {
+    payload: CommandCenterDigestMarkViewedInput,
+    success: CommandCenterDigestSnapshot,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsCommandCenterInboxDetailRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.inboxDetail, {
   payload: CommandCenterInboxDetailInput,
@@ -1758,6 +1788,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterSpacesSyncRpc,
   WsCommandCenterItemsQueryRpc,
   WsCommandCenterInboxQueryRpc,
+  WsCommandCenterDigestQueryRpc,
+  WsCommandCenterDigestPreferencesUpdateRpc,
+  WsCommandCenterDigestMarkViewedRpc,
   WsCommandCenterInboxDetailRpc,
   WsCommandCenterInboxCommentRpc,
   WsCommandCenterInboxRequestChangesRpc,

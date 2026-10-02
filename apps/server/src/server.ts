@@ -152,6 +152,7 @@ import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale"
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterInbox from "./command-center/Inbox.ts";
 import * as SprintPlan from "./command-center/SprintPlan.ts";
+import * as CommandCenterDigest from "./command-center/Digest.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
 import * as Observations from "./command-center/Observations.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
@@ -511,6 +512,7 @@ const AutomationScopedShellLayerLive = AutomationScopedShell.AutomationScopedShe
 const CommandCenterBaseLayerLive = Layer.mergeAll(
   CommandCenterService.runtimeLayer,
   CommandCenterInbox.layer,
+  CommandCenterDigest.liveLayer,
   CommandCenterEventStream.layer,
   Observations.layer,
   MemorySearchIndex.layer,

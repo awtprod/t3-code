@@ -3,6 +3,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { PlugZapIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo } from "react";
 
+import { DigestCard } from "../command-center/DigestCard";
 import { InboxScreen } from "../command-center/inbox/InboxScreen";
 import {
   type InboxSearch,
@@ -203,23 +204,28 @@ function InboxEnvironmentRoute({
   }
 
   return (
-    <InboxScreen
-      canApprove={session.data?.scopes?.includes(AuthCommandCenterApproveScope) === true}
-      environmentId={environmentId}
-      environmentOptions={environmentOptions}
-      draftScopeId={draftScopeId}
-      itemId={selectedItemId}
-      onEnvironmentChange={(nextEnvironmentId) =>
-        updateSearch({ environment: nextEnvironmentId, space: undefined, item: undefined })
-      }
-      onItemChange={(item) => updateSearch({ item })}
-      onSelectItem={(space, item) => updateSearch({ space, item })}
-      onSpaceChange={(space) => updateSearch({ space, item: undefined })}
-      onTabChange={(tab) => updateSearch({ tab, item: undefined })}
-      runs={bootstrapQuery.data.runs}
-      selectedSpaceId={selectedSpaceId}
-      spaces={spaces}
-      tab={search.tab}
-    />
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      <div className="max-h-[40vh] shrink-0 overflow-y-auto border-b border-border/60 p-3 sm:p-4">
+        <DigestCard environmentId={environmentId} />
+      </div>
+      <InboxScreen
+        canApprove={session.data?.scopes?.includes(AuthCommandCenterApproveScope) === true}
+        environmentId={environmentId}
+        environmentOptions={environmentOptions}
+        draftScopeId={draftScopeId}
+        itemId={selectedItemId}
+        onEnvironmentChange={(nextEnvironmentId) =>
+          updateSearch({ environment: nextEnvironmentId, space: undefined, item: undefined })
+        }
+        onItemChange={(item) => updateSearch({ item })}
+        onSelectItem={(space, item) => updateSearch({ space, item })}
+        onSpaceChange={(space) => updateSearch({ space, item: undefined })}
+        onTabChange={(tab) => updateSearch({ tab, item: undefined })}
+        runs={bootstrapQuery.data.runs}
+        selectedSpaceId={selectedSpaceId}
+        spaces={spaces}
+        tab={search.tab}
+      />
+    </div>
   );
 }

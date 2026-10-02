@@ -47,6 +47,7 @@ describe("Command Center RPC authorization", () => {
     ]) {
       expect(scopes.get(method)).toBe(AuthCommandCenterReadScope);
     }
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.digestQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.runsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.responsibilitiesList)).toBe(
@@ -92,6 +93,8 @@ describe("Command Center RPC authorization", () => {
       COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport,
       COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask,
       COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict,
+      COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate,
+      COMMAND_CENTER_WS_METHODS.digestMarkViewed,
     ]) {
       expect(scopes.get(method)).toBe(AuthCommandCenterOperateScope);
     }
