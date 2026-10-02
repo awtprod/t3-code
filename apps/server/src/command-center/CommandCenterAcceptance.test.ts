@@ -504,6 +504,9 @@ const unusedAutomationRuns = AutomationRuns.AutomationRuns.of({
   get: () => Effect.die("Automation execution lookup is not used by this acceptance path."),
   recoverDue: () => Effect.die("Automation recovery is not used by this acceptance path."),
   decideApproval: () => Effect.die("Automation approval is not used by this acceptance path."),
+  approveInboxDraft: () => Effect.die("Inbox draft approval is not used by this acceptance path."),
+  getInboxDraftReceipt: () =>
+    Effect.die("Inbox draft receipts are not used by this acceptance path."),
 });
 const unusedMemorySearch = MemorySearchIndex.MemorySearchIndex.of({
   rebuild: () => Effect.die("Memory indexing is not used by this acceptance path."),

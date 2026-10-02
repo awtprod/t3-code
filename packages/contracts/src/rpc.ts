@@ -301,6 +301,9 @@ import {
   CommandCenterInboxCommentInput,
   CommandCenterInboxDetail,
   CommandCenterInboxDetailInput,
+  CommandCenterInboxDraftApproveInput,
+  CommandCenterInboxDraftReceipt,
+  CommandCenterInboxDraftReceiptInput,
   CommandCenterInboxMutationResult,
   CommandCenterInboxQueryInput,
   CommandCenterInboxQueryResult,
@@ -724,6 +727,24 @@ export const WsCommandCenterSprintPlanListHistoryRpc = Rpc.make(
   {
     payload: CommandCenterSprintPlanListHistoryInput,
     success: CommandCenterSprintPlanListHistoryResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxDraftApproveRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxDraftApprove,
+  {
+    payload: CommandCenterInboxDraftApproveInput,
+    success: CommandCenterInboxDraftReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxDraftReceiptRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxDraftReceipt,
+  {
+    payload: CommandCenterInboxDraftReceiptInput,
+    success: Schema.NullOr(CommandCenterInboxDraftReceipt),
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
@@ -1811,6 +1832,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterSprintPlanPatchTaskRpc,
   WsCommandCenterSprintPlanResolveDateConflictRpc,
   WsCommandCenterSprintPlanListHistoryRpc,
+  WsCommandCenterInboxDraftApproveRpc,
+  WsCommandCenterInboxDraftReceiptRpc,
   WsCommandCenterRunsQueryRpc,
   WsCommandCenterAutomationsQueryRpc,
   WsCommandCenterResponsibilitiesListRpc,

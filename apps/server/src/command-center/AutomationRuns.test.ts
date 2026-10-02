@@ -12,6 +12,7 @@ import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts
 import * as ConnectionHealth from "./ConnectionHealth.ts";
 import { CommandCenterEventStream, layer as eventStreamLayer } from "./EventStream.ts";
 import { CommandCenterService, layer as serviceLayer } from "./Service.ts";
+import * as InboxGmailDrafts from "./InboxGmailDrafts.ts";
 import {
   automationAgentCommandId,
   automationAgentRunResumeKey,
@@ -183,7 +184,9 @@ function testLayer(options: { readonly executeNode?: AutomationNodeExecutor } = 
   const dependencies = Layer.mergeAll(commandCenterLayer, durableRuntimeLayer, eventStreamLayer);
   const persistence = SqlitePersistenceMemory;
   return automationRunsLayer.pipe(
+    Layer.provideMerge(InboxGmailDrafts.layer),
     Layer.provideMerge(dependencies),
+    Layer.provideMerge(configLayer),
     Layer.provideMerge(persistence),
     Layer.provideMerge(NodeServices.layer),
   );

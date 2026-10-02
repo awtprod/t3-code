@@ -159,6 +159,7 @@ import * as AutomationDefinitionConfig from "./command-center/AutomationDefiniti
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as Responsibilities from "./command-center/Responsibilities.ts";
 import * as RepositoryChecks from "./command-center/RepositoryChecks.ts";
+import * as InboxGmailDrafts from "./command-center/InboxGmailDrafts.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
@@ -535,11 +536,24 @@ const RepositoryChecksLayerLive = RepositoryChecks.layer.pipe(
   Layer.provide(PersistenceLayerLive),
 );
 
+const InboxGmailDraftsLayerLive = InboxGmailDrafts.layer.pipe(
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(CommandCenterConfigLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
 const CommandCenterCoreLayerLive = Layer.mergeAll(
   CommandCenterBaseLayerLive,
   RepositoryChecksLayerLive,
+  InboxGmailDraftsLayerLive,
   AutomationRuns.safeRuntimeLayer.pipe(
-    Layer.provide(Layer.mergeAll(CommandCenterBaseLayerLive, RepositoryChecksLayerLive)),
+    Layer.provide(
+      Layer.mergeAll(
+        CommandCenterBaseLayerLive,
+        RepositoryChecksLayerLive,
+        InboxGmailDraftsLayerLive,
+      ),
+    ),
   ),
 );
 

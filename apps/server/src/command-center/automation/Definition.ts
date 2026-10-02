@@ -461,6 +461,17 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
       }
     }
     if (node.kind === "connector.write" && node.config.operation === "gmail.draft.create") {
+      if (
+        node.config.source === "inbox.accepted" &&
+        Object.keys(node.config).some((key) => key !== "source" && key !== "operation")
+      ) {
+        issues.push({
+          code: "node.config.invalid",
+          message: `Accepted Inbox draft node '${node.id}' cannot contain an editable request.`,
+          path: ["nodes", index, "config"],
+          nodeIds: [node.id],
+        });
+      }
       const predecessors = graph.predecessorIds[node.id] ?? [];
       const approved = predecessors.some(
         (predecessorId) =>

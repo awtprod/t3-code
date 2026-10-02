@@ -55,6 +55,9 @@ function dependencies(
       { readonly operation: string; readonly contentTrust: string; readonly data: unknown },
       string
     >;
+    readonly executeInboxDraft?: (
+      context: AutomationNodeExecutionContext,
+    ) => Effect.Effect<Schema.Json, string>;
     readonly runScopedShell?: (
       input: AutomationScopedShellRequest,
     ) => Effect.Effect<AutomationScopedShellResult, never>;
@@ -109,6 +112,9 @@ function dependencies(
           contentTrust: "untrusted-external",
           data: { messages: [] },
         })),
+    ...(overrides.executeInboxDraft === undefined
+      ? {}
+      : { executeInboxDraft: overrides.executeInboxDraft }),
     runScopedShell:
       overrides.runScopedShell ??
       ((input: AutomationScopedShellRequest) =>
@@ -597,6 +603,31 @@ it.effect("preserves prospect retryability without exposing connector internals"
       type: "retry",
       error: "The Jev evaluation request failed or exceeded its bounds.",
     });
+  });
+});
+
+it.effect("never retries an uncertain accepted Inbox Gmail draft", () => {
+  let calls = 0;
+  const execute = makeSafeAutomationNodeExecutor(
+    dependencies({
+      executeInboxDraft: () => {
+        calls += 1;
+        return Effect.fail("Gmail draft creation needs reconciliation.");
+      },
+    }),
+  );
+  return Effect.gen(function* () {
+    const outcome = yield* execute(
+      context("connector.write", {
+        source: "inbox.accepted",
+        operation: "gmail.draft.create",
+      }),
+    );
+    expect(outcome).toEqual({
+      type: "failed",
+      error: "Gmail draft creation needs reconciliation.",
+    });
+    expect(calls).toBe(1);
   });
 });
 

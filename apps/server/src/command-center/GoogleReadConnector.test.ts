@@ -321,6 +321,18 @@ const fakeRunnerLayer = Layer.effect(
               }
               const outputIndex = input.args.indexOf("--out");
               const outputPath = input.args[outputIndex + 1];
+              if (input.args.includes("drafts") && input.args.includes("create")) {
+                return {
+                  stdout: '{"id":"draft-123","message":{"id":"message-456"}}',
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                };
+              }
               if (outputIndex < 0 || outputPath === undefined) {
                 return {
                   stdout: '{"ok":true}',
@@ -473,6 +485,41 @@ it.effect("marks exact successful verify and read selections connected", () =>
       { health: "connected", ...connectionSelection },
       { health: "connected", ...connectionSelection },
     ]);
+  }).pipe(Effect.provide(connectorTestLayer)),
+);
+
+it.effect("creates only a draft for the approved account and returns its verified ID", () =>
+  Effect.gen(function* () {
+    recordedArgs.length = 0;
+    const connector = yield* GoogleReadConnector;
+    const request = {
+      ...connectionSelection,
+      operation: "gmail.draft.create" as const,
+      to: ["recipient@example.com"],
+      subject: "Approved subject",
+      body: "Approved body",
+    };
+    expect(
+      (yield* connector.createDraft!(request, [], "different-account").pipe(Effect.flip)).reason,
+    ).toBe("configuration");
+    expect(recordedArgs).toHaveLength(0);
+    expect(yield* connector.createDraft!(request, [], "configured-account")).toEqual({
+      operation: "gmail.draft.create",
+      draftId: "draft-123",
+      messageId: "message-456",
+    });
+    expect(recordedArgs).toHaveLength(1);
+    expect(recordedArgs[0]).toEqual(
+      expect.arrayContaining([
+        "--account",
+        "configured-account",
+        "--gmail-no-send",
+        "gmail",
+        "drafts",
+        "create",
+      ]),
+    );
+    expect(recordedArgs[0]).not.toContain("send");
   }).pipe(Effect.provide(connectorTestLayer)),
 );
 

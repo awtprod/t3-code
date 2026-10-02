@@ -1929,6 +1929,22 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "command-center" },
           ),
+        [COMMAND_CENTER_WS_METHODS.inboxDraftApprove]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxDraftApprove,
+            withVerifiedCommandCenterInbox(input.spaceId, () =>
+              commandCenterAutomationRuns.approveInboxDraft(input, currentSession.subject),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxDraftReceipt]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxDraftReceipt,
+            withVerifiedCommandCenterInbox(input.spaceId, () =>
+              commandCenterAutomationRuns.getInboxDraftReceipt(input),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
         [COMMAND_CENTER_WS_METHODS.runsQuery]: (input) =>
           observeRpcEffect(COMMAND_CENTER_WS_METHODS.runsQuery, commandCenter.queryRuns(input), {
             "rpc.aggregate": "command-center",

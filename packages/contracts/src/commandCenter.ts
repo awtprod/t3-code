@@ -69,6 +69,8 @@ export const COMMAND_CENTER_WS_METHODS = {
   digestQuery: "cc.digest.query",
   digestPreferencesUpdate: "cc.digest.preferences.update",
   digestMarkViewed: "cc.digest.markViewed",
+  inboxDraftApprove: "cc.inbox.draft.approve",
+  inboxDraftReceipt: "cc.inbox.draft.receipt",
   runsQuery: "cc.runs.query",
   automationsQuery: "cc.automations.query",
   responsibilitiesList: "cc.responsibilities.list",

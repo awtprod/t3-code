@@ -29,6 +29,8 @@ For a sprint plan task adjustment, **Accept revision** still only selects the pr
 
 An applied adjustment stays in history. To reverse it, prepare an inverse candidate against the current plan and approve that new revision; reopening or reaccepting the old one does not replay it.
 
+For an accepted Gmail draft proposal backed by current local Item evidence, **Approve draft** is a separate action. It creates the exact addressed draft in the connected Gmail account and never sends it. Pending candidates, change requests, closed Items, and stale evidence block approval. Inbox shows the resulting Gmail draft ID when verified. If Gmail's response is inconclusive, Inbox shows a reconciliation state and will not automatically attempt another draft; check Gmail Drafts before taking further action.
+
 ## Snooze, dismiss, and reopen
 
 Snoozing requires a future wake time. Snoozed items remain available in the Snoozed view and can be unsnoozed at any time. Dismissed items move to Recent and retain their discussion and proposal history. Reopening a dismissed item returns it to Actionable; it does not repeat any external action that may already have happened.

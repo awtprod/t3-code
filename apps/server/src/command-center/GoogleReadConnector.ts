@@ -12,6 +12,7 @@ import { Artifact, type Artifact as ArtifactType } from "@command-center/core";
 import type {
   CommandCenterError,
   GoogleDraftCreateRequest,
+  GoogleDraftCreateResult,
   GoogleReadRequest,
   GoogleReadResult,
 } from "@t3tools/contracts";
@@ -211,7 +212,8 @@ export interface GoogleReadConnectorShape {
   readonly createDraft?: (
     request: GoogleDraftCreateRequest,
     attachmentPaths: ReadonlyArray<string>,
-  ) => Effect.Effect<Schema.Json, GoogleReadConnectorError>;
+    expectedAccountAlias?: string,
+  ) => Effect.Effect<GoogleDraftCreateResult, GoogleReadConnectorError>;
 }
 
 export class GoogleReadConnector extends Context.Service<
@@ -391,11 +393,21 @@ export const layer = Layer.effect(
     const createDraft = Effect.fn("GoogleReadConnector.createDraft")(function* (
       request: GoogleDraftCreateRequest,
       attachmentPaths: ReadonlyArray<string>,
+      expectedAccountAlias?: string,
     ) {
       return yield* withConnectionHealth(
         request,
         Effect.gen(function* () {
           const resolved = yield* resolveAccount(request);
+          if (
+            expectedAccountAlias !== undefined &&
+            resolved.accountAlias !== expectedAccountAlias
+          ) {
+            return yield* new GoogleReadConnectorError({
+              reason: "configuration",
+              message: "The approved Gmail draft account changed before creation.",
+            });
+          }
           yield* verifyBinary();
           yield* Effect.forEach(attachmentPaths, (attachmentPath) =>
             fs.stat(attachmentPath).pipe(
@@ -452,7 +464,7 @@ export const layer = Layer.effect(
               reason: "process",
               message: result.stderr.trim() || "The Gmail draft request failed.",
             });
-          return (yield* decodeUnknownJsonString(result.stdout).pipe(
+          const response = yield* decodeUnknownJsonString(result.stdout).pipe(
             Effect.mapError(
               (cause) =>
                 new GoogleReadConnectorError({
@@ -461,7 +473,33 @@ export const layer = Layer.effect(
                   cause,
                 }),
             ),
-          )) as Schema.Json;
+          );
+          const raw = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({
+              id: Schema.String.check(Schema.isNonEmpty()),
+              message: Schema.optional(
+                Schema.Struct({
+                  id: Schema.String.check(Schema.isNonEmpty()),
+                  threadId: Schema.optional(Schema.String.check(Schema.isNonEmpty())),
+                }),
+              ),
+            }),
+          )(response).pipe(
+            Effect.mapError(
+              (cause) =>
+                new GoogleReadConnectorError({
+                  reason: "output",
+                  message: "The Gmail draft response is missing its draft ID.",
+                  cause,
+                }),
+            ),
+          );
+          return {
+            operation: "gmail.draft.create" as const,
+            draftId: raw.id,
+            ...(raw.message?.id === undefined ? {} : { messageId: raw.message.id }),
+            ...(raw.message?.threadId === undefined ? {} : { threadId: raw.message.threadId }),
+          };
         }),
       );
     });

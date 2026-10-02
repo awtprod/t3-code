@@ -1,4 +1,5 @@
 import {
+  ConnectionId,
   Item,
   ItemId,
   NonNegativeInt,
@@ -316,6 +317,35 @@ export type CommandCenterInboxSnoozeInput = typeof CommandCenterInboxSnoozeInput
 export const CommandCenterInboxSimpleMutationInput = CommandCenterInboxMutationBase;
 export type CommandCenterInboxSimpleMutationInput =
   typeof CommandCenterInboxSimpleMutationInput.Type;
+
+export const CommandCenterInboxDraftApproveInput = Schema.Struct({
+  ...CommandCenterInboxMutationBase.fields,
+  revisionId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+});
+export type CommandCenterInboxDraftApproveInput = typeof CommandCenterInboxDraftApproveInput.Type;
+
+export const CommandCenterInboxDraftReceipt = Schema.Struct({
+  mutationId: MutationId,
+  itemId: ItemId,
+  spaceId: SpaceId,
+  expectedVersion: NonNegativeInt,
+  revisionId: TrimmedNonEmptyString,
+  payloadDigest: TrimmedNonEmptyString,
+  connectionId: ConnectionId,
+  accountAlias: TrimmedNonEmptyString,
+  status: Schema.Literals(["approved", "creating", "created", "uncertain"]),
+  draftId: Schema.optional(TrimmedNonEmptyString),
+  messageId: Schema.optional(TrimmedNonEmptyString),
+  threadId: Schema.optional(TrimmedNonEmptyString),
+  error: Schema.optional(TrimmedNonEmptyString),
+});
+export type CommandCenterInboxDraftReceipt = typeof CommandCenterInboxDraftReceipt.Type;
+
+export const CommandCenterInboxDraftReceiptInput = Schema.Struct({
+  spaceId: SpaceId,
+  itemId: ItemId,
+});
+export type CommandCenterInboxDraftReceiptInput = typeof CommandCenterInboxDraftReceiptInput.Type;
 
 export const CommandCenterInboxMutationResult = Schema.Struct({
   detail: CommandCenterInboxDetail,
