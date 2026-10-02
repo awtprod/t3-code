@@ -523,7 +523,7 @@ const executionIdFor = (key: string) =>
 }
 
 /** Makes every write fail like a busy/locked database, as SQLite reports it. */
-const databaseWrites = (enabled: boolean) =>
+const allowDatabaseWrites = (enabled: boolean) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* sql.unsafe(`PRAGMA query_only = ${enabled ? "OFF" : "ON"}`);
@@ -539,9 +539,9 @@ const databaseWrites = (enabled: boolean) =>
       yield* awaitInvocations(harness, 1);
       // The first renewal (at 10 s) hits a write error; writes recover 2 s later.
       yield* advance(harness, 9_000);
-      yield* databaseWrites(false);
+      yield* allowDatabaseWrites(false);
       yield* advance(harness, 2_000);
-      yield* databaseWrites(true);
+      yield* allowDatabaseWrites(true);
       yield* advance(harness, 30_000);
       yield* settle;
       expect(harness.interrupted).toBe(0);
@@ -566,11 +566,11 @@ const databaseWrites = (enabled: boolean) =>
       yield* awaitInvocations(harness, 1);
       // Writes fail for longer than the lease: retries are bounded by it.
       yield* advance(harness, 9_000);
-      yield* databaseWrites(false);
+      yield* allowDatabaseWrites(false);
       yield* advance(harness, 25_000);
       yield* settle;
       expect(harness.interrupted).toBe(1);
-      yield* databaseWrites(true);
+      yield* allowDatabaseWrites(true);
       expect((yield* Fiber.join(running))._tag).toBe("Failure");
       // Recovery does not re-run the unsafe step: its outcome is unknown.
       yield* advance(harness, 10_000);

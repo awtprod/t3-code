@@ -106,7 +106,12 @@ queries = {
         WHERE status IN ('approved','creating','uncertain')""",
 }
 for title, sql in queries.items():
-    rows = db.execute(sql).fetchall()
+    try:
+        rows = db.execute(sql).fetchall()
+    except sqlite3.OperationalError as error:
+        # A table the running build has not created yet holds nothing to resume.
+        print(f"== {title}: 0 (not present yet: {error})")
+        continue
     print(f"== {title}: {len(rows)}")
     for row in rows:
         print("  ", row)
