@@ -448,7 +448,10 @@ export const evaluateObservationEligibility = (input: {
   if (data.publishedAt === undefined) {
     if (input.policy.minimumMaturityMs > 0) reasons.push("publication-time-missing");
   } else if (
-    asOfMs - DateTime.toEpochMillis(DateTime.makeUnsafe(data.publishedAt)) <
+    // Maturity is a property of the measurement: how old the content was when
+    // it was observed. Waiting longer does not make an early measurement mature.
+    DateTime.toEpochMillis(DateTime.makeUnsafe(data.observedAt)) -
+      DateTime.toEpochMillis(DateTime.makeUnsafe(data.publishedAt)) <
     input.policy.minimumMaturityMs
   ) {
     reasons.push("evidence-immature");

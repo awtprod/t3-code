@@ -156,6 +156,31 @@ describe("evaluateObservationEligibility", () => {
     );
   });
 
+  it("judges maturity when the evidence was observed, not when it is reviewed", () => {
+    const publishedAt = "2026-09-13T12:00:00.000Z";
+    const reviewedLate = "2026-09-22T12:00:00.000Z" as never;
+    // Measured one day after publication: still immature eight days later.
+    const early = evaluateObservationEligibility({
+      policy,
+      evidence: snapshot({
+        ...base,
+        data: { ...base.data, publishedAt, observedAt: "2026-09-14T12:00:00.000Z" },
+      }),
+      asOf: reviewedLate,
+    });
+    assert.include(early.reasons, "evidence-immature");
+    // Measured seven days after publication: mature.
+    const mature = evaluateObservationEligibility({
+      policy,
+      evidence: snapshot({
+        ...base,
+        data: { ...base.data, publishedAt, observedAt: "2026-09-20T12:00:00.000Z" },
+      }),
+      asOf: reviewedLate,
+    });
+    assert.notInclude(mature.reasons, "evidence-immature");
+  });
+
   it("rejects immature, unknown-denominator, and short/long mismatched evidence", () => {
     const immature = evaluateObservationEligibility({
       policy,
