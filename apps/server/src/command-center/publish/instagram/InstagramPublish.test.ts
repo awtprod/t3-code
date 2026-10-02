@@ -524,6 +524,64 @@ describe("durable Instagram production executor", () => {
           ).toHaveLength(24);
           expect(stale[24]!.detail).toBeNull();
         }));
+  test("new approval rotates past 25 older IN_PROGRESS containers across restart at a frozen clock", (f) =>
+    Effect.gen(function* () {
+      const olderReceipts: InstagramReelReceipt[] = [];
+      for (let i = 0; i < 25; i++) {
+        const older = yield* f.service.request(
+          {
+            ...binding,
+            sha256: i.toString(16).padStart(64, "0"),
+            dueUtc: DateTime.formatIso(DateTime.makeUnsafe(T0 + 1000)),
+          },
+          session,
+        );
+        yield* f.service.approve(older.id, older.digest, session);
+        yield* f.patch(older.id, {
+          state: "processing",
+          createIntentAt: T0 + 1000,
+          containerId: "900001",
+        });
+        olderReceipts.push(yield* f.raw(older.id));
+      }
+      const current = yield* f.admit;
+      expect(new Set([...olderReceipts.map((receipt) => receipt.id), current.id]).size).toBe(26);
+      f.control.status = "IN_PROGRESS";
+      yield* TestClock.setTime(DUE);
+      yield* f.service.tick;
+      const firstClaims = yield* f.sql<{
+        claims: number;
+      }>`SELECT SUM(lease_generation) AS claims FROM command_center_instagram_reels`;
+      expect(firstClaims[0]!.claims).toBe(25);
+      expect((yield* f.raw(current.id)).state).toBe("approved");
+      expect(f.calls).toEqual({ create: 0, publish: 0, status: 25, permalink: 0, recent: 0 });
+
+      const restarted = yield* make(f.ports);
+      yield* restarted.tick;
+      const secondClaims = yield* f.sql<{
+        claims: number;
+      }>`SELECT SUM(lease_generation) AS claims FROM command_center_instagram_reels`;
+      expect(secondClaims[0]!.claims).toBe(50);
+      expect(yield* Clock.currentTimeMillis).toBe(DUE);
+      expect(DUE).toBeLessThan(Date.parse(current.binding.dueUtc) + current.binding.lateWindowMs);
+      const admitted = yield* f.raw(current.id);
+      expect({ state: admitted.state, creates: f.calls.create }).toEqual({
+        state: "processing",
+        creates: 1,
+      });
+      expect(admitted.createIntentAt).toBe(DUE);
+      expect(admitted.containerId).toBe("900001");
+      expect(admitted.readAttempts).toBe(0);
+      expect(admitted.detail).toBeNull();
+      expect(f.calls).toEqual({ create: 1, publish: 0, status: 50, permalink: 0, recent: 0 });
+      for (const original of olderReceipts) {
+        expect(original.binding.accountRevision).toBe(f.control.revision);
+        expect(DUE).toBeLessThan(
+          Date.parse(original.binding.dueUtc) + original.binding.lateWindowMs,
+        );
+        expect(yield* f.raw(original.id)).toEqual(original);
+      }
+    }));
   for (const heldState of ["uncertain", "published"] as const)
     for (const recoveryState of ["uncertain", "published"] as const)
       for (const equalDue of heldState === recoveryState ? [false, true] : [false])
