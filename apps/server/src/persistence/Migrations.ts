@@ -183,6 +183,46 @@ export const makeMigrationLoader = (throughId?: number) =>
  */
 const run = Migrator.make({});
 
+/**
+ * IDs that are intentionally absent from the registry. The upstream sync
+ * (#37) renumbered 57-60 to 61-64; databases that ran the old numbering still
+ * record 57-60 as applied, so those IDs must never be reused.
+ */
+export const RETIRED_MIGRATION_IDS: ReadonlyArray<number> = [57, 58, 59, 60];
+
+/**
+ * Problems with the order of registered migration IDs.
+ *
+ * The Migrator runs only IDs above the highest applied one, so the registry
+ * must be strictly increasing and gap-free apart from retired IDs. A gap means
+ * a lower-numbered migration from another branch has not landed yet: merging
+ * the higher one first would skip the lower one forever on every database that
+ * upgrades in between (see `assertNoSkippedMigrations`).
+ */
+export const findMigrationSequenceViolations = (
+  registeredIds: ReadonlyArray<number>,
+  retiredIds: ReadonlyArray<number> = RETIRED_MIGRATION_IDS,
+): ReadonlyArray<string> => {
+  const retired = new Set(retiredIds);
+  const violations: Array<string> = [];
+  for (let index = 1; index < registeredIds.length; index++) {
+    const previous = registeredIds[index - 1]!;
+    const current = registeredIds[index]!;
+    if (current <= previous) {
+      violations.push(`migration ${current} is registered after ${previous}`);
+      continue;
+    }
+    for (let missing = previous + 1; missing < current; missing++) {
+      if (retired.has(missing)) continue;
+      violations.push(`migration ${missing} is missing between ${previous} and ${current}`);
+    }
+  }
+  for (const id of registeredIds) {
+    if (retired.has(id)) violations.push(`migration ${id} reuses a retired ID`);
+  }
+  return violations;
+};
+
 /** Table the effect Migrator records applied migrations in (its default). */
 export const MIGRATIONS_TABLE = "effect_sql_migrations";
 
