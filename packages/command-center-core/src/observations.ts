@@ -372,6 +372,7 @@ export const ObservationEligibilityReason = Schema.Literals([
   "denominator-missing",
   "denominator-too-small",
   "evidence-stale",
+  "evidence-not-yet-available",
   "reporting-lag-missing",
   "reporting-lag-too-high",
   "evidence-incomplete",
@@ -474,12 +475,11 @@ export const evaluateObservationEligibility = (input: {
     }
   }
 
-  if (
-    asOfMs - DateTime.toEpochMillis(DateTime.makeUnsafe(data.collectedAt)) >
-    input.policy.maximumAgeMs
-  ) {
-    reasons.push("evidence-stale");
-  }
+  const collectedAtMs = DateTime.toEpochMillis(DateTime.makeUnsafe(data.collectedAt));
+  // Evidence collected after the evaluation time did not exist yet; a negative
+  // age must not pass the maximum-age check.
+  if (collectedAtMs > asOfMs) reasons.push("evidence-not-yet-available");
+  else if (asOfMs - collectedAtMs > input.policy.maximumAgeMs) reasons.push("evidence-stale");
   if (data.reportingLagMs === null) reasons.push("reporting-lag-missing");
   else if (data.reportingLagMs > input.policy.maximumReportingLagMs) {
     reasons.push("reporting-lag-too-high");

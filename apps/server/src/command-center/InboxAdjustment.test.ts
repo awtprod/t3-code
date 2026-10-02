@@ -72,6 +72,9 @@ const sourceJson = encodeJson({
 });
 
 const setup = Effect.fn("InboxAdjustmentTest.setup")(function* (withPolicy: boolean) {
+  // Evaluate evidence at a time after it was collected, as in production (the
+  // TestClock otherwise starts in 1970, before the fixture's observation).
+  yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe(instant)) + 60_000);
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
     INSERT INTO command_center_spaces (
