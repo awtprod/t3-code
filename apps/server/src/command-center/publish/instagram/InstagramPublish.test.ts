@@ -524,6 +524,94 @@ describe("durable Instagram production executor", () => {
           ).toHaveLength(24);
           expect(stale[24]!.detail).toBeNull();
         }));
+  for (const heldState of ["uncertain", "published"] as const)
+    for (const recoveryState of ["uncertain", "published"] as const)
+      for (const equalDue of heldState === recoveryState ? [false, true] : [false])
+        test(`current ${recoveryState} recovery rotates past 25 held ${heldState} receipts with ${equalDue ? "equal" : "older"} due times across restart at a frozen clock`, (f) =>
+          Effect.gen(function* () {
+            const heldReceipts: InstagramReelReceipt[] = [];
+            for (let i = 0; i < 25; i++) {
+              const old = yield* f.service.request(
+                {
+                  ...binding,
+                  sha256: i.toString(16).padStart(64, "0"),
+                  dueUtc: equalDue
+                    ? binding.dueUtc
+                    : DateTime.formatIso(DateTime.makeUnsafe(T0 + 1000)),
+                },
+                session,
+              );
+              yield* f.service.approve(old.id, old.digest, session);
+              yield* f.patch(old.id, {
+                state: heldState,
+                createIntentAt: T0,
+                containerId: "900001",
+                publishIntentAt: T0,
+                mediaId: heldState === "published" ? "900002" : null,
+                publishedAt: heldState === "published" ? T0 : null,
+              });
+              heldReceipts.push(yield* f.raw(old.id));
+            }
+            f.control.revision++;
+            const current = yield* f.service.request(
+              { ...binding, accountRevision: f.control.revision },
+              session,
+            );
+            yield* f.service.approve(current.id, current.digest, session);
+            yield* f.patch(current.id, {
+              state: recoveryState,
+              createIntentAt: T0,
+              containerId: "900001",
+              publishIntentAt: T0,
+              mediaId: recoveryState === "published" ? "900002" : null,
+              publishedAt: recoveryState === "published" ? T0 : null,
+            });
+            f.control.status = "PUBLISHED";
+            f.control.recent = {
+              data: [{ id: "900002", caption: binding.caption, timestamp: binding.dueUtc }],
+            };
+            yield* TestClock.setTime(DUE);
+            yield* f.service.tick;
+            const firstClaims = yield* f.sql<{
+              claims: number;
+            }>`SELECT SUM(lease_generation) AS claims FROM command_center_instagram_reels`;
+            expect(firstClaims[0]!.claims).toBe(25);
+            expect(f.calls).toEqual({ create: 0, publish: 0, status: 0, permalink: 0, recent: 0 });
+            expect((yield* f.raw(current.id)).readAttempts).toBe(0);
+            const restarted = yield* make(f.ports);
+            yield* restarted.tick;
+            const secondClaims = yield* f.sql<{
+              claims: number;
+            }>`SELECT SUM(lease_generation) AS claims FROM command_center_instagram_reels`;
+            expect(secondClaims[0]!.claims).toBe(50);
+            expect(yield* Clock.currentTimeMillis).toBe(DUE);
+            expect(f.calls).toEqual({
+              create: 0,
+              publish: 0,
+              status: recoveryState === "uncertain" ? 1 : 0,
+              permalink: recoveryState === "published" ? 1 : 0,
+              recent: recoveryState === "uncertain" ? 1 : 0,
+            });
+            const recovered = yield* f.raw(current.id);
+            expect(recovered.state).toBe(recoveryState);
+            expect(recovered.readAttempts).toBe(1);
+            expect(recovered.mediaId).toBe(recoveryState === "published" ? "900002" : null);
+            expect(recovered.permalink).toBe(
+              recoveryState === "published" ? "https://www.instagram.com/reel/test/" : null,
+            );
+            if (recoveryState === "uncertain")
+              expect(recovered.detail).toContain("Human reconciliation required");
+            for (const original of heldReceipts) {
+              const held = yield* f.raw(original.id);
+              expect(held.detail).toContain("Read-only recovery held");
+              expect(held).toEqual({
+                ...original,
+                updatedAt: DUE,
+                detail: held.detail,
+              });
+              expect(held.readAttempts).toBe(0);
+            }
+          }));
   for (const state of ["uncertain", "published"] as const) {
     for (const snapshot of [
       "wrong-account",
