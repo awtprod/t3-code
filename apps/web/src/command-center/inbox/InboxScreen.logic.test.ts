@@ -16,7 +16,9 @@ import {
   validateInboxSearch,
   writeInboxDraft,
   writeInboxPendingReply,
+  gmailDraftApprovalBlockedReason,
 } from "./InboxScreen.logic";
+import { GMAIL_DRAFT_DETAIL, gmailDraftReceipt } from "./InboxScreen.test-fixtures";
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -250,5 +252,39 @@ describe("Inbox route and draft logic", () => {
         ],
       ).map((entry) => entry.id),
     ).toEqual(["new", "shared", "old"]);
+  });
+});
+
+describe("gmailDraftApprovalBlockedReason", () => {
+  const authority = "This session lacks approval authority.";
+  const reason = (
+    canApprove: boolean,
+    receipt: ReturnType<typeof gmailDraftReceipt> | null = null,
+    detail = GMAIL_DRAFT_DETAIL,
+  ) => gmailDraftApprovalBlockedReason({ canApprove, detail, receipt });
+
+  it("allows an unblocked accepted draft only with approval authority", () => {
+    expect(reason(true)).toBeNull();
+    expect(reason(false)).toBe(authority);
+    expect(reason(false, gmailDraftReceipt("approved"))).toBe(authority);
+  });
+
+  it("does not show the authority message once the draft is in flight or settled", () => {
+    for (const status of ["creating", "created", "uncertain"] as const) {
+      expect(reason(false, gmailDraftReceipt(status))).toBeNull();
+    }
+  });
+
+  it("reports the specific Item blocker before missing authority", () => {
+    const closed = {
+      ...GMAIL_DRAFT_DETAIL,
+      item: { ...GMAIL_DRAFT_DETAIL.item, status: "done" as const },
+    };
+    expect(reason(false, null, closed)).toBe("This Item is closed.");
+    const dismissed = {
+      ...GMAIL_DRAFT_DETAIL,
+      state: { ...GMAIL_DRAFT_DETAIL.state, lifecycle: "dismissed" as const },
+    };
+    expect(reason(false, null, dismissed)).toBe("Reopen this item before approving its draft.");
   });
 });

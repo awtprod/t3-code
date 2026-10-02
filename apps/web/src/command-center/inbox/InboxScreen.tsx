@@ -66,6 +66,7 @@ import {
   resolveInboxDraftScopeId,
   writeInboxDraft,
   writeInboxPendingReply,
+  gmailDraftApprovalBlockedReason,
 } from "./InboxScreen.logic";
 
 export interface InboxEnvironmentOption {
@@ -759,7 +760,7 @@ interface InboxDetailPaneProps {
   readonly onChanged: () => void;
 }
 
-function InboxDetailPane({
+export function InboxDetailPane({
   canApprove,
   environmentId,
   draftScopeId,
@@ -1082,29 +1083,11 @@ function InboxDetailPane({
     currentRevision.payload.actionKind === "gmail.draft.create";
   const currentDraftReceipt =
     draftReceiptQuery.data?.revisionId === currentRevision?.id ? draftReceiptQuery.data : null;
-  const draftApprovalBlockedReason =
-    !isGmailDraft || currentRevision === undefined
-      ? null
-      : detail.state.lifecycle !== "open"
-        ? "Reopen this item before approving its draft."
-        : detail.item.status === "done" || detail.item.status === "canceled"
-          ? "This Item is closed."
-          : currentDraftReceipt?.status === "approved" &&
-              currentDraftReceipt.expectedVersion !== detail.state.version
-            ? "This Item changed after draft approval. Review the latest proposal."
-            : detail.state.unresolvedChangeRequestCount > 0 || detail.state.candidateCount > 0
-              ? "Resolve change requests and review pending candidates first."
-              : currentRevision.evidence.source !== "command-center-item" ||
-                  currentRevision.evidence.subjectId !== detail.item.id ||
-                  currentRevision.evidence.version !== detail.item.updatedAt
-                ? "This draft needs current local Item evidence before approval."
-                : currentRevision.payload.target.kind !== detail.state.subject.kind ||
-                    currentRevision.payload.target.id !== detail.state.subject.id
-                  ? "The draft target no longer matches this Inbox subject."
-                  : !canApprove &&
-                      (currentDraftReceipt === null || currentDraftReceipt.status === "approved")
-                    ? "This session lacks approval authority."
-                    : null;
+  const draftApprovalBlockedReason = gmailDraftApprovalBlockedReason({
+    canApprove,
+    detail,
+    receipt: currentDraftReceipt,
+  });
   const approveDraft = async () => {
     if (
       currentRevision === undefined ||

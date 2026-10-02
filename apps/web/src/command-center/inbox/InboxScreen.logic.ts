@@ -1,3 +1,5 @@
+import type { CommandCenterInboxDetail, CommandCenterInboxDraftReceipt } from "@t3tools/contracts";
+
 export const INBOX_PAGE_SIZE = 25;
 export const INBOX_HISTORY_PAGE_SIZE = 30;
 export const INBOX_COMMENT_MAX_CHARS = 20_000;
@@ -303,4 +305,42 @@ export function mergeHistoryById<T extends { readonly id: string; readonly seque
     for (const entry of page) entries.set(entry.id, entry);
   }
   return [...entries.values()].sort((left, right) => right.sequence - left.sequence);
+}
+
+/**
+ * Why the current Gmail draft proposal cannot be approved, or null when the
+ * Approve draft control may be used. Specific Item and evidence blockers win
+ * over missing approval authority; a receipt that is already creating,
+ * created or uncertain never shows the authority message.
+ */
+export function gmailDraftApprovalBlockedReason(input: {
+  readonly canApprove: boolean;
+  readonly detail: CommandCenterInboxDetail;
+  readonly receipt: CommandCenterInboxDraftReceipt | null;
+}): string | null {
+  const { canApprove, detail, receipt } = input;
+  const currentRevision = detail.currentRevision;
+  const isGmailDraft =
+    currentRevision?.payload.kind === "prepared-action" &&
+    currentRevision.payload.actionKind === "gmail.draft.create";
+  return !isGmailDraft || currentRevision === undefined
+    ? null
+    : detail.state.lifecycle !== "open"
+      ? "Reopen this item before approving its draft."
+      : detail.item.status === "done" || detail.item.status === "canceled"
+        ? "This Item is closed."
+        : receipt?.status === "approved" && receipt.expectedVersion !== detail.state.version
+          ? "This Item changed after draft approval. Review the latest proposal."
+          : detail.state.unresolvedChangeRequestCount > 0 || detail.state.candidateCount > 0
+            ? "Resolve change requests and review pending candidates first."
+            : currentRevision.evidence.source !== "command-center-item" ||
+                currentRevision.evidence.subjectId !== detail.item.id ||
+                currentRevision.evidence.version !== detail.item.updatedAt
+              ? "This draft needs current local Item evidence before approval."
+              : currentRevision.payload.target.kind !== detail.state.subject.kind ||
+                  currentRevision.payload.target.id !== detail.state.subject.id
+                ? "The draft target no longer matches this Inbox subject."
+                : !canApprove && (receipt === null || receipt.status === "approved")
+                  ? "This session lacks approval authority."
+                  : null;
 }
