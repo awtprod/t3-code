@@ -71,6 +71,27 @@ describe("findMigrationSequenceViolations", () => {
       "migrations 78-20261001 are missing before 20261002",
     ]);
   });
+
+  it("reports gaps up to the largest safe integer immediately, around retired IDs", () => {
+    const started = performance.now();
+    assert.deepStrictEqual(findMigrationSequenceViolations([1, 1_000_000_000_000]), [
+      "migrations 2-56 are missing before 1000000000000",
+      "migrations 61-999999999999 are missing before 1000000000000",
+    ]);
+    assert.deepStrictEqual(
+      findMigrationSequenceViolations([...prefix(77), Number.MAX_SAFE_INTEGER]),
+      [
+        `migrations 78-${Number.MAX_SAFE_INTEGER - 1} are missing before ${Number.MAX_SAFE_INTEGER}`,
+      ],
+    );
+    // A gap containing several retired IDs, including adjacent ones.
+    assert.deepStrictEqual(findMigrationSequenceViolations([1, 70], [57, 58, 60, 61]), [
+      "migrations 2-56 are missing before 70",
+      "migration 59 is missing before 70",
+      "migrations 62-69 are missing before 70",
+    ]);
+    assert.isBelow(performance.now() - started, 1_000);
+  });
 });
 
 describe("findSkippedMigrationIds", () => {
