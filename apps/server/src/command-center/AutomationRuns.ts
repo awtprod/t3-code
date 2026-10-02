@@ -233,6 +233,13 @@ export const layer = Layer.effect(
         input: snapshot.input,
         output: snapshot.output,
         createdAt: snapshot.createdAt,
+        updatedAt: snapshot.updatedAt,
+        checkpoints: snapshot.checkpoints.map((checkpoint) => ({
+          nodeId: checkpoint.nodeId,
+          state: checkpoint.state,
+          attemptCount: checkpoint.attemptCount,
+          resolutionKey: checkpoint.resolutionKey,
+        })),
         finishedAt: snapshot.finishedAt,
         ...(snapshot.error === null ? {} : { error: snapshot.error }),
       });

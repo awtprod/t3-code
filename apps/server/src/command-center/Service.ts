@@ -627,6 +627,23 @@ export interface CommandCenterServiceShape {
     readonly input: Readonly<Record<string, Schema.Json>>;
     readonly output: Schema.Json | null;
     readonly createdAt: string;
+    /**
+     * The runtime's durable time of this transition. It is the audit event's
+     * occurredAt, so recording the same persisted snapshot again (a retry or a
+     * restart) is an exact, idempotent replay.
+     */
+    readonly updatedAt: string;
+    /**
+     * Node progress at this transition. Together with updatedAt it identifies
+     * the transition, so an execution can legitimately re-enter a state (e.g.
+     * queued again after its approval resolves) as a new audit event.
+     */
+    readonly checkpoints: ReadonlyArray<{
+      readonly nodeId: string;
+      readonly state: string;
+      readonly attemptCount: number;
+      readonly resolutionKey: string | null;
+    }>;
     readonly finishedAt: string | null;
     readonly error?: string;
   }) => Effect.Effect<void, CommandCenterError>;
@@ -1800,6 +1817,23 @@ export const layer = Layer.effect(
               )
               ON CONFLICT(idempotency_key) DO NOTHING
             `;
+            // Re-projecting a waiting checkpoint (a retry or a restart) must
+            // replay the original audit events exactly, so they carry the
+            // durable times of the first projection rather than this call's.
+            const projected = yield* sql<{
+              readonly requestedAt: string;
+              readonly itemCreatedAt: string;
+            }>`
+              SELECT a.requested_at AS "requestedAt", i.created_at AS "itemCreatedAt"
+              FROM command_center_approvals a
+              JOIN command_center_items i ON i.id = ${itemId}
+              WHERE a.idempotency_key = ${idempotencyKey}
+              LIMIT 1
+            `;
+            const firstProjection = projected[0];
+            if (firstProjection === undefined) {
+              return yield* persistenceError("The automation Approval was not projected.");
+            }
             yield* appendAudit({
               eventId: `approval:${approvalId}:requested`,
               actorKind: "automation",
@@ -1807,7 +1841,7 @@ export const layer = Layer.effect(
               spaceId: input.spaceId,
               runId: input.executionId,
               payload: { approvalId, status: "requested", payloadDigest },
-              occurredAt: now,
+              occurredAt: firstProjection.requestedAt,
             });
             yield* appendAudit({
               eventId: `approval-item:${itemId}:created`,
@@ -1816,7 +1850,7 @@ export const layer = Layer.effect(
               spaceId: input.spaceId,
               runId: input.executionId,
               payload: { itemId, change: "created", kind: "approval" },
-              occurredAt: now,
+              occurredAt: firstProjection.itemCreatedAt,
             });
           }),
         );
@@ -1857,8 +1891,24 @@ export const layer = Layer.effect(
     const recordAutomationEvent = Effect.fn("CommandCenter.recordAutomationEvent")(
       function* (input: Parameters<CommandCenterServiceShape["recordAutomationEvent"]>[0]) {
         yield* requireConfiguredSpace(input.spaceId);
-        const now = DateTime.formatIso(yield* DateTime.now);
         const state = canonicalAutomationRunState(input.state);
+        // One audit event per runtime transition. The key binds the durable
+        // transition time and every node's progress; the payload repeats both,
+        // so a replay of this exact transition is idempotent while any other
+        // content under the same key is still rejected by the audit guard.
+        const transitionKey = yield* digest(
+          stringify({
+            updatedAt: input.updatedAt,
+            checkpoints: [...input.checkpoints]
+              .map(({ nodeId, state, attemptCount, resolutionKey }) => [
+                nodeId,
+                state,
+                attemptCount,
+                resolutionKey,
+              ])
+              .toSorted(([left], [right]) => String(left).localeCompare(String(right))),
+          }),
+        );
         const route = {
           automationId: input.automationId,
           actionKind: "automation.run",
@@ -1884,13 +1934,13 @@ export const layer = Layer.effect(
                 finished_at = excluded.finished_at
             `;
             yield* appendAudit({
-              eventId: `automation-execution:${input.executionId}:${input.state}`,
+              eventId: `automation-execution:${input.executionId}:${input.state}:${transitionKey}`,
               actorKind: "automation",
               action: "cc.automations.run.changed",
               spaceId: input.spaceId,
               runId: input.executionId,
               payload: input,
-              occurredAt: now,
+              occurredAt: input.updatedAt,
             });
           }),
         );
