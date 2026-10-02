@@ -572,7 +572,7 @@ export const make = Effect.fn("InstagramPublish.make")(function* (ports: Instagr
     const now = yield* Clock.currentTimeMillis;
     const rows = yield* sql<{
       id: string;
-    }>`SELECT id FROM command_center_instagram_reels WHERE due_ms <= ${now} AND lease_until <= ${now} AND state IN ('approved','creating','processing','ready','publishing','uncertain','published') AND NOT (state = 'published' AND json_extract(receipt_json, '$.permalink') IS NOT NULL) AND NOT (state IN ('published','uncertain') AND json_extract(receipt_json, '$.readAttempts') >= 3) AND NOT (state = 'uncertain' AND json_extract(receipt_json, '$.containerId') IS NULL) ORDER BY due_ms LIMIT 25`.pipe(
+    }>`SELECT id FROM command_center_instagram_reels WHERE due_ms <= ${now} AND lease_until <= ${now} AND state IN ('approved','creating','processing','ready','publishing','uncertain','published') AND NOT (state = 'published' AND json_extract(receipt_json, '$.permalink') IS NOT NULL) AND NOT (state IN ('published','uncertain') AND json_extract(receipt_json, '$.readAttempts') >= 3) AND NOT (state = 'uncertain' AND json_extract(receipt_json, '$.containerId') IS NULL) ORDER BY CASE WHEN state IN ('approved','creating','processing','ready','publishing') THEN 0 ELSE 1 END, due_ms LIMIT 25`.pipe(
       Effect.mapError(persistence),
     );
     yield* Effect.forEach(rows, (r) => drive(r.id), { discard: true });
