@@ -34,6 +34,7 @@ import {
   TrimmedString,
 } from "@command-center/core";
 import * as Schema from "effect/Schema";
+import { ThreadId as AssetThreadId } from "./baseSchemas.ts";
 
 export const COMMAND_CENTER_WS_METHODS = {
   bootstrap: "cc.bootstrap",
@@ -1010,3 +1011,78 @@ export const CommandCenterWindowsMediaRootsResult = Schema.Struct({
   roots: Schema.Array(CommandCenterWindowsMediaRoot),
 });
 export type CommandCenterWindowsMediaRootsResult = typeof CommandCenterWindowsMediaRootsResult.Type;
+
+/** Exact bytes are preserved; no caption trimming or caller-provided approval. */
+export const InstagramReelBinding = Schema.Struct({
+  version: Schema.Literal(1),
+  accountId: Schema.String.check(Schema.isPattern(/^[0-9]{5,30}$/)),
+  accountRevision: Schema.Int.check(Schema.isGreaterThan(0)),
+  threadId: AssetThreadId,
+  relativePath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+  workspaceRoot: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  sizeBytes: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1_000_000_000)),
+  durationMs: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(900_000)),
+  caption: Schema.String.check(Schema.isMaxLength(2200)),
+  dueUtc: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/)),
+  lateWindowMs: Schema.Int.check(
+    Schema.isGreaterThanOrEqualTo(30_000),
+    Schema.isLessThanOrEqualTo(300_000),
+  ),
+});
+export type InstagramReelBinding = typeof InstagramReelBinding.Type;
+export const InstagramReelRequest = Schema.Struct({ binding: InstagramReelBinding });
+export const InstagramReelSelection = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+});
+export const InstagramReelApprove = Schema.Struct({
+  ...InstagramReelSelection.fields,
+  digest: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+});
+export const InstagramReelState = Schema.Literals([
+  "requested",
+  "approved",
+  "creating",
+  "processing",
+  "ready",
+  "publishing",
+  "published",
+  "uncertain",
+  "canceled",
+  "error",
+]);
+export const InstagramReelReceipt = Schema.Struct({
+  id: Schema.String,
+  digest: Schema.String,
+  binding: InstagramReelBinding,
+  state: InstagramReelState,
+  approvalId: Schema.NullOr(Schema.String),
+  actor: Schema.NullOr(Schema.String),
+  approvalSessionId: Schema.NullOr(Schema.String),
+  approvalExpiresAt: Schema.NullOr(Schema.Number),
+  approvedAt: Schema.NullOr(Schema.Number),
+  canceledAt: Schema.NullOr(Schema.Number),
+  createIntentAt: Schema.NullOr(Schema.Number),
+  containerId: Schema.NullOr(Schema.String),
+  publishIntentAt: Schema.NullOr(Schema.Number),
+  mediaId: Schema.NullOr(Schema.String),
+  publishedAt: Schema.NullOr(Schema.Number),
+  permalink: Schema.NullOr(Schema.String),
+  readAttempts: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(3)),
+  updatedAt: Schema.Number,
+  detail: Schema.NullOr(Schema.String),
+});
+export type InstagramReelReceipt = typeof InstagramReelReceipt.Type;
+export const INSTAGRAM_REEL_METHODS = {
+  account: "cc.instagram.reel.account",
+  request: "cc.instagram.reel.request",
+  query: "cc.instagram.reel.query",
+  approve: "cc.instagram.reel.approve",
+  cancel: "cc.instagram.reel.cancel",
+} as const;
+
+/** Read-only metadata; never refreshes the private account token. */
+export const InstagramReelAccount = Schema.Struct({
+  accountId: InstagramReelBinding.fields.accountId,
+  accountRevision: InstagramReelBinding.fields.accountRevision,
+});

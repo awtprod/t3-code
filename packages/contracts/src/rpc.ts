@@ -1,4 +1,12 @@
 import * as Schema from "effect/Schema";
+import {
+  INSTAGRAM_REEL_METHODS,
+  InstagramReelRequest,
+  InstagramReelSelection,
+  InstagramReelApprove,
+  InstagramReelReceipt,
+  InstagramReelAccount,
+} from "./commandCenter.ts";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import { Approval, Item, Memory, ObservationSnapshot } from "@command-center/core";
@@ -892,6 +900,33 @@ export const WsCommandCenterGoogleConnectionRemoveRpc = Rpc.make(
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
+
+export const WsInstagramReelRequestRpc = Rpc.make(INSTAGRAM_REEL_METHODS.request, {
+  payload: InstagramReelRequest,
+  success: InstagramReelReceipt,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsInstagramReelQueryRpc = Rpc.make(INSTAGRAM_REEL_METHODS.query, {
+  payload: InstagramReelSelection,
+  success: InstagramReelReceipt,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsInstagramReelApproveRpc = Rpc.make(INSTAGRAM_REEL_METHODS.approve, {
+  payload: InstagramReelApprove,
+  success: InstagramReelReceipt,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsInstagramReelCancelRpc = Rpc.make(INSTAGRAM_REEL_METHODS.cancel, {
+  payload: InstagramReelSelection,
+  success: InstagramReelReceipt,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsInstagramReelAccountRpc = Rpc.make(INSTAGRAM_REEL_METHODS.account, {
+  payload: Schema.Struct({}),
+  success: InstagramReelAccount,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
 
 export const WsCommandCenterPublishConnectionsQueryRpc = Rpc.make(
   COMMAND_CENTER_WS_METHODS.publishConnectionsQuery,
@@ -1852,6 +1887,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterGoogleConnectionSetupCompleteRpc,
   WsCommandCenterGoogleConnectionRemoveRpc,
   WsCommandCenterPublishConnectionsQueryRpc,
+  WsInstagramReelRequestRpc,
+  WsInstagramReelAccountRpc,
+  WsInstagramReelQueryRpc,
+  WsInstagramReelApproveRpc,
+  WsInstagramReelCancelRpc,
   WsCommandCenterPublishConnectionSetupBeginRpc,
   WsCommandCenterPublishConnectionSetupCompleteRpc,
   WsCommandCenterPublishConnectionRemoveRpc,

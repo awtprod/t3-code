@@ -1,3 +1,5 @@
+import { INSTAGRAM_REEL_METHODS } from "@t3tools/contracts";
+import { InstagramPublish } from "./command-center/publish/instagram/InstagramPublish.ts";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -703,6 +705,20 @@ const makeWsRpcLayer = (
       const googleConnectionSetup = yield* Effect.serviceOption(
         GoogleConnectionSetup.GoogleConnectionSetup,
       );
+      const instagramPublish = yield* Effect.serviceOption(InstagramPublish);
+      const withInstagramPublish = <A>(
+        use: (service: InstagramPublish["Service"]) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        Option.match(instagramPublish, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "config",
+                message: "Instagram publishing is unavailable.",
+              }),
+            ),
+          onSome: use,
+        });
       const publishConnections = yield* Effect.serviceOption(PublishConnections.PublishConnections);
       const withPublishConnections = <A>(
         use: (
@@ -2149,6 +2165,33 @@ const makeWsRpcLayer = (
                   .pipe(Effect.tap(() => commandCenter.syncConfiguration({ force: true }))),
             }),
             { "rpc.aggregate": "command-center" },
+          ),
+        [INSTAGRAM_REEL_METHODS.account]: () =>
+          observeRpcEffect(
+            INSTAGRAM_REEL_METHODS.account,
+            withInstagramPublish((service) => service.account(currentSession)),
+          ),
+        [INSTAGRAM_REEL_METHODS.request]: (input) =>
+          observeRpcEffect(
+            INSTAGRAM_REEL_METHODS.request,
+            withInstagramPublish((service) => service.request(input.binding, currentSession)),
+          ),
+        [INSTAGRAM_REEL_METHODS.query]: (input) =>
+          observeRpcEffect(
+            INSTAGRAM_REEL_METHODS.query,
+            withInstagramPublish((service) => service.query(input.id, currentSession)),
+          ),
+        [INSTAGRAM_REEL_METHODS.approve]: (input) =>
+          observeRpcEffect(
+            INSTAGRAM_REEL_METHODS.approve,
+            withInstagramPublish((service) =>
+              service.approve(input.id, input.digest, currentSession),
+            ),
+          ),
+        [INSTAGRAM_REEL_METHODS.cancel]: (input) =>
+          observeRpcEffect(
+            INSTAGRAM_REEL_METHODS.cancel,
+            withInstagramPublish((service) => service.cancel(input.id, currentSession)),
           ),
         [COMMAND_CENTER_WS_METHODS.publishConnectionsQuery]: (_input) =>
           observeRpcEffect(

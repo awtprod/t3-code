@@ -1,3 +1,7 @@
+import * as InstagramPublishLive from "./command-center/publish/instagram/InstagramPublishLive.ts";
+import * as InstagramPublish from "./command-center/publish/instagram/InstagramPublish.ts";
+import * as InstagramTokenStore from "./command-center/publish/instagram/InstagramTokenStore.ts";
+import * as InstagramWorkspacePaths from "./workspace/WorkspacePaths.ts";
 import { EnvironmentHttpApi } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
@@ -714,8 +718,19 @@ const RunRecoveryCoordinatorLayerLive = RunRecoveryCoordinator.layer.pipe(
   Layer.provide(PersistenceLayerLive),
 );
 
+const InstagramPublishLayerLive = InstagramPublishLive.layer.pipe(
+  Layer.provide(InstagramTokenStore.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(InstagramWorkspacePaths.layer),
+  Layer.provide(PersistenceLayerLive),
+);
+const InstagramRunnerLayerLive = InstagramPublish.runnerLayer.pipe(
+  Layer.provideMerge(InstagramPublishLayerLive),
+);
+
 const CommandCenterLayerLive = Layer.mergeAll(
   ResponsibilitiesLayerLive,
+  InstagramRunnerLayerLive,
   AutomationScheduleInterpreterLayerLive,
   AutomationRunsLayerLive,
   AutomationTriggerCoordinatorLayerLive,

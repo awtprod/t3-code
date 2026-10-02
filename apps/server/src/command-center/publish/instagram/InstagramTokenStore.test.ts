@@ -257,4 +257,24 @@ describe("InstagramTokenStore", () => {
       });
     }).pipe(Effect.provide(storeLayer(fetchImpl)));
   });
+  it.effect("publishing snapshot never refreshes or rewrites an expiring token", () => {
+    const { calls, fetchImpl } = okGraph();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      const store = yield* InstagramTokenStore;
+      yield* store.connectFromToken(PASTED);
+      const original = yield* storedJson;
+      const requests = calls.length;
+      yield* TestClock.setTime(T0 + 50 * DAY_MS);
+      const snapshot = Option.getOrThrow(yield* store.publishingCredential);
+      expect(snapshot.igUserId).toBe("17841400000000000");
+      expect(snapshot.accountRevision).toBe(T0);
+      expect(calls.length).toBe(requests);
+      expect(yield* storedJson).toEqual(original);
+      yield* TestClock.setTime(T0 + 61 * DAY_MS);
+      expect(Option.isNone(yield* store.publishingCredential)).toBe(true);
+      expect(calls.length).toBe(requests);
+      expect(yield* storedJson).toEqual(original);
+    }).pipe(Effect.provide(storeLayer(fetchImpl)));
+  });
 });

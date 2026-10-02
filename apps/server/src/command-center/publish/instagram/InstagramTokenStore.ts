@@ -53,6 +53,11 @@ export type InstagramRefreshResult =
   | { readonly refreshed: false; readonly reason: "error"; readonly message: string };
 
 interface InstagramTokenStoreShape {
+  /** Nonmutating, server-only snapshot. Never refreshes or writes secrets. */
+  readonly publishingCredential: Effect.Effect<
+    Option.Option<InstagramActiveCredential & { readonly accountRevision: number }>,
+    CommandCenterError
+  >;
   /** Browser-safe summary. Lazily refreshes an expiring token first. */
   readonly summary: Effect.Effect<CommandCenterPublishConnection, CommandCenterError>;
   /** Validate a pasted long-lived token via GET /me, refresh it for an authoritative expiry, persist it. */
@@ -294,7 +299,19 @@ export const make = Effect.fn("InstagramTokenStore.make")(function* (
     });
   }).pipe(Effect.withSpan("InstagramTokenStore.activeCredential"));
 
+  const publishingCredential = Effect.gen(function* () {
+    const current = yield* slot.read;
+    const now = yield* nowMs;
+    if (Option.isNone(current) || current.value.tokenExpiresAtMs <= now) return Option.none();
+    return Option.some({
+      accessToken: current.value.accessToken,
+      igUserId: current.value.igUserId,
+      username: current.value.username,
+      accountRevision: current.value.connectedAtMs,
+    });
+  });
   return InstagramTokenStore.of({
+    publishingCredential,
     summary,
     connectFromToken,
     disconnect,

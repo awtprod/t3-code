@@ -28,7 +28,7 @@
  * every outbound string is passed through redact() first.
  */
 
-import { instagramGraphBaseUrl } from "./config.ts";
+import { isInstagramPublishingEnabled, instagramGraphBaseUrl } from "./config.ts";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -40,6 +40,7 @@ export interface InstagramClientOptions {
   baseUrl?: string;
   /** Per-request timeout in ms (covers headers and body). Defaults to 15s. */
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -196,12 +197,14 @@ export class InstagramClient {
   private readonly fetchImpl: FetchLike;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly signal: AbortSignal | undefined;
 
   constructor(options: InstagramClientOptions) {
     this.accessToken = options.accessToken;
     this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as FetchLike);
     this.baseUrl = options.baseUrl ?? instagramGraphBaseUrl();
     this.timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.signal = options.signal;
   }
 
   /** Replace every occurrence of the access token with a placeholder. */
@@ -220,6 +223,9 @@ export class InstagramClient {
     } = {},
   ): Promise<T> {
     const { method = "GET", query = {}, tokenIn = "header" } = options;
+    if (method === "POST" && !isInstagramPublishingEnabled()) {
+      throw new InstagramApiError({ message: "Instagram publishing is disabled.", endpoint: path });
+    }
     const url = new URL(`${this.baseUrl}${path}`);
     for (const [key, value] of Object.entries(query)) {
       if (value !== undefined) url.searchParams.set(key, String(value));
@@ -232,20 +238,38 @@ export class InstagramClient {
       url.searchParams.set("access_token", this.accessToken);
     }
 
+    const timeout = AbortSignal.timeout(this.timeoutMs);
+    const signal = this.signal ? AbortSignal.any([timeout, this.signal]) : timeout;
     let response: Response;
     let body: string;
     try {
       response = await this.fetchImpl(url.toString(), {
         method,
         headers,
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal,
       });
-      body = await response.text();
-    } catch (error) {
+      const reader = response.body?.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      if (reader) {
+        try {
+          while (true) {
+            signal.throwIfAborted();
+            const part = await reader.read();
+            if (part.done) break;
+            size += part.value.byteLength;
+            if (size > 262144) throw new Error("Graph response exceeds limit");
+            chunks.push(part.value);
+          }
+        } finally {
+          await reader.cancel();
+          reader.releaseLock();
+        }
+      }
+      body = new TextDecoder().decode(Buffer.concat(chunks));
+    } catch {
       throw new InstagramApiError({
-        message: `Instagram request failed: ${this.redact(
-          error instanceof Error ? error.message : String(error),
-        )}`,
+        message: "Instagram request failed or exceeded its bounded response deadline.",
         endpoint: path,
       });
     }
