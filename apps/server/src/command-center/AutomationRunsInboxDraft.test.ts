@@ -28,6 +28,7 @@ import { layer as eventStreamLayer } from "./EventStream.ts";
 import { GoogleReadConnectorError, type GoogleReadConnectorShape } from "./GoogleReadConnector.ts";
 import * as InboxGmailDrafts from "./InboxGmailDrafts.ts";
 import { CommandCenterService, layer as serviceLayer } from "./Service.ts";
+import { withAutomationInvariants } from "./automationTestInvariants.ts";
 import { makeSafeAutomationNodeExecutor } from "./automation/NodeExecutor.ts";
 import { layer as runtimeLayer } from "./automation/Runtime.ts";
 
@@ -294,31 +295,43 @@ const bothClocks = <E>(
     layer: (state: FakeState) => ReturnType<typeof testLayer>,
   ) => Effect.Effect<void, E, never>,
 ) => {
-  it.effect(name, () => body(freshState(), (state) => testLayer(state)));
+  it.effect(name, () => body(freshState(), (state) => withAutomationInvariants(testLayer(state))));
   it.live(`${name} (real advancing clock)`, () =>
-    body(freshState(), (state) => testLayer(state, "live")),
+    body(freshState(), (state) => withAutomationInvariants(testLayer(state, "live"))),
   );
 };
 
 bothClocks(
-  "creates exactly one draft with the approved content and account under repeated and concurrent approval",
+  "creates exactly one draft with the approved content and account under concurrent and repeated approval",
   (state, layer) =>
     Effect.gen(function* () {
       yield* seed;
       const runs = yield* AutomationRuns;
-      const first = yield* runs.approveInboxDraft(approval(), "andrew");
-      expect(first.status).toBe("created");
-      expect(first.draftId).toBe("draft-1");
-      expect(first.accountAlias).toBe("approved@example.com");
-
-      // Replays: sequential and concurrent clicks of the same approval.
-      const replays = yield* Effect.all(
-        [1, 2, 3].map(() => runs.approveInboxDraft(approval(), "andrew")),
+      // Three clicks race the first approval through the runtime and audit.
+      const racing = yield* Effect.all(
+        [1, 2, 3].map(() => Effect.exit(runs.approveInboxDraft(approval(), "andrew"))),
         { concurrency: "unbounded" },
       );
-      for (const replay of replays) {
-        expect(replay.status).toBe("created");
-        expect(replay.draftId).toBe("draft-1");
+      const succeeded = racing.flatMap((exit) => (exit._tag === "Success" ? [exit.value] : []));
+      expect(succeeded.length).toBeGreaterThan(0);
+      for (const exit of racing) {
+        if (exit._tag === "Failure") {
+          // A loser may only see the approval as already in progress.
+          expect(String(exit.cause)).not.toContain("already bound to different content");
+          expect(String(exit.cause)).toMatch(/conflict|already|not waiting/iu);
+        }
+      }
+      // A click that joins an approval another click is completing may see
+      // the receipt before the draft exists; none may see a second draft.
+      for (const receipt of succeeded) {
+        expect(["approved", "creating", "created"]).toContain(receipt.status);
+      }
+      expect(succeeded.some((receipt) => receipt.status === "created")).toBe(true);
+
+      // Later sequential replays return the same draft.
+      for (const _ of [1, 2]) {
+        const replay = yield* runs.approveInboxDraft(approval(), "andrew");
+        expect(replay).toMatchObject({ status: "created", draftId: "draft-1" });
       }
 
       expect(state.calls.map((call) => call.method)).toEqual(["createDraft"]);
@@ -366,27 +379,6 @@ bothClocks("refuses a draft whose accepted content no longer matches the Item", 
   }).pipe(Effect.provide(layer(state))),
 );
 
-bothClocks("an approval interrupted inside the Gmail call is never drafted twice", (state, layer) =>
-  Effect.gen(function* () {
-    yield* seed;
-    state.hangNextCreate = true;
-    const runs = yield* AutomationRuns;
-    // The connector never answers; the approving request is abandoned
-    // (client disconnect / server shutdown) while Gmail is in flight.
-    const inFlight = yield* runs.approveInboxDraft(approval(), "andrew").pipe(Effect.forkChild);
-    while (state.calls.length === 0) yield* Effect.yieldNow;
-    yield* Fiber.interrupt(inFlight);
-    expect(state.calls.map((call) => call.method)).toEqual(["createDraft"]);
-    expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId }))?.status).toBe("creating");
-
-    // Repeated approval after the interruption must not reach Gmail again.
-    yield* Effect.exit(runs.approveInboxDraft(approval(), "andrew"));
-    yield* Effect.exit(runs.approveInboxDraft(approval("approve-b"), "andrew"));
-    expect(state.calls.map((call) => call.method)).toEqual(["createDraft"]);
-    expect(yield* countGmailReceipts).toBe(1);
-  }).pipe(Effect.provide(layer(state))),
-);
-
 bothClocks("refuses a draft when the Google account changes after approval", (state, layer) =>
   Effect.gen(function* () {
     yield* seed;
@@ -424,6 +416,8 @@ const crashBeforeDraftCheckpoint = Effect.gen(function* () {
     SET state = 'running', output_json = NULL, error = NULL, finished_at = NULL
     WHERE execution_id = ${executionId} AND node_id = 'draft'
   `;
+  // The canonical Run still shows the last state recorded before the crash.
+  yield* sql`UPDATE command_center_runs SET state = 'running', finished_at = NULL WHERE id = ${executionId}`;
   return executionId;
 });
 
@@ -447,22 +441,47 @@ bothClocks(
     }).pipe(Effect.provide(layer(state))),
 );
 
+/** Waits, bounded, until the fake connector has been called; fails with the fiber's exit otherwise. */
+const awaitGmailCall = <A, E>(state: FakeState, fiber: Fiber.Fiber<A, E>) =>
+  Effect.gen(function* () {
+    for (let spin = 0; spin < 10_000; spin++) {
+      if (state.calls.length > 0) return;
+      const exited = fiber.pollUnsafe();
+      if (exited !== undefined) {
+        return yield* Effect.die(new Error(`approval ended before Gmail: ${String(exited)}`));
+      }
+      yield* Effect.yieldNow;
+    }
+    return yield* Effect.die(new Error("approval never reached Gmail"));
+  });
+
 bothClocks(
-  "restart recovery after a crash inside the Gmail call never drafts again",
+  "an approval interrupted inside the Gmail call is never drafted again by retries or restart recovery",
   (state, layer) =>
     Effect.gen(function* () {
       yield* seed;
       state.hangNextCreate = true;
       const runs = yield* AutomationRuns;
+      // The connector never answers and the approving request is abandoned
+      // (client gone, process killed) while Gmail is in flight.
       const inFlight = yield* runs.approveInboxDraft(approval(), "andrew").pipe(Effect.forkChild);
-      while (state.calls.length === 0) yield* Effect.yieldNow;
+      yield* awaitGmailCall(state, inFlight);
       yield* Fiber.interrupt(inFlight);
       expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId }))?.status).toBe("creating");
-      const executionId = yield* crashBeforeDraftCheckpoint;
 
-      yield* runs.recoverDue({ owner: "restarted-worker" });
+      // Repeated clicks: refused as in progress, never an audit conflict.
+      const again = yield* Effect.flip(runs.approveInboxDraft(approval(), "andrew"));
+      expect(again.reason).toBe("conflict");
+      expect(again.message).not.toContain("already bound to different content");
+
+      // The worker dies; after restart, recovery re-runs the draft node.
+      const executionId = yield* crashBeforeDraftCheckpoint;
+      const report = yield* runs.recoverDue({ owner: "restarted-worker" });
+      expect(report).toMatchObject({ recovered: 1, failures: [] });
       expect(state.calls.map((call) => call.method)).toEqual(["createDraft"]);
-      expect((yield* runs.get({ executionId, spaceId })).state).not.toBe("succeeded");
-      expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId }))?.status).not.toBe("created");
+      const recovered = yield* runs.get({ executionId, spaceId });
+      expect(["waiting_retry", "failed"]).toContain(recovered.state);
+      expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId }))?.status).toBe("creating");
+      expect(yield* countGmailReceipts).toBe(1);
     }).pipe(Effect.provide(layer(state))),
 );

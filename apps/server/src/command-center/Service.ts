@@ -156,7 +156,7 @@ const nextItemUpdatedAt = (current: string, observed: string): string => {
 
 const APPROVAL_TTL_HOURS = 24;
 
-const canonicalAutomationRunState = (
+export const canonicalAutomationRunState = (
   state:
     | "queued"
     | "running"
@@ -628,9 +628,10 @@ export interface CommandCenterServiceShape {
     readonly output: Schema.Json | null;
     readonly createdAt: string;
     /**
-     * The runtime's durable time of this transition. It is the audit event's
-     * occurredAt, so recording the same persisted snapshot again (a retry or a
-     * restart) is an exact, idempotent replay.
+     * The runtime execution row's durable updated_at for this snapshot (lease
+     * changes also advance it). It is the audit event's occurredAt, so
+     * recording the same persisted snapshot again (a retry or a restart) is an
+     * exact, idempotent replay, and an older snapshot can be recognised.
      */
     readonly updatedAt: string;
     /**
@@ -1381,11 +1382,15 @@ export const layer = Layer.effect(
       for (const approval of expired) {
         yield* sql.withTransaction(
           Effect.gen(function* () {
-            yield* sql`
+            const claimed = yield* sql<{ readonly id: string }>`
               UPDATE command_center_approvals
               SET status = 'expired', decided_at = ${now}
               WHERE id = ${approval.id} AND status = 'requested'
+              RETURNING id
             `;
+            // Another expiry (or a decision) already settled this approval;
+            // its audit events exist and must not be written again.
+            if (claimed.length === 0) return;
             if (approval.runId !== null) {
               yield* sql`
                 UPDATE command_center_runs
@@ -1821,10 +1826,16 @@ export const layer = Layer.effect(
             // replay the original audit events exactly, so they carry the
             // durable times of the first projection rather than this call's.
             const projected = yield* sql<{
+              readonly id: string;
+              readonly runId: string | null;
+              readonly payloadDigest: string;
+              readonly payloadJson: string;
               readonly requestedAt: string;
               readonly itemCreatedAt: string;
             }>`
-              SELECT a.requested_at AS "requestedAt", i.created_at AS "itemCreatedAt"
+              SELECT a.id, a.run_id AS "runId", a.payload_digest AS "payloadDigest",
+                a.payload_json AS "payloadJson", a.requested_at AS "requestedAt",
+                i.created_at AS "itemCreatedAt"
               FROM command_center_approvals a
               JOIN command_center_items i ON i.id = ${itemId}
               WHERE a.idempotency_key = ${idempotencyKey}
@@ -1833,6 +1844,19 @@ export const layer = Layer.effect(
             const firstProjection = projected[0];
             if (firstProjection === undefined) {
               return yield* persistenceError("The automation Approval was not projected.");
+            }
+            // Check the binding before auditing: a key bound to different
+            // work must not leave audit events behind.
+            if (
+              firstProjection.id !== approvalId ||
+              firstProjection.runId !== input.executionId ||
+              firstProjection.payloadDigest !== payloadDigest ||
+              firstProjection.payloadJson !== payloadJson
+            ) {
+              return yield* new CommandCenterError({
+                reason: "conflict",
+                message: "The automation Approval key is already bound to different work.",
+              });
             }
             yield* appendAudit({
               eventId: `approval:${approvalId}:requested`,
@@ -1893,20 +1917,24 @@ export const layer = Layer.effect(
         yield* requireConfiguredSpace(input.spaceId);
         const state = canonicalAutomationRunState(input.state);
         // One audit event per runtime transition. The key binds the durable
-        // transition time and every node's progress; the payload repeats both,
-        // so a replay of this exact transition is idempotent while any other
-        // content under the same key is still rejected by the audit guard.
+        // snapshot time, the terminal fields and every node's progress; the
+        // payload repeats them, so a replay of this exact transition is
+        // idempotent while any other content under the same key is still
+        // rejected by the audit guard.
+        const checkpoints = [...input.checkpoints].toSorted((left, right) =>
+          left.nodeId < right.nodeId ? -1 : left.nodeId > right.nodeId ? 1 : 0,
+        );
         const transitionKey = yield* digest(
           stringify({
             updatedAt: input.updatedAt,
-            checkpoints: [...input.checkpoints]
-              .map(({ nodeId, state, attemptCount, resolutionKey }) => [
-                nodeId,
-                state,
-                attemptCount,
-                resolutionKey,
-              ])
-              .toSorted(([left], [right]) => String(left).localeCompare(String(right))),
+            finishedAt: input.finishedAt,
+            error: input.error ?? null,
+            checkpoints: checkpoints.map(({ nodeId, state, attemptCount, resolutionKey }) => [
+              nodeId,
+              state,
+              attemptCount,
+              resolutionKey,
+            ]),
           }),
         );
         const route = {
@@ -1917,6 +1945,18 @@ export const layer = Layer.effect(
         };
         yield* sql.withTransaction(
           Effect.gen(function* () {
+            // A snapshot read before a newer transition was persisted (a slow
+            // replay, a concurrent resume, a status poll) must not move the
+            // projection backwards. Its producer, or the newer transition's,
+            // records the current state.
+            const runtimeRows = yield* sql<{ readonly updatedAt: string }>`
+              SELECT updated_at AS "updatedAt"
+              FROM command_center_automation_executions
+              WHERE id = ${input.executionId}
+              LIMIT 1
+            `;
+            const current = runtimeRows[0];
+            if (current !== undefined && current.updatedAt > input.updatedAt) return;
             yield* sql`
               INSERT INTO command_center_runs (
                 id, command_id, space_id, kind, state, route_json, input_json,
@@ -1939,7 +1979,7 @@ export const layer = Layer.effect(
               action: "cc.automations.run.changed",
               spaceId: input.spaceId,
               runId: input.executionId,
-              payload: input,
+              payload: { ...input, checkpoints },
               occurredAt: input.updatedAt,
             });
           }),

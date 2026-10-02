@@ -14,6 +14,7 @@ import * as ConnectionHealth from "./ConnectionHealth.ts";
 import { CommandCenterEventStream, layer as eventStreamLayer } from "./EventStream.ts";
 import { CommandCenterService, layer as serviceLayer } from "./Service.ts";
 import * as InboxGmailDrafts from "./InboxGmailDrafts.ts";
+import { withAutomationInvariants } from "./automationTestInvariants.ts";
 import {
   automationAgentCommandId,
   automationAgentRunResumeKey,
@@ -247,9 +248,9 @@ const bothClocks = <E>(
     layer: (options?: TestLayerOptions) => ReturnType<typeof testLayer>,
   ) => Effect.Effect<void, E, never>,
 ) => {
-  it.effect(name, () => body(testLayer));
+  it.effect(name, () => body((options) => withAutomationInvariants(testLayer(options))));
   it.live(`${name} (real advancing clock)`, () =>
-    body((options = {}) => testLayer({ ...options, clock: "live" })),
+    body((options = {}) => withAutomationInvariants(testLayer({ ...options, clock: "live" }))),
   );
 };
 
@@ -477,14 +478,26 @@ bothClocks(
       WHERE id = ${approval!.id}
     `;
 
-      const error = yield* runs
-        .decideApproval({
-          approvalId: approval!.id,
-          payloadDigest: approval!.payloadDigest,
-          decision: "approved",
-        })
-        .pipe(Effect.flip);
-      expect(error).toMatchObject({ reason: "conflict" });
+      // Overlapping requests each sweep expired approvals; only one may
+      // settle it, and none may fail on its audit events.
+      const errors = yield* Effect.all(
+        [1, 2, 3].map(() =>
+          runs
+            .decideApproval({
+              approvalId: approval!.id,
+              payloadDigest: approval!.payloadDigest,
+              decision: "approved",
+            })
+            .pipe(Effect.flip),
+        ),
+        { concurrency: "unbounded" },
+      );
+      for (const error of errors) expect(error).toMatchObject({ reason: "conflict" });
+      const expiryEvents = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM command_center_audit_events
+        WHERE action = 'cc.approvals.expire'
+      `;
+      expect(Number(expiryEvents[0]?.count)).toBe(1);
       expect((yield* commandCenter.queryApprovals({})).approvals).toContainEqual(
         expect.objectContaining({ id: approval!.id, status: "expired" }),
       );

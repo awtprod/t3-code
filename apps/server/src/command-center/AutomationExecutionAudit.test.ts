@@ -186,3 +186,35 @@ it.effect("keeps history written with the older per-state identity and stays ver
     expect(yield* audit.verify).toMatchObject({ valid: true });
   }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect("ignores a snapshot older than the persisted runtime execution", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* service.queryConnections({ spaceId: space.id });
+    // The durable runtime has already moved on to a later transition.
+    const later = "2026-09-28T00:00:05.000Z";
+    yield* sql`
+      INSERT INTO command_center_automation_executions (
+        id, automation_id, idempotency_key, space_id, config_commit_sha, definition_digest,
+        definition_json, input_json, state, created_at, updated_at, finished_at
+      ) VALUES (
+        'execution-a', 'automation-a', 'key-a', ${space.id},
+        '1234567890abcdef1234567890abcdef12345678', ${`sha256:${"c".repeat(64)}`},
+        '{}', '{}', 'succeeded', ${fixtureTime}, ${later}, ${later}
+      )
+    `;
+    yield* service.recordAutomationEvent(
+      transition({ state: "succeeded", approvalState: "succeeded", updatedAt: later }),
+    );
+    // A slow replay of the earlier queued snapshot arrives afterwards.
+    yield* service.recordAutomationEvent(transition());
+    const run = yield* sql<{ readonly state: string }>`
+      SELECT state FROM command_center_runs WHERE id = 'execution-a'
+    `;
+    expect(run[0]?.state).toBe("succeeded");
+    expect((yield* executionEvents).map((event) => event.eventId.split(":")[2])).toEqual([
+      "succeeded",
+    ]);
+  }).pipe(Effect.provide(testLayer)),
+);

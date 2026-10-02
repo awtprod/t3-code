@@ -664,8 +664,12 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   });
 
   const get = Effect.fn("AutomationRuntime.get")(function* (executionId: string) {
-    const row = yield* readExecutionRow(executionId);
-    const checkpoints = yield* readCheckpointRows(executionId);
+    // One transaction so the execution row and its checkpoints describe the
+    // same moment; a torn read could pair a waiting execution with an
+    // already-resolved checkpoint.
+    const [row, checkpoints] = yield* sql.withTransaction(
+      Effect.all([readExecutionRow(executionId), readCheckpointRows(executionId)]),
+    );
     return yield* snapshotFromRows(row, checkpoints);
   });
 
