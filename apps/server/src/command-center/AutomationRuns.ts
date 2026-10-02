@@ -769,8 +769,7 @@ export const layer = Layer.effect(
             SELECT id, state FROM command_center_automation_executions
             WHERE automation_id = ${template.id} AND space_id = ${input.spaceId}
               AND state NOT IN ('succeeded', 'failed', 'canceled')
-              AND json_extract(input_json, '$.mutationId') IS NOT NULL
-              AND json_extract(input_json, '$.mutationId') != ${input.mutationId}
+              AND COALESCE(json_extract(input_json, '$.mutationId'), '') != ${input.mutationId}
             LIMIT 1
           `;
           const blocking = otherActive[0];
@@ -782,27 +781,37 @@ export const layer = Layer.effect(
           }
           const approvedReceipt = yield* inboxDrafts.approve(input, actorSubject);
           if (approvedReceipt.status === "created" || approvedReceipt.status === "uncertain") {
-            return { approved: approvedReceipt, execution: null };
+            return { approved: approvedReceipt };
           }
           yield* inboxDrafts.loadForExecution({
             mutationId: input.mutationId,
             spaceId: input.spaceId,
             payloadDigest: approvedReceipt.payloadDigest,
           });
-          const started = yield* start({
+          // Admission only; the run is driven after the lock is released so
+          // other approvals never wait on a step.
+          yield* runtime.start({
             automationId: template.id,
-            spaceId: input.spaceId,
+            expectedSpaceId: input.spaceId,
             idempotencyKey: `inbox-gmail-draft:${input.mutationId}`,
             expectedConfigCommitSha: template.configCommit!,
             expectedDefinitionDigest: template.definitionDigest,
             input: { mutationId: input.mutationId, payloadDigest: approvedReceipt.payloadDigest },
           });
-          return { approved: approvedReceipt, execution: started };
+          return { approved: approvedReceipt, payloadDigest: approvedReceipt.payloadDigest };
         }),
       );
       const approved = admitted.approved;
-      if (admitted.execution === null) return approved;
-      const execution = admitted.execution;
+      if (!("payloadDigest" in admitted)) return approved;
+      // Same idempotency key: returns the run admitted above and drives it.
+      const execution = yield* start({
+        automationId: template.id,
+        spaceId: input.spaceId,
+        idempotencyKey: `inbox-gmail-draft:${input.mutationId}`,
+        expectedConfigCommitSha: template.configCommit!,
+        expectedDefinitionDigest: template.definitionDigest,
+        input: { mutationId: input.mutationId, payloadDigest: admitted.payloadDigest },
+      });
       if (execution.input.mutationId !== input.mutationId) {
         return yield* new CommandCenterError({
           reason: "conflict",

@@ -591,3 +591,40 @@ bothClocks(
       expect(state.calls).toHaveLength(2);
     }).pipe(Effect.provide(layer(state))),
 );
+
+bothClocks(
+  "a draft is refused, not bound, while an unbound template run is active",
+  (state, layer) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const runs = yield* AutomationRuns;
+      const commandCenter = yield* CommandCenterService;
+      // Someone ran the Inbox template by hand: no draft binding, waiting at its gate.
+      const manual = yield* runs.start({
+        automationId: draftTemplate.id,
+        spaceId,
+        idempotencyKey: "manual-template-run",
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+      });
+      expect(manual.state).toBe("waiting_approval");
+
+      const refused = yield* Effect.flip(runs.approveInboxDraft(approval(), "andrew"));
+      expect(refused.reason).toBe("conflict");
+      expect(refused.message).toContain(manual.id);
+      expect(yield* runs.getInboxDraftReceipt({ spaceId, itemId })).toBeNull();
+
+      // After that run is declined, the draft gets its own run and one draft.
+      const gate = (yield* commandCenter.queryApprovals({})).approvals.find(
+        (candidate) => candidate.runId === manual.id,
+      )!;
+      yield* runs.decideApproval({
+        approvalId: gate.id,
+        payloadDigest: gate.payloadDigest,
+        decision: "declined",
+      });
+      const created = yield* runs.approveInboxDraft(approval(), "andrew");
+      expect(created.status).toBe("created");
+      expect(state.calls).toHaveLength(1);
+    }).pipe(Effect.provide(layer(state))),
+);
