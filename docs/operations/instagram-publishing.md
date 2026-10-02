@@ -40,7 +40,7 @@ The April supoclip export is outside t3-code. Its request must refer to its exis
 
 ## Migration/release dependency
 
-This checkout stacks on PR127 head `558d6c8c74be79fdb16c5cff69c6ca7f92cc7e3a`, which includes PR126 head `419dd75d6bb77bb7b70d3464bf634087b3922ea4`. All reserved 072–077 migrations precede 078 in the static loader. Both Responsibilities and Instagram runner layers remain registered. Fresh startup and actual upgrades from 069, 071 and 077 execute the dependency migrations through 078 regardless of the publishing flag. Rerunning leaves migration history and receipts intact.
+This checkout stacks on PR127 head `c56297b64c20872f8ee3a8a88765878a0545b4b8`, which includes PR126 head `419dd75d6bb77bb7b70d3464bf634087b3922ea4` and its main integration. All reserved 072–077 migrations precede 078 in the static loader. Both Responsibilities and Instagram runner layers remain registered. Fresh startup and actual upgrades from 069, 071 and 077 execute the dependency migrations through 078 regardless of the publishing flag. Rerunning leaves migration history and receipts intact.
 
 078 retains its direct guard requiring all six reserved history rows. Never deploy 078 ahead of the reviewed dependency stack, insert synthetic history or bypass the migration guard. Stacking authorizes local dependency integration; Prism reviews and human-gated promotion still control release order.
 
