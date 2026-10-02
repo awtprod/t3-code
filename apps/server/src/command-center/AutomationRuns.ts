@@ -11,6 +11,11 @@ import {
 import { ApprovalId, ItemId, SpaceId, type Approval as ApprovalType } from "@command-center/core";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Semaphore from "effect/Semaphore";
+import * as Schedule from "effect/Schedule";
+import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -97,7 +102,9 @@ const toCommandCenterError = (cause: unknown): CommandCenterError => {
     const reason =
       cause.code === "automation-not-found" || cause.code === "execution-not-found"
         ? "not_found"
-        : cause.code === "idempotency-conflict" || cause.code === "definition-mismatch"
+        : cause.code === "idempotency-conflict" ||
+            cause.code === "definition-mismatch" ||
+            cause.code === "admission-conflict"
           ? "conflict"
           : "validation";
     return new CommandCenterError({ reason, message: cause.message, cause });
@@ -211,6 +218,9 @@ export const resolveGoogleDraftAttachmentPaths = Effect.fn(
   return paths.filter((attachmentPath): attachmentPath is string => attachmentPath !== undefined);
 });
 
+/** Bounded wait for in-flight drives on shutdown (systemd stops after 30 s). */
+const DRIVE_SHUTDOWN_DRAIN = Duration.seconds(20);
+
 export const layer = Layer.effect(
   AutomationRuns,
   Effect.gen(function* () {
@@ -218,6 +228,21 @@ export const layer = Layer.effect(
     const commandCenter = yield* CommandCenterService.CommandCenterService;
     const inboxDrafts = yield* InboxGmailDrafts.InboxGmailDrafts;
     const sql = yield* SqlClient.SqlClient;
+    // Drives run on the server's lifetime, not the request's: a client
+    // disconnect or RPC cancel must not interrupt a step mid-way (an unsafe
+    // step would then have to fail closed). On shutdown, in-flight drives get
+    // a bounded drain before they are interrupted.
+    const drives = yield* FiberSet.make<AutomationRuntime.AutomationExecutionSnapshot, unknown>();
+    const inboxDraftAdmission = yield* Semaphore.make(1);
+    yield* Effect.addFinalizer(() =>
+      FiberSet.awaitEmpty(drives).pipe(Effect.timeoutOption(DRIVE_SHUTDOWN_DRAIN), Effect.asVoid),
+    );
+    // Operator hold: executions created before this process started are not
+    // resumed by any path while it is set.
+    const held = yield* AutomationRuntime.readAutomationRecoveryHold;
+    const startedAt = yield* runtime.now;
+    const isHeld = (snapshot: AutomationRuntime.AutomationExecutionSnapshot) =>
+      held && snapshot.createdAt < startedAt;
     const inspectAgentRun = makeAutomationAgentRunInspector(sql);
 
     const recordSnapshot = (snapshot: AutomationRuntime.AutomationExecutionSnapshot) =>
@@ -276,13 +301,29 @@ export const layer = Layer.effect(
       if (!["queued", "running", "waiting_retry", "waiting_delay"].includes(initial.state)) {
         return initial;
       }
-      const lease = yield* runtime.acquireLease({
-        executionId: initial.id,
-        owner,
-        ttlMs: 30_000,
-      });
+      if (isHeld(initial)) return initial;
+      const acquired = yield* runtime
+        .acquireLease({
+          executionId: initial.id,
+          owner,
+          ttlMs: AutomationRuntime.AUTOMATION_LEASE_TTL_MS,
+        })
+        .pipe(
+          Effect.map((lease) => ({ lease })),
+          Effect.catchIf(
+            (cause) =>
+              isAutomationRuntimeError(cause) &&
+              (cause.code === "lease-denied" || cause.code === "invalid-state"),
+            () => Effect.succeed(null),
+          ),
+        );
+      // Another worker holds the live lease and is driving this execution (or
+      // it already finished); it records the result. Report the current state
+      // instead of failing.
+      if (acquired === null) return yield* runtime.get(initial.id);
+      const lease = acquired.lease;
       const command = { executionId: initial.id, owner, token: lease.token };
-      yield* Effect.gen(function* () {
+      const drive = Effect.gen(function* () {
         let current = initial;
         for (let step = 0; step < 100; step += 1) {
           if (
@@ -300,8 +341,14 @@ export const layer = Layer.effect(
             break;
           }
         }
-      }).pipe(Effect.ensuring(runtime.releaseLease(command).pipe(Effect.ignore)));
-      return yield* runtime.get(initial.id);
+      }).pipe(
+        Effect.ensuring(runtime.releaseLease(command).pipe(Effect.ignore)),
+        // Project the result from the detached fiber too: the caller may be
+        // gone (cancelled request, shutdown drain) by the time the step ends.
+        Effect.andThen(runtime.get(initial.id)),
+        Effect.tap((finished) => record(finished).pipe(Effect.retry(Schedule.recurs(2)))),
+      );
+      return yield* Fiber.join(yield* FiberSet.run(drives)(drive));
     });
 
     const applyAutomationApproval = Effect.fn("AutomationRuns.applyAutomationApproval")(function* (
@@ -479,6 +526,8 @@ export const layer = Layer.effect(
       owner: string,
     ) {
       let snapshot = yield* runtime.get(executionId);
+      // Held executions are left exactly as they are, decisions included.
+      if (isHeld(snapshot)) return snapshot;
       if (snapshot.state === "waiting_approval") {
         yield* record(snapshot);
         snapshot = yield* reconcileWaitingApproval(snapshot);
@@ -496,12 +545,14 @@ export const layer = Layer.effect(
     const recoverDue = Effect.fn("AutomationRuns.recoverDue")(function* (
       input: Parameters<AutomationRunsShape["recoverDue"]>[0],
     ) {
-      const due = yield* runtime.listRecoverable(
-        input.limit === undefined ? {} : { limit: input.limit },
-      );
-      const waitingAgents = yield* runtime.listWaitingExternal(
-        input.limit === undefined ? {} : { limit: input.limit },
-      );
+      // While held, scan only work created after start so held executions
+      // (which are left untouched) cannot fill every batch.
+      const scope = {
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+        ...(held ? { createdAtOrAfter: startedAt } : {}),
+      };
+      const due = yield* runtime.listRecoverable(scope);
+      const waitingAgents = yield* runtime.listWaitingExternal(scope);
       // A process can stop after the canonical Approval transaction commits but
       // before its checkpoint is resumed. Reconcile those durable decisions as
       // part of the same recovery pass; requested approvals remain inert.
@@ -520,11 +571,29 @@ export const layer = Layer.effect(
           }),
         ),
       ).pipe(Effect.map((groups) => groups.flat()));
+      // A process can also stop after the runtime reached waiting_approval
+      // but before the Run and its approval gate were projected. Nothing would
+      // ever show that gate, so recover it here.
+      const unprojectedGates = yield* sql<{ readonly id: string }>`
+        SELECT DISTINCT execution.id
+        FROM command_center_automation_executions execution
+        JOIN command_center_automation_node_checkpoints checkpoint
+          ON checkpoint.execution_id = execution.id AND checkpoint.state = 'waiting_approval'
+        WHERE execution.state = 'waiting_approval'
+          AND execution.created_at >= ${held ? startedAt : ""}
+          AND NOT EXISTS (
+            SELECT 1 FROM command_center_approvals approval
+            WHERE approval.id = 'automation-approval:' || execution.id || ':' || checkpoint.node_id
+          )
+        ORDER BY execution.updated_at, execution.id
+        LIMIT ${input.limit ?? 50}
+      `;
       const executionIds = [
         ...new Set([
           ...due.map((snapshot) => snapshot.id),
           ...waitingAgents.map((snapshot) => snapshot.id),
           ...waitingApprovalIds,
+          ...unprojectedGates.map((row) => row.id),
         ]),
       ];
       const results = yield* Effect.forEach(executionIds, (executionId) =>
@@ -565,7 +634,7 @@ export const layer = Layer.effect(
           message: "The automation execution was not found in the requested Space.",
         });
       }
-      if (snapshot.state === "waiting_approval") {
+      if (snapshot.state === "waiting_approval" && !isHeld(snapshot)) {
         yield* record(snapshot);
         snapshot = yield* reconcileWaitingApproval(snapshot);
       }
@@ -690,21 +759,70 @@ export const layer = Layer.effect(
         });
       }
       const template = templates[0]!;
-      const approved = yield* inboxDrafts.approve(input, actorSubject);
-      if (approved.status === "created" || approved.status === "uncertain") return approved;
-      yield* inboxDrafts.loadForExecution({
-        mutationId: input.mutationId,
-        spaceId: input.spaceId,
-        payloadDigest: approved.payloadDigest,
-      });
+      // Admission coalesces onto a Responsibility's active run. Another draft's
+      // run (e.g. one held across a deploy) would otherwise absorb this
+      // approval, or this approval would decide that run's gate.
+      // The check, the receipt approval and the admission run under one lock,
+      // so two different drafts approved at once cannot both pass the check
+      // and have one bound to the other's run.
+      const admitted = yield* inboxDraftAdmission.withPermits(1)(
+        Effect.gen(function* () {
+          const otherActive = yield* sql<{ readonly id: string; readonly state: string }>`
+            SELECT id, state FROM command_center_automation_executions
+            WHERE automation_id = ${template.id} AND space_id = ${input.spaceId}
+              AND state NOT IN ('succeeded', 'failed', 'canceled')
+              AND COALESCE(json_extract(input_json, '$.mutationId'), '') != ${input.mutationId}
+            LIMIT 1
+          `;
+          const blocking = otherActive[0];
+          if (blocking !== undefined) {
+            return yield* new CommandCenterError({
+              reason: "conflict",
+              message: `Another Inbox Gmail draft (run ${blocking.id}, ${blocking.state}) is still being processed in this Space. Approve this draft after it finishes.`,
+            });
+          }
+          const approvedReceipt = yield* inboxDrafts.approve(input, actorSubject);
+          if (approvedReceipt.status === "created" || approvedReceipt.status === "uncertain") {
+            return { approved: approvedReceipt };
+          }
+          yield* inboxDrafts.loadForExecution({
+            mutationId: input.mutationId,
+            spaceId: input.spaceId,
+            payloadDigest: approvedReceipt.payloadDigest,
+          });
+          // Admission only; the run is driven after the lock is released so
+          // other approvals never wait on a step.
+          yield* runtime.start({
+            automationId: template.id,
+            expectedSpaceId: input.spaceId,
+            // Never join another draft's (or a manual) run of this template.
+            coalesce: "same-input",
+            idempotencyKey: `inbox-gmail-draft:${input.mutationId}`,
+            expectedConfigCommitSha: template.configCommit!,
+            expectedDefinitionDigest: template.definitionDigest,
+            input: { mutationId: input.mutationId, payloadDigest: approvedReceipt.payloadDigest },
+          });
+          return { approved: approvedReceipt, payloadDigest: approvedReceipt.payloadDigest };
+        }),
+      );
+      const approved = admitted.approved;
+      if (!("payloadDigest" in admitted)) return approved;
+      // Same idempotency key: returns the run admitted above and drives it.
       const execution = yield* start({
         automationId: template.id,
         spaceId: input.spaceId,
         idempotencyKey: `inbox-gmail-draft:${input.mutationId}`,
         expectedConfigCommitSha: template.configCommit!,
         expectedDefinitionDigest: template.definitionDigest,
-        input: { mutationId: input.mutationId, payloadDigest: approved.payloadDigest },
+        input: { mutationId: input.mutationId, payloadDigest: admitted.payloadDigest },
       });
+      if (execution.input.mutationId !== input.mutationId) {
+        return yield* new CommandCenterError({
+          reason: "conflict",
+          message:
+            "Another Inbox Gmail draft is still being processed in this Space. Approve this draft after it finishes.",
+        });
+      }
       const waiting = execution.checkpoints.find(
         (checkpoint) =>
           checkpoint.state === "waiting_approval" && checkpoint.nodeKind === "approval",

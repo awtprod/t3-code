@@ -13,6 +13,14 @@ import * as AutomationRuntime from "./Runtime.ts";
 const DEFAULT_POLL_INTERVAL = Duration.seconds(5);
 const DEFAULT_BATCH_LIMIT = 50;
 
+export const AUTOMATION_RECOVERY_HOLD_ENV = AutomationRuntime.AUTOMATION_RECOVERY_HOLD_ENV;
+const emptyReport = (): AutomationRuns.AutomationRecoveryReport => ({
+  scanned: 0,
+  recovered: 0,
+  remaining: 0,
+  failures: [],
+});
+
 export interface AutomationRecoveryCoordinatorShape {
   readonly tick: () => Effect.Effect<AutomationRuns.AutomationRecoveryReport, never>;
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
@@ -31,6 +39,10 @@ export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const workerId = `recovery:${yield* crypto.randomUUIDv4.pipe(Effect.orDie)}`;
   const tickLock = yield* Semaphore.make(1);
+  // The operator hold is enforced per execution by AutomationRuns: ticks keep
+  // running for work created after start and leave held executions as they
+  // are. The coordinator only reports it.
+  const held = yield* AutomationRuntime.readAutomationRecoveryHold;
 
   const tick: AutomationRecoveryCoordinatorShape["tick"] = () =>
     tickLock.withPermits(1)(
@@ -48,7 +60,7 @@ export const make = Effect.gen(function* () {
         ),
         Effect.catch((cause) =>
           Effect.logWarning("command-center.automation.recovery-tick-failed", { cause }).pipe(
-            Effect.as({ scanned: 0, recovered: 0, remaining: 0, failures: [] }),
+            Effect.as(emptyReport()),
           ),
         ),
       ),
@@ -60,7 +72,13 @@ export const make = Effect.gen(function* () {
       yield* Effect.logInfo("command-center.automation.recovery-coordinator-started", {
         pollIntervalMs: Duration.toMillis(DEFAULT_POLL_INTERVAL),
         batchLimit: DEFAULT_BATCH_LIMIT,
+        held,
       });
+      if (held) {
+        yield* Effect.logWarning("command-center.automation.recovery-held", {
+          message: `${AUTOMATION_RECOVERY_HOLD_ENV} is set; no automation execution will be resumed until it is unset.`,
+        });
+      }
     });
 
   return AutomationRecoveryCoordinator.of({ tick, start });

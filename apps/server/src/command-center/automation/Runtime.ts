@@ -4,9 +4,11 @@ import {
   type AutomationNode as AutomationNodeType,
 } from "@command-center/core";
 import * as NodeCrypto from "node:crypto";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -57,6 +59,7 @@ export const AutomationRuntimeErrorCode = Schema.Literals([
   "definition-invalid",
   "execution-not-found",
   "idempotency-conflict",
+  "admission-conflict",
   "lease-denied",
   "lease-lost",
   "invalid-state",
@@ -184,6 +187,8 @@ export interface AutomationRuntimeDependencies {
   readonly randomUUID: Effect.Effect<string>;
   readonly defaultMaxAttempts?: number;
   readonly defaultRetryDelayMs?: number;
+  /** Lease length callers acquire with; a running step renews it at a third. */
+  readonly leaseTtlMs?: number;
 }
 
 export interface StartAutomationExecutionInput {
@@ -193,6 +198,11 @@ export interface StartAutomationExecutionInput {
   readonly expectedConfigCommitSha: string;
   readonly expectedDefinitionDigest: string;
   readonly input?: Readonly<Record<string, Schema.Json>>;
+  /**
+   * "same-input": refuse, instead of joining, an active execution whose run
+   * input differs; nothing is written. Default joins any active execution.
+   */
+  readonly coalesce?: "any" | "same-input";
 }
 
 export interface AcquireAutomationLeaseInput {
@@ -235,12 +245,18 @@ export interface AutomationRuntimeShape {
   readonly start: (
     input: StartAutomationExecutionInput,
   ) => Effect.Effect<AutomationExecutionSnapshot, RuntimeFailure>;
+  /** The runtime's clock: the same source as execution timestamps. */
+  readonly now: Effect.Effect<string>;
   readonly get: (executionId: string) => Effect.Effect<AutomationExecutionSnapshot, RuntimeFailure>;
   readonly listRecoverable: (input?: {
     readonly limit?: number;
+    /** Only executions created at or after this time (recovery hold). */
+    readonly createdAtOrAfter?: string;
   }) => Effect.Effect<ReadonlyArray<AutomationExecutionSnapshot>, RuntimeFailure>;
   readonly listWaitingExternal: (input?: {
     readonly limit?: number;
+    /** Only executions created at or after this time (recovery hold). */
+    readonly createdAtOrAfter?: string;
   }) => Effect.Effect<ReadonlyArray<AutomationExecutionSnapshot>, RuntimeFailure>;
   readonly reconcileActiveSlots: (input?: {
     readonly limit?: number;
@@ -352,6 +368,7 @@ const FailureResolutionScope = Schema.Struct({
   subject: BoundedFailureIdentity,
 });
 const StartAutomationExecution = Schema.Struct({
+  coalesce: Schema.optionalKey(Schema.Literals(["any", "same-input"])),
   automationId: Schema.String.check(
     Schema.isPattern(BOUNDED_RUNTIME_ID_PATTERN),
     Schema.isMaxLength(200),
@@ -380,6 +397,57 @@ const decodeAutomation = Schema.decodeUnknownEffect(Automation);
 const decodeStartAutomationExecution = Schema.decodeUnknownEffect(StartAutomationExecution);
 const isCanonicalFailure = Schema.is(CanonicalFailure);
 const isFailureResolutionScope = Schema.is(FailureResolutionScope);
+
+/**
+ * Operator hold for automation recovery (default off). While set, executions
+ * created before this process started are not resumed by any path: recovery
+ * ticks, new admissions that coalesce onto them, or approval application.
+ * See docs/operations/automation-recovery-hold.md.
+ */
+export const AUTOMATION_RECOVERY_HOLD_ENV = "COMMAND_CENTER_AUTOMATION_RECOVERY_HOLD";
+
+/** Unset or false-like means not held; any other value holds (fails closed). */
+export const readAutomationRecoveryHold = Effect.gen(function* () {
+  const raw = yield* Config.string(AUTOMATION_RECOVERY_HOLD_ENV).pipe(
+    Config.withDefault(""),
+    Effect.orElseSucceed(() => "true"),
+  );
+  const value = raw.trim().toLowerCase();
+  return value !== "" && !["0", "false", "no", "off", "n"].includes(value);
+});
+
+/** Backoff between attempts after a transient lease-renewal error. */
+const LEASE_RENEW_RETRY_MS = 1_000;
+
+/** Lease length for one automation drive; renewed while a step executes. */
+export const AUTOMATION_LEASE_TTL_MS = 30_000;
+
+/**
+ * Node kinds whose step may run again after its executor was interrupted
+ * (worker killed, or stalled past its lease) without risking a second external
+ * effect: pure steps, reads, and executors keyed by the durable per-attempt
+ * idempotency key or a deterministic command id. Anything else is failed
+ * closed with an "outcome is unknown" error for a human to reconcile; the
+ * runtime cannot fence an effect that already left the process.
+ */
+const REEXECUTION_SAFE_NODE_KINDS: ReadonlySet<string> = new Set([
+  "condition",
+  "transform",
+  "foreach",
+  "connector.read",
+  "item.mutate",
+  "agent.run",
+  "repository.checks",
+]);
+
+const isReexecutionSafe = (node: { readonly kind: string; readonly config: unknown }) =>
+  REEXECUTION_SAFE_NODE_KINDS.has(node.kind) ||
+  // The Inbox Gmail draft executor claims its receipt before calling Gmail and
+  // refuses a claimed or uncertain receipt, so a re-run cannot draft twice.
+  (node.kind === "connector.write" &&
+    typeof node.config === "object" &&
+    node.config !== null &&
+    (node.config as { readonly source?: unknown }).source === "inbox.accepted");
 
 const runtimeError = (code: AutomationRuntimeErrorCode, detail: string) =>
   new AutomationRuntimeError({ code, detail });
@@ -556,6 +624,12 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     1_000,
     86_400_000,
   );
+  const leaseTtlMs = positiveBoundedInteger(
+    dependencies.leaseTtlMs,
+    AUTOMATION_LEASE_TTL_MS,
+    3_600_000,
+  );
+  const leaseRenewEveryMs = Math.max(1_000, Math.floor(leaseTtlMs / 3));
 
   const readExecutionRow = Effect.fn("AutomationRuntime.readExecutionRow")(function* (
     executionId: string,
@@ -674,7 +748,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   });
 
   const listRecoverable = Effect.fn("AutomationRuntime.listRecoverable")(function* (
-    input: { readonly limit?: number } = {},
+    input: { readonly limit?: number; readonly createdAtOrAfter?: string } = {},
   ) {
     const now = yield* dependencies.now;
     const limit = positiveBoundedInteger(input.limit, 50, 500);
@@ -684,6 +758,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
       WHERE
         (execution.lease_token IS NULL OR execution.lease_expires_at IS NULL
           OR execution.lease_expires_at <= ${now})
+        AND execution.created_at >= ${input.createdAtOrAfter ?? ""}
         AND (
           execution.state IN ('queued', 'running')
           OR (
@@ -705,13 +780,14 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   });
 
   const listWaitingExternal = Effect.fn("AutomationRuntime.listWaitingExternal")(function* (
-    input: { readonly limit?: number } = {},
+    input: { readonly limit?: number; readonly createdAtOrAfter?: string } = {},
   ) {
     const limit = positiveBoundedInteger(input.limit, 50, 500);
     const rows = yield* sql<{ readonly id: string }>`
       SELECT execution.id
       FROM command_center_automation_executions execution
       WHERE execution.state = 'waiting_external'
+        AND execution.created_at >= ${input.createdAtOrAfter ?? ""}
         AND EXISTS (
           SELECT 1
           FROM command_center_automation_node_checkpoints checkpoint
@@ -916,8 +992,13 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
           return { kind: "paused" as const, automationId: stored.id };
         }
 
-        const slots = yield* sql<{ readonly executionId: string; readonly state: string }>`
-          SELECT slot.execution_id AS "executionId", execution.state
+        const slots = yield* sql<{
+          readonly executionId: string;
+          readonly state: string;
+          readonly inputJson: string;
+        }>`
+          SELECT slot.execution_id AS "executionId", execution.state,
+            execution.input_json AS "inputJson"
           FROM command_center_responsibility_active_slots slot
           JOIN command_center_automation_executions execution ON execution.id = slot.execution_id
           WHERE slot.automation_id = ${stored.id} AND slot.space_id = ${stored.spaceId}
@@ -928,6 +1009,14 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
           active !== undefined &&
           !TERMINAL_EXECUTION_STATES.has(active.state as AutomationRuntimeExecutionState)
         ) {
+          // Checked in the admission transaction itself, so no concurrent
+          // admission can slip between a caller's check and this join.
+          if (input.coalesce === "same-input" && active.inputJson !== inputJson) {
+            return yield* runtimeError(
+              "admission-conflict",
+              `Automation '${stored.id}' is busy with execution '${active.executionId}' for different input.`,
+            );
+          }
           yield* sql`
             INSERT INTO command_center_responsibility_admissions (
               idempotency_key, execution_id, automation_id, space_id, config_commit_sha,
@@ -1035,21 +1124,9 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
         `Automation execution '${input.executionId}' is already ${current.state}.`,
       );
     }
-    if (
-      current.leaseOwner === input.owner &&
-      current.leaseToken !== null &&
-      current.leaseExpiresAt !== null &&
-      current.leaseExpiresAt > now
-    ) {
-      return {
-        executionId: current.id,
-        owner: current.leaseOwner,
-        token: current.leaseToken,
-        generation: current.leaseGeneration,
-        expiresAt: current.leaseExpiresAt,
-      };
-    }
-
+    // A live lease is exclusive, even for a caller using the same owner name:
+    // two fibers resuming one approval share that name, and handing both the
+    // same token would let both run the step.
     const token = yield* dependencies.randomUUID;
     const expiresAt = addMilliseconds(now, ttlMs);
     const claimed = yield* sql<{
@@ -1089,7 +1166,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     const expiresAt = addMilliseconds(now, ttlMs);
     const renewed = yield* sql<{ readonly generation: number }>`
       UPDATE command_center_automation_executions
-      SET lease_expires_at = ${expiresAt}, updated_at = ${now}
+      SET lease_expires_at = ${expiresAt}
       WHERE id = ${input.executionId} AND lease_owner = ${input.owner}
         AND lease_token = ${input.token} AND lease_expires_at > ${now}
         AND state NOT IN ('succeeded', 'failed', 'canceled')
@@ -1169,7 +1246,9 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     const recoveryInstruction =
       input.state === "transient"
         ? "The existing bounded retry will run when it is due."
-        : "Correct the configured capability or input, then run the Responsibility again.";
+        : input.failure.canonicalCode === "node-outcome-unknown"
+          ? "Check the external system for this step's effect and reconcile it by hand before running the Responsibility again."
+          : "Correct the configured capability or input, then run the Responsibility again.";
     yield* sql`
       INSERT INTO command_center_responsibility_incidents (
         id, space_id, automation_id, canonical_code, resource, subject, state,
@@ -1248,6 +1327,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
           AND automation_id = ${input.execution.automationId}
           AND resource = ${scope.resource} AND subject = ${scope.subject}
           AND state != 'resolved'
+          AND canonical_code != 'node-outcome-unknown'
       `;
       yield* sql`
         UPDATE command_center_items
@@ -1415,7 +1495,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   const advance = Effect.fn("AutomationRuntime.advance")(function* (
     input: AutomationLeaseCommandInput,
   ) {
-    const now = yield* dependencies.now;
+    let now = yield* dependencies.now;
     const execution = yield* readExecutionRow(input.executionId);
     yield* assertLease(execution, input, now);
     if (TERMINAL_EXECUTION_STATES.has(execution.state)) return yield* get(execution.id);
@@ -1611,6 +1691,22 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
       // an approval captured for one revision from authorizing another.
       const approvalKey = `${execution.id}:${node.id}:${execution.definitionDigest}:${configuredApprovalKey}`;
       outcome = { type: "approval", approvalKey };
+    } else if (orphanedRunning !== undefined && !isReexecutionSafe(node)) {
+      // The previous executor of this step lost its lease mid-run. Its effect
+      // may or may not have happened; do not risk running it twice.
+      outcome = {
+        type: "failed",
+        error:
+          `Step '${node.id}' (${node.kind}) was interrupted while running and its outcome is unknown; ` +
+          "it was not run again. Reconcile it manually before retrying.",
+        // Only a human can resolve this: a later success of the same step does
+        // not prove what happened to the interrupted one.
+        failure: {
+          canonicalCode: "node-outcome-unknown",
+          resource: checkpoint.nodeKind,
+          subject: node.id,
+        },
+      };
     } else {
       const context = executorInput(execution, definition, node, checkpoint, checkpoints, runInput);
       const decodedPredecessors = yield* Effect.forEach(
@@ -1620,13 +1716,54 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
             ? Effect.map(parseJson(value), (decoded) => [key, decoded as Schema.Json] as const)
             : Effect.succeed([key, value] as const),
       );
-      outcome = yield* dependencies
+      const execute = dependencies
         .executeNode({ ...context, predecessorOutputs: Object.fromEntries(decodedPredecessors) })
         .pipe(
           Effect.catch((error) =>
             Effect.succeed({ type: "retry", error } satisfies AutomationNodeExecutionOutcome),
           ),
         );
+      // Keep the lease while the step runs so recovery does not start a second
+      // copy. If renewal fails the lease is gone: stop the step and commit
+      // nothing (every commit is fenced by the lease token anyway).
+      // A transient renewal error (e.g. a busy database) is retried while the
+      // lease is still valid; only a lost lease, or reaching its expiry, stops
+      // the step.
+      const heartbeat = Effect.gen(function* () {
+        let expiresAt = execution.leaseExpiresAt ?? now;
+        while (true) {
+          yield* Effect.sleep(Duration.millis(leaseRenewEveryMs));
+          while (true) {
+            const renewed = yield* renewLease({ ...input, ttlMs: leaseTtlMs }).pipe(
+              Effect.map((lease) => lease.expiresAt),
+              Effect.catch((error) =>
+                error._tag === "AutomationRuntimeError" && error.code === "lease-lost"
+                  ? Effect.fail(error)
+                  : Effect.logWarning("command-center.automation.lease-renew-retry", {
+                      executionId: input.executionId,
+                      cause: error,
+                    }).pipe(Effect.as(null)),
+              ),
+            );
+            if (renewed !== null) {
+              expiresAt = renewed;
+              break;
+            }
+            // Retry quickly, but stop before the lease can lapse under us.
+            const current = yield* dependencies.now;
+            if (addMilliseconds(current, LEASE_RENEW_RETRY_MS * 2) >= expiresAt) {
+              return yield* runtimeError(
+                "lease-lost",
+                "The automation execution lease could not be renewed before it expired.",
+              );
+            }
+            yield* Effect.sleep(Duration.millis(LEASE_RENEW_RETRY_MS));
+          }
+        }
+      });
+      outcome = yield* Effect.raceFirst(execute, heartbeat);
+      // Commit with the time the step finished, not when it started.
+      now = yield* dependencies.now;
     }
 
     switch (outcome.type) {
@@ -1980,6 +2117,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   });
 
   return AutomationRuntime.of({
+    now: dependencies.now,
     start,
     get,
     listRecoverable,

@@ -9,6 +9,7 @@ import {
 } from "@command-center/core";
 import { expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -94,6 +95,10 @@ interface FakeState {
   resolutions: number;
   failNextCreate: boolean;
   hangNextCreate: boolean;
+  /** Makes receipt approval yield, so concurrent approvals interleave there. */
+  slowApprove: boolean;
+  /** Released by the test to let a hung Gmail call finish. */
+  readonly hangGate: Deferred.Deferred<void>;
   readonly calls: Array<{
     readonly method: string;
     readonly request: unknown;
@@ -114,7 +119,13 @@ const makeFake = (state: FakeState): GoogleReadConnectorShape => {
     state.calls.push({ method: "createDraft", request, expectedAccountAlias });
     if (state.hangNextCreate) {
       state.hangNextCreate = false;
-      return Effect.never;
+      return Deferred.await(state.hangGate).pipe(
+        Effect.as({
+          operation: "gmail.draft.create" as const,
+          draftId: "draft-late",
+          messageId: "message-late",
+        }),
+      );
     }
     if (state.failNextCreate) {
       state.failNextCreate = false;
@@ -212,7 +223,26 @@ function testLayer(state: FakeState, clock: "frozen" | "live" = "frozen") {
   );
   return automationRunsLayer.pipe(
     Layer.provideMerge(durableRuntimeLayer),
-    Layer.provideMerge(InboxGmailDrafts.layer),
+    Layer.provideMerge(
+      Layer.effect(
+        InboxGmailDrafts.InboxGmailDrafts,
+        Effect.gen(function* () {
+          const real = yield* InboxGmailDrafts.InboxGmailDrafts;
+          return InboxGmailDrafts.InboxGmailDrafts.of({
+            ...real,
+            approve: (request, actor) =>
+              state.slowApprove
+                ? Effect.andThen(
+                    Effect.gen(function* () {
+                      for (let spin = 0; spin < 200; spin++) yield* Effect.yieldNow;
+                    }),
+                    real.approve(request, actor),
+                  )
+                : real.approve(request, actor),
+          });
+        }),
+      ).pipe(Layer.provide(InboxGmailDrafts.layer)),
+    ),
     Layer.provideMerge(Layer.mergeAll(commandCenterLayer, eventStreamLayer)),
     Layer.provideMerge(configLayer),
     Layer.provideMerge(SqlitePersistenceMemory),
@@ -229,38 +259,43 @@ const approvedRequest = {
   body: "Exact body",
 } as const;
 
+const seedItem = (id: ItemId, revisionId: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      INSERT INTO command_center_items (
+        id, space_id, kind, status, title, body, priority,
+        source_json, links_json, metadata_json, created_at, updated_at
+      ) VALUES (
+        ${id}, ${spaceId}, 'decision', 'review', 'Review response', 'Source text', 'high',
+        '{"kind":"user","capturedAt":"2026-09-28T00:00:00.000Z"}', '[]', '{}', ${now}, ${now}
+      )
+    `;
+    yield* sql`
+      INSERT INTO command_center_inbox_revisions (
+        id, item_id, revision, status, source, payload_json, preview_json, evidence_json,
+        actor_subject, created_at, accepted_at, accepted_by_subject
+      ) VALUES (${revisionId}, ${id}, 1, 'current', 'direct', ${encodeJson({
+        kind: "prepared-action",
+        actionKind: "gmail.draft.create",
+        target: { kind: "command-center-item", id },
+        parameters: approvedRequest,
+      })},
+        '{"summary":"Exact draft","before":"No draft","after":"A Gmail draft"}',
+        ${encodeJson({ source: "command-center-item", subjectId: id, version: now })},
+        'andrew', ${now}, ${now}, 'andrew')
+    `;
+    yield* sql`
+      UPDATE command_center_inbox_state
+      SET current_revision_id = ${revisionId}, version = 1
+      WHERE item_id = ${id}
+    `;
+  });
+
 const seed = Effect.gen(function* () {
   // Load config so the Space is projected before the Item references it.
   yield* (yield* CommandCenterService).queryConnections({ spaceId });
-  const sql = yield* SqlClient.SqlClient;
-  yield* sql`
-    INSERT INTO command_center_items (
-      id, space_id, kind, status, title, body, priority,
-      source_json, links_json, metadata_json, created_at, updated_at
-    ) VALUES (
-      ${itemId}, ${spaceId}, 'decision', 'review', 'Review response', 'Source text', 'high',
-      '{"kind":"user","capturedAt":"2026-09-28T00:00:00.000Z"}', '[]', '{}', ${now}, ${now}
-    )
-  `;
-  yield* sql`
-    INSERT INTO command_center_inbox_revisions (
-      id, item_id, revision, status, source, payload_json, preview_json, evidence_json,
-      actor_subject, created_at, accepted_at, accepted_by_subject
-    ) VALUES ('revision-a', ${itemId}, 1, 'current', 'direct', ${encodeJson({
-      kind: "prepared-action",
-      actionKind: "gmail.draft.create",
-      target: { kind: "command-center-item", id: itemId },
-      parameters: approvedRequest,
-    })},
-      '{"summary":"Exact draft","before":"No draft","after":"A Gmail draft"}',
-      ${encodeJson({ source: "command-center-item", subjectId: itemId, version: now })},
-      'andrew', ${now}, ${now}, 'andrew')
-  `;
-  yield* sql`
-    UPDATE command_center_inbox_state
-    SET current_revision_id = 'revision-a', version = 1
-    WHERE item_id = ${itemId}
-  `;
+  yield* seedItem(itemId, "revision-a");
 });
 
 const approval = (mutationId = "approve-a") =>
@@ -272,6 +307,8 @@ const freshState = (): FakeState => ({
   resolutions: 0,
   failNextCreate: false,
   hangNextCreate: false,
+  slowApprove: false,
+  hangGate: Deferred.makeUnsafe<void>(),
   calls: [],
 });
 
@@ -461,14 +498,14 @@ const awaitGmailCall = <A, E>(state: FakeState, fiber: Fiber.Fiber<A, E>) =>
   });
 
 bothClocks(
-  "an approval interrupted inside the Gmail call is never drafted again by retries or restart recovery",
+  "an approval abandoned during the Gmail call, then a worker crash, never drafts twice",
   (state, layer) =>
     Effect.gen(function* () {
       yield* seed;
       state.hangNextCreate = true;
       const runs = yield* AutomationRuns;
-      // The connector never answers and the approving request is abandoned
-      // (client gone, process killed) while Gmail is in flight.
+      // Gmail is slow to answer and the approving request is abandoned (client
+      // gone). The drive is detached from the request, so the call continues.
       const inFlight = yield* runs.approveInboxDraft(approval(), "andrew").pipe(Effect.forkChild);
       yield* awaitGmailCall(state, inFlight);
       yield* Fiber.interrupt(inFlight);
@@ -479,7 +516,8 @@ bothClocks(
       expect(again.reason).toBe("conflict");
       expect(again.message).not.toContain("already bound to different content");
 
-      // The worker dies; after restart, recovery re-runs the draft node.
+      // The worker then dies mid-call; after restart, recovery re-runs the
+      // draft node, which refuses the claimed receipt instead of calling Gmail.
       const executionId = yield* crashBeforeDraftCheckpoint;
       const report = yield* runs.recoverDue({ owner: "restarted-worker" });
       expect(report).toMatchObject({ recovered: 1, failures: [] });
@@ -487,6 +525,172 @@ bothClocks(
       const recovered = yield* runs.get({ executionId, spaceId });
       expect(["waiting_retry", "failed"]).toContain(recovered.state);
       expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId }))?.status).toBe("creating");
+
+      // The first call finally answers: the stale worker's runtime commit is
+      // fenced, but the receipt records the draft that really exists.
+      yield* Deferred.succeed(state.hangGate, undefined);
+      for (let spin = 0; spin < 2_000; spin++) yield* Effect.yieldNow;
+      expect(state.calls.map((call) => call.method)).toEqual(["createDraft"]);
       expect(yield* countGmailReceipts).toBe(1);
+      const receipt = yield* runs.getInboxDraftReceipt({ spaceId, itemId });
+      expect(receipt).toMatchObject({ status: "created", draftId: "draft-late" });
+    }).pipe(Effect.provide(layer(state))),
+);
+
+bothClocks(
+  "a second draft is refused, not absorbed, while another draft's run is active",
+  (state, layer) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const otherItem = ItemId.make("item-b");
+      yield* seedItem(otherItem, "revision-b");
+      state.hangNextCreate = true;
+      const runs = yield* AutomationRuns;
+      // Draft A's run is active, its Gmail call still in flight.
+      const first = yield* runs.approveInboxDraft(approval(), "andrew").pipe(Effect.forkChild);
+      yield* awaitGmailCall(state, first);
+
+      // Approving draft B must not coalesce onto A's run or decide A's gate.
+      const draftB = {
+        spaceId,
+        itemId: otherItem,
+        mutationId: "approve-b",
+        revisionId: "revision-b",
+        expectedVersion: 1,
+      } as const;
+      const refused = yield* Effect.flip(runs.approveInboxDraft(draftB, "andrew"));
+      expect(refused.reason).toBe("conflict");
+      expect(refused.message).toMatch(/Another Inbox Gmail draft/u);
+      expect(yield* runs.getInboxDraftReceipt({ spaceId, itemId: otherItem })).toBeNull();
+      expect(state.calls).toHaveLength(1);
+
+      // Once A finishes, B gets its own run and its own single draft.
+      yield* Deferred.succeed(state.hangGate, undefined);
+      expect((yield* Fiber.join(first)).status).toBe("created");
+      const second = yield* runs.approveInboxDraft(draftB, "andrew");
+      expect(second.status).toBe("created");
+      expect(state.calls).toHaveLength(2);
+    }).pipe(Effect.provide(layer(state))),
+);
+
+bothClocks(
+  "two different drafts approved at the same moment each get exactly one draft",
+  (state, layer) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const otherItem = ItemId.make("item-b");
+      yield* seedItem(otherItem, "revision-b");
+      const runs = yield* AutomationRuns;
+      const draftB = {
+        spaceId,
+        itemId: otherItem,
+        mutationId: "approve-b",
+        revisionId: "revision-b",
+        expectedVersion: 1,
+      } as const;
+      // Both approvals race; at most one may be refused, and only as in progress.
+      const raced = yield* Effect.all(
+        [
+          runs.approveInboxDraft(approval(), "andrew").pipe(Effect.exit),
+          runs.approveInboxDraft(draftB, "andrew").pipe(Effect.exit),
+        ],
+        { concurrency: "unbounded" },
+      );
+      for (const exit of raced) {
+        if (exit._tag === "Failure") expect(String(exit.cause)).toMatch(/still being processed/u);
+      }
+      // Retrying whatever was refused must succeed: nothing was bound to the
+      // other draft's run.
+      for (const [index, request] of [approval(), draftB].entries()) {
+        if (raced[index]!._tag === "Failure") {
+          expect((yield* runs.approveInboxDraft(request, "andrew")).status).toBe("created");
+        }
+      }
+      expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId }))?.status).toBe("created");
+      expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId: otherItem }))?.status).toBe(
+        "created",
+      );
+      expect(state.calls).toHaveLength(2);
+    }).pipe(Effect.provide(layer(state))),
+);
+
+bothClocks(
+  "a draft is refused, not bound, while an unbound template run is active",
+  (state, layer) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const runs = yield* AutomationRuns;
+      const commandCenter = yield* CommandCenterService;
+      // Someone ran the Inbox template by hand: no draft binding, waiting at its gate.
+      const manual = yield* runs.start({
+        automationId: draftTemplate.id,
+        spaceId,
+        idempotencyKey: "manual-template-run",
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+      });
+      expect(manual.state).toBe("waiting_approval");
+
+      const refused = yield* Effect.flip(runs.approveInboxDraft(approval(), "andrew"));
+      expect(refused.reason).toBe("conflict");
+      expect(refused.message).toContain(manual.id);
+      expect(yield* runs.getInboxDraftReceipt({ spaceId, itemId })).toBeNull();
+
+      // After that run is declined, the draft gets its own run and one draft.
+      const gate = (yield* commandCenter.queryApprovals({})).approvals.find(
+        (candidate) => candidate.runId === manual.id,
+      )!;
+      yield* runs.decideApproval({
+        approvalId: gate.id,
+        payloadDigest: gate.payloadDigest,
+        decision: "declined",
+      });
+      const created = yield* runs.approveInboxDraft(approval(), "andrew");
+      expect(created.status).toBe("created");
+      expect(state.calls).toHaveLength(1);
+    }).pipe(Effect.provide(layer(state))),
+);
+
+bothClocks(
+  "a draft that loses the approval race is refused before anything is approved",
+  (state, layer) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const otherItem = ItemId.make("item-b");
+      yield* seedItem(otherItem, "revision-b");
+      const runs = yield* AutomationRuns;
+      // Both approvals reach receipt approval together, which yields mid-way.
+      state.slowApprove = true;
+      // Keep the winner\'s run active: its Gmail call stays in flight.
+      state.hangNextCreate = true;
+      const draftB = {
+        spaceId,
+        itemId: otherItem,
+        mutationId: "approve-b",
+        revisionId: "revision-b",
+        expectedVersion: 1,
+      } as const;
+      const a = yield* runs
+        .approveInboxDraft(approval(), "andrew")
+        .pipe(Effect.exit, Effect.forkChild);
+      const b = yield* runs.approveInboxDraft(draftB, "andrew").pipe(Effect.exit, Effect.forkChild);
+      for (let spin = 0; spin < 5_000; spin++) {
+        if (
+          state.calls.length > 0 &&
+          (b.pollUnsafe() !== undefined || a.pollUnsafe() !== undefined)
+        )
+          break;
+        yield* Effect.yieldNow;
+      }
+      state.slowApprove = false;
+      yield* Deferred.succeed(state.hangGate, undefined);
+      const raced = [yield* Fiber.join(a), yield* Fiber.join(b)];
+      const outcomes = raced.map((exit) => exit._tag);
+      expect(outcomes.filter((tag) => tag === "Success")).toHaveLength(1);
+      // The loser was refused by the check, so its receipt was never approved
+      // and it is free to be approved again later.
+      const loser = outcomes[0] === "Failure" ? itemId : otherItem;
+      expect(yield* runs.getInboxDraftReceipt({ spaceId, itemId: loser })).toBeNull();
+      expect(state.calls).toHaveLength(1);
     }).pipe(Effect.provide(layer(state))),
 );
