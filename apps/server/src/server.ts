@@ -152,6 +152,7 @@ import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterInbox from "./command-center/Inbox.ts";
 import * as SprintPlan from "./command-center/SprintPlan.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as Observations from "./command-center/Observations.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as Responsibilities from "./command-center/Responsibilities.ts";
@@ -502,6 +503,7 @@ const CommandCenterBaseLayerLive = Layer.mergeAll(
   CommandCenterService.runtimeLayer,
   CommandCenterInbox.layer,
   CommandCenterEventStream.layer,
+  Observations.layer,
   MemorySearchIndex.layer,
   GoogleReadConnectorLayerLive,
   WindowsMediaConnectorLayerLive,

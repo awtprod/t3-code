@@ -1,7 +1,20 @@
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
-import { Approval, Item, Memory } from "@command-center/core";
+import { Approval, Item, Memory, ObservationSnapshot } from "@command-center/core";
+import {
+  CommandCenterObservationCorrectionRequest,
+  CommandCenterObservationGetRequest,
+  CommandCenterObservationHistoryPage,
+  CommandCenterObservationHistoryRequest,
+  CommandCenterObservationImportInput,
+  CommandCenterObservationImportReceipt,
+  CommandCenterObservationListPage,
+  CommandCenterObservationListRequest,
+  CommandCenterObservationManualCreateRequest,
+  CommandCenterObservationMutationReceipt,
+  CommandCenterObservationRetirementRequest,
+} from "./commandCenterObservations.ts";
 
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
@@ -949,6 +962,63 @@ export const WsCommandCenterWindowsMediaRootsRpc = Rpc.make(
   },
 );
 
+export const WsCommandCenterObservationsListRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsList,
+  {
+    payload: CommandCenterObservationListRequest,
+    success: CommandCenterObservationListPage,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsGetRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsGet,
+  {
+    payload: CommandCenterObservationGetRequest,
+    success: ObservationSnapshot,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsHistoryRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsHistory,
+  {
+    payload: CommandCenterObservationHistoryRequest,
+    success: CommandCenterObservationHistoryPage,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsCreateManualRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsCreateManual,
+  {
+    payload: CommandCenterObservationManualCreateRequest,
+    success: CommandCenterObservationMutationReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsImportRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsImport,
+  {
+    payload: CommandCenterObservationImportInput,
+    success: CommandCenterObservationImportReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsCorrectRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsCorrect,
+  {
+    payload: CommandCenterObservationCorrectionRequest,
+    success: CommandCenterObservationMutationReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsRetireRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsRetire,
+  {
+    payload: CommandCenterObservationRetirementRequest,
+    success: CommandCenterObservationMutationReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
   success: ServerUpsertKeybindingResult,
@@ -1719,6 +1789,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterGoogleReadRpc,
   WsCommandCenterWindowsMediaListRpc,
   WsCommandCenterWindowsMediaRootsRpc,
+  WsCommandCenterObservationsListRpc,
+  WsCommandCenterObservationsGetRpc,
+  WsCommandCenterObservationsHistoryRpc,
+  WsCommandCenterObservationsCreateManualRpc,
+  WsCommandCenterObservationsImportRpc,
+  WsCommandCenterObservationsCorrectRpc,
+  WsCommandCenterObservationsRetireRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

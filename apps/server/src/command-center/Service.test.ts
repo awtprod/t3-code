@@ -1204,6 +1204,184 @@ it.effect("reviews Memory candidates explicitly and enforces exact repository sc
   }).pipe(Effect.provide(makeTestLayer())),
 );
 
+it.effect("keeps correction-backed lessons scoped, deduplicated, reviewed, and expirable", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* service.bootstrap;
+    yield* sql`
+      INSERT INTO command_center_observations (
+        space_id, id, subject_id, content_kind, source_identity, source_revision,
+        source_payload_digest, metric_kind, metric_unit, metric_definition,
+        collection_method, current_revision_id, current_version, created_at
+      ) VALUES (
+        ${studioSpace.id}, 'lesson-observation', 'video-1', 'short-form', 'manual:lesson', '1',
+        'digest-1', 'best-short-views', 'count', 'Short views', 'manual', 'lesson-revision', 2,
+        ${fixtureTimestamp}
+      )
+    `;
+    yield* sql`
+      INSERT INTO command_center_observation_revisions (
+        revision_id, space_id, observation_id, version, revision_kind, revision_reason,
+        actor_kind, actor_id, snapshot_json, revision_digest, revised_at, retired
+      ) VALUES (
+        'lesson-revision', ${studioSpace.id}, 'lesson-observation', 2, 'corrected',
+        'The denominator was wrong.', 'user', 'test-user', '{}', 'digest-2',
+        ${fixtureTimestamp}, 0
+      )
+    `;
+    const proposal = {
+      requestId: "client-id-one",
+      spaceId: studioSpace.id,
+      kind: "procedure",
+      content: "Check the denominator before comparing views.",
+      confidence: 0.8,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      evidence: {
+        kind: "observation-correction",
+        observationId: "lesson-observation",
+        revisionId: "lesson-revision",
+      },
+    } as const;
+    const wrongSpace = yield* service
+      .proposeMemory(decodeProposal({ ...proposal, spaceId: personalSpace.id }))
+      .pipe(Effect.flip);
+    expect(wrongSpace).toMatchObject({ reason: "validation" });
+    yield* sql`
+      INSERT INTO command_center_observation_revisions (
+        revision_id, space_id, observation_id, version, revision_kind, revision_reason,
+        actor_kind, actor_id, snapshot_json, revision_digest, revised_at, retired
+      ) VALUES (
+        'connector-revision', ${studioSpace.id}, 'lesson-observation', 3, 'corrected',
+        'Connector refresh.', 'connector', 'source-1', '{}', 'digest-3',
+        ${fixtureTimestamp}, 0
+      )
+    `;
+    const nonUserCorrection = yield* service
+      .proposeMemory(
+        decodeProposal({
+          ...proposal,
+          evidence: { ...proposal.evidence, revisionId: "connector-revision" },
+        }),
+      )
+      .pipe(Effect.flip);
+    expect(nonUserCorrection).toMatchObject({ reason: "validation" });
+    const candidate = yield* service.proposeMemory(decodeProposal(proposal));
+    const replay = yield* service.proposeMemory(
+      decodeProposal({ ...proposal, requestId: "client-id-two" }),
+    );
+    expect(replay.id).toBe(candidate.id);
+    expect(candidate.provenance.sourceRef).toContain(
+      "lesson-observation/version/2/revision/lesson-revision",
+    );
+    expect(candidate.expiresAt).toBe("2099-01-01T00:00:00.000Z");
+    expect((yield* service.queryMemories({ spaceId: studioSpace.id })).memories).toEqual([]);
+    expect(
+      (yield* service.queryMemories({ spaceId: studioSpace.id, statuses: ["candidate"] })).memories,
+    ).toHaveLength(1);
+    const approved = yield* service.reviewMemory(
+      decodeMemoryReview({
+        memoryId: candidate.id,
+        spaceId: studioSpace.id,
+        decision: "approve",
+      }),
+    );
+    expect(approved.status).toBe("approved");
+    expect((yield* service.queryMemories({ spaceId: studioSpace.id })).memories).toHaveLength(1);
+    const expired = yield* service.reviewMemory(
+      decodeMemoryReview({
+        memoryId: candidate.id,
+        spaceId: studioSpace.id,
+        decision: "expire",
+      }),
+    );
+    expect(expired.status).toBe("expired");
+    expect((yield* service.queryMemories({ spaceId: studioSpace.id })).memories).toEqual([]);
+    expect(
+      (yield* service.queryMemories({ spaceId: personalSpace.id, statuses: ["expired"] })).memories,
+    ).toEqual([]);
+  }).pipe(Effect.provide(makeTestLayer())),
+);
+
+it.effect("approves a lesson only while its correction is the current, unretired revision", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* service.bootstrap;
+    const seedCorrectedObservation = (observationId: string) =>
+      Effect.gen(function* () {
+        yield* sql`
+          INSERT INTO command_center_observations (
+            space_id, id, subject_id, content_kind, source_identity, source_revision,
+            source_payload_digest, metric_kind, metric_unit, metric_definition,
+            collection_method, current_revision_id, current_version, created_at
+          ) VALUES (
+            ${studioSpace.id}, ${observationId}, 'video-1', 'short-form',
+            ${`manual:${observationId}`}, '1', 'digest-1', 'best-short-views', 'count',
+            'Short views', 'manual', ${`${observationId}:v2`}, 2, ${fixtureTimestamp}
+          )
+        `;
+        yield* sql`
+          INSERT INTO command_center_observation_revisions (
+            revision_id, space_id, observation_id, version, revision_kind, revision_reason,
+            actor_kind, actor_id, snapshot_json, revision_digest, revised_at, retired
+          ) VALUES (
+            ${`${observationId}:v2`}, ${studioSpace.id}, ${observationId}, 2, 'corrected',
+            'The denominator was wrong.', 'user', 'test-user', '{}', 'digest-2',
+            ${fixtureTimestamp}, 0
+          )
+        `;
+        return yield* service.proposeMemory(
+          decodeProposal({
+            requestId: `proposal:${observationId}`,
+            spaceId: studioSpace.id,
+            kind: "procedure",
+            content: `Check the denominator for ${observationId}.`,
+            confidence: 0.8,
+            evidence: {
+              kind: "observation-correction",
+              observationId,
+              revisionId: `${observationId}:v2`,
+            },
+          }),
+        );
+      });
+    const approve = (memoryId: string) =>
+      service.reviewMemory(
+        decodeMemoryReview({ memoryId, spaceId: studioSpace.id, decision: "approve" }),
+      );
+
+    const recorrected = yield* seedCorrectedObservation("recorrected-observation");
+    yield* sql`
+      UPDATE command_center_observations
+      SET current_revision_id = 'recorrected-observation:v3', current_version = 3
+      WHERE space_id = ${studioSpace.id} AND id = 'recorrected-observation'
+    `;
+    expect(yield* approve(recorrected.id).pipe(Effect.flip)).toMatchObject({ reason: "conflict" });
+
+    const retired = yield* seedCorrectedObservation("retired-observation");
+    yield* sql`
+      UPDATE command_center_observations SET retired_at = ${fixtureTimestamp}
+      WHERE space_id = ${studioSpace.id} AND id = 'retired-observation'
+    `;
+    expect(yield* approve(retired.id).pipe(Effect.flip)).toMatchObject({ reason: "conflict" });
+    const stale = yield* service.queryMemories({
+      spaceId: studioSpace.id,
+      statuses: ["candidate"],
+    });
+    expect(stale.memories.map((memory) => memory.id).toSorted()).toEqual(
+      [recorrected.id, retired.id].toSorted(),
+    );
+    const rejected = yield* service.reviewMemory(
+      decodeMemoryReview({ memoryId: retired.id, spaceId: studioSpace.id, decision: "reject" }),
+    );
+    expect(rejected.status).toBe("rejected");
+
+    const unchanged = yield* seedCorrectedObservation("unchanged-observation");
+    expect((yield* approve(unchanged.id)).status).toBe("approved");
+  }).pipe(Effect.provide(makeTestLayer())),
+);
+
 it.effect("allows only one conflicting Memory review to append audit state", () =>
   Effect.gen(function* () {
     const service = yield* CommandCenterService;

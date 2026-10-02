@@ -100,6 +100,13 @@ export const COMMAND_CENTER_WS_METHODS = {
   googleRead: "cc.connections.google.read",
   windowsMediaList: "cc.windowsMedia.list",
   windowsMediaRoots: "cc.windowsMedia.roots",
+  observationsList: "cc.observations.list",
+  observationsGet: "cc.observations.get",
+  observationsHistory: "cc.observations.history",
+  observationsCreateManual: "cc.observations.createManual",
+  observationsImport: "cc.observations.import",
+  observationsCorrect: "cc.observations.correct",
+  observationsRetire: "cc.observations.retire",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
@@ -785,6 +792,15 @@ export type CommandCenterMemoryRememberInput = typeof CommandCenterMemoryRemembe
 export const CommandCenterMemoryProposeInput = Schema.Struct({
   ...CommandCenterMemoryRememberInput.fields,
   confidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  evidence: Schema.optional(
+    Schema.Struct({
+      kind: Schema.Literal("observation-correction"),
+      observationId: TrimmedNonEmptyString,
+      revisionId: TrimmedNonEmptyString,
+    }),
+  ),
+  expiresAt: Schema.optional(Timestamp),
+  contradictionOf: Schema.optional(MemoryId),
 });
 export type CommandCenterMemoryProposeInput = typeof CommandCenterMemoryProposeInput.Type;
 
@@ -792,7 +808,7 @@ export const CommandCenterMemoryReviewInput = Schema.Struct({
   memoryId: MemoryId,
   spaceId: SpaceId,
   repositoryId: Schema.optional(RepositoryId),
-  decision: Schema.Literals(["approve", "reject"]),
+  decision: Schema.Literals(["approve", "reject", "expire"]),
 });
 export type CommandCenterMemoryReviewInput = typeof CommandCenterMemoryReviewInput.Type;
 
