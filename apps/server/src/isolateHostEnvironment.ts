@@ -3,7 +3,8 @@
  *
  * Agents and developers often run this suite from inside a live Command
  * Center process, which exports its private config directory, runtime home,
- * GitHub identities, web-push subject and Windows media bridge. Any of those
+ * GitHub identities, web-push subject, Windows media bridge and sandbox
+ * runtime settings (including a sandbox auth token). Any of those
  * leaking into a test either points it at real private state or silently
  * changes expectations (tests that default a value with `??=` keep the host's
  * value instead). Clear them before every test file; tests that need one set
@@ -20,6 +21,14 @@ const HOST_ENVIRONMENT_VARIABLES = [
   "CC_WINDOWS_MEDIA_SSH_ALIAS",
 ] as const;
 
+/** Every variable with this prefix configures the host's sandbox runtime. */
+const HOST_ENVIRONMENT_PREFIXES = ["T3_SANDBOX_"] as const;
+
 for (const name of HOST_ENVIRONMENT_VARIABLES) {
   delete process.env[name];
+}
+for (const name of Object.keys(process.env)) {
+  if (HOST_ENVIRONMENT_PREFIXES.some((prefix) => name.startsWith(prefix))) {
+    delete process.env[name];
+  }
 }

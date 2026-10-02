@@ -16,4 +16,9 @@ it("clears inherited host Command Center variables before tests run", () => {
   ]) {
     assert.strictEqual(process.env[name], undefined, `${name} leaked into the server test run`);
   }
+  assert.deepStrictEqual(
+    Object.keys(process.env).filter((name) => name.startsWith("T3_SANDBOX_")),
+    [],
+    "host sandbox runtime settings leaked into the server test run",
+  );
 });
