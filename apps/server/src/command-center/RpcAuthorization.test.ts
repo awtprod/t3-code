@@ -123,5 +123,8 @@ describe("Command Center RPC authorization", () => {
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.approvalDecide)).toBe(
       AuthCommandCenterApproveScope,
     );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove)).toBe(
+      AuthCommandCenterApproveScope,
+    );
   });
 });

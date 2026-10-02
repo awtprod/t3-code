@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import { AuthCommandCenterApproveScope, type EnvironmentId } from "@t3tools/contracts";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { PlugZapIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo } from "react";
@@ -204,6 +204,7 @@ function InboxEnvironmentRoute({
 
   return (
     <InboxScreen
+      canApprove={session.data?.scopes?.includes(AuthCommandCenterApproveScope) === true}
       environmentId={environmentId}
       environmentOptions={environmentOptions}
       draftScopeId={draftScopeId}

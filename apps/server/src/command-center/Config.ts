@@ -4,6 +4,7 @@ import {
   CapabilityName,
   Connection,
   Space,
+  ObservationEligibilityPolicy,
   type Connection as ConnectionType,
   type Space as SpaceType,
 } from "@command-center/core";
@@ -75,6 +76,7 @@ const SpaceConfigFile = Schema.Struct({
     Schema.Struct({
       allowedCapabilities: Schema.Array(CapabilityName),
       autoRunRiskLevels: Schema.Array(Schema.Literals(["low", "reversible"])),
+      observationEligibility: Schema.optional(ObservationEligibilityPolicy),
     }),
   ),
   routing: Schema.Struct({
@@ -335,6 +337,9 @@ export const layer = Layer.effect(
             raw.policy?.allowedCapabilities ?? ACTIVE_CAPABILITY_NAMES,
           ),
           autoRunRiskLevels: raw.policy?.autoRunRiskLevels ?? ["low", "reversible"],
+          ...(raw.policy?.observationEligibility === undefined
+            ? {}
+            : { observationEligibility: raw.policy.observationEligibility }),
         },
         modelDefaults:
           raw.routing.provider === "auto" || raw.routing.model === "auto"

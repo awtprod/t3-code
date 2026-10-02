@@ -295,6 +295,7 @@ import {
   GoogleReadResult,
 } from "./commandCenter.ts";
 import {
+  CommandCenterInboxApproveAdjustmentInput,
   CommandCenterInboxCandidateCreateInput,
   CommandCenterInboxCandidateMutationInput,
   CommandCenterInboxCommentInput,
@@ -572,6 +573,15 @@ export const WsCommandCenterInboxCandidateAcceptRpc = Rpc.make(
   COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
   {
     payload: CommandCenterInboxCandidateMutationInput,
+    success: CommandCenterInboxMutationResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxAdjustmentApproveRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove,
+  {
+    payload: CommandCenterInboxApproveAdjustmentInput,
     success: CommandCenterInboxMutationResult,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
@@ -1753,6 +1763,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterInboxRequestChangesRpc,
   WsCommandCenterInboxCandidateCreateRpc,
   WsCommandCenterInboxCandidateAcceptRpc,
+  WsCommandCenterInboxAdjustmentApproveRpc,
   WsCommandCenterInboxCandidateDiscardRpc,
   WsCommandCenterInboxChangeRequestResolveRpc,
   WsCommandCenterInboxSnoozeRpc,

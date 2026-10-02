@@ -836,7 +836,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
-  Layer.provideMerge(SprintPlan.layer),
+  Layer.provideMerge(SprintPlan.layer.pipe(Layer.provide(PersistenceLayerLive))),
   Layer.provideMerge(ReadinessGate.layer),
   Layer.provideMerge(ProcessDiagnostics.layer),
   Layer.provideMerge(ProcessResourceMonitor.layer),

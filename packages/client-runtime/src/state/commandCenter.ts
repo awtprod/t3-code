@@ -110,6 +110,16 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.itemId]),
       },
     }),
+    approveInboxAdjustment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-adjustment-approve",
+      tag: COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
     discardInboxCandidate: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:inbox-candidate-discard",
       tag: COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard,

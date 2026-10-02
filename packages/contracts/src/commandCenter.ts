@@ -51,6 +51,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   inboxRequestChanges: "cc.inbox.requestChanges",
   inboxCandidateCreate: "cc.inbox.candidate.create",
   inboxCandidateAccept: "cc.inbox.candidate.accept",
+  inboxAdjustmentApprove: "cc.inbox.adjustment.approve",
   inboxCandidateDiscard: "cc.inbox.candidate.discard",
   inboxChangeRequestResolve: "cc.inbox.changeRequest.resolve",
   inboxSnooze: "cc.inbox.snooze",
