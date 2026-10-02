@@ -550,3 +550,44 @@ bothClocks(
       expect(state.calls).toHaveLength(2);
     }).pipe(Effect.provide(layer(state))),
 );
+
+bothClocks(
+  "two different drafts approved at the same moment each get exactly one draft",
+  (state, layer) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const otherItem = ItemId.make("item-b");
+      yield* seedItem(otherItem, "revision-b");
+      const runs = yield* AutomationRuns;
+      const draftB = {
+        spaceId,
+        itemId: otherItem,
+        mutationId: "approve-b",
+        revisionId: "revision-b",
+        expectedVersion: 1,
+      } as const;
+      // Both approvals race; at most one may be refused, and only as in progress.
+      const raced = yield* Effect.all(
+        [
+          runs.approveInboxDraft(approval(), "andrew").pipe(Effect.exit),
+          runs.approveInboxDraft(draftB, "andrew").pipe(Effect.exit),
+        ],
+        { concurrency: "unbounded" },
+      );
+      for (const exit of raced) {
+        if (exit._tag === "Failure") expect(String(exit.cause)).toMatch(/still being processed/u);
+      }
+      // Retrying whatever was refused must succeed: nothing was bound to the
+      // other draft's run.
+      for (const [index, request] of [approval(), draftB].entries()) {
+        if (raced[index]!._tag === "Failure") {
+          expect((yield* runs.approveInboxDraft(request, "andrew")).status).toBe("created");
+        }
+      }
+      expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId }))?.status).toBe("created");
+      expect((yield* runs.getInboxDraftReceipt({ spaceId, itemId: otherItem }))?.status).toBe(
+        "created",
+      );
+      expect(state.calls).toHaveLength(2);
+    }).pipe(Effect.provide(layer(state))),
+);

@@ -25,7 +25,9 @@ Some things still happen while the hold is set:
 - **New work:** executions created after the start run normally, including retries, delays and
   agent waits handled by recovery.
 - **Inbox drafts:** approving a new Inbox Gmail draft is refused while another draft run (held or
-  not) is still active in that Space. Nothing is approved or bound by the refused attempt.
+  not) is still active in that Space; the message names the blocking run. Nothing is approved or
+  bound by the refused attempt, so it can simply be retried later. Drafts in one Space are
+  therefore approved one at a time, and none can be approved while a held draft run exists.
 
 Unset, `false`, `0`, `no`, `off` and `n` mean not held. Any other value holds, so a typo fails
 closed rather than releasing anything or stopping the server from starting.

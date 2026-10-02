@@ -453,7 +453,8 @@ const executionIdFor = (key: string) =>
           expectedConfigCommitSha: commitSha,
           expectedDefinitionDigest: definitionDigest,
         });
-        yield* runs.recoverDue({ owner: "tick" });
+        // Even with a batch of one, the held run cannot crowd out new work.
+        yield* runs.recoverDue({ owner: "tick", limit: 1 });
         expect((yield* runtime.get(recoverable.id)).state).toBe("waiting_approval");
         expect(harness.invocations).toEqual([`${fresh.id}:work`]);
       }).pipe(Effect.provide(heldRuns));

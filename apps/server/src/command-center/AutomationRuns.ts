@@ -11,6 +11,8 @@ import {
 import { ApprovalId, ItemId, SpaceId, type Approval as ApprovalType } from "@command-center/core";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Semaphore from "effect/Semaphore";
+import * as Schedule from "effect/Schedule";
 import * as Duration from "effect/Duration";
 import * as Fiber from "effect/Fiber";
 import * as FiberSet from "effect/FiberSet";
@@ -229,6 +231,7 @@ export const layer = Layer.effect(
     // step would then have to fail closed). On shutdown, in-flight drives get
     // a bounded drain before they are interrupted.
     const drives = yield* FiberSet.make<AutomationRuntime.AutomationExecutionSnapshot, unknown>();
+    const inboxDraftAdmission = yield* Semaphore.make(1);
     yield* Effect.addFinalizer(() =>
       FiberSet.awaitEmpty(drives).pipe(Effect.timeoutOption(DRIVE_SHUTDOWN_DRAIN), Effect.asVoid),
     );
@@ -341,7 +344,7 @@ export const layer = Layer.effect(
         // Project the result from the detached fiber too: the caller may be
         // gone (cancelled request, shutdown drain) by the time the step ends.
         Effect.andThen(runtime.get(initial.id)),
-        Effect.tap((finished) => record(finished)),
+        Effect.tap((finished) => record(finished).pipe(Effect.retry(Schedule.recurs(2)))),
       );
       return yield* Fiber.join(yield* FiberSet.run(drives)(drive));
     });
@@ -540,12 +543,14 @@ export const layer = Layer.effect(
     const recoverDue = Effect.fn("AutomationRuns.recoverDue")(function* (
       input: Parameters<AutomationRunsShape["recoverDue"]>[0],
     ) {
-      const due = yield* runtime.listRecoverable(
-        input.limit === undefined ? {} : { limit: input.limit },
-      );
-      const waitingAgents = yield* runtime.listWaitingExternal(
-        input.limit === undefined ? {} : { limit: input.limit },
-      );
+      // While held, scan only work created after start so held executions
+      // (which are left untouched) cannot fill every batch.
+      const scope = {
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+        ...(held ? { createdAtOrAfter: startedAt } : {}),
+      };
+      const due = yield* runtime.listRecoverable(scope);
+      const waitingAgents = yield* runtime.listWaitingExternal(scope);
       // A process can stop after the canonical Approval transaction commits but
       // before its checkpoint is resumed. Reconcile those durable decisions as
       // part of the same recovery pass; requested approvals remain inert.
@@ -573,6 +578,7 @@ export const layer = Layer.effect(
         JOIN command_center_automation_node_checkpoints checkpoint
           ON checkpoint.execution_id = execution.id AND checkpoint.state = 'waiting_approval'
         WHERE execution.state = 'waiting_approval'
+          AND execution.created_at >= ${held ? startedAt : ""}
           AND NOT EXISTS (
             SELECT 1 FROM command_center_approvals approval
             WHERE approval.id = 'automation-approval:' || execution.id || ':' || checkpoint.node_id
@@ -754,35 +760,49 @@ export const layer = Layer.effect(
       // Admission coalesces onto a Responsibility's active run. Another draft's
       // run (e.g. one held across a deploy) would otherwise absorb this
       // approval, or this approval would decide that run's gate.
-      const otherActive = yield* sql<{ readonly id: string }>`
-        SELECT id FROM command_center_automation_executions
-        WHERE automation_id = ${template.id} AND space_id = ${input.spaceId}
-          AND state NOT IN ('succeeded', 'failed', 'canceled')
-          AND COALESCE(json_extract(input_json, '$.mutationId'), '') != ${input.mutationId}
-        LIMIT 1
-      `;
-      if (otherActive.length > 0) {
-        return yield* new CommandCenterError({
-          reason: "conflict",
-          message:
-            "Another Inbox Gmail draft is still being processed in this Space. Approve this draft after it finishes.",
-        });
-      }
-      const approved = yield* inboxDrafts.approve(input, actorSubject);
-      if (approved.status === "created" || approved.status === "uncertain") return approved;
-      yield* inboxDrafts.loadForExecution({
-        mutationId: input.mutationId,
-        spaceId: input.spaceId,
-        payloadDigest: approved.payloadDigest,
-      });
-      const execution = yield* start({
-        automationId: template.id,
-        spaceId: input.spaceId,
-        idempotencyKey: `inbox-gmail-draft:${input.mutationId}`,
-        expectedConfigCommitSha: template.configCommit!,
-        expectedDefinitionDigest: template.definitionDigest,
-        input: { mutationId: input.mutationId, payloadDigest: approved.payloadDigest },
-      });
+      // The check, the receipt approval and the admission run under one lock,
+      // so two different drafts approved at once cannot both pass the check
+      // and have one bound to the other's run.
+      const admitted = yield* inboxDraftAdmission.withPermits(1)(
+        Effect.gen(function* () {
+          const otherActive = yield* sql<{ readonly id: string; readonly state: string }>`
+            SELECT id, state FROM command_center_automation_executions
+            WHERE automation_id = ${template.id} AND space_id = ${input.spaceId}
+              AND state NOT IN ('succeeded', 'failed', 'canceled')
+              AND json_extract(input_json, '$.mutationId') IS NOT NULL
+              AND json_extract(input_json, '$.mutationId') != ${input.mutationId}
+            LIMIT 1
+          `;
+          const blocking = otherActive[0];
+          if (blocking !== undefined) {
+            return yield* new CommandCenterError({
+              reason: "conflict",
+              message: `Another Inbox Gmail draft (run ${blocking.id}, ${blocking.state}) is still being processed in this Space. Approve this draft after it finishes.`,
+            });
+          }
+          const approvedReceipt = yield* inboxDrafts.approve(input, actorSubject);
+          if (approvedReceipt.status === "created" || approvedReceipt.status === "uncertain") {
+            return { approved: approvedReceipt, execution: null };
+          }
+          yield* inboxDrafts.loadForExecution({
+            mutationId: input.mutationId,
+            spaceId: input.spaceId,
+            payloadDigest: approvedReceipt.payloadDigest,
+          });
+          const started = yield* start({
+            automationId: template.id,
+            spaceId: input.spaceId,
+            idempotencyKey: `inbox-gmail-draft:${input.mutationId}`,
+            expectedConfigCommitSha: template.configCommit!,
+            expectedDefinitionDigest: template.definitionDigest,
+            input: { mutationId: input.mutationId, payloadDigest: approvedReceipt.payloadDigest },
+          });
+          return { approved: approvedReceipt, execution: started };
+        }),
+      );
+      const approved = admitted.approved;
+      if (admitted.execution === null) return approved;
+      const execution = admitted.execution;
       if (execution.input.mutationId !== input.mutationId) {
         return yield* new CommandCenterError({
           reason: "conflict",

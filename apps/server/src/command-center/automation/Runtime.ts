@@ -244,9 +244,13 @@ export interface AutomationRuntimeShape {
   readonly get: (executionId: string) => Effect.Effect<AutomationExecutionSnapshot, RuntimeFailure>;
   readonly listRecoverable: (input?: {
     readonly limit?: number;
+    /** Only executions created at or after this time (recovery hold). */
+    readonly createdAtOrAfter?: string;
   }) => Effect.Effect<ReadonlyArray<AutomationExecutionSnapshot>, RuntimeFailure>;
   readonly listWaitingExternal: (input?: {
     readonly limit?: number;
+    /** Only executions created at or after this time (recovery hold). */
+    readonly createdAtOrAfter?: string;
   }) => Effect.Effect<ReadonlyArray<AutomationExecutionSnapshot>, RuntimeFailure>;
   readonly reconcileActiveSlots: (input?: {
     readonly limit?: number;
@@ -737,7 +741,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   });
 
   const listRecoverable = Effect.fn("AutomationRuntime.listRecoverable")(function* (
-    input: { readonly limit?: number } = {},
+    input: { readonly limit?: number; readonly createdAtOrAfter?: string } = {},
   ) {
     const now = yield* dependencies.now;
     const limit = positiveBoundedInteger(input.limit, 50, 500);
@@ -747,6 +751,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
       WHERE
         (execution.lease_token IS NULL OR execution.lease_expires_at IS NULL
           OR execution.lease_expires_at <= ${now})
+        AND execution.created_at >= ${input.createdAtOrAfter ?? ""}
         AND (
           execution.state IN ('queued', 'running')
           OR (
@@ -768,13 +773,14 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   });
 
   const listWaitingExternal = Effect.fn("AutomationRuntime.listWaitingExternal")(function* (
-    input: { readonly limit?: number } = {},
+    input: { readonly limit?: number; readonly createdAtOrAfter?: string } = {},
   ) {
     const limit = positiveBoundedInteger(input.limit, 50, 500);
     const rows = yield* sql<{ readonly id: string }>`
       SELECT execution.id
       FROM command_center_automation_executions execution
       WHERE execution.state = 'waiting_external'
+        AND execution.created_at >= ${input.createdAtOrAfter ?? ""}
         AND EXISTS (
           SELECT 1
           FROM command_center_automation_node_checkpoints checkpoint
