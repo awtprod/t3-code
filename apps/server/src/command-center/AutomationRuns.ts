@@ -228,7 +228,7 @@ export const layer = Layer.effect(
     // disconnect or RPC cancel must not interrupt a step mid-way (an unsafe
     // step would then have to fail closed). On shutdown, in-flight drives get
     // a bounded drain before they are interrupted.
-    const drives = yield* FiberSet.make<void, unknown>();
+    const drives = yield* FiberSet.make<AutomationRuntime.AutomationExecutionSnapshot, unknown>();
     yield* Effect.addFinalizer(() =>
       FiberSet.awaitEmpty(drives).pipe(Effect.timeoutOption(DRIVE_SHUTDOWN_DRAIN), Effect.asVoid),
     );
@@ -336,9 +336,14 @@ export const layer = Layer.effect(
             break;
           }
         }
-      }).pipe(Effect.ensuring(runtime.releaseLease(command).pipe(Effect.ignore)));
-      yield* Fiber.join(yield* FiberSet.run(drives)(drive));
-      return yield* runtime.get(initial.id);
+      }).pipe(
+        Effect.ensuring(runtime.releaseLease(command).pipe(Effect.ignore)),
+        // Project the result from the detached fiber too: the caller may be
+        // gone (cancelled request, shutdown drain) by the time the step ends.
+        Effect.andThen(runtime.get(initial.id)),
+        Effect.tap((finished) => record(finished)),
+      );
+      return yield* Fiber.join(yield* FiberSet.run(drives)(drive));
     });
 
     const applyAutomationApproval = Effect.fn("AutomationRuns.applyAutomationApproval")(function* (
@@ -516,6 +521,8 @@ export const layer = Layer.effect(
       owner: string,
     ) {
       let snapshot = yield* runtime.get(executionId);
+      // Held executions are left exactly as they are, decisions included.
+      if (isHeld(snapshot)) return snapshot;
       if (snapshot.state === "waiting_approval") {
         yield* record(snapshot);
         snapshot = yield* reconcileWaitingApproval(snapshot);
@@ -619,7 +626,7 @@ export const layer = Layer.effect(
           message: "The automation execution was not found in the requested Space.",
         });
       }
-      if (snapshot.state === "waiting_approval") {
+      if (snapshot.state === "waiting_approval" && !isHeld(snapshot)) {
         yield* record(snapshot);
         snapshot = yield* reconcileWaitingApproval(snapshot);
       }
@@ -744,6 +751,23 @@ export const layer = Layer.effect(
         });
       }
       const template = templates[0]!;
+      // Admission coalesces onto a Responsibility's active run. Another draft's
+      // run (e.g. one held across a deploy) would otherwise absorb this
+      // approval, or this approval would decide that run's gate.
+      const otherActive = yield* sql<{ readonly id: string }>`
+        SELECT id FROM command_center_automation_executions
+        WHERE automation_id = ${template.id} AND space_id = ${input.spaceId}
+          AND state NOT IN ('succeeded', 'failed', 'canceled')
+          AND COALESCE(json_extract(input_json, '$.mutationId'), '') != ${input.mutationId}
+        LIMIT 1
+      `;
+      if (otherActive.length > 0) {
+        return yield* new CommandCenterError({
+          reason: "conflict",
+          message:
+            "Another Inbox Gmail draft is still being processed in this Space. Approve this draft after it finishes.",
+        });
+      }
       const approved = yield* inboxDrafts.approve(input, actorSubject);
       if (approved.status === "created" || approved.status === "uncertain") return approved;
       yield* inboxDrafts.loadForExecution({
@@ -759,6 +783,13 @@ export const layer = Layer.effect(
         expectedDefinitionDigest: template.definitionDigest,
         input: { mutationId: input.mutationId, payloadDigest: approved.payloadDigest },
       });
+      if (execution.input.mutationId !== input.mutationId) {
+        return yield* new CommandCenterError({
+          reason: "conflict",
+          message:
+            "Another Inbox Gmail draft is still being processed in this Space. Approve this draft after it finishes.",
+        });
+      }
       const waiting = execution.checkpoints.find(
         (checkpoint) =>
           checkpoint.state === "waiting_approval" && checkpoint.nodeKind === "approval",

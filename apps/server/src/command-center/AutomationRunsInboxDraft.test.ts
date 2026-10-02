@@ -238,38 +238,43 @@ const approvedRequest = {
   body: "Exact body",
 } as const;
 
+const seedItem = (id: ItemId, revisionId: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      INSERT INTO command_center_items (
+        id, space_id, kind, status, title, body, priority,
+        source_json, links_json, metadata_json, created_at, updated_at
+      ) VALUES (
+        ${id}, ${spaceId}, 'decision', 'review', 'Review response', 'Source text', 'high',
+        '{"kind":"user","capturedAt":"2026-09-28T00:00:00.000Z"}', '[]', '{}', ${now}, ${now}
+      )
+    `;
+    yield* sql`
+      INSERT INTO command_center_inbox_revisions (
+        id, item_id, revision, status, source, payload_json, preview_json, evidence_json,
+        actor_subject, created_at, accepted_at, accepted_by_subject
+      ) VALUES (${revisionId}, ${id}, 1, 'current', 'direct', ${encodeJson({
+        kind: "prepared-action",
+        actionKind: "gmail.draft.create",
+        target: { kind: "command-center-item", id },
+        parameters: approvedRequest,
+      })},
+        '{"summary":"Exact draft","before":"No draft","after":"A Gmail draft"}',
+        ${encodeJson({ source: "command-center-item", subjectId: id, version: now })},
+        'andrew', ${now}, ${now}, 'andrew')
+    `;
+    yield* sql`
+      UPDATE command_center_inbox_state
+      SET current_revision_id = ${revisionId}, version = 1
+      WHERE item_id = ${id}
+    `;
+  });
+
 const seed = Effect.gen(function* () {
   // Load config so the Space is projected before the Item references it.
   yield* (yield* CommandCenterService).queryConnections({ spaceId });
-  const sql = yield* SqlClient.SqlClient;
-  yield* sql`
-    INSERT INTO command_center_items (
-      id, space_id, kind, status, title, body, priority,
-      source_json, links_json, metadata_json, created_at, updated_at
-    ) VALUES (
-      ${itemId}, ${spaceId}, 'decision', 'review', 'Review response', 'Source text', 'high',
-      '{"kind":"user","capturedAt":"2026-09-28T00:00:00.000Z"}', '[]', '{}', ${now}, ${now}
-    )
-  `;
-  yield* sql`
-    INSERT INTO command_center_inbox_revisions (
-      id, item_id, revision, status, source, payload_json, preview_json, evidence_json,
-      actor_subject, created_at, accepted_at, accepted_by_subject
-    ) VALUES ('revision-a', ${itemId}, 1, 'current', 'direct', ${encodeJson({
-      kind: "prepared-action",
-      actionKind: "gmail.draft.create",
-      target: { kind: "command-center-item", id: itemId },
-      parameters: approvedRequest,
-    })},
-      '{"summary":"Exact draft","before":"No draft","after":"A Gmail draft"}',
-      ${encodeJson({ source: "command-center-item", subjectId: itemId, version: now })},
-      'andrew', ${now}, ${now}, 'andrew')
-  `;
-  yield* sql`
-    UPDATE command_center_inbox_state
-    SET current_revision_id = 'revision-a', version = 1
-    WHERE item_id = ${itemId}
-  `;
+  yield* seedItem(itemId, "revision-a");
 });
 
 const approval = (mutationId = "approve-a") =>
@@ -507,5 +512,41 @@ bothClocks(
       expect(yield* countGmailReceipts).toBe(1);
       const receipt = yield* runs.getInboxDraftReceipt({ spaceId, itemId });
       expect(receipt).toMatchObject({ status: "created", draftId: "draft-late" });
+    }).pipe(Effect.provide(layer(state))),
+);
+
+bothClocks(
+  "a second draft is refused, not absorbed, while another draft's run is active",
+  (state, layer) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const otherItem = ItemId.make("item-b");
+      yield* seedItem(otherItem, "revision-b");
+      state.hangNextCreate = true;
+      const runs = yield* AutomationRuns;
+      // Draft A's run is active, its Gmail call still in flight.
+      const first = yield* runs.approveInboxDraft(approval(), "andrew").pipe(Effect.forkChild);
+      yield* awaitGmailCall(state, first);
+
+      // Approving draft B must not coalesce onto A's run or decide A's gate.
+      const draftB = {
+        spaceId,
+        itemId: otherItem,
+        mutationId: "approve-b",
+        revisionId: "revision-b",
+        expectedVersion: 1,
+      } as const;
+      const refused = yield* Effect.flip(runs.approveInboxDraft(draftB, "andrew"));
+      expect(refused.reason).toBe("conflict");
+      expect(refused.message).toMatch(/Another Inbox Gmail draft/u);
+      expect(yield* runs.getInboxDraftReceipt({ spaceId, itemId: otherItem })).toBeNull();
+      expect(state.calls).toHaveLength(1);
+
+      // Once A finishes, B gets its own run and its own single draft.
+      yield* Deferred.succeed(state.hangGate, undefined);
+      expect((yield* Fiber.join(first)).status).toBe("created");
+      const second = yield* runs.approveInboxDraft(draftB, "andrew");
+      expect(second.status).toBe("created");
+      expect(state.calls).toHaveLength(2);
     }).pipe(Effect.provide(layer(state))),
 );

@@ -405,6 +405,9 @@ export const readAutomationRecoveryHold = Effect.gen(function* () {
   return value !== "" && !["0", "false", "no", "off", "n"].includes(value);
 });
 
+/** Backoff between attempts after a transient lease-renewal error. */
+const LEASE_RENEW_RETRY_MS = 1_000;
+
 /** Lease length for one automation drive; renewed while a step executes. */
 export const AUTOMATION_LEASE_TTL_MS = 30_000;
 
@@ -1217,7 +1220,9 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     const recoveryInstruction =
       input.state === "transient"
         ? "The existing bounded retry will run when it is due."
-        : "Correct the configured capability or input, then run the Responsibility again.";
+        : input.failure.canonicalCode === "node-outcome-unknown"
+          ? "Check the external system for this step's effect and reconcile it by hand before running the Responsibility again."
+          : "Correct the configured capability or input, then run the Responsibility again.";
     yield* sql`
       INSERT INTO command_center_responsibility_incidents (
         id, space_id, automation_id, canonical_code, resource, subject, state,
@@ -1296,6 +1301,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
           AND automation_id = ${input.execution.automationId}
           AND resource = ${scope.resource} AND subject = ${scope.subject}
           AND state != 'resolved'
+          AND canonical_code != 'node-outcome-unknown'
       `;
       yield* sql`
         UPDATE command_center_items
@@ -1667,7 +1673,13 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
         error:
           `Step '${node.id}' (${node.kind}) was interrupted while running and its outcome is unknown; ` +
           "it was not run again. Reconcile it manually before retrying.",
-        failure: { canonicalCode: "node-outcome-unknown", resource: node.kind, subject: node.id },
+        // Only a human can resolve this: a later success of the same step does
+        // not prove what happened to the interrupted one.
+        failure: {
+          canonicalCode: "node-outcome-unknown",
+          resource: checkpoint.nodeKind,
+          subject: node.id,
+        },
       };
     } else {
       const context = executorInput(execution, definition, node, checkpoint, checkpoints, runInput);
@@ -1695,28 +1707,32 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
         let expiresAt = execution.leaseExpiresAt ?? now;
         while (true) {
           yield* Effect.sleep(Duration.millis(leaseRenewEveryMs));
-          const renewed = yield* renewLease({ ...input, ttlMs: leaseTtlMs }).pipe(
-            Effect.map((lease) => lease.expiresAt),
-            Effect.catch((error) =>
-              error._tag === "AutomationRuntimeError" && error.code === "lease-lost"
-                ? Effect.fail(error)
-                : Effect.gen(function* () {
-                    const current = yield* dependencies.now;
-                    if (addMilliseconds(current, leaseRenewEveryMs) >= expiresAt) {
-                      return yield* runtimeError(
-                        "lease-lost",
-                        "The automation execution lease could not be renewed before it expired.",
-                      );
-                    }
-                    yield* Effect.logWarning("command-center.automation.lease-renew-retry", {
+          while (true) {
+            const renewed = yield* renewLease({ ...input, ttlMs: leaseTtlMs }).pipe(
+              Effect.map((lease) => lease.expiresAt),
+              Effect.catch((error) =>
+                error._tag === "AutomationRuntimeError" && error.code === "lease-lost"
+                  ? Effect.fail(error)
+                  : Effect.logWarning("command-center.automation.lease-renew-retry", {
                       executionId: input.executionId,
                       cause: error,
-                    });
-                    return expiresAt;
-                  }),
-            ),
-          );
-          expiresAt = renewed;
+                    }).pipe(Effect.as(null)),
+              ),
+            );
+            if (renewed !== null) {
+              expiresAt = renewed;
+              break;
+            }
+            // Retry quickly, but stop before the lease can lapse under us.
+            const current = yield* dependencies.now;
+            if (addMilliseconds(current, LEASE_RENEW_RETRY_MS * 2) >= expiresAt) {
+              return yield* runtimeError(
+                "lease-lost",
+                "The automation execution lease could not be renewed before it expired.",
+              );
+            }
+            yield* Effect.sleep(Duration.millis(LEASE_RENEW_RETRY_MS));
+          }
         }
       });
       outcome = yield* Effect.raceFirst(execute, heartbeat);

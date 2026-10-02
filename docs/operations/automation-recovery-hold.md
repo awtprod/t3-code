@@ -11,21 +11,21 @@ automated. All inventory commands are read-only.
 
 ## 1. Set the hold before the new build starts
 
-With `COMMAND_CENTER_AUTOMATION_RECOVERY_HOLD=true`, no path drives an execution that was created
-before the process started:
+With `COMMAND_CENTER_AUTOMATION_RECOVERY_HOLD=true`, an execution that was created before the
+process started (a "held" execution) is left exactly as it is:
 
-- recovery ticks;
-- a new admission that coalesces onto an existing run, such as a schedule, a webhook, a manual run,
-  or approving a new Inbox Gmail draft;
-- applying a decision to an approval;
-- opening a run in the UI.
+- recovery does not resume it, or apply decisions or agent results to it;
+- opening it in the UI does not apply its decision;
+- a new admission that coalesces onto it (a schedule, a webhook, a manual run) does not drive it.
 
 Some things still happen while the hold is set:
 
-- **Decided approvals:** an approval you decide is recorded, and its run is marked queued, but it does
-  not run until the hold is lifted.
-- **New work:** executions created after the start run normally.
-- **Bookkeeping:** active slot bookkeeping continues.
+- **Explicit decisions:** an approval you explicitly decide on a held run is recorded, and the run is
+  marked queued, but it does not run until the hold is lifted.
+- **New work:** executions created after the start run normally, including retries, delays and
+  agent waits handled by recovery.
+- **Inbox drafts:** approving a new Inbox Gmail draft is refused while another draft run (held or
+  not) is still active in that Space. Nothing is approved or bound by the refused attempt.
 
 Unset, `false`, `0`, `no`, `off` and `n` mean not held. Any other value holds, so a typo fails
 closed rather than releasing anything or stopping the server from starting.
@@ -162,11 +162,17 @@ for row in db.execute(\"SELECT id, automation_id, finished_at, error FROM comman
     commit is fenced by the lease token.
   - Stopping is cooperative: a call that already left the process (for example a spawned CLI
     request) may still complete.
-- **Requests and shutdown:** a step runs on the server's lifetime, so a closed browser tab or
-  cancelled request does not interrupt it. On shutdown, in-flight steps get up to 20 s to finish.
-  A step still running after that is interrupted; on restart it is re-run if safe, or failed
-  closed. Check the "interrupted steps" inventory and avoid restarting while long unsafe steps
-  run.
+- **Requests and shutdown:**
+  - A step runs on the server's lifetime, so a closed browser tab or cancelled request does not
+    interrupt it, and its result is recorded even with no one waiting.
+  - On shutdown, in-flight steps get up to 20 s to finish. A step still running after that is
+    interrupted; on restart it is re-run if safe, or failed closed.
+  - Check the "interrupted steps" inventory and avoid restarting while long unsafe steps run.
+- **Late finish:** a step that finishes after its lease expired, because the process stalled and
+  could not renew, is not committed even when no other worker took over. If its kind is unsafe, it
+  is failed closed on recovery.
+- **Unknown-outcome incidents:** an incident for a step whose outcome is unknown is never closed
+  automatically by a later success of the same step. A human resolves it.
 - **Not exactly-once for external effects:** a worker that is killed, or stalls past its lease,
   after an external call left the process cannot be fenced after the fact. Only kinds that are
   safe to repeat are re-run after an interruption: pure steps, reads, executors keyed by the

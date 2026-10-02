@@ -442,11 +442,47 @@ const executionIdFor = (key: string) =>
         yield* runs.get({ executionId: stranded.id, spaceId });
         yield* runs.recoverDue({ owner: "tick" });
         expect(harness.invocations).toEqual([]);
-        // Work started after the process came up still runs.
+        // Work started after the process came up still runs, including when
+        // only recovery drives it.
         const fresh = yield* runs.start(startInput(longUnsafe, "after-start"));
         expect(fresh.state).toBe("succeeded");
+        const recoverable = yield* runtime.start({
+          automationId: approvedSafe.id,
+          expectedSpaceId: spaceId,
+          idempotencyKey: "after-start-recovered",
+          expectedConfigCommitSha: commitSha,
+          expectedDefinitionDigest: definitionDigest,
+        });
+        yield* runs.recoverDue({ owner: "tick" });
+        expect((yield* runtime.get(recoverable.id)).state).toBe("waiting_approval");
         expect(harness.invocations).toEqual([`${fresh.id}:work`]);
       }).pipe(Effect.provide(heldRuns));
     }).pipe(Effect.provide(testLayer(harness, { invariants: false }))),
+  );
+}
+
+{
+  const harness = freshHarness();
+  it.effect("projects the result of a step whose request was cancelled mid-step", () =>
+    Effect.gen(function* () {
+      const runs = yield* AutomationRuns;
+      const sql = yield* SqlClient.SqlClient;
+      harness.gate = yield* Deferred.make<void>();
+      const request = yield* runs
+        .start(startInput(longSafe, "cancelled-request"))
+        .pipe(Effect.forkChild);
+      yield* awaitInvocations(harness, 1);
+      // The client goes away; the step carries on detached from the request.
+      yield* Fiber.interrupt(request);
+      const executionId = yield* executionIdFor("cancelled-request");
+      yield* Deferred.succeed(harness.gate, undefined);
+      yield* settle;
+      // No recovery tick ran: the detached drive projected its own result.
+      const projected = yield* sql<{ readonly state: string }>`
+        SELECT state FROM command_center_runs WHERE id = ${executionId}
+      `;
+      expect(projected[0]?.state).toBe("succeeded");
+      expect(harness.invocations).toHaveLength(1);
+    }).pipe(Effect.provide(testLayer(harness))),
   );
 }

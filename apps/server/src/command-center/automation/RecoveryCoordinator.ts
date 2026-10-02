@@ -39,36 +39,32 @@ export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const workerId = `recovery:${yield* crypto.randomUUIDv4.pipe(Effect.orDie)}`;
   const tickLock = yield* Semaphore.make(1);
-  // While the operator hold is set, ticks resume nothing (AutomationRuns also
-  // refuses to drive held executions on every other path). Slot bookkeeping
-  // still runs so admissions keep coalescing onto existing executions.
+  // The operator hold is enforced per execution by AutomationRuns: ticks keep
+  // running for work created after start and leave held executions as they
+  // are. The coordinator only reports it.
   const held = yield* AutomationRuntime.readAutomationRecoveryHold;
 
   const tick: AutomationRecoveryCoordinatorShape["tick"] = () =>
-    held
-      ? runtime
-          .reconcileActiveSlots({ limit: DEFAULT_BATCH_LIMIT })
-          .pipe(Effect.ignore, Effect.as(emptyReport()))
-      : tickLock.withPermits(1)(
-          runs.recoverDue({ owner: workerId, limit: DEFAULT_BATCH_LIMIT }).pipe(
-            Effect.tap(() => runtime.reconcileActiveSlots({ limit: DEFAULT_BATCH_LIMIT })),
-            Effect.tap((report) =>
-              report.scanned > 0 || report.failures.length > 0
-                ? Effect.logInfo("command-center.automation.recovery-tick", {
-                    scanned: report.scanned,
-                    recovered: report.recovered,
-                    remaining: report.remaining,
-                    failures: report.failures.length,
-                  })
-                : Effect.void,
-            ),
-            Effect.catch((cause) =>
-              Effect.logWarning("command-center.automation.recovery-tick-failed", { cause }).pipe(
-                Effect.as(emptyReport()),
-              ),
-            ),
+    tickLock.withPermits(1)(
+      runs.recoverDue({ owner: workerId, limit: DEFAULT_BATCH_LIMIT }).pipe(
+        Effect.tap(() => runtime.reconcileActiveSlots({ limit: DEFAULT_BATCH_LIMIT })),
+        Effect.tap((report) =>
+          report.scanned > 0 || report.failures.length > 0
+            ? Effect.logInfo("command-center.automation.recovery-tick", {
+                scanned: report.scanned,
+                recovered: report.recovered,
+                remaining: report.remaining,
+                failures: report.failures.length,
+              })
+            : Effect.void,
+        ),
+        Effect.catch((cause) =>
+          Effect.logWarning("command-center.automation.recovery-tick-failed", { cause }).pipe(
+            Effect.as(emptyReport()),
           ),
-        );
+        ),
+      ),
+    );
 
   const start: AutomationRecoveryCoordinatorShape["start"] = () =>
     Effect.gen(function* () {

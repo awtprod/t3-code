@@ -6,12 +6,38 @@ import * as Layer from "effect/Layer";
 
 import { AutomationRuns, type AutomationRunsShape } from "../AutomationRuns.ts";
 import { AUTOMATION_RECOVERY_HOLD_ENV, make } from "./RecoveryCoordinator.ts";
-import { AutomationRuntime, type AutomationRuntimeShape } from "./Runtime.ts";
+import {
+  AutomationRuntime,
+  type AutomationRuntimeShape,
+  readAutomationRecoveryHold,
+} from "./Runtime.ts";
 
-// The deploy-time recovery hold: with the operator flag set, recovery ticks
-// resume nothing; without it they run as before.
+// The deploy-time recovery hold is parsed fail-closed: only unset or a
+// false-like value releases it, and no value can stop the server starting.
+// Enforcement is per execution in AutomationRuns (AutomationLeaseFencing.test).
 
-const harness = (env: Readonly<Record<string, string>>) => {
+const withEnv = (env: Readonly<Record<string, string>>) =>
+  ConfigProvider.layer(ConfigProvider.fromEnv({ env }));
+
+for (const value of [undefined, "", "false", "False", "0", "no", "OFF", "n"]) {
+  it.effect(`does not hold for ${JSON.stringify(value)}`, () =>
+    Effect.gen(function* () {
+      expect(yield* readAutomationRecoveryHold).toBe(false);
+    }).pipe(
+      Effect.provide(withEnv(value === undefined ? {} : { [AUTOMATION_RECOVERY_HOLD_ENV]: value })),
+    ),
+  );
+}
+
+for (const value of ["true", "1", "TRUE", "yes", "enabled", "hold-please"]) {
+  it.effect(`holds for ${JSON.stringify(value)}`, () =>
+    Effect.gen(function* () {
+      expect(yield* readAutomationRecoveryHold).toBe(true);
+    }).pipe(Effect.provide(withEnv({ [AUTOMATION_RECOVERY_HOLD_ENV]: value }))),
+  );
+}
+
+it.effect("keeps ticking while held so work created after start still recovers", () => {
   const calls = { recoverDue: 0 };
   const layer = Layer.mergeAll(
     Layer.succeed(
@@ -20,7 +46,7 @@ const harness = (env: Readonly<Record<string, string>>) => {
         recoverDue: () =>
           Effect.sync(() => {
             calls.recoverDue += 1;
-            return { scanned: 1, recovered: 1, remaining: 0, failures: [] };
+            return { scanned: 0, recovered: 0, remaining: 0, failures: [] };
           }),
       } as unknown as AutomationRunsShape),
     ),
@@ -28,62 +54,13 @@ const harness = (env: Readonly<Record<string, string>>) => {
       AutomationRuntime,
       AutomationRuntime.of({
         reconcileActiveSlots: () => Effect.succeed({ released: 0 }),
-        now: Effect.succeed("2026-09-28T00:00:00.000Z"),
       } as unknown as AutomationRuntimeShape),
     ),
     NodeServices.layer,
-    ConfigProvider.layer(ConfigProvider.fromEnv({ env })),
+    withEnv({ [AUTOMATION_RECOVERY_HOLD_ENV]: "true" }),
   );
-  return { calls, layer };
-};
-
-{
-  const { calls, layer } = harness({ [AUTOMATION_RECOVERY_HOLD_ENV]: "true" });
-  it.effect("resumes nothing while the operator hold is set", () =>
-    Effect.gen(function* () {
-      const coordinator = yield* make;
-      expect(yield* coordinator.tick()).toEqual({
-        scanned: 0,
-        recovered: 0,
-        remaining: 0,
-        failures: [],
-      });
-      expect(calls.recoverDue).toBe(0);
-    }).pipe(Effect.provide(layer)),
-  );
-}
-
-{
-  const { calls, layer } = harness({});
-  it.effect("recovers normally when the hold is not set", () =>
-    Effect.gen(function* () {
-      const coordinator = yield* make;
-      expect((yield* coordinator.tick()).recovered).toBe(1);
-      expect(calls.recoverDue).toBe(1);
-    }).pipe(Effect.provide(layer)),
-  );
-}
-
-{
-  const { calls, layer } = harness({ [AUTOMATION_RECOVERY_HOLD_ENV]: "false" });
-  it.effect("recovers normally when the hold is explicitly off", () =>
-    Effect.gen(function* () {
-      const coordinator = yield* make;
-      yield* coordinator.tick();
-      expect(calls.recoverDue).toBe(1);
-    }).pipe(Effect.provide(layer)),
-  );
-}
-
-for (const value of ["TRUE", "enabled", "hold-please"]) {
-  const { calls, layer } = harness({ [AUTOMATION_RECOVERY_HOLD_ENV]: value });
-  it.effect(
-    `treats an unrecognised hold value (${value}) as held instead of failing to start`,
-    () =>
-      Effect.gen(function* () {
-        const coordinator = yield* make;
-        yield* coordinator.tick();
-        expect(calls.recoverDue).toBe(0);
-      }).pipe(Effect.provide(layer)),
-  );
-}
+  return Effect.gen(function* () {
+    yield* (yield* make).tick();
+    expect(calls.recoverDue).toBe(1);
+  }).pipe(Effect.provide(layer));
+});
