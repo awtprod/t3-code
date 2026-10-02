@@ -207,6 +207,11 @@ export const RETIRED_MIGRATION_IDS: ReadonlyArray<number> = [57, 58, 59, 60];
  * the higher one first would skip the lower one forever on every database that
  * upgrades in between (see `assertNoSkippedMigrations`).
  */
+const missingRange = (start: number, end: number, before: number): string =>
+  start === end
+    ? `migration ${start} is missing before ${before}`
+    : `migrations ${start}-${end} are missing before ${before}`;
+
 export const findMigrationSequenceViolations = (
   registeredIds: ReadonlyArray<number>,
   retiredIds: ReadonlyArray<number> = RETIRED_MIGRATION_IDS,
@@ -228,23 +233,21 @@ export const findMigrationSequenceViolations = (
     if (retired.has(id)) violations.push(`migration ${id} reuses a retired ID`);
   }
   // Gaps are judged on the sorted IDs so an out-of-order entry is reported
-  // once (above), not again as "missing". Ranges keep a typo'd huge ID cheap.
+  // once (above), not again as "missing". Each gap is split only at retired
+  // IDs inside it, so the work is bounded by the registry and retired list,
+  // never by the size of a gap (a typo'd huge ID is reported immediately).
   const sorted = [...new Set(registeredIds)].toSorted((left, right) => left - right);
+  const retiredSorted = [...retired].toSorted((left, right) => left - right);
   let expected = 1;
   for (const id of sorted) {
     let start = expected;
-    while (start < id) {
-      while (start < id && retired.has(start)) start++;
-      if (start >= id) break;
-      let end = start;
-      while (end + 1 < id && !retired.has(end + 1)) end++;
-      violations.push(
-        start === end
-          ? `migration ${start} is missing before ${id}`
-          : `migrations ${start}-${end} are missing before ${id}`,
-      );
-      start = end + 1;
+    for (const skipped of retiredSorted) {
+      if (skipped < start) continue;
+      if (skipped >= id) break;
+      if (skipped > start) violations.push(missingRange(start, skipped - 1, id));
+      start = skipped + 1;
     }
+    if (start < id) violations.push(missingRange(start, id - 1, id));
     expected = id + 1;
   }
   return violations;
