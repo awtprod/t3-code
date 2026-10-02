@@ -15,6 +15,11 @@ import {
   CommandCenterObservationMutationReceipt,
   CommandCenterObservationRetirementRequest,
 } from "./commandCenterObservations.ts";
+import {
+  COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+  CommandCenterYouTubeAnalyticsFetchInput,
+  CommandCenterYouTubeAnalyticsFetchResult,
+} from "./commandCenterYouTubeAnalytics.ts";
 
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
@@ -986,6 +991,14 @@ export const WsCommandCenterObservationsHistoryRpc = Rpc.make(
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
+export const WsCommandCenterYouTubeAnalyticsFetchRpc = Rpc.make(
+  COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+  {
+    payload: CommandCenterYouTubeAnalyticsFetchInput,
+    success: CommandCenterYouTubeAnalyticsFetchResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
 export const WsCommandCenterObservationsCreateManualRpc = Rpc.make(
   COMMAND_CENTER_WS_METHODS.observationsCreateManual,
   {
@@ -1792,6 +1805,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterObservationsListRpc,
   WsCommandCenterObservationsGetRpc,
   WsCommandCenterObservationsHistoryRpc,
+  WsCommandCenterYouTubeAnalyticsFetchRpc,
   WsCommandCenterObservationsCreateManualRpc,
   WsCommandCenterObservationsImportRpc,
   WsCommandCenterObservationsCorrectRpc,

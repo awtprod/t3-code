@@ -168,6 +168,8 @@ import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
 import * as PublishConnections from "./command-center/publish/PublishConnections.ts";
+import * as YouTubeAnalytics from "./command-center/publish/youtube/YouTubeAnalytics.ts";
+import * as YouTubeTokenStore from "./command-center/publish/youtube/YouTubeTokenStore.ts";
 import * as CommandCenterConfig from "./command-center/Config.ts";
 import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
@@ -484,6 +486,11 @@ const PublishConnectionsLayerLive = PublishConnections.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
+const YouTubeAnalyticsLayerLive = YouTubeAnalytics.layer.pipe(
+  Layer.provide(YouTubeTokenStore.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+  Layer.provide(Observations.layer),
+);
+
 const AutomationDefinitionConfigLayerLive = AutomationDefinitionConfig.layer.pipe(
   Layer.provideMerge(CommandCenterConfigLayerLive),
   Layer.provide(ProcessRunner.layer),
@@ -511,6 +518,7 @@ const CommandCenterBaseLayerLive = Layer.mergeAll(
   WindowsMediaConnectorLayerLive,
   GoogleConnectionSetupLayerLive,
   PublishConnectionsLayerLive,
+  YouTubeAnalyticsLayerLive,
   AutomationDefinitionConfigLayerLive,
   AutomationScheduleInterpreterLayerLive,
   AutomationScopedShellLayerLive,

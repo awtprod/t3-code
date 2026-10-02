@@ -114,6 +114,15 @@ function ObservationsRouteView() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmRetire, setConfirmRetire] = useState(false);
+  const [analyticsStartDate, setAnalyticsStartDate] = useState(() =>
+    new Date(Date.now() - 10 * 86_400_000).toISOString().slice(0, 10),
+  );
+  const [analyticsEndDate, setAnalyticsEndDate] = useState(() =>
+    new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10),
+  );
+  const [analyticsBusy, setAnalyticsBusy] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+  const [analyticsReceipt, setAnalyticsReceipt] = useState<string | null>(null);
   const list = useEnvironmentQuery(
     environmentId === null || space === undefined
       ? null
@@ -162,6 +171,16 @@ function ObservationsRouteView() {
       byRevision.set(revision.revisionId, revision);
     return [...byRevision.values()].sort((left, right) => right.version - left.version);
   }, [history.data, olderHistory]);
+  const publishingConnections = useEnvironmentQuery(
+    environmentId === null
+      ? null
+      : commandCenterEnvironment.publishConnections({ environmentId, input: {} }),
+  );
+  const youtube = publishingConnections.data?.connections.find(
+    (connection) => connection.provider === "youtube",
+  );
+  const analyticsPermission =
+    youtube?.analytics?.state === "verified" || youtube?.analytics?.state === "permission-granted";
   const create = useAtomCommand(commandCenterEnvironment.createManualObservation, {
     reportFailure: false,
   });
@@ -172,6 +191,9 @@ function ObservationsRouteView() {
     reportFailure: false,
   });
   const retire = useAtomCommand(commandCenterEnvironment.retireObservation, {
+    reportFailure: false,
+  });
+  const fetchYouTubeAnalytics = useAtomCommand(commandCenterEnvironment.fetchYouTubeAnalytics, {
     reportFailure: false,
   });
 
@@ -189,6 +211,10 @@ function ObservationsRouteView() {
     setReason("");
     setConfirmRetire(false);
   }, [detail.data?.revisionId, selectedId]);
+  useEffect(() => {
+    setAnalyticsError(null);
+    setAnalyticsReceipt(null);
+  }, [environmentId, space?.id, selectedId]);
 
   const setSearch = (next: Partial<Search>) =>
     void navigate({
@@ -210,8 +236,53 @@ function ObservationsRouteView() {
     setHistoryBefore(undefined);
     setOlderHistory([]);
     bootstrap.refresh();
+    publishingConnections.refresh();
     detail.refresh();
     history.refresh();
+  };
+  const fetchAnalytics = async () => {
+    const selected = detail.data;
+    if (
+      environmentId === null ||
+      selected === null ||
+      selected.retired ||
+      analyticsBusy ||
+      !analyticsPermission ||
+      selected.observation.channelId === undefined ||
+      selected.observation.contentId === undefined
+    )
+      return;
+    setAnalyticsBusy(true);
+    setAnalyticsError(null);
+    setAnalyticsReceipt(null);
+    try {
+      const result = await fetchYouTubeAnalytics({
+        environmentId,
+        input: {
+          spaceId: selected.observation.spaceId,
+          sourceObservationId: selected.observation.id,
+          expectedSourceRevisionId: selected.revisionId,
+          channelId: selected.observation.channelId,
+          videoId: selected.observation.contentId,
+          startDate: analyticsStartDate,
+          endDate: analyticsEndDate,
+        },
+      });
+      if (result._tag !== "Success") throw squashAtomCommandFailure(result);
+      const receipt = result.value;
+      setAnalyticsReceipt(
+        `Stored ${receipt.observationIds.length} Analytics observations (${receipt.status}). ` +
+          `Views: ${receipt.views ?? "unavailable"}. Reported through: ${receipt.freshThroughDate ?? "unknown"}.` +
+          (receipt.deduplicated ? " Existing source data was reused." : ""),
+      );
+      list.refresh();
+      publishingConnections.refresh();
+    } catch (failure) {
+      setAnalyticsError(message(failure));
+      publishingConnections.refresh();
+    } finally {
+      setAnalyticsBusy(false);
+    }
   };
   const listKey = `${environmentId}:${space?.id}:${cursor?.createdAt ?? "first"}:${cursor?.observationId ?? ""}`;
   useEffect(() => {
@@ -570,6 +641,72 @@ function ObservationsRouteView() {
                       </dd>
                     </div>
                   </dl>
+                  {detail.data.observation.channelId !== undefined &&
+                  detail.data.observation.contentId !== undefined &&
+                  (detail.data.observation.contentKind === "short-form" ||
+                    detail.data.observation.contentKind === "long-form") ? (
+                    <section
+                      className="space-y-3 rounded-lg border p-4"
+                      aria-label="YouTube Analytics"
+                    >
+                      <div>
+                        <h3 className="font-semibold">YouTube Analytics</h3>
+                        <p className="text-sm text-muted-foreground">
+                          Fetch a closed period for this mapped channel and video. Views support the
+                          average view percentage and duration observations. Thumbnail CTR remains
+                          manual because this API does not report it.
+                        </p>
+                      </div>
+                      <p className="text-sm">
+                        {detail.data.retired
+                          ? "This source observation is retired. Select an active video observation."
+                          : (youtube?.analytics?.detail ??
+                            "Connect YouTube with Analytics read permission in Settings first.")}
+                      </p>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="text-sm">
+                          Start date
+                          <input
+                            className="mt-1 block h-10 w-full rounded-md border bg-background px-3"
+                            type="date"
+                            value={analyticsStartDate}
+                            onChange={(event) => setAnalyticsStartDate(event.target.value)}
+                          />
+                        </label>
+                        <label className="text-sm">
+                          End date
+                          <input
+                            className="mt-1 block h-10 w-full rounded-md border bg-background px-3"
+                            type="date"
+                            value={analyticsEndDate}
+                            onChange={(event) => setAnalyticsEndDate(event.target.value)}
+                          />
+                        </label>
+                      </div>
+                      <Button
+                        disabled={
+                          detail.data.retired ||
+                          !analyticsPermission ||
+                          analyticsBusy ||
+                          !analyticsStartDate ||
+                          !analyticsEndDate
+                        }
+                        onClick={() => void fetchAnalytics()}
+                      >
+                        {analyticsBusy ? "Fetching…" : "Fetch Analytics"}
+                      </Button>
+                      {analyticsError ? (
+                        <p role="alert" className="text-sm text-destructive">
+                          {analyticsError}
+                        </p>
+                      ) : null}
+                      {analyticsReceipt ? (
+                        <p role="status" className="text-sm">
+                          {analyticsReceipt}
+                        </p>
+                      ) : null}
+                    </section>
+                  ) : null}
                   {detail.data.hasCollectionConflict ? (
                     <p
                       role="status"

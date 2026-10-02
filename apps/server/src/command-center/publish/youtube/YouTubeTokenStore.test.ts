@@ -9,7 +9,12 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../../../config.ts";
 import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
-import { YOUTUBE_UPLOAD_SCOPE, type FetchLike } from "./YouTubeOAuth.ts";
+import {
+  YOUTUBE_UPLOAD_SCOPE,
+  YOUTUBE_ANALYTICS_SCOPE,
+  YOUTUBE_READ_SCOPE,
+  type FetchLike,
+} from "./YouTubeOAuth.ts";
 import { makeLayer, YOUTUBE_CONNECTION_SECRET, YouTubeTokenStore } from "./YouTubeTokenStore.ts";
 
 const T0 = DateTime.toEpochMillis(DateTime.makeUnsafe("2026-09-27T00:00:00.000Z"));
@@ -105,6 +110,10 @@ describe("YouTubeTokenStore", () => {
         setupMode: "oauth-redirect",
         accountLabel: "andrew@example.com",
         lastRefreshedAt: DateTime.formatIso(DateTime.makeUnsafe(T0)),
+        analytics: {
+          state: "needs-consent",
+          detail: "Reconnect YouTube to grant Analytics and YouTube read access.",
+        },
       });
       expect(JSON.stringify(connection)).not.toMatch(/ya29|1\/\/refresh/u);
 
@@ -160,6 +169,39 @@ describe("YouTubeTokenStore", () => {
       // A 401 mid-upload invalidates the cache and forces the next read to refresh.
       yield* store.invalidateAccessToken;
       expect(yield* store.accessToken).not.toBe(refreshed);
+    }).pipe(Effect.provide(storeLayer(fetchImpl)));
+  });
+
+  it.effect("keeps Analytics consent and health separate from publishing", () => {
+    const { fetchImpl } = okGoogle();
+    return Effect.gen(function* () {
+      yield* TestClock.setTime(T0);
+      yield* connect;
+      const store = yield* YouTubeTokenStore;
+      expect((yield* store.analyticsAccessToken.pipe(Effect.flip)).message).toContain("Reconnect");
+      expect(yield* store.accessToken).toBe("ya29.initial");
+      const secretStore = yield* ServerSecretStore.ServerSecretStore;
+      const saved = Option.getOrThrow(yield* storedJson) as Record<string, unknown>;
+      yield* secretStore.set(
+        YOUTUBE_CONNECTION_SECRET,
+        new TextEncoder().encode(
+          JSON.stringify({
+            ...saved,
+            scope: `${YOUTUBE_UPLOAD_SCOPE} ${YOUTUBE_ANALYTICS_SCOPE} ${YOUTUBE_READ_SCOPE}`,
+          }),
+        ),
+      );
+      expect(yield* store.analyticsAccessToken).toMatch(/^ya29\.refreshed-/u);
+      yield* store.recordAnalyticsCheck("YouTube Analytics returned HTTP 403.");
+      expect(yield* store.summary).toMatchObject({
+        state: "connected",
+        analytics: { state: "error" },
+      });
+      yield* store.recordAnalyticsCheck();
+      expect(yield* store.summary).toMatchObject({
+        state: "connected",
+        analytics: { state: "verified" },
+      });
     }).pipe(Effect.provide(storeLayer(fetchImpl)));
   });
 

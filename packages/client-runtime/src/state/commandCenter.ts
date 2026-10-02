@@ -1,4 +1,7 @@
-import { COMMAND_CENTER_WS_METHODS } from "@t3tools/contracts";
+import {
+  COMMAND_CENTER_WS_METHODS,
+  COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+} from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -352,6 +355,22 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       label: "environment-data:command-center:observations-history",
       tag: COMMAND_CENTER_WS_METHODS.observationsHistory,
       staleTimeMs: 1_000,
+    }),
+    fetchYouTubeAnalytics: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:youtube-analytics-fetch",
+      tag: COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([
+            environmentId,
+            input.spaceId,
+            input.videoId,
+            input.startDate,
+            input.endDate,
+          ]),
+      },
     }),
     createManualObservation: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:observation-create-manual",

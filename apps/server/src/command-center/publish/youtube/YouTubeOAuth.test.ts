@@ -8,9 +8,12 @@ import {
   emailFromIdToken,
   exchangeYouTubeAuthorizationCode,
   grantsYouTubeUpload,
+  grantsYouTubeAnalytics,
   refreshYouTubeAccessToken,
   resolveYouTubeOAuthClient,
   YOUTUBE_UPLOAD_SCOPE,
+  YOUTUBE_ANALYTICS_SCOPE,
+  YOUTUBE_READ_SCOPE,
   YouTubeOAuthError,
   type FetchLike,
 } from "./YouTubeOAuth.ts";
@@ -48,6 +51,12 @@ describe("YouTubeOAuth", () => {
       code_challenge_method: "S256",
     });
     expect(url.searchParams.get("scope")?.split(" ")).toContain(YOUTUBE_UPLOAD_SCOPE);
+    expect(url.searchParams.get("scope")?.split(" ")).toContain(YOUTUBE_ANALYTICS_SCOPE);
+    expect(url.searchParams.get("scope")?.split(" ")).toContain(YOUTUBE_READ_SCOPE);
+    expect(url.searchParams.get("include_granted_scopes")).toBe("true");
+    expect(grantsYouTubeAnalytics(`${YOUTUBE_ANALYTICS_SCOPE} ${YOUTUBE_READ_SCOPE}`)).toBe(true);
+    expect(grantsYouTubeAnalytics(YOUTUBE_UPLOAD_SCOPE)).toBe(false);
+    expect(grantsYouTubeAnalytics(YOUTUBE_ANALYTICS_SCOPE)).toBe(false);
     expect(url.searchParams.get("code_challenge")).toBe(
       NodeCrypto.createHash("sha256").update(request.codeVerifier).digest("base64url"),
     );

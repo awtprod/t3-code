@@ -59,7 +59,8 @@ const PROVIDER_COPY: Readonly<
 > = {
   youtube: {
     title: "YouTube",
-    description: "Upload finished clips as videos or Shorts.",
+    description:
+      "Upload finished clips and, with separate read permission, inspect YouTube Analytics.",
     credentialLabel: "Paste the final browser address",
     credentialPlaceholder: "http://127.0.0.1/oauth2/callback?code=…&state=…",
     icon: YoutubeIcon,
@@ -289,6 +290,11 @@ export function PublishingConnectionsSection({
             status={
               <span className="space-y-0.5">
                 <span className="block">{connectionStatus(connection)}</span>
+                {connection.provider === "youtube" && connection.state === "connected" ? (
+                  <span className="block">
+                    Analytics: {connection.analytics?.detail ?? "Permission status unavailable."}
+                  </span>
+                ) : null}
                 {warning === undefined ? null : (
                   <span className="block text-warning-foreground">{warning}</span>
                 )}

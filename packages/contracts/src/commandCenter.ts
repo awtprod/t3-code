@@ -107,6 +107,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   observationsImport: "cc.observations.import",
   observationsCorrect: "cc.observations.correct",
   observationsRetire: "cc.observations.retire",
+  youtubeAnalyticsFetch: "cc.youtube.analytics.fetch",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
@@ -525,6 +526,13 @@ export const CommandCenterPublishConnection = Schema.Struct({
   expiresAt: Schema.optional(Timestamp),
   lastRefreshedAt: Schema.optional(Timestamp),
   detail: Schema.optional(TrimmedNonEmptyString),
+  analytics: Schema.optional(
+    Schema.Struct({
+      state: Schema.Literals(["needs-consent", "permission-granted", "verified", "error"]),
+      detail: TrimmedNonEmptyString,
+      verifiedAt: Schema.optional(Timestamp),
+    }),
+  ),
 });
 export type CommandCenterPublishConnection = typeof CommandCenterPublishConnection.Type;
 
