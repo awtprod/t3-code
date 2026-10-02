@@ -487,3 +487,99 @@ const executionIdFor = (key: string) =>
     }).pipe(Effect.provide(testLayer(harness))),
   );
 }
+
+{
+  const harness = freshHarness();
+  it.effect("refuses to join a busy run for different input, writing nothing", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AutomationRuntime;
+      const sql = yield* SqlClient.SqlClient;
+      yield* (yield* CommandCenterService).queryAutomations({ spaceId });
+      const request = (key: string, input: Record<string, string>, coalesce?: "same-input") => ({
+        automationId: approvedSafe.id,
+        expectedSpaceId: spaceId,
+        idempotencyKey: key,
+        expectedConfigCommitSha: commitSha,
+        expectedDefinitionDigest: definitionDigest,
+        input,
+        ...(coalesce === undefined ? {} : { coalesce }),
+      });
+      // A run started by hand (no draft binding) is active.
+      const manual = yield* runtime.start(request("manual", {}));
+      const refused = yield* Effect.flip(
+        runtime.start(request("draft-b", { mutationId: "b" }, "same-input")),
+      );
+      expect(refused).toMatchObject({ code: "admission-conflict" });
+      const bound = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM command_center_responsibility_admissions
+        WHERE idempotency_key = 'draft-b'
+      `;
+      expect(Number(bound[0]?.count)).toBe(0);
+      // The default still joins the active run (and binds the key to it).
+      const joined = yield* runtime.start(request("schedule-tick", { tick: "1" }));
+      expect(joined.id).toBe(manual.id);
+    }).pipe(Effect.provide(testLayer(harness, { invariants: false }))),
+  );
+}
+
+/** Makes every write fail like a busy/locked database, as SQLite reports it. */
+const databaseWrites = (enabled: boolean) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql.unsafe(`PRAGMA query_only = ${enabled ? "OFF" : "ON"}`);
+  });
+
+{
+  const harness = freshHarness();
+  it.effect("retries a transient lease-renewal error without stopping the step", () =>
+    Effect.gen(function* () {
+      const runs = yield* AutomationRuns;
+      harness.gate = yield* Deferred.make<void>();
+      const running = yield* runs.start(startInput(longSafe, "renew-blip")).pipe(Effect.forkChild);
+      yield* awaitInvocations(harness, 1);
+      // The first renewal (at 10 s) hits a write error; writes recover 2 s later.
+      yield* advance(harness, 9_000);
+      yield* databaseWrites(false);
+      yield* advance(harness, 2_000);
+      yield* databaseWrites(true);
+      yield* advance(harness, 30_000);
+      yield* settle;
+      expect(harness.interrupted).toBe(0);
+      // The lease is still live: recovery cannot start a second copy.
+      yield* runs.recoverDue({ owner: "tick" });
+      expect(harness.invocations).toHaveLength(1);
+      yield* Deferred.succeed(harness.gate, undefined);
+      expect((yield* Fiber.join(running)).state).toBe("succeeded");
+    }).pipe(Effect.provide(testLayer(harness))),
+  );
+}
+
+{
+  const harness = freshHarness();
+  it.effect("stops the step when renewal keeps failing until the lease would lapse", () =>
+    Effect.gen(function* () {
+      const runs = yield* AutomationRuns;
+      harness.gate = yield* Deferred.make<void>();
+      const running = yield* runs
+        .start(startInput(longUnsafe, "renew-outage"))
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* awaitInvocations(harness, 1);
+      // Writes fail for longer than the lease: retries are bounded by it.
+      yield* advance(harness, 9_000);
+      yield* databaseWrites(false);
+      yield* advance(harness, 25_000);
+      yield* settle;
+      expect(harness.interrupted).toBe(1);
+      yield* databaseWrites(true);
+      expect((yield* Fiber.join(running))._tag).toBe("Failure");
+      // Recovery does not re-run the unsafe step: its outcome is unknown.
+      yield* advance(harness, 10_000);
+      yield* runs.recoverDue({ owner: "tick" });
+      const executionId = yield* executionIdFor("renew-outage");
+      const recovered = yield* runs.get({ executionId, spaceId });
+      expect(recovered.state).toBe("failed");
+      expect(recovered.error).toMatch(/outcome is unknown/u);
+      expect(harness.invocations).toHaveLength(1);
+    }).pipe(Effect.provide(testLayer(harness))),
+  );
+}

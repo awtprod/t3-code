@@ -95,6 +95,8 @@ interface FakeState {
   resolutions: number;
   failNextCreate: boolean;
   hangNextCreate: boolean;
+  /** Makes receipt approval yield, so concurrent approvals interleave there. */
+  slowApprove: boolean;
   /** Released by the test to let a hung Gmail call finish. */
   readonly hangGate: Deferred.Deferred<void>;
   readonly calls: Array<{
@@ -221,7 +223,26 @@ function testLayer(state: FakeState, clock: "frozen" | "live" = "frozen") {
   );
   return automationRunsLayer.pipe(
     Layer.provideMerge(durableRuntimeLayer),
-    Layer.provideMerge(InboxGmailDrafts.layer),
+    Layer.provideMerge(
+      Layer.effect(
+        InboxGmailDrafts.InboxGmailDrafts,
+        Effect.gen(function* () {
+          const real = yield* InboxGmailDrafts.InboxGmailDrafts;
+          return InboxGmailDrafts.InboxGmailDrafts.of({
+            ...real,
+            approve: (request, actor) =>
+              state.slowApprove
+                ? Effect.andThen(
+                    Effect.gen(function* () {
+                      for (let spin = 0; spin < 200; spin++) yield* Effect.yieldNow;
+                    }),
+                    real.approve(request, actor),
+                  )
+                : real.approve(request, actor),
+          });
+        }),
+      ).pipe(Layer.provide(InboxGmailDrafts.layer)),
+    ),
     Layer.provideMerge(Layer.mergeAll(commandCenterLayer, eventStreamLayer)),
     Layer.provideMerge(configLayer),
     Layer.provideMerge(SqlitePersistenceMemory),
@@ -286,6 +307,7 @@ const freshState = (): FakeState => ({
   resolutions: 0,
   failNextCreate: false,
   hangNextCreate: false,
+  slowApprove: false,
   hangGate: Deferred.makeUnsafe<void>(),
   calls: [],
 });
@@ -625,6 +647,50 @@ bothClocks(
       });
       const created = yield* runs.approveInboxDraft(approval(), "andrew");
       expect(created.status).toBe("created");
+      expect(state.calls).toHaveLength(1);
+    }).pipe(Effect.provide(layer(state))),
+);
+
+bothClocks(
+  "a draft that loses the approval race is refused before anything is approved",
+  (state, layer) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const otherItem = ItemId.make("item-b");
+      yield* seedItem(otherItem, "revision-b");
+      const runs = yield* AutomationRuns;
+      // Both approvals reach receipt approval together, which yields mid-way.
+      state.slowApprove = true;
+      // Keep the winner\'s run active: its Gmail call stays in flight.
+      state.hangNextCreate = true;
+      const draftB = {
+        spaceId,
+        itemId: otherItem,
+        mutationId: "approve-b",
+        revisionId: "revision-b",
+        expectedVersion: 1,
+      } as const;
+      const a = yield* runs
+        .approveInboxDraft(approval(), "andrew")
+        .pipe(Effect.exit, Effect.forkChild);
+      const b = yield* runs.approveInboxDraft(draftB, "andrew").pipe(Effect.exit, Effect.forkChild);
+      for (let spin = 0; spin < 5_000; spin++) {
+        if (
+          state.calls.length > 0 &&
+          (b.pollUnsafe() !== undefined || a.pollUnsafe() !== undefined)
+        )
+          break;
+        yield* Effect.yieldNow;
+      }
+      state.slowApprove = false;
+      yield* Deferred.succeed(state.hangGate, undefined);
+      const raced = [yield* Fiber.join(a), yield* Fiber.join(b)];
+      const outcomes = raced.map((exit) => exit._tag);
+      expect(outcomes.filter((tag) => tag === "Success")).toHaveLength(1);
+      // The loser was refused by the check, so its receipt was never approved
+      // and it is free to be approved again later.
+      const loser = outcomes[0] === "Failure" ? itemId : otherItem;
+      expect(yield* runs.getInboxDraftReceipt({ spaceId, itemId: loser })).toBeNull();
       expect(state.calls).toHaveLength(1);
     }).pipe(Effect.provide(layer(state))),
 );

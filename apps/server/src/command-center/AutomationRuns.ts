@@ -102,7 +102,9 @@ const toCommandCenterError = (cause: unknown): CommandCenterError => {
     const reason =
       cause.code === "automation-not-found" || cause.code === "execution-not-found"
         ? "not_found"
-        : cause.code === "idempotency-conflict" || cause.code === "definition-mismatch"
+        : cause.code === "idempotency-conflict" ||
+            cause.code === "definition-mismatch" ||
+            cause.code === "admission-conflict"
           ? "conflict"
           : "validation";
     return new CommandCenterError({ reason, message: cause.message, cause });
@@ -793,6 +795,8 @@ export const layer = Layer.effect(
           yield* runtime.start({
             automationId: template.id,
             expectedSpaceId: input.spaceId,
+            // Never join another draft's (or a manual) run of this template.
+            coalesce: "same-input",
             idempotencyKey: `inbox-gmail-draft:${input.mutationId}`,
             expectedConfigCommitSha: template.configCommit!,
             expectedDefinitionDigest: template.definitionDigest,

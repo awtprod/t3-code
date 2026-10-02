@@ -59,6 +59,7 @@ export const AutomationRuntimeErrorCode = Schema.Literals([
   "definition-invalid",
   "execution-not-found",
   "idempotency-conflict",
+  "admission-conflict",
   "lease-denied",
   "lease-lost",
   "invalid-state",
@@ -197,6 +198,11 @@ export interface StartAutomationExecutionInput {
   readonly expectedConfigCommitSha: string;
   readonly expectedDefinitionDigest: string;
   readonly input?: Readonly<Record<string, Schema.Json>>;
+  /**
+   * "same-input": refuse, instead of joining, an active execution whose run
+   * input differs; nothing is written. Default joins any active execution.
+   */
+  readonly coalesce?: "any" | "same-input";
 }
 
 export interface AcquireAutomationLeaseInput {
@@ -362,6 +368,7 @@ const FailureResolutionScope = Schema.Struct({
   subject: BoundedFailureIdentity,
 });
 const StartAutomationExecution = Schema.Struct({
+  coalesce: Schema.optionalKey(Schema.Literals(["any", "same-input"])),
   automationId: Schema.String.check(
     Schema.isPattern(BOUNDED_RUNTIME_ID_PATTERN),
     Schema.isMaxLength(200),
@@ -985,8 +992,13 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
           return { kind: "paused" as const, automationId: stored.id };
         }
 
-        const slots = yield* sql<{ readonly executionId: string; readonly state: string }>`
-          SELECT slot.execution_id AS "executionId", execution.state
+        const slots = yield* sql<{
+          readonly executionId: string;
+          readonly state: string;
+          readonly inputJson: string;
+        }>`
+          SELECT slot.execution_id AS "executionId", execution.state,
+            execution.input_json AS "inputJson"
           FROM command_center_responsibility_active_slots slot
           JOIN command_center_automation_executions execution ON execution.id = slot.execution_id
           WHERE slot.automation_id = ${stored.id} AND slot.space_id = ${stored.spaceId}
@@ -997,6 +1009,14 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
           active !== undefined &&
           !TERMINAL_EXECUTION_STATES.has(active.state as AutomationRuntimeExecutionState)
         ) {
+          // Checked in the admission transaction itself, so no concurrent
+          // admission can slip between a caller's check and this join.
+          if (input.coalesce === "same-input" && active.inputJson !== inputJson) {
+            return yield* runtimeError(
+              "admission-conflict",
+              `Automation '${stored.id}' is busy with execution '${active.executionId}' for different input.`,
+            );
+          }
           yield* sql`
             INSERT INTO command_center_responsibility_admissions (
               idempotency_key, execution_id, automation_id, space_id, config_commit_sha,
