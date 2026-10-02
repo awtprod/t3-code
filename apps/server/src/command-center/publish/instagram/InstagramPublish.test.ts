@@ -467,6 +467,63 @@ describe("durable Instagram production executor", () => {
       expect(f.calls.permalink).toBe(2);
       expect((yield* f.raw(r.id)).permalink).not.toBeNull();
     }));
+  for (const recoveryState of ["uncertain", "published"] as const)
+    for (const activeState of ["approved", "processing"] as const)
+      test(`due ${activeState} progresses ahead of 25 older ${recoveryState} receipts from a replaced connection`, (f) =>
+        Effect.gen(function* () {
+          const staleIds: string[] = [];
+          for (let i = 0; i < 25; i++) {
+            const oldBinding = {
+              ...binding,
+              dueUtc: DateTime.formatIso(DateTime.makeUnsafe(T0 + (i + 1) * 1000)),
+            };
+            const old = yield* f.service.request(oldBinding, session);
+            yield* f.service.approve(old.id, old.digest, session);
+            yield* f.patch(old.id, {
+              state: recoveryState,
+              createIntentAt: T0,
+              containerId: "900001",
+              publishIntentAt: T0,
+              mediaId: recoveryState === "published" ? "900002" : null,
+              publishedAt: recoveryState === "published" ? T0 : null,
+            });
+            staleIds.push(old.id);
+          }
+          f.control.revision++;
+          const active = yield* f.service.request(
+            { ...binding, accountRevision: f.control.revision },
+            session,
+          );
+          yield* f.service.approve(active.id, active.digest, session);
+          if (activeState === "processing")
+            yield* f.patch(active.id, {
+              state: "processing",
+              createIntentAt: DUE,
+              containerId: "900001",
+            });
+          yield* TestClock.setTime(DUE);
+          yield* f.service.tick;
+          expect((yield* f.raw(active.id)).state).toBe("published");
+          expect(f.calls).toEqual({
+            create: activeState === "approved" ? 1 : 0,
+            publish: 1,
+            status: 1,
+            permalink: 0,
+            recent: 0,
+          });
+          const stale = yield* Effect.forEach(staleIds, (id) => f.raw(id));
+          for (const receipt of stale) {
+            expect(receipt.state).toBe(recoveryState);
+            expect(receipt.readAttempts).toBe(0);
+            expect(receipt.permalink).toBeNull();
+            expect(receipt.binding.accountRevision).toBe(binding.accountRevision);
+          }
+          // One active action and 24 guarded recovery attempts fill the bounded batch.
+          expect(
+            stale.filter((receipt) => receipt.detail?.includes("Read-only recovery held")),
+          ).toHaveLength(24);
+          expect(stale[24]!.detail).toBeNull();
+        }));
   for (const state of ["uncertain", "published"] as const) {
     for (const snapshot of [
       "wrong-account",
