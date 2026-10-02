@@ -47,8 +47,24 @@ describe("Command Center RPC authorization", () => {
     ]) {
       expect(scopes.get(method)).toBe(AuthCommandCenterReadScope);
     }
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.digestQuery)).toBe(AuthCommandCenterReadScope);
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxDraftReceipt)).toBe(
+      AuthCommandCenterReadScope,
+    );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.runsQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationsQuery)).toBe(AuthCommandCenterReadScope);
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.responsibilitiesList)).toBe(
+      AuthCommandCenterReadScope,
+    );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.responsibilityGet)).toBe(
+      AuthCommandCenterReadScope,
+    );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.responsibilityPause)).toBe(
+      AuthCommandCenterOperateScope,
+    );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.responsibilityResume)).toBe(
+      AuthCommandCenterOperateScope,
+    );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.automationDefinitionGet)).toBe(
       AuthCommandCenterReadScope,
     );
@@ -80,6 +96,8 @@ describe("Command Center RPC authorization", () => {
       COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport,
       COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask,
       COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict,
+      COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate,
+      COMMAND_CENTER_WS_METHODS.digestMarkViewed,
     ]) {
       expect(scopes.get(method)).toBe(AuthCommandCenterOperateScope);
     }
@@ -109,6 +127,12 @@ describe("Command Center RPC authorization", () => {
     );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.memoryReview)).toBe(AuthCommandCenterOperateScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.approvalDecide)).toBe(
+      AuthCommandCenterApproveScope,
+    );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove)).toBe(
+      AuthCommandCenterApproveScope,
+    );
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.inboxDraftApprove)).toBe(
       AuthCommandCenterApproveScope,
     );
   });

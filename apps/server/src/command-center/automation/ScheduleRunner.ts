@@ -13,6 +13,8 @@ import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as CommandCenterService from "../Service.ts";
+import { canonicalJson } from "./Digest.ts";
+import { responsibilityIncidentId, sanitizeIncidentError } from "./Runtime.ts";
 import * as TriggerCoordinator from "./TriggerCoordinator.ts";
 
 const DEFAULT_POLL_INTERVAL = Duration.seconds(15);
@@ -108,6 +110,142 @@ export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const tickLock = yield* Semaphore.make(1);
 
+  const advanceCursor = Effect.fn("AutomationScheduleRunner.advanceCursor")(function* (
+    automationId: string,
+    completed: string,
+    observedAt: string,
+  ) {
+    yield* sql`
+      INSERT INTO command_center_automation_schedule_cursors (
+        automation_id, last_checked_minute, updated_at
+      ) VALUES (${automationId}, ${completed}, ${observedAt})
+      ON CONFLICT(automation_id) DO UPDATE SET
+        last_checked_minute = excluded.last_checked_minute,
+        updated_at = excluded.updated_at
+      WHERE command_center_automation_schedule_cursors.last_checked_minute
+        < excluded.last_checked_minute
+    `;
+  });
+
+  const persistAdmission = Effect.fn("AutomationScheduleRunner.persistAdmission")(
+    function* (input: {
+      readonly automationId: string;
+      readonly spaceId: string;
+      readonly scheduledFor: string;
+      readonly observedAt: string;
+      readonly outcome:
+        | { readonly type: "admitted" }
+        | { readonly type: "paused" }
+        | {
+            readonly type: "blocked";
+            readonly canonicalCode: string;
+            readonly resource: string;
+            readonly subject: string;
+            readonly error: string;
+          };
+    }) {
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          const admissionStatus =
+            input.outcome.type === "admitted"
+              ? "admitted"
+              : input.outcome.type === "paused"
+                ? "paused"
+                : "blocked";
+          yield* sql`
+          INSERT INTO command_center_responsibility_status (
+            space_id, automation_id, last_admission_attempt_at,
+            last_admission_status, updated_at
+          ) VALUES (
+            ${input.spaceId}, ${input.automationId}, ${input.observedAt},
+            ${admissionStatus}, ${input.observedAt}
+          )
+          ON CONFLICT(space_id, automation_id) DO UPDATE SET
+            last_admission_attempt_at = excluded.last_admission_attempt_at,
+            last_admission_status = excluded.last_admission_status,
+            updated_at = excluded.updated_at
+        `;
+          if (input.outcome.type === "blocked") {
+            const id = responsibilityIncidentId({
+              spaceId: input.spaceId,
+              automationId: input.automationId,
+              canonicalCode: input.outcome.canonicalCode,
+              resource: input.outcome.resource,
+              subject: input.outcome.subject,
+            });
+            const displayError = sanitizeIncidentError(input.outcome.error);
+            yield* sql`
+            INSERT INTO command_center_responsibility_incidents (
+              id, space_id, automation_id, canonical_code, resource, subject, state,
+              first_seen_at, last_seen_at, occurrence_count, latest_execution_id,
+              retry_at, recovery_instruction, display_error, resolved_at
+            ) VALUES (
+              ${id}, ${input.spaceId}, ${input.automationId}, ${input.outcome.canonicalCode},
+              ${input.outcome.resource}, ${input.outcome.subject}, 'blocked',
+              ${input.observedAt}, ${input.observedAt}, 1, NULL, NULL,
+              'Correct the committed definition or required capability, then retry the Responsibility.',
+              ${displayError}, NULL
+            )
+            ON CONFLICT(space_id, automation_id, canonical_code, resource, subject) DO UPDATE SET
+              state = 'blocked', last_seen_at = excluded.last_seen_at,
+              occurrence_count = command_center_responsibility_incidents.occurrence_count + 1,
+              latest_execution_id = NULL, retry_at = NULL,
+              recovery_instruction = excluded.recovery_instruction,
+              display_error = excluded.display_error, resolved_at = NULL
+          `;
+            const sourceJson = canonicalJson({
+              kind: "automation",
+              sourceRef: id,
+              capturedAt: input.observedAt,
+            });
+            const metadataJson = canonicalJson({
+              incidentId: id,
+              automationId: input.automationId,
+              executionId: null,
+              canonicalCode: input.outcome.canonicalCode,
+              resource: input.outcome.resource,
+              subject: input.outcome.subject,
+            });
+            yield* sql`
+            INSERT INTO command_center_items (
+              id, space_id, kind, status, title, body, priority,
+              source_json, metadata_json, created_at, updated_at
+            ) VALUES (
+              ${id}, ${input.spaceId}, 'alert', 'ready',
+              'Responsibility needs attention', ${displayError}, 'high',
+              ${sourceJson}, ${metadataJson}, ${input.observedAt}, ${input.observedAt}
+            )
+            ON CONFLICT(id) DO UPDATE SET
+              status = 'ready', body = excluded.body, metadata_json = excluded.metadata_json,
+              updated_at = excluded.updated_at
+          `;
+          } else if (input.outcome.type === "admitted") {
+            yield* sql`
+            UPDATE command_center_responsibility_incidents
+            SET state = 'resolved', resolved_at = ${input.observedAt}, retry_at = NULL
+            WHERE space_id = ${input.spaceId}
+              AND automation_id = ${input.automationId}
+              AND resource = 'schedule-admission'
+              AND latest_execution_id IS NULL AND state != 'resolved'
+          `;
+            yield* sql`
+            UPDATE command_center_items
+            SET status = 'done', updated_at = ${input.observedAt}
+            WHERE id IN (
+              SELECT id FROM command_center_responsibility_incidents
+              WHERE space_id = ${input.spaceId}
+                AND automation_id = ${input.automationId}
+                AND resource = 'schedule-admission'
+                AND latest_execution_id IS NULL AND state = 'resolved'
+            )
+          `;
+          }
+          yield* advanceCursor(input.automationId, input.scheduledFor, input.observedAt);
+        }),
+      );
+    },
+  );
+
   const tickUnlocked: AutomationScheduleRunnerShape["tick"] = Effect.fn(
     "AutomationScheduleRunner.tick",
   )(function* (scheduledFor) {
@@ -124,10 +262,7 @@ export const make = Effect.gen(function* () {
     // This keeps disabled or draft definitions inert if an alternate data source
     // ever returns a broader result.
     const candidates = automations.filter(
-      (automation) =>
-        automation.enabled &&
-        automation.configCommit !== undefined &&
-        automation.trigger.type === "schedule",
+      (automation) => automation.enabled && automation.trigger.type === "schedule",
     );
     let due = 0;
     let admitted = 0;
@@ -167,24 +302,48 @@ export const make = Effect.gen(function* () {
               }),
             );
           if (!result.ok) {
+            if (result.cause.reason === "admission-blocked") {
+              const admission = result.cause.admissionFailure;
+              const paused = admission?.classification === "paused";
+              if (!paused) {
+                failures.push({ automationId: automation.id, message: result.cause.message });
+              }
+              yield* persistAdmission({
+                automationId: automation.id,
+                spaceId: automation.spaceId,
+                scheduledFor,
+                observedAt: occurrence,
+                outcome: paused
+                  ? { type: "paused" }
+                  : {
+                      type: "blocked",
+                      canonicalCode: admission?.canonicalCode ?? "admission-permanent",
+                      resource: admission?.resource ?? "schedule-admission",
+                      subject: admission?.subject ?? automation.id,
+                      error: result.cause.message,
+                    },
+              }).pipe(Effect.mapError(persistenceError));
+              lastCompleted = scheduledFor;
+              continue;
+            }
             failures.push({ automationId: automation.id, message: result.cause.message });
             break;
           }
           admitted += 1;
+          yield* persistAdmission({
+            automationId: automation.id,
+            spaceId: automation.spaceId,
+            scheduledFor,
+            observedAt: occurrence,
+            outcome: { type: "admitted" },
+          }).pipe(Effect.mapError(persistenceError));
         }
         lastCompleted = scheduledFor;
       }
       if (lastCompleted !== undefined) {
-        yield* sql`
-            INSERT INTO command_center_automation_schedule_cursors (
-              automation_id, last_checked_minute, updated_at
-            ) VALUES (${automation.id}, ${lastCompleted}, ${occurrence})
-            ON CONFLICT(automation_id) DO UPDATE SET
-              last_checked_minute = excluded.last_checked_minute,
-              updated_at = excluded.updated_at
-            WHERE command_center_automation_schedule_cursors.last_checked_minute
-              < excluded.last_checked_minute
-          `.pipe(Effect.mapError(persistenceError));
+        yield* advanceCursor(automation.id, lastCompleted, occurrence).pipe(
+          Effect.mapError(persistenceError),
+        );
       }
     }
 

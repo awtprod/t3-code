@@ -55,6 +55,9 @@ function dependencies(
       { readonly operation: string; readonly contentTrust: string; readonly data: unknown },
       string
     >;
+    readonly executeInboxDraft?: (
+      context: AutomationNodeExecutionContext,
+    ) => Effect.Effect<Schema.Json, string>;
     readonly runScopedShell?: (
       input: AutomationScopedShellRequest,
     ) => Effect.Effect<AutomationScopedShellResult, never>;
@@ -109,6 +112,9 @@ function dependencies(
           contentTrust: "untrusted-external",
           data: { messages: [] },
         })),
+    ...(overrides.executeInboxDraft === undefined
+      ? {}
+      : { executeInboxDraft: overrides.executeInboxDraft }),
     runScopedShell:
       overrides.runScopedShell ??
       ((input: AutomationScopedShellRequest) =>
@@ -263,6 +269,92 @@ it.effect("admits only scoped read-only Google requests", () => {
     });
     expect(write).toMatchObject({ type: "failed" });
     expect(scopes).toEqual([{ spaceId: "space-a", connectionId: "google-primary" }]);
+  });
+});
+
+it.effect("emits bounded canonical metadata for connector credential and request faults", () => {
+  const execute = makeSafeAutomationNodeExecutor(
+    dependencies({
+      googleRead: () => Effect.fail("credential token unavailable"),
+    }),
+  );
+  return Effect.gen(function* () {
+    const credential = yield* execute(
+      context("connector.read", {
+        connectionId: "google-primary",
+        operation: "gmail.search",
+        query: "newer_than:7d",
+      }),
+    );
+    const malformed = yield* execute(
+      context("connector.read", {
+        connectionId: "google-primary",
+        operation: "gmail.send",
+      }),
+    );
+
+    expect(credential).toMatchObject({
+      type: "retry",
+      failure: {
+        canonicalCode: "connector-credential-unavailable",
+        resource: "google:gmail.search",
+        subject: "google-primary",
+      },
+    });
+    expect(malformed).toMatchObject({
+      type: "failed",
+      failure: {
+        canonicalCode: "connector-request-invalid",
+        resource: "automation-node",
+        subject: "node-1",
+      },
+    });
+  });
+});
+
+it.effect("keeps read and draft incident scopes separate on one Google connection", () => {
+  const readExecutor = makeSafeAutomationNodeExecutor(dependencies());
+  const draftExecutor = makeSafeAutomationNodeExecutor({
+    ...dependencies(),
+    googleDraft: () => Effect.succeed({ draftId: "draft-1" }),
+  });
+  const draftContext = context("connector.write", {
+    connectionId: "google-primary",
+    operation: "gmail.draft.create",
+    to: ["recipient@example.test"],
+    subject: "Review",
+    body: "Draft body",
+  });
+  return Effect.gen(function* () {
+    const blockedDraft = yield* readExecutor(draftContext);
+    const read = yield* readExecutor(
+      context("connector.read", {
+        connectionId: "google-primary",
+        operation: "gmail.search",
+        query: "newer_than:7d",
+      }),
+    );
+    const recoveredDraft = yield* draftExecutor(draftContext);
+    expect(blockedDraft).toMatchObject({
+      type: "failed",
+      failure: {
+        canonicalCode: "connector-capability-unavailable",
+        resource: "google:gmail.draft.create",
+        subject: "google-primary",
+      },
+    });
+    expect(read).toMatchObject({
+      type: "succeeded",
+      resolvedFailureScopes: expect.arrayContaining([
+        { resource: "google:gmail.search", subject: "google-primary" },
+      ]),
+    });
+    expect(recoveredDraft).toMatchObject({
+      type: "succeeded",
+      resolvedFailureScopes: expect.arrayContaining([
+        { resource: "google:gmail.draft.create", subject: "google-primary" },
+      ]),
+    });
   });
 });
 
@@ -511,6 +603,31 @@ it.effect("preserves prospect retryability without exposing connector internals"
       type: "retry",
       error: "The Jev evaluation request failed or exceeded its bounds.",
     });
+  });
+});
+
+it.effect("never retries an uncertain accepted Inbox Gmail draft", () => {
+  let calls = 0;
+  const execute = makeSafeAutomationNodeExecutor(
+    dependencies({
+      executeInboxDraft: () => {
+        calls += 1;
+        return Effect.fail("Gmail draft creation needs reconciliation.");
+      },
+    }),
+  );
+  return Effect.gen(function* () {
+    const outcome = yield* execute(
+      context("connector.write", {
+        source: "inbox.accepted",
+        operation: "gmail.draft.create",
+      }),
+    );
+    expect(outcome).toEqual({
+      type: "failed",
+      error: "Gmail draft creation needs reconciliation.",
+    });
+    expect(calls).toBe(1);
   });
 });
 

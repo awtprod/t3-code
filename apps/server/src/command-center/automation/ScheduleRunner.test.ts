@@ -7,6 +7,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { CommandCenterService, type CommandCenterServiceShape } from "../Service.ts";
+import { canonicalJson } from "./Digest.ts";
 import {
   AutomationScheduleRunner,
   AutomationScheduleRunnerError,
@@ -60,6 +61,9 @@ function testLayer(input: {
   readonly admissions: Array<{ readonly automationId: string; readonly scheduledFor: string }>;
   readonly queries: Array<unknown>;
   readonly failAutomationId?: string;
+  readonly blockedAutomationId?: string;
+  readonly blockedClassification?: "paused" | "permanent";
+  readonly shouldBlock?: () => boolean;
 }) {
   const commandCenter = CommandCenterService.of({
     queryAutomations: (query: Parameters<CommandCenterServiceShape["queryAutomations"]>[0]) => {
@@ -81,66 +85,129 @@ function testLayer(input: {
           }),
         );
       }
+      if (
+        request.automationId === input.blockedAutomationId &&
+        (input.shouldBlock === undefined || input.shouldBlock())
+      ) {
+        return Effect.fail(
+          new AutomationTriggerError({
+            reason: "admission-blocked",
+            message: "automation is paused",
+            admissionFailure: {
+              classification: input.blockedClassification ?? "paused",
+              canonicalCode:
+                input.blockedClassification === "permanent"
+                  ? "connector-capability-unavailable"
+                  : "automation-paused",
+              resource: "schedule-admission",
+              subject: request.automationId,
+            },
+          }),
+        );
+      }
+      const configured = input.automations.find(
+        (candidate) => candidate.id === request.automationId,
+      );
+      if (configured?.configCommit === undefined) {
+        return Effect.fail(
+          new AutomationTriggerError({
+            reason: "admission-blocked",
+            message: "automation has no committed revision",
+            admissionFailure: {
+              classification: "permanent",
+              canonicalCode: "automation-uncommitted",
+              resource: "schedule-admission",
+              subject: request.automationId,
+            },
+          }),
+        );
+      }
       return Effect.succeed({ id: `execution-${input.admissions.length}` } as never);
     },
     admitWebhook: () => Effect.die("unused"),
   } satisfies AutomationTriggerCoordinatorShape);
+  const persistence = Layer.effectDiscard(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO command_center_spaces (
+          id, owner_id, slug, name, kind, created_at, updated_at
+        ) VALUES ('space-a', 'andrew', 'space-a', 'Space A', 'business', ${now}, ${now})
+      `;
+      for (const configured of input.automations) {
+        yield* sql`
+          INSERT INTO command_center_automations (
+            id, space_id, name, enabled, commit_sha, definition_digest,
+            definition_json, last_loaded_at
+          ) VALUES (
+            ${configured.id}, ${configured.spaceId}, ${configured.name},
+            ${configured.enabled ? 1 : 0}, ${configured.configCommit ?? "uncommitted"},
+            ${configured.definitionDigest},
+            ${canonicalJson(configured as unknown as Schema.Json)}, ${now}
+          )
+        `;
+      }
+    }),
+  ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
   return layer.pipe(
     Layer.provideMerge(Layer.succeed(CommandCenterService, commandCenter)),
     Layer.provideMerge(Layer.succeed(AutomationTriggerCoordinator, coordinator)),
-    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(persistence),
   );
 }
 
-it.effect(
-  "ticks only committed enabled due schedules and suppresses duplicate in-process minutes",
-  () => {
-    const admissions: Array<{ readonly automationId: string; readonly scheduledFor: string }> = [];
-    const queries: Array<unknown> = [];
-    const runnerLayer = testLayer({
-      automations: [
-        automation({ id: "due" }),
-        automation({ id: "disabled", enabled: false }),
-        automation({ id: "draft", committed: false }),
-        automation({
-          id: "later",
-          trigger: { type: "schedule", expression: "1 * * * *", timezone: "UTC" },
-        }),
-        automation({ id: "hook", trigger: { type: "webhook", route: "/hooks/weekly" } }),
-      ],
-      admissions,
-      queries,
-    });
+it.effect("records uncommitted due schedules and suppresses duplicate in-process minutes", () => {
+  const admissions: Array<{ readonly automationId: string; readonly scheduledFor: string }> = [];
+  const queries: Array<unknown> = [];
+  const runnerLayer = testLayer({
+    automations: [
+      automation({ id: "due" }),
+      automation({ id: "disabled", enabled: false }),
+      automation({ id: "draft", committed: false }),
+      automation({
+        id: "later",
+        trigger: { type: "schedule", expression: "1 * * * *", timezone: "UTC" },
+      }),
+      automation({ id: "hook", trigger: { type: "webhook", route: "/hooks/weekly" } }),
+    ],
+    admissions,
+    queries,
+  });
 
-    return Effect.gen(function* () {
-      const runner = yield* AutomationScheduleRunner;
-      const first = yield* runner.tick("2026-07-20T12:00:42.000Z");
-      const duplicate = yield* runner.tick("2026-07-20T12:00:58.000Z");
+  return Effect.gen(function* () {
+    const runner = yield* AutomationScheduleRunner;
+    const first = yield* runner.tick("2026-07-20T12:00:42.000Z");
+    const duplicate = yield* runner.tick("2026-07-20T12:00:58.000Z");
 
-      expect(first).toEqual(
-        expect.objectContaining({
-          scheduledFor: "2026-07-20T12:00:00.000Z",
-          scanned: 5,
-          due: 1,
-          admitted: 1,
-          skippedDuplicate: false,
-          failures: [],
-        }),
-      );
-      expect(duplicate).toEqual(
-        expect.objectContaining({
-          scheduledFor: "2026-07-20T12:00:00.000Z",
-          admitted: 0,
-          skippedDuplicate: true,
-        }),
-      );
-      expect(queries).toEqual([{ enabled: true }, { enabled: true }]);
-      expect(admissions).toEqual([
-        { automationId: "due", scheduledFor: "2026-07-20T12:00:00.000Z" },
-      ]);
-    }).pipe(Effect.provide(runnerLayer));
-  },
-);
+    expect(first).toEqual(
+      expect.objectContaining({
+        scheduledFor: "2026-07-20T12:00:00.000Z",
+        scanned: 5,
+        due: 2,
+        admitted: 1,
+        skippedDuplicate: false,
+        failures: [
+          {
+            automationId: AutomationId.make("draft"),
+            message: "automation has no committed revision",
+          },
+        ],
+      }),
+    );
+    expect(duplicate).toEqual(
+      expect.objectContaining({
+        scheduledFor: "2026-07-20T12:00:00.000Z",
+        admitted: 0,
+        skippedDuplicate: true,
+      }),
+    );
+    expect(queries).toEqual([{ enabled: true }, { enabled: true }]);
+    expect(admissions).toEqual([
+      { automationId: "due", scheduledFor: "2026-07-20T12:00:00.000Z" },
+      { automationId: "draft", scheduledFor: "2026-07-20T12:00:00.000Z" },
+    ]);
+  }).pipe(Effect.provide(runnerLayer));
+});
 
 it.effect("catches up persisted due minutes after restart without duplicating the cursor", () => {
   const admissions: Array<{ readonly automationId: string; readonly scheduledFor: string }> = [];
@@ -229,6 +296,143 @@ it.effect(
     }).pipe(Effect.provide(runnerLayer));
   },
 );
+
+it.effect("consumes a paused occurrence without creating a fault alert", () => {
+  const admissions: Array<{ readonly automationId: string; readonly scheduledFor: string }> = [];
+  const queries: Array<unknown> = [];
+  const runnerLayer = testLayer({
+    automations: [automation({ id: "paused" })],
+    admissions,
+    queries,
+    blockedAutomationId: "paused",
+  });
+
+  return Effect.gen(function* () {
+    const runner = yield* AutomationScheduleRunner;
+    const blocked = yield* runner.tick("2026-07-20T12:00:01.000Z");
+    const noReplay = yield* runner.tick("2026-07-20T12:00:30.000Z");
+
+    expect(blocked).toMatchObject({
+      due: 1,
+      admitted: 0,
+      failures: [],
+    });
+    expect(noReplay).toMatchObject({ due: 0, admitted: 0, skippedDuplicate: true });
+    expect(admissions).toHaveLength(1);
+    const sql = yield* SqlClient.SqlClient;
+    expect(
+      yield* sql<{ readonly status: string; readonly checkedAt: string | null }>`
+        SELECT last_admission_status AS status, last_checked_at AS "checkedAt"
+        FROM command_center_responsibility_status
+        WHERE automation_id = 'paused'
+      `,
+    ).toEqual([{ status: "paused", checkedAt: null }]);
+    expect(
+      yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM command_center_responsibility_incidents
+      `,
+    ).toEqual([{ count: 0 }]);
+  }).pipe(Effect.provide(runnerLayer));
+});
+
+it.effect("groups permanent admission faults and resolves them after healthy admission", () => {
+  const admissions: Array<{ readonly automationId: string; readonly scheduledFor: string }> = [];
+  const queries: Array<unknown> = [];
+  let blocked = true;
+  const runnerLayer = testLayer({
+    automations: [automation({ id: "capability" })],
+    admissions,
+    queries,
+    blockedAutomationId: "capability",
+    blockedClassification: "permanent",
+    shouldBlock: () => blocked,
+  });
+
+  return Effect.gen(function* () {
+    const runner = yield* AutomationScheduleRunner;
+    yield* runner.tick("2026-07-20T12:00:01.000Z");
+    yield* runner.tick("2026-07-20T12:01:01.000Z");
+    const sql = yield* SqlClient.SqlClient;
+    expect(
+      yield* sql<{
+        readonly state: string;
+        readonly count: number;
+        readonly executionId: string | null;
+      }>`
+        SELECT state, occurrence_count AS count, latest_execution_id AS "executionId"
+        FROM command_center_responsibility_incidents
+      `,
+    ).toEqual([{ state: "blocked", count: 2, executionId: null }]);
+    expect(
+      yield* sql<{
+        readonly admission: string;
+        readonly checkedAt: string | null;
+      }>`
+        SELECT last_admission_status AS admission, last_checked_at AS "checkedAt"
+        FROM command_center_responsibility_status
+        WHERE automation_id = 'capability'
+      `,
+    ).toEqual([{ admission: "blocked", checkedAt: null }]);
+
+    blocked = false;
+    yield* runner.tick("2026-07-20T12:02:01.000Z");
+    expect(
+      yield* sql<{ readonly state: string }>`
+        SELECT state FROM command_center_responsibility_incidents
+      `,
+    ).toEqual([{ state: "resolved" }]);
+    expect(
+      yield* sql<{ readonly status: string }>`
+        SELECT status FROM command_center_items
+        WHERE id LIKE 'responsibility-incident:%'
+      `,
+    ).toEqual([{ status: "done" }]);
+  }).pipe(Effect.provide(runnerLayer));
+});
+
+it.effect("does not advance the cursor when permanent incident persistence fails", () => {
+  const admissions: Array<{ readonly automationId: string; readonly scheduledFor: string }> = [];
+  const queries: Array<unknown> = [];
+  const runnerLayer = testLayer({
+    automations: [automation({ id: "persist-fault" })],
+    admissions,
+    queries,
+    blockedAutomationId: "persist-fault",
+    blockedClassification: "permanent",
+  });
+
+  return Effect.gen(function* () {
+    const runner = yield* AutomationScheduleRunner;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      CREATE TRIGGER fail_responsibility_incident_insert
+      BEFORE INSERT ON command_center_responsibility_incidents
+      BEGIN
+        SELECT RAISE(ABORT, 'forced incident insert failure');
+      END
+    `;
+    expect(yield* runner.tick("2026-07-20T12:00:01.000Z").pipe(Effect.flip)).toMatchObject({
+      reason: "persistence",
+    });
+    expect(
+      yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM command_center_automation_schedule_cursors
+        WHERE automation_id = 'persist-fault'
+      `,
+    ).toEqual([{ count: 0 }]);
+
+    yield* sql`DROP TRIGGER fail_responsibility_incident_insert`;
+    yield* runner.tick("2026-07-20T12:00:30.000Z");
+    expect(admissions).toHaveLength(2);
+    expect(
+      yield* sql<{ readonly minute: string }>`
+        SELECT last_checked_minute AS minute
+        FROM command_center_automation_schedule_cursors
+        WHERE automation_id = 'persist-fault'
+      `,
+    ).toEqual([{ minute: "2026-07-20T12:00:00.000Z" }]);
+  }).pipe(Effect.provide(runnerLayer));
+});
 
 it.effect("rejects invalid tick timestamps before querying definitions", () => {
   const admissions: Array<{ readonly automationId: string; readonly scheduledFor: string }> = [];

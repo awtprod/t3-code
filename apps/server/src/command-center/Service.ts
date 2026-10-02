@@ -156,7 +156,7 @@ const nextItemUpdatedAt = (current: string, observed: string): string => {
 
 const APPROVAL_TTL_HOURS = 24;
 
-const canonicalAutomationRunState = (
+export const canonicalAutomationRunState = (
   state:
     | "queued"
     | "running"
@@ -489,6 +489,22 @@ const decodeMemoryRow = Effect.fn("CommandCenter.decodeMemoryRow")(function* (ro
   }).pipe(Effect.mapError((cause) => persistenceError("Stored Memory is invalid.", cause)));
 });
 
+const LESSON_EVIDENCE_SOURCE_REF = /^observation\/([^/]+)\/version\/\d+\/revision\/([^/]+)$/u;
+
+/** Returns the Observation revision a correction-backed lesson was proposed from, if any. */
+const lessonEvidenceRef = (sourceRef: string | undefined) => {
+  const [, observationId, revisionId] = LESSON_EVIDENCE_SOURCE_REF.exec(sourceRef ?? "") ?? [];
+  if (observationId === undefined || revisionId === undefined) return undefined;
+  try {
+    return {
+      observationId: decodeURIComponent(observationId),
+      revisionId: decodeURIComponent(revisionId),
+    };
+  } catch {
+    return undefined;
+  }
+};
+
 export interface CommandCenterServiceShape {
   readonly bootstrap: Effect.Effect<CommandCenterBootstrap, CommandCenterError>;
   readonly syncConfiguration: (input?: {
@@ -518,6 +534,15 @@ export interface CommandCenterServiceShape {
   readonly queryArtifacts: (
     input: CommandCenterArtifactsQueryInput,
   ) => Effect.Effect<{ readonly artifacts: ReadonlyArray<ArtifactType> }, CommandCenterError>;
+  /**
+   * Resolve specific Artifacts by id within one Space. Unlike `queryArtifacts`, this is not
+   * bounded to the most recent page, so an older export stays addressable. Ids that do not exist
+   * or belong to another Space are omitted rather than returned.
+   */
+  readonly getArtifactsByIds: (input: {
+    readonly spaceId: CommandCenterArtifactsQueryInput["spaceId"];
+    readonly artifactIds: ReadonlyArray<string>;
+  }) => Effect.Effect<{ readonly artifacts: ReadonlyArray<ArtifactType> }, CommandCenterError>;
   readonly queryConnections: (
     input: CommandCenterConnectionsQueryInput,
   ) => Effect.Effect<
@@ -602,9 +627,30 @@ export interface CommandCenterServiceShape {
     readonly input: Readonly<Record<string, Schema.Json>>;
     readonly output: Schema.Json | null;
     readonly createdAt: string;
+    /**
+     * The runtime execution row's durable updated_at for this snapshot (lease
+     * changes also advance it). It is the audit event's occurredAt, so
+     * recording the same persisted snapshot again (a retry or a restart) is an
+     * exact, idempotent replay, and an older snapshot can be recognised.
+     */
+    readonly updatedAt: string;
+    /**
+     * Node progress at this transition. Together with updatedAt it identifies
+     * the transition, so an execution can legitimately re-enter a state (e.g.
+     * queued again after its approval resolves) as a new audit event.
+     */
+    readonly checkpoints: ReadonlyArray<{
+      readonly nodeId: string;
+      readonly state: string;
+      readonly attemptCount: number;
+      readonly resolutionKey: string | null;
+    }>;
     readonly finishedAt: string | null;
     readonly error?: string;
-  }) => Effect.Effect<void, CommandCenterError>;
+  }) => Effect.Effect<
+    { readonly projected: boolean },
+    CommandCenterError
+  > /* projected: false when the snapshot is no longer the current runtime row */;
   readonly recordAutomationDefinitionCommit: (input: {
     readonly operation: "created" | "updated";
     readonly requestId?: string;
@@ -1203,7 +1249,9 @@ export const layer = Layer.effect(
       return yield* Effect.forEach(rows, decodeMemoryRow);
     });
 
-    const listAllMemories = Effect.fn("CommandCenter.listAllMemories")(function* () {
+    const listAllMemories = Effect.fn("CommandCenter.listAllMemories")(function* (
+      spaceId?: string,
+    ) {
       const rows = yield* sql<MemoryRow>`
         SELECT m.id, m.space_id AS "spaceId", m.repository_ref AS "repositoryRef", m.kind,
           m.status, m.content, m.confidence, m.provenance_json AS "provenanceJson",
@@ -1211,6 +1259,7 @@ export const layer = Layer.effect(
           m.created_at AS "createdAt", m.updated_at AS "updatedAt"
         FROM command_center_memories m
         JOIN command_center_spaces s ON s.id = m.space_id AND s.lifecycle = 'active'
+        WHERE ${spaceId ?? null} IS NULL OR m.space_id = ${spaceId ?? null}
         ORDER BY m.updated_at DESC
         LIMIT 500
       `;
@@ -1336,11 +1385,15 @@ export const layer = Layer.effect(
       for (const approval of expired) {
         yield* sql.withTransaction(
           Effect.gen(function* () {
-            yield* sql`
+            const claimed = yield* sql<{ readonly id: string }>`
               UPDATE command_center_approvals
               SET status = 'expired', decided_at = ${now}
               WHERE id = ${approval.id} AND status = 'requested'
+              RETURNING id
             `;
+            // Another expiry (or a decision) already settled this approval;
+            // its audit events exist and must not be written again.
+            if (claimed.length === 0) return;
             if (approval.runId !== null) {
               yield* sql`
                 UPDATE command_center_runs
@@ -1552,6 +1605,30 @@ export const layer = Layer.effect(
       ),
     );
 
+    const getArtifactsByIds = Effect.fn("CommandCenter.getArtifactsByIds")(
+      function* (input: {
+        readonly spaceId: CommandCenterArtifactsQueryInput["spaceId"];
+        readonly artifactIds: ReadonlyArray<string>;
+      }) {
+        yield* syncConfig(false);
+        const artifactIds = [...new Set(input.artifactIds)];
+        if (artifactIds.length === 0) return { artifacts: [] };
+        const rows = yield* sql<ArtifactRow>`
+          SELECT a.id, a.space_id AS "spaceId", a.run_id AS "runId", a.kind, a.title, a.uri,
+            a.content_digest AS "contentDigest", a.provenance_json AS "provenanceJson",
+            a.metadata_json AS "metadataJson", a.created_at AS "createdAt"
+          FROM command_center_artifacts a
+          JOIN command_center_spaces s ON s.id = a.space_id AND s.lifecycle = 'active'
+          WHERE a.space_id = ${input.spaceId}
+            AND ${sql.in("a.id", artifactIds)}
+        `;
+        return { artifacts: yield* Effect.forEach(rows, decodeArtifactRow) };
+      },
+      Effect.mapError((cause) =>
+        isCommandCenterError(cause) ? cause : persistenceError("Could not load Artifacts.", cause),
+      ),
+    );
+
     const queryConnections = Effect.fn("CommandCenter.queryConnections")(function* (
       input: CommandCenterConnectionsQueryInput,
     ) {
@@ -1571,14 +1648,18 @@ export const layer = Layer.effect(
     const queryMemories = Effect.fn("CommandCenter.queryMemories")(
       function* (input: CommandCenterMemoryQueryInput) {
         yield* bootstrap;
-        const memories = yield* listAllMemories();
+        const memories = yield* listAllMemories(input.spaceId);
+        const now = DateTime.formatIso(yield* DateTime.now);
         return {
           memories: takeLimit(
             memories.filter(
               (memory) =>
                 (input.spaceId === undefined || memory.spaceId === input.spaceId) &&
                 (input.repositoryId === undefined || memory.repositoryId === input.repositoryId) &&
-                isIncluded(memory.status, input.statuses),
+                (input.statuses === undefined
+                  ? memory.status === "approved" &&
+                    (memory.expiresAt === undefined || memory.expiresAt > now)
+                  : isIncluded(memory.status, input.statuses)),
             ),
             input.limit,
           ),
@@ -1744,6 +1825,42 @@ export const layer = Layer.effect(
               )
               ON CONFLICT(idempotency_key) DO NOTHING
             `;
+            // Re-projecting a waiting checkpoint (a retry or a restart) must
+            // replay the original audit events exactly, so they carry the
+            // durable times of the first projection rather than this call's.
+            const projected = yield* sql<{
+              readonly id: string;
+              readonly runId: string | null;
+              readonly payloadDigest: string;
+              readonly payloadJson: string;
+              readonly requestedAt: string;
+              readonly itemCreatedAt: string;
+            }>`
+              SELECT a.id, a.run_id AS "runId", a.payload_digest AS "payloadDigest",
+                a.payload_json AS "payloadJson", a.requested_at AS "requestedAt",
+                i.created_at AS "itemCreatedAt"
+              FROM command_center_approvals a
+              JOIN command_center_items i ON i.id = ${itemId}
+              WHERE a.idempotency_key = ${idempotencyKey}
+              LIMIT 1
+            `;
+            const firstProjection = projected[0];
+            if (firstProjection === undefined) {
+              return yield* persistenceError("The automation Approval was not projected.");
+            }
+            // Check the binding before auditing: a key bound to different
+            // work must not leave audit events behind.
+            if (
+              firstProjection.id !== approvalId ||
+              firstProjection.runId !== input.executionId ||
+              firstProjection.payloadDigest !== payloadDigest ||
+              firstProjection.payloadJson !== payloadJson
+            ) {
+              return yield* new CommandCenterError({
+                reason: "conflict",
+                message: "The automation Approval key is already bound to different work.",
+              });
+            }
             yield* appendAudit({
               eventId: `approval:${approvalId}:requested`,
               actorKind: "automation",
@@ -1751,7 +1868,7 @@ export const layer = Layer.effect(
               spaceId: input.spaceId,
               runId: input.executionId,
               payload: { approvalId, status: "requested", payloadDigest },
-              occurredAt: now,
+              occurredAt: firstProjection.requestedAt,
             });
             yield* appendAudit({
               eventId: `approval-item:${itemId}:created`,
@@ -1760,7 +1877,7 @@ export const layer = Layer.effect(
               spaceId: input.spaceId,
               runId: input.executionId,
               payload: { itemId, change: "created", kind: "approval" },
-              occurredAt: now,
+              occurredAt: firstProjection.itemCreatedAt,
             });
           }),
         );
@@ -1801,16 +1918,39 @@ export const layer = Layer.effect(
     const recordAutomationEvent = Effect.fn("CommandCenter.recordAutomationEvent")(
       function* (input: Parameters<CommandCenterServiceShape["recordAutomationEvent"]>[0]) {
         yield* requireConfiguredSpace(input.spaceId);
-        const now = DateTime.formatIso(yield* DateTime.now);
         const state = canonicalAutomationRunState(input.state);
+        // One audit event per runtime transition. The key binds the durable
+        // snapshot time, the terminal fields and every node's progress; the
+        // payload repeats them, so a replay of this exact transition is
+        // idempotent while any other content under the same key is still
+        // rejected by the audit guard.
+        const checkpoints = [...input.checkpoints].toSorted((left, right) =>
+          left.nodeId < right.nodeId ? -1 : left.nodeId > right.nodeId ? 1 : 0,
+        );
+        const transitionKey = yield* digest(
+          stringify({
+            updatedAt: input.updatedAt,
+            finishedAt: input.finishedAt,
+            error: input.error ?? null,
+            checkpoints: checkpoints.map(({ nodeId, state, attemptCount, resolutionKey }) => [
+              nodeId,
+              state,
+              attemptCount,
+              resolutionKey,
+            ]),
+          }),
+        );
         const route = {
           automationId: input.automationId,
           actionKind: "automation.run",
           configCommitSha: input.configCommitSha,
           definitionDigest: input.definitionDigest,
         };
-        yield* sql.withTransaction(
+        return yield* sql.withTransaction(
           Effect.gen(function* () {
+            // The canonical Run row must exist before its audit events (they
+            // reference it). Creating it is never a regression; updating it
+            // is guarded below.
             yield* sql`
               INSERT INTO command_center_runs (
                 id, command_id, space_id, kind, state, route_json, input_json,
@@ -1821,21 +1961,53 @@ export const layer = Layer.effect(
                 ${input.output === null ? null : stringify(input.output)}, ${input.error ?? null},
                 ${input.createdAt}, ${input.finishedAt}
               )
-              ON CONFLICT(id) DO UPDATE SET
-                state = excluded.state,
-                result_json = excluded.result_json,
-                error = excluded.error,
-                finished_at = excluded.finished_at
+              ON CONFLICT(id) DO NOTHING
             `;
+            // Audit history is append-only and keyed per transition: every
+            // observed transition is appended (an exact replay is a no-op).
             yield* appendAudit({
-              eventId: `automation-execution:${input.executionId}:${input.state}`,
+              eventId: `automation-execution:${input.executionId}:${input.state}:${transitionKey}`,
               actorKind: "automation",
               action: "cc.automations.run.changed",
               spaceId: input.spaceId,
               runId: input.executionId,
-              payload: input,
-              occurredAt: now,
+              payload: { ...input, checkpoints },
+              occurredAt: input.updatedAt,
             });
+            // The canonical Run projects only the current runtime row. A
+            // snapshot taken before a newer write (a slow replay, a concurrent
+            // resume, a status poll, even in the same millisecond) must not
+            // move it backwards; whoever holds the current row records it.
+            const runtimeRows = yield* sql<{
+              readonly state: string;
+              readonly updatedAt: string;
+              readonly finishedAt: string | null;
+              readonly error: string | null;
+            }>`
+              SELECT state, updated_at AS "updatedAt", finished_at AS "finishedAt", error
+              FROM command_center_automation_executions
+              WHERE id = ${input.executionId}
+              LIMIT 1
+            `;
+            const current = runtimeRows[0];
+            if (
+              current !== undefined &&
+              (current.state !== input.state ||
+                current.updatedAt !== input.updatedAt ||
+                current.finishedAt !== input.finishedAt ||
+                current.error !== (input.error ?? null))
+            ) {
+              return { projected: false };
+            }
+            yield* sql`
+              UPDATE command_center_runs
+              SET state = ${state},
+                result_json = ${input.output === null ? null : stringify(input.output)},
+                error = ${input.error ?? null},
+                finished_at = ${input.finishedAt}
+              WHERE id = ${input.executionId}
+            `;
+            return { projected: true };
           }),
         );
       },
@@ -2945,7 +3117,16 @@ export const layer = Layer.effect(
         status: "approved" | "candidate",
         confidence: number,
       ) {
-        yield* requireConfiguredSpace(input.spaceId);
+        const configuredSpace = yield* requireConfiguredSpace(input.spaceId);
+        if (
+          input.repositoryId !== undefined &&
+          !configuredSpace.repositories.some((repository) => repository.id === input.repositoryId)
+        ) {
+          return yield* new CommandCenterError({
+            reason: "not_found",
+            message: "The Memory repository is not configured in this Space.",
+          });
+        }
         const existing = yield* sql<MemoryRow>`
         SELECT id, space_id AS "spaceId", repository_ref AS "repositoryRef", kind, status,
           content, confidence, provenance_json AS "provenanceJson",
@@ -2955,10 +3136,21 @@ export const layer = Layer.effect(
       `;
         if (existing[0] !== undefined) {
           const stored = yield* decodeMemoryRow(existing[0]);
-          if (stored.spaceId !== input.spaceId) {
+          if (
+            stored.spaceId !== input.spaceId ||
+            stored.repositoryId !== input.repositoryId ||
+            stored.content !== input.content ||
+            stored.kind !== input.kind ||
+            stored.provenance.sourceRef !== input.sourceRef ||
+            (status === "candidate" &&
+              (stored.confidence !== confidence ||
+                stored.expiresAt !== ("expiresAt" in input ? input.expiresAt : undefined) ||
+                stored.contradictionOf !==
+                  ("contradictionOf" in input ? input.contradictionOf : undefined)))
+          ) {
             return yield* new CommandCenterError({
               reason: "conflict",
-              message: "The Memory request id is already bound to a different Space.",
+              message: "The Memory request id is already bound to different content or scope.",
             });
           }
           if (stored.status === "candidate") {
@@ -2981,6 +3173,14 @@ export const layer = Layer.effect(
             sourceRef: input.sourceRef,
             capturedAt: now,
           },
+          ...(status === "candidate" && "expiresAt" in input && input.expiresAt !== undefined
+            ? { expiresAt: input.expiresAt }
+            : {}),
+          ...(status === "candidate" &&
+          "contradictionOf" in input &&
+          input.contradictionOf !== undefined
+            ? { contradictionOf: input.contradictionOf }
+            : {}),
           createdAt: now,
           updatedAt: now,
         }).pipe(Effect.mapError((cause) => persistenceError("Could not store Memory.", cause)));
@@ -2989,12 +3189,13 @@ export const layer = Layer.effect(
             yield* sql`
             INSERT INTO command_center_memories (
               id, space_id, repository_ref, scope, kind, content, status, confidence,
-              provenance_json, created_at, updated_at
+              provenance_json, expires_at, contradiction_of, created_at, updated_at
             ) VALUES (
               ${memory.id}, ${memory.spaceId}, ${memory.repositoryId ?? null},
               ${memory.repositoryId === undefined ? "space" : "repository"}, ${memory.kind},
               ${memory.content}, ${memory.status}, ${memory.confidence},
-              ${stringify(memory.provenance)}, ${memory.createdAt}, ${memory.updatedAt}
+              ${stringify(memory.provenance)}, ${memory.expiresAt ?? null},
+              ${memory.contradictionOf ?? null}, ${memory.createdAt}, ${memory.updatedAt}
             )
           `;
             if (status === "candidate") {
@@ -3017,8 +3218,80 @@ export const layer = Layer.effect(
     );
 
     const remember = (input: CommandCenterMemoryRememberInput) => storeMemory(input, "approved", 1);
-    const proposeMemory = (input: CommandCenterMemoryProposeInput) =>
-      storeMemory(input, "candidate", input.confidence);
+    const proposeMemory = Effect.fn("CommandCenter.proposeMemory")(
+      function* (input: CommandCenterMemoryProposeInput) {
+        if (input.evidence === undefined)
+          return yield* storeMemory(input, "candidate", input.confidence);
+        const evidence = input.evidence;
+        const revisions = yield* sql<{
+          readonly spaceId: string;
+          readonly observationId: string;
+          readonly version: number;
+          readonly revisionKind: string;
+          readonly actorKind: string;
+          readonly retired: number;
+        }>`
+          SELECT space_id AS "spaceId", observation_id AS "observationId", version,
+            revision_kind AS "revisionKind", actor_kind AS "actorKind", retired
+          FROM command_center_observation_revisions
+          WHERE revision_id = ${evidence.revisionId}
+          LIMIT 1
+        `;
+        const revision = revisions[0];
+        if (
+          revision === undefined ||
+          revision.spaceId !== input.spaceId ||
+          revision.observationId !== evidence.observationId ||
+          revision.revisionKind !== "corrected" ||
+          revision.actorKind !== "user" ||
+          revision.retired !== 0
+        ) {
+          return yield* new CommandCenterError({
+            reason: "validation",
+            message: "A reviewed lesson needs an explicit correction in the same Space.",
+          });
+        }
+        if (
+          input.expiresAt !== undefined &&
+          input.expiresAt <= DateTime.formatIso(yield* DateTime.now)
+        ) {
+          return yield* new CommandCenterError({
+            reason: "validation",
+            message: "The lesson expiry must be in the future.",
+          });
+        }
+        if (input.contradictionOf !== undefined) {
+          const conflicts = yield* sql<{ readonly id: string }>`
+            SELECT id FROM command_center_memories
+            WHERE id = ${input.contradictionOf} AND space_id = ${input.spaceId}
+              AND repository_ref IS ${input.repositoryId ?? null} AND status = 'approved'
+            LIMIT 1
+          `;
+          if (conflicts.length === 0) {
+            return yield* new CommandCenterError({
+              reason: "validation",
+              message: "The conflicting approved Memory is not in this scope.",
+            });
+          }
+        }
+        const normalized = input.content.trim().replace(/\s+/gu, " ").toLowerCase();
+        const memoryId = `lesson:${yield* digest(
+          stringify([input.spaceId, input.repositoryId ?? null, evidence.revisionId, normalized]),
+        )}`;
+        return yield* storeMemory(
+          {
+            ...input,
+            requestId: memoryId,
+            sourceRef: `observation/${encodeURIComponent(evidence.observationId)}/version/${revision.version}/revision/${encodeURIComponent(evidence.revisionId)}`,
+          },
+          "candidate",
+          input.confidence,
+        );
+      },
+      Effect.mapError((cause) =>
+        isCommandCenterError(cause) ? cause : persistenceError("Could not propose Memory.", cause),
+      ),
+    );
 
     const reviewMemory = Effect.fn("CommandCenter.reviewMemory")(
       function* (input: CommandCenterMemoryReviewInput) {
@@ -3043,21 +3316,58 @@ export const layer = Layer.effect(
             message: "The Memory candidate was not found in the requested scope.",
           });
         }
-        const nextStatus = input.decision === "approve" ? "approved" : "rejected";
+        const nextStatus =
+          input.decision === "approve"
+            ? "approved"
+            : input.decision === "expire"
+              ? "expired"
+              : "rejected";
         if (row.status === nextStatus) return yield* decodeMemoryRow(row);
-        if (row.status !== "candidate") {
+        if (
+          (input.decision === "expire" &&
+            row.status !== "approved" &&
+            row.status !== "candidate") ||
+          (input.decision !== "expire" && row.status !== "candidate")
+        ) {
           return yield* new CommandCenterError({
             reason: "conflict",
             message: "The Memory candidate has already been reviewed.",
           });
         }
         const now = DateTime.formatIso(yield* DateTime.now);
+        if (input.decision === "approve" && row.expiresAt !== null && row.expiresAt <= now) {
+          return yield* new CommandCenterError({
+            reason: "conflict",
+            message: "The Memory candidate has expired; expire it instead of approving it.",
+          });
+        }
+        // Approval must still rest on the current correction. Reject and expire stay allowed so
+        // a stale lesson can always be cleared out of review.
+        const evidence =
+          input.decision === "approve"
+            ? lessonEvidenceRef((yield* decodeMemoryRow(row)).provenance.sourceRef)
+            : undefined;
         const wonDecision = yield* sql.withTransaction(
           Effect.gen(function* () {
+            if (evidence !== undefined) {
+              const current = yield* sql<{ readonly id: string }>`
+                SELECT id FROM command_center_observations
+                WHERE space_id = ${row.spaceId} AND id = ${evidence.observationId}
+                  AND current_revision_id = ${evidence.revisionId} AND retired_at IS NULL
+                LIMIT 1
+              `;
+              if (current.length === 0) {
+                return yield* new CommandCenterError({
+                  reason: "conflict",
+                  message:
+                    "The lesson's Observation was corrected again or retired; reject this lesson instead.",
+                });
+              }
+            }
             const decided = yield* sql<{ readonly id: string }>`
               UPDATE command_center_memories
               SET status = ${nextStatus}, updated_at = ${now}
-              WHERE id = ${row.id} AND status = 'candidate'
+              WHERE id = ${row.id} AND status = ${row.status}
               RETURNING id
             `;
             if (decided.length === 0) return false;
@@ -3363,6 +3673,7 @@ export const layer = Layer.effect(
       queryAutomations,
       queryApprovals,
       queryArtifacts,
+      getArtifactsByIds,
       queryConnections,
       queryMemories,
       submitCommand,

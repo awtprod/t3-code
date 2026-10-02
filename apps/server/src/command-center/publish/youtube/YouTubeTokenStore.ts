@@ -16,6 +16,7 @@ import {
   emailFromIdToken,
   exchangeYouTubeAuthorizationCode,
   grantsYouTubeUpload,
+  grantsYouTubeAnalytics,
   refreshYouTubeAccessToken,
   resolveYouTubeOAuthClient,
   revokeYouTubeToken,
@@ -51,12 +52,16 @@ const StoredYouTubeConnection = Schema.Struct({
   connectedAtMs: Schema.Number,
   lastRefreshedAtMs: Schema.Number,
   lastError: Schema.optional(Schema.String),
+  analyticsVerifiedAtMs: Schema.optional(Schema.Number),
+  analyticsLastError: Schema.optional(Schema.String),
 });
 export type StoredYouTubeConnection = typeof StoredYouTubeConnection.Type;
 
 interface CachedAccessToken {
   readonly accessToken: string;
   readonly expiresAtMs: number;
+  readonly refreshToken: string;
+  readonly scope: string;
 }
 
 interface YouTubeTokenStoreShape {
@@ -76,6 +81,8 @@ interface YouTubeTokenStoreShape {
   readonly disconnect: Effect.Effect<CommandCenterPublishConnection, CommandCenterError>;
   /** A valid access token for the upload path, refreshed first when near expiry. */
   readonly accessToken: Effect.Effect<string, CommandCenterError>;
+  readonly analyticsAccessToken: Effect.Effect<string, CommandCenterError>;
+  readonly recordAnalyticsCheck: (error?: string) => Effect.Effect<void, CommandCenterError>;
   /** Drop the cached access token (after a 401) so the next read refreshes. */
   readonly invalidateAccessToken: Effect.Effect<void>;
   /** Remember the channel an upload landed on, for the settings row label. */
@@ -129,6 +136,23 @@ export function youTubeConnectionSummary(
     ...(stored.lastError === undefined || stored.lastError.trim().length === 0
       ? {}
       : { detail: stored.lastError }),
+    analytics: !grantsYouTubeAnalytics(stored.scope)
+      ? {
+          state: "needs-consent",
+          detail: "Reconnect YouTube to grant Analytics and YouTube read access.",
+        }
+      : stored.analyticsLastError !== undefined
+        ? { state: "error", detail: stored.analyticsLastError }
+        : stored.analyticsVerifiedAtMs !== undefined
+          ? {
+              state: "verified",
+              detail: "Analytics read access verified.",
+              verifiedAt: isoFromMillis(stored.analyticsVerifiedAtMs),
+            }
+          : {
+              state: "permission-granted",
+              detail: "Analytics permission granted; live report access has not been verified.",
+            },
   };
 }
 
@@ -255,6 +279,8 @@ export const make = Effect.fn("YouTubeTokenStore.make")(function* (
       Option.some({
         accessToken: grant.accessToken,
         expiresAtMs: now + grant.expiresInSeconds * 1000,
+        refreshToken: stored.refreshToken,
+        scope: stored.scope,
       }),
     );
     return youTubeConnectionSummary(stored);
@@ -289,10 +315,6 @@ export const make = Effect.fn("YouTubeTokenStore.make")(function* (
 
   const accessToken = Effect.gen(function* () {
     const now = yield* nowMs;
-    const cached = yield* Ref.get(cache);
-    if (Option.isSome(cached) && cached.value.expiresAtMs - now > ACCESS_TOKEN_REFRESH_SKEW_MS) {
-      return cached.value.accessToken;
-    }
     const current = yield* slot.read;
     if (Option.isNone(current)) {
       return yield* connectorError(
@@ -300,6 +322,15 @@ export const make = Effect.fn("YouTubeTokenStore.make")(function* (
       );
     }
     const stored = current.value;
+    const cached = yield* Ref.get(cache);
+    if (
+      Option.isSome(cached) &&
+      cached.value.refreshToken === stored.refreshToken &&
+      cached.value.scope === stored.scope &&
+      cached.value.expiresAtMs - now > ACCESS_TOKEN_REFRESH_SKEW_MS
+    ) {
+      return cached.value.accessToken;
+    }
     const client = yield* requireClient;
     if (client.clientId !== stored.clientId) {
       return yield* connectorError(
@@ -315,21 +346,55 @@ export const make = Effect.fn("YouTubeTokenStore.make")(function* (
       return yield* refreshed.failure;
     }
     const { lastError: _previousError, ...rest } = stored;
-    yield* slot.write({
+    const nextStored = {
       ...rest,
       // Google may rotate the refresh token; keep whichever is newest.
       refreshToken: refreshed.success.refreshToken ?? stored.refreshToken,
+      scope: refreshed.success.scope ?? stored.scope,
       lastRefreshedAtMs: now,
-    });
+    };
+    yield* slot.write(nextStored);
     yield* Ref.set(
       cache,
       Option.some({
         accessToken: refreshed.success.accessToken,
         expiresAtMs: now + refreshed.success.expiresInSeconds * 1000,
+        refreshToken: nextStored.refreshToken,
+        scope: nextStored.scope,
       }),
     );
     return refreshed.success.accessToken;
   }).pipe(Effect.withSpan("YouTubeTokenStore.accessToken"));
+
+  const analyticsAccessToken = Effect.gen(function* () {
+    const current = yield* slot.read;
+    if (Option.isNone(current) || !grantsYouTubeAnalytics(current.value.scope)) {
+      return yield* connectorError(
+        "YouTube Analytics read permission is missing. Reconnect YouTube in Settings > Connections.",
+      );
+    }
+    const token = yield* accessToken;
+    const refreshed = yield* slot.read;
+    if (Option.isNone(refreshed) || !grantsYouTubeAnalytics(refreshed.value.scope)) {
+      return yield* connectorError(
+        "YouTube Analytics read permission was removed. Reconnect YouTube in Settings > Connections.",
+      );
+    }
+    return token;
+  });
+
+  const recordAnalyticsCheck = Effect.fn("YouTubeTokenStore.recordAnalyticsCheck")(function* (
+    error?: string,
+  ) {
+    const current = yield* slot.read;
+    if (Option.isNone(current)) return;
+    const at = yield* nowMs;
+    const { analyticsLastError: _oldError, ...rest } = current.value;
+    yield* slot.write({
+      ...rest,
+      ...(error === undefined ? { analyticsVerifiedAtMs: at } : { analyticsLastError: error }),
+    });
+  });
 
   const recordChannel = Effect.fn("YouTubeTokenStore.recordChannel")(function* (channel: {
     readonly channelId: string;
@@ -353,6 +418,8 @@ export const make = Effect.fn("YouTubeTokenStore.make")(function* (
     begin,
     disconnect,
     accessToken,
+    analyticsAccessToken,
+    recordAnalyticsCheck,
     invalidateAccessToken: Ref.set(cache, Option.none()),
     recordChannel,
   });

@@ -1,7 +1,25 @@
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
-import { Approval, Item, Memory } from "@command-center/core";
+import { Approval, Item, Memory, ObservationSnapshot } from "@command-center/core";
+import {
+  CommandCenterObservationCorrectionRequest,
+  CommandCenterObservationGetRequest,
+  CommandCenterObservationHistoryPage,
+  CommandCenterObservationHistoryRequest,
+  CommandCenterObservationImportInput,
+  CommandCenterObservationImportReceipt,
+  CommandCenterObservationListPage,
+  CommandCenterObservationListRequest,
+  CommandCenterObservationManualCreateRequest,
+  CommandCenterObservationMutationReceipt,
+  CommandCenterObservationRetirementRequest,
+} from "./commandCenterObservations.ts";
+import {
+  COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+  CommandCenterYouTubeAnalyticsFetchInput,
+  CommandCenterYouTubeAnalyticsFetchResult,
+} from "./commandCenterYouTubeAnalytics.ts";
 
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
@@ -277,11 +295,15 @@ import {
   GoogleReadResult,
 } from "./commandCenter.ts";
 import {
+  CommandCenterInboxApproveAdjustmentInput,
   CommandCenterInboxCandidateCreateInput,
   CommandCenterInboxCandidateMutationInput,
   CommandCenterInboxCommentInput,
   CommandCenterInboxDetail,
   CommandCenterInboxDetailInput,
+  CommandCenterInboxDraftApproveInput,
+  CommandCenterInboxDraftReceipt,
+  CommandCenterInboxDraftReceiptInput,
   CommandCenterInboxMutationResult,
   CommandCenterInboxQueryInput,
   CommandCenterInboxQueryResult,
@@ -309,6 +331,14 @@ import {
   CommandCenterSprintPlanResolveDateConflictResult,
 } from "./commandCenterSprintPlan.ts";
 import {
+  CommandCenterDigestMarkViewedInput,
+  CommandCenterDigestPreferences,
+  CommandCenterDigestPreferencesUpdateInput,
+  CommandCenterDigestQueryInput,
+  CommandCenterDigestQueryResult,
+  CommandCenterDigestSnapshot,
+} from "./commandCenterDigest.ts";
+import {
   CommandCenterEventEnvelope,
   CommandCenterEventPage,
   CommandCenterEventReplayInput,
@@ -317,6 +347,15 @@ import {
   CommandCenterTimelinePage,
   CommandCenterTimelineQuery,
 } from "./commandCenterEvents.ts";
+import {
+  CommandCenterResponsibilitiesListInput,
+  CommandCenterResponsibilitiesListResult,
+  CommandCenterResponsibilityGetInput,
+  CommandCenterResponsibilityPauseInput,
+  CommandCenterResponsibilityStatus,
+  CommandCenterResponsibilityDetail,
+  CommandCenterResponsibilityError,
+} from "./commandCenterResponsibilities.ts";
 
 export const WS_METHODS = {
   // Project registry methods
@@ -511,6 +550,28 @@ export const WsCommandCenterInboxQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.i
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
 
+export const WsCommandCenterDigestQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.digestQuery, {
+  payload: CommandCenterDigestQueryInput,
+  success: CommandCenterDigestQueryResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+export const WsCommandCenterDigestPreferencesUpdateRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate,
+  {
+    payload: CommandCenterDigestPreferencesUpdateInput,
+    success: CommandCenterDigestPreferences,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterDigestMarkViewedRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.digestMarkViewed,
+  {
+    payload: CommandCenterDigestMarkViewedInput,
+    success: CommandCenterDigestSnapshot,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsCommandCenterInboxDetailRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.inboxDetail, {
   payload: CommandCenterInboxDetailInput,
   success: CommandCenterInboxDetail,
@@ -545,6 +606,15 @@ export const WsCommandCenterInboxCandidateAcceptRpc = Rpc.make(
   COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
   {
     payload: CommandCenterInboxCandidateMutationInput,
+    success: CommandCenterInboxMutationResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxAdjustmentApproveRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove,
+  {
+    payload: CommandCenterInboxApproveAdjustmentInput,
     success: CommandCenterInboxMutationResult,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
@@ -661,6 +731,24 @@ export const WsCommandCenterSprintPlanListHistoryRpc = Rpc.make(
   },
 );
 
+export const WsCommandCenterInboxDraftApproveRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxDraftApprove,
+  {
+    payload: CommandCenterInboxDraftApproveInput,
+    success: CommandCenterInboxDraftReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterInboxDraftReceiptRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.inboxDraftReceipt,
+  {
+    payload: CommandCenterInboxDraftReceiptInput,
+    success: Schema.NullOr(CommandCenterInboxDraftReceipt),
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsCommandCenterRunsQueryRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.runsQuery, {
   payload: CommandCenterRunsQueryInput,
   success: CommandCenterRunsQueryResult,
@@ -673,6 +761,42 @@ export const WsCommandCenterAutomationsQueryRpc = Rpc.make(
     payload: CommandCenterAutomationsQueryInput,
     success: CommandCenterAutomationsQueryResult,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterResponsibilitiesListRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.responsibilitiesList,
+  {
+    payload: CommandCenterResponsibilitiesListInput,
+    success: CommandCenterResponsibilitiesListResult,
+    error: Schema.Union([CommandCenterResponsibilityError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterResponsibilityGetRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.responsibilityGet,
+  {
+    payload: CommandCenterResponsibilityGetInput,
+    success: CommandCenterResponsibilityDetail,
+    error: Schema.Union([CommandCenterResponsibilityError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterResponsibilityPauseRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.responsibilityPause,
+  {
+    payload: CommandCenterResponsibilityPauseInput,
+    success: CommandCenterResponsibilityStatus,
+    error: Schema.Union([CommandCenterResponsibilityError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterResponsibilityResumeRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.responsibilityResume,
+  {
+    payload: CommandCenterResponsibilityPauseInput,
+    success: CommandCenterResponsibilityStatus,
+    error: Schema.Union([CommandCenterResponsibilityError, EnvironmentAuthorizationError]),
   },
 );
 
@@ -900,6 +1024,71 @@ export const WsCommandCenterWindowsMediaRootsRpc = Rpc.make(
   {
     payload: CommandCenterWindowsMediaRootsInput,
     success: CommandCenterWindowsMediaRootsResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterObservationsListRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsList,
+  {
+    payload: CommandCenterObservationListRequest,
+    success: CommandCenterObservationListPage,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsGetRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsGet,
+  {
+    payload: CommandCenterObservationGetRequest,
+    success: ObservationSnapshot,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsHistoryRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsHistory,
+  {
+    payload: CommandCenterObservationHistoryRequest,
+    success: CommandCenterObservationHistoryPage,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterYouTubeAnalyticsFetchRpc = Rpc.make(
+  COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+  {
+    payload: CommandCenterYouTubeAnalyticsFetchInput,
+    success: CommandCenterYouTubeAnalyticsFetchResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsCreateManualRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsCreateManual,
+  {
+    payload: CommandCenterObservationManualCreateRequest,
+    success: CommandCenterObservationMutationReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsImportRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsImport,
+  {
+    payload: CommandCenterObservationImportInput,
+    success: CommandCenterObservationImportReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsCorrectRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsCorrect,
+  {
+    payload: CommandCenterObservationCorrectionRequest,
+    success: CommandCenterObservationMutationReceipt,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+export const WsCommandCenterObservationsRetireRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.observationsRetire,
+  {
+    payload: CommandCenterObservationRetirementRequest,
+    success: CommandCenterObservationMutationReceipt,
     error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
   },
 );
@@ -1620,11 +1809,15 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterSpacesSyncRpc,
   WsCommandCenterItemsQueryRpc,
   WsCommandCenterInboxQueryRpc,
+  WsCommandCenterDigestQueryRpc,
+  WsCommandCenterDigestPreferencesUpdateRpc,
+  WsCommandCenterDigestMarkViewedRpc,
   WsCommandCenterInboxDetailRpc,
   WsCommandCenterInboxCommentRpc,
   WsCommandCenterInboxRequestChangesRpc,
   WsCommandCenterInboxCandidateCreateRpc,
   WsCommandCenterInboxCandidateAcceptRpc,
+  WsCommandCenterInboxAdjustmentApproveRpc,
   WsCommandCenterInboxCandidateDiscardRpc,
   WsCommandCenterInboxChangeRequestResolveRpc,
   WsCommandCenterInboxSnoozeRpc,
@@ -1639,8 +1832,14 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterSprintPlanPatchTaskRpc,
   WsCommandCenterSprintPlanResolveDateConflictRpc,
   WsCommandCenterSprintPlanListHistoryRpc,
+  WsCommandCenterInboxDraftApproveRpc,
+  WsCommandCenterInboxDraftReceiptRpc,
   WsCommandCenterRunsQueryRpc,
   WsCommandCenterAutomationsQueryRpc,
+  WsCommandCenterResponsibilitiesListRpc,
+  WsCommandCenterResponsibilityGetRpc,
+  WsCommandCenterResponsibilityPauseRpc,
+  WsCommandCenterResponsibilityResumeRpc,
   WsCommandCenterAutomationDefinitionGetRpc,
   WsCommandCenterAutomationDefinitionCreateRpc,
   WsCommandCenterAutomationDefinitionSaveRpc,
@@ -1670,6 +1869,14 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterGoogleReadRpc,
   WsCommandCenterWindowsMediaListRpc,
   WsCommandCenterWindowsMediaRootsRpc,
+  WsCommandCenterObservationsListRpc,
+  WsCommandCenterObservationsGetRpc,
+  WsCommandCenterObservationsHistoryRpc,
+  WsCommandCenterYouTubeAnalyticsFetchRpc,
+  WsCommandCenterObservationsCreateManualRpc,
+  WsCommandCenterObservationsImportRpc,
+  WsCommandCenterObservationsCorrectRpc,
+  WsCommandCenterObservationsRetireRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

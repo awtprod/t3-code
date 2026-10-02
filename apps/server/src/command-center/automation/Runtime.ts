@@ -3,6 +3,7 @@ import {
   type Automation as AutomationType,
   type AutomationNode as AutomationNodeType,
 } from "@command-center/core";
+import * as NodeCrypto from "node:crypto";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -50,6 +51,7 @@ export type AutomationCheckpointState = typeof AutomationCheckpointState.Type;
 export const AutomationRuntimeErrorCode = Schema.Literals([
   "automation-not-found",
   "automation-disabled",
+  "automation-paused",
   "automation-uncommitted",
   "definition-mismatch",
   "definition-invalid",
@@ -104,6 +106,7 @@ export interface AutomationExecutionSnapshot {
   readonly id: string;
   readonly automationId: string;
   readonly idempotencyKey: string;
+  readonly workIdentity: string;
   readonly spaceId: string;
   readonly configCommitSha: string;
   readonly definitionDigest: string;
@@ -118,10 +121,35 @@ export interface AutomationExecutionSnapshot {
   readonly finishedAt: string | null;
 }
 
+export interface AutomationCanonicalFailure {
+  readonly canonicalCode: string;
+  readonly resource: string;
+  readonly subject: string;
+}
+
+export interface AutomationFailureResolutionScope {
+  readonly resource: string;
+  readonly subject: string;
+}
+
 export type AutomationNodeExecutionOutcome =
-  | { readonly type: "succeeded"; readonly output?: Schema.Json }
-  | { readonly type: "failed"; readonly error: string; readonly output?: Schema.Json }
-  | { readonly type: "retry"; readonly error: string; readonly retryAfterMs?: number }
+  | {
+      readonly type: "succeeded";
+      readonly output?: Schema.Json;
+      readonly resolvedFailureScopes?: ReadonlyArray<AutomationFailureResolutionScope>;
+    }
+  | {
+      readonly type: "failed";
+      readonly error: string;
+      readonly output?: Schema.Json;
+      readonly failure?: AutomationCanonicalFailure;
+    }
+  | {
+      readonly type: "retry";
+      readonly error: string;
+      readonly retryAfterMs?: number;
+      readonly failure?: AutomationCanonicalFailure;
+    }
   | {
       readonly type: "wait";
       readonly resumeKey: string;
@@ -214,6 +242,9 @@ export interface AutomationRuntimeShape {
   readonly listWaitingExternal: (input?: {
     readonly limit?: number;
   }) => Effect.Effect<ReadonlyArray<AutomationExecutionSnapshot>, RuntimeFailure>;
+  readonly reconcileActiveSlots: (input?: {
+    readonly limit?: number;
+  }) => Effect.Effect<number, RuntimeFailure>;
   readonly acquireLease: (
     input: AcquireAutomationLeaseInput,
   ) => Effect.Effect<AutomationExecutionLease, RuntimeFailure>;
@@ -250,10 +281,20 @@ interface StoredAutomationRow {
   readonly definitionJson: string;
 }
 
+interface AdmissionRow {
+  readonly executionId: string;
+  readonly automationId: string;
+  readonly spaceId: string;
+  readonly configCommitSha: string;
+  readonly definitionDigest: string;
+  readonly inputJson: string;
+}
+
 interface ExecutionRow {
   readonly id: string;
   readonly automationId: string;
   readonly idempotencyKey: string;
+  readonly workIdentity: string | null;
   readonly spaceId: string;
   readonly configCommitSha: string;
   readonly definitionDigest: string;
@@ -295,6 +336,40 @@ interface CheckpointRow {
 
 const COMMIT_SHA_PATTERN = /^[a-f0-9]{40,64}$/u;
 const DEFINITION_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
+const BOUNDED_RUNTIME_ID_PATTERN = /^[\P{Cc}]{1,500}$/u;
+const CANONICAL_FAILURE_CODE_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,127}$/u;
+const BoundedFailureIdentity = Schema.String.check(
+  Schema.isPattern(BOUNDED_RUNTIME_ID_PATTERN),
+  Schema.isMaxLength(200),
+);
+const CanonicalFailure = Schema.Struct({
+  canonicalCode: Schema.String.check(Schema.isPattern(CANONICAL_FAILURE_CODE_PATTERN)),
+  resource: BoundedFailureIdentity,
+  subject: BoundedFailureIdentity,
+});
+const FailureResolutionScope = Schema.Struct({
+  resource: BoundedFailureIdentity,
+  subject: BoundedFailureIdentity,
+});
+const StartAutomationExecution = Schema.Struct({
+  automationId: Schema.String.check(
+    Schema.isPattern(BOUNDED_RUNTIME_ID_PATTERN),
+    Schema.isMaxLength(200),
+  ),
+  expectedSpaceId: Schema.optionalKey(
+    Schema.String.check(Schema.isPattern(BOUNDED_RUNTIME_ID_PATTERN), Schema.isMaxLength(200)),
+  ),
+  idempotencyKey: Schema.String.check(Schema.isPattern(BOUNDED_RUNTIME_ID_PATTERN)),
+  expectedConfigCommitSha: Schema.String.check(
+    Schema.isPattern(BOUNDED_RUNTIME_ID_PATTERN),
+    Schema.isMaxLength(128),
+  ),
+  expectedDefinitionDigest: Schema.String.check(
+    Schema.isPattern(BOUNDED_RUNTIME_ID_PATTERN),
+    Schema.isMaxLength(128),
+  ),
+  input: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
+});
 const TERMINAL_EXECUTION_STATES = new Set<AutomationRuntimeExecutionState>([
   "succeeded",
   "failed",
@@ -302,6 +377,9 @@ const TERMINAL_EXECUTION_STATES = new Set<AutomationRuntimeExecutionState>([
 ]);
 const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeAutomation = Schema.decodeUnknownEffect(Automation);
+const decodeStartAutomationExecution = Schema.decodeUnknownEffect(StartAutomationExecution);
+const isCanonicalFailure = Schema.is(CanonicalFailure);
+const isFailureResolutionScope = Schema.is(FailureResolutionScope);
 
 const runtimeError = (code: AutomationRuntimeErrorCode, detail: string) =>
   new AutomationRuntimeError({ code, detail });
@@ -314,6 +392,60 @@ const parseJson = Effect.fn("AutomationRuntime.parseJson")(function* (source: st
 
 function stringifyJson(value: Schema.Json): string {
   return canonicalJson(value);
+}
+
+function responsibilityWorkIdentity(spaceId: string, automationId: string): string {
+  return `responsibility:v1:${spaceId}:${automationId}`;
+}
+
+export function sanitizeIncidentError(error: string): string {
+  const withoutControls = Array.from(error, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint < 32 || (codePoint >= 127 && codePoint <= 159) ? " " : character;
+  }).join("");
+  const sanitized = withoutControls.replace(/\s+/gu, " ").trim().slice(0, 500);
+  return sanitized.length === 0 ? "Automation execution failed." : sanitized;
+}
+
+export function responsibilityIncidentId(input: {
+  readonly spaceId: string;
+  readonly automationId: string;
+  readonly canonicalCode: string;
+  readonly resource: string;
+  readonly subject: string;
+}): string {
+  return `responsibility-incident:${NodeCrypto.createHash("sha256")
+    .update(
+      `${input.spaceId}\n${input.automationId}\n${input.canonicalCode}\n${input.resource}\n${input.subject}`,
+    )
+    .digest("hex")}`;
+}
+
+function fallbackCanonicalFailure(error: string, transient: boolean): AutomationCanonicalFailure {
+  const bounded = sanitizeIncidentError(error).toLowerCase();
+  const category = /credential|token|auth(?:entication|orization)?|permission|forbidden/u.test(
+    bounded,
+  )
+    ? "credential"
+    : /malformed|invalid|schema|parse|required|unsupported/u.test(bounded)
+      ? "invalid-input"
+      : /timeout|timed out|deadline/u.test(bounded)
+        ? "timeout"
+        : /unavailable|connection|network|provider/u.test(bounded)
+          ? "unavailable"
+          : "unknown";
+  const template = bounded
+    .replace(/https?:\/\/\S+/gu, "<url>")
+    .replace(/[\w.+-]+@[\w.-]+/gu, "<email>")
+    .replace(/[a-z0-9_./:+-]{16,}/gu, "<value>")
+    .replace(/\b\d+\b/gu, "#")
+    .slice(0, 160);
+  const fingerprint = NodeCrypto.createHash("sha256").update(template).digest("hex").slice(0, 12);
+  return {
+    canonicalCode: `node-${transient ? "transient" : "failed"}-${category}:${fingerprint}`,
+    resource: "automation-node",
+    subject: "unknown",
+  };
 }
 
 function addMilliseconds(iso: string, milliseconds: number): string {
@@ -430,6 +562,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   ) {
     const rows = yield* sql<ExecutionRow>`
       SELECT id, automation_id AS "automationId", idempotency_key AS "idempotencyKey",
+        work_identity AS "workIdentity",
         space_id AS "spaceId", config_commit_sha AS "configCommitSha",
         definition_digest AS "definitionDigest", definition_json AS "definitionJson",
         input_json AS "inputJson", state, lease_owner AS "leaseOwner",
@@ -514,6 +647,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
       id: row.id,
       automationId: row.automationId,
       idempotencyKey: row.idempotencyKey,
+      workIdentity: row.workIdentity ?? responsibilityWorkIdentity(row.spaceId, row.automationId),
       spaceId: row.spaceId,
       configCommitSha: row.configCommitSha,
       definitionDigest: row.definitionDigest,
@@ -530,8 +664,12 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   });
 
   const get = Effect.fn("AutomationRuntime.get")(function* (executionId: string) {
-    const row = yield* readExecutionRow(executionId);
-    const checkpoints = yield* readCheckpointRows(executionId);
+    // One transaction so the execution row and its checkpoints describe the
+    // same moment; a torn read could pair a waiting execution with an
+    // already-resolved checkpoint.
+    const [row, checkpoints] = yield* sql.withTransaction(
+      Effect.all([readExecutionRow(executionId), readCheckpointRows(executionId)]),
+    );
     return yield* snapshotFromRows(row, checkpoints);
   });
 
@@ -587,6 +725,63 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     return yield* Effect.forEach(rows, (row) => get(row.id));
   });
 
+  const reconcileActiveSlots = Effect.fn("AutomationRuntime.reconcileActiveSlots")(function* (
+    input: { readonly limit?: number } = {},
+  ) {
+    const limit = positiveBoundedInteger(input.limit, 50, 500);
+    const stale = yield* sql<{ readonly automationId: string }>`
+      SELECT slot.automation_id AS "automationId"
+      FROM command_center_responsibility_active_slots slot
+      LEFT JOIN command_center_automation_executions execution ON execution.id = slot.execution_id
+      WHERE execution.id IS NULL OR execution.state IN ('succeeded', 'failed', 'canceled')
+      ORDER BY slot.claimed_at, slot.automation_id
+      LIMIT ${limit}
+    `;
+    for (const row of stale) {
+      yield* sql`
+        DELETE FROM command_center_responsibility_active_slots
+        WHERE automation_id = ${row.automationId}
+      `;
+    }
+    const missing = yield* sql<{
+      readonly automationId: string;
+      readonly spaceId: string;
+      readonly workIdentity: string | null;
+      readonly executionId: string;
+      readonly claimedAt: string;
+    }>`
+      SELECT execution.automation_id AS "automationId", execution.space_id AS "spaceId",
+        execution.work_identity AS "workIdentity", execution.id AS "executionId",
+        execution.created_at AS "claimedAt"
+      FROM command_center_automation_executions execution
+      LEFT JOIN command_center_responsibility_active_slots slot
+        ON slot.automation_id = execution.automation_id
+      WHERE execution.state NOT IN ('succeeded', 'failed', 'canceled')
+        AND slot.automation_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM command_center_automation_executions newer
+          WHERE newer.automation_id = execution.automation_id
+            AND newer.state NOT IN ('succeeded', 'failed', 'canceled')
+            AND (newer.created_at > execution.created_at
+              OR (newer.created_at = execution.created_at AND newer.id > execution.id))
+        )
+      ORDER BY execution.created_at, execution.id
+      LIMIT ${limit}
+    `;
+    for (const row of missing) {
+      yield* sql`
+        INSERT OR IGNORE INTO command_center_responsibility_active_slots (
+          automation_id, space_id, work_identity, execution_id, claimed_at
+        ) VALUES (
+          ${row.automationId}, ${row.spaceId},
+          ${row.workIdentity ?? responsibilityWorkIdentity(row.spaceId, row.automationId)},
+          ${row.executionId}, ${row.claimedAt}
+        )
+      `;
+    }
+    return stale.length + missing.length;
+  });
+
   const readDefinition = Effect.fn("AutomationRuntime.readDefinition")(function* (source: string) {
     const parsed = yield* parseJson(source);
     const automation = yield* decodeAutomation(parsed).pipe(
@@ -606,112 +801,205 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
   });
 
   const start = Effect.fn("AutomationRuntime.start")(function* (
-    input: StartAutomationExecutionInput,
+    rawInput: StartAutomationExecutionInput,
   ) {
+    const input = yield* decodeStartAutomationExecution(rawInput).pipe(
+      Effect.mapError(() =>
+        runtimeError("definition-invalid", "The automation start request is invalid."),
+      ),
+    );
     const runInput = input.input ?? {};
     const inputJson = stringifyJson(runInput);
-    const existing = yield* sql<ExecutionRow>`
-      SELECT id, automation_id AS "automationId", idempotency_key AS "idempotencyKey",
-        space_id AS "spaceId", config_commit_sha AS "configCommitSha",
-        definition_digest AS "definitionDigest", definition_json AS "definitionJson",
-        input_json AS "inputJson", state, lease_owner AS "leaseOwner",
-        lease_token AS "leaseToken", lease_generation AS "leaseGeneration",
-        lease_acquired_at AS "leaseAcquiredAt", lease_expires_at AS "leaseExpiresAt",
-        output_json AS "outputJson", error, created_at AS "createdAt",
-        updated_at AS "updatedAt", finished_at AS "finishedAt"
-      FROM command_center_automation_executions
-      WHERE idempotency_key = ${input.idempotencyKey}
-      LIMIT 1
-    `;
-    if (existing[0] !== undefined) {
-      const row = existing[0];
-      if (
-        row.automationId !== input.automationId ||
-        (input.expectedSpaceId !== undefined && row.spaceId !== input.expectedSpaceId) ||
-        row.configCommitSha !== input.expectedConfigCommitSha ||
-        row.definitionDigest !== input.expectedDefinitionDigest ||
-        row.inputJson !== inputJson
-      ) {
-        return yield* runtimeError(
-          "idempotency-conflict",
-          `Idempotency key '${input.idempotencyKey}' is already bound to another execution request.`,
-        );
-      }
-      return yield* get(row.id);
-    }
-
-    const rows = yield* sql<StoredAutomationRow>`
-      SELECT id, space_id AS "spaceId", enabled, commit_sha AS "commitSha",
-        definition_digest AS "definitionDigest", definition_json AS "definitionJson"
-      FROM command_center_automations
-      WHERE id = ${input.automationId}
-      LIMIT 1
-    `;
-    const stored = rows[0];
-    if (stored === undefined) {
-      return yield* runtimeError(
-        "automation-not-found",
-        `Automation '${input.automationId}' was not found.`,
-      );
-    }
-    if (input.expectedSpaceId !== undefined && stored.spaceId !== input.expectedSpaceId) {
-      return yield* runtimeError(
-        "automation-not-found",
-        `Automation '${input.automationId}' was not found in the requested Space.`,
-      );
-    }
-    if (stored.enabled !== 1) {
-      return yield* runtimeError(
-        "automation-disabled",
-        `Automation '${input.automationId}' is disabled.`,
-      );
-    }
-    if (
-      !COMMIT_SHA_PATTERN.test(stored.commitSha) ||
-      !DEFINITION_DIGEST_PATTERN.test(stored.definitionDigest)
-    ) {
-      return yield* runtimeError(
-        "automation-uncommitted",
-        `Automation '${input.automationId}' is not pinned to a committed definition.`,
-      );
-    }
-    if (
-      stored.commitSha !== input.expectedConfigCommitSha ||
-      stored.definitionDigest !== input.expectedDefinitionDigest
-    ) {
-      return yield* runtimeError(
-        "definition-mismatch",
-        `Automation '${input.automationId}' changed after it was selected.`,
-      );
-    }
-
-    const { automation, definition } = yield* readDefinition(stored.definitionJson);
-    if (
-      automation.id !== stored.id ||
-      automation.spaceId !== stored.spaceId ||
-      automation.enabled !== true ||
-      automation.configCommit !== stored.commitSha ||
-      automation.definitionDigest !== stored.definitionDigest
-    ) {
-      return yield* runtimeError(
-        "definition-mismatch",
-        `Automation '${input.automationId}' metadata does not match its pinned definition.`,
-      );
-    }
-
     const executionId = yield* dependencies.randomUUID;
     const now = yield* dependencies.now;
-    yield* sql.withTransaction(
+    const admitted = yield* sql.withTransaction(
       Effect.gen(function* () {
+        const existing = yield* sql<AdmissionRow>`
+          SELECT execution_id AS "executionId", automation_id AS "automationId",
+            space_id AS "spaceId", config_commit_sha AS "configCommitSha",
+            definition_digest AS "definitionDigest", input_json AS "inputJson"
+          FROM command_center_responsibility_admissions
+          WHERE idempotency_key = ${input.idempotencyKey}
+          LIMIT 1
+        `;
+        if (existing[0] !== undefined) {
+          const row = existing[0];
+          if (
+            row.automationId !== input.automationId ||
+            (input.expectedSpaceId !== undefined && row.spaceId !== input.expectedSpaceId) ||
+            row.configCommitSha !== input.expectedConfigCommitSha ||
+            row.definitionDigest !== input.expectedDefinitionDigest ||
+            row.inputJson !== inputJson
+          ) {
+            return yield* runtimeError(
+              "idempotency-conflict",
+              `Idempotency key '${input.idempotencyKey}' is already bound to another execution request.`,
+            );
+          }
+          return { kind: "existing" as const, executionId: row.executionId };
+        }
+
+        const rows = yield* sql<StoredAutomationRow>`
+          SELECT id, space_id AS "spaceId", enabled, commit_sha AS "commitSha",
+            definition_digest AS "definitionDigest", definition_json AS "definitionJson"
+          FROM command_center_automations
+          WHERE id = ${input.automationId}
+          LIMIT 1
+        `;
+        const stored = rows[0];
+        if (
+          stored === undefined ||
+          (input.expectedSpaceId !== undefined && stored.spaceId !== input.expectedSpaceId)
+        ) {
+          return yield* runtimeError(
+            "automation-not-found",
+            `Automation '${input.automationId}' was not found in the requested Space.`,
+          );
+        }
+        if (stored.enabled !== 1) {
+          return yield* runtimeError(
+            "automation-disabled",
+            `Automation '${input.automationId}' is disabled.`,
+          );
+        }
+        if (
+          !COMMIT_SHA_PATTERN.test(stored.commitSha) ||
+          !DEFINITION_DIGEST_PATTERN.test(stored.definitionDigest)
+        ) {
+          return yield* runtimeError(
+            "automation-uncommitted",
+            `Automation '${input.automationId}' is not pinned to a committed definition.`,
+          );
+        }
+        if (
+          stored.commitSha !== input.expectedConfigCommitSha ||
+          stored.definitionDigest !== input.expectedDefinitionDigest
+        ) {
+          return yield* runtimeError(
+            "definition-mismatch",
+            `Automation '${input.automationId}' changed after it was selected.`,
+          );
+        }
+
+        const { automation, definition } = yield* readDefinition(stored.definitionJson);
+        if (
+          automation.id !== stored.id ||
+          automation.spaceId !== stored.spaceId ||
+          automation.enabled !== true ||
+          automation.configCommit !== stored.commitSha ||
+          automation.definitionDigest !== stored.definitionDigest ||
+          definition.nodes.length !== automation.nodes.length
+        ) {
+          return yield* runtimeError(
+            "definition-mismatch",
+            `Automation '${input.automationId}' metadata does not match its pinned definition.`,
+          );
+        }
+
+        const controls = yield* sql<{ readonly paused: number }>`
+          SELECT paused
+          FROM command_center_responsibility_controls
+          WHERE space_id = ${stored.spaceId} AND automation_id = ${stored.id}
+          LIMIT 1
+        `;
+        if (controls[0]?.paused === 1) {
+          yield* sql`
+            INSERT INTO command_center_responsibility_status (
+              space_id, automation_id, last_admission_attempt_at,
+              last_admission_status, updated_at
+            ) VALUES (${stored.spaceId}, ${stored.id}, ${now}, 'paused', ${now})
+            ON CONFLICT(space_id, automation_id) DO UPDATE SET
+              last_admission_attempt_at = excluded.last_admission_attempt_at,
+              last_admission_status = excluded.last_admission_status,
+              updated_at = excluded.updated_at
+          `;
+          return { kind: "paused" as const, automationId: stored.id };
+        }
+
+        const slots = yield* sql<{ readonly executionId: string; readonly state: string }>`
+          SELECT slot.execution_id AS "executionId", execution.state
+          FROM command_center_responsibility_active_slots slot
+          JOIN command_center_automation_executions execution ON execution.id = slot.execution_id
+          WHERE slot.automation_id = ${stored.id} AND slot.space_id = ${stored.spaceId}
+          LIMIT 1
+        `;
+        const active = slots[0];
+        if (
+          active !== undefined &&
+          !TERMINAL_EXECUTION_STATES.has(active.state as AutomationRuntimeExecutionState)
+        ) {
+          yield* sql`
+            INSERT INTO command_center_responsibility_admissions (
+              idempotency_key, execution_id, automation_id, space_id, config_commit_sha,
+              definition_digest, input_json, accepted_at
+            ) VALUES (
+              ${input.idempotencyKey}, ${active.executionId}, ${stored.id}, ${stored.spaceId},
+              ${stored.commitSha}, ${stored.definitionDigest}, ${inputJson}, ${now}
+            )
+          `;
+          yield* sql`
+            INSERT INTO command_center_responsibility_status (
+              space_id, automation_id, last_admission_attempt_at, last_admission_status,
+              last_attempted_execution_id, current_execution_id, updated_at
+            ) VALUES (
+              ${stored.spaceId}, ${stored.id}, ${now}, 'admitted',
+              ${active.executionId}, ${active.executionId}, ${now}
+            )
+            ON CONFLICT(space_id, automation_id) DO UPDATE SET
+              last_admission_attempt_at = excluded.last_admission_attempt_at,
+              last_admission_status = excluded.last_admission_status,
+              last_attempted_execution_id = excluded.last_attempted_execution_id,
+              current_execution_id = excluded.current_execution_id,
+              updated_at = excluded.updated_at
+          `;
+          return { kind: "existing" as const, executionId: active.executionId };
+        }
+        if (active !== undefined) {
+          yield* sql`
+            DELETE FROM command_center_responsibility_active_slots
+            WHERE automation_id = ${stored.id} AND execution_id = ${active.executionId}
+          `;
+        }
+
+        const workIdentity = responsibilityWorkIdentity(stored.spaceId, stored.id);
         yield* sql`
           INSERT INTO command_center_automation_executions (
-            id, automation_id, idempotency_key, space_id, config_commit_sha,
+            id, automation_id, idempotency_key, work_identity, space_id, config_commit_sha,
             definition_digest, definition_json, input_json, state, created_at, updated_at
           ) VALUES (
-            ${executionId}, ${automation.id}, ${input.idempotencyKey}, ${automation.spaceId},
+            ${executionId}, ${automation.id}, ${input.idempotencyKey}, ${workIdentity}, ${automation.spaceId},
             ${stored.commitSha}, ${stored.definitionDigest}, ${stored.definitionJson}, ${inputJson},
             'queued', ${now}, ${now}
           )
+        `;
+        yield* sql`
+          INSERT INTO command_center_responsibility_active_slots (
+            automation_id, space_id, work_identity, execution_id, claimed_at
+          ) VALUES (${automation.id}, ${automation.spaceId}, ${workIdentity}, ${executionId}, ${now})
+        `;
+        yield* sql`
+          INSERT INTO command_center_responsibility_admissions (
+            idempotency_key, execution_id, automation_id, space_id, config_commit_sha,
+            definition_digest, input_json, accepted_at
+          ) VALUES (
+            ${input.idempotencyKey}, ${executionId}, ${automation.id}, ${automation.spaceId},
+            ${stored.commitSha}, ${stored.definitionDigest}, ${inputJson}, ${now}
+          )
+        `;
+        yield* sql`
+          INSERT INTO command_center_responsibility_status (
+            space_id, automation_id, last_admission_attempt_at, last_admission_status,
+            last_attempted_execution_id, current_execution_id, updated_at
+          ) VALUES (
+            ${automation.spaceId}, ${automation.id}, ${now}, 'admitted',
+            ${executionId}, ${executionId}, ${now}
+          )
+          ON CONFLICT(space_id, automation_id) DO UPDATE SET
+            last_admission_attempt_at = excluded.last_admission_attempt_at,
+            last_admission_status = excluded.last_admission_status,
+            last_attempted_execution_id = excluded.last_attempted_execution_id,
+            current_execution_id = excluded.current_execution_id,
+            updated_at = excluded.updated_at
         `;
         for (const node of automation.nodes) {
           yield* sql`
@@ -723,15 +1011,16 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
             )
           `;
         }
+        return { kind: "created" as const, executionId };
       }),
     );
-
-    // Re-validating the snapshot above makes this assertion safe and keeps the
-    // planning conversion exercised before any durable execution is admitted.
-    if (definition.nodes.length !== automation.nodes.length) {
-      return yield* runtimeError("definition-invalid", "The pinned node set is inconsistent.");
+    if (admitted.kind === "paused") {
+      return yield* runtimeError(
+        "automation-paused",
+        `Automation '${admitted.automationId}' is paused.`,
+      );
     }
-    return yield* get(executionId);
+    return yield* get(admitted.executionId);
   });
 
   const acquireLease = Effect.fn("AutomationRuntime.acquireLease")(function* (
@@ -851,6 +1140,149 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     }
   });
 
+  const failureIdentity = (
+    outcome: Extract<AutomationNodeExecutionOutcome, { readonly type: "failed" | "retry" }>,
+    checkpoint: CheckpointRow,
+    nodeId: string,
+  ): AutomationCanonicalFailure => {
+    if (outcome.failure !== undefined && isCanonicalFailure(outcome.failure)) {
+      return outcome.failure;
+    }
+    const fallback = fallbackCanonicalFailure(outcome.error, outcome.type === "retry");
+    return { ...fallback, resource: checkpoint.nodeKind, subject: nodeId };
+  };
+
+  const recordIncident = Effect.fn("AutomationRuntime.recordIncident")(function* (input: {
+    readonly execution: ExecutionRow;
+    readonly failure: AutomationCanonicalFailure;
+    readonly error: string;
+    readonly state: "transient" | "blocked";
+    readonly retryAt?: string | null;
+    readonly now: string;
+  }) {
+    const id = responsibilityIncidentId({
+      spaceId: input.execution.spaceId,
+      automationId: input.execution.automationId,
+      ...input.failure,
+    });
+    const displayError = sanitizeIncidentError(input.error);
+    const recoveryInstruction =
+      input.state === "transient"
+        ? "The existing bounded retry will run when it is due."
+        : "Correct the configured capability or input, then run the Responsibility again.";
+    yield* sql`
+      INSERT INTO command_center_responsibility_incidents (
+        id, space_id, automation_id, canonical_code, resource, subject, state,
+        first_seen_at, last_seen_at, occurrence_count, latest_execution_id,
+        retry_at, recovery_instruction, display_error, resolved_at
+      ) VALUES (
+        ${id}, ${input.execution.spaceId}, ${input.execution.automationId},
+        ${input.failure.canonicalCode}, ${input.failure.resource}, ${input.failure.subject}, ${input.state},
+        ${input.now}, ${input.now}, 1, ${input.execution.id}, ${input.retryAt ?? null},
+        ${recoveryInstruction}, ${displayError}, NULL
+      )
+      ON CONFLICT(space_id, automation_id, canonical_code, resource, subject) DO UPDATE SET
+        state = excluded.state, last_seen_at = excluded.last_seen_at,
+        occurrence_count = command_center_responsibility_incidents.occurrence_count + 1,
+        latest_execution_id = excluded.latest_execution_id, retry_at = excluded.retry_at,
+        recovery_instruction = excluded.recovery_instruction,
+        display_error = excluded.display_error, resolved_at = NULL
+    `;
+    yield* sql`
+      INSERT INTO command_center_responsibility_status (
+        space_id, automation_id, last_checked_at, last_check_status,
+        last_attempted_execution_id, current_execution_id, updated_at
+      ) VALUES (
+        ${input.execution.spaceId}, ${input.execution.automationId}, ${input.now},
+        ${input.state === "transient" ? "transient-error" : "blocked"},
+        ${input.execution.id},
+        ${input.state === "transient" ? input.execution.id : null}, ${input.now}
+      )
+      ON CONFLICT(space_id, automation_id) DO UPDATE SET
+        last_checked_at = excluded.last_checked_at,
+        last_check_status = excluded.last_check_status,
+        last_attempted_execution_id = excluded.last_attempted_execution_id,
+        current_execution_id = excluded.current_execution_id,
+        updated_at = excluded.updated_at
+    `;
+    if (input.state === "blocked") {
+      const itemSource = stringifyJson({
+        kind: "automation",
+        sourceRef: id,
+        capturedAt: input.now,
+      });
+      const itemMetadata = stringifyJson({
+        incidentId: id,
+        automationId: input.execution.automationId,
+        executionId: input.execution.id,
+        canonicalCode: input.failure.canonicalCode,
+        resource: input.failure.resource,
+        subject: input.failure.subject,
+      });
+      yield* sql`
+        INSERT INTO command_center_items (
+          id, space_id, kind, status, title, body, priority,
+          source_json, metadata_json, created_at, updated_at
+        ) VALUES (
+          ${id}, ${input.execution.spaceId}, 'alert', 'ready',
+          'Responsibility needs attention', ${displayError}, 'high',
+          ${itemSource}, ${itemMetadata}, ${input.now}, ${input.now}
+        )
+        ON CONFLICT(id) DO UPDATE SET
+          status = 'ready', body = excluded.body, metadata_json = excluded.metadata_json,
+          updated_at = excluded.updated_at
+      `;
+    }
+  });
+
+  const resolveIncidents = Effect.fn("AutomationRuntime.resolveIncidents")(function* (input: {
+    readonly execution: ExecutionRow;
+    readonly scopes: ReadonlyArray<AutomationFailureResolutionScope>;
+    readonly now: string;
+  }) {
+    for (const scope of input.scopes.filter(isFailureResolutionScope)) {
+      yield* sql`
+        UPDATE command_center_responsibility_incidents
+        SET state = 'resolved', resolved_at = ${input.now}, retry_at = NULL
+        WHERE space_id = ${input.execution.spaceId}
+          AND automation_id = ${input.execution.automationId}
+          AND resource = ${scope.resource} AND subject = ${scope.subject}
+          AND state != 'resolved'
+      `;
+      yield* sql`
+        UPDATE command_center_items
+        SET status = 'done', updated_at = ${input.now}
+        WHERE id IN (
+          SELECT id FROM command_center_responsibility_incidents
+          WHERE space_id = ${input.execution.spaceId}
+            AND automation_id = ${input.execution.automationId}
+            AND resource = ${scope.resource} AND subject = ${scope.subject}
+            AND state = 'resolved'
+        )
+      `;
+    }
+  });
+
+  const recordCheckAttempt = Effect.fn("AutomationRuntime.recordCheckAttempt")(function* (input: {
+    readonly execution: ExecutionRow;
+    readonly now: string;
+  }) {
+    yield* sql`
+      INSERT INTO command_center_responsibility_status (
+        space_id, automation_id, last_checked_at, last_attempted_execution_id,
+        current_execution_id, updated_at
+      ) VALUES (
+        ${input.execution.spaceId}, ${input.execution.automationId}, ${input.now},
+        ${input.execution.id}, ${input.execution.id}, ${input.now}
+      )
+      ON CONFLICT(space_id, automation_id) DO UPDATE SET
+        last_checked_at = excluded.last_checked_at,
+        last_attempted_execution_id = excluded.last_attempted_execution_id,
+        current_execution_id = excluded.current_execution_id,
+        updated_at = excluded.updated_at
+    `;
+  });
+
   const guardedCheckpointUpdate = Effect.fn("AutomationRuntime.guardedCheckpointUpdate")(
     function* (input: {
       readonly execution: ExecutionRow;
@@ -900,16 +1332,45 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     }) {
       const outputJson =
         input.output === undefined || input.output === null ? null : stringifyJson(input.output);
-      const updated = yield* sql<{ readonly id: string }>`
+      const updated = yield* sql<{
+        readonly id: string;
+        readonly automationId: string;
+        readonly spaceId: string;
+      }>`
       UPDATE command_center_automation_executions
       SET state = ${input.state}, output_json = ${outputJson}, error = ${input.error ?? null},
         updated_at = ${input.now}, finished_at = ${input.finished === true ? input.now : null}
       WHERE id = ${input.executionId} AND lease_owner = ${input.lease.owner}
         AND lease_token = ${input.lease.token} AND lease_expires_at > ${input.now}
-      RETURNING id
+      RETURNING id, automation_id AS "automationId", space_id AS "spaceId"
     `;
-      if (updated.length === 0) {
+      const row = updated[0];
+      if (row === undefined) {
         return yield* runtimeError("lease-lost", "The automation execution lease was lost.");
+      }
+      if (TERMINAL_EXECUTION_STATES.has(input.state)) {
+        yield* sql`
+          DELETE FROM command_center_responsibility_active_slots
+          WHERE automation_id = ${row.automationId} AND execution_id = ${row.id}
+        `;
+        yield* sql`
+          INSERT INTO command_center_responsibility_status (
+            space_id, automation_id, last_checked_at, last_check_status,
+            last_successful_at, last_attempted_execution_id, current_execution_id, updated_at
+          ) VALUES (
+            ${row.spaceId}, ${row.automationId}, ${input.now},
+            ${input.state === "succeeded" ? "ok" : input.state === "failed" ? "blocked" : null},
+            ${input.state === "succeeded" ? input.now : null}, ${row.id}, NULL, ${input.now}
+          )
+          ON CONFLICT(space_id, automation_id) DO UPDATE SET
+            last_checked_at = excluded.last_checked_at,
+            last_check_status = COALESCE(excluded.last_check_status,
+              command_center_responsibility_status.last_check_status),
+            last_successful_at = COALESCE(excluded.last_successful_at,
+              command_center_responsibility_status.last_successful_at),
+            last_attempted_execution_id = excluded.last_attempted_execution_id,
+            current_execution_id = NULL, updated_at = excluded.updated_at
+        `;
       }
     },
   );
@@ -973,25 +1434,29 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
         return yield* get(execution.id);
       }
       if (waiting.state === "waiting_delay") {
-        yield* guardedCheckpointUpdate({
-          execution,
-          lease: input,
-          nodeId: waiting.nodeId,
-          now,
-          state: "succeeded",
-          output: { resumedAt: now },
-          finished: true,
-        });
-        yield* finishWhenComplete(execution, input, now);
-        const afterDelay = yield* readExecutionRow(execution.id);
-        if (!TERMINAL_EXECUTION_STATES.has(afterDelay.state)) {
-          yield* updateExecutionState({
-            executionId: execution.id,
-            lease: input,
-            now,
-            state: "running",
-          });
-        }
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* guardedCheckpointUpdate({
+              execution,
+              lease: input,
+              nodeId: waiting.nodeId,
+              now,
+              state: "succeeded",
+              output: { resumedAt: now },
+              finished: true,
+            });
+            yield* finishWhenComplete(execution, input, now);
+            const afterDelay = yield* readExecutionRow(execution.id);
+            if (!TERMINAL_EXECUTION_STATES.has(afterDelay.state)) {
+              yield* updateExecutionState({
+                executionId: execution.id,
+                lease: input,
+                now,
+                state: "running",
+              });
+            }
+          }),
+        );
         return yield* get(execution.id);
       }
       const retried = yield* sql<{ readonly nodeId: string }>`
@@ -1025,7 +1490,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
       );
     }
     if (plan.plan.complete) {
-      yield* finishWhenComplete(execution, input, now);
+      yield* sql.withTransaction(finishWhenComplete(execution, input, now));
       return yield* get(execution.id);
     }
 
@@ -1166,80 +1631,129 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
 
     switch (outcome.type) {
       case "succeeded": {
-        yield* guardedCheckpointUpdate({
-          execution,
-          lease: input,
-          nodeId: node.id,
-          now,
-          state: "succeeded",
-          output: outcome.output ?? null,
-          finished: true,
-        });
-        yield* finishWhenComplete(execution, input, now);
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* guardedCheckpointUpdate({
+              execution,
+              lease: input,
+              nodeId: node.id,
+              now,
+              state: "succeeded",
+              output: outcome.output ?? null,
+              finished: true,
+            });
+            yield* recordCheckAttempt({ execution, now });
+            yield* resolveIncidents({
+              execution,
+              scopes: [
+                { resource: checkpoint.nodeKind, subject: node.id },
+                ...(outcome.resolvedFailureScopes ?? []),
+              ],
+              now,
+            });
+            yield* finishWhenComplete(execution, input, now);
+          }),
+        );
         return yield* get(execution.id);
       }
       case "retry": {
+        const failure = failureIdentity(outcome, checkpoint, node.id);
         if (checkpoint.attemptCount >= checkpoint.maxAttempts) {
-          yield* guardedCheckpointUpdate({
-            execution,
-            lease: input,
-            nodeId: node.id,
-            now,
-            state: "failed",
-            error: outcome.error,
-            finished: true,
-          });
-          yield* updateExecutionState({
-            executionId: execution.id,
-            lease: input,
-            now,
-            state: "failed",
-            error: outcome.error,
-            finished: true,
-          });
+          yield* sql.withTransaction(
+            Effect.gen(function* () {
+              yield* guardedCheckpointUpdate({
+                execution,
+                lease: input,
+                nodeId: node.id,
+                now,
+                state: "failed",
+                error: outcome.error,
+                finished: true,
+              });
+              yield* updateExecutionState({
+                executionId: execution.id,
+                lease: input,
+                now,
+                state: "failed",
+                error: outcome.error,
+                finished: true,
+              });
+              yield* recordIncident({
+                execution,
+                failure,
+                error: outcome.error,
+                state: "blocked",
+                now,
+              });
+            }),
+          );
           return yield* get(execution.id);
         }
         const waitingUntil = addMilliseconds(
           now,
           nonNegativeBoundedNumber(outcome.retryAfterMs, defaultRetryDelayMs, 86_400_000),
         );
-        yield* guardedCheckpointUpdate({
-          execution,
-          lease: input,
-          nodeId: node.id,
-          now,
-          state: "waiting_retry",
-          waitingUntil,
-          error: outcome.error,
-        });
-        yield* updateExecutionState({
-          executionId: execution.id,
-          lease: input,
-          now,
-          state: "waiting_retry",
-        });
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* guardedCheckpointUpdate({
+              execution,
+              lease: input,
+              nodeId: node.id,
+              now,
+              state: "waiting_retry",
+              waitingUntil,
+              error: outcome.error,
+            });
+            yield* updateExecutionState({
+              executionId: execution.id,
+              lease: input,
+              now,
+              state: "waiting_retry",
+            });
+            yield* recordIncident({
+              execution,
+              failure,
+              error: outcome.error,
+              state: "transient",
+              retryAt: waitingUntil,
+              now,
+            });
+          }),
+        );
         return yield* get(execution.id);
       }
       case "failed": {
-        yield* guardedCheckpointUpdate({
-          execution,
-          lease: input,
-          nodeId: node.id,
-          now,
-          state: "failed",
-          output: outcome.output ?? null,
-          error: outcome.error,
-          finished: true,
-        });
-        yield* updateExecutionState({
-          executionId: execution.id,
-          lease: input,
-          now,
-          state: "failed",
-          output: outcome.output ?? null,
-          error: outcome.error,
-          finished: true,
-        });
+        const failure = failureIdentity(outcome, checkpoint, node.id);
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* guardedCheckpointUpdate({
+              execution,
+              lease: input,
+              nodeId: node.id,
+              now,
+              state: "failed",
+              output: outcome.output ?? null,
+              error: outcome.error,
+              finished: true,
+            });
+            yield* updateExecutionState({
+              executionId: execution.id,
+              lease: input,
+              now,
+              state: "failed",
+              output: outcome.output ?? null,
+              error: outcome.error,
+              finished: true,
+            });
+            yield* recordIncident({
+              execution,
+              failure,
+              error: outcome.error,
+              state: "blocked",
+              now,
+            });
+          }),
+        );
         return yield* get(execution.id);
       }
       case "wait": {
@@ -1260,6 +1774,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
               now,
               state: "waiting_external",
             });
+            yield* recordCheckAttempt({ execution, now });
           }),
         );
         return yield* get(execution.id);
@@ -1346,6 +1861,42 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
               finished_at = ${input.outcome === "succeeded" ? null : now}
             WHERE id = ${input.executionId} AND state = 'waiting_external'
           `;
+          if (input.outcome === "succeeded") {
+            yield* recordCheckAttempt({ execution, now });
+            yield* resolveIncidents({
+              execution,
+              scopes: [{ resource: checkpoint.nodeKind, subject: checkpoint.nodeId }],
+              now,
+            });
+          } else {
+            yield* sql`
+              DELETE FROM command_center_responsibility_active_slots
+              WHERE automation_id = ${execution.automationId}
+                AND execution_id = ${execution.id}
+            `;
+            yield* recordCheckAttempt({ execution, now });
+            if (input.outcome === "failed") {
+              const failure = failureIdentity(
+                { type: "failed", error: error ?? "External work failed." },
+                checkpoint,
+                checkpoint.nodeId,
+              );
+              yield* recordIncident({
+                execution,
+                failure,
+                error: error ?? "External work failed.",
+                state: "blocked",
+                now,
+              });
+            } else {
+              yield* sql`
+                UPDATE command_center_responsibility_status
+                SET current_execution_id = NULL, updated_at = ${now}
+                WHERE space_id = ${execution.spaceId}
+                  AND automation_id = ${execution.automationId}
+              `;
+            }
+          }
         }
         return yield* get(input.executionId);
       }),
@@ -1409,6 +1960,20 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
             finished_at = ${input.approved ? null : now}
           WHERE id = ${input.executionId} AND state = 'waiting_approval'
         `;
+        if (!input.approved) {
+          yield* sql`
+            DELETE FROM command_center_responsibility_active_slots
+            WHERE automation_id = (
+              SELECT automation_id FROM command_center_automation_executions
+              WHERE id = ${input.executionId}
+            ) AND execution_id = ${input.executionId}
+          `;
+          yield* sql`
+            UPDATE command_center_responsibility_status
+            SET current_execution_id = NULL, updated_at = ${now}
+            WHERE current_execution_id = ${input.executionId}
+          `;
+        }
         return yield* get(input.executionId);
       }),
     );
@@ -1419,6 +1984,7 @@ export const make = Effect.fn("AutomationRuntime.make")(function* (
     get,
     listRecoverable,
     listWaitingExternal,
+    reconcileActiveSlots,
     acquireLease,
     renewLease,
     releaseLease,

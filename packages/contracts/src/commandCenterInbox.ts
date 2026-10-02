@@ -1,4 +1,5 @@
 import {
+  ConnectionId,
   Item,
   ItemId,
   NonNegativeInt,
@@ -54,8 +55,44 @@ const TaskPatchOperation = Schema.Struct({
   before: Schema.Json,
   after: Schema.Json,
 });
+const SprintPlanTaskPatchOperation = Schema.Struct({
+  taskId: ShortIdentity,
+  field: Schema.Literals(["text", "note", "day", "owner", "done"]),
+  before: Schema.Union([Schema.String, Schema.Boolean]),
+  after: Schema.Union([Schema.String, Schema.Boolean]),
+});
+const SprintPlanTaskPatch = Schema.Struct({
+  kind: Schema.Literal("sprint-plan-task-patch"),
+  target: Schema.Struct({ kind: Schema.Literal("sprint-plan"), id: ShortIdentity }),
+  expectedPlanVersion: NonNegativeInt,
+  operations: Schema.Array(SprintPlanTaskPatchOperation).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(100),
+    Schema.makeFilter((operations) => {
+      const pairs = new Set(
+        operations.map((operation) => `${operation.taskId}\u0000${operation.field}`),
+      );
+      return pairs.size === operations.length || "Task and field pairs must be unique.";
+    }),
+    Schema.makeFilter(
+      (operations) =>
+        operations.every(
+          ({ field, before, after }) =>
+            (field === "done"
+              ? typeof before === "boolean" && typeof after === "boolean"
+              : typeof before === "string" && typeof after === "string") && before !== after,
+        ) || "Each task patch needs distinct, correctly typed before and after values.",
+    ),
+  ),
+  reason: ExactMessage.check(Schema.isMaxLength(4_096)),
+  expectedBenefit: ExactMessage,
+  uncertainty: ExactMessage,
+  reviewAt: Timestamp,
+  preservedConstraints: Schema.Array(ExactMessage).check(Schema.isMaxLength(32)),
+});
 
 export const CommandCenterInboxProposalPayload = Schema.Union([
+  SprintPlanTaskPatch,
   Schema.Struct({
     kind: Schema.Literal("task-patch"),
     target: ProposalTarget,
@@ -134,13 +171,20 @@ export const CommandCenterInboxRevision = Schema.Struct({
 export type CommandCenterInboxRevision = typeof CommandCenterInboxRevision.Type;
 
 export const CommandCenterInboxApprovalState = Schema.Struct({
-  supported: Schema.Literal(false),
-  eligible: Schema.Literal(false),
+  supported: Schema.Boolean,
+  eligible: Schema.Boolean,
   reason: Schema.Literals([
     "phase-a-no-executor",
     "no-current-proposal",
     "changes-requested",
     "candidate-pending",
+    "unsupported-proposal",
+    "already-applied",
+    "policy-not-configured",
+    "evidence-ineligible",
+    "evidence-stale",
+    "plan-stale",
+    "ready",
   ]),
 });
 export type CommandCenterInboxApprovalState = typeof CommandCenterInboxApprovalState.Type;
@@ -244,6 +288,16 @@ export const CommandCenterInboxCandidateMutationInput = Schema.Struct({
   ...CommandCenterInboxMutationBase.fields,
   candidateRevisionId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
 });
+export const CommandCenterInboxApproveAdjustmentInput = Schema.Struct({
+  spaceId: SpaceId,
+  itemId: ItemId,
+  mutationId: MutationId,
+  currentRevisionId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  expectedInboxVersion: NonNegativeInt,
+  expectedPlanVersion: NonNegativeInt,
+});
+export type CommandCenterInboxApproveAdjustmentInput =
+  typeof CommandCenterInboxApproveAdjustmentInput.Type;
 export type CommandCenterInboxCandidateMutationInput =
   typeof CommandCenterInboxCandidateMutationInput.Type;
 
@@ -263,6 +317,35 @@ export type CommandCenterInboxSnoozeInput = typeof CommandCenterInboxSnoozeInput
 export const CommandCenterInboxSimpleMutationInput = CommandCenterInboxMutationBase;
 export type CommandCenterInboxSimpleMutationInput =
   typeof CommandCenterInboxSimpleMutationInput.Type;
+
+export const CommandCenterInboxDraftApproveInput = Schema.Struct({
+  ...CommandCenterInboxMutationBase.fields,
+  revisionId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+});
+export type CommandCenterInboxDraftApproveInput = typeof CommandCenterInboxDraftApproveInput.Type;
+
+export const CommandCenterInboxDraftReceipt = Schema.Struct({
+  mutationId: MutationId,
+  itemId: ItemId,
+  spaceId: SpaceId,
+  expectedVersion: NonNegativeInt,
+  revisionId: TrimmedNonEmptyString,
+  payloadDigest: TrimmedNonEmptyString,
+  connectionId: ConnectionId,
+  accountAlias: TrimmedNonEmptyString,
+  status: Schema.Literals(["approved", "creating", "created", "uncertain"]),
+  draftId: Schema.optional(TrimmedNonEmptyString),
+  messageId: Schema.optional(TrimmedNonEmptyString),
+  threadId: Schema.optional(TrimmedNonEmptyString),
+  error: Schema.optional(TrimmedNonEmptyString),
+});
+export type CommandCenterInboxDraftReceipt = typeof CommandCenterInboxDraftReceipt.Type;
+
+export const CommandCenterInboxDraftReceiptInput = Schema.Struct({
+  spaceId: SpaceId,
+  itemId: ItemId,
+});
+export type CommandCenterInboxDraftReceiptInput = typeof CommandCenterInboxDraftReceiptInput.Type;
 
 export const CommandCenterInboxMutationResult = Schema.Struct({
   detail: CommandCenterInboxDetail,

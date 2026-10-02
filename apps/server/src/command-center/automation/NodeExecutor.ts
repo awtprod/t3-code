@@ -23,6 +23,7 @@ import {
   parseAutomationProspectEvaluateNodeConfig,
   parseAutomationProspectNotifyNodeConfig,
   parseAutomationScopedShellNodeConfig,
+  parseRepositoryChecksNodeConfig,
 } from "./Definition.ts";
 import type {
   ProspectEvaluationError,
@@ -77,6 +78,13 @@ export interface ProspectNotificationFailure {
 }
 
 export interface AutomationNodeExecutorDependencies {
+  readonly pollRepositoryChecks?: (input: {
+    readonly spaceId: ReturnType<typeof SpaceId.make>;
+    readonly repositoryId: string;
+  }) => Effect.Effect<{ readonly scanned: number; readonly created: number }, string>;
+  readonly executeInboxDraft?: (
+    context: AutomationNodeExecutionContext,
+  ) => Effect.Effect<Schema.Json, string>;
   readonly startAgentRun: (
     input: AutomationAgentRunRequest,
   ) => Effect.Effect<AutomationAgentRunLinkedResult, AutomationAgentRunFailure>;
@@ -105,8 +113,35 @@ function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function permanentFailure(message: string): AutomationNodeExecutionOutcome {
-  return { type: "failed", error: message };
+function permanentFailure(
+  message: string,
+  failure?: Extract<AutomationNodeExecutionOutcome, { readonly type: "failed" }>["failure"],
+): AutomationNodeExecutionOutcome {
+  return { type: "failed", error: message, ...(failure === undefined ? {} : { failure }) };
+}
+
+function nodeConfigurationFailure(context: AutomationNodeExecutionContext, canonicalCode: string) {
+  return {
+    canonicalCode,
+    resource: "automation-node",
+    subject: String(context.node.id),
+  } as const;
+}
+
+function connectorFailure(
+  connectionId: string,
+  operation: string,
+  error: string,
+): NonNullable<Extract<AutomationNodeExecutionOutcome, { readonly type: "retry" }>["failure"]> {
+  return {
+    canonicalCode: /credential|token|auth(?:entication|orization)?|permission|forbidden/iu.test(
+      error,
+    )
+      ? "connector-credential-unavailable"
+      : "connector-read-unavailable",
+    resource: `google:${operation}`,
+    subject: connectionId,
+  };
 }
 
 function runtimeRoots(context: AutomationNodeExecutionContext): JsonObject {
@@ -327,7 +362,10 @@ const executeConnectorRead = Effect.fn("AutomationNodeExecutor.connectorRead")(f
 ) {
   const connectionId = context.node.config.connectionId;
   if (typeof connectionId !== "string" || connectionId.trim().length === 0) {
-    return permanentFailure(`Connector node '${context.node.id}' requires a connectionId.`);
+    return permanentFailure(
+      `Connector node '${context.node.id}' requires a connectionId.`,
+      nodeConfigurationFailure(context, "connector-connection-required"),
+    );
   }
   const request = yield* decodeGoogleReadRequest(
     googleRequestConfig(context.node.config, context.spaceId, connectionId),
@@ -340,10 +378,15 @@ const executeConnectorRead = Effect.fn("AutomationNodeExecutor.connectorRead")(f
       onSuccess: (value) => ({ _tag: "Right" as const, right: value }),
     }),
   );
-  if (request._tag === "Left") return permanentFailure(request.left);
+  if (request._tag === "Left")
+    return permanentFailure(
+      request.left,
+      nodeConfigurationFailure(context, "connector-request-invalid"),
+    );
   if (request.right.operation === "drive.export") {
     return permanentFailure(
       "Drive export must use the dedicated artifact-producing connector path.",
+      nodeConfigurationFailure(context, "connector-operation-invalid"),
     );
   }
 
@@ -353,9 +396,18 @@ const executeConnectorRead = Effect.fn("AutomationNodeExecutor.connectorRead")(f
       onSuccess: (value) => ({ _tag: "Right" as const, right: value }),
     }),
   );
-  if (result._tag === "Left") return { type: "retry", error: result.left } as const;
+  if (result._tag === "Left")
+    return {
+      type: "retry",
+      error: result.left,
+      failure: connectorFailure(connectionId, request.right.operation, result.left),
+    } as const;
   return {
     type: "succeeded",
+    resolvedFailureScopes: [
+      { resource: "automation-node", subject: String(context.node.id) },
+      { resource: `google:${request.right.operation}`, subject: connectionId },
+    ],
     output: {
       operation: result.right.operation,
       contentTrust: "untrusted-external",
@@ -368,9 +420,29 @@ const executeConnectorWrite = Effect.fn("AutomationNodeExecutor.connectorWrite")
   context: AutomationNodeExecutionContext,
   dependencies: AutomationNodeExecutorDependencies,
 ) {
+  if (context.node.config.source === "inbox.accepted") {
+    if (
+      context.node.config.operation !== "gmail.draft.create" ||
+      dependencies.executeInboxDraft === undefined
+    ) {
+      return permanentFailure("The accepted Inbox draft executor is unavailable.");
+    }
+    const result = yield* dependencies.executeInboxDraft(context).pipe(
+      Effect.match({
+        onFailure: (error) => ({ ok: false as const, error }),
+        onSuccess: (output) => ({ ok: true as const, output }),
+      }),
+    );
+    return result.ok
+      ? ({ type: "succeeded", output: result.output } as const)
+      : permanentFailure(result.error);
+  }
   const connectionId = context.node.config.connectionId;
   if (typeof connectionId !== "string" || connectionId.trim().length === 0) {
-    return permanentFailure(`Connector write node '${context.node.id}' requires a connectionId.`);
+    return permanentFailure(
+      `Connector write node '${context.node.id}' requires a connectionId.`,
+      nodeConfigurationFailure(context, "connector-connection-required"),
+    );
   }
   const request = yield* decodeGoogleDraftCreateRequest(
     googleRequestConfig(context.node.config, context.spaceId, connectionId),
@@ -383,9 +455,14 @@ const executeConnectorWrite = Effect.fn("AutomationNodeExecutor.connectorWrite")
   if (request._tag === "Left")
     return permanentFailure(
       "The connector write node does not contain a valid Gmail draft request.",
+      nodeConfigurationFailure(context, "connector-request-invalid"),
     );
   if (dependencies.googleDraft === undefined) {
-    return permanentFailure("Gmail draft creation is not configured on this server.");
+    return permanentFailure("Gmail draft creation is not configured on this server.", {
+      canonicalCode: "connector-capability-unavailable",
+      resource: "google:gmail.draft.create",
+      subject: connectionId,
+    });
   }
   const drafted = yield* dependencies.googleDraft(request.value).pipe(
     Effect.match({
@@ -394,9 +471,17 @@ const executeConnectorWrite = Effect.fn("AutomationNodeExecutor.connectorWrite")
     }),
   );
   return drafted._tag === "Left"
-    ? ({ type: "retry", error: drafted.error } as const)
+    ? ({
+        type: "retry",
+        error: drafted.error,
+        failure: connectorFailure(connectionId, request.value.operation, drafted.error),
+      } as const)
     : ({
         type: "succeeded",
+        resolvedFailureScopes: [
+          { resource: "automation-node", subject: String(context.node.id) },
+          { resource: "google:gmail.draft.create", subject: connectionId },
+        ],
         output: { operation: "gmail.draft.create", data: drafted.value },
       } as const);
 });
@@ -691,6 +776,23 @@ export function makeSafeAutomationNodeExecutor(dependencies: AutomationNodeExecu
         return executeProspectEvaluation(context, dependencies);
       case "prospect.notify":
         return executeProspectNotification(context, dependencies);
+      case "repository.checks": {
+        const parsed = parseRepositoryChecksNodeConfig(context.node.config);
+        if (!parsed.ok) return Effect.succeed(permanentFailure(parsed.message));
+        if (dependencies.pollRepositoryChecks === undefined)
+          return Effect.succeed(permanentFailure("Repository check polling is unavailable."));
+        return dependencies
+          .pollRepositoryChecks({
+            spaceId: SpaceId.make(context.spaceId),
+            repositoryId: parsed.config.repositoryId,
+          })
+          .pipe(
+            Effect.match({
+              onFailure: (error) => ({ type: "retry" as const, error }),
+              onSuccess: (output) => ({ type: "succeeded" as const, output }),
+            }),
+          );
+      }
       case "delay":
       case "approval":
         return Effect.succeed(
@@ -710,6 +812,7 @@ export const AUTOMATION_V1_NODE_POLICY = {
     "shell.scoped",
     "prospect.evaluate",
     "prospect.notify",
+    "repository.checks",
   ],
   routed: ["agent.run"],
   runtimeManaged: ["delay", "approval"],

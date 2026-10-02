@@ -32,7 +32,9 @@ import {
   EventId,
   MessageId,
   COMMAND_CENTER_WS_METHODS,
+  COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
   CommandCenterError,
+  CommandCenterResponsibilityError,
   CommandCenterEventStreamError,
   CommandCenterSprintPlanApplyImportResult,
   CommandCenterSprintPlanGetOriginalResult,
@@ -178,10 +180,13 @@ import * as RelayClient from "@t3tools/shared/relayClient";
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterInbox from "./command-center/Inbox.ts";
 import * as SprintPlan from "./command-center/SprintPlan.ts";
+import * as CommandCenterDigest from "./command-center/Digest.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as Observations from "./command-center/Observations.ts";
 import { refreshCommandCenterConnection } from "./command-center/ConnectionRefresh.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as Responsibilities from "./command-center/Responsibilities.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
 import * as AutomationScheduleInterpreter from "./command-center/automation/ScheduleInterpreter.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
@@ -189,6 +194,7 @@ import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
 import * as PublishConnections from "./command-center/publish/PublishConnections.ts";
+import * as YouTubeAnalytics from "./command-center/publish/youtube/YouTubeAnalytics.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
@@ -624,13 +630,59 @@ const makeWsRpcLayer = (
       const commandCenter = yield* CommandCenterService.CommandCenterService;
       const commandCenterInbox = yield* Effect.serviceOption(CommandCenterInbox.CommandCenterInbox);
       const sprintPlan = yield* Effect.serviceOption(SprintPlan.SprintPlanService);
+      const commandCenterDigest = yield* Effect.serviceOption(
+        CommandCenterDigest.CommandCenterDigest,
+      );
       const commandCenterEvents = yield* CommandCenterEventStream.CommandCenterEventStream;
+      const observations = yield* Effect.serviceOption(Observations.ObservationService);
+      const youtubeAnalytics = yield* Effect.serviceOption(YouTubeAnalytics.YouTubeAnalytics);
+      const observationActor = { kind: "user", id: currentSession.sessionId } as const;
+      const observationError = (cause: Observations.ObservationError) =>
+        new CommandCenterError({
+          reason: cause.reason === "not-found" ? "not_found" : cause.reason,
+          message: cause.message,
+          cause,
+        });
+      const withObservations = <A>(
+        use: (
+          service: Observations.ObservationServiceShape,
+        ) => Effect.Effect<A, Observations.ObservationError>,
+      ) =>
+        Option.match(observations, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "config",
+                message: "Observations are unavailable in this environment.",
+              }),
+            ),
+          onSome: (service) => use(service).pipe(Effect.mapError(observationError)),
+        });
       const automationDefinitionConfig =
         yield* AutomationDefinitionConfig.AutomationDefinitionConfig;
       const automationScheduleInterpreter = yield* Effect.serviceOption(
         AutomationScheduleInterpreter.AutomationScheduleInterpreter,
       );
       const commandCenterAutomationRuns = yield* AutomationRuns.AutomationRuns;
+      const commandCenterResponsibilities = yield* Effect.serviceOption(
+        Responsibilities.Responsibilities,
+      );
+      const responsibilityUnavailable = () =>
+        new Responsibilities.ResponsibilityError({
+          code: "config-unavailable",
+          message: "Responsibility controls are unavailable in this environment.",
+        });
+      const responsibilityRpcError = (cause: Responsibilities.ResponsibilityError) =>
+        new CommandCenterResponsibilityError({ code: cause.code, message: cause.message });
+      const responsibilityCall = <A>(
+        operation: (
+          service: Responsibilities.ResponsibilitiesShape,
+        ) => Effect.Effect<A, Responsibilities.ResponsibilityError>,
+      ) =>
+        Option.match(commandCenterResponsibilities, {
+          onNone: () => Effect.fail(responsibilityUnavailable()),
+          onSome: operation,
+        }).pipe(Effect.mapError(responsibilityRpcError));
       const commandCenterAutomationTriggers = yield* AutomationTriggerCoordinator.make;
       const commandCenterMemorySearch = yield* MemorySearchIndex.MemorySearchIndex;
       const googleReadConnector = yield* GoogleReadConnector.GoogleReadConnector;
@@ -742,6 +794,27 @@ const makeWsRpcLayer = (
         id: currentSession.subject,
         kind: "user",
       };
+      const withVerifiedCommandCenterDigest = <A>(
+        use: (
+          service: CommandCenterDigest.CommandCenterDigest["Service"],
+          configTimezone: string | null,
+        ) => Effect.Effect<A, CommandCenterError>,
+      ) =>
+        commandCenter.refreshInboxSpaceProjection(undefined).pipe(
+          Effect.andThen(commandCenter.bootstrap),
+          Effect.flatMap((snapshot) =>
+            Option.match(commandCenterDigest, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "config",
+                    message: "Command Center Digest is unavailable in this environment.",
+                  }),
+                ),
+              onSome: (service) => use(service, snapshot.timezone ?? null),
+            }),
+          ),
+        );
       const commandCenterReadiness = yield* ReadinessGate.CommandCenterReadinessGate;
       const refreshCommandCenterSpaceProjection = (spaceId?: CommandCenterSpaceIdType) =>
         commandCenter.querySpaces(spaceId === undefined ? {} : { spaceId }).pipe(
@@ -1640,6 +1713,37 @@ const makeWsRpcLayer = (
             withVerifiedCommandCenterInbox(input.spaceId, (inbox) => inbox.query(input)),
             { "rpc.aggregate": "command-center" },
           ),
+        [COMMAND_CENTER_WS_METHODS.digestQuery]: (_input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.digestQuery,
+            withVerifiedCommandCenterDigest((digest, configTimezone) =>
+              digest.query({ recipientSubject: currentSession.subject, configTimezone }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate,
+            withVerifiedCommandCenterDigest((digest, configTimezone) =>
+              digest.updatePreferences({
+                recipientSubject: currentSession.subject,
+                configTimezone,
+                preferences: input,
+              }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.digestMarkViewed]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.digestMarkViewed,
+            withVerifiedCommandCenterDigest((digest) =>
+              digest.markViewed({
+                recipientSubject: currentSession.subject,
+                snapshotId: input.snapshotId,
+              }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
         [COMMAND_CENTER_WS_METHODS.inboxDetail]: (input) =>
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.inboxDetail,
@@ -1678,6 +1782,14 @@ const makeWsRpcLayer = (
             COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
             withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
               inbox.acceptCandidate(input, { subject: currentSession.subject }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove,
+            withVerifiedCommandCenterInbox(input.spaceId, (inbox) =>
+              inbox.approveAdjustment(input, { subject: currentSession.subject }),
             ),
             { "rpc.aggregate": "command-center" },
           ),
@@ -1817,6 +1929,22 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "command-center" },
           ),
+        [COMMAND_CENTER_WS_METHODS.inboxDraftApprove]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxDraftApprove,
+            withVerifiedCommandCenterInbox(input.spaceId, () =>
+              commandCenterAutomationRuns.approveInboxDraft(input, currentSession.subject),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.inboxDraftReceipt]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.inboxDraftReceipt,
+            withVerifiedCommandCenterInbox(input.spaceId, () =>
+              commandCenterAutomationRuns.getInboxDraftReceipt(input),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
         [COMMAND_CENTER_WS_METHODS.runsQuery]: (input) =>
           observeRpcEffect(COMMAND_CENTER_WS_METHODS.runsQuery, commandCenter.queryRuns(input), {
             "rpc.aggregate": "command-center",
@@ -1825,6 +1953,36 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.automationsQuery,
             commandCenter.queryAutomations(input),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.responsibilitiesList]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.responsibilitiesList,
+            responsibilityCall((service) => service.list(input)).pipe(
+              Effect.map((responsibilities) => ({ responsibilities })),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.responsibilityGet]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.responsibilityGet,
+            responsibilityCall((service) => service.get(input)),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.responsibilityPause]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.responsibilityPause,
+            responsibilityCall((service) =>
+              service.setPause({ ...input, paused: true, actor: currentSessionId }),
+            ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.responsibilityResume]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.responsibilityResume,
+            responsibilityCall((service) =>
+              service.setPause({ ...input, paused: false, actor: currentSessionId }),
+            ),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.automationDefinitionGet]: (input) =>
@@ -2203,6 +2361,58 @@ const makeWsRpcLayer = (
                 artifact,
                 sizeBytes: exported.sizeBytes,
               };
+            }),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsList]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsList,
+            withObservations((service) => service.list(input)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsGet]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsGet,
+            withObservations((service) => service.get(input)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsHistory]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsHistory,
+            withObservations((service) => service.history(input)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsCreateManual]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsCreateManual,
+            withObservations((service) => service.createManual(input, observationActor)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsImport]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsImport,
+            withObservations((service) =>
+              service.importBatch(input.spaceId, input.request, observationActor),
+            ),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsCorrect]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsCorrect,
+            withObservations((service) => service.correct(input, observationActor)),
+          ),
+        [COMMAND_CENTER_WS_METHODS.observationsRetire]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.observationsRetire,
+            withObservations((service) => service.retire(input, observationActor)),
+          ),
+        [COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+            Option.match(youtubeAnalytics, {
+              onNone: () =>
+                Effect.fail(
+                  new CommandCenterError({
+                    reason: "config",
+                    message: "YouTube Analytics is unavailable in this environment.",
+                  }),
+                ),
+              onSome: (service) => service.fetch(input),
             }),
             { "rpc.aggregate": "command-center" },
           ),

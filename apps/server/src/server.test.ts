@@ -9283,6 +9283,207 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("hands a routed turn on another driver to a subagent thread", () =>
+    Effect.gen(function* () {
+      // The thread's session is bound to Codex; auto routing picks Claude, which
+      // that session cannot run, so the turn becomes a delegation instead of a
+      // `thread.turn.start` the provider reactor would reject.
+      const threadId = ThreadId.make("thread-bound-codex");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const codexProvider = {
+        ...efficiencyClaudeProvider,
+        instanceId: ProviderInstanceId.make("codex"),
+        driver: ProviderDriverKind.make("codex"),
+        models: [{ slug: "gpt-5-codex", name: "Codex", isCustom: false, capabilities: null }],
+      };
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+          providerRegistry: {
+            getProviders: Effect.succeed([codexProvider, efficiencyClaudeProvider]),
+          },
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              efficiency: { ...DEFAULT_SERVER_SETTINGS.efficiency, enabled: true },
+            }),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: (id) =>
+              Effect.succeed(
+                Option.some(
+                  makeDefaultOrchestrationThreadShell({
+                    id,
+                    routingMode: "auto",
+                    session: {
+                      threadId: id,
+                      status: "ready",
+                      providerName: "codex",
+                      providerInstanceId: ProviderInstanceId.make("codex"),
+                      runtimeMode: "full-access",
+                      activeTurnId: null,
+                      lastError: null,
+                      updatedAt: createdAt,
+                    },
+                  }),
+                ),
+              ),
+            getThreadDetailById: () => Effect.succeed(Option.none()),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-bound-codex"),
+            threadId,
+            message: {
+              messageId: MessageId.make("msg-bound-codex"),
+              role: "user",
+              text: "implement it",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt,
+          }),
+        ),
+      );
+
+      assert.isUndefined(
+        dispatchedCommands.find((command) => command.type === "thread.turn.start"),
+      );
+      const delegate = dispatchedCommands.find(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.turn.delegate" }> =>
+          command.type === "thread.turn.delegate",
+      );
+      assert.equal(delegate?.threadId, threadId);
+      assert.equal(delegate?.message.messageId, "msg-bound-codex");
+      assert.equal(delegate?.delegation.modelSelection.instanceId, "claudeAgent");
+      assert.equal(delegate?.delegation.reuseChild, false);
+      assert.notEqual(delegate?.delegation.childThreadId, threadId);
+      assert.deepEqual(
+        delegate?.delegation.efficiencyDecision.modelSelection,
+        delegate?.delegation.modelSelection,
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("keeps plan-accept and retry turns on the thread's own provider", () =>
+    Effect.gen(function* () {
+      // Same Codex-bound thread as above, but the turns carry thread-bound
+      // context: accepting a proposed plan and retrying a turn. A fresh
+      // subagent has neither the plan nor the retried turn, so these run
+      // unrouted on the thread's provider with their metadata intact.
+      const threadId = ThreadId.make("thread-bound-codex-context");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const codexProvider = {
+        ...efficiencyClaudeProvider,
+        instanceId: ProviderInstanceId.make("codex"),
+        driver: ProviderDriverKind.make("codex"),
+        models: [{ slug: "gpt-5-codex", name: "Codex", isCustom: false, capabilities: null }],
+      };
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+          providerRegistry: {
+            getProviders: Effect.succeed([codexProvider, efficiencyClaudeProvider]),
+          },
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              efficiency: { ...DEFAULT_SERVER_SETTINGS.efficiency, enabled: true },
+            }),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: (id) =>
+              Effect.succeed(
+                Option.some(
+                  makeDefaultOrchestrationThreadShell({
+                    id,
+                    routingMode: "auto",
+                    session: {
+                      threadId: id,
+                      status: "ready",
+                      providerName: "codex",
+                      providerInstanceId: ProviderInstanceId.make("codex"),
+                      runtimeMode: "full-access",
+                      activeTurnId: null,
+                      lastError: null,
+                      updatedAt: createdAt,
+                    },
+                  }),
+                ),
+              ),
+            getThreadDetailById: () => Effect.succeed(Option.none()),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const turn = (id: string) => ({
+        type: "thread.turn.start" as const,
+        commandId: CommandId.make(`cmd-${id}`),
+        threadId,
+        message: {
+          messageId: MessageId.make(`msg-${id}`),
+          role: "user" as const,
+          text: "go",
+          attachments: [],
+        },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        createdAt,
+      });
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              ...turn("plan"),
+              sourceProposedPlan: { threadId, planId: "plan-1" },
+            });
+            yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              ...turn("retry"),
+              retryOfTurnId: TurnId.make("turn-1"),
+            });
+          }),
+        ),
+      );
+
+      assert.isUndefined(
+        dispatchedCommands.find((command) => command.type === "thread.turn.delegate"),
+      );
+      const starts = dispatchedCommands.filter(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
+          command.type === "thread.turn.start",
+      );
+      assert.deepEqual(
+        starts.map((command) => command.message.messageId),
+        ["msg-plan", "msg-retry"],
+      );
+      assert.deepEqual(starts[0]?.sourceProposedPlan, { threadId, planId: "plan-1" });
+      assert.equal(starts[1]?.retryOfTurnId, "turn-1");
+      for (const start of starts) assert.isUndefined(start.efficiencyDecision);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("leaves the turn byte-identical when efficiency is disabled", () =>
     Effect.gen(function* () {
       const command = makeBootstrapTurnStart("auto");

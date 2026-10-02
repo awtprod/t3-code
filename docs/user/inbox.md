@@ -25,7 +25,11 @@ Choose **Edit proposal** to prepare a direct revision. If no proposal exists yet
 
 Creating a candidate does not replace the current proposal. Review its exact structured effect, then choose **Accept revision** to make it current or **Discard** to keep the previous proposal. Accepted, superseded, and discarded revisions retain that same structured effect, evidence, and actor in history. Accepting a revision only edits the proposal—it does not authorize or execute the action. Change requests remain blocking until someone marks each one resolved.
 
-Some Inbox items cannot be executed yet. In that case, Inbox explains the limitation and continues to support discussion and revision instead of showing an approval button that cannot work.
+For a sprint plan task adjustment, **Accept revision** still only selects the proposal. When its linked observation is current and meets the Space's evidence policy, a separate **Approve exact task changes** button appears. It applies the listed task fields together and records who approved them. If the plan, task fields, evidence, or review state changes first, Inbox blocks approval and explains why. A Space without an observation eligibility policy cannot approve these adjustments. Other proposal kinds remain review-only.
+
+An applied adjustment stays in history. To reverse it, prepare an inverse candidate against the current plan and approve that new revision; reopening or reaccepting the old one does not replay it.
+
+For an accepted Gmail draft proposal backed by current local Item evidence, **Approve draft** is a separate action. It creates the exact addressed draft in the connected Gmail account and never sends it. Pending candidates, change requests, closed Items, and stale evidence block approval. Inbox shows the resulting Gmail draft ID when verified. If Gmail's response is inconclusive, Inbox shows a reconciliation state and will not automatically attempt another draft; check Gmail Drafts before taking further action.
 
 ## Snooze, dismiss, and reopen
 

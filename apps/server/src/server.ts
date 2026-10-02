@@ -2,6 +2,7 @@ import { EnvironmentHttpApi } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
@@ -79,6 +80,7 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { SandboxSettleCleanupReactorLive } from "./orchestration/Layers/SandboxSettleCleanupReactor.ts";
+import { SubagentDelegationReactorLive } from "./orchestration/Layers/SubagentDelegationReactor.ts";
 import { SandboxLifecycleReactorLive } from "./orchestration/Layers/SandboxLifecycleReactor.ts";
 import { SandboxRuntimeManagerLive } from "./sandbox/SandboxRuntimeManager.ts";
 import * as ThreadSettlementReactor from "./orchestration/ThreadSettlementReactor.ts";
@@ -150,9 +152,14 @@ import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale"
 import * as CommandCenterService from "./command-center/Service.ts";
 import * as CommandCenterInbox from "./command-center/Inbox.ts";
 import * as SprintPlan from "./command-center/SprintPlan.ts";
+import * as CommandCenterDigest from "./command-center/Digest.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as Observations from "./command-center/Observations.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as Responsibilities from "./command-center/Responsibilities.ts";
+import * as RepositoryChecks from "./command-center/RepositoryChecks.ts";
+import * as InboxGmailDrafts from "./command-center/InboxGmailDrafts.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
@@ -164,6 +171,8 @@ import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
 import * as PublishConnections from "./command-center/publish/PublishConnections.ts";
+import * as YouTubeAnalytics from "./command-center/publish/youtube/YouTubeAnalytics.ts";
+import * as YouTubeTokenStore from "./command-center/publish/youtube/YouTubeTokenStore.ts";
 import * as CommandCenterConfig from "./command-center/Config.ts";
 import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
@@ -382,6 +391,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(SandboxLifecycleReactorLive),
   Layer.provideMerge(SandboxSettleCleanupReactorLive),
+  Layer.provideMerge(SubagentDelegationReactorLive),
   Layer.provideMerge(ThreadSettlementReactor.layer),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
@@ -479,6 +489,11 @@ const PublishConnectionsLayerLive = PublishConnections.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
+const YouTubeAnalyticsLayerLive = YouTubeAnalytics.layer.pipe(
+  Layer.provide(YouTubeTokenStore.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+  Layer.provide(Observations.layer),
+);
+
 const AutomationDefinitionConfigLayerLive = AutomationDefinitionConfig.layer.pipe(
   Layer.provideMerge(CommandCenterConfigLayerLive),
   Layer.provide(ProcessRunner.layer),
@@ -499,25 +514,113 @@ const AutomationScopedShellLayerLive = AutomationScopedShell.AutomationScopedShe
 const CommandCenterBaseLayerLive = Layer.mergeAll(
   CommandCenterService.runtimeLayer,
   CommandCenterInbox.layer,
+  CommandCenterDigest.liveLayer,
   CommandCenterEventStream.layer,
+  Observations.layer,
   MemorySearchIndex.layer,
   GoogleReadConnectorLayerLive,
   WindowsMediaConnectorLayerLive,
   GoogleConnectionSetupLayerLive,
   PublishConnectionsLayerLive,
+  YouTubeAnalyticsLayerLive,
   AutomationDefinitionConfigLayerLive,
   AutomationScheduleInterpreterLayerLive,
   AutomationScopedShellLayerLive,
 );
 
+const RepositoryChecksLayerLive = RepositoryChecks.layer.pipe(
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(GitHubCli.layer),
+  Layer.provide(SourceControlRateLimit.layer),
+  Layer.provide(VcsProcess.layer),
+  Layer.provide(PersistenceLayerLive),
+);
+
+const InboxGmailDraftsLayerLive = InboxGmailDrafts.layer.pipe(
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(CommandCenterConfigLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
 const CommandCenterCoreLayerLive = Layer.mergeAll(
   CommandCenterBaseLayerLive,
-  AutomationRuns.safeRuntimeLayer.pipe(Layer.provide(CommandCenterBaseLayerLive)),
+  RepositoryChecksLayerLive,
+  InboxGmailDraftsLayerLive,
+  AutomationRuns.safeRuntimeLayer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        CommandCenterBaseLayerLive,
+        RepositoryChecksLayerLive,
+        InboxGmailDraftsLayerLive,
+      ),
+    ),
+  ),
 );
 
 const AutomationRunsLayerLive = AutomationRuns.layer.pipe(
   Layer.provideMerge(CommandCenterCoreLayerLive),
 );
+
+const ResponsibilitiesLayerLive = Layer.effect(
+  Responsibilities.Responsibilities,
+  Effect.gen(function* () {
+    const commandCenter = yield* CommandCenterService.CommandCenterService;
+    const configured = Effect.fn("Responsibilities.configured")(function* () {
+      const config = yield* commandCenter.syncConfiguration({ force: true }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new Responsibilities.ResponsibilityError({
+              code: "config-unavailable",
+              message: "Could not verify the committed Automation configuration.",
+              cause,
+            }),
+        ),
+      );
+      if (config.health.status !== "loaded") {
+        return yield* new Responsibilities.ResponsibilityError({
+          code: "config-unavailable",
+          message: "The committed Automation configuration is unavailable.",
+        });
+      }
+      const activeSpaces = new Set(
+        config.spaces.filter((space) => space.lifecycle === "active").map((space) => space.id),
+      );
+      return config.automations.flatMap((automation) =>
+        activeSpaces.has(automation.spaceId) && automation.configCommit
+          ? [
+              {
+                automationId: automation.id,
+                spaceId: automation.spaceId,
+                configCommitSha: automation.configCommit,
+                definitionDigest: automation.definitionDigest,
+                enabled: automation.enabled,
+              },
+            ]
+          : [],
+      );
+    });
+    return yield* Responsibilities.make({
+      now: Effect.map(DateTime.now, DateTime.formatIso),
+      listConfiguredAutomations: configured,
+      validateAutomation: ({ automationId, spaceId }) =>
+        configured().pipe(
+          Effect.flatMap((automations) => {
+            const identity = automations.find(
+              (item) => item.automationId === automationId && item.spaceId === spaceId,
+            );
+            return identity
+              ? Effect.succeed(identity)
+              : Effect.fail(
+                  new Responsibilities.ResponsibilityError({
+                    code: "not-found",
+                    message: "The Responsibility is absent from committed configuration.",
+                  }),
+                );
+          }),
+        ),
+    });
+  }),
+).pipe(Layer.provideMerge(CommandCenterBaseLayerLive), Layer.provide(PersistenceLayerLive));
 
 const AutomationTriggerCoordinatorLayerLive = AutomationTriggerCoordinator.layer.pipe(
   Layer.provide(AutomationRunsLayerLive),
@@ -612,6 +715,7 @@ const RunRecoveryCoordinatorLayerLive = RunRecoveryCoordinator.layer.pipe(
 );
 
 const CommandCenterLayerLive = Layer.mergeAll(
+  ResponsibilitiesLayerLive,
   AutomationScheduleInterpreterLayerLive,
   AutomationRunsLayerLive,
   AutomationTriggerCoordinatorLayerLive,
@@ -760,7 +864,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
-  Layer.provideMerge(SprintPlan.layer),
+  Layer.provideMerge(SprintPlan.layer.pipe(Layer.provide(PersistenceLayerLive))),
   Layer.provideMerge(ReadinessGate.layer),
   Layer.provideMerge(ProcessDiagnostics.layer),
   Layer.provideMerge(ProcessResourceMonitor.layer),

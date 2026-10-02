@@ -66,6 +66,7 @@ import {
   resolveInboxDraftScopeId,
   writeInboxDraft,
   writeInboxPendingReply,
+  gmailDraftApprovalBlockedReason,
 } from "./InboxScreen.logic";
 
 export interface InboxEnvironmentOption {
@@ -74,6 +75,7 @@ export interface InboxEnvironmentOption {
 }
 
 interface InboxScreenProps {
+  readonly canApprove: boolean;
   readonly environmentId: EnvironmentId;
   readonly environmentOptions: ReadonlyArray<InboxEnvironmentOption>;
   readonly draftScopeId?: string | undefined;
@@ -371,13 +373,16 @@ function ProposalPayloadDetails({
         ) : null}
       </dl>
       <div className="mt-3 space-y-3">
-        {payload.kind === "task-patch"
-          ? payload.operations.map((operation, index) => (
+        {payload.kind !== "prepared-action"
+          ? payload.operations.map((operation) => (
               <div
                 className="rounded-lg border border-border/60 p-3"
-                key={`${operation.field}:${index}`}
+                key={`${"taskId" in operation ? `${operation.taskId}:` : ""}${operation.field}:${jsonEditorValue(operation.before)}:${jsonEditorValue(operation.after)}`}
               >
-                <p className="font-mono text-xs font-semibold break-all">{operation.field}</p>
+                <p className="font-mono text-xs font-semibold break-all">
+                  {"taskId" in operation ? `${operation.taskId} · ` : ""}
+                  {operation.field}
+                </p>
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   <div>
                     <p className="text-xs text-muted-foreground">Before</p>
@@ -404,6 +409,18 @@ function ProposalPayloadDetails({
             ))}
         {payload.kind === "prepared-action" && Object.keys(payload.parameters).length === 0 ? (
           <p className="text-xs text-muted-foreground">No parameters.</p>
+        ) : null}
+        {payload.kind === "sprint-plan-task-patch" ? (
+          <div className="space-y-1 rounded-lg border border-border/60 p-3 text-xs">
+            <p>Plan version: {payload.expectedPlanVersion}</p>
+            <p>Reason: {payload.reason}</p>
+            <p>Expected benefit: {payload.expectedBenefit}</p>
+            <p>Uncertainty: {payload.uncertainty}</p>
+            <p>Review on: {dateLabel(payload.reviewAt)}</p>
+            {payload.preservedConstraints.map((constraint) => (
+              <p key={constraint}>Preserve: {constraint}</p>
+            ))}
+          </div>
         ) : null}
       </div>
     </div>
@@ -436,7 +453,7 @@ function ProposalEditor({ current, disabled, onCreate }: ProposalEditorProps) {
   const [summary, setSummary] = useState(current.preview.summary);
   const initialValues = useMemo(
     () =>
-      current.payload.kind === "task-patch"
+      current.payload.kind !== "prepared-action"
         ? current.payload.operations.map((operation) => jsonEditorValue(operation.after))
         : Object.values(current.payload.parameters).map(jsonEditorValue),
     [current],
@@ -461,24 +478,45 @@ function ProposalEditor({ current, disabled, onCreate }: ProposalEditorProps) {
       return;
     }
     const parsedValues = parsed.map((entry) => (entry.ok ? entry.value : null));
+    if (
+      current.payload.kind === "sprint-plan-task-patch" &&
+      current.payload.operations.some((operation, index) => {
+        const value = parsedValues[index];
+        return (
+          (operation.field === "done" ? typeof value !== "boolean" : typeof value !== "string") ||
+          value === operation.before
+        );
+      })
+    ) {
+      setValidationError("Each sprint plan field needs a changed value of the correct type.");
+      return;
+    }
     const payload: CommandCenterInboxProposalPayload =
-      current.payload.kind === "task-patch"
+      current.payload.kind === "sprint-plan-task-patch"
         ? {
             ...current.payload,
             operations: current.payload.operations.map((operation, index) => ({
               ...operation,
-              after: parsedValues[index] as never,
+              after: parsedValues[index] as string | boolean,
             })),
           }
-        : {
-            ...current.payload,
-            parameters: Object.fromEntries(
-              Object.keys(current.payload.parameters).map((key, index) => [
-                key,
-                parsedValues[index] as never,
-              ]),
-            ),
-          };
+        : current.payload.kind === "task-patch"
+          ? {
+              ...current.payload,
+              operations: current.payload.operations.map((operation, index) => ({
+                ...operation,
+                after: parsedValues[index] as never,
+              })),
+            }
+          : {
+              ...current.payload,
+              parameters: Object.fromEntries(
+                Object.keys(current.payload.parameters).map((key, index) => [
+                  key,
+                  parsedValues[index] as never,
+                ]),
+              ),
+            };
     if (
       new TextEncoder().encode(JSON.stringify(payload)).byteLength >
       COMMAND_CENTER_INBOX_MAX_PROPOSAL_BYTES
@@ -507,9 +545,10 @@ function ProposalEditor({ current, disabled, onCreate }: ProposalEditorProps) {
     readonly value: string;
     readonly before?: string;
   }> =
-    current.payload.kind === "task-patch"
+    current.payload.kind !== "prepared-action"
       ? current.payload.operations.map((operation, index) => ({
-          label: operation.field,
+          label:
+            "taskId" in operation ? `${operation.taskId} · ${operation.field}` : operation.field,
           before: jsonEditorValue(operation.before),
           value: values[index] ?? "null",
         }))
@@ -711,6 +750,7 @@ function StarterProposalEditor({
 }
 
 interface InboxDetailPaneProps {
+  readonly canApprove: boolean;
   readonly environmentId: EnvironmentId;
   readonly draftScopeId?: string | undefined;
   readonly itemId: string;
@@ -720,7 +760,8 @@ interface InboxDetailPaneProps {
   readonly onChanged: () => void;
 }
 
-function InboxDetailPane({
+export function InboxDetailPane({
+  canApprove,
   environmentId,
   draftScopeId,
   itemId,
@@ -745,6 +786,17 @@ function InboxDetailPane({
     (detailQuery.data === null || optimisticDetail.state.version >= detailQuery.data.state.version)
       ? optimisticDetail
       : detailQuery.data;
+  const hasGmailDraftProposal =
+    detail?.currentRevision?.payload.kind === "prepared-action" &&
+    detail.currentRevision.payload.actionKind === "gmail.draft.create";
+  const draftReceiptQuery = useEnvironmentQuery(
+    hasGmailDraftProposal
+      ? commandCenterEnvironment.getInboxDraftReceipt({
+          environmentId,
+          input: { spaceId: SpaceId.make(space.id), itemId: ItemId.make(itemId) },
+        })
+      : null,
+  );
   useEffect(() => {
     setOptimisticDetail(null);
   }, [environmentId, itemId, space.id]);
@@ -800,7 +852,19 @@ function InboxDetailPane({
 
   const [submitting, setSubmitting] = useState<string | null>(null);
   const mutationInFlightRef = useRef(false);
+  const approvalAttemptRef = useRef<{
+    readonly revisionId: string;
+    readonly inboxVersion: number;
+    readonly planVersion: number;
+    readonly mutationId: string;
+  } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [draftApprovalError, setDraftApprovalError] = useState<string | null>(null);
+  const draftApprovalRequestRef = useRef<{ revisionId: string; mutationId: string } | null>(null);
+  useEffect(() => {
+    setDraftApprovalError(null);
+    draftApprovalRequestRef.current = null;
+  }, [environmentId, itemId, space.id, detail?.currentRevision?.id]);
   const [rejectedReply, setRejectedReply] = useState<InboxPendingReply | null>(null);
   const comment = useAtomCommand(commandCenterEnvironment.commentOnInboxItem, {
     reportFailure: false,
@@ -812,6 +876,12 @@ function InboxDetailPane({
     reportFailure: false,
   });
   const acceptCandidate = useAtomCommand(commandCenterEnvironment.acceptInboxCandidate, {
+    reportFailure: false,
+  });
+  const approveAdjustment = useAtomCommand(commandCenterEnvironment.approveInboxAdjustment, {
+    reportFailure: false,
+  });
+  const approveInboxDraft = useAtomCommand(commandCenterEnvironment.approveInboxDraft, {
     reportFailure: false,
   });
   const discardCandidate = useAtomCommand(commandCenterEnvironment.discardInboxCandidate, {
@@ -1008,6 +1078,57 @@ function InboxDetailPane({
         detail.nextRevisionBeforeSequence !== undefined
       : nextOlder !== undefined;
   const disabled = submitting !== null;
+  const isGmailDraft =
+    currentRevision?.payload.kind === "prepared-action" &&
+    currentRevision.payload.actionKind === "gmail.draft.create";
+  const currentDraftReceipt =
+    draftReceiptQuery.data?.revisionId === currentRevision?.id ? draftReceiptQuery.data : null;
+  const draftApprovalBlockedReason = gmailDraftApprovalBlockedReason({
+    canApprove,
+    detail,
+    receipt: currentDraftReceipt,
+  });
+  const approveDraft = async () => {
+    if (
+      currentRevision === undefined ||
+      draftApprovalBlockedReason !== null ||
+      (currentDraftReceipt !== null && currentDraftReceipt.status !== "approved") ||
+      mutationInFlightRef.current
+    )
+      return;
+    const savedRequest = draftApprovalRequestRef.current;
+    const mutationId =
+      currentDraftReceipt?.mutationId ??
+      (savedRequest?.revisionId === currentRevision.id
+        ? savedRequest.mutationId
+        : `web:${randomUUID()}`);
+    draftApprovalRequestRef.current = { revisionId: currentRevision.id, mutationId };
+    mutationInFlightRef.current = true;
+    setSubmitting("approve-draft");
+    setDraftApprovalError(null);
+    try {
+      const result = await approveInboxDraft({
+        environmentId,
+        input: {
+          spaceId: SpaceId.make(space.id),
+          itemId: ItemId.make(itemId),
+          mutationId,
+          expectedVersion: currentDraftReceipt?.expectedVersion ?? detail.state.version,
+          revisionId: currentRevision.id,
+        },
+      });
+      draftReceiptQuery.refresh();
+      if (result._tag !== "Success") {
+        setDraftApprovalError(mutationError(result));
+      }
+    } catch (failure) {
+      draftReceiptQuery.refresh();
+      setDraftApprovalError(mutationError(failure));
+    } finally {
+      mutationInFlightRef.current = false;
+      setSubmitting(null);
+    }
+  };
   const submitFeedback = async () => {
     if ((pendingReply === null && draft.text.trim().length === 0) || disabled) return;
     const submitted = inboxPendingReplyForSubmit({
@@ -1287,38 +1408,188 @@ function InboxDetailPane({
                   {currentRevision.evidence.version}
                 </p>
               </div>
-              <ProposalEditor
-                current={currentRevision}
-                disabled={disabled}
-                onCreate={async ({ payload, preview }) => {
-                  return runMutation("create-candidate", async () =>
-                    createCandidate({
-                      environmentId,
-                      input: {
-                        spaceId: SpaceId.make(space.id),
-                        itemId: ItemId.make(itemId),
-                        mutationId: `web:${randomUUID()}`,
-                        expectedVersion: detail.state.version,
-                        source: "direct",
-                        payload,
-                        preview,
-                        evidence: currentRevision.evidence,
-                      },
-                    }),
-                  );
-                }}
-              />
+              {detail.state.approval.reason !== "already-applied" ? (
+                <ProposalEditor
+                  current={currentRevision}
+                  disabled={disabled}
+                  onCreate={async ({ payload, preview }) => {
+                    return runMutation("create-candidate", async () =>
+                      createCandidate({
+                        environmentId,
+                        input: {
+                          spaceId: SpaceId.make(space.id),
+                          itemId: ItemId.make(itemId),
+                          mutationId: `web:${randomUUID()}`,
+                          expectedVersion: detail.state.version,
+                          source: "direct",
+                          payload,
+                          preview,
+                          evidence: currentRevision.evidence,
+                        },
+                      }),
+                    );
+                  }}
+                />
+              ) : null}
             </>
           )}
-          <div className="mt-4 rounded-xl border border-border/60 bg-muted/15 p-3 text-sm text-muted-foreground">
-            {detail.state.approval.reason === "changes-requested"
-              ? "Approval is blocked until every change request is resolved."
-              : detail.state.approval.reason === "candidate-pending"
-                ? "Review the pending candidate before the proposal can move forward."
-                : detail.state.approval.reason === "no-current-proposal"
-                  ? "There is no proposal to approve."
-                  : "Execution is not available for this item. Comments and proposal revisions remain available."}
-          </div>
+          {isGmailDraft && currentRevision !== undefined ? (
+            <div className="mt-4 rounded-xl border border-border/60 bg-muted/15 p-3 text-sm">
+              <p className="font-medium">Gmail draft approval</p>
+              <p className="mt-1 text-muted-foreground">
+                Accepting a revision only selects its proposal. Approve draft creates the exact
+                addressed draft in the connected Gmail account; it never sends mail.
+              </p>
+              {currentDraftReceipt?.status === "created" ? (
+                <p className="mt-2" role="status">
+                  Draft created · ID{" "}
+                  <code className="break-all">{currentDraftReceipt.draftId}</code>
+                </p>
+              ) : currentDraftReceipt?.status === "uncertain" ? (
+                <p className="mt-2 text-destructive-foreground" role="alert">
+                  Gmail did not return a verified outcome. Check Drafts and reconcile this item
+                  before trying again. {currentDraftReceipt.error}
+                </p>
+              ) : currentDraftReceipt !== null ? (
+                <p className="mt-2 text-muted-foreground" role="status">
+                  {currentDraftReceipt.status === "creating"
+                    ? "Draft creation started. If this persists, check Gmail Drafts; the Run will not retry an uncertain result."
+                    : "Draft approved and waiting for its Run."}
+                </p>
+              ) : null}
+              {currentDraftReceipt !== null ? (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Approved account {currentDraftReceipt.accountAlias} · connection{" "}
+                  {currentDraftReceipt.connectionId}
+                </p>
+              ) : null}
+              {draftApprovalBlockedReason !== null ? (
+                <p className="mt-2 text-muted-foreground">{draftApprovalBlockedReason}</p>
+              ) : null}
+              {draftReceiptQuery.error !== null ? (
+                <p className="mt-2 text-destructive-foreground" role="alert">
+                  Could not check draft status. Reload this status before approving.
+                </p>
+              ) : null}
+              {draftApprovalError !== null ? (
+                <p className="mt-2 text-destructive-foreground" role="alert">
+                  {draftApprovalError} Check draft status before another action.
+                </p>
+              ) : null}
+              {draftReceiptQuery.error !== null || draftApprovalError !== null ? (
+                <Button
+                  className="mt-3"
+                  onClick={draftReceiptQuery.refresh}
+                  size="sm"
+                  variant="outline"
+                >
+                  <RefreshCwIcon /> Check draft status
+                </Button>
+              ) : null}
+              <Button
+                className="mt-3"
+                disabled={
+                  disabled ||
+                  draftApprovalBlockedReason !== null ||
+                  draftReceiptQuery.isPending ||
+                  draftReceiptQuery.error !== null ||
+                  (currentDraftReceipt !== null && currentDraftReceipt.status !== "approved")
+                }
+                onClick={() => void approveDraft()}
+                size="sm"
+              >
+                <CheckIcon />{" "}
+                {submitting === "approve-draft"
+                  ? "Approving…"
+                  : currentDraftReceipt?.status === "approved"
+                    ? "Continue approved draft"
+                    : "Approve draft"}
+              </Button>
+            </div>
+          ) : (
+            <>
+              <div className="mt-4 rounded-xl border border-border/60 bg-muted/15 p-3 text-sm text-muted-foreground">
+                {detail.state.approval.reason === "changes-requested"
+                  ? "Approval is blocked until every change request is resolved."
+                  : detail.state.approval.reason === "candidate-pending"
+                    ? "Review the pending candidate before the proposal can move forward."
+                    : detail.state.approval.reason === "no-current-proposal"
+                      ? "There is no proposal to approve."
+                      : detail.state.approval.reason === "already-applied"
+                        ? "This exact revision was approved and applied to the sprint plan. A reversal needs a new candidate and a new approval."
+                        : detail.state.approval.reason === "policy-not-configured"
+                          ? "Approval is blocked until this Space has an observation eligibility policy."
+                          : detail.state.approval.reason === "evidence-stale"
+                            ? "Approval is blocked because the evidence identity no longer matches the current observation."
+                            : detail.state.approval.reason === "evidence-ineligible"
+                              ? "Approval is blocked because the current observation does not meet this Space's policy."
+                              : detail.state.approval.reason === "plan-stale"
+                                ? "Approval is blocked because the sprint plan changed. Prepare a new exact revision."
+                                : detail.state.approval.reason === "ready"
+                                  ? "This accepted revision is eligible. Approve applies only the exact task fields shown above."
+                                  : "Execution is not available for this item. Comments and proposal revisions remain available."}
+              </div>
+              {currentRevision?.payload.kind === "sprint-plan-task-patch" &&
+              detail.state.approval.eligible ? (
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <Button
+                    disabled={disabled || !canApprove}
+                    onClick={() => {
+                      const payload = currentRevision.payload;
+                      if (payload.kind !== "sprint-plan-task-patch") return;
+                      const previous = approvalAttemptRef.current;
+                      const attempt =
+                        previous?.revisionId === currentRevision.id &&
+                        previous.inboxVersion === detail.state.version &&
+                        previous.planVersion === payload.expectedPlanVersion
+                          ? previous
+                          : {
+                              revisionId: currentRevision.id,
+                              inboxVersion: detail.state.version,
+                              planVersion: payload.expectedPlanVersion,
+                              mutationId: `web:${randomUUID()}`,
+                            };
+                      approvalAttemptRef.current = attempt;
+                      void runMutation("approve-adjustment", async () =>
+                        approveAdjustment({
+                          environmentId,
+                          input: {
+                            spaceId: SpaceId.make(space.id),
+                            itemId: ItemId.make(itemId),
+                            mutationId: attempt.mutationId,
+                            currentRevisionId: attempt.revisionId,
+                            expectedInboxVersion: attempt.inboxVersion,
+                            expectedPlanVersion: attempt.planVersion,
+                          },
+                        }),
+                      ).then((succeeded) => {
+                        if (succeeded) approvalAttemptRef.current = null;
+                        else detailQuery.refresh();
+                      });
+                    }}
+                    size="sm"
+                  >
+                    <CheckIcon /> Approve exact task changes
+                  </Button>
+                  {!canApprove ? (
+                    <p className="text-xs text-muted-foreground">
+                      This session lacks approval authority.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </>
+          )}
+          {draftReceiptQuery.data !== null &&
+          draftReceiptQuery.data.revisionId !== currentRevision?.id ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Previous Gmail draft revision {draftReceiptQuery.data.revisionId}:{" "}
+              {draftReceiptQuery.data.status}
+              {draftReceiptQuery.data.draftId === undefined
+                ? ""
+                : ` · draft ID ${draftReceiptQuery.data.draftId}`}
+            </p>
+          ) : null}
         </section>
 
         {candidates.length > 0 ? (
@@ -1337,7 +1608,11 @@ function InboxDetailPane({
                 </p>
                 <ProposalHumanContext preview={candidate.preview} />
                 <ProposalPayloadDetails
-                  label="Exact effect if accepted"
+                  label={
+                    candidate.payload.kind === "sprint-plan-task-patch"
+                      ? "Exact proposed effect; accepting only selects it"
+                      : "Exact effect if accepted"
+                  }
                   payload={candidate.payload}
                 />
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -1650,6 +1925,7 @@ function SnoozeAndDismiss({
 }
 
 export function InboxScreen({
+  canApprove,
   environmentId,
   environmentOptions,
   draftScopeId,
@@ -1795,6 +2071,7 @@ export function InboxScreen({
           <div className={cn("min-h-0", itemId === undefined && "hidden lg:block")}>
             {itemId !== undefined && selectedSpace !== undefined ? (
               <InboxDetailPane
+                canApprove={canApprove}
                 draftScopeId={scopedDraftId}
                 environmentId={environmentId}
                 itemId={itemId}

@@ -8,6 +8,7 @@ import * as Semaphore from "effect/Semaphore";
 import type * as Scope from "effect/Scope";
 
 import * as AutomationRuns from "../AutomationRuns.ts";
+import * as AutomationRuntime from "./Runtime.ts";
 
 const DEFAULT_POLL_INTERVAL = Duration.seconds(5);
 const DEFAULT_BATCH_LIMIT = 50;
@@ -26,6 +27,7 @@ export class AutomationRecoveryCoordinator extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const runs = yield* AutomationRuns.AutomationRuns;
+  const runtime = yield* AutomationRuntime.AutomationRuntime;
   const crypto = yield* Crypto.Crypto;
   const workerId = `recovery:${yield* crypto.randomUUIDv4.pipe(Effect.orDie)}`;
   const tickLock = yield* Semaphore.make(1);
@@ -33,6 +35,7 @@ export const make = Effect.gen(function* () {
   const tick: AutomationRecoveryCoordinatorShape["tick"] = () =>
     tickLock.withPermits(1)(
       runs.recoverDue({ owner: workerId, limit: DEFAULT_BATCH_LIMIT }).pipe(
+        Effect.tap(() => runtime.reconcileActiveSlots({ limit: DEFAULT_BATCH_LIMIT })),
         Effect.tap((report) =>
           report.scanned > 0 || report.failures.length > 0
             ? Effect.logInfo("command-center.automation.recovery-tick", {

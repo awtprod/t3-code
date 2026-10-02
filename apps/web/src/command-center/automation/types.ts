@@ -22,6 +22,7 @@ export const AUTOMATION_EDITOR_NODE_KINDS = [
   "shell.scoped",
   "prospect.evaluate",
   "prospect.notify",
+  "repository.checks",
 ] as const;
 
 export type AutomationEditorNodeKind = (typeof AUTOMATION_EDITOR_NODE_KINDS)[number];

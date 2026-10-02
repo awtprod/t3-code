@@ -22,6 +22,7 @@ import {
   ProviderInteractionMode,
   ProviderDriverKind,
   RuntimeMode,
+  SUBAGENT_STARTED_ACTIVITY_KIND,
   TerminalOpenInput,
 } from "@t3tools/contracts";
 import {
@@ -636,6 +637,15 @@ function useLocalDispatchState(input: {
     (message) => message.role === "user",
   );
   const latestUserMessageId = latestUserMessage?.id ?? null;
+  const latestUserMessageDelegated =
+    latestUserMessageId !== null &&
+    (input.activeThread?.activities ?? []).some(
+      (activity) =>
+        activity.kind === SUBAGENT_STARTED_ACTIVITY_KIND &&
+        typeof activity.payload === "object" &&
+        activity.payload !== null &&
+        (activity.payload as { messageId?: unknown }).messageId === latestUserMessageId,
+    );
 
   const resetLocalDispatch = useCallback(() => {
     setLocalDispatch(null);
@@ -652,6 +662,7 @@ function useLocalDispatchState(input: {
         hasPendingApproval: input.activePendingApproval !== null,
         hasPendingUserInput: input.activePendingUserInput !== null,
         threadError: input.threadError,
+        latestUserMessageDelegated,
       }),
     [
       input.activeLatestTurn,
@@ -660,6 +671,7 @@ function useLocalDispatchState(input: {
       input.activeThread?.session,
       input.phase,
       input.threadError,
+      latestUserMessageDelegated,
       latestUserMessageId,
       localDispatch,
     ],

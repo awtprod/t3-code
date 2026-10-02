@@ -51,6 +51,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   inboxRequestChanges: "cc.inbox.requestChanges",
   inboxCandidateCreate: "cc.inbox.candidate.create",
   inboxCandidateAccept: "cc.inbox.candidate.accept",
+  inboxAdjustmentApprove: "cc.inbox.adjustment.approve",
   inboxCandidateDiscard: "cc.inbox.candidate.discard",
   inboxChangeRequestResolve: "cc.inbox.changeRequest.resolve",
   inboxSnooze: "cc.inbox.snooze",
@@ -65,8 +66,17 @@ export const COMMAND_CENTER_WS_METHODS = {
   sprintPlanPatchTask: "cc.sprintPlan.patchTask",
   sprintPlanResolveDateConflict: "cc.sprintPlan.resolveDateConflict",
   sprintPlanListHistory: "cc.sprintPlan.listHistory",
+  digestQuery: "cc.digest.query",
+  digestPreferencesUpdate: "cc.digest.preferences.update",
+  digestMarkViewed: "cc.digest.markViewed",
+  inboxDraftApprove: "cc.inbox.draft.approve",
+  inboxDraftReceipt: "cc.inbox.draft.receipt",
   runsQuery: "cc.runs.query",
   automationsQuery: "cc.automations.query",
+  responsibilitiesList: "cc.responsibilities.list",
+  responsibilityGet: "cc.responsibilities.get",
+  responsibilityPause: "cc.responsibilities.pause",
+  responsibilityResume: "cc.responsibilities.resume",
   automationDefinitionGet: "cc.automations.definition.get",
   automationDefinitionCreate: "cc.automations.definition.create",
   automationDefinitionSave: "cc.automations.definition.save",
@@ -96,6 +106,14 @@ export const COMMAND_CENTER_WS_METHODS = {
   googleRead: "cc.connections.google.read",
   windowsMediaList: "cc.windowsMedia.list",
   windowsMediaRoots: "cc.windowsMedia.roots",
+  observationsList: "cc.observations.list",
+  observationsGet: "cc.observations.get",
+  observationsHistory: "cc.observations.history",
+  observationsCreateManual: "cc.observations.createManual",
+  observationsImport: "cc.observations.import",
+  observationsCorrect: "cc.observations.correct",
+  observationsRetire: "cc.observations.retire",
+  youtubeAnalyticsFetch: "cc.youtube.analytics.fetch",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
@@ -297,6 +315,7 @@ export const CommandCenterAutomationSourceNodeKind = Schema.Literals([
   "shell.scoped",
   "prospect.evaluate",
   "prospect.notify",
+  "repository.checks",
 ]);
 
 /** Exact editable shape stored in the private configuration checkout. */
@@ -514,6 +533,13 @@ export const CommandCenterPublishConnection = Schema.Struct({
   expiresAt: Schema.optional(Timestamp),
   lastRefreshedAt: Schema.optional(Timestamp),
   detail: Schema.optional(TrimmedNonEmptyString),
+  analytics: Schema.optional(
+    Schema.Struct({
+      state: Schema.Literals(["needs-consent", "permission-granted", "verified", "error"]),
+      detail: TrimmedNonEmptyString,
+      verifiedAt: Schema.optional(Timestamp),
+    }),
+  ),
 });
 export type CommandCenterPublishConnection = typeof CommandCenterPublishConnection.Type;
 
@@ -781,6 +807,15 @@ export type CommandCenterMemoryRememberInput = typeof CommandCenterMemoryRemembe
 export const CommandCenterMemoryProposeInput = Schema.Struct({
   ...CommandCenterMemoryRememberInput.fields,
   confidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  evidence: Schema.optional(
+    Schema.Struct({
+      kind: Schema.Literal("observation-correction"),
+      observationId: TrimmedNonEmptyString,
+      revisionId: TrimmedNonEmptyString,
+    }),
+  ),
+  expiresAt: Schema.optional(Timestamp),
+  contradictionOf: Schema.optional(MemoryId),
 });
 export type CommandCenterMemoryProposeInput = typeof CommandCenterMemoryProposeInput.Type;
 
@@ -788,7 +823,7 @@ export const CommandCenterMemoryReviewInput = Schema.Struct({
   memoryId: MemoryId,
   spaceId: SpaceId,
   repositoryId: Schema.optional(RepositoryId),
-  decision: Schema.Literals(["approve", "reject"]),
+  decision: Schema.Literals(["approve", "reject", "expire"]),
 });
 export type CommandCenterMemoryReviewInput = typeof CommandCenterMemoryReviewInput.Type;
 
