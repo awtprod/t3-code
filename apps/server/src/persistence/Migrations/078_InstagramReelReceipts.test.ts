@@ -34,7 +34,7 @@ it.layer(NodeSqliteClient.layerMemory())("default startup migration layer", (it)
   );
 });
 
-for (const previous of [71, 77]) {
+for (const previous of [69, 71, 77]) {
   it.layer(NodeSqliteClient.layerMemory())(`upgrade ${previous} to 078`, (it) => {
     it.effect("executes actual dependency migrations and preserves receipts on rerun", () =>
       Effect.gen(function* () {
@@ -55,7 +55,7 @@ for (const previous of [71, 77]) {
   });
 }
 
-for (const through of [71, 76]) {
+for (const through of [69, 71, 76]) {
   it.layer(NodeSqliteClient.layerMemory())(`direct 078 after ${through}`, (it) => {
     it.effect("still refuses missing reserved migration history and creates no Reel table", () =>
       Effect.gen(function* () {
