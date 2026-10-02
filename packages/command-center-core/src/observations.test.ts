@@ -156,6 +156,24 @@ describe("evaluateObservationEligibility", () => {
     );
   });
 
+  it("rejects evidence collected after the evaluation time", () => {
+    const future = evaluateObservationEligibility({
+      policy,
+      evidence: snapshot({
+        ...base,
+        data: {
+          ...base.data,
+          observedAt: "2026-09-23T12:00:00.000Z",
+          collectedAt: "2026-09-23T12:00:00.000Z",
+        },
+      }),
+      asOf: "2026-09-22T12:00:00.000Z" as never,
+    });
+    assert.strictEqual(future.status, "insufficient");
+    assert.include(future.reasons, "evidence-not-yet-available");
+    assert.notInclude(future.reasons, "evidence-stale");
+  });
+
   it("judges maturity when the evidence was observed, not when it is reviewed", () => {
     const publishedAt = "2026-09-13T12:00:00.000Z";
     const reviewedLate = "2026-09-22T12:00:00.000Z" as never;
