@@ -178,6 +178,8 @@ it.effect("classifies an uncommitted schedule as a durable permanent admission f
     get: () => Effect.die("unused"),
     recoverDue: () => Effect.die("unused"),
     decideApproval: () => Effect.die("unused"),
+    approveInboxDraft: () => Effect.die("unused"),
+    getInboxDraftReceipt: () => Effect.die("unused"),
   } satisfies AutomationRunsShape);
   const testLayer = layer.pipe(
     Layer.provide(Layer.succeed(CommandCenterService, service)),
@@ -227,6 +229,8 @@ it.effect("classifies a paused scheduled admission as intentional control", () =
     get: () => Effect.die("unused"),
     recoverDue: () => Effect.die("unused"),
     decideApproval: () => Effect.die("unused"),
+    approveInboxDraft: () => Effect.die("unused"),
+    getInboxDraftReceipt: () => Effect.die("unused"),
   } satisfies AutomationRunsShape);
   const testLayer = layer.pipe(
     Layer.provide(Layer.succeed(CommandCenterService, service)),
