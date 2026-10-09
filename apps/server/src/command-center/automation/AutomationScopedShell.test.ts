@@ -128,6 +128,7 @@ function testLayer(calls: VerifiedScopedShellExecuteInput[]) {
   const repositoryIdentityLayer = Layer.succeed(
     RepositoryIdentityResolver.RepositoryIdentityResolver,
     RepositoryIdentityResolver.RepositoryIdentityResolver.of({
+      resolveRemoteKeys: () => Effect.succeed([]),
       resolve: (cwd) => {
         const match = [
           ["repo-a", repositoryARemote, repositoryACanonicalRemote],
