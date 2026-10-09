@@ -350,3 +350,89 @@ it.effect("rejects Space config and instruction symlinks that escape the private
     );
   }).pipe(Effect.provide(configTestLayer)),
 );
+
+const writeAgentSpaceConfig = (agent: unknown) =>
+  Effect.gen(function* () {
+    const config = yield* CommandCenterConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    yield* fs.makeDirectory(path.join(config.configDirectory, "spaces"), { recursive: true });
+    yield* fs.writeFileString(
+      path.join(config.configDirectory, "command-center.json"),
+      encodeJson({
+        schemaVersion: 1,
+        timezone: "Etc/UTC",
+        routing: {
+          mode: "auto",
+          showPreview: true,
+          explicitSelectionWins: true,
+          providerFallback: "first-healthy-compatible",
+        },
+        spaces: [{ id: "agent-space", configPath: "spaces/agent.json" }],
+        connections: [],
+      }),
+    );
+    yield* fs.writeFileString(
+      path.join(config.configDirectory, "spaces/agent.json"),
+      encodeJson({
+        schemaVersion: 1,
+        id: "agent-space",
+        name: "Agent Space",
+        kind: "system",
+        aliases: [],
+        instructionsFile: "spaces/agent.md",
+        repositories: [],
+        connectionIds: [],
+        routing: { provider: "auto", model: "auto" },
+        ...(agent === undefined ? {} : { agent }),
+      }),
+    );
+    yield* fs.writeFileString(path.join(config.configDirectory, "spaces/agent.md"), "Agent.");
+    return yield* config.load;
+  });
+
+it.effect("leaves a Space without an agent block agent-less (default off)", () =>
+  Effect.gen(function* () {
+    const loaded = yield* writeAgentSpaceConfig(undefined);
+    expect(loaded.health.status).toBe("loaded");
+    expect(loaded.spaces[0]?.agent).toBeUndefined();
+  }).pipe(Effect.provide(configTestLayer)),
+);
+
+it.effect("applies Space agent defaults and maps the agent model at the boundary", () =>
+  Effect.gen(function* () {
+    const loaded = yield* writeAgentSpaceConfig({
+      enabled: true,
+      model: { provider: "claudeAgent", model: "claude-opus-5-5" },
+      checkIns: { cron: ["30 8 * * *", "30 18 * * *"], timezone: "America/New_York" },
+      quietHours: { start: "23:00", end: "07:00", timezone: "America/New_York" },
+    });
+    expect(loaded.health.status).toBe("loaded");
+    expect(loaded.spaces[0]?.agent).toEqual({
+      enabled: true,
+      model: { providerId: "claudeAgent", modelId: "claude-opus-5-5" },
+      checkIns: { cron: ["30 8 * * *", "30 18 * * *"], timezone: "America/New_York" },
+      quietHours: { start: "23:00", end: "07:00", timezone: "America/New_York" },
+      dailyWakeLimit: 12,
+      debounceMinutes: 10,
+    });
+  }).pipe(Effect.provide(configTestLayer)),
+);
+
+it.effect("rejects malformed Space agent blocks instead of projecting them", () =>
+  Effect.gen(function* () {
+    for (const agent of [
+      { enabled: "yes" },
+      { enabled: true, dailyWakeLimit: 0 },
+      { enabled: true, debounceMinutes: 121 },
+      { enabled: true, checkIns: { cron: ["every morning"], timezone: "Etc/UTC" } },
+      { enabled: true, checkIns: { cron: ["0 8 * * *"], timezone: "Mars/Olympus" } },
+      { enabled: true, quietHours: { start: "25:00", end: "07:00", timezone: "Etc/UTC" } },
+      { enabled: true, quietHours: { start: "07:00", end: "07:00", timezone: "Etc/UTC" } },
+    ]) {
+      const loaded = yield* writeAgentSpaceConfig(agent);
+      expect(loaded.health.status, encodeJson(agent)).toBe("invalid");
+      expect(loaded.spaces).toEqual([]);
+    }
+  }).pipe(Effect.provide(configTestLayer)),
+);

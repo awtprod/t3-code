@@ -176,15 +176,15 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))("runMigrations guard", 
 
 describe("stacked Instagram migration manifest", () => {
   it("registers every reserved dependency before 078 exactly once", () => {
-    assert.strictEqual(migrationManifest.length, 74);
+    assert.strictEqual(migrationManifest.length, 75);
     assert.deepStrictEqual(migrationManifest.slice(-7), [
-      [72, "CommandCenterResponsibilities"],
       [73, "CommandCenterObservations"],
       [74, "CommandCenterSprintPlanAdjustments"],
       [75, "CommandCenterDigest"],
       [76, "CommandCenterRepositorySignals"],
       [77, "CommandCenterInboxGmailDrafts"],
       [78, "InstagramReelReceipts"],
+      [79, "CommandCenterSpaceAgent"],
     ]);
   });
 });

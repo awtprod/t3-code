@@ -13,6 +13,8 @@ import * as Effect from "effect/Effect";
 
 export type McpCapability = "preview" | "database.read" | "database.write" | CapabilityName;
 export type McpMemoryWriteMode = "propose" | "remember";
+/** Server-issued role of the thread holding the credential. */
+export type McpThreadRole = "space-agent";
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
@@ -28,6 +30,8 @@ export interface McpInvocationScope {
   readonly repositoryId?: RepositoryId;
   /** Server-issued policy. Tool input cannot promote proposal-only credentials. */
   readonly memoryWriteMode?: McpMemoryWriteMode;
+  /** Present only for credentials minted for a Space agent thread. */
+  readonly role?: McpThreadRole;
   readonly issuedAt: number;
 }
 

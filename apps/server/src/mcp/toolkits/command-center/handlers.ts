@@ -48,6 +48,19 @@ export const requireScopedSpace = Effect.fn("CommandCenterToolkit.requireScopedS
       message: "This MCP credential cannot access the requested Space.",
     });
   }
+  if (scope.role === "space-agent") {
+    // A Space agent credential outlives config edits; re-check the live
+    // policy so disabling the agent, archiving the Space, or narrowing its
+    // capabilities takes effect on the very next tool call.
+    const service = yield* CommandCenterService.CommandCenterService;
+    const space = yield* service.getConfiguredSpace(scope.spaceId);
+    if (space.agent?.enabled !== true || !space.policy.allowedCapabilities.includes(capability)) {
+      return yield* new CommandCenterError({
+        reason: "validation",
+        message: "This Space agent is disabled or no longer allowed to use this tool.",
+      });
+    }
+  }
   return { ...scope, spaceId: scope.spaceId };
 });
 
@@ -313,9 +326,22 @@ const handlers = {
         ...(input.sourceRef === undefined ? {} : { sourceRef: input.sourceRef }),
         ...(repository.repositoryId === undefined ? {} : { repositoryId: repository.repositoryId }),
       };
-      return yield* memoryWriteOperationForScope(scope) === "remember"
-        ? service.remember(memory)
-        : service.proposeMemory({ ...memory, confidence: input.confidence });
+      if (memoryWriteOperationForScope(scope) !== "remember") {
+        return yield* service.proposeMemory({ ...memory, confidence: input.confidence });
+      }
+      // Space agent Memory is approved but attributed to the agent thread.
+      return yield* scope.role === "space-agent"
+        ? service.rememberFromSpaceAgent(memory, { threadId: scope.threadId })
+        : service.remember(memory);
+    }),
+  cc_space_brief: ({ spaceId }) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.memory.read", spaceId);
+      const service = yield* CommandCenterService.CommandCenterService;
+      return yield* service.spaceBrief({
+        spaceId: scope.spaceId,
+        ...(scope.repositoryId === undefined ? {} : { repositoryId: scope.repositoryId }),
+      });
     }),
   cc_memory_search: (input) =>
     Effect.gen(function* () {
@@ -519,17 +545,23 @@ const handlers = {
           ? { projectId: input.projectId }
           : {}),
       };
-      return yield* service.submitMcpChildCommand(
-        command,
-        commandCenterProviderAvailability(yield* providerRegistry.getProviders),
-        {
+      const providers = commandCenterProviderAvailability(yield* providerRegistry.getProviders);
+      if (scope.role === "space-agent") {
+        // Server-side autonomy gate: out-of-policy work becomes a decision.
+        return yield* service.submitSpaceAgentCommand(command, providers, {
           spaceId: scope.spaceId,
-          ...(scope.repositoryId === undefined ? {} : { repositoryId: scope.repositoryId }),
           threadId: scope.threadId,
           providerSessionId: scope.providerSessionId,
           providerInstanceId: scope.providerInstanceId,
-        },
-      );
+        });
+      }
+      return yield* service.submitMcpChildCommand(command, providers, {
+        spaceId: scope.spaceId,
+        ...(scope.repositoryId === undefined ? {} : { repositoryId: scope.repositoryId }),
+        threadId: scope.threadId,
+        providerSessionId: scope.providerSessionId,
+        providerInstanceId: scope.providerInstanceId,
+      });
     }),
   cc_automations_run: (input) =>
     Effect.gen(function* () {

@@ -28,7 +28,18 @@ export interface McpThreadScope {
   readonly spaceId: SpaceId;
   readonly repositoryId?: RepositoryId;
   readonly memoryWriteMode: McpInvocationContext.McpMemoryWriteMode;
+  readonly role?: McpInvocationContext.McpThreadRole;
 }
+
+/**
+ * Derives a durable thread scope from persisted state (a Space agent thread)
+ * when no in-memory scope was registered. It is consulted on every credential
+ * issue, so it survives restarts and provider-session stops, and a disabled or
+ * archived Space simply resolves to no scope.
+ */
+export type McpThreadScopeResolver = (
+  threadId: ThreadId,
+) => Effect.Effect<McpThreadScope | undefined>;
 
 export interface McpIssuedCredential {
   readonly config: McpProviderSession.McpProviderSessionConfig;
@@ -49,6 +60,8 @@ export interface McpSessionRegistryShape {
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
   readonly registerThreadScope: (threadId: ThreadId, scope: McpThreadScope) => Effect.Effect<void>;
   readonly unregisterThreadScope: (threadId: ThreadId) => Effect.Effect<void>;
+  /** The registered scope, or the durable resolver's scope, for a thread. */
+  readonly scopeForThread: (threadId: ThreadId) => Effect.Effect<McpThreadScope | undefined>;
   readonly revokeAll: Effect.Effect<void>;
 }
 
@@ -71,7 +84,28 @@ interface RegistryState {
 export interface McpSessionRegistryOptions {
   readonly livenessWindowMs?: number;
   readonly now?: () => number;
+  /** Test seam; production reads the resolver installed by the Space agent. */
+  readonly resolveThreadScope?: McpThreadScopeResolver;
 }
+
+let activeThreadScopeResolver: McpThreadScopeResolver | undefined;
+
+/**
+ * Install the durable thread-scope resolver for the lifetime of the calling
+ * scope. The previous resolver is restored on release.
+ */
+export const installMcpThreadScopeResolver = (resolver: McpThreadScopeResolver) =>
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      const previous = activeThreadScopeResolver;
+      activeThreadScopeResolver = resolver;
+      return previous;
+    }),
+    (previous) =>
+      Effect.sync(() => {
+        if (activeThreadScopeResolver === resolver) activeThreadScopeResolver = previous;
+      }),
+  );
 
 /**
  * How long a credential outlives the last sign of life from its provider
@@ -123,6 +157,29 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       ? `http://${getHttpMcpEndpointHost(httpServer.address.hostname)}:${httpServer.address.port}/mcp`
       : "http://127.0.0.1/mcp";
 
+  const resolveDurableScope = (threadId: ThreadId): Effect.Effect<McpThreadScope | undefined> => {
+    const resolver = options.resolveThreadScope ?? activeThreadScopeResolver;
+    if (resolver === undefined) return Effect.succeed(undefined);
+    // Fail closed: a resolver defect grants no scope, it never widens one.
+    return resolver(threadId).pipe(
+      Effect.catchDefect((defect) =>
+        Effect.logWarning("mcp.thread-scope-resolver-failed", { threadId, defect }).pipe(
+          Effect.as(undefined),
+        ),
+      ),
+    );
+  };
+
+  const scopeForThread: McpSessionRegistryShape["scopeForThread"] = (threadId) =>
+    SynchronizedRef.get(state).pipe(
+      Effect.flatMap(({ threadScopes }) => {
+        const registered = threadScopes.get(threadId);
+        return registered === undefined
+          ? resolveDurableScope(threadId)
+          : Effect.succeed(registered);
+      }),
+    );
+
   const hashToken = (token: string) =>
     crypto
       .digest("SHA-256", new TextEncoder().encode(token))
@@ -143,9 +200,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const providerSessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
-      const registeredScope = (yield* SynchronizedRef.get(state)).threadScopes.get(
-        request.threadId,
-      );
+      const registeredScope = yield* scopeForThread(request.threadId);
       const spaceId = request.spaceId ?? registeredScope?.spaceId;
       const repositoryId = request.repositoryId ?? registeredScope?.repositoryId;
       const capabilities = new Set<McpInvocationContext.McpCapability>(
@@ -164,6 +219,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         ...(spaceId === undefined ? {} : { spaceId }),
         ...(repositoryId === undefined ? {} : { repositoryId }),
         memoryWriteMode: registeredScope?.memoryWriteMode ?? "propose",
+        ...(registeredScope?.role === undefined ? {} : { role: registeredScope.role }),
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records, threadScopes }) => {
@@ -252,6 +308,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         });
       },
     ),
+    scopeForThread,
     revokeAll: SynchronizedRef.set(state, { records: new Map(), threadScopes: new Map() }),
   });
 });
@@ -305,6 +362,18 @@ export const registerActiveMcpThreadScope = (
 ): Effect.Effect<boolean> =>
   activeMcpSessionRegistry
     ? activeMcpSessionRegistry.registerThreadScope(threadId, scope).pipe(Effect.as(true))
+    : Effect.succeed(false);
+
+/**
+ * Whether a thread is bound to a Command Center scope (registered for a Run,
+ * or durable for a Space agent). Such threads need a credential even when no
+ * browser or database tools are enabled.
+ */
+export const hasActiveMcpThreadScope = (threadId: ThreadId): Effect.Effect<boolean> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry
+        .scopeForThread(threadId)
+        .pipe(Effect.map((scope) => scope !== undefined))
     : Effect.succeed(false);
 
 export const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>

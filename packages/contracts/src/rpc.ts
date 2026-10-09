@@ -291,6 +291,10 @@ import {
   CommandCenterRunsQueryResult,
   CommandCenterRunStartInput,
   CommandCenterRunStartResult,
+  CommandCenterSpaceAgentListInput,
+  CommandCenterSpaceAgentListResult,
+  CommandCenterSpaceAgentWakeInput,
+  CommandCenterSpaceAgentWakeResult,
   CommandCenterSpacesQueryInput,
   CommandCenterSpacesQueryResult,
   CommandCenterSpacesSyncInput,
@@ -503,6 +507,18 @@ export const WsCommandCenterBootstrapRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.bo
 export const WsCommandCenterCommandSubmitRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.commandSubmit, {
   payload: CommandCenterCommandSubmitInput,
   success: CommandCenterCommandSubmitResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterSpaceAgentListRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.spaceAgentList, {
+  payload: CommandCenterSpaceAgentListInput,
+  success: CommandCenterSpaceAgentListResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterSpaceAgentWakeRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.spaceAgentWake, {
+  payload: CommandCenterSpaceAgentWakeInput,
+  success: CommandCenterSpaceAgentWakeResult,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
 
@@ -1837,6 +1853,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterBootstrapRpc,
   WsCommandCenterCommandSubmitRpc,
   WsCommandCenterRunStartRpc,
+  WsCommandCenterSpaceAgentListRpc,
+  WsCommandCenterSpaceAgentWakeRpc,
   WsCommandCenterEventsReplayRpc,
   WsCommandCenterEventsSubscribeRpc,
   WsCommandCenterTimelineQueryRpc,

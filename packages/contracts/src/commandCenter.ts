@@ -20,6 +20,7 @@ import {
   MemoryId,
   MemoryKind,
   MemoryStatus,
+  ModelSelection as CommandCenterModelSelection,
   ProjectId,
   RepositoryId,
   RouteDecision,
@@ -115,6 +116,8 @@ export const COMMAND_CENTER_WS_METHODS = {
   observationsCorrect: "cc.observations.correct",
   observationsRetire: "cc.observations.retire",
   youtubeAnalyticsFetch: "cc.youtube.analytics.fetch",
+  spaceAgentList: "cc.spaceAgent.list",
+  spaceAgentWake: "cc.spaceAgent.wake",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
@@ -185,6 +188,49 @@ export const CommandCenterCommandSubmitResult = Schema.Struct({
   duplicate: Schema.Boolean,
 });
 export type CommandCenterCommandSubmitResult = typeof CommandCenterCommandSubmitResult.Type;
+
+/**
+ * Returned to a Space agent whose requested Run is outside its Space's
+ * auto-run policy: no Run was created, a decision Item asks the user instead.
+ */
+export const CommandCenterSpaceAgentProposalResult = Schema.Struct({
+  proposal: Schema.Literal("decision"),
+  item: Item,
+  route: RouteDecision,
+});
+export type CommandCenterSpaceAgentProposalResult =
+  typeof CommandCenterSpaceAgentProposalResult.Type;
+
+export const CommandCenterSpaceBrief = Schema.Struct({
+  spaceId: SpaceId,
+  /** Bounded, rendered brief. Empty when the Space has nothing recorded. */
+  brief: Schema.String,
+});
+export type CommandCenterSpaceBrief = typeof CommandCenterSpaceBrief.Type;
+
+export const CommandCenterSpaceAgentSummary = Schema.Struct({
+  spaceId: SpaceId,
+  displayName: TrimmedNonEmptyString,
+  enabled: Schema.Boolean,
+  /** The agent thread, once it has been created. */
+  threadId: Schema.NullOr(AssetThreadId),
+  model: Schema.NullOr(CommandCenterModelSelection),
+});
+export type CommandCenterSpaceAgentSummary = typeof CommandCenterSpaceAgentSummary.Type;
+
+export const CommandCenterSpaceAgentListInput = Schema.Struct({});
+export const CommandCenterSpaceAgentListResult = Schema.Struct({
+  agents: Schema.Array(CommandCenterSpaceAgentSummary),
+});
+export type CommandCenterSpaceAgentListResult = typeof CommandCenterSpaceAgentListResult.Type;
+
+export const CommandCenterSpaceAgentWakeInput = Schema.Struct({ spaceId: SpaceId });
+export type CommandCenterSpaceAgentWakeInput = typeof CommandCenterSpaceAgentWakeInput.Type;
+export const CommandCenterSpaceAgentWakeResult = Schema.Struct({
+  spaceId: SpaceId,
+  threadId: AssetThreadId,
+});
+export type CommandCenterSpaceAgentWakeResult = typeof CommandCenterSpaceAgentWakeResult.Type;
 
 /**
  * Client acknowledgement sent only after the route receipt has been rendered.

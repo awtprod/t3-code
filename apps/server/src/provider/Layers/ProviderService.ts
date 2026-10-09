@@ -102,6 +102,8 @@ export interface ProviderServiceLiveOptions {
   readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
   /** Same seam as `issueMcpCredential`, for observing the deny path's revoke. */
   readonly revokeMcpCredential?: typeof McpSessionRegistry.revokeActiveMcpThread;
+  /** Same seam, for whether a thread is bound to a Command Center scope. */
+  readonly hasMcpThreadScope?: typeof McpSessionRegistry.hasActiveMcpThreadScope;
 }
 
 type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["Service"]> =
@@ -283,6 +285,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
   const revokeMcpCredential =
     options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
+  const hasMcpThreadScope =
+    options?.hasMcpThreadScope ?? McpSessionRegistry.hasActiveMcpThreadScope;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const prepareMcpSession = (
@@ -310,9 +314,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               ...(projectId === undefined ? {} : { projectId }),
               ...(cwd === undefined ? {} : { cwd }),
             });
+      // A Command Center scope (Run or Space agent thread) carries its own
+      // tools, so it still needs a credential when browser and database
+      // access are both off.
+      const hasCommandCenterScope =
+        settings !== undefined &&
+        !settings.enableAgentBrowserAccess &&
+        databases.length === 0 &&
+        (yield* hasMcpThreadScope(threadId));
       if (
         settings === undefined ||
-        (!settings.enableAgentBrowserAccess && databases.length === 0)
+        (!settings.enableAgentBrowserAccess && databases.length === 0 && !hasCommandCenterScope)
       ) {
         // Revoke as well as clear. Every other prepare path reaches
         // `issueActiveMcpCredential`, which revokes the thread first, so
