@@ -1280,6 +1280,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.status,
           sessions.provider_name AS "providerName",
           sessions.provider_instance_id AS "providerInstanceId",
+          sessions.session_generation AS "sessionGeneration",
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
           sessions.last_error AS "lastError",
@@ -1454,6 +1455,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         kind,
         summary,
         payload_json AS "payload",
+        correlated_message_id AS "correlatedMessageId",
         sequence,
         created_at AS "createdAt"
       FROM projection_thread_activities
@@ -1488,6 +1490,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         a.kind,
         a.summary,
         a.payload_json AS "payload",
+        a.correlated_message_id AS "correlatedMessageId",
         a.sequence,
         a.created_at AS "createdAt"
       FROM projection_thread_activities a
@@ -3159,17 +3162,15 @@ pending_approval_requests AS (
         workspaceRoot: threadRow.value.workspaceRoot,
         worktreePath: threadRow.value.worktreePath,
         ...(threadRow.value.sandbox === null ? {} : { sandbox: threadRow.value.sandbox }),
-        checkpoints: checkpointRows.map(
-          (row): OrchestrationCheckpointSummary => ({
-            turnId: row.turnId,
-            checkpointTurnCount: row.checkpointTurnCount,
-            checkpointRef: row.checkpointRef,
-            status: row.status,
-            files: row.files,
-            assistantMessageId: row.assistantMessageId,
-            completedAt: row.completedAt,
-          }),
-        ),
+        checkpoints: checkpointRows.map((row): OrchestrationCheckpointSummary => ({
+          turnId: row.turnId,
+          checkpointTurnCount: row.checkpointTurnCount,
+          checkpointRef: row.checkpointRef,
+          status: row.status,
+          files: row.files,
+          assistantMessageId: row.assistantMessageId,
+          completedAt: row.completedAt,
+        })),
       });
     });
 

@@ -1715,16 +1715,34 @@ const makeWsRpcLayer = (
                 }));
               if (startFromOrigin) {
                 yield* track(worktreeSetupTracker.stageStatus(threadId, "fetch", "running"));
-                yield* gitWorkflow.fetchRemote({
-                  cwd: prepareWorktree.projectCwd,
-                  remoteName: "origin",
-                  refName: prepareWorktree.baseBranch,
-                });
-                const remoteBaseExists = yield* gitWorkflow.remoteBranchExists({
-                  cwd: prepareWorktree.projectCwd,
-                  refName: prepareWorktree.baseBranch,
-                  remoteName: "origin",
-                });
+                // Command Center: an unreachable origin falls back to the local
+                // base branch instead of failing the turn.
+                const fetched = yield* gitWorkflow
+                  .fetchRemote({
+                    cwd: prepareWorktree.projectCwd,
+                    remoteName: "origin",
+                    refName: prepareWorktree.baseBranch,
+                  })
+                  .pipe(
+                    Effect.as(true),
+                    Effect.catch((error) =>
+                      Effect.logWarning(
+                        "failed to refresh origin while preparing worktree; using local base branch",
+                        {
+                          cwd: prepareWorktree.projectCwd,
+                          baseBranch: prepareWorktree.baseBranch,
+                          detail: error.message,
+                        },
+                      ).pipe(Effect.as(false)),
+                    ),
+                  );
+                const remoteBaseExists =
+                  fetched &&
+                  (yield* gitWorkflow.remoteBranchExists({
+                    cwd: prepareWorktree.projectCwd,
+                    refName: prepareWorktree.baseBranch,
+                    remoteName: "origin",
+                  }));
                 if (remoteBaseExists) {
                   const resolvedRemoteBase = yield* gitWorkflow.resolveRemoteTrackingCommit({
                     cwd: prepareWorktree.projectCwd,
@@ -1746,7 +1764,9 @@ const makeWsRpcLayer = (
                       threadId,
                       "fetch",
                       "warning",
-                      `origin/${prepareWorktree.baseBranch} not found, using local branch`,
+                      fetched
+                        ? `origin/${prepareWorktree.baseBranch} not found, using local branch`
+                        : "origin could not be fetched, using local branch",
                     ),
                   );
                 }
@@ -2187,61 +2207,63 @@ const makeWsRpcLayer = (
               )
             : undefined;
 
-        return {
-          environment,
-          auth,
-          cwd: config.cwd,
-          keybindingsConfigPath: config.keybindingsConfigPath,
-          keybindings: keybindingsConfig.keybindings,
-          issues: keybindingsConfig.issues,
-          providers,
-          availableEditors,
-          // Same discovery-with-timeout treatment as editors: a slow probe
-          // must not stall server.getConfig, so it degrades to no targets.
-          remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
-            remoteOpenTargets.resolveTargets(),
-          ),
-          observability: {
-            logsDirectoryPath: config.logsDir,
-            localTracingEnabled: true,
-            ...(config.otlpTracesUrl !== undefined ? { otlpTracesUrl: config.otlpTracesUrl } : {}),
-            otlpTracesEnabled: config.otlpTracesUrl !== undefined,
-            ...(config.otlpMetricsUrl !== undefined
-              ? { otlpMetricsUrl: config.otlpMetricsUrl }
+          return {
+            environment,
+            auth,
+            cwd: config.cwd,
+            keybindingsConfigPath: config.keybindingsConfigPath,
+            keybindings: keybindingsConfig.keybindings,
+            issues: keybindingsConfig.issues,
+            providers,
+            availableEditors,
+            // Same discovery-with-timeout treatment as editors: a slow probe
+            // must not stall server.getConfig, so it degrades to no targets.
+            remoteOpenTargets: yield* resolveAvailableEditorsForConfig(
+              remoteOpenTargets.resolveTargets(),
+            ),
+            observability: {
+              logsDirectoryPath: config.logsDir,
+              localTracingEnabled: true,
+              ...(config.otlpTracesUrl !== undefined
+                ? { otlpTracesUrl: config.otlpTracesUrl }
+                : {}),
+              otlpTracesEnabled: config.otlpTracesUrl !== undefined,
+              ...(config.otlpMetricsUrl !== undefined
+                ? { otlpMetricsUrl: config.otlpMetricsUrl }
+                : {}),
+              otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
+            },
+            // Only advertised once the gateway is actually listening; a client
+            // that sees this field will route previews through it, so announcing
+            // a port nothing answers would break previews that work today.
+            ...(config.previewGatewayEnabled && config.previewGatewayPort > 0
+              ? {
+                  previewGateway: {
+                    loopbackPort: config.previewGatewayPort,
+                    // Tailscale Serve is what makes the gateway reachable from
+                    // another machine; without it there is no public port to name.
+                    ...(config.tailscaleServeEnabled
+                      ? { publicHttpsPort: config.previewGatewayServePort }
+                      : {}),
+                  },
+                }
               : {}),
-            otlpMetricsEnabled: config.otlpMetricsUrl !== undefined,
-          },
-          // Only advertised once the gateway is actually listening; a client
-          // that sees this field will route previews through it, so announcing
-          // a port nothing answers would break previews that work today.
-          ...(config.previewGatewayEnabled && config.previewGatewayPort > 0
-            ? {
-                previewGateway: {
-                  loopbackPort: config.previewGatewayPort,
-                  // Tailscale Serve is what makes the gateway reachable from
-                  // another machine; without it there is no public port to name.
-                  ...(config.tailscaleServeEnabled
-                    ? { publicHttpsPort: config.previewGatewayServePort }
-                    : {}),
-                },
-              }
-            : {}),
-          settings,
-          shellResumeCompletionMarker: true,
-          ...(fileManagerRevealKind === undefined
-            ? {}
-            : {
-                shellRevealInFileManager: true,
-                shellRevealInFileManagerKind: fileManagerRevealKind,
-              }),
-          threadResumeCompletionMarker: true,
-          threadSnapshotPagination: true,
-          worktreeCleanupNotices: yield* Option.match(worktreeCleanup, {
-            onNone: () => Effect.succeed([]),
-            onSome: (cleanup) => cleanup.notices,
-          }),
-        };
-      });
+            settings,
+            shellResumeCompletionMarker: true,
+            ...(fileManagerRevealKind === undefined
+              ? {}
+              : {
+                  shellRevealInFileManager: true,
+                  shellRevealInFileManagerKind: fileManagerRevealKind,
+                }),
+            threadResumeCompletionMarker: true,
+            threadSnapshotPagination: true,
+            worktreeCleanupNotices: yield* Option.match(worktreeCleanup, {
+              onNone: () => Effect.succeed([]),
+              onSome: (cleanup) => cleanup.notices,
+            }),
+          };
+        });
 
       const refreshGitStatus = (cwd: string) =>
         vcsStatusBroadcaster

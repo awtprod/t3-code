@@ -57,12 +57,13 @@ function quoteSystemdValue(value: string): string {
 }
 
 /**
- * Reads `T3CODE_HOME` back out of a rendered unit or plist. Only values this
+ * Reads the served home back out of a rendered unit or plist. Only values this
  * file writes are expected, so a quoted systemd value is unquoted and
- * unescaped the same way `quoteSystemdValue` produced it.
+ * unescaped the same way `quoteSystemdValue` produced it. Command Center's
+ * systemd unit names it `COMMAND_CENTER_HOME`; the plist keeps `T3CODE_HOME`.
  */
 export function bootServiceBaseDirOf(contents: string): string | undefined {
-  const systemd = /^Environment=T3CODE_HOME=(.*)$/m.exec(contents)?.[1];
+  const systemd = /^Environment=(?:COMMAND_CENTER_HOME|T3CODE_HOME)=(.*)$/m.exec(contents)?.[1];
   if (systemd !== undefined) {
     const raw = systemd.trim();
     const unquoted =

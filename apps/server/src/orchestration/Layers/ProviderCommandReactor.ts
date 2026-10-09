@@ -2469,9 +2469,8 @@ export const make = Effect.gen(function* () {
                 afterSequence: event.sequence,
               }),
             ),
-            Effect.map(
-              (claim): ProviderTurnSendClaimOutcome =>
-                claim.interruptedAfter ? { _tag: "canceled" } : { _tag: "superseded" },
+            Effect.map((claim): ProviderTurnSendClaimOutcome =>
+              claim.interruptedAfter ? { _tag: "canceled" } : { _tag: "superseded" },
             ),
             Effect.catchCause(() => Effect.failCause(claimCause)),
           ),
@@ -2857,11 +2856,6 @@ export const make = Effect.gen(function* () {
       );
     }
 
-    // Provider sessions resume into the persisted cwd, so a worktree deleted
-    // out from under the thread has to be recreated before anything that
-    // depends on it (title/branch generation, execution-target resolution).
-    yield* ensureThreadWorktree(thread);
-
     const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
@@ -2952,6 +2946,12 @@ export const make = Effect.gen(function* () {
       return;
     }
 
+    // Provider sessions resume into the persisted cwd, so a worktree deleted
+    // out from under the thread has to be recreated before anything that
+    // depends on it (title/branch generation, execution-target resolution).
+    // Account commands above never touch the worktree, so they run first.
+    yield* ensureThreadWorktree(thread);
+
     const project = yield* resolveProject(thread.projectId);
     const legacyCwd = resolveThreadWorkspaceCwd({
       thread,
@@ -2970,8 +2970,6 @@ export const make = Effect.gen(function* () {
     if (postReadyClaim.supersededBySameMessage || postReadyClaim.interruptedAfter) {
       return;
     }
-
-    yield* ensureThreadWorktree(thread);
 
     const isCompactCommand = isCompactCommandMessage(message);
     if (!hasOtherUserMessages && !isCompactCommand) {

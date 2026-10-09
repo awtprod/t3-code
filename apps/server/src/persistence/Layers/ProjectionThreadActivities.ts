@@ -175,6 +175,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
           kind,
           summary,
           payload_json AS "payload",
+          correlated_message_id AS "correlatedMessageId",
           sequence,
           created_at AS "createdAt"
         FROM projection_thread_activities

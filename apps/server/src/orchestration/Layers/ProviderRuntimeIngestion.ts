@@ -3943,36 +3943,36 @@ const make = Effect.gen(function* () {
           yield* rememberTaskDescription(thread.id, event.payload.taskId, description);
         }
       }
+      // Usage attribution reads the thread shell: the per-event path must not
+      // hydrate thread detail (upstream's one-lifecycle-query-per-event budget).
       if (event.type === "turn.usage.recorded") {
-        const threadDetail = yield* getLoadedThreadDetail();
         yield* projectionTurnUsageRepository.record({
           threadId: thread.id,
           turnId: event.turnId,
-          projectId: event.payload.usage.projectId ?? threadDetail?.projectId ?? null,
+          projectId: event.payload.usage.projectId ?? thread.projectId,
           providerInstanceId:
             event.providerInstanceId ?? ProviderInstanceId.make(String(event.provider)),
           provider: event.provider,
           usage: event.payload.usage,
         });
       } else if (event.type === "thread.token-usage.updated" || event.type === "turn.completed") {
-        const threadDetail = yield* getLoadedThreadDetail();
         const usage =
           event.type === "thread.token-usage.updated"
             ? usageRecordFromTokenSnapshot(
                 event,
-                threadDetail?.modelSelection.model,
+                thread.modelSelection.model,
                 isCommandCenterThreadId(thread.id) ? "automation" : "interactive",
               )
             : usageRecordFromTurnCompletion(
                 event,
-                threadDetail?.modelSelection.model,
+                thread.modelSelection.model,
                 isCommandCenterThreadId(thread.id) ? "automation" : "interactive",
               );
         if (usage && event.turnId) {
           yield* projectionTurnUsageRepository.record({
             threadId: thread.id,
             turnId: event.turnId,
-            projectId: threadDetail?.projectId ?? null,
+            projectId: thread.projectId,
             providerInstanceId:
               event.providerInstanceId ?? ProviderInstanceId.make(String(event.provider)),
             provider: event.provider,

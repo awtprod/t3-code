@@ -473,6 +473,19 @@ function isUnavailableRepositoryGitStderr(stderr: string): boolean {
   return isNonRepositoryGitStderr(stderr) || isUnusableGitCwdStderr(stderr);
 }
 
+/**
+ * Operations that point Git at a private, scoped temporary index through
+ * GIT_INDEX_FILE. The hardened environment drops that variable for every other
+ * operation; dropping it here would make the review diff stage untracked files
+ * as intent-to-add entries in the user's real index.
+ */
+function operationUsesPrivateIndex(operation: string): boolean {
+  return (
+    operation.startsWith("GitVcsDriver.checkpoints.") ||
+    operation.startsWith("GitVcsDriver.readUnifiedWorkingTreeReviewDiff.")
+  );
+}
+
 function isUnbornHeadStderr(stderr: string): boolean {
   const normalized = stderr.toLowerCase();
   return (
@@ -845,7 +858,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               {
                 cwd: commandInput.cwd,
                 env: hardenedHostGitEnvironment([input.env, trace2Monitor.env], {
-                  allowIndexFile: input.operation.startsWith("GitVcsDriver.checkpoints."),
+                  allowIndexFile: operationUsesPrivateIndex(input.operation),
                   writableRoots,
                 }),
                 extendEnv: false,
