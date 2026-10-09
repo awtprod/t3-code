@@ -32,6 +32,9 @@ describe("Command Center RPC authorization", () => {
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.eventsSubscribe)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.timelineQuery)).toBe(AuthCommandCenterReadScope);
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.spacesQuery)).toBe(AuthCommandCenterReadScope);
+    expect(scopes.get(COMMAND_CENTER_WS_METHODS.spaceAgentActivity)).toBe(
+      AuthCommandCenterReadScope,
+    );
     expect(scopes.get(COMMAND_CENTER_WS_METHODS.connectionsRefresh)).toBe(
       AuthCommandCenterReadScope,
     );

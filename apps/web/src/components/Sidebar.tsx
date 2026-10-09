@@ -1,4 +1,7 @@
 import { autoAnimate } from "@formkit/auto-animate";
+import { SidebarSpaceAgents } from "../command-center/space-agent/SpaceAgentsSidebarGroup";
+import { spaceAgentThreadIds } from "../command-center/space-agent/SpaceAgent.logic";
+import { useSpaceAgentList } from "../command-center/space-agent/useSpaceAgents";
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
@@ -2171,6 +2174,8 @@ export default function Sidebar() {
   // the partition works directly off live shells: no archived-snapshot
   // merging, no optimistic holds. Archived threads remain hidden here —
   // archive keeps its original "remove from sidebar" meaning.
+  const { agents: enabledAgents } = useSpaceAgentList();
+  const spaceAgentThreadIdSet = useMemo(() => spaceAgentThreadIds(enabledAgents), [enabledAgents]);
   const {
     pinnedThreads,
     reorderablePinnedKeys,
@@ -2188,6 +2193,8 @@ export default function Sidebar() {
     const visible = threads.filter(
       (thread) =>
         thread.archivedAt === null &&
+        // Enabled Space agents get their own "Spaces" group; don't list twice.
+        !spaceAgentThreadIdSet.has(thread.id) &&
         (scopedProjectKeys === null ||
           scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
     );
@@ -2241,7 +2248,7 @@ export default function Sidebar() {
       settledThreads: sortSettledThreadsForSidebar(settled),
       snoozeNow: preciseNow,
     };
-  }, [nowMinute, scopedProjectKeys, serverConfigs, snoozeWakeTick, threads]);
+  }, [nowMinute, scopedProjectKeys, serverConfigs, snoozeWakeTick, spaceAgentThreadIdSet, threads]);
 
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
@@ -3611,6 +3618,7 @@ export default function Sidebar() {
         fixedHeader={
           <>
             <SidebarCommandCenterNavigation />
+            <SidebarSpaceAgents />
             <SidebarSeparator className="mx-2 w-auto" />
             {/* Lifted above the stage backdrop, whose fade bleeds below the
                 header and would otherwise paint across the search row's outline. */}

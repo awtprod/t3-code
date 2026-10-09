@@ -41,6 +41,34 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.runId]),
       },
     }),
+    spaceAgents: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:space-agents",
+      tag: COMMAND_CENTER_WS_METHODS.spaceAgentList,
+      staleTimeMs: 5_000,
+    }),
+    spaceAgentActivity: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:space-agent-activity",
+      tag: COMMAND_CENTER_WS_METHODS.spaceAgentActivity,
+      staleTimeMs: 5_000,
+    }),
+    wakeSpaceAgent: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:space-agent-wake",
+      tag: COMMAND_CENTER_WS_METHODS.spaceAgentWake,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.spaceId]),
+      },
+    }),
+    setSpaceAgentPaused: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:space-agent-set-paused",
+      tag: COMMAND_CENTER_WS_METHODS.spaceAgentSetPaused,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.spaceId]),
+      },
+    }),
     syncSpaces: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:sync-spaces",
       tag: COMMAND_CENTER_WS_METHODS.spacesSync,

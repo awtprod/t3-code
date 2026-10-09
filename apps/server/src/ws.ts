@@ -33,6 +33,7 @@ import {
   CommandId,
   EventId,
   MessageId,
+  COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT,
   COMMAND_CENTER_WS_METHODS,
   COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
   CommandCenterError,
@@ -199,6 +200,7 @@ import * as PublishConnections from "./command-center/publish/PublishConnections
 import * as YouTubeAnalytics from "./command-center/publish/youtube/YouTubeAnalytics.ts";
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
+import * as SpaceActivity from "./command-center/SpaceActivity.ts";
 import * as SpaceAgent from "./command-center/SpaceAgent.ts";
 import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
@@ -664,6 +666,20 @@ const makeWsRpcLayer = (
               new CommandCenterError({
                 reason: "config",
                 message: "Space agent wakes are unavailable in this environment.",
+              }),
+            ),
+          onSome: use,
+        });
+      const spaceActivity = yield* Effect.serviceOption(SpaceActivity.SpaceActivity);
+      const withSpaceActivity = <A>(
+        use: (service: SpaceActivity.SpaceActivityShape) => Effect.Effect<A, CommandCenterError>,
+      ): Effect.Effect<A, CommandCenterError> =>
+        Option.match(spaceActivity, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "config",
+                message: "Space activity is unavailable in this environment.",
               }),
             ),
           onSome: use,
@@ -1722,6 +1738,18 @@ const makeWsRpcLayer = (
             withSpaceAgentWaker((service) => service.setPaused(input.spaceId, input.paused)).pipe(
               Effect.map(({ paused }) => ({ spaceId: input.spaceId, paused })),
             ),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.spaceAgentActivity]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.spaceAgentActivity,
+            withSpaceActivity((service) =>
+              service.recent({
+                spaceId: input.spaceId,
+                ...(input.limit === undefined ? {} : { limit: input.limit }),
+                maxLimit: COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT,
+              }),
+            ).pipe(Effect.map((entries) => ({ spaceId: input.spaceId, entries }))),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.eventsReplay]: (input) =>

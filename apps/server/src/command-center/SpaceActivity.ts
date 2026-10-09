@@ -119,13 +119,19 @@ export interface SpaceActivityRecord {
   readonly eventSequence: number;
 }
 
+export interface SpaceActivityQuery {
+  readonly spaceId: string;
+  readonly since?: string;
+  readonly limit?: number;
+  /** Upper clamp for `limit`; defaults to `SPACE_ACTIVITY_MAX_LIMIT`. */
+  readonly maxLimit?: number;
+}
+
 export interface SpaceActivityShape {
-  /** Newest first. `limit` is clamped to 1..50 (default 20). */
-  readonly recent: (input: {
-    readonly spaceId: string;
-    readonly since?: string;
-    readonly limit?: number;
-  }) => Effect.Effect<ReadonlyArray<SpaceActivityEntry>, CommandCenterError>;
+  /** Newest first. `limit` is clamped to 1..`maxLimit` (default 20, max 50). */
+  readonly recent: (
+    input: SpaceActivityQuery,
+  ) => Effect.Effect<ReadonlyArray<SpaceActivityEntry>, CommandCenterError>;
   /**
    * Append one row unless (source, event sequence, Space) is already present,
    * then prune the Space to its newest rows. Returns whether a row was added.
@@ -163,19 +169,17 @@ const persistenceError = (message: string) => (cause: unknown) =>
   new CommandCenterError({ reason: "persistence", message, cause });
 
 /**
- * The newest activity rows of a Space (newest first, limit clamped to 1..50).
- * Shared by `SpaceActivity.recent` and the Space brief loader, which only has
- * a `SqlClient`.
+ * The newest activity rows of a Space (newest first, limit clamped to
+ * 1..`maxLimit`, default 50). Shared by `SpaceActivity.recent` and the Space
+ * brief loader, which only has a `SqlClient`.
  */
-export const queryRecentSpaceActivity = (input: {
-  readonly spaceId: string;
-  readonly since?: string;
-  readonly limit?: number;
-}): Effect.Effect<ReadonlyArray<SpaceActivityEntry>, CommandCenterError, SqlClient.SqlClient> =>
+export const queryRecentSpaceActivity = (
+  input: SpaceActivityQuery,
+): Effect.Effect<ReadonlyArray<SpaceActivityEntry>, CommandCenterError, SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const limit = Math.min(
-      SPACE_ACTIVITY_MAX_LIMIT,
+      Math.max(1, Math.floor(input.maxLimit ?? SPACE_ACTIVITY_MAX_LIMIT)),
       Math.max(1, Math.floor(input.limit ?? DEFAULT_LIMIT)),
     );
     // Rows store canonical ISO instants, so `since` is normalized to compare.
