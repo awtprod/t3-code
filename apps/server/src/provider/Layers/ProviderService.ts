@@ -58,7 +58,11 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderAdapterRequestError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -811,6 +815,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
+        // Starting over a live session closes it. Refuse while it still runs
+        // work the user has not stopped, before anything below rebinds the
+        // sandbox or rotates the MCP credential that live session is using.
+        const replacementBlocker =
+          adapter.sessionReplacementBlocker === undefined
+            ? undefined
+            : yield* adapter.sessionReplacementBlocker(threadId);
+        if (replacementBlocker !== undefined) {
+          return yield* new ProviderAdapterRequestError({
+            provider: adapter.provider,
+            method: "session/replace",
+            detail: replacementBlocker,
+          });
+        }
         if (executionTarget?.kind === "sandbox") {
           bindSandboxProviderTarget(executionTarget, sandboxBindingOwner);
           // Push the thread's credential document into its sidecar before the

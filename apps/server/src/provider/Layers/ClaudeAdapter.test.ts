@@ -58,6 +58,7 @@ import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { BUNDLED_CLAUDE_MODEL_CATALOG } from "../ClaudeModelCatalog.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
+  CLAUDE_BACKGROUND_WORK_BLOCKS_REPLACEMENT,
   CLAUDE_T3_MCP_AUTHORIZATION_ENV,
   makeClaudeAdapter,
   maybeDowngradeBashWorkerModel,
@@ -5681,6 +5682,78 @@ describe("ClaudeAdapterLive", () => {
       assert(options !== undefined);
       assert.equal(options.mcpServers, undefined);
       assert.equal(options.env?.[CLAUDE_T3_MCP_AUTHORIZATION_ENV], undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("blocks replacing the session only while Claude runs background work", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const blocker = adapter.sessionReplacementBlocker;
+      assert(blocker !== undefined);
+      // No session at all: nothing to lose.
+      assert.equal(yield* blocker(THREAD_ID), undefined);
+
+      const taskEvents = (count: number) =>
+        adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type.startsWith("task.")),
+          Stream.take(count),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      assert.equal(yield* blocker(session.threadId), undefined);
+
+      const started = yield* taskEvents(1);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-background",
+        description: "Background agent",
+        task_type: "local_agent",
+        uuid: "task-background-uuid",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(started);
+      assert.equal(yield* blocker(session.threadId), CLAUDE_BACKGROUND_WORK_BLOCKS_REPLACEMENT);
+
+      const finished = yield* taskEvents(1);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-background",
+        status: "completed",
+        output_file: "/tmp/task-background.jsonl",
+        summary: "done",
+        uuid: "task-background-done-uuid",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(finished);
+      assert.equal(yield* blocker(session.threadId), undefined);
+
+      // Stop is the way out: a stopped session blocks nothing.
+      const restarted = yield* taskEvents(1);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-background-2",
+        description: "Background agent",
+        task_type: "local_agent",
+        uuid: "task-background-2-uuid",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(restarted);
+      assert.equal(yield* blocker(session.threadId), CLAUDE_BACKGROUND_WORK_BLOCKS_REPLACEMENT);
+      yield* adapter.stopSession(session.threadId);
+      assert.equal(yield* blocker(session.threadId), undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

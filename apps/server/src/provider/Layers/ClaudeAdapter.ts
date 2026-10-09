@@ -1656,6 +1656,9 @@ function isResultForOtherTurn(result: SDKResultMessage, turn: ClaudeTurnState): 
   return typeof kind === "string" && kind !== "human";
 }
 
+export const CLAUDE_BACKGROUND_WORK_BLOCKS_REPLACEMENT =
+  "Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
+
 const CLAUDE_USAGE_LIMIT_FAILURE =
   "Claude usage limit reached. Send the message again once the limit resets.";
 
@@ -5337,6 +5340,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const listSessions: ClaudeAdapterShape["listSessions"] = () =>
     Effect.sync(() => Array.from(sessions.values(), ({ session }) => ({ ...session })));
 
+  // Background agents and shells run inside the CLI process, so a replacement
+  // session (a setting change the CLI cannot apply in place) would kill them
+  // and lose their results. Stop is the way out: it closes the process.
+  const sessionReplacementBlocker: NonNullable<ClaudeAdapterShape["sessionReplacementBlocker"]> = (
+    threadId,
+  ) =>
+    Effect.sync(() => {
+      const context = sessions.get(threadId);
+      return context !== undefined && !context.stopped && context.liveTaskIds.size > 0
+        ? CLAUDE_BACKGROUND_WORK_BLOCKS_REPLACEMENT
+        : undefined;
+    });
+
   const hasSession: ClaudeAdapterShape["hasSession"] = (threadId) =>
     Effect.sync(() => {
       const context = sessions.get(threadId);
@@ -5386,6 +5402,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     stopSession,
     listSessions,
     hasSession,
+    sessionReplacementBlocker,
     stopAll,
     get streamEvents() {
       return Stream.fromQueue(runtimeEventQueue);

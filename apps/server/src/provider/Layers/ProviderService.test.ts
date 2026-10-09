@@ -262,6 +262,12 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       }),
   );
 
+  const replacementBlockers = new Map<ThreadId, string>();
+  const sessionReplacementBlocker = vi.fn(
+    (threadId: ThreadId): Effect.Effect<string | undefined> =>
+      Effect.sync(() => replacementBlockers.get(threadId)),
+  );
+
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
     capabilities: {
@@ -278,6 +284,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     ...(provider === CODEX_DRIVER ? { uploadFeedback } : {}),
+    sessionReplacementBlocker,
     stopAll,
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
@@ -314,6 +321,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     readThread,
     rollbackThread,
     uploadFeedback,
+    replacementBlockers,
     stopAll,
   };
 }
@@ -2756,6 +2764,77 @@ describe("agent browser access", () => {
   // Credential issuance is the observable that matters: it is the only place a
   // credential is minted, and `/mcp` accepts nothing else, so withholding it is
   // what actually denies every provider and external MCP client.
+  it.effect(
+    "refuses to replace a session that still runs work, before touching its MCP access",
+    () =>
+      Effect.gen(function* () {
+        const issued: Array<McpSessionRegistry.McpCredentialRequest> = [];
+        const revoked: Array<ThreadId> = [];
+        const threadId = asThreadId("thread-background-work");
+        const codex = makeFakeCodexAdapter();
+        codex.replacementBlockers.set(threadId, "Background agents are still running.");
+        const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+          Layer.provide(SqlitePersistenceMemory),
+        );
+        const providerLayer = makeProviderServiceLive({
+          issueMcpCredential: (request) =>
+            Effect.sync(() => {
+              issued.push(request);
+              return undefined;
+            }),
+          revokeMcpCredential: (revokedThreadId) =>
+            Effect.sync(() => void revoked.push(revokedThreadId)),
+        }).pipe(
+          Layer.provide(
+            Layer.succeed(
+              ProviderAdapterRegistry.ProviderAdapterRegistry,
+              makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter }),
+            ),
+          ),
+          Layer.provide(ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer))),
+          Layer.provideMerge(
+            ServerSettings.ServerSettingsService.layerTest({ enableAgentBrowserAccess: true }),
+          ),
+          Layer.provide(serverConfigTestLayer),
+          Layer.provide(AnalyticsService.layerTest),
+          Layer.provide(
+            Layer.succeed(
+              ProviderEventLoggers.ProviderEventLoggers,
+              ProviderEventLoggers.NoOpProviderEventLoggers,
+            ),
+          ),
+        );
+
+        const start = (target: ThreadId) =>
+          Effect.gen(function* () {
+            const provider = yield* ProviderService.ProviderService;
+            return yield* provider.startSession(target, {
+              provider: CODEX_DRIVER,
+              providerInstanceId: codexInstanceId,
+              threadId: target,
+              runtimeMode: "full-access",
+            });
+          }).pipe(Effect.provide(providerLayer));
+
+        const refused = yield* start(threadId).pipe(Effect.flip);
+        assert.equal(refused._tag, "ProviderAdapterRequestError");
+        assert.equal(
+          refused._tag === "ProviderAdapterRequestError" ? refused.detail : undefined,
+          "Background agents are still running.",
+        );
+        // The live session keeps its process and its MCP credential.
+        assert.equal(codex.startSession.mock.calls.length, 0);
+        assert.deepEqual(issued, []);
+        assert.deepEqual(revoked, []);
+
+        // Once the work ends the replacement goes ahead as before.
+        codex.replacementBlockers.delete(threadId);
+        yield* start(threadId);
+        assert.equal(codex.startSession.mock.calls.length, 1);
+        assert.equal(issued.length, 1);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("requests no MCP credential when agent browser access is off", () =>
     Effect.gen(function* () {
       const result = yield* startSessionsWith({ enableAgentBrowserAccess: false }, [
