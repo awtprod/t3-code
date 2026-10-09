@@ -98,9 +98,19 @@ const catalog = {
 const env = {
   ...Object.fromEntries(
     Object.entries(process.env).filter(([key]) =>
-      ["path", "pathext", "systemroot", "windir", "comspec", "temp", "tmp"].includes(
-        key.toLowerCase(),
-      ),
+      [
+        "path",
+        "pathext",
+        "systemroot",
+        "systemdrive",
+        "windir",
+        "comspec",
+        "temp",
+        "tmp",
+        "os",
+        "number_of_processors",
+        "processor_architecture",
+      ].includes(key.toLowerCase()),
     ),
   ),
   USERPROFILE: NodePath.join(profile, "home"),
@@ -108,8 +118,11 @@ const env = {
   LOCALAPPDATA: NodePath.join(profile, "local"),
   COMMAND_CENTER_HOME: NodePath.join(profile, "state"),
   T3CODE_DISABLE_AUTO_UPDATE: "true",
+  ELECTRON_ENABLE_LOGGING: "1",
   VITE_DEV_SERVER_URL: "",
 };
+for (const directory of [env.USERPROFILE, env.APPDATA, env.LOCALAPPDATA])
+  NodeFS.mkdirSync(directory, { recursive: true });
 const evidence = {
   startedAt: new Date().toISOString(),
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Record the actual CI host platform.
@@ -163,7 +176,7 @@ try {
     if (mode === "cold-reconnect") control.rejectBearer = true;
     electron = await _electron.launch({
       executablePath: NodePath.resolve(executable),
-      args: ["--disable-gpu"],
+      args: ["--disable-gpu", "--enable-logging=stderr", "--v=1"],
       env,
       timeout: 60000,
     });
@@ -199,6 +212,7 @@ try {
     NodeAssert.equal(launch.storage.isPackaged, true);
     NodeAssert.equal(launch.storage.encryptionAvailable, true);
     NodeAssert.ok(launch.storage.userData.startsWith(profile));
+    NodeAssert.equal(launch.storage.userData, evidence.launches[0].storage.userData);
     if (mode === "seed") {
       encryptedProbe = await electron.evaluate(
         ({ safeStorage }, text) => safeStorage.encryptString(text).toString("base64"),
