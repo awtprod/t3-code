@@ -1467,6 +1467,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         const status = yield* driver.statusDetailsLocal(cwd);
 
         assert.equal(status.hasWorkingTreeChanges, false);
+        assert.deepStrictEqual(status.workingTree.files, []);
         assert.deepStrictEqual(yield* fileSystem.readFile(indexPath), before);
       }),
     );
