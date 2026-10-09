@@ -9,12 +9,12 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import {
   findPullRequestUrl,
-  isSpaceAgentThreadId,
   layer as spaceActivityLayer,
   resolveSpaceIdsForProject,
   SPACE_ACTIVITY_RETENTION,
   SpaceActivity,
 } from "./SpaceActivity.ts";
+import { isSpaceAgentThreadId } from "./SpaceAgentIds.ts";
 
 const NOW = "2026-10-09T12:00:00.000Z";
 const secondsAfterNow = (seconds: number) =>

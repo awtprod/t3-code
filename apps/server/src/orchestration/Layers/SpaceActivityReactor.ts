@@ -16,11 +16,8 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { CommandCenterEventStream } from "../../command-center/EventStream.ts";
-import {
-  isSpaceAgentThreadId,
-  resolveSpaceIdsForProject,
-  SpaceActivity,
-} from "../../command-center/SpaceActivity.ts";
+import { resolveSpaceIdsForProject, SpaceActivity } from "../../command-center/SpaceActivity.ts";
+import { isSpaceAgentThreadId } from "../../command-center/SpaceAgentIds.ts";
 import { RepositoryIdentityResolver } from "../../project/RepositoryIdentityResolver.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
