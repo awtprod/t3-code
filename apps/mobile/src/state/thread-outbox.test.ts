@@ -462,6 +462,8 @@ describe("thread outbox", () => {
       modelSelection: antigravity,
       runtimeMode: "approval-required",
       interactionMode: "default",
+      // Command Center: queued settings also carry the thread's routing mode.
+      routingMode: "manual",
     });
     expect(
       resolveQueuedThreadSettings(
