@@ -1031,6 +1031,7 @@ describe("OrchestrationEngine", () => {
     "rejects PR discovery completed after a newer %s command",
     async (change) => {
       const system = await createOrchestrationSystem(undefined, {
+        resolveRemoteKeys: () => Effect.succeed([]),
         resolve: (workspaceRoot) =>
           Effect.succeed({
             canonicalKey: "example.test/owner/repository",

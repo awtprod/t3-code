@@ -354,6 +354,14 @@ import {
   CommandCenterRunsQueryResult,
   CommandCenterRunStartInput,
   CommandCenterRunStartResult,
+  CommandCenterSpaceAgentActivityInput,
+  CommandCenterSpaceAgentActivityResult,
+  CommandCenterSpaceAgentListInput,
+  CommandCenterSpaceAgentListResult,
+  CommandCenterSpaceAgentSetPausedInput,
+  CommandCenterSpaceAgentSetPausedResult,
+  CommandCenterSpaceAgentWakeInput,
+  CommandCenterSpaceAgentWakeResult,
   CommandCenterSpacesQueryInput,
   CommandCenterSpacesQueryResult,
   CommandCenterSpacesSyncInput,
@@ -608,6 +616,36 @@ export const WsCommandCenterCommandSubmitRpc = Rpc.make(COMMAND_CENTER_WS_METHOD
   success: CommandCenterCommandSubmitResult,
   error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
 });
+
+export const WsCommandCenterSpaceAgentListRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.spaceAgentList, {
+  payload: CommandCenterSpaceAgentListInput,
+  success: CommandCenterSpaceAgentListResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterSpaceAgentWakeRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.spaceAgentWake, {
+  payload: CommandCenterSpaceAgentWakeInput,
+  success: CommandCenterSpaceAgentWakeResult,
+  error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+});
+
+export const WsCommandCenterSpaceAgentSetPausedRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.spaceAgentSetPaused,
+  {
+    payload: CommandCenterSpaceAgentSetPausedInput,
+    success: CommandCenterSpaceAgentSetPausedResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCommandCenterSpaceAgentActivityRpc = Rpc.make(
+  COMMAND_CENTER_WS_METHODS.spaceAgentActivity,
+  {
+    payload: CommandCenterSpaceAgentActivityInput,
+    success: CommandCenterSpaceAgentActivityResult,
+    error: Schema.Union([CommandCenterError, EnvironmentAuthorizationError]),
+  },
+);
 
 export const WsCommandCenterRunStartRpc = Rpc.make(COMMAND_CENTER_WS_METHODS.runStart, {
   payload: CommandCenterRunStartInput,
@@ -2168,6 +2206,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsCommandCenterBootstrapRpc,
   WsCommandCenterCommandSubmitRpc,
   WsCommandCenterRunStartRpc,
+  WsCommandCenterSpaceAgentListRpc,
+  WsCommandCenterSpaceAgentWakeRpc,
+  WsCommandCenterSpaceAgentSetPausedRpc,
+  WsCommandCenterSpaceAgentActivityRpc,
   WsCommandCenterEventsReplayRpc,
   WsCommandCenterEventsSubscribeRpc,
   WsCommandCenterTimelineQueryRpc,

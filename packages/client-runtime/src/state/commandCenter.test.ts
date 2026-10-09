@@ -42,6 +42,25 @@ describe("Command Center environment atoms", () => {
     );
   });
 
+  it("keys Space agent activity by Space and limit", () => {
+    const first = atoms.spaceAgentActivity({
+      environmentId,
+      input: { spaceId: "acme" as never, limit: 20 },
+    });
+    expect(first).toBe(
+      atoms.spaceAgentActivity({ environmentId, input: { spaceId: "acme" as never, limit: 20 } }),
+    );
+    expect(first).not.toBe(
+      atoms.spaceAgentActivity({
+        environmentId,
+        input: { spaceId: "example" as never, limit: 20 },
+      }),
+    );
+    expect(atoms.spaceAgents({ environmentId, input: {} })).toBe(
+      atoms.spaceAgents({ environmentId, input: {} }),
+    );
+  });
+
   it("keys exact automation source by environment, Space, and automation", () => {
     const first = atoms.automationDefinition({
       environmentId,

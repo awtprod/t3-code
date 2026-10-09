@@ -1,3 +1,4 @@
+import { type Item, itemNeedsYou } from "@command-center/core";
 import type { WebPushPreferences } from "@t3tools/contracts";
 import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
 import * as DateTime from "effect/DateTime";
@@ -101,4 +102,40 @@ export function isNotificationFreshEnough(state: RelayAgentActivityState, nowMs:
     onSome: (dt) => dt.epochMilliseconds,
   });
   return updatedAtMs !== null && nowMs - updatedAtMs <= TERMINAL_NOTIFICATION_FRESHNESS_MS;
+}
+
+/** The stored Item fields the Space agent question push decides on. */
+export interface SpaceAgentQuestionCandidate {
+  readonly kind: string;
+  readonly status: string;
+  readonly priority: string;
+  /** Parsed `metadata_json`. */
+  readonly metadata: unknown;
+}
+
+/**
+ * Whether a just-created Item is a Space agent question worth a push: the
+ * agent created it (`metadata.spaceAgent`) and it lands in Needs You (an
+ * approval or decision, in review, or urgent and waiting). The agent's other
+ * Items (tasks, notes, follow-ups) stay quiet.
+ */
+export function isSpaceAgentQuestion(item: SpaceAgentQuestionCandidate): boolean {
+  const metadata = item.metadata;
+  if (
+    typeof metadata !== "object" ||
+    metadata === null ||
+    (metadata as Record<string, unknown>)["spaceAgent"] !== true
+  ) {
+    return false;
+  }
+  return itemNeedsYou({
+    kind: item.kind as Item["kind"],
+    status: item.status as Item["status"],
+    priority: item.priority as Item["priority"],
+  });
+}
+
+/** An agent question asks for the user's input, so it follows `notifyOnInput`. */
+export function spaceAgentQuestionAllowedForPreferences(preferences: WebPushPreferences): boolean {
+  return preferences.notifyOnInput;
 }

@@ -48,7 +48,10 @@ it("records the committed static-context baseline", () => {
     // 2026-10: effect rc.112 JSON Schema output plus object-root input schemas
     // for cc_spaces_list and cc_google_read (upstream catch-up sync); main's
     // +512 bytes above (prospect, memory correction, repository.checks) on top.
-    mcp: { toolCount: 36, schemaBytes: 25_877, toolkitCounts: [14, 13, 9] },
+    // 2026-10: +117 bytes for the read-only `cc_space_brief` Space agent tool.
+    // 2026-10: +271 bytes for the read-only `cc_space_activity` feed tool.
+    // 2026-10: +560 bytes for `cc_items_update` (status/title/description only).
+    mcp: { toolCount: 39, schemaBytes: 26_813, toolkitCounts: [14, 16, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

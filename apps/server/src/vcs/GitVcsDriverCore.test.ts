@@ -1451,6 +1451,29 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.strictEqual(contents.newContents, "# branch change\nunchanged context\n");
       }),
     );
+
+    it.effect("skips untracked diffs instead of diffing hundreds of untracked files", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* Effect.forEach(
+          Array.from({ length: 501 }, (_, index) => `bulk/${index}.txt`),
+          (file) => writeTextFile(cwd, file, "x\n"),
+          { concurrency: 32, discard: true },
+        );
+        yield* writeTextFile(cwd, "README.md", "changed\n");
+
+        const status = yield* driver.statusDetailsLocal(cwd);
+        assert.isTrue(status.hasWorkingTreeChanges);
+
+        const preview = yield* driver.getReviewDiffPreview({ cwd });
+        const workingTree = preview.sources.find((source) => source.kind === "working-tree");
+        assert.isTrue(workingTree?.truncated);
+        assert.include(workingTree?.diff, "README.md");
+        assert.notInclude(workingTree?.diff, "bulk/");
+      }),
+    );
   });
 
   describe("repository status", () => {
@@ -1598,6 +1621,35 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
 
         assert.equal(cachedStatus.behindCount, 0);
         assert.equal(refreshedStatus.behindCount, 1);
+      }),
+    );
+
+    it.effect("does not start Git auto-maintenance from background upstream fetches", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const remote = yield* makeTmpDir("git-vcs-driver-remote-");
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(remote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(cwd, ["push", "-u", "origin", initialBranch]);
+        yield* git(cwd, ["repack", "-d"]);
+        yield* writeTextFile(cwd, "second.txt", "second\n");
+        yield* git(cwd, ["add", "second.txt"]);
+        yield* git(cwd, ["commit", "-m", "second commit"]);
+        yield* git(cwd, ["push"]);
+        yield* git(cwd, ["repack", "-d"]);
+        // Two packs make `git gc --auto` due, and without detaching it would run inside the fetch.
+        yield* git(cwd, ["config", "gc.autoPackLimit", "1"]);
+        yield* git(cwd, ["config", "gc.autoDetach", "false"]);
+        yield* git(cwd, ["config", "maintenance.autoDetach", "false"]);
+        const packCount = git(cwd, ["count-objects", "-v"]).pipe(
+          Effect.map((stdout) => stdout.match(/^packs: (\d+)$/m)?.[1]),
+        );
+        assert.equal(yield* packCount, "2");
+
+        yield* (yield* GitVcsDriver.GitVcsDriver).statusDetailsRemote(cwd);
+
+        assert.equal(yield* packCount, "2");
       }),
     );
 
@@ -1766,6 +1818,27 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           assert.equal(file.path, "initial.ts");
           assert.equal(file.insertions, 1);
         }
+      }),
+    );
+
+    it.effect("reads working-tree totals without rewriting the git index", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const indexPath = pathService.join(cwd, ".git", "index");
+        // A stale mtime makes README.md stat-dirty; porcelain `git diff` would refresh it
+        // and write the index back, racing the user's own git commands for index.lock.
+        yield* fileSystem.utimes(pathService.join(cwd, "README.md"), 0, 0);
+        const before = yield* fileSystem.readFile(indexPath);
+
+        const status = yield* driver.statusDetailsLocal(cwd);
+
+        assert.equal(status.hasWorkingTreeChanges, false);
+        assert.deepStrictEqual(status.workingTree.files, []);
+        assert.deepStrictEqual(yield* fileSystem.readFile(indexPath), before);
       }),
     );
   });

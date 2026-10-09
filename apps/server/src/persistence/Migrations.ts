@@ -87,18 +87,22 @@ import Migration0075 from "./Migrations/075_CommandCenterDigest.ts";
 import Migration0076 from "./Migrations/076_CommandCenterRepositorySignals.ts";
 import Migration0077 from "./Migrations/077_CommandCenterInboxGmailDrafts.ts";
 import Migration0078 from "./Migrations/078_InstagramReelReceipts.ts";
-// Upstream-added migrations (T3 Code upstream 044-052), renumbered to 079-087
-// so they append after the fork's highest deployed migration (078). See
+import Migration0079 from "./Migrations/079_CommandCenterSpaceAgent.ts";
+import Migration0080 from "./Migrations/080_CommandCenterSpaceActivity.ts";
+import Migration0081 from "./Migrations/081_CommandCenterSpaceAgentState.ts";
+import Migration0082 from "./Migrations/082_CommandCenterSpaceAgentReplies.ts";
+// Upstream-added migrations (T3 Code upstream 044-052), renumbered to 083-091
+// so they append after the fork's highest migration (082). See
 // docs/operations/upstream-sync.md.
-import Migration0079 from "./Migrations/079_ClearAutomaticProjectModelDefaults.ts";
-import Migration0080 from "./Migrations/080_ProjectionProjectsAutoPull.ts";
-import Migration0081 from "./Migrations/081_RepairAutomaticSettlementTimestamps.ts";
-import Migration0082 from "./Migrations/082_ProjectionProjectIcon.ts";
-import Migration0083 from "./Migrations/083_ProjectionThreadBranchPullRequest.ts";
-import Migration0084 from "./Migrations/084_ProjectionThreadsActiveOrderKey.ts";
-import Migration0085 from "./Migrations/085_ProjectionThreadPullRequests.ts";
-import Migration0086 from "./Migrations/086_ProjectionThreadMessageContext.ts";
-import Migration0087 from "./Migrations/087_ProjectionThreadTitleState.ts";
+import Migration0083 from "./Migrations/083_ClearAutomaticProjectModelDefaults.ts";
+import Migration0084 from "./Migrations/084_ProjectionProjectsAutoPull.ts";
+import Migration0085 from "./Migrations/085_RepairAutomaticSettlementTimestamps.ts";
+import Migration0086 from "./Migrations/086_ProjectionProjectIcon.ts";
+import Migration0087 from "./Migrations/087_ProjectionThreadBranchPullRequest.ts";
+import Migration0088 from "./Migrations/088_ProjectionThreadsActiveOrderKey.ts";
+import Migration0089 from "./Migrations/089_ProjectionThreadPullRequests.ts";
+import Migration0090 from "./Migrations/090_ProjectionThreadMessageContext.ts";
+import Migration0091 from "./Migrations/091_ProjectionThreadTitleState.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -185,18 +189,22 @@ export const migrationEntries = [
   [76, "CommandCenterRepositorySignals", Migration0076],
   [77, "CommandCenterInboxGmailDrafts", Migration0077],
   [78, "InstagramReelReceipts", Migration0078],
-  // Upstream-added migrations (T3 Code upstream 044-052) renumbered to 079-087,
-  // appended after the fork's 078, preserving upstream's relative order
-  // (044->79 ... 052->87).
-  [79, "ClearAutomaticProjectModelDefaults", Migration0079],
-  [80, "ProjectionProjectsAutoPull", Migration0080],
-  [81, "RepairAutomaticSettlementTimestamps", Migration0081],
-  [82, "ProjectionProjectIcon", Migration0082],
-  [83, "ProjectionThreadBranchPullRequest", Migration0083],
-  [84, "ProjectionThreadsActiveOrderKey", Migration0084],
-  [85, "ProjectionThreadPullRequests", Migration0085],
-  [86, "ProjectionThreadMessageContext", Migration0086],
-  [87, "ProjectionThreadTitleState", Migration0087],
+  [79, "CommandCenterSpaceAgent", Migration0079],
+  [80, "CommandCenterSpaceActivity", Migration0080],
+  [81, "CommandCenterSpaceAgentState", Migration0081],
+  [82, "CommandCenterSpaceAgentReplies", Migration0082],
+  // Upstream-added migrations (T3 Code upstream 044-052) renumbered to 083-091,
+  // appended after the fork's 082, preserving upstream's relative order
+  // (044->83 ... 052->91).
+  [83, "ClearAutomaticProjectModelDefaults", Migration0083],
+  [84, "ProjectionProjectsAutoPull", Migration0084],
+  [85, "RepairAutomaticSettlementTimestamps", Migration0085],
+  [86, "ProjectionProjectIcon", Migration0086],
+  [87, "ProjectionThreadBranchPullRequest", Migration0087],
+  [88, "ProjectionThreadsActiveOrderKey", Migration0088],
+  [89, "ProjectionThreadPullRequests", Migration0089],
+  [90, "ProjectionThreadMessageContext", Migration0090],
+  [91, "ProjectionThreadTitleState", Migration0091],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

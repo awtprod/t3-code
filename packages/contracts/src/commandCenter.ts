@@ -20,6 +20,7 @@ import {
   MemoryId,
   MemoryKind,
   MemoryStatus,
+  ModelSelection as CommandCenterModelSelection,
   ProjectId,
   RepositoryId,
   RouteDecision,
@@ -34,7 +35,7 @@ import {
   TrimmedString,
 } from "@command-center/core";
 import * as Schema from "effect/Schema";
-import { ThreadId as AssetThreadId } from "./baseSchemas.ts";
+import { ThreadId as AssetThreadId, NonNegativeInt } from "./baseSchemas.ts";
 
 export const COMMAND_CENTER_WS_METHODS = {
   bootstrap: "cc.bootstrap",
@@ -115,6 +116,10 @@ export const COMMAND_CENTER_WS_METHODS = {
   observationsCorrect: "cc.observations.correct",
   observationsRetire: "cc.observations.retire",
   youtubeAnalyticsFetch: "cc.youtube.analytics.fetch",
+  spaceAgentList: "cc.spaceAgent.list",
+  spaceAgentWake: "cc.spaceAgent.wake",
+  spaceAgentSetPaused: "cc.spaceAgent.setPaused",
+  spaceAgentActivity: "cc.spaceAgent.activity",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedError<CommandCenterError>()(
@@ -185,6 +190,113 @@ export const CommandCenterCommandSubmitResult = Schema.Struct({
   duplicate: Schema.Boolean,
 });
 export type CommandCenterCommandSubmitResult = typeof CommandCenterCommandSubmitResult.Type;
+
+/**
+ * Returned to a Space agent whose requested Run is outside its Space's
+ * auto-run policy: no Run was created, a decision Item asks the user instead.
+ */
+export const CommandCenterSpaceAgentProposalResult = Schema.Struct({
+  proposal: Schema.Literal("decision"),
+  item: Item,
+  route: RouteDecision,
+});
+export type CommandCenterSpaceAgentProposalResult =
+  typeof CommandCenterSpaceAgentProposalResult.Type;
+
+export const CommandCenterSpaceBrief = Schema.Struct({
+  spaceId: SpaceId,
+  /** Bounded, rendered brief. Empty when the Space has nothing recorded. */
+  brief: Schema.String,
+});
+export type CommandCenterSpaceBrief = typeof CommandCenterSpaceBrief.Type;
+
+export const CommandCenterSpaceAgentWakeReason = Schema.Literals([
+  "event",
+  "check-in",
+  "manual",
+  "reply",
+]);
+export type CommandCenterSpaceAgentWakeReason = typeof CommandCenterSpaceAgentWakeReason.Type;
+
+export const CommandCenterSpaceAgentSummary = Schema.Struct({
+  spaceId: SpaceId,
+  displayName: TrimmedNonEmptyString,
+  enabled: Schema.Boolean,
+  /** The agent thread, once it has been created. */
+  threadId: Schema.NullOr(AssetThreadId),
+  model: Schema.NullOr(CommandCenterModelSelection),
+  /** Automatic wakes (events and check-ins) are suspended; manual wakes still work. */
+  paused: Schema.Boolean,
+  lastWakeAt: Schema.NullOr(Timestamp),
+  lastWakeReason: Schema.NullOr(CommandCenterSpaceAgentWakeReason),
+  /** Wakes of every kind on the agent's current local day. */
+  wakesToday: NonNegativeInt,
+  /** Activity rows recorded since the last delivered wake. */
+  pendingEvents: NonNegativeInt,
+});
+export type CommandCenterSpaceAgentSummary = typeof CommandCenterSpaceAgentSummary.Type;
+
+export const CommandCenterSpaceAgentListInput = Schema.Struct({});
+export const CommandCenterSpaceAgentListResult = Schema.Struct({
+  agents: Schema.Array(CommandCenterSpaceAgentSummary),
+});
+export type CommandCenterSpaceAgentListResult = typeof CommandCenterSpaceAgentListResult.Type;
+
+export const CommandCenterSpaceAgentWakeInput = Schema.Struct({ spaceId: SpaceId });
+export type CommandCenterSpaceAgentWakeInput = typeof CommandCenterSpaceAgentWakeInput.Type;
+export const CommandCenterSpaceAgentWakeResult = Schema.Struct({
+  spaceId: SpaceId,
+  threadId: AssetThreadId,
+});
+export type CommandCenterSpaceAgentWakeResult = typeof CommandCenterSpaceAgentWakeResult.Type;
+
+export const CommandCenterSpaceAgentSetPausedInput = Schema.Struct({
+  spaceId: SpaceId,
+  paused: Schema.Boolean,
+});
+export type CommandCenterSpaceAgentSetPausedInput =
+  typeof CommandCenterSpaceAgentSetPausedInput.Type;
+export const CommandCenterSpaceAgentSetPausedResult = Schema.Struct({
+  spaceId: SpaceId,
+  paused: Schema.Boolean,
+});
+export type CommandCenterSpaceAgentSetPausedResult =
+  typeof CommandCenterSpaceAgentSetPausedResult.Type;
+
+/** Most activity rows one `cc.spaceAgent.activity` call returns. */
+export const COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT = 100;
+
+export const CommandCenterSpaceAgentActivityInput = Schema.Struct({
+  spaceId: SpaceId,
+  /** Rows to return, newest first. Defaults to 20. */
+  limit: Schema.optional(
+    Schema.Int.check(
+      Schema.isBetween({ minimum: 1, maximum: COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT }),
+    ),
+  ),
+});
+export type CommandCenterSpaceAgentActivityInput = typeof CommandCenterSpaceAgentActivityInput.Type;
+
+/** One row of a Space's activity feed (a finished thread turn or Run). */
+export const CommandCenterSpaceActivityEntry = Schema.Struct({
+  occurredAt: Timestamp,
+  title: Schema.String,
+  status: Schema.String,
+  summary: Schema.String,
+  /** The newest GitHub pull request URL the source mentioned, if any. */
+  url: Schema.optional(Schema.String),
+  sourceKind: Schema.Literals(["thread", "run"]),
+  sourceId: Schema.String,
+});
+export type CommandCenterSpaceActivityEntry = typeof CommandCenterSpaceActivityEntry.Type;
+
+export const CommandCenterSpaceAgentActivityResult = Schema.Struct({
+  spaceId: SpaceId,
+  /** Newest first. */
+  entries: Schema.Array(CommandCenterSpaceActivityEntry),
+});
+export type CommandCenterSpaceAgentActivityResult =
+  typeof CommandCenterSpaceAgentActivityResult.Type;
 
 /**
  * Client acknowledgement sent only after the route receipt has been rendered.

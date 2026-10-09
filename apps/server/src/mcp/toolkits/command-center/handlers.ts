@@ -1,4 +1,4 @@
-import { CommandCenterError } from "@t3tools/contracts";
+import { CommandCenterError, type CommandCenterItemUpdateInput } from "@t3tools/contracts";
 import { RepositoryId, SpaceId } from "@command-center/core";
 import * as Effect from "effect/Effect";
 
@@ -10,6 +10,7 @@ import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import { googleCapabilityForOperation } from "../../../command-center/GoogleCapabilities.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
+import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
 import { commandCenterProviderAvailability } from "../../../command-center/ProviderAvailability.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -47,6 +48,19 @@ export const requireScopedSpace = Effect.fn("CommandCenterToolkit.requireScopedS
       reason: "validation",
       message: "This MCP credential cannot access the requested Space.",
     });
+  }
+  if (scope.role === "space-agent") {
+    // A Space agent credential outlives config edits; re-check the live
+    // policy so disabling the agent, archiving the Space, or narrowing its
+    // capabilities takes effect on the very next tool call.
+    const service = yield* CommandCenterService.CommandCenterService;
+    const space = yield* service.getConfiguredSpace(scope.spaceId);
+    if (space.agent?.enabled !== true || !space.policy.allowedCapabilities.includes(capability)) {
+      return yield* new CommandCenterError({
+        reason: "validation",
+        message: "This Space agent is disabled or no longer allowed to use this tool.",
+      });
+    }
   }
   return { ...scope, spaceId: scope.spaceId };
 });
@@ -258,6 +272,13 @@ export const memoryWriteOperationForScope = (scope: {
   readonly memoryWriteMode?: McpInvocationContext.McpMemoryWriteMode;
 }): "remember" | "propose" => (scope.memoryWriteMode === "remember" ? "remember" : "propose");
 
+/** Space agent scopes act as the agent; every other credential keeps the default actor. */
+const spaceAgentItemActor = (scope: {
+  readonly role?: string | undefined;
+  readonly threadId: string;
+}): CommandCenterService.CommandCenterItemActor | undefined =>
+  scope.role === "space-agent" ? { kind: "space-agent", threadId: scope.threadId } : undefined;
+
 const handlers = {
   cc_spaces_list: (_input) =>
     Effect.gen(function* () {
@@ -281,9 +302,28 @@ const handlers = {
     }),
   cc_items_create: (input) =>
     Effect.gen(function* () {
-      yield* requireScopedSpace("cc.items.write", input.spaceId);
+      const scope = yield* requireScopedSpace("cc.items.write", input.spaceId);
       const service = yield* CommandCenterService.CommandCenterService;
-      return yield* service.createItem(input);
+      return yield* service.createItem(input, spaceAgentItemActor(scope));
+    }),
+  cc_items_update: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.items.write", input.spaceId);
+      const service = yield* CommandCenterService.CommandCenterService;
+      const patch = Object.fromEntries(
+        Object.entries(input.patch).filter(([, value]) => value !== undefined),
+      ) as CommandCenterItemUpdateInput["patch"];
+      if (Object.keys(patch).length === 0) {
+        return yield* new CommandCenterError({
+          reason: "validation",
+          message: "An Item update must change the status, title, or description.",
+        });
+      }
+      return yield* service.updateItem(
+        { ...input, patch },
+        // Non-agent credentials keep the user-actor path the Inbox UI uses.
+        spaceAgentItemActor(scope),
+      );
     }),
   cc_memory_list: ({ spaceId }) =>
     Effect.gen(function* () {
@@ -313,9 +353,22 @@ const handlers = {
         ...(input.sourceRef === undefined ? {} : { sourceRef: input.sourceRef }),
         ...(repository.repositoryId === undefined ? {} : { repositoryId: repository.repositoryId }),
       };
-      return yield* memoryWriteOperationForScope(scope) === "remember"
-        ? service.remember(memory)
-        : service.proposeMemory({ ...memory, confidence: input.confidence });
+      if (memoryWriteOperationForScope(scope) !== "remember") {
+        return yield* service.proposeMemory({ ...memory, confidence: input.confidence });
+      }
+      // Space agent Memory is approved but attributed to the agent thread.
+      return yield* scope.role === "space-agent"
+        ? service.rememberFromSpaceAgent(memory, { threadId: scope.threadId })
+        : service.remember(memory);
+    }),
+  cc_space_brief: ({ spaceId }) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.memory.read", spaceId);
+      const service = yield* CommandCenterService.CommandCenterService;
+      return yield* service.spaceBrief({
+        spaceId: scope.spaceId,
+        ...(scope.repositoryId === undefined ? {} : { repositoryId: scope.repositoryId }),
+      });
     }),
   cc_memory_search: (input) =>
     Effect.gen(function* () {
@@ -519,17 +572,23 @@ const handlers = {
           ? { projectId: input.projectId }
           : {}),
       };
-      return yield* service.submitMcpChildCommand(
-        command,
-        commandCenterProviderAvailability(yield* providerRegistry.getProviders),
-        {
+      const providers = commandCenterProviderAvailability(yield* providerRegistry.getProviders);
+      if (scope.role === "space-agent") {
+        // Server-side autonomy gate: out-of-policy work becomes a decision.
+        return yield* service.submitSpaceAgentCommand(command, providers, {
           spaceId: scope.spaceId,
-          ...(scope.repositoryId === undefined ? {} : { repositoryId: scope.repositoryId }),
           threadId: scope.threadId,
           providerSessionId: scope.providerSessionId,
           providerInstanceId: scope.providerInstanceId,
-        },
-      );
+        });
+      }
+      return yield* service.submitMcpChildCommand(command, providers, {
+        spaceId: scope.spaceId,
+        ...(scope.repositoryId === undefined ? {} : { repositoryId: scope.repositoryId }),
+        threadId: scope.threadId,
+        providerSessionId: scope.providerSessionId,
+        providerInstanceId: scope.providerInstanceId,
+      });
     }),
   cc_automations_run: (input) =>
     Effect.gen(function* () {
@@ -603,6 +662,25 @@ const handlers = {
         contentTrust: "untrusted-external" as const,
         artifact,
         sizeBytes: exported.sizeBytes,
+      };
+    }),
+  cc_space_activity: ({ since, limit }) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.items.read");
+      if (scope.repositoryId !== undefined) {
+        return yield* new CommandCenterError({
+          reason: "validation",
+          message:
+            "Space activity spans every repository; a repository-scoped credential cannot read it.",
+        });
+      }
+      const activity = yield* SpaceActivity.SpaceActivity;
+      return {
+        activity: yield* activity.recent({
+          spaceId: scope.spaceId,
+          ...(since === undefined ? {} : { since }),
+          ...(limit === undefined ? {} : { limit }),
+        }),
       };
     }),
 } satisfies Parameters<typeof CommandCenterToolkit.toLayer>[0];

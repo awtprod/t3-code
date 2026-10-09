@@ -50,6 +50,7 @@ import {
   WorktreeSetupSnapshot,
   type WorktreeSetupStageId,
 } from "@t3tools/contracts";
+import { SpaceId } from "@command-center/core";
 import {
   computeDpopAccessTokenHash,
   computeDpopJwkThumbprint,
@@ -197,6 +198,7 @@ import * as AutomationDefinitionConfig from "./command-center/AutomationDefiniti
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as SpaceActivity from "./command-center/SpaceActivity.ts";
 import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import { makeWindowsMediaSettings } from "./command-center/WindowsMediaConfig.ts";
 import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
@@ -579,6 +581,7 @@ const buildAppUnderTest = (options?: {
       CommandCenterReadinessGate.CommandCenterReadinessGate["Service"]
     >;
     windowsMediaConnector?: Partial<WindowsMediaConnector.WindowsMediaConnector["Service"]>;
+    spaceActivity?: Partial<SpaceActivity.SpaceActivity["Service"]>;
   };
 }) =>
   Effect.gen(function* () {
@@ -1162,6 +1165,9 @@ const buildAppUnderTest = (options?: {
             }),
             ...options?.layers?.windowsMediaConnector,
           }),
+          options?.layers?.spaceActivity === undefined
+            ? Layer.empty
+            : Layer.mock(SpaceActivity.SpaceActivity)(options.layers.spaceActivity),
           orchestrationCommandDispatcherLayer,
         ),
       ),
@@ -4451,6 +4457,94 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }
       // The rejected calls never reached the connector.
       assert.deepEqual(listedPaths, ["C:\\Clips"]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves cc.spaceAgent.activity to command-center:read with a bounded limit", () =>
+    Effect.gen(function* () {
+      const queries: Array<SpaceActivity.SpaceActivityQuery> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          commandCenterReadiness: { requireReady: Effect.void },
+          spaceActivity: {
+            recent: (input) =>
+              Effect.sync(() => {
+                queries.push(input);
+                return [
+                  {
+                    occurredAt: "2026-10-09T12:00:00.000Z",
+                    title: "Ship the example feature",
+                    status: "completed",
+                    summary: "Opened a PR.",
+                    url: "https://github.com/acme/example/pull/7",
+                    sourceKind: "thread" as const,
+                    sourceId: "thread-1",
+                  },
+                ];
+              }),
+          },
+        },
+      });
+
+      const wsUrlForScope = (scope: string) =>
+        Effect.gen(function* () {
+          const { body } = yield* exchangeAccessToken(defaultDesktopBootstrapToken, { scope });
+          const ticketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+            headers: { authorization: `Bearer ${body.access_token ?? ""}` },
+          });
+          const ticket = (yield* ticketResponse.json) as { readonly ticket: string };
+          return `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsTicket=${encodeURIComponent(ticket.ticket)}`;
+        });
+
+      const readUrl = yield* wsUrlForScope("command-center:read");
+      const result = yield* Effect.scoped(
+        withWsRpcClient(readUrl, (client) =>
+          client[COMMAND_CENTER_WS_METHODS.spaceAgentActivity]({
+            spaceId: SpaceId.make("acme"),
+          }),
+        ),
+      );
+      assert.equal(result.spaceId, "acme");
+      assert.equal(result.entries[0]?.url, "https://github.com/acme/example/pull/7");
+      yield* Effect.scoped(
+        withWsRpcClient(readUrl, (client) =>
+          client[COMMAND_CENTER_WS_METHODS.spaceAgentActivity]({
+            spaceId: SpaceId.make("acme"),
+            limit: 100,
+          }),
+        ),
+      );
+      assert.deepEqual(queries, [
+        { spaceId: "acme", maxLimit: 100 },
+        { spaceId: "acme", limit: 100, maxLimit: 100 },
+      ]);
+
+      // Over the contract maximum is rejected before the service is reached.
+      const overLimit = yield* Effect.exit(
+        Effect.scoped(
+          withWsRpcClient(readUrl, (client) =>
+            client[COMMAND_CENTER_WS_METHODS.spaceAgentActivity]({
+              spaceId: SpaceId.make("acme"),
+              limit: 101,
+            }),
+          ),
+        ),
+      );
+      assert.equal(overLimit._tag, "Failure");
+      assert.equal(queries.length, 2);
+
+      const unscopedUrl = yield* wsUrlForScope("orchestration:read");
+      const rejected = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(unscopedUrl, (client) =>
+            client[COMMAND_CENTER_WS_METHODS.spaceAgentActivity]({
+              spaceId: SpaceId.make("acme"),
+            }),
+          ),
+        ),
+      );
+      assert.equal(rejected._tag, "EnvironmentAuthorizationError");
+      assert.equal(queries.length, 2);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

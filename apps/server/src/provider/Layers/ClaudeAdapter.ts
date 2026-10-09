@@ -458,14 +458,14 @@ interface ClaudeSessionContext {
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
-  /** Limits already announced for the running turn, keyed `window:resetsAt`. */
-  announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
   /**
    * Head of the latest real user turn's request text, captured in `sendTurn`
    * and reset on each new (non-steer) turn. Feeds the tool-result sieve's
    * `task.user_request` (slice B).
    */
   lastUserRequestText: string | undefined;
+  /** Limits already announced for the running turn, keyed `window:resetsAt`. */
+  announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
   stopped: boolean;
 }
 
@@ -1720,6 +1720,14 @@ function titleForTool(itemType: CanonicalItemType): string {
   }
 }
 
+/**
+ * The SDK passes `mcpServers` to the CLI as an inline `--mcp-config` argument,
+ * and process arguments are readable by every local user. The T3 MCP
+ * credential therefore travels in the child's environment, which only its
+ * owner can read, and the CLI expands the `${VAR}` reference when it connects.
+ */
+export const CLAUDE_T3_MCP_AUTHORIZATION_ENV = "T3_CODE_MCP_AUTHORIZATION";
+
 const SUPPORTED_CLAUDE_IMAGE_MIME_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -1905,6 +1913,9 @@ function resultOutcome(
     errorMessage,
   };
 }
+
+export const CLAUDE_BACKGROUND_WORK_BLOCKS_REPLACEMENT =
+  "Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
 
 function streamKindFromDeltaType(deltaType: string): ClaudeTextStreamKind {
   return deltaType.includes("thinking") ? "reasoning_text" : "assistant_text";
@@ -5167,7 +5178,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : {}),
         },
         supportedDialogKinds: ["resume_return"],
-        env: McpProviderSession.withAgentDeviceEnvironment(claudeEnvironment, mcpSession),
+        env: McpProviderSession.withAgentDeviceEnvironment(
+          mcpSession
+            ? {
+                ...claudeEnvironment,
+                [CLAUDE_T3_MCP_AUTHORIZATION_ENV]: mcpSession.authorizationHeader,
+              }
+            : claudeEnvironment,
+          mcpSession,
+        ),
         additionalDirectories,
         ...(sandboxProviderTarget(input.threadId)
           ? {
@@ -5183,7 +5202,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   type: "http",
                   url: mcpSession.endpoint,
                   headers: {
-                    Authorization: mcpSession.authorizationHeader,
+                    Authorization: `\${${CLAUDE_T3_MCP_AUTHORIZATION_ENV}}`,
                   },
                 },
               },
@@ -5799,6 +5818,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const listSessions: ClaudeAdapterShape["listSessions"] = () =>
     Effect.sync(() => Array.from(sessions.values(), ({ session }) => ({ ...session })));
 
+  // Background agents and shells run inside the CLI process, so a replacement
+  // session (a setting change the CLI cannot apply in place) would kill them
+  // and lose their results. Stop is the way out: it closes the process.
+  const sessionReplacementBlocker: NonNullable<ClaudeAdapterShape["sessionReplacementBlocker"]> = (
+    threadId,
+  ) =>
+    Effect.sync(() => {
+      const context = sessions.get(threadId);
+      return context !== undefined && !context.stopped && context.liveTaskIds.size > 0
+        ? CLAUDE_BACKGROUND_WORK_BLOCKS_REPLACEMENT
+        : undefined;
+    });
+
   const hasSession: ClaudeAdapterShape["hasSession"] = (threadId) =>
     Effect.sync(() => {
       const context = sessions.get(threadId);
@@ -5849,6 +5881,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     stopSession,
     listSessions,
     hasSession,
+    sessionReplacementBlocker,
     stopAll,
     get streamEvents() {
       return Stream.fromQueue(runtimeEventQueue);

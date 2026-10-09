@@ -276,6 +276,8 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
 
       expect(nonGitIdentity).toBeNull();
       expect(noRemoteIdentity).toBeNull();
+      expect(yield* resolver.resolveRemoteKeys(nonGitDir)).toEqual([]);
+      expect(yield* resolver.resolveRemoteKeys(gitDir)).toEqual([]);
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 
@@ -314,6 +316,11 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
         expect(identity?.canonicalKey).toBe("github.com/t3tools/t3code");
         expect(identity?.displayName).toBe("t3tools/t3code");
         expect(yield* resolver.resolve(cwd)).toEqual(identity);
+        // Every fetch remote stays visible for matching a fork by its origin.
+        expect([...(yield* resolver.resolveRemoteKeys(cwd))].toSorted()).toEqual([
+          "github.com/julius/t3code",
+          "github.com/t3tools/t3code",
+        ]);
       }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 

@@ -154,6 +154,13 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<ProviderUploadFeedbackResult, TError>;
 
   /**
+   * Why replacing this thread's live session would destroy work the user has
+   * not stopped, as a message for them, or `undefined` when it is safe.
+   * Adapters whose sessions run no work outside the active turn omit it.
+   */
+  readonly sessionReplacementBlocker?: (threadId: ThreadId) => Effect.Effect<string | undefined>;
+
+  /**
    * Stop all sessions owned by this adapter.
    */
   readonly stopAll: () => Effect.Effect<void, TError>;

@@ -13,13 +13,13 @@ layer("076_ProjectionThreadMessageContext", (it) => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 85 });
+      yield* runMigrations({ toMigrationInclusive: 89 });
       yield* sql`
         ALTER TABLE projection_thread_messages
         ADD COLUMN context_json TEXT
       `;
 
-      yield* runMigrations({ toMigrationInclusive: 86 });
+      yield* runMigrations({ toMigrationInclusive: 90 });
 
       const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
         PRAGMA table_info(projection_thread_messages)
@@ -28,7 +28,7 @@ layer("076_ProjectionThreadMessageContext", (it) => {
       const migrations = yield* sql<{ readonly migration_id: number }>`
         SELECT migration_id
         FROM effect_sql_migrations
-        WHERE migration_id = 86
+        WHERE migration_id = 90
       `;
 
       assert.equal(context?.name, "context_json");

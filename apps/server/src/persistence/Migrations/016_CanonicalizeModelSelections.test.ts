@@ -385,8 +385,8 @@ layer("044_ClearAutomaticProjectModelDefaults", (it) => {
   it.effect("clears create-time seeds and preserves explicit project defaults", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      // Upstream's 044 is the fork's 079 (after the fork's 078).
-      yield* runMigrations({ toMigrationInclusive: 78 });
+      // Upstream's 044 is the fork's 083 (after the fork's 082).
+      yield* runMigrations({ toMigrationInclusive: 82 });
 
       yield* sql`
         INSERT INTO projection_projects (
@@ -430,7 +430,7 @@ layer("044_ClearAutomaticProjectModelDefaults", (it) => {
           ('event-explicit-update', 'project', 'project-explicit', 1, 'project.meta-updated', '2026-08-02T00:00:00.000Z', 'command-explicit-update', NULL, 'command-explicit-update', 'client', '{"defaultModelSelection":{"instanceId":"codex","model":"gpt-5.6-sol","options":[{"id":"reasoningEffort","value":"high"}]}}', '{}')
       `;
 
-      yield* runMigrations({ toMigrationInclusive: 79 });
+      yield* runMigrations({ toMigrationInclusive: 83 });
 
       const projects = yield* sql<{
         readonly projectId: string;

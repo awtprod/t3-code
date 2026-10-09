@@ -32,6 +32,8 @@ import ProjectScriptsControl, {
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
 import { OpenInPicker } from "./OpenInPicker";
+import { SpaceAgentThreadControls } from "../../command-center/space-agent/SpaceAgentThreadControls";
+import { isSpaceAgentThreadId } from "../../command-center/space-agent/SpaceAgent.logic";
 import { useRemoteOpenState, type RemoteOpenMode } from "../../remoteOpen";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useT3ProjectFileScripts } from "~/hooks/useT3ProjectFileScripts";
@@ -409,6 +411,12 @@ export const ChatHeader = memo(function ChatHeader({
           "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:motion-safe:ease-out",
         )}
       >
+        {isServerThread && isSpaceAgentThreadId(activeThreadId) && (
+          <SpaceAgentThreadControls
+            environmentId={activeThreadEnvironmentId}
+            threadId={activeThreadId}
+          />
+        )}
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}

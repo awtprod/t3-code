@@ -13,8 +13,8 @@ layer("072_ProjectionProjectIcon", (it) => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 81 });
-      yield* runMigrations({ toMigrationInclusive: 82 });
+      yield* runMigrations({ toMigrationInclusive: 85 });
+      yield* runMigrations({ toMigrationInclusive: 86 });
 
       const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
         PRAGMA table_info(projection_projects)

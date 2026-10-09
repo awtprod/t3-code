@@ -12,6 +12,7 @@ import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { SandboxLifecycleReactor } from "../Services/SandboxLifecycleReactor.ts";
 import { SandboxSettleCleanupReactor } from "../Services/SandboxSettleCleanupReactor.ts";
+import { SpaceActivityReactor } from "../Services/SpaceActivityReactor.ts";
 import { SubagentDelegationReactor } from "../Services/SubagentDelegationReactor.ts";
 import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
 import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
@@ -28,6 +29,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const sandboxLifecycleReactor = yield* SandboxLifecycleReactor;
   const sandboxSettleCleanupReactor = yield* SandboxSettleCleanupReactor;
   const subagentDelegationReactor = yield* SubagentDelegationReactor;
+  const spaceActivityReactor = yield* SpaceActivityReactor;
   const threadSettlementReactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
   const pullRequestSyncReactor = yield* PullRequestSyncReactor.PullRequestSyncReactor;
   const threadPullRequestReactor = yield* ThreadPullRequestReactor.ThreadPullRequestReactor;
@@ -43,6 +45,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* sandboxSettleCleanupReactor.start();
     yield* threadPullRequestReactor.start();
     yield* subagentDelegationReactor.start();
+    yield* spaceActivityReactor.start();
     yield* threadSettlementReactor.start();
     yield* pullRequestSyncReactor.start();
     yield* agentAwarenessRelay.start();
@@ -60,6 +63,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* sandboxLifecycleReactor.drain;
     yield* sandboxSettleCleanupReactor.drain;
     yield* subagentDelegationReactor.drain;
+    yield* spaceActivityReactor.drain;
   });
 
   return {

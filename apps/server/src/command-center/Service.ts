@@ -7,6 +7,7 @@ import {
   Connection,
   type Item as ItemType,
   Item,
+  itemNeedsYou,
   Memory,
   type Memory as MemoryType,
   type ProviderAvailability,
@@ -40,9 +41,12 @@ import {
   type CommandCenterMemoryRememberInput,
   type CommandCenterMemoryReviewInput,
   type CommandCenterRunsQueryInput,
+  type CommandCenterSpaceAgentProposalResult,
+  type CommandCenterSpaceBrief,
   type CommandCenterSpacesQueryInput,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -64,6 +68,9 @@ import {
 import { ConnectionHealth, layer as connectionHealthLayer } from "./ConnectionHealth.ts";
 import { configProjectionFingerprint, type ConfigSyncState } from "./ConfigProjection.ts";
 import { CommandApprovalPayload, makeCommandApprovalPayload } from "./CommandApproval.ts";
+import { spaceAgentRunAuthorizedEventId } from "./SpaceAgentIds.ts";
+import { isSpaceAgentItemMetadata, recordSpaceAgentReply } from "./SpaceAgentReplies.ts";
+import { loadSpaceBriefInput, renderSpaceBrief } from "./SpaceBrief.ts";
 
 const decodeSpace = Schema.decodeUnknownEffect(Space);
 const decodeItem = Schema.decodeUnknownEffect(Item);
@@ -186,6 +193,7 @@ interface SpaceRow {
   readonly instructions: string | null;
   readonly policyJson: string;
   readonly modelDefaultsJson: string;
+  readonly agentJson: string | null;
   readonly connectionsJson: string;
   readonly repositoriesJson: string;
   readonly aliasesJson: string;
@@ -351,6 +359,7 @@ const decodeSpaceRow = Effect.fn("CommandCenter.decodeSpaceRow")(function* (row:
       row.modelDefaultsJson === "{}"
         ? undefined
         : yield* parseJson(row.modelDefaultsJson, "Space model defaults"),
+    agent: row.agentJson === null ? undefined : yield* parseJson(row.agentJson, "Space agent"),
     connectionIds: yield* parseJson(row.connectionsJson, "Space connections"),
     repositories: yield* parseJson(row.repositoriesJson, "Space repositories"),
     aliases: yield* parseJson(row.aliasesJson, "Space aliases"),
@@ -505,6 +514,12 @@ const lessonEvidenceRef = (sourceRef: string | undefined) => {
   }
 };
 
+/** A Space agent acting through the MCP Item tools. */
+export interface CommandCenterItemActor {
+  readonly kind: "space-agent";
+  readonly threadId: string;
+}
+
 export interface CommandCenterServiceShape {
   readonly bootstrap: Effect.Effect<CommandCenterBootstrap, CommandCenterError>;
   readonly syncConfiguration: (input?: {
@@ -579,11 +594,46 @@ export interface CommandCenterServiceShape {
       readonly providerInstanceId: string;
     },
   ) => Effect.Effect<CommandCenterCommandSubmitResultType, CommandCenterError>;
+  /** Bounded brief of approved Memory and open Items for one configured Space. */
+  readonly spaceBrief: (input: {
+    readonly spaceId: string;
+    readonly repositoryId?: string;
+  }) => Effect.Effect<CommandCenterSpaceBrief, CommandCenterError>;
+  /** The active, configured Space (cached config; fails when absent). */
+  readonly getConfiguredSpace: (spaceId: string) => Effect.Effect<SpaceType, CommandCenterError>;
+  /**
+   * Internal MCP boundary for a Space agent thread, which has no parent Run.
+   * `submitCommand` stays the only route/policy gate: the Run is kept and
+   * authorized only when that gate leaves it queued and ready at a risk listed
+   * in the Space's `autoRunRiskLevels`. Anything else is rolled back (no Run,
+   * no approval) and recorded as a decision Item for the user instead.
+   */
+  readonly submitSpaceAgentCommand: (
+    input: CommandCenterCommandSubmitInput,
+    providers: ReadonlyArray<ProviderAvailability>,
+    source: {
+      readonly spaceId: string;
+      readonly threadId: string;
+      readonly providerSessionId: string;
+      readonly providerInstanceId: string;
+    },
+  ) => Effect.Effect<
+    CommandCenterCommandSubmitResultType | CommandCenterSpaceAgentProposalResult,
+    CommandCenterError
+  >;
+  /** `actor` marks the Item as a Space agent's (agent provenance + `metadata.spaceAgent`). */
   readonly createItem: (
     input: CommandCenterItemCreateInput,
+    actor?: CommandCenterItemActor,
   ) => Effect.Effect<ItemType, CommandCenterError>;
+  /**
+   * Without `actor` the change is the user's: a status change on a Space agent
+   * Item is queued as a reply for the agent. With `actor` the audit event is the
+   * agent's and no reply is queued.
+   */
   readonly updateItem: (
     input: CommandCenterItemUpdateInput,
+    actor?: CommandCenterItemActor,
   ) => Effect.Effect<CommandCenterItemUpdateResultType, CommandCenterError>;
   readonly recordArtifact: (input: {
     readonly artifact: ArtifactType;
@@ -592,6 +642,11 @@ export interface CommandCenterServiceShape {
   }) => Effect.Effect<ArtifactType, CommandCenterError>;
   readonly remember: (
     input: CommandCenterMemoryRememberInput,
+  ) => Effect.Effect<MemoryType, CommandCenterError>;
+  /** Approved Memory written by a Space agent, attributed to its thread. */
+  readonly rememberFromSpaceAgent: (
+    input: CommandCenterMemoryRememberInput,
+    source: { readonly threadId: string },
   ) => Effect.Effect<MemoryType, CommandCenterError>;
   readonly proposeMemory: (
     input: CommandCenterMemoryProposeInput,
@@ -674,14 +729,19 @@ export class CommandCenterService extends Context.Service<
   CommandCenterServiceShape
 >()("@awtprod/command-center/command-center/Service/CommandCenterService") {}
 
-export function itemNeedsYou(item: Pick<ItemType, "kind" | "status" | "priority">): boolean {
-  return (
-    item.kind === "approval" ||
-    item.kind === "decision" ||
-    item.status === "review" ||
-    (item.status === "waiting" && item.priority === "urgent")
-  );
-}
+/** Rolls back an out-of-policy Space agent submission inside its transaction. */
+class SpaceAgentProposalRequired extends Data.TaggedError("SpaceAgentProposalRequired")<{
+  readonly route: RouteDecisionType;
+}> {}
+
+const SPACE_AGENT_PROPOSAL_TEXT_CHARS = 4_000;
+
+const clipProposalText = (value: string, maxChars: number): string => {
+  const trimmed = value.trim();
+  return trimmed.length <= maxChars
+    ? trimmed
+    : `${trimmed.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+};
 
 function inferClassifier(text: string, spaceId: SpaceType["id"] | undefined) {
   const normalized = normalizeSpaceAlias(text);
@@ -905,12 +965,14 @@ export const layer = Layer.effect(
               yield* sql`
                 INSERT INTO command_center_spaces (
                   id, slug, name, kind, instructions, policy_json, model_defaults_json,
-                  connections_json, repositories_json, aliases_json, lifecycle, created_at,
-                  updated_at
+                  agent_json, connections_json, repositories_json, aliases_json, lifecycle,
+                  created_at, updated_at
                 ) VALUES (
                   ${space.id}, ${space.slug}, ${space.displayName}, ${space.kind},
                   ${space.instructions}, ${stringify(space.policy)},
-                  ${stringify(space.modelDefaults ?? {})}, ${stringify(space.connectionIds)},
+                  ${stringify(space.modelDefaults ?? {})},
+                  ${space.agent === undefined ? null : stringify(space.agent)},
+                  ${stringify(space.connectionIds)},
                   ${stringify(space.repositories)}, ${stringify(space.aliases)},
                   ${space.lifecycle}, ${space.createdAt}, ${space.updatedAt}
                 )
@@ -921,6 +983,7 @@ export const layer = Layer.effect(
                   instructions = excluded.instructions,
                   policy_json = excluded.policy_json,
                   model_defaults_json = excluded.model_defaults_json,
+                  agent_json = excluded.agent_json,
                   connections_json = excluded.connections_json,
                   repositories_json = excluded.repositories_json,
                   aliases_json = excluded.aliases_json,
@@ -1078,6 +1141,7 @@ export const layer = Layer.effect(
       const rows = yield* sql<SpaceRow>`
         SELECT id, slug, name, kind, instructions,
           policy_json AS "policyJson", model_defaults_json AS "modelDefaultsJson",
+          agent_json AS "agentJson",
           connections_json AS "connectionsJson", repositories_json AS "repositoriesJson",
           aliases_json AS "aliasesJson", lifecycle,
           created_at AS "createdAt", updated_at AS "updatedAt"
@@ -2797,8 +2861,240 @@ export const layer = Layer.effect(
           ),
         );
 
+    const submitSpaceAgentCommand: CommandCenterServiceShape["submitSpaceAgentCommand"] = (
+      input,
+      providers,
+      source,
+    ) =>
+      Effect.gen(function* () {
+        if (
+          [
+            source.spaceId,
+            source.threadId,
+            source.providerSessionId,
+            source.providerInstanceId,
+          ].some((value) => value.trim().length === 0) ||
+          (input.spaceId !== undefined && input.spaceId !== source.spaceId)
+        ) {
+          return yield* new CommandCenterError({
+            reason: "validation",
+            message: "The Space agent source scope is incomplete or does not match the command.",
+          });
+        }
+        // Warm the config cache before the transaction so a rollback below can
+        // never leave the cached projection ahead of the database.
+        const space = yield* requireConfiguredSpace(source.spaceId);
+        if (space.agent?.enabled !== true) {
+          return yield* new CommandCenterError({
+            reason: "validation",
+            message: "This Space does not have an enabled agent.",
+          });
+        }
+        const pinnedInput = { ...input, spaceId: space.id };
+        const outcome = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const result = yield* submitCommand(pinnedInput, providers);
+              // A replayed command id never authorizes anything new.
+              if (result.duplicate) return { _tag: "Submitted" as const, result };
+              const risk = result.route.risk;
+              const inPolicy =
+                result.route.spaceId === space.id &&
+                result.run.status === "queued" &&
+                result.route.status === "ready" &&
+                !result.route.approvalRequired &&
+                (risk === "low" || risk === "reversible") &&
+                space.policy.autoRunRiskLevels.includes(risk);
+              if (!inPolicy) {
+                return yield* new SpaceAgentProposalRequired({ route: result.route });
+              }
+              const authorizedAt = DateTime.formatIso(yield* DateTime.now);
+              const authorized = yield* sql<{ readonly id: string }>`
+                UPDATE command_center_runs
+                SET execution_authorized_at = ${authorizedAt}
+                WHERE id = ${result.run.id}
+                  AND state = 'queued'
+                  AND thread_id IS NULL
+                  AND parent_run_id IS NULL
+                  AND execution_authorized_at IS NULL
+                RETURNING id
+              `;
+              if (authorized.length !== 1) {
+                return yield* new CommandCenterError({
+                  reason: "conflict",
+                  message: "The Space agent Run changed before it could be authorized.",
+                });
+              }
+              yield* appendAudit({
+                eventId: spaceAgentRunAuthorizedEventId(result.run.id),
+                actorKind: "agent",
+                action: "cc.runs.space-agent.authorized",
+                spaceId: space.id,
+                runId: result.run.id,
+                payload: {
+                  runId: result.run.id,
+                  authorizedAt,
+                  risk,
+                  autoRunRiskLevels: space.policy.autoRunRiskLevels,
+                  source: {
+                    kind: "space-agent",
+                    threadId: source.threadId,
+                    providerSessionId: source.providerSessionId,
+                    providerInstanceId: source.providerInstanceId,
+                    spaceId: space.id,
+                  },
+                },
+                occurredAt: authorizedAt,
+              });
+              return { _tag: "Submitted" as const, result };
+            }),
+          )
+          .pipe(
+            Effect.catchIf(
+              (cause): cause is SpaceAgentProposalRequired =>
+                cause instanceof SpaceAgentProposalRequired,
+              (proposal) => Effect.succeed({ _tag: "Proposal" as const, route: proposal.route }),
+            ),
+          );
+        if (outcome._tag === "Submitted") return outcome.result;
+        const item = yield* recordSpaceAgentProposal({
+          spaceId: space.id,
+          threadId: source.threadId,
+          command: pinnedInput,
+          route: outcome.route,
+        });
+        return { proposal: "decision" as const, item, route: outcome.route };
+      }).pipe(
+        Effect.mapError((cause) =>
+          isCommandCenterError(cause)
+            ? cause
+            : persistenceError("Could not submit the Space agent command.", cause),
+        ),
+      );
+
+    const spaceBrief: CommandCenterServiceShape["spaceBrief"] = (input) =>
+      Effect.gen(function* () {
+        const space = yield* requireConfiguredSpace(input.spaceId);
+        const briefInput = yield* loadSpaceBriefInput({
+          space: { id: space.id, displayName: space.displayName },
+          repositoryId: input.repositoryId,
+          now: DateTime.formatIso(yield* DateTime.now),
+        }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+        return { spaceId: space.id, brief: renderSpaceBrief(briefInput) };
+      }).pipe(
+        Effect.mapError((cause) =>
+          isCommandCenterError(cause)
+            ? cause
+            : persistenceError("Could not load the Space brief.", cause),
+        ),
+      );
+
+    const recordSpaceAgentProposal = Effect.fn("CommandCenter.recordSpaceAgentProposal")(
+      function* (input: {
+        readonly spaceId: string;
+        readonly threadId: string;
+        readonly command: CommandCenterCommandSubmitInput;
+        readonly route: RouteDecisionType;
+      }) {
+        const itemId = `space-agent-proposal:${(yield* digest(
+          `${input.spaceId}\0${input.command.commandId}`,
+        )).slice(0, 40)}`;
+        const existing = yield* sql<ItemRow>`
+          SELECT id, space_id AS "spaceId", kind, status, title, body, priority,
+            due_at AS "dueAt", source_json AS "sourceJson", links_json AS "linksJson",
+            metadata_json AS "metadataJson", created_at AS "createdAt", updated_at AS "updatedAt"
+          FROM command_center_items WHERE id = ${itemId}
+        `;
+        if (existing[0] !== undefined) {
+          const stored = yield* decodeItemRow(existing[0]);
+          if (stored.spaceId !== input.spaceId) {
+            return yield* new CommandCenterError({
+              reason: "conflict",
+              message: "The Space agent proposal id is already bound to a different Space.",
+            });
+          }
+          return stored;
+        }
+        const now = DateTime.formatIso(yield* DateTime.now);
+        const commandText = clipProposalText(input.command.text, SPACE_AGENT_PROPOSAL_TEXT_CHARS);
+        const reasons = input.route.reasons
+          .slice(0, 8)
+          .map((reason) => clipProposalText(reason, 240));
+        const item = yield* decodeItem({
+          id: itemId,
+          spaceId: input.spaceId,
+          kind: "decision",
+          status: "review",
+          priority: "high",
+          title: clipProposalText(`Agent proposal: ${input.command.text}`, 120),
+          description: [
+            commandText,
+            `Risk: ${input.route.risk} (${input.route.actionKind}). This is outside the Space's auto-run policy, so the agent did not start it.`,
+            ...(reasons.length === 0 ? [] : [`Route notes: ${reasons.join("; ")}`]),
+          ].join("\n\n"),
+          artifactIds: [],
+          provenance: { kind: "agent", sourceRef: input.threadId, capturedAt: now },
+          metadata: {
+            spaceAgent: true,
+            type: "space-agent-proposal",
+            threadId: input.threadId,
+            commandId: input.command.commandId,
+            risk: input.route.risk,
+            actionKind: input.route.actionKind,
+            routeStatus: input.route.status,
+            reasons,
+            proposal: {
+              text: commandText,
+              ...(input.command.repositoryId === undefined
+                ? {}
+                : { repositoryId: input.command.repositoryId }),
+              ...(input.command.providerId === undefined
+                ? {}
+                : { providerId: input.command.providerId }),
+              ...(input.command.modelId === undefined ? {} : { modelId: input.command.modelId }),
+            },
+          },
+          createdAt: now,
+          updatedAt: now,
+        }).pipe(
+          Effect.mapError((cause) =>
+            persistenceError("Could not record the Space agent proposal.", cause),
+          ),
+        );
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* sql`
+              INSERT INTO command_center_items (
+                id, space_id, kind, status, title, body, priority, due_at,
+                source_json, links_json, metadata_json, created_at, updated_at
+              ) VALUES (
+                ${item.id}, ${item.spaceId}, ${item.kind}, ${item.status}, ${item.title},
+                ${item.description ?? null}, ${item.priority}, NULL,
+                ${stringify(item.provenance)}, ${stringify(item.artifactIds)},
+                ${stringify(item.metadata)}, ${item.createdAt}, ${item.updatedAt}
+              )
+            `;
+            yield* appendAudit({
+              eventId: `space-agent-proposal:${item.id}:created`,
+              actorKind: "agent",
+              action: "cc.items.changed",
+              spaceId: item.spaceId,
+              payload: {
+                itemId: item.id,
+                change: "created",
+                kind: item.kind,
+                status: item.status,
+              },
+              occurredAt: now,
+            });
+          }),
+        );
+        return item;
+      },
+    );
+
     const createItem = Effect.fn("CommandCenter.createItem")(
-      function* (input: CommandCenterItemCreateInput) {
+      function* (input: CommandCenterItemCreateInput, actor?: CommandCenterItemActor) {
         yield* requireConfiguredSpace(input.spaceId);
         const existing = yield* sql<ItemRow>`
         SELECT id, space_id AS "spaceId", kind, status, title, body, priority,
@@ -2827,8 +3123,11 @@ export const layer = Layer.effect(
           description: input.description,
           dueAt: input.dueAt,
           artifactIds: [],
-          provenance: { kind: "user", capturedAt: now },
-          metadata: {},
+          provenance:
+            actor === undefined
+              ? { kind: "user", capturedAt: now }
+              : { kind: "agent", sourceRef: actor.threadId, capturedAt: now },
+          metadata: actor === undefined ? {} : { spaceAgent: true, threadId: actor.threadId },
           createdAt: now,
           updatedAt: now,
         }).pipe(Effect.mapError((cause) => persistenceError("Could not create Item.", cause)));
@@ -2846,7 +3145,7 @@ export const layer = Layer.effect(
             )
           `;
             yield* appendAudit({
-              actorKind: "user",
+              actorKind: actor === undefined ? "user" : "agent",
               action: "cc.items.create",
               spaceId: item.spaceId,
               payload: { itemId: item.id, kind: item.kind },
@@ -2862,7 +3161,7 @@ export const layer = Layer.effect(
     );
 
     const updateItem = Effect.fn("CommandCenter.updateItem")(
-      function* (input: CommandCenterItemUpdateInput) {
+      function* (input: CommandCenterItemUpdateInput, actor?: CommandCenterItemActor) {
         yield* requireConfiguredSpace(input.spaceId);
         const patchFields = Object.keys(input.patch);
         if (
@@ -2954,9 +3253,24 @@ export const layer = Layer.effect(
             }
 
             const updatedItem = yield* decodeItemRow(updatedRow);
+            if (
+              actor === undefined &&
+              current.status !== updatedItem.status &&
+              isSpaceAgentItemMetadata(updatedItem.metadata)
+            ) {
+              yield* recordSpaceAgentReply(sql, {
+                sourceId: eventId,
+                spaceId: updatedItem.spaceId,
+                itemId: updatedItem.id,
+                itemTitle: updatedItem.title,
+                kind: "status",
+                body: `Status changed from ${current.status} to ${updatedItem.status}.`,
+                occurredAt: updatedAt,
+              });
+            }
             yield* appendAudit({
               eventId,
-              actorKind: "user",
+              actorKind: actor === undefined ? "user" : "agent",
               action: "cc.items.changed",
               spaceId: updatedItem.spaceId,
               payload: {
@@ -3116,7 +3430,9 @@ export const layer = Layer.effect(
         input: CommandCenterMemoryRememberInput | CommandCenterMemoryProposeInput,
         status: "approved" | "candidate",
         confidence: number,
+        approvedBy: "user" | "agent" = "user",
       ) {
+        const actorKind = status === "approved" ? approvedBy : "agent";
         const configuredSpace = yield* requireConfiguredSpace(input.spaceId);
         if (
           input.repositoryId !== undefined &&
@@ -3169,7 +3485,7 @@ export const layer = Layer.effect(
           content: input.content,
           confidence,
           provenance: {
-            kind: status === "approved" ? "user" : "agent",
+            kind: actorKind,
             sourceRef: input.sourceRef,
             capturedAt: now,
           },
@@ -3202,7 +3518,7 @@ export const layer = Layer.effect(
               yield* ensureCandidateProjection(memory, now);
             }
             yield* appendAudit({
-              actorKind: status === "approved" ? "user" : "agent",
+              actorKind,
               action: status === "approved" ? "cc.memory.remember" : "cc.memory.propose",
               spaceId: memory.spaceId,
               payload: { memoryId: memory.id, kind: memory.kind, status },
@@ -3218,6 +3534,10 @@ export const layer = Layer.effect(
     );
 
     const remember = (input: CommandCenterMemoryRememberInput) => storeMemory(input, "approved", 1);
+    const rememberFromSpaceAgent: CommandCenterServiceShape["rememberFromSpaceAgent"] = (
+      input,
+      source,
+    ) => storeMemory({ ...input, sourceRef: source.threadId }, "approved", 1, "agent");
     const proposeMemory = Effect.fn("CommandCenter.proposeMemory")(
       function* (input: CommandCenterMemoryProposeInput) {
         if (input.evidence === undefined)
@@ -3679,10 +3999,14 @@ export const layer = Layer.effect(
       submitCommand,
       authorizeRunExecution,
       submitMcpChildCommand,
+      submitSpaceAgentCommand,
+      getConfiguredSpace: requireConfiguredSpace,
+      spaceBrief,
       createItem,
       updateItem,
       recordArtifact,
       remember,
+      rememberFromSpaceAgent,
       proposeMemory,
       reviewMemory,
       decideApproval,

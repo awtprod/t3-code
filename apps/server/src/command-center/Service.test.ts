@@ -7,6 +7,7 @@ import {
   Artifact,
   Connection,
   ItemId,
+  itemNeedsYou,
   ProviderAvailability,
   Space,
   type ProviderAvailability as ProviderAvailabilityType,
@@ -30,11 +31,7 @@ import { resolveGoogleDraftAttachmentPaths } from "./AutomationRuns.ts";
 import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts";
 import * as ConnectionHealth from "./ConnectionHealth.ts";
 import { make as makeInbox } from "./Inbox.ts";
-import {
-  CommandCenterService,
-  itemNeedsYou,
-  layer as commandCenterServiceLayer,
-} from "./Service.ts";
+import { CommandCenterService, layer as commandCenterServiceLayer } from "./Service.ts";
 
 const decodeSpace = Schema.decodeUnknownSync(Space);
 const decodeArtifact = Schema.decodeUnknownSync(Artifact);
@@ -2705,5 +2702,376 @@ it.effect("denies stale conflicting and cross-Space Item updates", () =>
       )
       .pipe(Effect.flip);
     expect(crossSpace.reason).toBe("not_found");
+  }).pipe(Effect.provide(makeTestLayer())),
+);
+
+const agentSpaceSource = {
+  spaceId: studioSpace.id,
+  threadId: "cc-space-agent-example-studio",
+  providerSessionId: "space-agent-session",
+  providerInstanceId: "space-agent-provider",
+};
+
+const withStudioAgent = (
+  config: LoadedCommandCenterConfig,
+  agent: { readonly enabled: boolean } | null = { enabled: true },
+): LoadedCommandCenterConfig => ({
+  ...config,
+  spaces: config.spaces.map((space) =>
+    space.id === studioSpace.id
+      ? decodeSpace({
+          ...space,
+          ...(agent === null
+            ? {}
+            : { agent: { ...agent, dailyWakeLimit: 12, debounceMinutes: 10 } }),
+        })
+      : space,
+  ),
+});
+
+const countSpaceAgentWrites = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const [runs] = yield* sql<{ readonly count: number }>`
+    SELECT COUNT(*) AS count FROM command_center_runs
+  `;
+  const [approvals] = yield* sql<{ readonly count: number }>`
+    SELECT COUNT(*) AS count FROM command_center_approvals
+  `;
+  const [receipts] = yield* sql<{ readonly count: number }>`
+    SELECT COUNT(*) AS count FROM command_center_command_receipts
+  `;
+  return { runs: runs?.count, approvals: approvals?.count, receipts: receipts?.count };
+});
+
+it.effect("lets a Space agent start in-policy work as an authorized, parentless Run", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const sql = yield* SqlClient.SqlClient;
+    const result = yield* service.submitSpaceAgentCommand(
+      decodeCommand({
+        commandId: "command-space-agent-in-policy",
+        text: "Summarize the Example Studio app",
+        spaceId: studioSpace.id,
+      }),
+      providers,
+      agentSpaceSource,
+    );
+    expect("run" in result).toBe(true);
+    if (!("run" in result)) return;
+    const rows = yield* sql<{
+      readonly state: string;
+      readonly parentRunId: string | null;
+      readonly executionAuthorizedAt: string | null;
+    }>`
+      SELECT state, parent_run_id AS "parentRunId",
+        execution_authorized_at AS "executionAuthorizedAt"
+      FROM command_center_runs WHERE id = ${result.run.id}
+    `;
+    const audits = yield* sql<{ readonly actorKind: string; readonly payloadJson: string }>`
+      SELECT actor_kind AS "actorKind", payload_json AS "payloadJson"
+      FROM command_center_audit_events
+      WHERE event_id = ${`space-agent-run:${result.run.id}:authorized`}
+    `;
+
+    expect(["low", "reversible"]).toContain(result.route.risk);
+    expect(rows[0]).toMatchObject({ state: "queued", parentRunId: null });
+    expect(rows[0]?.executionAuthorizedAt).not.toBeNull();
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.actorKind).toBe("agent");
+    expect(decodeUnknownJsonString(audits[0]?.payloadJson ?? "{}")).toMatchObject({
+      source: { kind: "space-agent", threadId: agentSpaceSource.threadId },
+    });
+  }).pipe(Effect.provide(makeTestLayer(withStudioAgent(loadedConfig)))),
+);
+
+it.effect("turns out-of-policy Space agent work into a decision Item without a Run", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const command = decodeCommand({
+      commandId: "command-space-agent-out-of-policy",
+      text: "Summarize the Example Studio app",
+      spaceId: studioSpace.id,
+    });
+    const result = yield* service.submitSpaceAgentCommand(command, providers, agentSpaceSource);
+    const replay = yield* service.submitSpaceAgentCommand(command, providers, agentSpaceSource);
+    const bootstrap = yield* service.bootstrap;
+
+    expect(result).toMatchObject({ proposal: "decision" });
+    if (!("proposal" in result) || !("proposal" in replay)) {
+      throw new Error("Expected a Space agent proposal.");
+    }
+    expect(result.item).toMatchObject({
+      kind: "decision",
+      status: "review",
+      spaceId: studioSpace.id,
+      provenance: { kind: "agent", sourceRef: agentSpaceSource.threadId },
+      metadata: {
+        spaceAgent: true,
+        type: "space-agent-proposal",
+        commandId: "command-space-agent-out-of-policy",
+        proposal: { text: "Summarize the Example Studio app" },
+      },
+    });
+    expect(result.item.description).toContain("Summarize the Example Studio app");
+    expect(replay.item.id).toBe(result.item.id);
+    expect(itemNeedsYou(result.item)).toBe(true);
+    expect(bootstrap.needsYou.filter((item) => item.id === result.item.id)).toHaveLength(1);
+    expect(yield* countSpaceAgentWrites).toEqual({ runs: 0, approvals: 0, receipts: 0 });
+  }).pipe(Effect.provide(makeTestLayer(withStudioAgent(approvalGatedConfig)))),
+);
+
+it.effect("never starts protected Space agent work, even when low-risk work may auto-run", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const result = yield* service.submitSpaceAgentCommand(
+      decodeCommand({
+        commandId: "command-space-agent-deploy",
+        text: "Deploy the application",
+        spaceId: studioSpace.id,
+      }),
+      providers,
+      agentSpaceSource,
+    );
+    const bootstrap = yield* service.bootstrap;
+
+    expect(result).toMatchObject({
+      proposal: "decision",
+      route: { risk: "approval-required", status: "blocked" },
+    });
+    expect(yield* countSpaceAgentWrites).toEqual({ runs: 0, approvals: 0, receipts: 0 });
+    // The blocked-route alert of a user command is rolled back with the Run.
+    expect(bootstrap.items.filter((item) => item.kind === "alert")).toEqual([]);
+  }).pipe(Effect.provide(makeTestLayer(withStudioAgent(loadedConfig)))),
+);
+
+it.effect("refuses Space agent submissions when the agent is absent, disabled, or misscoped", () =>
+  Effect.gen(function* () {
+    const command = decodeCommand({
+      commandId: "command-space-agent-refused",
+      text: "Summarize the Example Studio app",
+      spaceId: studioSpace.id,
+    });
+    for (const config of [
+      withStudioAgent(loadedConfig, null),
+      withStudioAgent(loadedConfig, { enabled: false }),
+    ]) {
+      const outcome = yield* Effect.gen(function* () {
+        const service = yield* CommandCenterService;
+        const error = yield* service
+          .submitSpaceAgentCommand(command, providers, agentSpaceSource)
+          .pipe(Effect.flip);
+        return { error, writes: yield* countSpaceAgentWrites };
+      }).pipe(Effect.provide(makeTestLayer(config)));
+      expect(outcome.error).toMatchObject({ reason: "validation" });
+      expect(outcome.writes).toEqual({ runs: 0, approvals: 0, receipts: 0 });
+    }
+
+    const crossSpace = yield* Effect.gen(function* () {
+      const service = yield* CommandCenterService;
+      const error = yield* service
+        .submitSpaceAgentCommand(
+          decodeCommand({ ...command, spaceId: systemSpace.id }),
+          providers,
+          agentSpaceSource,
+        )
+        .pipe(Effect.flip);
+      return { error, writes: yield* countSpaceAgentWrites };
+    }).pipe(Effect.provide(makeTestLayer(withStudioAgent(loadedConfig))));
+    expect(crossSpace.error).toMatchObject({ reason: "validation" });
+    expect(crossSpace.writes).toEqual({ runs: 0, approvals: 0, receipts: 0 });
+  }),
+);
+
+it.effect("fails closed for Space agent work when the policy config is malformed", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const error = yield* service
+      .submitSpaceAgentCommand(
+        decodeCommand({
+          commandId: "command-space-agent-invalid-config",
+          text: "Summarize the Example Studio app",
+          spaceId: studioSpace.id,
+        }),
+        providers,
+        agentSpaceSource,
+      )
+      .pipe(Effect.flip);
+    expect(error).toMatchObject({ reason: "config" });
+    expect(yield* countSpaceAgentWrites).toEqual({ runs: 0, approvals: 0, receipts: 0 });
+  }).pipe(Effect.provide(makeTestLayer(unavailableConfig("invalid")))),
+);
+
+it.effect("stores Space agent Memory as approved with agent provenance on its thread", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const memory = yield* service.rememberFromSpaceAgent(
+      decodeRemember({
+        requestId: "space-agent-memory-1",
+        spaceId: studioSpace.id,
+        kind: "procedure",
+        content: "Release builds run from the Desktop Windows Build workflow.",
+        sourceRef: "agent-supplied-ref",
+      }),
+      { threadId: agentSpaceSource.threadId },
+    );
+    expect(memory).toMatchObject({
+      status: "approved",
+      provenance: { kind: "agent", sourceRef: agentSpaceSource.threadId },
+    });
+    const brief = yield* service.spaceBrief({ spaceId: studioSpace.id });
+    expect(brief.brief).toContain("[procedure] Release builds run from the Desktop Windows Build");
+  }).pipe(Effect.provide(makeTestLayer(withStudioAgent(loadedConfig)))),
+);
+
+const readSpaceAgentReplies = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* sql<{
+    readonly itemId: string;
+    readonly itemTitle: string;
+    readonly kind: string;
+    readonly body: string;
+  }>`
+    SELECT item_id AS "itemId", item_title AS "itemTitle", kind, body
+    FROM command_center_space_agent_replies
+    ORDER BY id
+  `;
+});
+
+it.effect("marks Space agent Items and queues the user's replies on them for the agent", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const inbox = yield* makeInbox;
+    const sql = yield* SqlClient.SqlClient;
+    const actor = { kind: "space-agent", threadId: "cc-space-agent-example-studio" } as const;
+
+    const question = yield* service.createItem(
+      {
+        requestId: "agent-question",
+        spaceId: studioSpace.id,
+        kind: "decision",
+        priority: "normal",
+        title: "Which sample vendor?",
+      },
+      actor,
+    );
+    expect(question.provenance).toMatchObject({
+      kind: "agent",
+      sourceRef: "cc-space-agent-example-studio",
+    });
+    expect(question.metadata).toEqual({
+      spaceAgent: true,
+      threadId: "cc-space-agent-example-studio",
+    });
+    const createdAudit = yield* sql<{ readonly actorKind: string }>`
+      SELECT actor_kind AS "actorKind" FROM command_center_audit_events
+      WHERE action = 'cc.items.create' AND payload_json LIKE ${`%${question.id}%`}
+    `;
+    expect(createdAudit).toEqual([{ actorKind: "agent" }]);
+
+    const userItem = yield* service.createItem({
+      requestId: "user-item",
+      spaceId: studioSpace.id,
+      kind: "decision",
+      priority: "normal",
+      title: "A user decision",
+    });
+    expect(userItem.provenance.kind).toBe("user");
+    expect(userItem.metadata).toEqual({});
+
+    // The agent's own edit is audited as the agent and queues nothing.
+    yield* service.updateItem(
+      decodeItemUpdate({
+        itemId: question.id,
+        spaceId: question.spaceId,
+        expectedUpdatedAt: question.updatedAt,
+        patch: { status: "review", description: "Two sample vendors quoted." },
+      }),
+      actor,
+    );
+    expect(yield* readSpaceAgentReplies).toEqual([]);
+
+    // Comments and change requests on the agent's Item are queued.
+    yield* inbox.comment(
+      {
+        spaceId: studioSpace.id,
+        itemId: question.id,
+        mutationId: "reply-comment",
+        expectedVersion: (yield* inbox.detail({ spaceId: studioSpace.id, itemId: question.id }))
+          .state.version,
+        text: "Go with the example vendor.",
+      },
+      { subject: "reviewer" },
+    );
+    yield* inbox.requestChanges(
+      {
+        spaceId: studioSpace.id,
+        itemId: question.id,
+        mutationId: "reply-change",
+        expectedVersion: (yield* inbox.detail({ spaceId: studioSpace.id, itemId: question.id }))
+          .state.version,
+        text: "Add the price.",
+      },
+      { subject: "reviewer" },
+    );
+    // A comment on a user Item is not.
+    yield* inbox.comment(
+      {
+        spaceId: studioSpace.id,
+        itemId: userItem.id,
+        mutationId: "user-comment",
+        expectedVersion: 0,
+        text: "Just a note.",
+      },
+      { subject: "reviewer" },
+    );
+
+    // The user's status decision is queued once.
+    const latest = (yield* service.bootstrap).items.find((item) => item.id === question.id)!;
+    const decided = decodeItemUpdate({
+      itemId: question.id,
+      spaceId: question.spaceId,
+      expectedUpdatedAt: latest.updatedAt,
+      patch: { status: "done" },
+    });
+    yield* service.updateItem(decided);
+    yield* service.updateItem(decided);
+
+    yield* inbox.dismiss(
+      {
+        spaceId: studioSpace.id,
+        itemId: question.id,
+        mutationId: "reply-dismiss",
+        expectedVersion: (yield* inbox.detail({ spaceId: studioSpace.id, itemId: question.id }))
+          .state.version,
+      },
+      { subject: "reviewer" },
+    );
+
+    expect(yield* readSpaceAgentReplies).toEqual([
+      {
+        itemId: question.id,
+        itemTitle: "Which sample vendor?",
+        kind: "comment",
+        body: "Go with the example vendor.",
+      },
+      {
+        itemId: question.id,
+        itemTitle: "Which sample vendor?",
+        kind: "change-request",
+        body: "Add the price.",
+      },
+      {
+        itemId: question.id,
+        itemTitle: "Which sample vendor?",
+        kind: "status",
+        body: "Status changed from review to done.",
+      },
+      {
+        itemId: question.id,
+        itemTitle: "Which sample vendor?",
+        kind: "dismissed",
+        body: "Dismissed from the Inbox.",
+      },
+    ]);
   }).pipe(Effect.provide(makeTestLayer())),
 );

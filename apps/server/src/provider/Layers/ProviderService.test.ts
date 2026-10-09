@@ -316,6 +316,12 @@ function makeFakeCodexAdapter(
     }),
   );
 
+  const replacementBlockers = new Map<ThreadId, string>();
+  const sessionReplacementBlocker = vi.fn(
+    (threadId: ThreadId): Effect.Effect<string | undefined> =>
+      Effect.sync(() => replacementBlockers.get(threadId)),
+  );
+
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
     capabilities: {
@@ -341,6 +347,7 @@ function makeFakeCodexAdapter(
     readThread,
     rollbackThread,
     ...(provider === CODEX_DRIVER ? { uploadFeedback } : {}),
+    sessionReplacementBlocker,
     stopAll,
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
@@ -378,6 +385,7 @@ function makeFakeCodexAdapter(
     readThread,
     rollbackThread,
     uploadFeedback,
+    replacementBlockers,
     stopAll,
   };
 }
@@ -5506,6 +5514,125 @@ describe("agent browser access", () => {
 
       return issued;
     });
+
+  // A live session that still runs work must survive any start for its
+  // thread: the start replaces it on its own adapter and stops it on others.
+  const makeReplacementHarness = () => {
+    const issued: Array<McpSessionRegistry.McpCredentialRequest> = [];
+    const codex = makeFakeCodexAdapter();
+    const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const providerLayer = makeProviderServiceLive({
+      issueMcpCredential: (request) =>
+        Effect.sync(() => {
+          issued.push(request);
+          return undefined;
+        }),
+    }).pipe(
+      Layer.provide(
+        Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistry,
+          makeAdapterRegistryMock({
+            [CODEX_DRIVER]: codex.adapter,
+            [CLAUDE_AGENT_DRIVER]: claude.adapter,
+          }),
+        ),
+      ),
+      Layer.provide(ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer))),
+      Layer.provideMerge(
+        ServerSettings.ServerSettingsService.layerTest({ enableAgentBrowserAccess: true }),
+      ),
+      Layer.provide(serverConfigTestLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(
+        Layer.succeed(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      ),
+    );
+    return { issued, codex, claude, providerLayer };
+  };
+
+  it.effect(
+    "refuses to replace a session that still runs work, before touching its MCP access",
+    () =>
+      Effect.gen(function* () {
+        const threadId = asThreadId("thread-background-work");
+        const { issued, codex, providerLayer } = makeReplacementHarness();
+        const start = Effect.gen(function* () {
+          const provider = yield* ProviderService.ProviderService;
+          return yield* provider.startSession(threadId, {
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            runtimeMode: "full-access",
+          });
+        });
+
+        yield* Effect.gen(function* () {
+          yield* start;
+          codex.replacementBlockers.set(threadId, "Background agents are still running.");
+          const issuedBefore = issued.length;
+
+          const refused = yield* start.pipe(Effect.flip);
+          assert.equal(refused._tag, "ProviderAdapterRequestError");
+          assert.equal(
+            refused._tag === "ProviderAdapterRequestError" ? refused.detail : undefined,
+            "Background agents are still running.",
+          );
+          // The live session keeps its process and its MCP credential.
+          assert.equal(codex.startSession.mock.calls.length, 1);
+          assert.equal(issued.length, issuedBefore);
+
+          // Once the work ends the replacement goes ahead as before.
+          codex.replacementBlockers.delete(threadId);
+          yield* start;
+          assert.equal(codex.startSession.mock.calls.length, 2);
+        }).pipe(Effect.provide(providerLayer));
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("refuses to move a thread to another provider while its session runs work", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-background-work-switch");
+      const { issued, codex, claude, providerLayer } = makeReplacementHarness();
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        yield* provider.startSession(threadId, {
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+        claude.replacementBlockers.set(threadId, "Claude background agents are still running.");
+        const issuedBefore = issued.length;
+
+        const refused = yield* provider
+          .startSession(threadId, {
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            threadId,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.flip);
+        assert.equal(refused._tag, "ProviderAdapterRequestError");
+        if (refused._tag === "ProviderAdapterRequestError") {
+          assert.equal(refused.provider, CLAUDE_AGENT_DRIVER);
+          assert.equal(refused.detail, "Claude background agents are still running.");
+        }
+        // Nothing started, nothing stopped, and the Claude session's MCP
+        // credential was not rotated.
+        assert.equal(codex.startSession.mock.calls.length, 0);
+        assert.equal(claude.stopSession.mock.calls.length, 0);
+        assert.equal(yield* claude.adapter.hasSession(threadId), true);
+        assert.equal(issued.length, issuedBefore);
+      }).pipe(Effect.provide(providerLayer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   // The capability on the credential is the observable that matters: a session
   // always gets a credential (the pull request toolkit is never withheld), and

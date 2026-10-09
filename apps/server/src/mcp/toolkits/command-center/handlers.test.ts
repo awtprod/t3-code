@@ -1,4 +1,19 @@
 import { describe, expect, it } from "@effect/vitest";
+import { RepositoryId, SpaceId } from "@command-center/core";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
+import { Tool } from "effect/unstable/ai";
+
+import * as AutomationRuns from "../../../command-center/AutomationRuns.ts";
+import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
+import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts";
+import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
+import * as CommandCenterService from "../../../command-center/Service.ts";
+import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
+import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 import {
   automationDefinitionFitsScope,
@@ -11,7 +26,9 @@ import {
   memoryVisibleToScope,
   resolveProposedMemoryRepository,
   resolveRunStartScope,
+  CommandCenterToolkitHandlersLive,
 } from "./handlers.ts";
+import { CommandCenterSpaceActivityTool, CommandCenterToolkit } from "./tools.ts";
 
 describe("Command Center MCP repository scopes", () => {
   it("shows Space Memory plus only the credential's exact repository Memory", () => {
@@ -230,4 +247,278 @@ describe("credential-bound Memory writes", () => {
     expect(memoryWriteOperationForScope({ memoryWriteMode: "propose" })).toBe("propose");
     expect(memoryWriteOperationForScope({})).toBe("propose");
   });
+});
+
+const activityScope = (
+  overrides: Partial<McpInvocationContext.McpInvocationScope> = {},
+): McpInvocationContext.McpInvocationScope => ({
+  environmentId: EnvironmentId.make("environment-1"),
+  threadId: ThreadId.make("cc-space-agent-command-center"),
+  providerSessionId: "session-1",
+  providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  capabilities: new Set(["cc.items.read"]),
+  spaceId: SpaceId.make("command-center"),
+  issuedAt: 0,
+  ...overrides,
+});
+
+const invokeSpaceActivity = (
+  scope: McpInvocationContext.McpInvocationScope,
+  input: { readonly since?: string; readonly limit?: number },
+) =>
+  Effect.gen(function* () {
+    const requests: Array<unknown> = [];
+    const outputs = yield* Effect.gen(function* () {
+      const toolkit = yield* CommandCenterToolkit;
+      const stream = yield* toolkit.handle("cc_space_activity", input);
+      return Array.from(yield* Stream.runCollect(stream)).map((output) => output.isFailure);
+    }).pipe(
+      // Typed tool failures surface as a failed effect.
+      Effect.catch(() => Effect.succeed([true])),
+      Effect.provide(
+        CommandCenterToolkitHandlersLive.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+              // Unused by this tool; the toolkit still requires them.
+              Layer.mock(CommandCenterService.CommandCenterService)({}),
+              Layer.mock(AutomationRuns.AutomationRuns)({}),
+              Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+              Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.succeed(
+                ReadinessGate.CommandCenterReadinessGate,
+                ReadinessGate.CommandCenterReadinessGate.of({
+                  state: Effect.succeed("ready"),
+                  requireReady: Effect.void,
+                  markReady: Effect.void,
+                  markFailed: Effect.void,
+                }),
+              ),
+              Layer.mock(SpaceActivity.SpaceActivity)({
+                recent: (request) =>
+                  Effect.sync(() => {
+                    requests.push(request);
+                    return [
+                      {
+                        occurredAt: "2026-10-09T12:00:00.000Z",
+                        title: "Build the activity feed",
+                        status: "completed",
+                        summary: "Done.",
+                        sourceKind: "thread" as const,
+                        sourceId: "t-feed",
+                      },
+                    ];
+                  }),
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    return { outputs, requests };
+  });
+
+const { spaceId: _spaceId, ...unboundScope } = activityScope();
+
+describe("cc_space_activity scoping", () => {
+  it("takes no Space from tool input", () => {
+    const schema = Tool.getJsonSchema(CommandCenterSpaceActivityTool) as {
+      readonly properties?: Readonly<Record<string, unknown>>;
+    };
+    expect(Object.keys(schema.properties ?? {}).toSorted()).toEqual(["limit", "since"]);
+  });
+
+  it.effect("reads only the session's Space", () =>
+    Effect.gen(function* () {
+      const { outputs, requests } = yield* invokeSpaceActivity(activityScope(), { limit: 5 });
+      expect(outputs).toEqual([false]);
+      expect(requests).toEqual([{ spaceId: "command-center", limit: 5 }]);
+    }),
+  );
+
+  it.effect("refuses repository-scoped, unbound, and under-privileged credentials", () =>
+    Effect.gen(function* () {
+      for (const scope of [
+        activityScope({ repositoryId: RepositoryId.make("t3-code") }),
+        unboundScope,
+        activityScope({ capabilities: new Set(["cc.memory.read"]) }),
+      ]) {
+        const { outputs, requests } = yield* invokeSpaceActivity(scope, {});
+        expect(outputs).toEqual([true]);
+        expect(requests).toEqual([]);
+      }
+    }),
+  );
+});
+
+const itemScope = (
+  overrides: Partial<McpInvocationContext.McpInvocationScope> = {},
+): McpInvocationContext.McpInvocationScope => ({
+  environmentId: EnvironmentId.make("environment-1"),
+  threadId: ThreadId.make("cc-space-agent-acme"),
+  providerSessionId: "session-1",
+  providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  capabilities: new Set(["cc.items.write"]),
+  spaceId: SpaceId.make("acme"),
+  role: "space-agent",
+  issuedAt: 0,
+  ...overrides,
+});
+
+const ITEM_UPDATED_AT = "2026-10-09T12:00:00.000Z";
+
+const invokeItemTool = (
+  scope: McpInvocationContext.McpInvocationScope,
+  name: "cc_items_create" | "cc_items_update",
+  input: unknown,
+) =>
+  Effect.gen(function* () {
+    const calls: Array<{
+      readonly method: string;
+      readonly input: unknown;
+      readonly actor: unknown;
+    }> = [];
+    const item = {
+      id: "item-1",
+      spaceId: "acme",
+      kind: "decision",
+      status: "review",
+      priority: "normal",
+      title: "Pick a vendor",
+      artifactIds: [],
+      provenance: { kind: "agent", capturedAt: ITEM_UPDATED_AT },
+      metadata: { spaceAgent: true },
+      createdAt: ITEM_UPDATED_AT,
+      updatedAt: ITEM_UPDATED_AT,
+    };
+    const outputs = yield* Effect.gen(function* () {
+      const toolkit = yield* CommandCenterToolkit;
+      const stream = yield* toolkit.handle(name, input as never);
+      return Array.from(yield* Stream.runCollect(stream)).map((output) => output.isFailure);
+    }).pipe(
+      Effect.catch(() => Effect.succeed([true])),
+      Effect.provide(
+        CommandCenterToolkitHandlersLive.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+              Layer.mock(CommandCenterService.CommandCenterService)({
+                getConfiguredSpace: () =>
+                  Effect.succeed({
+                    agent: { enabled: true },
+                    policy: { allowedCapabilities: ["cc.items.write"] },
+                  } as never),
+                createItem: (request, actor) =>
+                  Effect.sync(() => {
+                    calls.push({ method: "createItem", input: request, actor });
+                    return item as never;
+                  }),
+                updateItem: (request, actor) =>
+                  Effect.sync(() => {
+                    calls.push({ method: "updateItem", input: request, actor });
+                    return { item, duplicate: false } as never;
+                  }),
+              }),
+              Layer.mock(AutomationRuns.AutomationRuns)({}),
+              Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+              Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.mock(SpaceActivity.SpaceActivity)({}),
+              Layer.succeed(
+                ReadinessGate.CommandCenterReadinessGate,
+                ReadinessGate.CommandCenterReadinessGate.of({
+                  state: Effect.succeed("ready"),
+                  requireReady: Effect.void,
+                  markReady: Effect.void,
+                  markFailed: Effect.void,
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    return { outputs, calls };
+  });
+
+const updateInput = (overrides: Record<string, unknown> = {}) => ({
+  itemId: "item-1",
+  spaceId: "acme",
+  expectedUpdatedAt: ITEM_UPDATED_AT,
+  patch: { status: "done", description: "Went with the example vendor." },
+  ...overrides,
+});
+
+describe("Command Center MCP Item writes", () => {
+  it("exposes only status, title, and description on cc_items_update", () => {
+    const tool = Object.values(CommandCenterToolkit.tools).find(
+      (candidate) => candidate.name === "cc_items_update",
+    )!;
+    const schema = Tool.getJsonSchema(tool) as {
+      readonly properties?: {
+        readonly patch?: { readonly properties?: Readonly<Record<string, unknown>> };
+      };
+    };
+    expect(Object.keys(schema.properties?.patch?.properties ?? {}).toSorted()).toEqual([
+      "description",
+      "status",
+      "title",
+    ]);
+  });
+
+  it.effect("updates a Space agent's Item as the agent", () =>
+    Effect.gen(function* () {
+      const { outputs, calls } = yield* invokeItemTool(
+        itemScope(),
+        "cc_items_update",
+        updateInput(),
+      );
+      expect(outputs).toEqual([false]);
+      expect(calls).toEqual([
+        {
+          method: "updateItem",
+          input: updateInput(),
+          actor: { kind: "space-agent", threadId: "cc-space-agent-acme" },
+        },
+      ]);
+    }),
+  );
+
+  it.effect("refuses another Space, missing write capability, and an empty patch", () =>
+    Effect.gen(function* () {
+      for (const [scope, input] of [
+        [itemScope(), updateInput({ spaceId: "example" })],
+        [itemScope({ capabilities: new Set(["cc.items.read"]) }), updateInput()],
+        [itemScope(), updateInput({ patch: {} })],
+      ] as const) {
+        const { outputs, calls } = yield* invokeItemTool(scope, "cc_items_update", input);
+        expect(outputs).toEqual([true]);
+        expect(calls).toEqual([]);
+      }
+    }),
+  );
+
+  it.effect("marks Items the Space agent creates, and leaves other credentials as the user", () =>
+    Effect.gen(function* () {
+      const createInput = {
+        requestId: "request-1",
+        spaceId: "acme",
+        kind: "decision",
+        priority: "normal",
+        title: "Pick a vendor",
+      };
+      const agent = yield* invokeItemTool(itemScope(), "cc_items_create", createInput);
+      expect(agent.outputs).toEqual([false]);
+      expect(agent.calls[0]?.actor).toEqual({
+        kind: "space-agent",
+        threadId: "cc-space-agent-acme",
+      });
+
+      const { role: _role, ...userScope } = itemScope();
+      const user = yield* invokeItemTool(userScope, "cc_items_create", createInput);
+      expect(user.outputs).toEqual([false]);
+      expect(user.calls[0]?.actor).toBeUndefined();
+    }),
+  );
 });

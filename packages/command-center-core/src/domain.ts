@@ -169,6 +169,44 @@ export const SpacePolicy = Schema.Struct({
 });
 export type SpacePolicy = typeof SpacePolicy.Type;
 
+export const SPACE_AGENT_DEFAULT_DAILY_WAKE_LIMIT = 12;
+export const SPACE_AGENT_DEFAULT_DEBOUNCE_MINUTES = 10;
+export const SPACE_AGENT_MAX_CHECK_INS = 8;
+
+/** Local wall-clock time, 24-hour "HH:MM". */
+export const SpaceAgentClockTime = Schema.String.check(
+  Schema.isPattern(/^(?:[01]\d|2[0-3]):[0-5]\d$/u),
+);
+const SpaceAgentTimezone = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
+
+/**
+ * Canonical always-on agent settings for a Space. Defaults are applied at the
+ * config boundary, so consumers never see an absent limit. Cron expressions
+ * and timezones are validated there too (the core package has no cron parser).
+ */
+export const SpaceAgentConfig = Schema.Struct({
+  enabled: Schema.Boolean,
+  model: Schema.optional(ModelSelection),
+  checkIns: Schema.optional(
+    Schema.Struct({
+      cron: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(64))).check(
+        Schema.isMaxLength(SPACE_AGENT_MAX_CHECK_INS),
+      ),
+      timezone: SpaceAgentTimezone,
+    }),
+  ),
+  quietHours: Schema.optional(
+    Schema.Struct({
+      start: SpaceAgentClockTime,
+      end: SpaceAgentClockTime,
+      timezone: SpaceAgentTimezone,
+    }),
+  ),
+  dailyWakeLimit: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 48 })),
+  debounceMinutes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 120 })),
+});
+export type SpaceAgentConfig = typeof SpaceAgentConfig.Type;
+
 export const Space = Schema.Struct({
   id: SpaceId,
   slug: TrimmedNonEmptyString,
@@ -177,6 +215,8 @@ export const Space = Schema.Struct({
   instructions: TrimmedString,
   policy: SpacePolicy,
   modelDefaults: Schema.optional(ModelSelection),
+  /** Absent means the Space has no always-on agent (default off). */
+  agent: Schema.optional(SpaceAgentConfig),
   connectionIds: Schema.Array(ConnectionId),
   repositories: Schema.Array(RepositoryBinding),
   aliases: Schema.Array(TrimmedNonEmptyString),
@@ -234,6 +274,16 @@ export const Item = Schema.Struct({
   updatedAt: Timestamp,
 });
 export type Item = typeof Item.Type;
+
+/** Whether an Item belongs in the user's Needs You queue. */
+export function itemNeedsYou(item: Pick<Item, "kind" | "status" | "priority">): boolean {
+  return (
+    item.kind === "approval" ||
+    item.kind === "decision" ||
+    item.status === "review" ||
+    (item.status === "waiting" && item.priority === "urgent")
+  );
+}
 
 export const RunKind = Schema.Literals(["agent", "automation", "connector"]);
 export type RunKind = typeof RunKind.Type;
