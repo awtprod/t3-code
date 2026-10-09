@@ -191,7 +191,10 @@ describe("stacked Instagram migration manifest", () => {
     ]);
   });
 
-  it("registers the Space activity feed after the Space agent migration", () => {
-    assert.deepStrictEqual(migrationManifest.at(-1), [80, "CommandCenterSpaceActivity"]);
+  it("registers the Space agent wake state after the Space activity feed", () => {
+    assert.deepStrictEqual(migrationManifest.slice(-2), [
+      [80, "CommandCenterSpaceActivity"],
+      [81, "CommandCenterSpaceAgentState"],
+    ]);
   });
 });

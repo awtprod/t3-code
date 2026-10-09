@@ -61,3 +61,37 @@ fact, preference; newest first, about 6,000 characters), open Items (Needs You
 first, about 2,000 characters), and optional recent activity (newest first, about
 2,500 characters). It is empty when there is nothing to show. Every Command Center
 Run prompt in the Space includes it.
+
+## Wakes
+
+`SpaceAgentWaker` (`SpaceAgentWaker.ts`) polls every 30 seconds. Each active Space
+whose agent is enabled and not paused gets at most one server-authored wake turn
+per pass. Its ledger is `command_center_space_agent_state` (migration 081), one
+row per Space. A new row starts its activity cursor at the Space's newest
+activity row, so older history counts as brief context, not as a wake.
+
+- **Event wake.** New `command_center_space_activity` rows (id above the cursor)
+  set `pending_since` to the oldest one's time. The wake fires once
+  `pending_since + debounceMinutes` and `last_wake_at + debounceMinutes` have both
+  passed, outside quiet hours, while the local day has fewer than `dailyWakeLimit`
+  event wakes. Over the limit it waits for the next local day.
+- **Check-in.** It fires once per `checkIns.cron` slot, outside quiet hours.
+  Slots inside quiet hours are skipped. A slot missed by downtime fires only if
+  it is under two hours old, and only once. The slot is persisted before the turn
+  is sent, so a restart cannot send it twice. Check-ins also deliver any pending
+  events and count in `wakes_today`, but not against `dailyWakeLimit`.
+- **Local day.** The wake day (for `dailyWakeLimit`) uses `checkIns.timezone`,
+  then `quietHours.timezone`, then America/New_York. Quiet hours use their own timezone.
+- **Failures.** A busy agent (`conflict`) leaves the ledger untouched (a claimed
+  check-in slot is released) and retries on the next pass. Other failures log a
+  warning and back off in memory, from 1 minute doubling up to 30.
+- **Delivery.** `deliverWake` is shared by the loop and the manual
+  `cc.spaceAgent.wake` RPC. On success it moves the cursor to the newest row it
+  delivered, clears `pending_since`, and records `last_wake_at/reason`.
+- **Wake text.** It states why the agent woke, then lists up to 20 activity rows
+  (newest first, about 3,000 characters, marked as untrusted data), then gives
+  the allowed responses: do nothing, update memory, create or update an Item, ask
+  via a decision Item, or start an in-policy Run.
+- **RPCs.** `cc.spaceAgent.list` adds `paused`, `lastWakeAt`, `lastWakeReason`,
+  `wakesToday`, and `pendingEvents`. `cc.spaceAgent.setPaused` (operate scope)
+  stops automatic wakes only. Manual wakes still work while paused.

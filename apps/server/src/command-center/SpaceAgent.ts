@@ -24,6 +24,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
@@ -39,6 +40,10 @@ import {
 } from "./RunDispatcher.ts";
 import * as CommandCenterService from "./Service.ts";
 import { spaceAgentThreadId, spaceIdFromSpaceAgentThreadId } from "./SpaceAgentIds.ts";
+import {
+  EMPTY_SPACE_AGENT_WAKE_STATUS,
+  querySpaceAgentWakeStatuses,
+} from "./SpaceAgentWakeState.ts";
 
 /** Default model for a Space agent with no agent or Space model configured. */
 export const SPACE_AGENT_DEFAULT_MODEL: SpaceModelSelection = {
@@ -152,6 +157,7 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
+  const sql = yield* SqlClient.SqlClient;
   // One writer at a time, so concurrent wakes cannot both create the thread.
   const threadLock = yield* Semaphore.make(1);
 
@@ -325,6 +331,10 @@ export const make = Effect.gen(function* () {
 
   const list: SpaceAgentShape["list"] = Effect.gen(function* () {
     const { spaces } = yield* service.querySpaces({});
+    const statuses = yield* querySpaceAgentWakeStatuses({
+      now: DateTime.formatIso(yield* DateTime.now),
+      spaces,
+    }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
     return yield* Effect.forEach(spaces, (space) =>
       Effect.gen(function* () {
         const threadId = ThreadId.make(spaceAgentThreadId(space.id));
@@ -335,6 +345,7 @@ export const make = Effect.gen(function* () {
           enabled: space.agent?.enabled === true,
           threadId: Option.isSome(existing) ? threadId : null,
           model: space.agent === undefined ? null : resolveSpaceAgentModel(space),
+          ...(statuses.get(space.id) ?? EMPTY_SPACE_AGENT_WAKE_STATUS),
         } satisfies CommandCenterSpaceAgentSummary;
       }),
     );

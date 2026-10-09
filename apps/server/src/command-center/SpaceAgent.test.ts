@@ -20,6 +20,7 @@ import { CommandCenterConfig, type LoadedCommandCenterConfig } from "./Config.ts
 import * as ConnectionHealth from "./ConnectionHealth.ts";
 import { layer as commandCenterServiceLayer } from "./Service.ts";
 import * as SpaceAgent from "./SpaceAgent.ts";
+import * as SpaceAgentWaker from "./SpaceAgentWaker.ts";
 
 const decodeSpace = Schema.decodeUnknownSync(Space);
 const fixtureTimestamp = "2026-01-01T00:00:00.000Z";
@@ -70,7 +71,8 @@ const makeHarness = (
 ) => {
   const dispatched: Array<ClientOrchestrationCommand> = [];
   const threads = new Map<string, OrchestrationThreadShell>();
-  const layer = SpaceAgent.layer.pipe(
+  const layer = SpaceAgentWaker.layer.pipe(
+    Layer.provideMerge(SpaceAgent.layer),
     Layer.provideMerge(commandCenterServiceLayer),
     Layer.provide(
       Layer.succeed(
@@ -243,6 +245,11 @@ describe("Space agent", () => {
             enabled: true,
             threadId: agentThreadId,
             model: { providerId: "claudeAgent", modelId: "claude-opus-5-5" },
+            paused: false,
+            lastWakeAt: null,
+            lastWakeReason: null,
+            wakesToday: 0,
+            pendingEvents: 0,
           },
           {
             spaceId: "quiet-space",
@@ -250,9 +257,49 @@ describe("Space agent", () => {
             enabled: false,
             threadId: null,
             model: null,
+            paused: false,
+            lastWakeAt: null,
+            lastWakeReason: null,
+            wakesToday: 0,
+            pendingEvents: 0,
           },
         ]),
       );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("lists pause and manual-wake state set through the waker", () => {
+    const harness = makeHarness();
+    harness.seedThread();
+    return Effect.gen(function* () {
+      const spaceAgent = yield* SpaceAgent.SpaceAgent;
+      const waker = yield* SpaceAgentWaker.SpaceAgentWaker;
+      const agentState = Effect.map(spaceAgent.list, (agents) =>
+        agents.find((agent) => agent.spaceId === "agent-space"),
+      );
+      // Listing projects the configured Spaces the waker reads.
+      yield* spaceAgent.list;
+
+      expect(yield* waker.setPaused("agent-space", true)).toEqual({
+        spaceId: "agent-space",
+        paused: true,
+      });
+      expect(yield* agentState).toMatchObject({ paused: true, wakesToday: 0 });
+
+      const woke = yield* waker.deliverWake("agent-space", { kind: "manual" });
+      expect(woke).toMatchObject({ threadId: agentThreadId, kind: "manual" });
+      expect(harness.dispatched.at(-1)?.type).toBe("thread.turn.start");
+      const listed = yield* agentState;
+      expect(listed).toMatchObject({
+        paused: true,
+        lastWakeReason: "manual",
+        wakesToday: 1,
+        pendingEvents: 0,
+      });
+      expect(listed?.lastWakeAt).not.toBeNull();
+
+      yield* waker.setPaused("agent-space", false);
+      expect(yield* agentState).toMatchObject({ paused: false, lastWakeReason: "manual" });
     }).pipe(Effect.provide(harness.layer));
   });
 });

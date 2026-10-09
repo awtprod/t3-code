@@ -57,6 +57,12 @@ export function digestPeriod(at: string, timezone: string) {
   };
 }
 
+/** The local calendar date ("YYYY-MM-DD") of an instant in `timezone`. */
+export function localDateAt(at: string, timezone: string): string {
+  // @effect-diagnostics-next-line globalDate:off -- Intl requires a native Date for local calendar parts.
+  return parts(new Date(at), timezone).date;
+}
+
 export function isDigestQuietHour(
   at: string,
   timezone: string,

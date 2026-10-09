@@ -44,6 +44,7 @@ import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as StalledTurnWatchdog from "./orchestration/Services/StalledTurnWatchdog.ts";
 import * as WorktreeCleanup from "./worktreeCleanup.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
+import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import {
   type CommandCenterAuditChainVerification,
@@ -465,6 +466,7 @@ export const make = (options?: StartupOptions) =>
     const stalledTurnWatchdog = yield* StalledTurnWatchdog.StalledTurnWatchdog;
     const worktreeCleanup = yield* WorktreeCleanup.WorktreeCleanup;
     const automationScheduleRunner = yield* AutomationScheduleRunner.AutomationScheduleRunner;
+    const spaceAgentWaker = yield* SpaceAgentWaker.SpaceAgentWaker;
     const automationRecoveryCoordinator =
       yield* AutomationRecoveryCoordinator.AutomationRecoveryCoordinator;
     const runRecoveryCoordinator = yield* RunRecoveryCoordinator.RunRecoveryCoordinator;
@@ -527,6 +529,7 @@ export const make = (options?: StartupOptions) =>
               yield* forkParked(stalledTurnWatchdog.start().pipe(Scope.provide(reactorScope)));
               yield* forkParked(worktreeCleanup.start().pipe(Scope.provide(reactorScope)));
               yield* forkParked(automationScheduleRunner.start().pipe(Scope.provide(reactorScope)));
+              yield* forkParked(spaceAgentWaker.start().pipe(Scope.provide(reactorScope)));
               yield* forkParked(
                 automationRecoveryCoordinator.start().pipe(Scope.provide(reactorScope)),
               );
