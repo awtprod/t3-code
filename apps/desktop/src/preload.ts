@@ -53,6 +53,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   },
   getLocalEnvironmentBearerToken: () =>
     ipcRenderer.invoke(IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL),
+  recoverRemotePrimarySession: (expectedHttpBaseUrl) =>
+    ipcRenderer.invoke(IpcChannels.RECOVER_REMOTE_PRIMARY_SESSION_CHANNEL, expectedHttpBaseUrl),
   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
   setClientSettings: (settings) =>
     ipcRenderer.invoke(IpcChannels.SET_CLIENT_SETTINGS_CHANNEL, settings),

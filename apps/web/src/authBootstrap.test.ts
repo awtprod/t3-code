@@ -136,6 +136,114 @@ describe("resolveInitialServerAuthGateState", () => {
     vi.restoreAllMocks();
   });
 
+  it("opens the gate only after saved desktop bearer validation without exchanging browser credentials", async () => {
+    const testApi = await installAuthApi({ session: () => unauthenticatedSession(LOOPBACK_AUTH) });
+    const recoverRemotePrimarySession = vi.fn().mockResolvedValue({
+      ...authenticatedSession(LOOPBACK_AUTH),
+      sessionMethod: "bearer-access-token",
+    });
+    const testWindow = installTestBrowser("https://remote.example.test/");
+    testWindow.desktopBridge = {
+      getLocalEnvironmentBootstraps: () => [],
+      recoverRemotePrimarySession,
+    } as unknown as DesktopBridge;
+    const { reconnectSavedDesktopEnvironment, resolveInitialServerAuthGateState } =
+      await import("./environments/primary");
+    await expect(resolveInitialServerAuthGateState()).resolves.toMatchObject({
+      status: "requires-auth",
+    });
+    await reconnectSavedDesktopEnvironment();
+    await expect(resolveInitialServerAuthGateState()).resolves.toEqual({ status: "authenticated" });
+    expect(recoverRemotePrimarySession).toHaveBeenCalledWith("https://remote.example.test/");
+    expect(testApi.calls.browserSession).toEqual([]);
+    expect(testApi.calls.pairingCredential).toEqual([]);
+    expect(testApi.calls.session).toBe(1);
+  });
+
+  it.each([
+    [
+      "missing saved credential",
+      () => Promise.reject(new Error("No credential is saved on this device")),
+    ],
+    ["expired credential", () => Promise.resolve(unauthenticatedSession(LOOPBACK_AUTH))],
+    ["cookie-only authentication", () => Promise.resolve(authenticatedSession(LOOPBACK_AUTH))],
+  ] as const)(
+    "keeps the gate closed for %s without creating another session",
+    async (_label, recover) => {
+      const testApi = await installAuthApi({
+        session: () => unauthenticatedSession(LOOPBACK_AUTH),
+      });
+      const testWindow = installTestBrowser("https://remote.example.test/");
+      testWindow.desktopBridge = {
+        getLocalEnvironmentBootstraps: () => [],
+        recoverRemotePrimarySession: recover,
+      } as unknown as DesktopBridge;
+      const { reconnectSavedDesktopEnvironment, resolveInitialServerAuthGateState } =
+        await import("./environments/primary");
+      await expect(reconnectSavedDesktopEnvironment()).rejects.toThrow();
+      await expect(resolveInitialServerAuthGateState()).resolves.toMatchObject({
+        status: "requires-auth",
+      });
+      expect(testApi.calls.browserSession).toEqual([]);
+      expect(testApi.calls.pairingCredential).toEqual([]);
+    },
+  );
+
+  it("reports an older desktop shell without creating a browser session", async () => {
+    const testApi = await installAuthApi({ session: () => unauthenticatedSession(LOOPBACK_AUTH) });
+    const testWindow = installTestBrowser("https://remote.example.test/");
+    testWindow.desktopBridge = {
+      getLocalEnvironmentBootstraps: () => [],
+    } as unknown as DesktopBridge;
+    const { reconnectSavedDesktopEnvironment, resolveInitialServerAuthGateState } =
+      await import("./environments/primary");
+    await expect(reconnectSavedDesktopEnvironment()).rejects.toThrow("needs an update");
+    await expect(resolveInitialServerAuthGateState()).resolves.toMatchObject({
+      status: "requires-auth",
+    });
+    expect(testApi.calls.browserSession).toEqual([]);
+  });
+
+  it.each(["rejected recovery", "unsupported desktop shell"])(
+    "discards an older authenticated bootstrap after %s",
+    async (failure) => {
+      let completeOldSession: (session: AuthSessionState) => void = () => {
+        throw new Error("Old session promise not initialized");
+      };
+      const oldSession = new Promise<AuthSessionState>((resolve) => {
+        completeOldSession = resolve;
+      });
+      let sessionCalls = 0;
+      const runner: PrimaryHttpEffectRunner = async <A>() => {
+        sessionCalls += 1;
+        return (sessionCalls === 1 ? await oldSession : unauthenticatedSession(LOOPBACK_AUTH)) as A;
+      };
+      __setPrimaryHttpRunnerForTests(runner);
+      const testWindow = installTestBrowser("https://remote.example.test/");
+      testWindow.desktopBridge = {
+        getLocalEnvironmentBootstraps: () => [],
+        ...(failure === "rejected recovery"
+          ? {
+              recoverRemotePrimarySession: () => Promise.reject(new Error("Saved bearer rejected")),
+            }
+          : {}),
+      } as unknown as DesktopBridge;
+      const { reconnectSavedDesktopEnvironment, resolveInitialServerAuthGateState } =
+        await import("./environments/primary");
+      const oldGate = resolveInitialServerAuthGateState();
+      const anotherOldGate = resolveInitialServerAuthGateState();
+      expect(sessionCalls).toBe(1);
+      await expect(reconnectSavedDesktopEnvironment()).rejects.toThrow();
+      completeOldSession(authenticatedSession(LOOPBACK_AUTH));
+      await expect(oldGate).resolves.toMatchObject({ status: "requires-auth" });
+      await expect(anotherOldGate).resolves.toMatchObject({ status: "requires-auth" });
+      await expect(resolveInitialServerAuthGateState()).resolves.toMatchObject({
+        status: "requires-auth",
+      });
+      expect(sessionCalls).toBe(3);
+    },
+  );
+
   it("reuses an in-flight silent bootstrap attempt", async () => {
     const nextSession = sequence(
       unauthenticatedSession(DESKTOP_AUTH),

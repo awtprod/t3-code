@@ -157,6 +157,15 @@ export class DesktopConnectionCatalogStore extends Context.Service<
       | DesktopConnectionCatalogStoreMigrationError
       | DesktopConnectionCatalogStoreProtectionError
     >;
+    /** Read an existing encrypted catalog without migrating or writing legacy data. */
+    readonly getExisting: Effect.Effect<
+      Option.Option<string>,
+      | DesktopConnectionCatalogStoreReadError
+      | DesktopConnectionCatalogStoreDocumentDecodeError
+      | DesktopConnectionCatalogStoreDecodeError
+      | DesktopConnectionCatalogStoreMigrationError
+      | DesktopConnectionCatalogStoreProtectionError
+    >;
     readonly set: (
       catalog: string,
     ) => Effect.Effect<
@@ -469,10 +478,12 @@ export const make = Effect.gen(function* () {
     return Option.some(encoded);
   });
 
-  const getCatalog = Effect.gen(function* () {
+  const getCatalog = Effect.fn("desktop.connectionCatalogStore.get")(function* (
+    allowMigration: boolean,
+  ) {
     const document = yield* readDocument(fileSystem, catalogPath);
     if (Option.isNone(document)) {
-      return yield* migrateLegacyCatalog;
+      return allowMigration ? yield* migrateLegacyCatalog : Option.none<string>();
     }
     if (!(yield* encryptionAvailable)) {
       return Option.none<string>();
@@ -492,10 +503,10 @@ export const make = Effect.gen(function* () {
       ),
     );
     return Option.some(decrypted);
-  }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get"));
+  });
 
   const get = environment.remoteOnlyBuild
-    ? getCatalog.pipe(
+    ? getCatalog(true).pipe(
         Effect.catchTag("DesktopConnectionCatalogStoreProtectionError", (error) =>
           error.operation === "decrypt-catalog"
             ? Effect.logWarning(
@@ -505,10 +516,11 @@ export const make = Effect.gen(function* () {
             : Effect.fail(error),
         ),
       )
-    : getCatalog;
+    : getCatalog(true);
 
   return DesktopConnectionCatalogStore.of({
     get,
+    getExisting: getCatalog(false),
     set: Effect.fn("desktop.connectionCatalogStore.set")(function* (catalog) {
       if (!(yield* encryptionAvailable)) {
         return false;

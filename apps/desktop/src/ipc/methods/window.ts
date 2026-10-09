@@ -1,4 +1,5 @@
 import {
+  AuthSessionState,
   ContextMenuItemSchema,
   DesktopAppBrandingSchema,
   DesktopEnvironmentBootstrapSchema,
@@ -182,6 +183,18 @@ export const getLocalEnvironmentBearerToken = DesktopIpc.makeIpcMethod({
     const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
     return yield* localAuth.getBearerToken;
   }),
+});
+
+export const recoverRemotePrimarySession = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.RECOVER_REMOTE_PRIMARY_SESSION_CHANNEL,
+  payload: Schema.String,
+  result: AuthSessionState,
+  handler: Effect.fn("desktop.ipc.window.recoverRemotePrimarySession")(
+    function* (expectedHttpBaseUrl) {
+      const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      return yield* localAuth.recoverRemotePrimarySession(expectedHttpBaseUrl);
+    },
+  ),
 });
 
 export const pickFolder = DesktopIpc.makeIpcMethod({

@@ -24,6 +24,7 @@ export {
   PrimaryEnvironmentPairingCredentialRejectedError,
   PrimaryEnvironmentRequestError,
   reauthenticatePrimaryEnvironment,
+  reconnectSavedDesktopEnvironment,
   resolveInitialServerAuthGateState,
   revokeOtherServerClientSessions,
   revokeServerClientSession,

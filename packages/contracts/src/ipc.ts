@@ -1143,6 +1143,8 @@ export interface DesktopBridge {
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
   getLocalEnvironmentBearerToken: () => Promise<string | null>;
+  /** Validate the existing saved credential for the unchanged remote primary. */
+  recoverRemotePrimarySession?: (expectedHttpBaseUrl: string) => Promise<AuthSessionState>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   getConnectionCatalog?: () => Promise<string | null>;
