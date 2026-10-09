@@ -397,6 +397,23 @@ export function createDevRunnerEnv({
       // Once the runner has selected an explicit or worktree-local home, an
       // inherited launcher home must not redirect the child back to shared
       // state.
+      // A config dir inherited together with that launcher home (an agent or
+      // terminal running inside Command Center) belongs to the same shared
+      // state: it would point the isolated server at the real Spaces and
+      // Automations. Drop it so the server uses `<home>-config`. A config dir
+      // exported on its own (e.g. `pnpm serve --home-dir` with an operator's
+      // private config repo) is deliberate and kept.
+      if (
+        output.COMMAND_CENTER_CONFIG_DIR !== undefined &&
+        (output.COMMAND_CENTER_HOME !== undefined ||
+          output.T3_SERVICE_LAUNCHER_CONTEXT !== undefined ||
+          output.T3_BOOT_SERVICE_UNIT !== undefined)
+      ) {
+        yield* Effect.logWarning(
+          "[dev-runner] ignoring COMMAND_CENTER_CONFIG_DIR inherited from a parent Command Center; using the selected home's config",
+        );
+        delete output.COMMAND_CENTER_CONFIG_DIR;
+      }
       delete output.COMMAND_CENTER_HOME;
     } else {
       delete output.T3CODE_HOME;
@@ -794,7 +811,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     const baseDir = env.T3CODE_HOME ?? (yield* DEFAULT_T3_HOME);
 
     yield* Effect.logInfo(
-      `[dev-runner] mode=${input.mode} source=${source}${selectionSuffix} serverPort=${String(env.T3CODE_PORT)} webPort=${String(env.PORT)} baseDir=${baseDir}`,
+      `[dev-runner] mode=${input.mode} source=${source}${selectionSuffix} serverPort=${String(env.T3CODE_PORT)} webPort=${String(env.PORT)} baseDir=${baseDir} configDir=${env.COMMAND_CENTER_CONFIG_DIR ?? `${env.COMMAND_CENTER_HOME ?? baseDir}-config`}`,
     );
 
     // deriveServerPaths (apps/server/src/config.ts) picks `dev/` vs `userdata/`

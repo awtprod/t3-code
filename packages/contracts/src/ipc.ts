@@ -1362,6 +1362,12 @@ export interface DesktopBridge {
   retryRemotePrimary: (remoteHttpBaseUrl?: string) => Promise<DesktopPrimaryBackendState>;
   startLocalExecutionOnce: () => Promise<void>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
+  /**
+   * Local filesystem path of a dropped or pasted `File` (Electron
+   * `webUtils.getPathForFile`). Empty string when the file has no backing path.
+   * Optional while older desktop shells can host a newer web client.
+   */
+  getPathForFile?: (file: File) => string;
   /** Optional while older desktop shells can host a newer web client. */
   pickProjectFavicon?: (initialPath?: string) => Promise<string | null>;
   /**

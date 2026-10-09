@@ -10,6 +10,7 @@
 
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -76,17 +77,28 @@ import Migration0065 from "./Migrations/065_AuthSessionClientConnection.ts";
 import Migration0066 from "./Migrations/066_ProjectionThreadLinkedPullRequest.ts";
 import Migration0067 from "./Migrations/067_ProjectionThreadsUnsettledAt.ts";
 import Migration0068 from "./Migrations/068_ProviderRestartRecovery.ts";
-// Upstream-added migrations (T3 Code upstream 044-052), renumbered to 069-077
-// so they append after the fork's highest migration (068). See sync manifest.
-import Migration0069 from "./Migrations/069_ClearAutomaticProjectModelDefaults.ts";
-import Migration0070 from "./Migrations/070_ProjectionProjectsAutoPull.ts";
-import Migration0071 from "./Migrations/071_RepairAutomaticSettlementTimestamps.ts";
-import Migration0072 from "./Migrations/072_ProjectionProjectIcon.ts";
-import Migration0073 from "./Migrations/073_ProjectionThreadBranchPullRequest.ts";
-import Migration0074 from "./Migrations/074_ProjectionThreadsActiveOrderKey.ts";
-import Migration0075 from "./Migrations/075_ProjectionThreadPullRequests.ts";
-import Migration0076 from "./Migrations/076_ProjectionThreadMessageContext.ts";
-import Migration0077 from "./Migrations/077_ProjectionThreadTitleState.ts";
+import Migration0069 from "./Migrations/069_WebPushSubscriptions.ts";
+import Migration0070 from "./Migrations/070_CommandCenterInbox.ts";
+import Migration0071 from "./Migrations/071_CommandCenterSprintPlans.ts";
+import Migration0072 from "./Migrations/072_CommandCenterResponsibilities.ts";
+import Migration0073 from "./Migrations/073_CommandCenterObservations.ts";
+import Migration0074 from "./Migrations/074_CommandCenterSprintPlanAdjustments.ts";
+import Migration0075 from "./Migrations/075_CommandCenterDigest.ts";
+import Migration0076 from "./Migrations/076_CommandCenterRepositorySignals.ts";
+import Migration0077 from "./Migrations/077_CommandCenterInboxGmailDrafts.ts";
+import Migration0078 from "./Migrations/078_InstagramReelReceipts.ts";
+// Upstream-added migrations (T3 Code upstream 044-052), renumbered to 079-087
+// so they append after the fork's highest deployed migration (078). See
+// docs/operations/upstream-sync.md.
+import Migration0079 from "./Migrations/079_ClearAutomaticProjectModelDefaults.ts";
+import Migration0080 from "./Migrations/080_ProjectionProjectsAutoPull.ts";
+import Migration0081 from "./Migrations/081_RepairAutomaticSettlementTimestamps.ts";
+import Migration0082 from "./Migrations/082_ProjectionProjectIcon.ts";
+import Migration0083 from "./Migrations/083_ProjectionThreadBranchPullRequest.ts";
+import Migration0084 from "./Migrations/084_ProjectionThreadsActiveOrderKey.ts";
+import Migration0085 from "./Migrations/085_ProjectionThreadPullRequests.ts";
+import Migration0086 from "./Migrations/086_ProjectionThreadMessageContext.ts";
+import Migration0087 from "./Migrations/087_ProjectionThreadTitleState.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -98,7 +110,7 @@ import Migration0077 from "./Migrations/077_ProjectionThreadTitleState.ts";
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  */
-const migrationEntries = [
+export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],
@@ -163,17 +175,28 @@ const migrationEntries = [
   [66, "ProjectionThreadLinkedPullRequest", Migration0066],
   [67, "ProjectionThreadsUnsettledAt", Migration0067],
   [68, "ProviderRestartRecovery", Migration0068],
-  // Upstream-added migrations (T3 Code upstream 044-052) renumbered to 069-077,
-  // appended after fork's 068, preserving upstream's relative order (044->69 ... 052->77).
-  [69, "ClearAutomaticProjectModelDefaults", Migration0069],
-  [70, "ProjectionProjectsAutoPull", Migration0070],
-  [71, "RepairAutomaticSettlementTimestamps", Migration0071],
-  [72, "ProjectionProjectIcon", Migration0072],
-  [73, "ProjectionThreadBranchPullRequest", Migration0073],
-  [74, "ProjectionThreadsActiveOrderKey", Migration0074],
-  [75, "ProjectionThreadPullRequests", Migration0075],
-  [76, "ProjectionThreadMessageContext", Migration0076],
-  [77, "ProjectionThreadTitleState", Migration0077],
+  [69, "WebPushSubscriptions", Migration0069],
+  [70, "CommandCenterInbox", Migration0070],
+  [71, "CommandCenterSprintPlans", Migration0071],
+  [72, "CommandCenterResponsibilities", Migration0072],
+  [73, "CommandCenterObservations", Migration0073],
+  [74, "CommandCenterSprintPlanAdjustments", Migration0074],
+  [75, "CommandCenterDigest", Migration0075],
+  [76, "CommandCenterRepositorySignals", Migration0076],
+  [77, "CommandCenterInboxGmailDrafts", Migration0077],
+  [78, "InstagramReelReceipts", Migration0078],
+  // Upstream-added migrations (T3 Code upstream 044-052) renumbered to 079-087,
+  // appended after the fork's 078, preserving upstream's relative order
+  // (044->79 ... 052->87).
+  [79, "ClearAutomaticProjectModelDefaults", Migration0079],
+  [80, "ProjectionProjectsAutoPull", Migration0080],
+  [81, "RepairAutomaticSettlementTimestamps", Migration0081],
+  [82, "ProjectionProjectIcon", Migration0082],
+  [83, "ProjectionThreadBranchPullRequest", Migration0083],
+  [84, "ProjectionThreadsActiveOrderKey", Migration0084],
+  [85, "ProjectionThreadPullRequests", Migration0085],
+  [86, "ProjectionThreadMessageContext", Migration0086],
+  [87, "ProjectionThreadTitleState", Migration0087],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -193,6 +216,127 @@ const makeMigrationLoader = (throughId?: number) =>
  */
 const run = Migrator.make({});
 
+/**
+ * IDs that are intentionally absent from the registry. The upstream sync
+ * (#37) renumbered 57-60 to 61-64; databases that ran the old numbering still
+ * record 57-60 as applied, so those IDs must never be reused.
+ */
+export const RETIRED_MIGRATION_IDS: ReadonlyArray<number> = [57, 58, 59, 60];
+
+/**
+ * Problems with the order of registered migration IDs.
+ *
+ * The Migrator runs only IDs above the highest applied one, so the registry
+ * must be strictly increasing and gap-free apart from retired IDs. A gap means
+ * a lower-numbered migration from another branch has not landed yet: merging
+ * the higher one first would skip the lower one forever on every database that
+ * upgrades in between (see `assertNoSkippedMigrations`).
+ */
+const missingRange = (start: number, end: number, before: number): string =>
+  start === end
+    ? `migration ${start} is missing before ${before}`
+    : `migrations ${start}-${end} are missing before ${before}`;
+
+export const findMigrationSequenceViolations = (
+  registeredIds: ReadonlyArray<number>,
+  retiredIds: ReadonlyArray<number> = RETIRED_MIGRATION_IDS,
+): ReadonlyArray<string> => {
+  const violations: Array<string> = [];
+  const invalid = registeredIds.filter((id) => !Number.isSafeInteger(id) || id < 1);
+  if (invalid.length > 0) {
+    return invalid.map((id) => `migration ID ${String(id)} is not a positive integer`);
+  }
+  const retired = new Set(retiredIds);
+  for (let index = 1; index < registeredIds.length; index++) {
+    const previous = registeredIds[index - 1]!;
+    const current = registeredIds[index]!;
+    if (current <= previous) {
+      violations.push(`migration ${current} is registered after ${previous}`);
+    }
+  }
+  for (const id of registeredIds) {
+    if (retired.has(id)) violations.push(`migration ${id} reuses a retired ID`);
+  }
+  // Gaps are judged on the sorted IDs so an out-of-order entry is reported
+  // once (above), not again as "missing". Each gap is split only at retired
+  // IDs inside it, so the work is bounded by the registry and retired list,
+  // never by the size of a gap (a typo'd huge ID is reported immediately).
+  const sorted = [...new Set(registeredIds)].toSorted((left, right) => left - right);
+  const retiredSorted = [...retired].toSorted((left, right) => left - right);
+  let expected = 1;
+  for (const id of sorted) {
+    let start = expected;
+    for (const skipped of retiredSorted) {
+      if (skipped < start) continue;
+      if (skipped >= id) break;
+      if (skipped > start) violations.push(missingRange(start, skipped - 1, id));
+      start = skipped + 1;
+    }
+    if (start < id) violations.push(missingRange(start, id - 1, id));
+    expected = id + 1;
+  }
+  return violations;
+};
+
+/** Table the effect Migrator records applied migrations in (its default). */
+export const MIGRATIONS_TABLE = "effect_sql_migrations";
+
+/**
+ * Registered migration IDs that the Migrator would silently never run.
+ *
+ * The Migrator only runs registered migrations whose ID is greater than the
+ * highest applied ID. A migration registered with a lower ID after a higher
+ * one was already applied (e.g. two branches numbered ahead of each other and
+ * merged/deployed out of order) is therefore skipped forever. Gaps in the
+ * registry are irrelevant: only registered-but-unapplied IDs below the highest
+ * applied ID are returned.
+ */
+export const findSkippedMigrationIds = (
+  registeredIds: ReadonlyArray<number>,
+  appliedIds: ReadonlyArray<number>,
+): ReadonlyArray<number> => {
+  if (appliedIds.length === 0) return [];
+  const applied = new Set(appliedIds);
+  const maxApplied = Math.max(...appliedIds);
+  return registeredIds.filter((id) => id < maxApplied && !applied.has(id)).sort((a, b) => a - b);
+};
+
+/**
+ * Fail before running migrations if any registered migration would be skipped
+ * because a higher-numbered migration is already recorded as applied.
+ */
+export const assertNoSkippedMigrations = Effect.fn("assertNoSkippedMigrations")(function* (
+  registeredIds: ReadonlyArray<number>,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const fail = (cause: unknown) =>
+    new Migrator.MigrationError({
+      kind: "BadState",
+      message: `Failed to read applied migrations from ${MIGRATIONS_TABLE}`,
+      cause,
+    });
+  const tables = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${MIGRATIONS_TABLE}
+  `.pipe(Effect.mapError(fail));
+  if (tables.length === 0) return;
+  const rows = yield* sql<{ readonly migration_id: number }>`
+    SELECT migration_id FROM ${sql(MIGRATIONS_TABLE)}
+  `.withoutTransform.pipe(Effect.mapError(fail));
+  const appliedIds = rows.map((row) => Number(row.migration_id));
+  const skipped = findSkippedMigrationIds(registeredIds, appliedIds);
+  if (skipped.length === 0) return;
+  const maxApplied = Math.max(...appliedIds);
+  return yield* new Migrator.MigrationError({
+    kind: "BadState",
+    message:
+      `Refusing to start: registered migration(s) ${skipped.join(", ")} have not been applied, ` +
+      `but migration ${maxApplied} (a higher ID) already has been. The migrator only runs IDs ` +
+      `above the latest applied one, so these would be skipped forever. They were most likely ` +
+      `registered after a higher-numbered migration was already applied to this database ` +
+      `(out-of-order merge or deploy). Renumber them above ${maxApplied} or apply them manually.`,
+  });
+});
+
 export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
 }
@@ -210,6 +354,11 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  yield* assertNoSkippedMigrations(
+    migrationEntries
+      .map(([id]) => id)
+      .filter((id) => toMigrationInclusive === undefined || id <= toMigrationInclusive),
+  );
   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0

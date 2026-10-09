@@ -9,9 +9,14 @@ import {
   type RepositoryIdentity,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as InstagramPublishLive from "./command-center/publish/instagram/InstagramPublishLive.ts";
+import * as InstagramPublish from "./command-center/publish/instagram/InstagramPublish.ts";
+import * as InstagramTokenStore from "./command-center/publish/instagram/InstagramTokenStore.ts";
+import * as InstagramWorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
@@ -36,6 +41,11 @@ import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
+import { webPushHttpApiLayer } from "./webPush/http.ts";
+import * as WebPushConfig from "./webPush/WebPushConfig.ts";
+import * as WebPushSubscriptions from "./webPush/WebPushSubscriptions.ts";
+import * as WebPushSender from "./webPush/WebPushSender.ts";
+import { layer as localWebPushNotifierLayer } from "./webPush/LocalWebPushNotifier.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -95,6 +105,7 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { SandboxSettleCleanupReactorLive } from "./orchestration/Layers/SandboxSettleCleanupReactor.ts";
+import { SubagentDelegationReactorLive } from "./orchestration/Layers/SubagentDelegationReactor.ts";
 import { SandboxLifecycleReactorLive } from "./orchestration/Layers/SandboxLifecycleReactor.ts";
 import { SandboxRuntimeManagerLive } from "./sandbox/SandboxRuntimeManager.ts";
 import * as ThreadSettlementReactor from "./orchestration/ThreadSettlementReactor.ts";
@@ -162,6 +173,7 @@ import {
   OrchestrationRuntimeStateLayerLive,
 } from "./orchestration/runtimeLayer.ts";
 import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
+import * as Judge from "./efficiency/Judge.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./orchestration/Layers/ProjectionSnapshotQuery.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -173,9 +185,16 @@ import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
 import * as CommandCenterService from "./command-center/Service.ts";
+import * as CommandCenterInbox from "./command-center/Inbox.ts";
+import * as SprintPlan from "./command-center/SprintPlan.ts";
+import * as CommandCenterDigest from "./command-center/Digest.ts";
 import * as CommandCenterEventStream from "./command-center/EventStream.ts";
+import * as Observations from "./command-center/Observations.ts";
 import * as AutomationDefinitionConfig from "./command-center/AutomationDefinitionConfig.ts";
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
+import * as Responsibilities from "./command-center/Responsibilities.ts";
+import * as RepositoryChecks from "./command-center/RepositoryChecks.ts";
+import * as InboxGmailDrafts from "./command-center/InboxGmailDrafts.ts";
 import * as AutomationScheduleRunner from "./command-center/automation/ScheduleRunner.ts";
 import * as AutomationRecoveryCoordinator from "./command-center/automation/RecoveryCoordinator.ts";
 import * as AutomationTriggerCoordinator from "./command-center/automation/TriggerCoordinator.ts";
@@ -184,7 +203,11 @@ import * as AutomationScopedShell from "./command-center/automation/AutomationSc
 import * as VerifiedScopedShell from "./command-center/automation/VerifiedScopedShell.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
+import * as PublishConnections from "./command-center/publish/PublishConnections.ts";
+import * as YouTubeAnalytics from "./command-center/publish/youtube/YouTubeAnalytics.ts";
+import * as YouTubeTokenStore from "./command-center/publish/youtube/YouTubeTokenStore.ts";
 import * as CommandCenterConfig from "./command-center/Config.ts";
 import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
@@ -216,6 +239,14 @@ const ServerSettingsLayerLive = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
   Layer.provideMerge(SqlitePersistenceLayerLive),
 );
+
+// The efficiency Judge reads the live judge settings, records usage rows, and
+// writes the decision log. Self-contained (bundles ServerSettings + SQL) so it
+// can be provided both to the command dispatcher (tier judgment) and, ambiently,
+// to the WebSocket preview RPC. ServerConfig / FileSystem / Path stay open
+// requirements, satisfied by the runtime. Test harnesses that compose the raw
+// orchestration/route layers provide `Judge.layerTest` at their boundary.
+const JudgeLayerLive = Judge.layer.pipe(Layer.provide(ServerSettingsLayerLive));
 
 const NativeTelemetryLayerLive = NativeTelemetryClient.layer.pipe(
   Layer.provide(ResourceMonitorBinary.layer),
@@ -333,14 +364,27 @@ export const makePreviewGatewayServedLayer = <A extends HttpServer.HttpServer, E
   );
 const PlatformServicesLive = NodeServices.layer;
 
+// Web Push services (VAPID config, subscription store, sender) shared by the
+// notifier reactor and the HTTP route group. ServerSecretStore holds the VAPID
+// key pair; the sender reads the resolved config. SqlClient (subscription store)
+// and the secret store's own deps are satisfied by the runtime context.
+const WebPushConfigLayerLive = WebPushConfig.layer.pipe(Layer.provide(ServerSecretStore.layer));
+export const WebPushServicesLive = Layer.mergeAll(
+  WebPushConfigLayerLive,
+  WebPushSubscriptions.layer,
+  WebPushSender.layer.pipe(Layer.provide(WebPushConfigLayerLive)),
+);
+
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
+  Layer.provideMerge(localWebPushNotifierLayer),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(SandboxLifecycleReactorLive),
   Layer.provideMerge(SandboxSettleCleanupReactorLive),
+  Layer.provideMerge(SubagentDelegationReactorLive),
   Layer.provideMerge(ThreadSettlementReactor.layer),
   Layer.provideMerge(PullRequestSyncReactor.layer),
   Layer.provideMerge(ThreadPullRequestReactor.layer),
@@ -471,10 +515,23 @@ const GoogleReadConnectorLayerLive = GoogleReadConnector.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
+const WindowsMediaConnectorLayerLive = WindowsMediaConnector.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+);
+
 const GoogleConnectionSetupLayerLive = GoogleConnectionSetup.layer.pipe(
   Layer.provideMerge(CommandCenterConfigLayerLive),
   Layer.provide(ProcessRunner.layer),
   Layer.provide(ServerSecretStore.layer),
+);
+
+const PublishConnectionsLayerLive = PublishConnections.layer.pipe(
+  Layer.provide(ServerSecretStore.layer),
+);
+
+const YouTubeAnalyticsLayerLive = YouTubeAnalytics.layer.pipe(
+  Layer.provide(YouTubeTokenStore.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+  Layer.provide(Observations.layer),
 );
 
 const AutomationDefinitionConfigLayerLive = AutomationDefinitionConfig.layer.pipe(
@@ -498,23 +555,114 @@ const AutomationScopedShellLayerLive = AutomationScopedShell.AutomationScopedShe
 
 const CommandCenterBaseLayerLive = Layer.mergeAll(
   CommandCenterService.runtimeLayer,
+  CommandCenterInbox.layer,
+  CommandCenterDigest.liveLayer,
   CommandCenterEventStream.layer,
+  Observations.layer,
   MemorySearchIndex.layer,
   GoogleReadConnectorLayerLive,
+  WindowsMediaConnectorLayerLive,
   GoogleConnectionSetupLayerLive,
+  PublishConnectionsLayerLive,
+  YouTubeAnalyticsLayerLive,
   AutomationDefinitionConfigLayerLive,
   AutomationScheduleInterpreterLayerLive,
   AutomationScopedShellLayerLive,
 );
 
+const RepositoryChecksLayerLive = RepositoryChecks.layer.pipe(
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(GitHubCli.layer),
+  Layer.provide(SourceControlRateLimit.layer),
+  Layer.provide(VcsProcess.layer),
+  Layer.provide(PersistenceLayerLive),
+);
+
+const InboxGmailDraftsLayerLive = InboxGmailDrafts.layer.pipe(
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(CommandCenterConfigLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
 const CommandCenterCoreLayerLive = Layer.mergeAll(
   CommandCenterBaseLayerLive,
-  AutomationRuns.safeRuntimeLayer.pipe(Layer.provide(CommandCenterBaseLayerLive)),
+  RepositoryChecksLayerLive,
+  InboxGmailDraftsLayerLive,
+  AutomationRuns.safeRuntimeLayer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        CommandCenterBaseLayerLive,
+        RepositoryChecksLayerLive,
+        InboxGmailDraftsLayerLive,
+      ),
+    ),
+  ),
 );
 
 const AutomationRunsLayerLive = AutomationRuns.layer.pipe(
   Layer.provideMerge(CommandCenterCoreLayerLive),
 );
+
+const ResponsibilitiesLayerLive = Layer.effect(
+  Responsibilities.Responsibilities,
+  Effect.gen(function* () {
+    const commandCenter = yield* CommandCenterService.CommandCenterService;
+    const configured = Effect.fn("Responsibilities.configured")(function* () {
+      const config = yield* commandCenter.syncConfiguration({ force: true }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new Responsibilities.ResponsibilityError({
+              code: "config-unavailable",
+              message: "Could not verify the committed Automation configuration.",
+              cause,
+            }),
+        ),
+      );
+      if (config.health.status !== "loaded") {
+        return yield* new Responsibilities.ResponsibilityError({
+          code: "config-unavailable",
+          message: "The committed Automation configuration is unavailable.",
+        });
+      }
+      const activeSpaces = new Set(
+        config.spaces.filter((space) => space.lifecycle === "active").map((space) => space.id),
+      );
+      return config.automations.flatMap((automation) =>
+        activeSpaces.has(automation.spaceId) && automation.configCommit
+          ? [
+              {
+                automationId: automation.id,
+                spaceId: automation.spaceId,
+                configCommitSha: automation.configCommit,
+                definitionDigest: automation.definitionDigest,
+                enabled: automation.enabled,
+              },
+            ]
+          : [],
+      );
+    });
+    return yield* Responsibilities.make({
+      now: Effect.map(DateTime.now, DateTime.formatIso),
+      listConfiguredAutomations: configured,
+      validateAutomation: ({ automationId, spaceId }) =>
+        configured().pipe(
+          Effect.flatMap((automations) => {
+            const identity = automations.find(
+              (item) => item.automationId === automationId && item.spaceId === spaceId,
+            );
+            return identity
+              ? Effect.succeed(identity)
+              : Effect.fail(
+                  new Responsibilities.ResponsibilityError({
+                    code: "not-found",
+                    message: "The Responsibility is absent from committed configuration.",
+                  }),
+                );
+          }),
+        ),
+    });
+  }),
+).pipe(Layer.provideMerge(CommandCenterBaseLayerLive), Layer.provide(PersistenceLayerLive));
 
 const AutomationTriggerCoordinatorLayerLive = AutomationTriggerCoordinator.layer.pipe(
   Layer.provide(AutomationRunsLayerLive),
@@ -602,6 +750,7 @@ const OrchestrationCommandDispatcherLayerLive = OrchestrationCommandDispatcher.l
   Layer.provide(ProviderRegistryLive),
   Layer.provide(ProjectSetupScriptRunnerLayerLive),
   Layer.provide(ServerSettingsLayerLive),
+  Layer.provide(JudgeLayerLive),
   Layer.provide(T3ProjectFileLoader.layer),
   Layer.provide(VcsStatusBroadcaster.layer.pipe(Layer.provide(GitWorkflowLayerLive))),
   Layer.provide(WorkspacePaths.layer),
@@ -619,7 +768,19 @@ const RunRecoveryCoordinatorLayerLive = RunRecoveryCoordinator.layer.pipe(
   Layer.provide(PersistenceLayerLive),
 );
 
+const InstagramPublishLayerLive = InstagramPublishLive.layer.pipe(
+  Layer.provide(InstagramTokenStore.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(InstagramWorkspacePaths.layer),
+  Layer.provide(PersistenceLayerLive),
+);
+const InstagramRunnerLayerLive = InstagramPublish.runnerLayer.pipe(
+  Layer.provideMerge(InstagramPublishLayerLive),
+);
+
 const CommandCenterLayerLive = Layer.mergeAll(
+  ResponsibilitiesLayerLive,
+  InstagramRunnerLayerLive,
   AutomationScheduleInterpreterLayerLive,
   AutomationRunsLayerLive,
   AutomationTriggerCoordinatorLayerLive,
@@ -725,7 +886,9 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(AntigravityInstallationRefreshLive),
   Layer.provideMerge(ProviderAuthServiceLive),
   // Core Services
-  Layer.provideMerge(Layer.mergeAll(OrchestrationRuntimeStateLayerLive, ServerSettingsLayerLive)),
+  Layer.provideMerge(
+    Layer.mergeAll(OrchestrationRuntimeStateLayerLive, ServerSettingsLayerLive, JudgeLayerLive),
+  ),
   Layer.provideMerge(CheckpointingLayerLive),
   Layer.provideMerge(
     Layer.mergeAll(
@@ -745,7 +908,12 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
       Layer.provideMerge(TerminalLayerLive),
     ),
   ),
-  Layer.provideMerge(PersistenceLayerLive),
+  // Web Push config/store/sender, shared by the notifier reactor (above) and the
+  // route group. Kept above PersistenceLayerLive in the pipe so the later
+  // PersistenceLayerLive satisfies the subscription store's SqlClient requirement;
+  // nested so both stay a single pipe step and PersistenceLayerLive is still
+  // exposed to the rest of the runtime.
+  Layer.provideMerge(WebPushServicesLive.pipe(Layer.provideMerge(PersistenceLayerLive))),
   // Both read a user-owned file out of the state directory and stream changes
   // to clients; neither depends on the other.
   Layer.provideMerge(
@@ -757,7 +925,14 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // `providerInstances` hydration merges `settings.providers.<kind>`
   // with explicit `providerInstances` entries on boot.
-  Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+  //
+  // `ClaudeDriver.create` yields the efficiency `Judge` for the tool-result
+  // sieve, so this hydration layer (the single site where `BUILT_IN_DRIVERS`
+  // are instantiated) requires `Judge`. Close it here with `JudgeLayerLive`
+  // so the requirement never leaks onto the runtime's exported surface —
+  // Effect memoizes the shared layer reference, so this is the same Judge
+  // singleton used by the tier-judgment dispatcher.
+  Layer.provideMerge(ProviderInstanceRegistryHydrationLive.pipe(Layer.provide(JudgeLayerLive))),
 ).pipe(
   Layer.provideMerge(AntigravityInstallation.layer),
   // Shared native/canonical NDJSON writers used by both the per-instance
@@ -796,6 +971,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   // Misc.
+  Layer.provideMerge(SprintPlan.layer.pipe(Layer.provide(PersistenceLayerLive))),
   Layer.provideMerge(ReadinessGate.layer),
   Layer.provideMerge(ProcessDiagnostics.layer),
   Layer.provideMerge(ProcessResourceMonitor.layer),
@@ -825,6 +1001,7 @@ export const makeRoutesLayer = Layer.mergeAll(
       Layer.provide(connectHttpApiLayer),
       Layer.provide(orchestrationHttpApiLayer),
       Layer.provide(pullRequestHttpApiLayer),
+      Layer.provide(webPushHttpApiLayer),
       Layer.provide(serverEnvironmentHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),
     ),

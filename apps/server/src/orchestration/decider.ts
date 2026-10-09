@@ -5,6 +5,7 @@ import {
   MAX_SCRIPT_ID_LENGTH,
   SCRIPT_RUN_COMMAND_PATTERN,
   MessageId,
+  SUBAGENT_STARTED_ACTIVITY_KIND,
   ThreadLinkedPullRequest,
   UserInputRequestedPayload,
   isImportedAgentSessionMessageId,
@@ -193,6 +194,77 @@ function withEventBase(
 }
 
 type PlannedOrchestrationEvent = Omit<OrchestrationEvent, "sequence">;
+
+/**
+ * Refuses to start agent work for a thread while a human holds its sandbox
+ * takeover lease or its sandbox is mid-transition. Shared by every command
+ * that records a user message and hands it to an agent (`thread.turn.start`
+ * and its subagent twin `thread.turn.delegate`), so neither path can run an
+ * agent the other would refuse.
+ */
+const requireThreadAcceptsAgentTurn = Effect.fn("requireThreadAcceptsAgentTurn")(function* (
+  thread: OrchestrationThread,
+  commandType: OrchestrationCommand["type"],
+) {
+  if (thread.sandbox?.controller.kind === "human") {
+    return yield* sandboxInvariant(
+      commandType,
+      `thread ${thread.id} is controlled by an active human takeover lease`,
+    );
+  }
+  if (
+    thread.sandbox != null &&
+    !RE_PROVISIONABLE_SANDBOX_LIFECYCLES.has(thread.sandbox.lifecycle) &&
+    thread.sandbox.lifecycle !== "ready"
+  ) {
+    return yield* sandboxInvariant(
+      commandType,
+      `thread ${thread.id} sandbox is ${thread.sandbox.lifecycle}`,
+    );
+  }
+});
+
+/**
+ * A user message is real activity and resets ANY override: it wakes an
+ * explicitly settled thread, and it clears a keep-active pin back to neutral
+ * so the thread can auto-settle again after this burst of work goes stale. A
+ * snooze clears the same way — sending a message to a snoozed thread is the
+ * user re-engaging, so the return ticket is spent.
+ */
+const userMessageLifecycleResets = Effect.fn("userMessageLifecycleResets")(function* (
+  thread: OrchestrationThread,
+  command: Pick<OrchestrationCommand, "commandId"> & {
+    readonly threadId: OrchestrationThread["id"];
+    readonly createdAt: string;
+  },
+) {
+  const events: Array<Omit<OrchestrationEvent, "sequence">> = [];
+  if (thread.settledOverride !== null) {
+    events.push({
+      ...(yield* withEventBase({
+        aggregateKind: "thread",
+        aggregateId: command.threadId,
+        occurredAt: command.createdAt,
+        commandId: command.commandId,
+      })),
+      type: "thread.unsettled",
+      payload: { threadId: command.threadId, reason: "activity", updatedAt: command.createdAt },
+    });
+  }
+  if (thread.snoozedUntil != null) {
+    events.push({
+      ...(yield* withEventBase({
+        aggregateKind: "thread",
+        aggregateId: command.threadId,
+        occurredAt: command.createdAt,
+        commandId: command.commandId,
+      })),
+      type: "thread.unsnoozed",
+      payload: { threadId: command.threadId, reason: "activity", updatedAt: command.createdAt },
+    });
+  }
+  return events;
+});
 
 type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
@@ -1451,22 +1523,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      if (targetThread.sandbox?.controller.kind === "human") {
-        return yield* sandboxInvariant(
-          command.type,
-          `thread ${command.threadId} is controlled by an active human takeover lease`,
-        );
-      }
-      if (
-        targetThread.sandbox != null &&
-        !RE_PROVISIONABLE_SANDBOX_LIFECYCLES.has(targetThread.sandbox.lifecycle) &&
-        targetThread.sandbox.lifecycle !== "ready"
-      ) {
-        return yield* sandboxInvariant(
-          command.type,
-          `thread ${command.threadId} sandbox is ${targetThread.sandbox.lifecycle}`,
-        );
-      }
+      yield* requireThreadAcceptsAgentTurn(targetThread, command.type);
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1554,44 +1611,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
         },
       };
-      // Real activity resets ANY override: it wakes an explicitly settled
-      // thread, and it clears a keep-active pin back to neutral so the
-      // thread can auto-settle again after this burst of work goes stale.
-      // A snooze clears the same way — sending a message to a snoozed
-      // thread is the user re-engaging, so the return ticket is spent.
-      const lifecycleResetEvents: Array<Omit<OrchestrationEvent, "sequence">> = [];
-      if (targetThread.settledOverride !== null) {
-        lifecycleResetEvents.push({
-          ...(yield* withEventBase({
-            aggregateKind: "thread",
-            aggregateId: command.threadId,
-            occurredAt: command.createdAt,
-            commandId: command.commandId,
-          })),
-          type: "thread.unsettled",
-          payload: {
-            threadId: command.threadId,
-            reason: "activity",
-            updatedAt: command.createdAt,
-          },
-        });
-      }
-      if (targetThread.snoozedUntil != null) {
-        lifecycleResetEvents.push({
-          ...(yield* withEventBase({
-            aggregateKind: "thread",
-            aggregateId: command.threadId,
-            occurredAt: command.createdAt,
-            commandId: command.commandId,
-          })),
-          type: "thread.unsnoozed",
-          payload: {
-            threadId: command.threadId,
-            reason: "activity",
-            updatedAt: command.createdAt,
-          },
-        });
-      }
+      const lifecycleResetEvents = yield* userMessageLifecycleResets(targetThread, command);
       return [
         ...lifecycleResetEvents,
         ...(userMessageEvent ? [userMessageEvent] : []),
@@ -1639,6 +1659,63 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: command.createdAt,
         },
       };
+    }
+
+    case "thread.turn.delegate": {
+      const targetThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      yield* requireThreadAcceptsAgentTurn(targetThread, command.type);
+      const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.message-sent",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.message.messageId,
+          role: "user",
+          text: command.message.text,
+          attachments: command.message.attachments,
+          turnId: null,
+          streaming: false,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+      const { delegation } = command;
+      const delegatedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        causationEventId: userMessageEvent.eventId,
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: EventId.make(`subagent-started:${command.commandId}`),
+            tone: "info",
+            kind: SUBAGENT_STARTED_ACTIVITY_KIND,
+            summary: `Routed to a ${delegation.modelSelection.model} subagent`,
+            payload: {
+              ...delegation,
+              detail: `This thread's session is bound to another provider, so the turn runs in subagent thread ${delegation.childThreadId}. Its reply is posted here when it finishes.`,
+            },
+            turnId: null,
+            createdAt: command.createdAt,
+          },
+        },
+      };
+      const lifecycleResetEvents = yield* userMessageLifecycleResets(targetThread, command);
+      return [...lifecycleResetEvents, userMessageEvent, delegatedEvent];
     }
 
     case "thread.turn.resume": {

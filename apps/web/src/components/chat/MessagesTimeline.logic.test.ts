@@ -3168,6 +3168,46 @@ describe("deriveMessagesTimelineRows", () => {
     });
   });
 
+  it("surfaces finished clips from successful entries on collapsed tool groups", () => {
+    const commands = [
+      ["completed", "ffmpeg -y -i raw.mov -t 30 out/clip-a.mp4"],
+      ["failed", "ffmpeg -y -i raw.mov out/broken.mp4"],
+      ["completed", "ffmpeg -i out/clip-a.mp4 -vf scale=720:-2 out/clip-b.webm"],
+      ["completed", "ls out"],
+    ] as const;
+    const timelineEntries = commands.map(([status, command], index) => ({
+      id: `work-entry-${index}`,
+      kind: "work" as const,
+      createdAt: `2026-01-01T00:00:0${index}Z`,
+      entry: {
+        id: `work-${index}`,
+        createdAt: `2026-01-01T00:00:0${index}Z`,
+        label: "Ran command",
+        tone: "tool" as const,
+        itemType: "command_execution" as const,
+        command,
+        toolLifecycleStatus: status,
+      },
+    }));
+    const derive = (expandedWorkGroupIds?: ReadonlySet<string>) =>
+      deriveMessagesTimelineRows({
+        timelineEntries,
+        isWorking: false,
+        activeTurnStartedAt: null,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+        ...(expandedWorkGroupIds ? { expandedWorkGroupIds } : {}),
+      });
+
+    const collapsed = derive().find((row) => row.kind === "work-toggle");
+    expect(collapsed).toMatchObject({ videoClipPaths: ["out/clip-a.mp4", "out/clip-b.webm"] });
+    const expanded = derive(new Set([collapsed!.kind === "work-toggle" ? collapsed!.groupId : ""]));
+    expect(expanded.find((row) => row.kind === "work-toggle")).toMatchObject({
+      expanded: true,
+      videoClipPaths: [],
+    });
+  });
+
   it.each([
     ["the later success is hidden", ["failed", "completed", "info"], false],
     ["the later success is visible", ["failed", "info", "completed"], false],
@@ -3239,6 +3279,7 @@ describe("computeStableMessagesTimelineRows", () => {
       summaryKind: "other",
       toolSurface: "browser",
       hasFailure: false,
+      videoClipPaths: [],
     };
     const initial = computeStableMessagesTimelineRows([initialRow], {
       byId: new Map(),

@@ -1,5 +1,9 @@
 import {
   AuthAccessReadScope,
+  AuthCommandCenterReadScope,
+  AuthCommandCenterOperateScope,
+  AuthCommandCenterApproveScope,
+  INSTAGRAM_REEL_METHODS,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
@@ -23,6 +27,11 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  */
 export const RPC_REQUIRED_SCOPES = {
   ...Object.fromEntries(COMMAND_CENTER_RPC_SCOPE_ENTRIES),
+  [INSTAGRAM_REEL_METHODS.account]: AuthCommandCenterReadScope,
+  [INSTAGRAM_REEL_METHODS.request]: AuthCommandCenterOperateScope,
+  [INSTAGRAM_REEL_METHODS.query]: AuthCommandCenterReadScope,
+  [INSTAGRAM_REEL_METHODS.approve]: AuthCommandCenterApproveScope,
+  [INSTAGRAM_REEL_METHODS.cancel]: AuthCommandCenterApproveScope,
   [ORCHESTRATION_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,

@@ -34,11 +34,19 @@ it("records the committed static-context baseline", () => {
     },
   };
   expect(baseline).toEqual({
-    collaborationInstructions: { defaultBytes: 2_071, planBytes: 10_302 },
+    // 2026-09: +94 bytes to route default-mode questions through
+    // `request_user_input` when the tool is listed (plain-text fallback
+    // remains for the tool-unavailable case).
+    collaborationInstructions: { defaultBytes: 2_165, planBytes: 10_302 },
     // 2026-09: +1,938 bytes for the optional `database` selector on the nine
     // Supabase tools (multi-database projects).
-    // 2026-10: effect rc.112 JSON Schema output (-108 bytes) plus object-root
-    // input schemas for cc_spaces_list and cc_google_read (+16 bytes).
+    // 2026-09: +76 bytes for the `prospect.evaluate`/`prospect.notify`
+    // automation node configs (review-only prospect queue).
+    // 2026-09: +396 bytes for scoped correction evidence, expiry, and
+    // contradiction fields on the existing memory proposal tool.
+    // 2026-09: +40 bytes for the `repository.checks` source-node configuration.
+    // 2026-10: effect rc.112 JSON Schema output plus object-root input schemas
+    // for cc_spaces_list and cc_google_read (upstream catch-up sync).
     mcp: { toolCount: 36, schemaBytes: 25_365, toolkitCounts: [14, 13, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,

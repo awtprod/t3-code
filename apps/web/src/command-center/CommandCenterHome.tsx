@@ -24,6 +24,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { commandCenterEnvironment } from "~/state/commandCenter";
 
 import { CommandCenterShell } from "./CommandCenterShell";
+import { DigestCard } from "./DigestCard";
 import {
   classifyCommandCenterExecutionTarget,
   resolveCommandCenterRouterEnvironmentId,
@@ -110,7 +111,13 @@ interface DelegatedDesktopRun {
   readonly threadId: ThreadId;
 }
 
-export function CommandCenterHome() {
+export function CommandCenterHome({
+  initialEnvironmentId,
+  initialRunId,
+}: {
+  readonly initialEnvironmentId?: EnvironmentId | undefined;
+  readonly initialRunId?: string | undefined;
+} = {}) {
   const navigate = useNavigate();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { environments } = useEnvironments();
@@ -126,10 +133,12 @@ export function CommandCenterHome() {
       })),
     [environments],
   );
-  const environmentId = resolveCommandCenterRouterEnvironmentId({
-    primaryEnvironmentId,
-    environments: environmentCandidates,
-  });
+  const environmentId =
+    initialEnvironmentId ??
+    resolveCommandCenterRouterEnvironmentId({
+      primaryEnvironmentId,
+      environments: environmentCandidates,
+    });
   const routerEnvironment = environments.find(
     (environment) => environment.environmentId === environmentId,
   );
@@ -441,18 +450,31 @@ export function CommandCenterHome() {
     (itemId: string) => {
       const item = bootstrap?.needsYou.find((candidate) => candidate.id === itemId);
       if (item === undefined) return;
-      const linkedRun = bootstrap?.runs.find(
-        (candidate) => candidate.id === item.provenance.sourceRef,
-      );
-      if (linkedRun?.threadId !== undefined) {
-        openLinkedThread(linkedRun.threadId);
-        return;
-      }
-      selectSpace(item.spaceId);
-      setDraft(`Help me resolve: ${item.title}`);
+      void navigate({
+        to: "/inbox",
+        search: {
+          tab: "actionable",
+          ...(environmentId === null ? {} : { environment: environmentId }),
+          space: item.spaceId,
+          item: item.id,
+        },
+      });
     },
-    [bootstrap, openLinkedThread, selectSpace],
+    [bootstrap, environmentId, navigate],
   );
+
+  const openedInitialRunRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (
+      initialRunId === undefined ||
+      openedInitialRunRef.current === initialRunId ||
+      !bootstrap?.runs.some((run) => run.id === initialRunId)
+    ) {
+      return;
+    }
+    openedInitialRunRef.current = initialRunId;
+    selectConversation(initialRunId);
+  }, [bootstrap?.runs, initialRunId, selectConversation]);
 
   const openTodayItem = useCallback(
     (itemId: string) => {
@@ -936,6 +958,7 @@ export function CommandCenterHome() {
   return (
     <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <CommandCenterShell
+        digest={<DigestCard environmentId={environmentId} />}
         activeConversationId={activeConversationId}
         context={projection.context}
         conversationTitle="Command"

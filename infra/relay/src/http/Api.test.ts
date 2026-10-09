@@ -34,6 +34,7 @@ import {
   relayDocsRedirectRoute,
   relayEnvironmentAuthLayer,
   relayNotFoundRoute,
+  publishProspectNotification,
   relayDpopFailureReason,
   revokeEnvironmentLinkRecord,
   traceRelayHttpRequestWith,
@@ -49,6 +50,9 @@ import * as ManagedEndpointProvider from "../environments/ManagedEndpointProvide
 import * as EnvironmentLinker from "../environments/EnvironmentLinker.ts";
 import * as RelayTokens from "../auth/RelayTokens.ts";
 import * as Devices from "../agentActivity/Devices.ts";
+import * as WebPushSubscriptions from "../agentActivity/WebPushSubscriptions.ts";
+import * as EnvironmentPublishSignatures from "../environments/EnvironmentPublishSignatures.ts";
+import * as AgentActivityPublisher from "../agentActivity/AgentActivityPublisher.ts";
 
 vi.mock("@clerk/backend", () => ({
   createClerkClient: vi.fn(),
@@ -122,6 +126,7 @@ describe("device listing compatibility", () => {
           Layer.mock(EnvironmentLinker.EnvironmentLinker, {}),
           Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
+          Layer.mock(WebPushSubscriptions.WebPushSubscriptions, {}),
           Layer.mock(Devices.Devices, {
             listForUser: ({ userId }) => {
               expect(userId).toBe("user-1");
@@ -291,6 +296,51 @@ describe("relay environment authentication", () => {
         ),
       ),
       Effect.scoped,
+    );
+  });
+});
+
+describe("prospect notification publication", () => {
+  const notification = {
+    type: "prospect",
+    itemId: "prospect-review:lead-1",
+    spaceId: "space-1",
+    evaluationId: "evaluation-1",
+    environmentId: "environment-1" as EnvironmentId,
+    title: "New prospect",
+    body: "Review it.",
+    deepLink: "/prospects/prospect-review%3Alead-1",
+  } as const;
+
+  it.effect("rejects a principal whose environment does not match the path", () => {
+    const verifyProspectNotification = vi.fn(() => Effect.void);
+    const publishNotification = vi.fn(() =>
+      Effect.succeed({ status: "queued" as const, idempotencyKey: "key", deliveries: [] }),
+    );
+    return Effect.gen(function* () {
+      const result = yield* Effect.result(
+        publishProspectNotification({
+          environmentId: "environment-1",
+          principal: {
+            environmentId: "environment-2",
+            environmentPublicKey: "public-key",
+          },
+          payload: { notification, proof: "proof" },
+        }),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(verifyProspectNotification).not.toHaveBeenCalled();
+      expect(publishNotification).not.toHaveBeenCalled();
+    }).pipe(
+      Effect.provideService(EnvironmentPublishSignatures.EnvironmentPublishSignatures, {
+        verify: () => Effect.die("unused activity verifier"),
+        verifyProspectNotification,
+      }),
+      Effect.provideService(AgentActivityPublisher.AgentActivityPublisher, {
+        publish: () => Effect.die("unused activity publisher"),
+        replayForLiveActivityRegistration: () => Effect.die("unused replay"),
+        publishProspectNotification: publishNotification,
+      }),
     );
   });
 });

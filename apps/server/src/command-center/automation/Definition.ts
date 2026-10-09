@@ -33,8 +33,29 @@ export const AutomationFileNodeKind = Schema.Literals([
   "delay",
   "approval",
   "shell.scoped",
+  "prospect.evaluate",
+  "prospect.notify",
+  "repository.checks",
 ]);
 export type AutomationFileNodeKind = typeof AutomationFileNodeKind.Type;
+
+const RepositoryChecksNodeConfig = Schema.Struct({ repositoryId: RepositoryId });
+const decodeRepositoryChecksNodeConfig = Schema.decodeUnknownExit(RepositoryChecksNodeConfig);
+
+export function parseRepositoryChecksNodeConfig(input: unknown) {
+  if (
+    input === null ||
+    typeof input !== "object" ||
+    Array.isArray(input) ||
+    Object.keys(input).some((key) => key !== "repositoryId")
+  ) {
+    return { ok: false as const, message: "Repository checks require only repositoryId." };
+  }
+  const decoded = decodeRepositoryChecksNodeConfig(input);
+  return Exit.isFailure(decoded)
+    ? { ok: false as const, message: formatSchemaError(decoded.cause) }
+    : { ok: true as const, config: decoded.value };
+}
 
 const JsonObject = Schema.Record(Schema.String, Schema.Json);
 export const AUTOMATION_DEFINITION_SCHEMA_VERSION = 1 as const;
@@ -139,6 +160,69 @@ export function parseAutomationScopedShellNodeConfig(
     return { ok: false, message: formatSchemaError(decoded.cause) };
   }
   return { ok: true, config: decoded.value };
+}
+
+/** Automation authors may select only a pre-provisioned runtime profile and a small batch. */
+export const AutomationProspectEvaluateNodeConfig = Schema.Struct({
+  profile: TrimmedNonEmptyString,
+  limit: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10 })),
+});
+export type AutomationProspectEvaluateNodeConfig = typeof AutomationProspectEvaluateNodeConfig.Type;
+
+const PROSPECT_EVALUATE_CONFIG_KEYS = new Set(["profile", "limit"]);
+const PROSPECT_PROFILE_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
+const decodeAutomationProspectEvaluateNodeConfig = Schema.decodeUnknownExit(
+  AutomationProspectEvaluateNodeConfig,
+);
+
+export type AutomationProspectEvaluateNodeConfigResult =
+  | { readonly ok: true; readonly config: AutomationProspectEvaluateNodeConfig }
+  | { readonly ok: false; readonly message: string };
+
+export function parseAutomationProspectEvaluateNodeConfig(
+  input: unknown,
+): AutomationProspectEvaluateNodeConfigResult {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, message: "Prospect evaluation node config must be an object." };
+  }
+  const unknownKeys = Object.keys(input).filter((key) => !PROSPECT_EVALUATE_CONFIG_KEYS.has(key));
+  if (unknownKeys.length > 0) {
+    return {
+      ok: false,
+      message: `Prospect evaluation node config contains unsupported field '${unknownKeys.sort()[0]}'.`,
+    };
+  }
+  const decoded = decodeAutomationProspectEvaluateNodeConfig(input);
+  if (Exit.isFailure(decoded)) {
+    return { ok: false, message: formatSchemaError(decoded.cause) };
+  }
+  if (!PROSPECT_PROFILE_PATTERN.test(decoded.value.profile)) {
+    return { ok: false, message: "Prospect evaluation node profile name is malformed." };
+  }
+  return { ok: true, config: decoded.value };
+}
+
+export type AutomationProspectNotifyNodeConfig = Readonly<Record<never, never>>;
+
+export type AutomationProspectNotifyNodeConfigResult =
+  | { readonly ok: true; readonly config: AutomationProspectNotifyNodeConfig }
+  | { readonly ok: false; readonly message: string };
+
+/** Notification content and identity always come from persisted Items, never Git config. */
+export function parseAutomationProspectNotifyNodeConfig(
+  input: unknown,
+): AutomationProspectNotifyNodeConfigResult {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, message: "Prospect notification node config must be an object." };
+  }
+  const unknownKeys = Object.keys(input);
+  if (unknownKeys.length > 0) {
+    return {
+      ok: false,
+      message: `Prospect notification node config contains unsupported field '${unknownKeys.sort()[0]}'.`,
+    };
+  }
+  return { ok: true, config: {} };
 }
 
 export const AutomationFileTrigger = Schema.Union([
@@ -332,6 +416,17 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
         });
       }
     }
+    if (node.kind === "repository.checks") {
+      const config = parseRepositoryChecksNodeConfig(node.config);
+      if (!config.ok || decoded.definition.trigger.kind !== "schedule") {
+        issues.push({
+          code: "node.config.invalid",
+          message: config.ok ? "Repository checks require a schedule trigger." : config.message,
+          path: ["nodes", index, "config"],
+          nodeIds: [node.id],
+        });
+      }
+    }
     if (node.kind === "shell.scoped") {
       const config = parseAutomationScopedShellNodeConfig(node.config);
       if (!config.ok) {
@@ -343,7 +438,40 @@ export function validateAutomationDefinition(input: unknown): AutomationValidati
         });
       }
     }
+    if (node.kind === "prospect.evaluate") {
+      const config = parseAutomationProspectEvaluateNodeConfig(node.config);
+      if (!config.ok) {
+        issues.push({
+          code: "node.config.invalid",
+          message: config.message,
+          path: ["nodes", index, "config"],
+          nodeIds: [node.id],
+        });
+      }
+    }
+    if (node.kind === "prospect.notify") {
+      const config = parseAutomationProspectNotifyNodeConfig(node.config);
+      if (!config.ok) {
+        issues.push({
+          code: "node.config.invalid",
+          message: config.message,
+          path: ["nodes", index, "config"],
+          nodeIds: [node.id],
+        });
+      }
+    }
     if (node.kind === "connector.write" && node.config.operation === "gmail.draft.create") {
+      if (
+        node.config.source === "inbox.accepted" &&
+        Object.keys(node.config).some((key) => key !== "source" && key !== "operation")
+      ) {
+        issues.push({
+          code: "node.config.invalid",
+          message: `Accepted Inbox draft node '${node.id}' cannot contain an editable request.`,
+          path: ["nodes", index, "config"],
+          nodeIds: [node.id],
+        });
+      }
       const predecessors = graph.predecessorIds[node.id] ?? [];
       const approved = predecessors.some(
         (predecessorId) =>

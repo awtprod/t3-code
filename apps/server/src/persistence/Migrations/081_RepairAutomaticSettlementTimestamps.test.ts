@@ -14,7 +14,7 @@ layer("071_RepairAutomaticSettlementTimestamps", (it) => {
   it.effect("repairs automatic stamps and leaves manual settlement alone", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 70 });
+      yield* runMigrations({ toMigrationInclusive: 80 });
 
       yield* sql`
         INSERT INTO projection_threads (
@@ -164,7 +164,7 @@ layer("071_RepairAutomaticSettlementTimestamps", (it) => {
       const eventsBefore =
         yield* sql`SELECT payload_json FROM orchestration_events ORDER BY event_id`;
 
-      yield* runMigrations({ toMigrationInclusive: 71 });
+      yield* runMigrations({ toMigrationInclusive: 81 });
 
       const threads = yield* sql<{
         readonly threadId: string;

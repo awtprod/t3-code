@@ -7,6 +7,8 @@ import type {
   RelayAgentActivityState,
   RelayDeliveryResult,
   RelayPublishResponse,
+  RelayProspectNotification,
+  RelayProspectNotificationPublishResponse,
 } from "@t3tools/contracts/relay";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -21,6 +23,8 @@ import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as ApnsDeliveries from "./ApnsDeliveries.ts";
 import * as FcmDeliveries from "./FcmDeliveries.ts";
+import * as WebPushSubscriptions from "./WebPushSubscriptions.ts";
+import { relayProspectNotificationIdempotencyKey } from "@t3tools/contracts/relay";
 
 export type AgentActivityPublishError =
   | FcmDeliveries.FcmDeliveryError
@@ -31,6 +35,10 @@ export type AgentActivityPublishError =
   | LiveActivities.LiveActivityTargetListPersistenceError
   | ApnsDeliveries.ApnsDeliveryError;
 
+export type ProspectNotificationPublishError =
+  | EnvironmentLinks.EnvironmentLinkUserListPersistenceError
+  | WebPushSubscriptions.WebPushSubscriptionPersistenceError;
+
 export class AgentActivityPublisher extends Context.Service<
   AgentActivityPublisher,
   {
@@ -40,6 +48,11 @@ export class AgentActivityPublisher extends Context.Service<
       readonly threadId: string;
       readonly state: RelayAgentActivityState | null;
     }) => Effect.Effect<RelayPublishResponse, AgentActivityPublishError>;
+    readonly publishProspectNotification: (input: {
+      readonly environmentId: string;
+      readonly environmentPublicKey: string;
+      readonly notification: RelayProspectNotification;
+    }) => Effect.Effect<RelayProspectNotificationPublishResponse, ProspectNotificationPublishError>;
     readonly replayForLiveActivityRegistration: (input: {
       readonly userId: string;
       readonly deviceId: string;
@@ -127,6 +140,28 @@ export const make = Effect.gen(function* () {
   });
 
   return AgentActivityPublisher.of({
+    publishProspectNotification: Effect.fn(
+      "relay.agent_activity_publisher.publish_prospect_notification",
+    )(function* (input) {
+      const deliveryUsers = yield* links.listDeliveryUsersForEnvironment({
+        environmentId: input.environmentId,
+        environmentPublicKey: input.environmentPublicKey,
+      });
+      const deliveries = (yield* Effect.forEach(
+        deliveryUsers.filter((deliveryUser) => deliveryUser.notificationsEnabled),
+        (deliveryUser) =>
+          apnsDeliveries.sendProspectWebPushForUser({
+            userId: deliveryUser.userId,
+            notification: input.notification,
+          }),
+        { concurrency: 4 },
+      )).flat();
+      return {
+        status: deliveries.some((delivery) => !delivery.ok) ? "failed" : "queued",
+        idempotencyKey: relayProspectNotificationIdempotencyKey(input.notification),
+        deliveries,
+      };
+    }),
     replayForLiveActivityRegistration: Effect.fn(
       "relay.agent_activity_publisher.replay_for_live_activity_registration",
     )(function* (input) {

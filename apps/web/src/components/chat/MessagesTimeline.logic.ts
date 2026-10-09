@@ -10,6 +10,7 @@ import {
   summarizeToolGroup,
   toolGroupAction,
   toolGroupSummaryKind,
+  workEntryVideoPath,
   type ToolGroupSummaryKind,
 } from "@t3tools/client-runtime/work-log/presentation";
 export {
@@ -346,6 +347,8 @@ export type MessagesTimelineRow =
       toolIcon?: WorkLogEntry["toolIcon"];
       summaryToolIcon?: "browser" | "device" | "t3-code" | "pull-request";
       hasFailure: boolean;
+      /** Finished clips in a collapsed group, shown under its summary. */
+      videoClipPaths: ReadonlyArray<string>;
     }
   | {
       kind: "turn-fold";
@@ -584,6 +587,15 @@ function expandedWorkGroupRow(
     groupedEntries,
     isExpandedToolGroup: true,
   };
+}
+
+/** Distinct clips produced or read by the group's successful entries, in order. */
+function workGroupVideoClipPaths(entries: ReadonlyArray<WorkLogEntry>): string[] {
+  const paths = entries.flatMap((entry) => {
+    const path = workEntryDisplayIndicatesToolFailure(entry) ? null : workEntryVideoPath(entry);
+    return path === null ? [] : [path];
+  });
+  return [...new Set(paths)];
 }
 
 export function resolveAssistantMessageCopyState({
@@ -1343,6 +1355,8 @@ export function deriveMessagesTimelineRows(input: {
             hasFailure:
               latestToolEntry !== undefined &&
               workEntryDisplayIndicatesToolFailure(latestToolEntry),
+            // Expanded groups show each clip on its own entry row instead.
+            videoClipPaths: expanded ? [] : workGroupVideoClipPaths(visibleGroupedEntries),
           });
           if (expanded) {
             nextRows.push(
@@ -1665,7 +1679,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.summaryKind === bw.summaryKind &&
         a.toolSurface === bw.toolSurface &&
         Equal.equals(a.toolIcon, bw.toolIcon) &&
-        a.hasFailure === bw.hasFailure
+        a.hasFailure === bw.hasFailure &&
+        a.videoClipPaths.join("\n") === bw.videoClipPaths.join("\n")
       );
     }
 

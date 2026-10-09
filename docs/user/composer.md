@@ -27,6 +27,10 @@ photos are converted to JPEG there and when selected from the mobile photo
 library; photos over the image limit are also resized to fit. On mobile, you can
 also send files to T3 Code through another app's system share sheet.
 
+On web and desktop, video clips the agent renders or opens (MP4, WebM, MOV, M4V, and OGV) also
+appear in the conversation as a thumbnail tile, including when the agent embeds one in its reply
+as an image. Select the tile to play the clip in the same player.
+
 See [images and videos](#images-and-videos-in-messages) for previewing and saving media.
 
 ## Send while the agent is working

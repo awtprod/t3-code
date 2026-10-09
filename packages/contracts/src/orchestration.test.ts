@@ -5,11 +5,14 @@ import * as Schema from "effect/Schema";
 import { CommandId, ProjectId, ThreadId } from "./baseSchemas.ts";
 
 import {
+  ChatAttachment,
+  ChatFileAttachment,
+  ChatImageAttachment,
+  ChatWindowsFileAttachment,
   ClientOrchestrationCommand,
   ProjectIconOverride,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
-  type ChatImageAttachment,
   ModelSelection,
   OrchestrationCommand,
   OrchestrationDispatchCommandError,
@@ -486,6 +489,88 @@ it.effect("rejects accessibility trees above the serialized payload limit", () =
     );
 
     assert.strictEqual(Exit.isFailure(result), true);
+  }),
+);
+
+const windowsFileAttachment = {
+  type: "windows-file",
+  id: "wf-00000000-0000-4000-8000-000000000001",
+  name: "Take 3 (final).mov",
+  mimeType: "video/quicktime",
+  sizeBytes: 5_368_709_120,
+  host: "editing-pc",
+  path: "C:\\Media\\Clips ñ\\Take 3 (final).mov",
+};
+
+it.effect("round-trips a windows-file reference attachment", () =>
+  Effect.gen(function* () {
+    const decoded = yield* Schema.decodeUnknownEffect(ChatAttachment)(windowsFileAttachment);
+    assert.strictEqual(decoded.type, "windows-file");
+    assert.deepStrictEqual(decoded, windowsFileAttachment);
+    const encoded = yield* Schema.encodeEffect(ChatAttachment)(decoded);
+    assert.deepStrictEqual(encoded, windowsFileAttachment);
+    // No bytes and no upload id ride on the reference.
+    assert.strictEqual("dataUrl" in decoded, false);
+
+    const command = yield* decodeThreadTurnStartCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-windows-file",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-windows-file",
+        role: "user",
+        text: "open this in Resolve",
+        attachments: [windowsFileAttachment],
+      },
+      runtimeMode: DEFAULT_RUNTIME_MODE,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.deepStrictEqual(command.message.attachments[0], windowsFileAttachment);
+  }),
+);
+
+it.effect("rejects malformed windows-file references instead of tolerating them", () =>
+  Effect.gen(function* () {
+    const decode = (attachment: unknown) =>
+      Effect.exit(Schema.decodeUnknownEffect(ChatAttachment)(attachment));
+    for (const bad of [
+      { ...windowsFileAttachment, path: "relative\\clip.mov" },
+      { ...windowsFileAttachment, path: 'C:\\a"b.mov' },
+      { ...windowsFileAttachment, path: "C:\\a" + "\n" + "b.mov" },
+      { ...windowsFileAttachment, host: "editing-pc; rm -rf /" },
+    ]) {
+      assert.strictEqual(Exit.isFailure(yield* decode(bad)), true);
+    }
+  }),
+);
+
+// A client built before windows-file existed decodes it through its open
+// fallback member (which excluded only image/file) instead of failing the
+// whole message.
+it.effect("old clients decode a windows-file reference via the unknown fallback", () =>
+  Effect.gen(function* () {
+    const OldUnknown = Schema.Struct({
+      type: Schema.String.check(Schema.isPattern(/^(?!(?:image|file)$)/)),
+      id: Schema.String,
+      name: Schema.String,
+      mimeType: Schema.String,
+      sizeBytes: Schema.Number,
+    });
+    const OldChatAttachment = Schema.Union([ChatImageAttachment, ChatFileAttachment, OldUnknown]);
+    const OldMessage = Schema.Struct({
+      id: Schema.String,
+      attachments: Schema.Array(OldChatAttachment),
+    });
+    const decoded = yield* Schema.decodeUnknownEffect(OldMessage)({
+      id: "message-1",
+      attachments: [windowsFileAttachment],
+    });
+    assert.strictEqual(decoded.attachments.length, 1);
+    assert.strictEqual(decoded.attachments[0]!.type, "windows-file");
+    assert.strictEqual(decoded.attachments[0]!.name, windowsFileAttachment.name);
+    // And ChatWindowsFileAttachment is a distinct, strict member on new builds.
+    assert.strictEqual(Schema.is(ChatWindowsFileAttachment)(windowsFileAttachment), true);
   }),
 );
 

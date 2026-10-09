@@ -11,6 +11,10 @@
 import * as NodeUtil from "node:util";
 import {
   type CanUseTool,
+  type HookCallback,
+  type HookCallbackMatcher,
+  type PostToolUseHookInput,
+  type PreToolUseHookInput,
   query,
   getSessionMessages,
   forkSession,
@@ -49,6 +53,7 @@ import {
   type ThreadTokenUsageSnapshot,
   type TurnTokenUsage,
   type ProviderUserInputAnswers,
+  rewriteManagerModelInCommand,
   type RuntimeContentStreamKind,
   RuntimeItemId,
   RuntimeRequestId,
@@ -77,6 +82,7 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -454,6 +460,12 @@ interface ClaudeSessionContext {
   lastThreadStartedId: string | undefined;
   /** Limits already announced for the running turn, keyed `window:resetsAt`. */
   announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
+  /**
+   * Head of the latest real user turn's request text, captured in `sendTurn`
+   * and reset on each new (non-steer) turn. Feeds the tool-result sieve's
+   * `task.user_request` (slice B).
+   */
+  lastUserRequestText: string | undefined;
   stopped: boolean;
 }
 
@@ -478,6 +490,78 @@ export interface ClaudeAdapterLiveOptions {
   readonly modelCatalog?: Effect.Effect<ClaudeModelCatalog>;
   /** Scoped-bucket names the driver's status probe last saw; see `claudeUsageLimits`. */
   readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
+  /**
+   * Tool-result sieve (slice B). When present, a `PostToolUse` hook is
+   * registered that calls this back with the tool result plus the derived task;
+   * it returns the replacement output (`updatedToolOutput`) or `undefined` to
+   * leave the result untouched. `ClaudeDriver` builds it from
+   * `ServerSettingsService` + `Judge` and only supplies it when the sieve mode
+   * is not `off`. The effect is self-contained (deps pre-provided), bounds its
+   * own time, and never fails — the adapter still defends with an outer cap and
+   * a catch so the hook can never throw into the SDK.
+   */
+  readonly toolResultSieve?: (
+    input: ToolResultSieveHookInput,
+  ) => Effect.Effect<unknown | undefined>;
+}
+
+/** Input handed to the tool-result sieve callback (slice B wiring). */
+export interface ToolResultSieveHookInput {
+  readonly toolName: string;
+  readonly toolInput: unknown;
+  readonly toolResponse: unknown;
+  readonly task: { readonly user_request: string; readonly assistant_intent: string };
+  readonly agentId?: string;
+  /** Owning thread id, forwarded to the judge decision-log meta. */
+  readonly threadId?: string;
+}
+
+/**
+ * Tools whose `PostToolUse` fires the sieve hook. Built as a regex alternation
+ * for the SDK matcher; live `settings.efficiency.sieve.tools` narrows further
+ * inside the sieve callback (and `Bash` is never sieved in v1).
+ */
+const SIEVE_HOOK_MATCHER_TOOLS = ["Read", "Grep"] as const;
+
+/**
+ * Absolute hard cap for a single sieve hook invocation. The judge timeout
+ * (typically 15 s) bounds the work inside the callback; this is a belt-and-
+ * suspenders ceiling so a wedged callback can never stall the SDK's turn.
+ */
+const SIEVE_HOOK_HARD_TIMEOUT_MS = 30_000;
+
+/** Head/tail budget (chars) for the task fields handed to the sieve judge. */
+const SIEVE_TASK_USER_REQUEST_CHARS = 1500;
+const SIEVE_TASK_ASSISTANT_INTENT_CHARS = 1500;
+
+/**
+ * Tail of the current turn's assistant text (its stated intent before the tool
+ * call). Uses the retained per-block `fallbackText`; empty when a turn streamed
+ * only deltas or has no assistant text yet. Best-effort — the sieve judge still
+ * has the user request when this is empty.
+ */
+function deriveSieveAssistantIntent(context: ClaudeSessionContext): string {
+  const turnState = context.turnState;
+  if (!turnState) return "";
+  const parts: Array<string> = [];
+  for (const block of turnState.assistantTextBlockOrder) {
+    if (block.fallbackText.length > 0) parts.push(block.fallbackText);
+  }
+  const joined = parts.join("\n");
+  return joined.length > SIEVE_TASK_ASSISTANT_INTENT_CHARS
+    ? joined.slice(joined.length - SIEVE_TASK_ASSISTANT_INTENT_CHARS)
+    : joined;
+}
+
+/** Task context for the tool-result sieve, from what the adapter already keeps. */
+function deriveSieveTask(context: ClaudeSessionContext): {
+  readonly user_request: string;
+  readonly assistant_intent: string;
+} {
+  return {
+    user_request: context.lastUserRequestText ?? "",
+    assistant_intent: deriveSieveAssistantIntent(context),
+  };
 }
 
 function isUuid(value: string): boolean {
@@ -1330,12 +1414,23 @@ function trimmedString(value: unknown): string | undefined {
 }
 
 /**
- * Manager/worker guardrail for the subagent-spawning `Task` tool. When the
- * session (root) model is a manager-tier model (Fable), a subagent that would
- * inherit that model (no explicit `model`) or explicitly request a manager
- * model is downgraded to the cheaper worker fallback; an explicit non-manager
- * worker model is respected. Non-`Task` tools and non-manager sessions pass
- * through unchanged. Pure, so it is unit-testable without the SDK.
+ * Names the subagent-spawning tool has used across SDK versions. Older SDKs
+ * called it `Task`; `@anthropic-ai/claude-agent-sdk` >= 0.3.x renamed it to
+ * `Agent`. The guardrail below must match every name, or a subagent can land on
+ * a manager-tier model through the unrecognized name.
+ */
+const SUBAGENT_SPAWN_TOOL_NAMES: ReadonlySet<string> = new Set(["Agent", "Task"]);
+
+/** PreToolUse matcher for the tools the model guardrail rewrites. */
+const MODEL_GUARDRAIL_HOOK_MATCHER = [...SUBAGENT_SPAWN_TOOL_NAMES, "Bash"].join("|");
+
+/**
+ * Manager/worker guardrail for the subagent-spawning tool (`Agent`, formerly
+ * `Task`). A subagent that would run on a manager-tier model (Fable) — either
+ * by inheriting the session model (no explicit `model`) or by requesting one —
+ * is downgraded to the cheaper worker fallback, whatever the session model is.
+ * An explicit non-manager model is respected. Other tools pass through
+ * unchanged. Pure, so it is unit-testable without the SDK.
  */
 export function maybeDowngradeSubagentModel(
   toolName: Parameters<CanUseTool>[0],
@@ -1343,21 +1438,39 @@ export function maybeDowngradeSubagentModel(
   sessionModel: string | undefined,
   catalog: ClaudeModelCatalog,
 ): Parameters<CanUseTool>[1] {
-  if (toolName !== "Task" || !sessionModel) {
-    return toolInput;
-  }
-  const sessionSlug = resolveClaudeModelSlug(catalog, sessionModel);
-  if (!isClaudeManagerModelSlug(sessionSlug)) {
+  if (!SUBAGENT_SPAWN_TOOL_NAMES.has(toolName)) {
     return toolInput;
   }
   const requested = trimmedString((toolInput as { readonly model?: unknown }).model);
-  const requestedSlug = requested ? resolveClaudeModelSlug(catalog, requested) : undefined;
-  // No explicit model → the subagent would inherit the manager model; or the
-  // request is itself a manager model. Either way, force the worker fallback.
-  if (!requestedSlug || isClaudeManagerModelSlug(requestedSlug)) {
-    return { ...toolInput, model: CLAUDE_WORKER_FALLBACK_MODEL };
+  // No explicit model → the subagent inherits the session model.
+  const effective = requested ?? sessionModel;
+  if (!effective || !isClaudeManagerModelSlug(resolveClaudeModelSlug(catalog, effective))) {
+    return toolInput;
   }
-  return toolInput;
+  return { ...toolInput, model: CLAUDE_WORKER_FALLBACK_MODEL };
+}
+
+/**
+ * Manager/worker guardrail for the `Bash` tool's headless worker-dispatch path.
+ * Workers can also be spawned as detached `claude -p --model …` / `codex exec
+ * -m …` processes, which `maybeDowngradeSubagentModel` cannot see. Any
+ * manager-tier model (Fable, Astra) in such a command is rewritten to the
+ * matching worker fallback. Non-`Bash` tools pass through unchanged.
+ * Pure/unit-testable.
+ */
+export function maybeDowngradeBashWorkerModel(
+  toolName: Parameters<CanUseTool>[0],
+  toolInput: Parameters<CanUseTool>[1],
+): Parameters<CanUseTool>[1] {
+  if (toolName !== "Bash") {
+    return toolInput;
+  }
+  const command = trimmedString((toolInput as { readonly command?: unknown }).command);
+  if (!command) {
+    return toolInput;
+  }
+  const rewritten = rewriteManagerModelInCommand(command);
+  return rewritten === command ? toolInput : { ...toolInput, command: rewritten };
 }
 
 /**
@@ -4659,6 +4772,63 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return { behavior: "completed" as const, result: action };
       });
 
+      // Guardrail: no subagent may run on a manager-tier model. Downgrade an
+      // inheriting or manager `Agent` spawn, and rewrite manager models in a
+      // `Bash` worker-dispatch command, to the cheaper worker fallback. Each
+      // helper is a no-op for the other's tool. Enforced from a PreToolUse hook
+      // because the SDK never consults canUseTool for auto-allowed tools
+      // (`Agent` is always auto-allowed, in every permission mode).
+      const applyModelGuardrail = (
+        context: ClaudeSessionContext,
+        toolName: Parameters<CanUseTool>[0],
+        toolInput: Parameters<CanUseTool>[1],
+        toolUseId: string | undefined,
+      ): Parameters<CanUseTool>[1] => {
+        // The live session model tracks mid-thread model switches; the
+        // start-time selection is only a fallback.
+        const sessionModel = context.session.model ?? modelSelection?.model ?? undefined;
+        const effectiveInput = maybeDowngradeBashWorkerModel(
+          toolName,
+          maybeDowngradeSubagentModel(toolName, toolInput, sessionModel, modelCatalog),
+        );
+
+        // When the spawn guardrail downgraded a subagent's model, seed the
+        // pending-model map keyed by this tool_use_id so the `task.started`
+        // activity reports the worker model rather than momentarily inheriting
+        // the session model (which the card then visibly "switches" off of once
+        // the authoritative subagent snapshot arrives). The snapshot still
+        // refines this in place; we only fill the pre-snapshot gap.
+        if (SUBAGENT_SPAWN_TOOL_NAMES.has(toolName) && effectiveInput !== toolInput && toolUseId) {
+          const downgradedModel = trimmedString(
+            (effectiveInput as { readonly model?: unknown }).model,
+          );
+          if (downgradedModel) {
+            rememberPendingTaskModel(context.pendingTaskModels, toolUseId, downgradedModel);
+          }
+        }
+        return effectiveInput;
+      };
+
+      const preToolUseModelGuardrailHook: HookCallback = async (hookInput) => {
+        if (hookInput.hook_event_name !== "PreToolUse") return {};
+        const pre = hookInput as PreToolUseHookInput;
+        const context = await runPromise(Ref.get(contextRef));
+        if (!context) return {};
+        const rawInput = pre.tool_input;
+        if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) {
+          return {};
+        }
+        const toolInput = rawInput as Parameters<CanUseTool>[1];
+        const updatedInput = applyModelGuardrail(
+          context,
+          pre.tool_name,
+          toolInput,
+          pre.tool_use_id,
+        );
+        if (updatedInput === toolInput) return {};
+        return { hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput } };
+      };
+
       const canUseToolEffect = Effect.fn("canUseTool")(function* (
         toolName: Parameters<CanUseTool>[0],
         toolInput: Parameters<CanUseTool>[1],
@@ -4672,15 +4842,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           } satisfies PermissionResult;
         }
 
-        // Guardrail: a manager-tier session (Fable) must not spawn manager-tier
-        // subagents. Downgrade an inheriting or manager `Task` model to the
-        // cheaper worker fallback. Applied across every runtime mode below, so
-        // both the auto-allow and the approval paths carry the rewritten model.
-        const effectiveInput = maybeDowngradeSubagentModel(
+        // The PreToolUse guardrail hook has already rewritten the input; this is
+        // idempotent defense in depth for the tools that do reach canUseTool.
+        const effectiveInput = applyModelGuardrail(
+          context,
           toolName,
           toolInput,
-          modelSelection?.model ?? context.session.model ?? undefined,
-          modelCatalog,
+          callbackOptions.toolUseID,
         );
 
         // Handle AskUserQuestion: surface clarifying questions to the
@@ -4840,6 +5008,45 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         callbackOptions,
       ) => runPromise(handleResumeDialog(request, callbackOptions));
 
+      // Tool-result sieve (slice B). Registered only when the driver supplied a
+      // callback (sieve mode !== off). The callback is self-contained and bounds
+      // its own time via the judge timeout; the outer cap + catch here guarantee
+      // the hook can never throw into, or stall, the SDK turn. On any doubt the
+      // tool result passes through untouched.
+      const toolResultSieveCallback = options?.toolResultSieve;
+      const postToolUseSieveHook: HookCallback = async (hookInput) => {
+        try {
+          if (!toolResultSieveCallback) return {};
+          if (hookInput.hook_event_name !== "PostToolUse") return {};
+          const post = hookInput as PostToolUseHookInput;
+          const context = await runPromise(Ref.get(contextRef));
+          if (!context) return {};
+          const updatedToolOutput = await runPromise(
+            toolResultSieveCallback({
+              toolName: post.tool_name,
+              toolInput: post.tool_input,
+              toolResponse: post.tool_response,
+              task: deriveSieveTask(context),
+              threadId: context.session.threadId,
+              ...(post.agent_id ? { agentId: post.agent_id } : {}),
+            }).pipe(
+              Effect.timeout(Duration.millis(SIEVE_HOOK_HARD_TIMEOUT_MS)),
+              Effect.catchCause(() => Effect.succeed(undefined)),
+            ),
+          );
+          if (updatedToolOutput === undefined) return {};
+          return {
+            hookSpecificOutput: {
+              hookEventName: "PostToolUse",
+              updatedToolOutput,
+            },
+          };
+        } catch {
+          // The hook must never throw into the SDK: swallow and leave untouched.
+          return {};
+        }
+      };
+
       const claudeBinaryPath = claudeSdkExecutablePath;
       const {
         "permission-mode": launchArgPermissionMode,
@@ -4939,6 +5146,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         includePartialMessages: true,
         canUseTool,
         onUserDialog,
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: MODEL_GUARDRAIL_HOOK_MATCHER,
+              hooks: [preToolUseModelGuardrailHook],
+            } satisfies HookCallbackMatcher,
+          ],
+          // Register the tool-result sieve PostToolUse hook only when the driver
+          // supplied a callback (sieve mode !== off).
+          ...(toolResultSieveCallback
+            ? {
+                PostToolUse: [
+                  {
+                    matcher: SIEVE_HOOK_MATCHER_TOOLS.join("|"),
+                    hooks: [postToolUseSieveHook],
+                  } satisfies HookCallbackMatcher,
+                ],
+              }
+            : {}),
+        },
         supportedDialogKinds: ["resume_return"],
         env: McpProviderSession.withAgentDeviceEnvironment(claudeEnvironment, mcpSession),
         additionalDirectories,
@@ -5056,6 +5283,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
         announcedUsageLimits: undefined,
+        lastUserRequestText: undefined,
         stopped: false,
       };
       yield* Ref.set(contextRef, context);
@@ -5137,6 +5365,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     const context = yield* requireSession(input.threadId);
+    // Capture the latest user request head for the tool-result sieve's task
+    // context (slice B). Steers and new turns both update it; a fresh turn's
+    // assistant intent is derived live from the turn's assistant text blocks.
+    const userRequestText = input.input?.trim();
+    if (userRequestText) {
+      context.lastUserRequestText = userRequestText.slice(0, SIEVE_TASK_USER_REQUEST_CHARS);
+    }
     const modelCatalog = yield* modelCatalogEffect;
     const selectedModel =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId

@@ -362,7 +362,10 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         const path = yield* Path.Path;
         const env = yield* createDevRunnerEnv({
           mode: "dev",
-          baseEnv: { COMMAND_CENTER_HOME: "/opt/shared-command-center" },
+          baseEnv: {
+            COMMAND_CENTER_HOME: "/opt/shared-command-center",
+            COMMAND_CENTER_CONFIG_DIR: "/opt/shared-command-center-config",
+          },
           serverOffset: 0,
           webOffset: 0,
           t3Home: "/tmp/isolated-t3",
@@ -377,6 +380,28 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
         assert.equal(env.T3CODE_HOME, path.resolve("/tmp/isolated-t3"));
         assert.equal(env.COMMAND_CENTER_HOME, undefined);
+        assert.equal(env.COMMAND_CENTER_CONFIG_DIR, undefined);
+      }),
+    );
+
+    it.effect("keeps a config dir exported without a launcher home", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "serve",
+          baseEnv: { COMMAND_CENTER_CONFIG_DIR: "/srv/operator-config" },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: "/srv/operator-data",
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+          tailscaleServe: undefined,
+        });
+
+        assert.equal(env.COMMAND_CENTER_CONFIG_DIR, "/srv/operator-config");
       }),
     );
 

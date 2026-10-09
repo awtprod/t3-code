@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ProviderInstanceId, type ModelCapabilities } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ModelCapabilities,
+} from "@t3tools/contracts";
 
 import {
   applyClaudePromptEffortPrefix,
@@ -14,7 +19,29 @@ import {
   toCustomModelSetting,
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
+  normalizeModelSlug,
+  resolveSelectableModel,
 } from "./model.ts";
+
+describe("Claude alias compatibility", () => {
+  it("keeps normalization and catalog resolution aligned when a newer model is unavailable", () => {
+    const provider = ProviderDriverKind.make("claudeAgent");
+    const stable = DEFAULT_MODEL_BY_PROVIDER[provider]!;
+    const next = "claude-synthetic-next";
+    const stableModel = { slug: stable, name: "Synthetic Stable", aliases: ["sonnet"] };
+    const nextModel = { slug: next, name: "Synthetic Next", aliases: ["synthetic-next"] };
+
+    for (const models of [[stableModel], [stableModel, nextModel]]) {
+      expect(resolveSelectableModel(provider, "sonnet", models)).toBe(stable);
+      expect(normalizeModelSlug("sonnet", provider)).toBe(
+        resolveSelectableModel(provider, "sonnet", models),
+      );
+      expect(resolveSelectableModel(provider, "synthetic-next", models)).toBe(
+        models.includes(nextModel) ? next : null,
+      );
+    }
+  });
+});
 
 const codexCaps: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [

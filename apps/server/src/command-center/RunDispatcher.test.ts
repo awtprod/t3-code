@@ -46,9 +46,9 @@ const spaceId = SpaceId.make("space-example");
 const repositoryId = RepositoryId.make("repository-example");
 
 it("uses high reasoning for the Command Center Terra default", () => {
-  expect(commandCenterModelSelection({ providerId: "codex", modelId: "gpt-5.6-terra" })).toEqual({
+  expect(commandCenterModelSelection({ providerId: "codex", modelId: "gpt-6-terra" })).toEqual({
     instanceId: "codex",
-    model: "gpt-5.6-terra",
+    model: "gpt-6-terra",
     options: [{ id: "reasoningEffort", value: "high" }],
   });
   expect(commandCenterModelSelection({ providerId: "claude", modelId: "sonnet" })).toEqual({

@@ -20,6 +20,7 @@ import { resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { readWindowsMediaSettings } from "../command-center/WindowsMediaConfig.ts";
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
 import { detectServerEnvironmentMachineKind } from "./ServerEnvironmentMachine.ts";
 
@@ -183,6 +184,7 @@ const makeIdentity = Effect.gen(function* () {
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
+  const fileSystem = yield* FileSystem.FileSystem;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const identity = yield* ServerEnvironmentIdentity;
@@ -193,6 +195,14 @@ export const make = Effect.gen(function* () {
   const label = yield* resolveServerEnvironmentLabel({ cwdBaseName });
   const machine = yield* detectServerEnvironmentMachineKind();
   const launcher = yield* resolveServiceLauncherMode();
+  // Advertise the Windows media picker only when it is enabled and its ssh
+  // config is present, so clients never offer a browser that cannot connect.
+  const windowsMediaSettings = yield* readWindowsMediaSettings;
+  const windowsMedia =
+    windowsMediaSettings.enabled &&
+    (yield* fileSystem
+      .exists(windowsMediaSettings.sshConfigPath)
+      .pipe(Effect.orElseSucceed(() => false)));
   const serverSelfUpdate = resolveServerSelfUpdateCapability({
     desktopManaged: serverConfig.mode === "desktop",
     launcherManaged: launcher.managed,
@@ -239,6 +249,7 @@ export const make = Effect.gen(function* () {
       threadPullRequestLinking: true,
       environmentIcon: true,
       projectCloneTracking: true,
+      windowsMedia,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverSelfUpdate === "boot-service" || desktopAppUpdate
         ? {

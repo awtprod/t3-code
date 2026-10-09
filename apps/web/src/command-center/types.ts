@@ -173,6 +173,7 @@ export interface CommandCenterConfigNotice {
 }
 
 export interface CommandCenterShellProps {
+  readonly digest?: React.ReactNode;
   readonly spaces: readonly CommandCenterSpace[];
   readonly projects: readonly CommandCenterProject[];
   readonly conversations: readonly CommandCenterConversation[];

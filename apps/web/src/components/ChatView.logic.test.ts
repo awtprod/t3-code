@@ -2048,6 +2048,29 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     ).toBe(false);
   });
 
+  it("acknowledges a message the server handed to a subagent thread", () => {
+    const localDispatch = createLocalDispatchSnapshot(
+      makeThread({ latestTurn: completedTurn, session: readySession }),
+    );
+    const input = {
+      localDispatch,
+      phase: "ready" as const,
+      latestTurn: completedTurn,
+      latestUserMessageId: MessageId.make("message-delegated"),
+      session: readySession,
+      hasPendingApproval: false,
+      hasPendingUserInput: false,
+      threadError: null,
+    };
+
+    // Neither the turn nor the session moves on a delegated send; only the
+    // delegation marks it received.
+    expect(hasServerAcknowledgedLocalDispatch(input)).toBe(false);
+    expect(hasServerAcknowledgedLocalDispatch({ ...input, latestUserMessageDelegated: true })).toBe(
+      true,
+    );
+  });
+
   it("keeps a follow-up active while its provider session is starting", () => {
     const localDispatch = createLocalDispatchSnapshot(
       makeThread({ latestTurn: completedTurn, session: readySession }),

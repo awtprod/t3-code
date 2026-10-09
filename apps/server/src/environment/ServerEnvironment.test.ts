@@ -178,6 +178,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.threadTitleRegeneration).toBe(true);
       expect(second.capabilities.threadPullRequests).toBe(true);
       expect(second.capabilities.threadPullRequestLinking).toBe(true);
+      expect(typeof second.capabilities.windowsMedia).toBe("boolean");
       expect(second.capabilities.agentActivityPublishing).toBe(false);
     }),
   );

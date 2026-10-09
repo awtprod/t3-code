@@ -9,12 +9,16 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
-import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import {
+  buildCodexDeveloperInstructions,
+  codexDefaultModeDeveloperInstructions,
+} from "../CodexDeveloperInstructions.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
   buildCommandCenterDarwinIsolationProbeScript,
   buildCommandCenterIsolationProbeScript,
   buildCommandCenterWindowsIsolationProbeScript,
+  buildThreadStartParams,
   buildTurnStartParams,
   describeMcpElicitation,
   ensureCommandCenterWindowsSandbox,
@@ -250,6 +254,20 @@ function makeThreadOpenResponse(
     },
   } as unknown as CodexRpc.ClientRequestResponsesByMethod["thread/start"];
 }
+
+describe("buildThreadStartParams", () => {
+  const base = { cwd: "/repo", runtimeMode: "full-access", serviceTier: undefined } as const;
+
+  it("points an Astra thread's inheriting subagents at the worker model", () => {
+    const params = buildThreadStartParams({ ...base, model: "gpt-6-astra" });
+    NodeAssert.deepEqual(params.config, { "agents.default_subagent_model": "gpt-6-sol" });
+  });
+
+  it("leaves non-manager threads without a subagent config override", () => {
+    NodeAssert.equal(buildThreadStartParams({ ...base, model: "gpt-6-terra" }).config, undefined);
+    NodeAssert.equal(buildThreadStartParams({ ...base, model: undefined }).config, undefined);
+  });
+});
 
 describe("buildTurnStartParams", () => {
   it("keeps invalid turn values only in the schema cause", () => {
@@ -794,6 +812,16 @@ describe("T3 browser developer instructions", () => {
       /preview_open/,
     );
   });
+
+  it("routes default-mode questions through request_user_input when it is listed", () => {
+    const instructions = codexDefaultModeDeveloperInstructions(true);
+    NodeAssert.match(
+      instructions,
+      /ask it with the `request_user_input` tool when that tool is listed/,
+    );
+    // The plain-text fallback remains only for the tool-unavailable case.
+    NodeAssert.match(instructions, /only when the tool is unavailable, ask directly/);
+  });
 });
 
 describe("hasConfiguredMcpServer", () => {
@@ -950,6 +978,8 @@ describe("codexSessionAppServerArgs", () => {
     NodeAssert.deepStrictEqual(codexSessionAppServerArgs(["-c", "model=gpt-5"], undefined), [
       "app-server",
       "-c",
+      "features.default_mode_request_user_input=true",
+      "-c",
       "model=gpt-5",
     ]);
   });
@@ -965,6 +995,8 @@ describe("codexSessionAppServerArgs", () => {
         "--strict-config",
         "--enable",
         "foo",
+        "-c",
+        "features.default_mode_request_user_input=true",
         "-c",
         "mcp_servers.t3-code.url=http://127.0.0.1/mcp",
       ],

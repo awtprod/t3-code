@@ -8,6 +8,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { AutomationRuns, layer as automationRunsLayer } from "../AutomationRuns.ts";
+import * as InboxGmailDrafts from "../InboxGmailDrafts.ts";
 import { CommandCenterService, type CommandCenterServiceShape } from "../Service.ts";
 import { canonicalJson } from "./Digest.ts";
 import { make as makeRecoveryCoordinator } from "./RecoveryCoordinator.ts";
@@ -63,7 +64,7 @@ function recoveryTestLayer(input: {
   const commandCenter = CommandCenterService.of({
     queryAutomations: () => Effect.succeed({ automations: [input.automation] }),
     queryApprovals: () => Effect.succeed({ approvals: [] }),
-    recordAutomationEvent: () => Effect.void,
+    recordAutomationEvent: () => Effect.succeed({ projected: true }),
     getAutomationApprovalBinding: () => Effect.succeed(null),
     ensureAutomationApproval: () => Effect.die("approval nodes are not used in this test"),
   } as unknown as CommandCenterServiceShape);
@@ -77,9 +78,23 @@ function recoveryTestLayer(input: {
       defaultRetryDelayMs: 1_000,
     }),
   );
+  const persistence = SqlitePersistenceMemory;
   return automationRunsLayer.pipe(
+    Layer.provideMerge(
+      Layer.succeed(
+        InboxGmailDrafts.InboxGmailDrafts,
+        InboxGmailDrafts.InboxGmailDrafts.of({
+          approve: () => Effect.die("Inbox drafts are not used in recovery tests."),
+          receipt: () => Effect.die("Inbox drafts are not used in recovery tests."),
+          loadForExecution: () => Effect.die("Inbox drafts are not used in recovery tests."),
+          claim: () => Effect.die("Inbox drafts are not used in recovery tests."),
+          complete: () => Effect.die("Inbox drafts are not used in recovery tests."),
+          uncertain: () => Effect.die("Inbox drafts are not used in recovery tests."),
+        }),
+      ),
+    ),
     Layer.provideMerge(dependencies),
-    Layer.provideMerge(SqlitePersistenceMemory),
+    Layer.provideMerge(persistence),
     Layer.provideMerge(NodeServices.layer),
   );
 }

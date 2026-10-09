@@ -101,6 +101,7 @@ import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 import * as TerminalManager from "../src/terminal/Manager.ts";
 import * as AgentAwarenessRelay from "../src/relay/AgentAwarenessRelay.ts";
+import { LocalWebPushNotifier } from "../src/webPush/LocalWebPushNotifier.ts";
 import { ThreadSandboxRuntime } from "../src/sandbox/ThreadSandboxRuntime.ts";
 import {
   SandboxManagerError,
@@ -657,6 +658,13 @@ export const makeOrchestrationIntegrationHarness = (
         Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
           publishThread: () => Effect.void,
           start: () => Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(LocalWebPushNotifier, {
+          start: () => Effect.void,
+          processThread: () => Effect.void,
+          seedFromSnapshot: Effect.void,
         }),
       ),
     );

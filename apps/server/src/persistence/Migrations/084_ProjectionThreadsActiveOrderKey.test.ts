@@ -4,13 +4,13 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "../Migrations.ts";
-import migrateActiveOrderKey from "./074_ProjectionThreadsActiveOrderKey.ts";
+import migrateActiveOrderKey from "./084_ProjectionThreadsActiveOrderKey.ts";
 
 it.layer(NodeSqliteClient.layerMemory())("074_ProjectionThreadsActiveOrderKey", (it) => {
   it.effect("migrates old threads without changing their timestamps or assigning an order", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 73 });
+      yield* runMigrations({ toMigrationInclusive: 83 });
       const now = "2026-01-01T00:00:00.000Z";
       yield* sql`
         INSERT INTO projection_threads (
@@ -21,7 +21,7 @@ it.layer(NodeSqliteClient.layerMemory())("074_ProjectionThreadsActiveOrderKey", 
           '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', ${now}, ${now}
         )
       `;
-      yield* runMigrations({ toMigrationInclusive: 74 });
+      yield* runMigrations({ toMigrationInclusive: 84 });
       const migrated = yield* sql<{ readonly activeOrderKey: string | null }>`
         SELECT active_order_key AS "activeOrderKey" FROM projection_threads WHERE thread_id = 'thread-1'
       `;

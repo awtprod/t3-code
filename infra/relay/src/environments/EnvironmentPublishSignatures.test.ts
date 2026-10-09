@@ -4,8 +4,14 @@ import type {
   RelayAgentActivityPublishProofPayload,
   RelayAgentActivityPublishRequest,
   RelayAgentActivityState,
+  RelayProspectNotification,
+  RelayProspectNotificationPublishProofPayload,
+  RelayProspectNotificationPublishRequest,
 } from "@t3tools/contracts/relay";
-import { RELAY_ACTIVITY_PUBLISH_TYP } from "@t3tools/shared/relayJwt";
+import {
+  RELAY_ACTIVITY_PUBLISH_TYP,
+  RELAY_PROSPECT_NOTIFICATION_PUBLISH_TYP,
+} from "@t3tools/shared/relayJwt";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
@@ -61,10 +67,12 @@ const isEnvironmentPublishSignatureInvalid = Schema.is(
   EnvironmentPublishSignatures.EnvironmentPublishSignatureInvalid,
 );
 
-function signTestJwt(payload: object, privateKey: string): string {
-  const header = Buffer.from(
-    JSON.stringify({ alg: "EdDSA", typ: RELAY_ACTIVITY_PUBLISH_TYP }),
-  ).toString("base64url");
+function signTestJwt(
+  payload: object,
+  privateKey: string,
+  typ = RELAY_ACTIVITY_PUBLISH_TYP,
+): string {
+  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ })).toString("base64url");
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const signingInput = `${header}.${encodedPayload}`;
   return `${signingInput}.${NodeCrypto.sign(null, Buffer.from(signingInput), privateKey).toString("base64url")}`;
@@ -88,6 +96,48 @@ const freshRequest = Effect.gen(function* () {
     proof: signTestJwt(payload, keyPair.privateKey),
   } satisfies RelayAgentActivityPublishRequest;
 });
+
+const prospectNotification = {
+  type: "prospect",
+  itemId: "prospect-review:lead/123",
+  spaceId: "space-1",
+  evaluationId: "evaluation-1",
+  environmentId: state.environmentId,
+  title: "New prospect",
+  body: "Acme is ready for review.",
+  deepLink: `/prospects/${encodeURIComponent("prospect-review:lead/123")}`,
+} satisfies RelayProspectNotification;
+
+const freshProspectRequest = (input?: {
+  readonly payload?: Partial<RelayProspectNotificationPublishProofPayload>;
+  readonly notification?: RelayProspectNotification;
+  readonly privateKey?: string;
+  readonly typ?: string;
+}) =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const notification = input?.notification ?? prospectNotification;
+    const payload = {
+      iss: "t3-env:env",
+      aud: "https://relay.example.test",
+      sub: "env",
+      jti: "prospect-jti",
+      iat: Math.floor(now.epochMilliseconds / 1_000),
+      exp: Math.floor(DateTime.add(now, { minutes: 5 }).epochMilliseconds / 1_000),
+      environmentId: state.environmentId,
+      itemId: notification.itemId,
+      notification,
+      ...input?.payload,
+    } satisfies RelayProspectNotificationPublishProofPayload;
+    return {
+      notification,
+      proof: signTestJwt(
+        payload,
+        input?.privateKey ?? keyPair.privateKey,
+        input?.typ ?? RELAY_PROSPECT_NOTIFICATION_PUBLISH_TYP,
+      ),
+    } satisfies RelayProspectNotificationPublishRequest;
+  });
 
 function layer(replay?: Partial<DpopProofs.DpopProofReplay["Service"]>) {
   return EnvironmentPublishSignatures.layer.pipe(
@@ -224,6 +274,124 @@ describe("EnvironmentPublishSignatures", () => {
           });
         }
       }
+    }).pipe(Effect.provide(layer({ consume: () => Effect.succeed(false) }))),
+  );
+
+  it.effect("verifies prospect proofs and binds every signed notification field", () =>
+    Effect.gen(function* () {
+      const request = yield* freshProspectRequest();
+      const signatures = yield* EnvironmentPublishSignatures.EnvironmentPublishSignatures;
+      yield* signatures.verifyProspectNotification({
+        environmentId: state.environmentId,
+        environmentPublicKey: keyPair.publicKey,
+        request,
+      });
+      const tampered = yield* Effect.result(
+        signatures.verifyProspectNotification({
+          environmentId: state.environmentId,
+          environmentPublicKey: keyPair.publicKey,
+          request: {
+            ...request,
+            notification: { ...request.notification, body: "Tampered" },
+          },
+        }),
+      );
+      expect(Result.isFailure(tampered)).toBe(true);
+      if (Result.isFailure(tampered)) {
+        expect(tampered.failure).toMatchObject({
+          _tag: "EnvironmentProspectPublishSignatureInvalid",
+          stage: "validate_claims",
+        });
+      }
+    }).pipe(Effect.provide(layer())),
+  );
+
+  it.effect("rejects stale prospect proofs", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const request = yield* freshProspectRequest({
+        payload: {
+          iat: Math.floor(DateTime.subtract(now, { minutes: 10 }).epochMilliseconds / 1_000),
+          exp: Math.floor(DateTime.subtract(now, { minutes: 5 }).epochMilliseconds / 1_000),
+        },
+      });
+      const signatures = yield* EnvironmentPublishSignatures.EnvironmentPublishSignatures;
+      const result = yield* Effect.result(
+        signatures.verifyProspectNotification({
+          environmentId: state.environmentId,
+          environmentPublicKey: keyPair.publicKey,
+          request,
+        }),
+      );
+      expect(Result.isFailure(result) && result.failure._tag).toBe(
+        "EnvironmentProspectPublishSignatureExpired",
+      );
+    }).pipe(Effect.provide(layer())),
+  );
+
+  it.effect("rejects future and overlong prospect proofs", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const nowSeconds = Math.floor(now.epochMilliseconds / 1_000);
+      const signatures = yield* EnvironmentPublishSignatures.EnvironmentPublishSignatures;
+      for (const payload of [
+        { iat: nowSeconds + 1, exp: nowSeconds + 120 },
+        { iat: nowSeconds, exp: nowSeconds + 301 },
+      ]) {
+        const request = yield* freshProspectRequest({ payload });
+        const result = yield* Effect.result(
+          signatures.verifyProspectNotification({
+            environmentId: state.environmentId,
+            environmentPublicKey: keyPair.publicKey,
+            request,
+          }),
+        );
+        expect(Result.isFailure(result)).toBe(true);
+      }
+    }).pipe(Effect.provide(layer())),
+  );
+
+  it.effect("rejects wrong typ and invalid public keys", () =>
+    Effect.gen(function* () {
+      const signatures = yield* EnvironmentPublishSignatures.EnvironmentPublishSignatures;
+      const wrongTyp = yield* freshProspectRequest({ typ: RELAY_ACTIVITY_PUBLISH_TYP });
+      const invalidTypResult = yield* Effect.result(
+        signatures.verifyProspectNotification({
+          environmentId: state.environmentId,
+          environmentPublicKey: keyPair.publicKey,
+          request: wrongTyp,
+        }),
+      );
+      expect(Result.isFailure(invalidTypResult)).toBe(true);
+
+      const request = yield* freshProspectRequest();
+      const invalidKeyResult = yield* Effect.result(
+        signatures.verifyProspectNotification({
+          environmentId: state.environmentId,
+          environmentPublicKey: "not-a-public-key",
+          request,
+        }),
+      );
+      expect(Result.isFailure(invalidKeyResult)).toBe(true);
+    }).pipe(Effect.provide(layer())),
+  );
+
+  it.effect("rejects replayed prospect nonces", () =>
+    Effect.gen(function* () {
+      const request = yield* freshProspectRequest();
+      const signatures = yield* EnvironmentPublishSignatures.EnvironmentPublishSignatures;
+      const result = yield* Effect.result(
+        signatures.verifyProspectNotification({
+          environmentId: state.environmentId,
+          environmentPublicKey: keyPair.publicKey,
+          request,
+        }),
+      );
+      expect(Result.isFailure(result) && result.failure).toMatchObject({
+        _tag: "EnvironmentProspectPublishSignatureInvalid",
+        reason: "replayed_nonce",
+        stage: "consume_nonce",
+      });
     }).pipe(Effect.provide(layer({ consume: () => Effect.succeed(false) }))),
   );
 });

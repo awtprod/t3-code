@@ -10,6 +10,7 @@
  * @module ProviderServiceLive
  */
 import {
+  ChatWindowsFileAttachment,
   EventId,
   MessageId,
   ModelSelection,
@@ -59,6 +60,10 @@ import * as Stream from "effect/Stream";
 
 import { appendUserInputAttachmentPaths } from "../userInputAttachments.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  readWindowsMediaSettings,
+  windowsFileAttachmentPathLine,
+} from "../../command-center/WindowsMediaConfig.ts";
 import * as ServerConfig from "../../config.ts";
 import * as DeviceService from "../../device/DeviceService.ts";
 import { ensureAgentDeviceShim } from "../../device/AgentDeviceShim.ts";
@@ -257,6 +262,7 @@ interface PendingCompaction {
   compactedEventObserved: boolean;
   expectedTurnId: TurnId | undefined;
 }
+const isWindowsFileAttachment = Schema.is(ChatWindowsFileAttachment);
 
 export { resolveProviderInstanceGitHubIdentity };
 
@@ -513,6 +519,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const sandboxBindingOwner = makeSandboxProviderBindingOwner();
   const analytics = yield* Effect.service(AnalyticsService.AnalyticsService);
   const serverConfig = yield* ServerConfig.ServerConfig;
+  const windowsMediaSettings = yield* readWindowsMediaSettings;
   const eventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
   // Options-provided logger wins (test overrides); otherwise we take whatever
   // the `ProviderEventLoggers` tag exposes — `undefined` means "no canonical
@@ -1809,7 +1816,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     // clipboard text remains path-only everywhere: eagerly embedding it would
     // spend the same context the client deliberately preserved by folding it.
     // Unresolvable ids are skipped here and surface as adapter errors when the
-    // file is read.
+    // file is read. A windows-file reference has no local bytes: it gets a line
+    // naming the Windows path, its host, and the exact scp pull command instead.
     let inputTextWithAttachmentContext = inputTextWithCitations;
     const appendAttachmentContext = (context: string | undefined) => {
       if (context === undefined) return true;
@@ -1823,6 +1831,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       return false;
     };
     for (const attachment of attachments) {
+      if (isWindowsFileAttachment(attachment)) {
+        appendAttachmentContext(
+          windowsFileAttachmentPathLine({
+            name: attachment.name,
+            host: attachment.host,
+            path: attachment.path,
+            sshConfigPath: windowsMediaSettings.sshConfigPath,
+          }),
+        );
+        continue;
+      }
       const attachmentPath = resolveAttachmentPath({
         attachmentsDir: serverConfig.attachmentsDir,
         attachment,

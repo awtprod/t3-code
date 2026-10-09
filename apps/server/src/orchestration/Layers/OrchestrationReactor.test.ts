@@ -18,6 +18,7 @@ import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
+import { LocalWebPushNotifier } from "../../webPush/LocalWebPushNotifier.ts";
 
 describe("OrchestrationReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<OrchestrationReactor, never> | null = null;
@@ -131,6 +132,16 @@ describe("OrchestrationReactor", () => {
             },
           }),
         ),
+        Layer.provideMerge(
+          Layer.succeed(LocalWebPushNotifier, {
+            processThread: () => Effect.void,
+            seedFromSnapshot: Effect.void,
+            start: () => {
+              started.push("local-web-push-notifier");
+              return Effect.void;
+            },
+          }),
+        ),
       ),
     );
 
@@ -149,6 +160,7 @@ describe("OrchestrationReactor", () => {
       "thread-settlement-reactor",
       "pull-request-sync-reactor",
       "agent-awareness-relay",
+      "local-web-push-notifier",
     ]);
 
     await Effect.runPromise(Scope.close(scope, Exit.void));

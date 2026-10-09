@@ -1,10 +1,17 @@
 import {
   CommandId,
   type ClientOrchestrationCommand,
+  type EfficiencyDecision,
   EventId,
+  MessageId,
+  type ModelSelection,
   OrchestrationDispatchCommandError,
   type OrchestrationCommand,
-  type ThreadId,
+  type OrchestrationThreadShell,
+  type ServerProvider,
+  SUBAGENT_STARTED_ACTIVITY_KIND,
+  ThreadId,
+  ThreadSubagentDelegation,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -18,8 +25,23 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
-import { resolveInteractiveEfficiency } from "../efficiency/EfficiencyRouting.ts";
+import {
+  interactiveTurnMatchesRule,
+  resolveInteractiveEfficiency,
+  routedSelectionNeedsSubagent,
+  type TierJudgmentInput,
+} from "../efficiency/EfficiencyRouting.ts";
+import { Judge } from "../efficiency/Judge.ts";
+import {
+  buildTierJudgmentRequest,
+  findRouteContext,
+  tierJudgmentFromAnswers,
+} from "../efficiency/TierJudgment.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import { ProjectionThreadMessageRepositoryLive } from "../persistence/Layers/ProjectionThreadMessages.ts";
+import { ProjectionTurnRepositoryLive } from "../persistence/Layers/ProjectionTurns.ts";
+import { ProjectionThreadMessageRepository } from "../persistence/Services/ProjectionThreadMessages.ts";
+import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { T3ProjectFileLoader } from "../project/T3ProjectFileLoader.ts";
 import {
@@ -40,6 +62,9 @@ import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const isSandboxGitBaseUnavailableError = Schema.is(SandboxGitBaseUnavailableError);
+const decodeSubagentDelegation = Schema.decodeUnknownOption(ThreadSubagentDelegation);
+/** How many of a parent's most recent subagents are considered for reuse. */
+const REUSABLE_SUBAGENT_LOOKBACK = 5;
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
@@ -91,6 +116,17 @@ export interface OrchestrationCommandDispatcherShape {
   readonly dispatchNormalized: (
     command: OrchestrationCommand,
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
+  /**
+   * Token-efficiency routing for a normalized command, without dispatching it.
+   * An auto-routed `thread.turn.start` comes back carrying its
+   * `efficiencyDecision` (and the decided model / tier on any bootstrap
+   * `createThread`); every other command is returned unchanged. The WebSocket
+   * transport dispatches through its own bootstrap path, so it calls this
+   * first rather than `dispatchNormalized`.
+   */
+  readonly resolve: (
+    command: OrchestrationCommand,
+  ) => Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError>;
 }
 
 /**
@@ -109,6 +145,9 @@ export const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerRegistry = yield* ProviderRegistry;
   const serverSettings = yield* ServerSettingsService;
+  const judge = yield* Judge;
+  const projectionTurns = yield* ProjectionTurnRepository;
+  const projectionMessages = yield* ProjectionThreadMessageRepository;
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const projectFileLoader = yield* T3ProjectFileLoader;
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -353,10 +392,166 @@ export const make = Effect.gen(function* () {
       );
     });
 
+  /**
+   * The thread's current route: the latest turn's decision (for sticky
+   * routing), the text of the message that started the route, and the turn
+   * count. Best-effort — a lookup failure only drops the context.
+   */
+  const loadRouteContext = (
+    thread: OrchestrationThreadShell | undefined,
+  ): Effect.Effect<{
+    readonly priorTurnCount: number;
+    readonly priorDecision?: EfficiencyDecision;
+    readonly taskMessage?: string;
+  }> =>
+    Effect.gen(function* () {
+      const latestTurnId = thread?.latestTurn?.turnId;
+      if (thread === undefined || latestTurnId === undefined) return { priorTurnCount: 0 };
+      const turns = yield* projectionTurns.listByThreadId({ threadId: thread.id });
+      const context = findRouteContext(turns, latestTurnId);
+      const taskMessage =
+        context.taskMessageId === undefined
+          ? undefined
+          : Option.getOrUndefined(
+              yield* projectionMessages.getByMessageId({
+                messageId: MessageId.make(context.taskMessageId),
+              }),
+            )?.text;
+      return {
+        priorTurnCount: Math.max(1, turns.filter((turn) => turn.turnId !== null).length),
+        ...(context.priorDecision === undefined ? {} : { priorDecision: context.priorDecision }),
+        ...(taskMessage === undefined ? {} : { taskMessage }),
+      };
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logDebug("efficiency route context unavailable", { error }).pipe(
+          Effect.as({ priorTurnCount: thread?.latestTurn ? 1 : 0 }),
+        ),
+      ),
+    );
+
+  const resolveTierJudgment = (
+    command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+    thread: OrchestrationThreadShell | undefined,
+    route: { readonly priorTurnCount: number; readonly taskMessage?: string },
+  ): Effect.Effect<TierJudgmentInput | undefined> => {
+    const projectId = command.bootstrap?.createThread?.projectId ?? thread?.projectId;
+    const threadTitle = thread?.title ?? command.bootstrap?.createThread?.title;
+    return judge
+      .ask(
+        buildTierJudgmentRequest({
+          message: command.message.text,
+          attachmentCount: command.message.attachments.length,
+          interactionMode: command.interactionMode,
+          ...(projectId === undefined ? {} : { projectId }),
+          priorTurnCount: route.priorTurnCount,
+          ...(threadTitle === undefined ? {} : { threadTitle }),
+          ...(route.taskMessage === undefined ? {} : { taskMessage: route.taskMessage }),
+        }),
+        { threadId: command.threadId },
+      )
+      .pipe(
+        Effect.map((result) => tierJudgmentFromAnswers(result.answers, result.model)),
+        Effect.catchTag("JudgeError", (error) =>
+          Effect.logDebug("tier judgment skipped", { reason: error.reason }).pipe(
+            Effect.as(undefined),
+          ),
+        ),
+      );
+  };
+
+  /**
+   * The most recent live subagent of `parentThreadId` already on exactly
+   * `selection`'s instance and model and not mid-turn, so a follow-up routed the
+   * same way continues that conversation instead of starting a fresh one.
+   * Best-effort: a lookup failure just starts a new subagent.
+   */
+  const findReusableSubagent = (parentThreadId: ThreadId, selection: ModelSelection) =>
+    Effect.gen(function* () {
+      const parent = Option.getOrUndefined(
+        yield* projectionSnapshotQuery.getThreadDetailById(parentThreadId),
+      );
+      if (parent === undefined) return undefined;
+      const childIds = [
+        ...new Set(
+          parent.activities
+            .filter((activity) => activity.kind === SUBAGENT_STARTED_ACTIVITY_KIND)
+            .flatMap((activity) =>
+              Option.toArray(decodeSubagentDelegation(activity.payload)).map(
+                (delegation) => delegation.childThreadId,
+              ),
+            )
+            .toReversed(),
+        ),
+      ].slice(0, REUSABLE_SUBAGENT_LOOKBACK);
+      for (const childId of childIds) {
+        const child = Option.getOrUndefined(
+          yield* projectionSnapshotQuery.getThreadShellById(childId),
+        );
+        if (child === undefined || child.archivedAt !== null) continue;
+        if (child.latestTurn?.state === "running") continue;
+        const instanceId = child.session?.providerInstanceId ?? child.modelSelection.instanceId;
+        if (instanceId === selection.instanceId && child.modelSelection.model === selection.model) {
+          return childId;
+        }
+      }
+      return undefined;
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logDebug("subagent reuse lookup failed", { error }).pipe(Effect.as(undefined)),
+      ),
+    );
+
+  /**
+   * A routed turn the thread's bound session cannot serve (see
+   * `routedSelectionNeedsSubagent`) becomes a `thread.turn.delegate`: the parent
+   * records the message and the subagent reactor runs the turn in a child
+   * thread on the routed model.
+   *
+   * Accepting a proposed plan (`sourceProposedPlan`) and retrying a turn
+   * (`retryOfTurnId`) are bound to this thread: the plan and the retried turn
+   * live in its session, and a fresh child has neither. Those turns skip the
+   * routed model and run unrouted (`unrouted`) on the thread's own provider,
+   * exactly as a manual turn would.
+   */
+  const delegateToSubagentIfNeeded = (
+    command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+    unrouted: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+    thread: OrchestrationThreadShell,
+    providers: ReadonlyArray<ServerProvider>,
+  ): Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError> =>
+    Effect.gen(function* () {
+      const decision = command.efficiencyDecision;
+      if (decision === undefined || command.bootstrap !== undefined) return command;
+      if (!routedSelectionNeedsSubagent({ thread, selection: decision.modelSelection, providers }))
+        return command;
+      if (command.sourceProposedPlan !== undefined || command.retryOfTurnId !== undefined)
+        return unrouted;
+      const reusable = yield* findReusableSubagent(thread.id, decision.modelSelection);
+      const childThreadId = reusable ?? ThreadId.make(yield* randomUUID);
+      return {
+        type: "thread.turn.delegate",
+        commandId: command.commandId,
+        threadId: command.threadId,
+        message: command.message,
+        delegation: {
+          childThreadId,
+          reuseChild: reusable !== undefined,
+          messageId: command.message.messageId,
+          modelSelection: decision.modelSelection,
+          efficiencyDecision: decision,
+          interactionMode: command.interactionMode,
+        },
+        createdAt: command.createdAt,
+      } satisfies OrchestrationCommand;
+    });
+
   const resolveEfficiency = (
     command: OrchestrationCommand,
   ): Effect.Effect<OrchestrationCommand, OrchestrationDispatchCommandError> => {
     if (command.type !== "thread.turn.start") return Effect.succeed(command);
+    // Already routed (a subagent's child turn carries its parent's decision).
+    if (command.efficiencyDecision !== undefined) return Effect.succeed(command);
     return Effect.gen(function* () {
       const thread = command.bootstrap?.createThread
         ? undefined
@@ -372,12 +567,34 @@ export const make = Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings;
       if (!settings.efficiency.enabled) return command;
       const providers = yield* providerRegistry.getProviders;
-      return resolveInteractiveEfficiency({
+      // An explicit rule always wins over a judgment, so skip the judge
+      // round-trip (its latency and cost) entirely when a rule already matches
+      // this turn — the judgment would only be recorded and discarded.
+      const ruleMatches = interactiveTurnMatchesRule({
+        settings: settings.efficiency,
+        projectId: command.bootstrap?.createThread?.projectId ?? thread?.projectId,
+        interactionMode: command.interactionMode,
+        attachmentCount: command.message.attachments.length,
+      });
+      // Resolve an optional judgment first. Any judge error (or a disabled
+      // judge) leaves `tierJudgment` undefined, so routing proceeds exactly as
+      // it does today (a prior decision is only reused on a judged
+      // continuation).
+      const judging = !ruleMatches && settings.efficiency.tierJudgment.enabled && judge.enabled;
+      const route = judging ? yield* loadRouteContext(thread) : undefined;
+      const tierJudgment =
+        route === undefined ? undefined : yield* resolveTierJudgment(command, thread, route);
+      const resolved = resolveInteractiveEfficiency({
         command,
         ...(thread === undefined ? {} : { thread }),
         settings: settings.efficiency,
         providers,
+        ...(tierJudgment === undefined ? {} : { tierJudgment }),
+        ...(route?.priorDecision === undefined ? {} : { priorDecision: route.priorDecision }),
       }).command;
+      return thread === undefined
+        ? resolved
+        : yield* delegateToSubagentIfNeeded(resolved, command, thread, providers);
     }).pipe(
       Effect.mapError((cause) =>
         toDispatchCommandError(cause, "Failed to resolve token-efficiency routing"),
@@ -481,7 +698,15 @@ export const make = Effect.gen(function* () {
       Effect.flatMap(dispatchNormalized),
     );
 
-  return OrchestrationCommandDispatcher.of({ dispatch, dispatchNormalized });
+  return OrchestrationCommandDispatcher.of({
+    dispatch,
+    dispatchNormalized,
+    resolve: resolveEfficiency,
+  });
 });
 
-export const layer = Layer.effect(OrchestrationCommandDispatcher, make);
+export const layer = Layer.effect(OrchestrationCommandDispatcher, make).pipe(
+  Layer.provide(
+    Layer.mergeAll(ProjectionTurnRepositoryLive, ProjectionThreadMessageRepositoryLive),
+  ),
+);

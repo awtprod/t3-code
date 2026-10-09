@@ -408,6 +408,110 @@ export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
 });
 export type AuthOtherClientSessionsRevokeResult = typeof AuthOtherClientSessionsRevokeResult.Type;
 
+// ===============================
+// Direct Web Push (RFC 8291 aes128gcm + VAPID, no relay)
+// ===============================
+
+// Every client-supplied string is length-bounded: the endpoint is POSTed to
+// verbatim and the keys/deviceId are stored, so an unbounded value is a memory
+// and log-volume hazard. The SSRF host allowlist is enforced server-side.
+const WebPushDeviceId = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(512));
+const WebPushEndpoint = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(2048));
+const WebPushKey = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(512));
+
+export const WebPushPreferences = Schema.Struct({
+  notifyOnApproval: Schema.Boolean,
+  notifyOnInput: Schema.Boolean,
+  notifyOnCompletion: Schema.Boolean,
+  notifyOnFailure: Schema.Boolean,
+});
+export type WebPushPreferences = typeof WebPushPreferences.Type;
+
+// `configured: false` (with a null key) is the not-configured signal the client
+// renders instead of an error: the environment simply has no VAPID subject set.
+export const WebPushConfigResult = Schema.Struct({
+  configured: Schema.Boolean,
+  vapidPublicKey: Schema.NullOr(Schema.String),
+});
+export type WebPushConfigResult = typeof WebPushConfigResult.Type;
+
+export const WebPushSubscriptionInput = Schema.Struct({
+  deviceId: WebPushDeviceId,
+  endpoint: WebPushEndpoint,
+  p256dh: WebPushKey,
+  auth: WebPushKey,
+  preferences: WebPushPreferences,
+});
+export type WebPushSubscriptionInput = typeof WebPushSubscriptionInput.Type;
+
+export const WebPushSubscriptionDeleteInput = Schema.Struct({
+  deviceId: WebPushDeviceId,
+});
+export type WebPushSubscriptionDeleteInput = typeof WebPushSubscriptionDeleteInput.Type;
+
+export const WebPushTestInput = Schema.Struct({
+  deviceId: WebPushDeviceId,
+});
+export type WebPushTestInput = typeof WebPushTestInput.Type;
+
+export const WebPushMutationResult = Schema.Struct({
+  ok: Schema.Boolean,
+});
+export type WebPushMutationResult = typeof WebPushMutationResult.Type;
+
+export const WebPushTestResult = Schema.Struct({
+  ok: Schema.Boolean,
+  // True when the environment has no VAPID subject configured; the client shows
+  // the not-configured hint rather than a delivery error.
+  notConfigured: Schema.Boolean,
+  status: Schema.Number,
+  reason: Schema.NullOr(Schema.String),
+});
+export type WebPushTestResult = typeof WebPushTestResult.Type;
+
+const EnvironmentWebPushReadErrors = [
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentWebPushWriteErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+
+export class EnvironmentWebPushHttpApi extends HttpApiGroup.make("webPush")
+  .add(
+    HttpApiEndpoint.get("config", "/api/web-push/config", {
+      headers: OptionalBearerHeaders,
+      success: WebPushConfigResult,
+      error: EnvironmentWebPushReadErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.put("putSubscription", "/api/web-push/subscription", {
+      headers: OptionalBearerHeaders,
+      payload: WebPushSubscriptionInput,
+      success: WebPushMutationResult,
+      error: EnvironmentWebPushWriteErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("deleteSubscription", "/api/web-push/subscription", {
+      headers: OptionalBearerHeaders,
+      payload: WebPushSubscriptionDeleteInput,
+      success: WebPushMutationResult,
+      error: EnvironmentWebPushReadErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("test", "/api/web-push/test", {
+      headers: OptionalBearerHeaders,
+      payload: WebPushTestInput,
+      success: WebPushTestResult,
+      error: EnvironmentWebPushWriteErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata").add(
   HttpApiEndpoint.get("descriptor", "/.well-known/t3/environment", {
     success: ExecutionEnvironmentDescriptor,
@@ -619,4 +723,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
-  .add(EnvironmentConnectHttpApi) {}
+  .add(EnvironmentConnectHttpApi)
+  .add(EnvironmentWebPushHttpApi) {}

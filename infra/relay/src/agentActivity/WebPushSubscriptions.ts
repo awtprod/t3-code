@@ -13,7 +13,7 @@ import { and, eq, ne } from "drizzle-orm";
 import * as RelayDb from "../db.ts";
 import { relayWebPushSubscriptions } from "../persistence/schema.ts";
 
-export class WebPushRegistrationInvalidError extends Schema.TaggedErrorClass<WebPushRegistrationInvalidError>()(
+export class WebPushRegistrationInvalidError extends Schema.TaggedError<WebPushRegistrationInvalidError>()(
   "WebPushRegistrationInvalidError",
   {
     userId: Schema.String,
@@ -26,7 +26,7 @@ export class WebPushRegistrationInvalidError extends Schema.TaggedErrorClass<Web
   }
 }
 
-export class WebPushSubscriptionPersistenceError extends Schema.TaggedErrorClass<WebPushSubscriptionPersistenceError>()(
+export class WebPushSubscriptionPersistenceError extends Schema.TaggedError<WebPushSubscriptionPersistenceError>()(
   "WebPushSubscriptionPersistenceError",
   {
     userId: Schema.String,

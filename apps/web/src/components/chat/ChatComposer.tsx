@@ -100,6 +100,7 @@ import {
 import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
+  type ComposerThreadDraftState,
   type DraftId,
   type PersistedComposerFileAttachment,
   type PersistedComposerImageAttachment,
@@ -929,6 +930,7 @@ import {
   FileIcon,
   BotIcon,
   CircleAlertIcon,
+  MonitorIcon,
   PaperclipIcon,
   PencilRulerIcon,
   PlayIcon,
@@ -936,6 +938,11 @@ import {
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { hasProviderSetup } from "./ProviderStatusBanner";
+import { WindowsFileChip } from "./WindowsFileChip";
+import { WindowsMediaPickerDialog } from "./WindowsMediaPickerDialog";
+import { windowsFileAttachmentFromEntry } from "./windowsMediaPicker.logic";
+import { routeDroppedFiles } from "./windowsMediaDrop.logic";
+import { commandCenterEnvironment } from "~/state/commandCenter";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
@@ -1288,6 +1295,8 @@ export interface ChatComposerProps {
   attachmentUploadsCapabilityKnown: boolean;
   supportsAttachmentUploads: boolean;
   supportsQuestionAttachments: boolean;
+  /** Server advertises the Windows media picker (capabilities.windowsMedia). */
+  supportsWindowsMedia: boolean;
   maxFileAttachmentBytes: number | null;
   routeKind: "server" | "draft";
   routeThreadRef: ScopedThreadRef;
@@ -1441,6 +1450,8 @@ export interface ChatComposerProps {
 // Component
 // --------------------------------------------------------------------------
 
+const EMPTY_WINDOWS_FILES: NonNullable<ComposerThreadDraftState["windowsFiles"]> = [];
+
 export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
   const {
     composerDraftTarget,
@@ -1448,6 +1459,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     attachmentUploadsCapabilityKnown,
     supportsAttachmentUploads,
     supportsQuestionAttachments,
+    supportsWindowsMedia,
     maxFileAttachmentBytes,
     routeKind,
     routeThreadRef,
@@ -1567,6 +1579,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const prompt = composerDraft.prompt;
   const composerImages = attachmentDraft.images;
   const composerFiles = attachmentDraft.files;
+  const composerWindowsFiles = composerDraft.windowsFiles ?? EMPTY_WINDOWS_FILES;
+  const [windowsPickerOpen, setWindowsPickerOpen] = useState(false);
   // A question answer has no chips: its files live in the question draft and show in the
   // strip. Only the thread prompt's references decide which files leave the strip.
   const inlineFileIdSet = useMemo(() => {
@@ -1701,6 +1715,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
   const addComposerDraftFiles = useComposerDraftStore((store) => store.addFiles);
   const removeComposerDraftFile = useComposerDraftStore((store) => store.removeFile);
+  const addComposerDraftWindowsFile = useComposerDraftStore((store) => store.addWindowsFile);
+  const listWindowsMediaFolder = useAtomCommand(commandCenterEnvironment.windowsMediaList, {
+    reportFailure: false,
+  });
+  const removeComposerDraftWindowsFile = useComposerDraftStore((store) => store.removeWindowsFile);
   const setComposerDraftFileUpload = useComposerDraftStore((store) => store.setFileUpload);
   const insertComposerDraftTerminalContext = useComposerDraftStore(
     (store) => store.insertTerminalContext,
@@ -2192,13 +2211,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () =>
       deriveComposerSendState({
         prompt,
-        imageCount: composerImages.length + composerFiles.length,
+        imageCount: composerImages.length + composerFiles.length + composerWindowsFiles.length,
         terminalContexts: composerTerminalContexts,
         elementContextCount: composerPreviewAnnotations.length + composerReviewComments.length,
       }),
     [
       composerFiles.length,
       composerImages.length,
+      composerWindowsFiles.length,
       composerPreviewAnnotations.length,
       composerReviewComments.length,
       composerTerminalContexts,
@@ -5165,6 +5185,42 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     },
   ): Promise<boolean> => {
     if (!activeThreadId || files.length === 0 || isRevertingCheckpointRef.current) return false;
+    const getPathForFile = window.desktopBridge?.getPathForFile;
+    if (
+      !supportsWindowsMedia ||
+      !getPathForFile ||
+      pendingUserInputs.length > 0 ||
+      options?.source !== undefined
+    ) {
+      return addComposerUploadAttachments(files, options);
+    }
+    // Desktop app on the Windows media host: a dropped video that already
+    // lives on that box becomes a path reference instead of an upload.
+    const routed = await routeDroppedFiles(files, {
+      enabled: true,
+      getPathForFile,
+      newId: randomUUID,
+      listFolder: async (path) => {
+        const result = await listWindowsMediaFolder({ environmentId, input: { path } });
+        return result._tag === "Success" ? result.value : null;
+      },
+    });
+    for (const reference of routed.references) {
+      addComposerDraftWindowsFile(composerDraftTarget, reference);
+    }
+    // Windows references render in their own strip, not as inline chips.
+    if (routed.uploads.length === 0) return false;
+    return addComposerUploadAttachments(routed.uploads, options);
+  };
+
+  const addComposerUploadAttachments = async (
+    files: File[],
+    options?: {
+      readonly source?: ChatFileAttachment["source"];
+      readonly selection?: { start: number; end: number };
+    },
+  ): Promise<boolean> => {
+    if (!activeThreadId || files.length === 0 || isRevertingCheckpointRef.current) return false;
     if (
       pendingUserInputs.length > 0 &&
       (!supportsQuestionAttachments ||
@@ -6547,6 +6603,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
               {!isComposerCollapsedMobile &&
                 !isComposerApprovalState &&
+                pendingUserInputs.length === 0 &&
+                composerWindowsFiles.length > 0 && (
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {composerWindowsFiles.map((file) => (
+                      <WindowsFileChip
+                        key={file.id}
+                        file={file}
+                        onRemove={() =>
+                          removeComposerDraftWindowsFile(composerDraftTarget, file.id)
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
+
+              {!isComposerCollapsedMobile &&
+                !isComposerApprovalState &&
                 composerOtherFiles.length > 0 && (
                   <div className="mb-3 flex flex-col gap-1">
                     {composerOtherFiles.map((file) => {
@@ -6814,7 +6887,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         ref={attachmentInputRef}
                         type="file"
                         multiple
-                        className="hidden"
+                        // Visually hidden, not display:none: iOS Safari opens
+                        // the picker for a display:none input but can drop
+                        // the selection instead of firing change.
+                        className="sr-only"
+                        tabIndex={-1}
                         onChange={(event) => {
                           const files = Array.from(event.currentTarget.files ?? []);
                           event.currentTarget.value = "";
@@ -6843,6 +6920,39 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         </TooltipTrigger>
                         <TooltipPopup>Attach files</TooltipPopup>
                       </Tooltip>
+                    </>
+                  ) : null}
+                  {supportsWindowsMedia && pendingUserInputs.length === 0 ? (
+                    <>
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-sm"
+                              onPointerDown={(event) => event.preventDefault()}
+                              onClick={() => setWindowsPickerOpen(true)}
+                              aria-label="Browse Windows"
+                            />
+                          }
+                        >
+                          <MonitorIcon />
+                        </TooltipTrigger>
+                        <TooltipPopup>Browse Windows</TooltipPopup>
+                      </Tooltip>
+                      <WindowsMediaPickerDialog
+                        open={windowsPickerOpen}
+                        onOpenChange={setWindowsPickerOpen}
+                        environmentId={environmentId}
+                        onPick={(entry, host) => {
+                          addComposerDraftWindowsFile(
+                            composerDraftTarget,
+                            windowsFileAttachmentFromEntry({ id: randomUUID(), host, entry }),
+                          );
+                          focusComposer();
+                        }}
+                      />
                     </>
                   ) : null}
                   <ComposerFooterPrimaryActions

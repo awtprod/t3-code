@@ -49,8 +49,9 @@ import { AntigravityInstallation } from "../AntigravityInstallation.ts";
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { ClaudeDriver } from "../Drivers/ClaudeDriver.ts";
-import { CodexDriver } from "../Drivers/CodexDriver.ts";
+import * as Judge from "../../efficiency/Judge.ts";
+import { ClaudeDriver, type ClaudeDriverEnv } from "../Drivers/ClaudeDriver.ts";
+import { CodexDriver, type CodexDriverEnv } from "../Drivers/CodexDriver.ts";
 import { CursorDriver } from "../Drivers/CursorDriver.ts";
 import { GrokDriver } from "../Drivers/GrokDriver.ts";
 import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
@@ -233,6 +234,8 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(CodexResetCredit.layerTest),
+    // ClaudeDriver.create yields the efficiency Judge for the tool-result sieve.
+    Layer.provideMerge(Judge.layerTest),
   );
 
   it.live("boots two independent codex instances from a ProviderInstanceConfigMap", () =>
@@ -371,7 +374,7 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
         },
       };
 
-      const { registry } = yield* makeProviderInstanceRegistry({
+      const { registry } = yield* makeProviderInstanceRegistry<CodexDriverEnv | ClaudeDriverEnv>({
         drivers: [CodexDriver, ClaudeDriver],
         configMap,
       });
@@ -461,6 +464,8 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(CodexResetCredit.layerTest),
+    // ClaudeDriver.create yields the efficiency Judge for the tool-result sieve.
+    Layer.provideMerge(Judge.layerTest),
   );
 
   it.live("boots one instance of every shipped driver from a single config map", () =>

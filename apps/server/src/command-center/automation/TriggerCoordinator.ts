@@ -19,8 +19,18 @@ import * as Schema from "effect/Schema";
 
 import * as AutomationRuns from "../AutomationRuns.ts";
 import * as CommandCenterService from "../Service.ts";
+import { AutomationRuntimeError } from "./Runtime.ts";
 
 const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const isAutomationRuntimeError = Schema.is(AutomationRuntimeError);
+const BoundedAdmissionIdentity = Schema.String.check(Schema.isMaxLength(200));
+
+const AutomationAdmissionFailure = Schema.Struct({
+  classification: Schema.Literals(["paused", "permanent"]),
+  canonicalCode: Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9._:-]{0,127}$/u)),
+  resource: BoundedAdmissionIdentity,
+  subject: BoundedAdmissionIdentity,
+});
 
 export class AutomationTriggerError extends Schema.TaggedError<AutomationTriggerError>()(
   "AutomationTriggerError",
@@ -31,10 +41,12 @@ export class AutomationTriggerError extends Schema.TaggedError<AutomationTrigger
       "invalid-schedule",
       "invalid-webhook",
       "ambiguous-webhook",
+      "admission-blocked",
       "start-failed",
     ]),
     message: Schema.String,
     cause: Schema.optional(Schema.Defect()),
+    admissionFailure: Schema.optional(AutomationAdmissionFailure),
   },
 ) {}
 
@@ -42,6 +54,19 @@ function triggerError(reason: AutomationTriggerError["reason"], message: string,
   return new AutomationTriggerError({
     reason,
     message,
+    ...(cause === undefined ? {} : { cause }),
+  });
+}
+
+function admissionError(
+  message: string,
+  admissionFailure: typeof AutomationAdmissionFailure.Type,
+  cause?: unknown,
+) {
+  return new AutomationTriggerError({
+    reason: "admission-blocked",
+    message,
+    admissionFailure,
     ...(cause === undefined ? {} : { cause }),
   });
 }
@@ -112,10 +137,12 @@ export const make = Effect.gen(function* () {
     input: JsonObject,
   ) {
     if (automation.configCommit === undefined) {
-      return yield* triggerError(
-        "start-failed",
-        `Automation '${automation.id}' has no committed revision.`,
-      );
+      return yield* admissionError(`Automation '${automation.id}' has no committed revision.`, {
+        classification: "permanent",
+        canonicalCode: "automation-uncommitted",
+        resource: "schedule-admission",
+        subject: automation.id,
+      });
     }
     return yield* runs
       .start({
@@ -126,7 +153,36 @@ export const make = Effect.gen(function* () {
         expectedDefinitionDigest: automation.definitionDigest,
         input,
       })
-      .pipe(Effect.mapError((cause) => triggerError("start-failed", cause.message, cause)));
+      .pipe(
+        Effect.mapError((cause) => {
+          const runtimeCause = isAutomationRuntimeError(cause.cause) ? cause.cause : undefined;
+          if (runtimeCause?.code === "automation-paused") {
+            return admissionError(
+              cause.message,
+              {
+                classification: "paused",
+                canonicalCode: "automation-paused",
+                resource: "schedule-admission",
+                subject: automation.id,
+              },
+              cause,
+            );
+          }
+          if (["validation", "not_found", "conflict", "config"].includes(cause.reason)) {
+            return admissionError(
+              cause.message,
+              {
+                classification: "permanent",
+                canonicalCode: runtimeCause?.code ?? `admission-${cause.reason.replace("_", "-")}`,
+                resource: "schedule-admission",
+                subject: automation.id,
+              },
+              cause,
+            );
+          }
+          return triggerError("start-failed", cause.message, cause);
+        }),
+      );
   });
 
   const admitSchedule = Effect.fn("AutomationTriggerCoordinator.admitSchedule")(function* (

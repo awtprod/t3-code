@@ -164,6 +164,7 @@ export type SpaceLifecycle = typeof SpaceLifecycle.Type;
 export const SpacePolicy = Schema.Struct({
   allowedCapabilities: Schema.Array(CapabilityName),
   autoRunRiskLevels: Schema.Array(Schema.Literals(["low", "reversible"])),
+  observationEligibility: Schema.optional(Schema.Unknown),
   route: Schema.optional(ModelSelection),
 });
 export type SpacePolicy = typeof SpacePolicy.Type;
@@ -292,6 +293,9 @@ export const AutomationNodeKind = Schema.Literals([
   "delay",
   "approval",
   "shell.scoped",
+  "prospect.evaluate",
+  "prospect.notify",
+  "repository.checks",
 ]);
 export type AutomationNodeKind = typeof AutomationNodeKind.Type;
 

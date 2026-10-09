@@ -34,6 +34,7 @@ import {
   TrimmedString,
 } from "@command-center/core";
 import * as Schema from "effect/Schema";
+import { ThreadId as AssetThreadId } from "./baseSchemas.ts";
 
 export const COMMAND_CENTER_WS_METHODS = {
   bootstrap: "cc.bootstrap",
@@ -45,8 +46,38 @@ export const COMMAND_CENTER_WS_METHODS = {
   spacesQuery: "cc.spaces.query",
   spacesSync: "cc.spaces.sync",
   itemsQuery: "cc.items.query",
+  inboxQuery: "cc.inbox.query",
+  inboxDetail: "cc.inbox.detail",
+  inboxComment: "cc.inbox.comment",
+  inboxRequestChanges: "cc.inbox.requestChanges",
+  inboxCandidateCreate: "cc.inbox.candidate.create",
+  inboxCandidateAccept: "cc.inbox.candidate.accept",
+  inboxAdjustmentApprove: "cc.inbox.adjustment.approve",
+  inboxCandidateDiscard: "cc.inbox.candidate.discard",
+  inboxChangeRequestResolve: "cc.inbox.changeRequest.resolve",
+  inboxSnooze: "cc.inbox.snooze",
+  inboxUnsnooze: "cc.inbox.unsnooze",
+  inboxDismiss: "cc.inbox.dismiss",
+  inboxReopen: "cc.inbox.reopen",
+  sprintPlanList: "cc.sprintPlan.list",
+  sprintPlanPreviewImport: "cc.sprintPlan.previewImport",
+  sprintPlanApplyImport: "cc.sprintPlan.applyImport",
+  sprintPlanGetCurrent: "cc.sprintPlan.getCurrent",
+  sprintPlanGetOriginal: "cc.sprintPlan.getOriginal",
+  sprintPlanPatchTask: "cc.sprintPlan.patchTask",
+  sprintPlanResolveDateConflict: "cc.sprintPlan.resolveDateConflict",
+  sprintPlanListHistory: "cc.sprintPlan.listHistory",
+  digestQuery: "cc.digest.query",
+  digestPreferencesUpdate: "cc.digest.preferences.update",
+  digestMarkViewed: "cc.digest.markViewed",
+  inboxDraftApprove: "cc.inbox.draft.approve",
+  inboxDraftReceipt: "cc.inbox.draft.receipt",
   runsQuery: "cc.runs.query",
   automationsQuery: "cc.automations.query",
+  responsibilitiesList: "cc.responsibilities.list",
+  responsibilityGet: "cc.responsibilities.get",
+  responsibilityPause: "cc.responsibilities.pause",
+  responsibilityResume: "cc.responsibilities.resume",
   automationDefinitionGet: "cc.automations.definition.get",
   automationDefinitionCreate: "cc.automations.definition.create",
   automationDefinitionSave: "cc.automations.definition.save",
@@ -58,6 +89,10 @@ export const COMMAND_CENTER_WS_METHODS = {
   googleConnectionSetupBegin: "cc.connections.google.setup.begin",
   googleConnectionSetupComplete: "cc.connections.google.setup.complete",
   googleConnectionRemove: "cc.connections.google.remove",
+  publishConnectionsQuery: "cc.connections.publish.query",
+  publishConnectionSetupBegin: "cc.connections.publish.setup.begin",
+  publishConnectionSetupComplete: "cc.connections.publish.setup.complete",
+  publishConnectionRemove: "cc.connections.publish.remove",
   memoryQuery: "cc.memory.query",
   memorySearch: "cc.memory.search",
   itemCreate: "cc.items.create",
@@ -70,6 +105,16 @@ export const COMMAND_CENTER_WS_METHODS = {
   automationRunGet: "cc.automations.run.get",
   automationWebhookAdmit: "cc.automations.webhook.admit",
   googleRead: "cc.connections.google.read",
+  windowsMediaList: "cc.windowsMedia.list",
+  windowsMediaRoots: "cc.windowsMedia.roots",
+  observationsList: "cc.observations.list",
+  observationsGet: "cc.observations.get",
+  observationsHistory: "cc.observations.history",
+  observationsCreateManual: "cc.observations.createManual",
+  observationsImport: "cc.observations.import",
+  observationsCorrect: "cc.observations.correct",
+  observationsRetire: "cc.observations.retire",
+  youtubeAnalyticsFetch: "cc.youtube.analytics.fetch",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedError<CommandCenterError>()(
@@ -269,6 +314,9 @@ export const CommandCenterAutomationSourceNodeKind = Schema.Literals([
   "delay",
   "approval",
   "shell.scoped",
+  "prospect.evaluate",
+  "prospect.notify",
+  "repository.checks",
 ]);
 
 /** Exact editable shape stored in the private configuration checkout. */
@@ -459,6 +507,93 @@ export const CommandCenterGoogleConnectionRemoveResult = Schema.Struct({
 });
 export type CommandCenterGoogleConnectionRemoveResult =
   typeof CommandCenterGoogleConnectionRemoveResult.Type;
+
+/** External accounts finished clips can be published to. One account per provider per environment. */
+export const CommandCenterPublishProvider = Schema.Literals(["youtube", "instagram"]);
+export type CommandCenterPublishProvider = typeof CommandCenterPublishProvider.Type;
+
+/**
+ * How a provider collects its credential during `complete`:
+ * - `paste-token`: the user pastes a long-lived access token (Instagram).
+ * - `oauth-redirect`: the user opens `authUrl`, approves, and pastes the 127.0.0.1 callback address (YouTube).
+ */
+export const CommandCenterPublishConnectionSetupMode = Schema.Literals([
+  "paste-token",
+  "oauth-redirect",
+]);
+export type CommandCenterPublishConnectionSetupMode =
+  typeof CommandCenterPublishConnectionSetupMode.Type;
+
+/** Browser-safe connection summary. Never carries a token. */
+export const CommandCenterPublishConnection = Schema.Struct({
+  provider: CommandCenterPublishProvider,
+  state: Schema.Literals(["connected", "disconnected", "unavailable"]),
+  setupMode: CommandCenterPublishConnectionSetupMode,
+  accountId: Schema.optional(TrimmedNonEmptyString),
+  accountLabel: Schema.optional(TrimmedNonEmptyString),
+  expiresAt: Schema.optional(Timestamp),
+  lastRefreshedAt: Schema.optional(Timestamp),
+  detail: Schema.optional(TrimmedNonEmptyString),
+  analytics: Schema.optional(
+    Schema.Struct({
+      state: Schema.Literals(["needs-consent", "permission-granted", "verified", "error"]),
+      detail: TrimmedNonEmptyString,
+      verifiedAt: Schema.optional(Timestamp),
+    }),
+  ),
+});
+export type CommandCenterPublishConnection = typeof CommandCenterPublishConnection.Type;
+
+export const CommandCenterPublishConnectionsQueryInput = Schema.Struct({});
+export type CommandCenterPublishConnectionsQueryInput =
+  typeof CommandCenterPublishConnectionsQueryInput.Type;
+
+export const CommandCenterPublishConnectionsQueryResult = Schema.Struct({
+  connections: Schema.Array(CommandCenterPublishConnection),
+});
+export type CommandCenterPublishConnectionsQueryResult =
+  typeof CommandCenterPublishConnectionsQueryResult.Type;
+
+export const CommandCenterPublishConnectionSetupBeginInput = Schema.Struct({
+  provider: CommandCenterPublishProvider,
+});
+export type CommandCenterPublishConnectionSetupBeginInput =
+  typeof CommandCenterPublishConnectionSetupBeginInput.Type;
+
+export const CommandCenterPublishConnectionSetupBeginResult = Schema.Struct({
+  sessionId: TrimmedNonEmptyString,
+  provider: CommandCenterPublishProvider,
+  setupMode: CommandCenterPublishConnectionSetupMode,
+  authUrl: Schema.optional(TrimmedNonEmptyString),
+  expiresAt: Timestamp,
+});
+export type CommandCenterPublishConnectionSetupBeginResult =
+  typeof CommandCenterPublishConnectionSetupBeginResult.Type;
+
+export const CommandCenterPublishConnectionSetupCompleteInput = Schema.Struct({
+  sessionId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  credential: TrimmedNonEmptyString.check(Schema.isMaxLength(8 * 1024)),
+});
+export type CommandCenterPublishConnectionSetupCompleteInput =
+  typeof CommandCenterPublishConnectionSetupCompleteInput.Type;
+
+export const CommandCenterPublishConnectionSetupCompleteResult = Schema.Struct({
+  connection: CommandCenterPublishConnection,
+});
+export type CommandCenterPublishConnectionSetupCompleteResult =
+  typeof CommandCenterPublishConnectionSetupCompleteResult.Type;
+
+export const CommandCenterPublishConnectionRemoveInput = Schema.Struct({
+  provider: CommandCenterPublishProvider,
+});
+export type CommandCenterPublishConnectionRemoveInput =
+  typeof CommandCenterPublishConnectionRemoveInput.Type;
+
+export const CommandCenterPublishConnectionRemoveResult = Schema.Struct({
+  connection: CommandCenterPublishConnection,
+});
+export type CommandCenterPublishConnectionRemoveResult =
+  typeof CommandCenterPublishConnectionRemoveResult.Type;
 
 export const CommandCenterMemoryQueryInput = Schema.Struct({
   spaceId: Schema.optional(SpaceId),
@@ -673,6 +808,15 @@ export type CommandCenterMemoryRememberInput = typeof CommandCenterMemoryRemembe
 export const CommandCenterMemoryProposeInput = Schema.Struct({
   ...CommandCenterMemoryRememberInput.fields,
   confidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  evidence: Schema.optional(
+    Schema.Struct({
+      kind: Schema.Literal("observation-correction"),
+      observationId: TrimmedNonEmptyString,
+      revisionId: TrimmedNonEmptyString,
+    }),
+  ),
+  expiresAt: Schema.optional(Timestamp),
+  contradictionOf: Schema.optional(MemoryId),
 });
 export type CommandCenterMemoryProposeInput = typeof CommandCenterMemoryProposeInput.Type;
 
@@ -680,7 +824,7 @@ export const CommandCenterMemoryReviewInput = Schema.Struct({
   memoryId: MemoryId,
   spaceId: SpaceId,
   repositoryId: Schema.optional(RepositoryId),
-  decision: Schema.Literals(["approve", "reject"]),
+  decision: Schema.Literals(["approve", "reject", "expire"]),
 });
 export type CommandCenterMemoryReviewInput = typeof CommandCenterMemoryReviewInput.Type;
 
@@ -811,3 +955,134 @@ export const GoogleDraftCreateResult = Schema.Struct({
   threadId: Schema.optional(TrimmedNonEmptyString),
 });
 export type GoogleDraftCreateResult = typeof GoogleDraftCreateResult.Type;
+
+/** Upper bounds that keep a Windows directory listing websocket-sized. */
+export const WINDOWS_MEDIA_MAX_ENTRIES = 2_000;
+export const WINDOWS_MEDIA_PATH_MAX_CHARS = 4_096;
+
+export const WindowsMediaPath = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(WINDOWS_MEDIA_PATH_MAX_CHARS),
+);
+export type WindowsMediaPath = typeof WindowsMediaPath.Type;
+
+export const WindowsMediaEntryKind = Schema.Literals(["dir", "video", "image", "audio", "other"]);
+export type WindowsMediaEntryKind = typeof WindowsMediaEntryKind.Type;
+
+export const CommandCenterWindowsMediaListInput = Schema.Struct({
+  path: WindowsMediaPath,
+});
+export type CommandCenterWindowsMediaListInput = typeof CommandCenterWindowsMediaListInput.Type;
+
+export const CommandCenterWindowsMediaEntry = Schema.Struct({
+  name: Schema.String,
+  /** Absolute Windows path of the entry, ready to send back as a list path or attach. */
+  path: Schema.String,
+  isDir: Schema.Boolean,
+  sizeBytes: Schema.Number,
+  /** ISO-8601 UTC last-write time, null when Windows did not report one. */
+  mtime: Schema.NullOr(Schema.String),
+  kind: WindowsMediaEntryKind,
+  mimeType: Schema.String,
+});
+export type CommandCenterWindowsMediaEntry = typeof CommandCenterWindowsMediaEntry.Type;
+
+export const CommandCenterWindowsMediaListResult = Schema.Struct({
+  host: Schema.String,
+  path: Schema.String,
+  /** Parent directory, or null at a drive/allowlisted root. */
+  parent: Schema.NullOr(Schema.String),
+  entries: Schema.Array(CommandCenterWindowsMediaEntry),
+  /** True when the directory held more entries than the listing cap. */
+  truncated: Schema.Boolean,
+});
+export type CommandCenterWindowsMediaListResult = typeof CommandCenterWindowsMediaListResult.Type;
+
+export const CommandCenterWindowsMediaRootsInput = Schema.Struct({});
+export type CommandCenterWindowsMediaRootsInput = typeof CommandCenterWindowsMediaRootsInput.Type;
+
+export const CommandCenterWindowsMediaRoot = Schema.Struct({
+  label: Schema.String,
+  path: Schema.String,
+});
+export type CommandCenterWindowsMediaRoot = typeof CommandCenterWindowsMediaRoot.Type;
+
+export const CommandCenterWindowsMediaRootsResult = Schema.Struct({
+  host: Schema.String,
+  roots: Schema.Array(CommandCenterWindowsMediaRoot),
+});
+export type CommandCenterWindowsMediaRootsResult = typeof CommandCenterWindowsMediaRootsResult.Type;
+
+/** Exact bytes are preserved; no caption trimming or caller-provided approval. */
+export const InstagramReelBinding = Schema.Struct({
+  version: Schema.Literal(1),
+  accountId: Schema.String.check(Schema.isPattern(/^[0-9]{5,30}$/)),
+  accountRevision: Schema.Int.check(Schema.isGreaterThan(0)),
+  threadId: AssetThreadId,
+  relativePath: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+  workspaceRoot: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  sizeBytes: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1_000_000_000)),
+  durationMs: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(900_000)),
+  caption: Schema.String.check(Schema.isMaxLength(2200)),
+  dueUtc: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/)),
+  lateWindowMs: Schema.Int.check(
+    Schema.isGreaterThanOrEqualTo(30_000),
+    Schema.isLessThanOrEqualTo(300_000),
+  ),
+});
+export type InstagramReelBinding = typeof InstagramReelBinding.Type;
+export const InstagramReelRequest = Schema.Struct({ binding: InstagramReelBinding });
+export const InstagramReelSelection = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+});
+export const InstagramReelApprove = Schema.Struct({
+  ...InstagramReelSelection.fields,
+  digest: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+});
+export const InstagramReelState = Schema.Literals([
+  "requested",
+  "approved",
+  "creating",
+  "processing",
+  "ready",
+  "publishing",
+  "published",
+  "uncertain",
+  "canceled",
+  "error",
+]);
+export const InstagramReelReceipt = Schema.Struct({
+  id: Schema.String,
+  digest: Schema.String,
+  binding: InstagramReelBinding,
+  state: InstagramReelState,
+  approvalId: Schema.NullOr(Schema.String),
+  actor: Schema.NullOr(Schema.String),
+  approvalSessionId: Schema.NullOr(Schema.String),
+  approvalExpiresAt: Schema.NullOr(Schema.Number),
+  approvedAt: Schema.NullOr(Schema.Number),
+  canceledAt: Schema.NullOr(Schema.Number),
+  createIntentAt: Schema.NullOr(Schema.Number),
+  containerId: Schema.NullOr(Schema.String),
+  publishIntentAt: Schema.NullOr(Schema.Number),
+  mediaId: Schema.NullOr(Schema.String),
+  publishedAt: Schema.NullOr(Schema.Number),
+  permalink: Schema.NullOr(Schema.String),
+  readAttempts: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(3)),
+  updatedAt: Schema.Number,
+  detail: Schema.NullOr(Schema.String),
+});
+export type InstagramReelReceipt = typeof InstagramReelReceipt.Type;
+export const INSTAGRAM_REEL_METHODS = {
+  account: "cc.instagram.reel.account",
+  request: "cc.instagram.reel.request",
+  query: "cc.instagram.reel.query",
+  approve: "cc.instagram.reel.approve",
+  cancel: "cc.instagram.reel.cancel",
+} as const;
+
+/** Read-only metadata; never refreshes the private account token. */
+export const InstagramReelAccount = Schema.Struct({
+  accountId: InstagramReelBinding.fields.accountId,
+  accountRevision: InstagramReelBinding.fields.accountRevision,
+});

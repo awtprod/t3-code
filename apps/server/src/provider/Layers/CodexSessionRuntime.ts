@@ -3,8 +3,10 @@ import * as NodeNet from "node:net";
 
 import {
   ApprovalRequestId,
+  CODEX_WORKER_FALLBACK_MODEL,
   DEFAULT_MODEL,
   EventId,
+  isCodexManagerModelSlug,
   ProviderDriverKind,
   ProviderItemId,
   type ProviderInstanceId,
@@ -709,6 +711,12 @@ export function buildThreadStartParams(input: {
       : { sandbox: config.sandbox, approvalsReviewer: config.approvalsReviewer }),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    // Manager/worker guardrail: Codex subagents inherit the parent model by
+    // default, so an Astra-rooted thread would fan out Astra workers. Point
+    // inheriting spawns at the worker model instead (resume reuses these params).
+    ...(isCodexManagerModelSlug(input.model)
+      ? { config: { "agents.default_subagent_model": CODEX_WORKER_FALLBACK_MODEL } }
+      : {}),
   };
 }
 
@@ -1903,10 +1911,12 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
-    const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
-      Layer.build,
-      Effect.provideService(Scope.Scope, runtimeScope),
-    );
+    // The client is the sole reader of the child's stderr (it keeps a tail for
+    // exit errors); it forwards decoded text here for the log-line handler below.
+    const stderrText = yield* Queue.unbounded<string>();
+    const clientContext = yield* CodexClient.layerChildProcess(child, {
+      onStderr: (text) => Queue.offer(stderrText, text).pipe(Effect.asVoid),
+    }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
     );
@@ -3013,8 +3023,7 @@ export const makeCodexSessionRuntime = (
     );
 
     const stderrRemainderRef = yield* Ref.make("");
-    yield* child.stderr.pipe(
-      Stream.decodeText(),
+    yield* Stream.fromQueue(stderrText).pipe(
       Stream.runForEach((chunk) =>
         Ref.modify(stderrRemainderRef, (current) => {
           const combined = current + chunk;

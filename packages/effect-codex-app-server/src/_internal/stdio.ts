@@ -44,20 +44,59 @@ export const makeInMemoryStdio = Effect.fn("makeInMemoryStdio")(function* () {
   };
 });
 
+/** Upper bound, in UTF-16 code units, of the retained child stderr tail. */
+export const CODEX_STDERR_TAIL_MAX_CHARS = 4096;
+
+/**
+ * A bounded rolling tail of decoded stderr text. Only the most recent
+ * `maxChars` characters are kept, so a chatty child cannot grow it unbounded.
+ */
+export const makeStderrTail = (maxChars: number = CODEX_STDERR_TAIL_MAX_CHARS) => {
+  let tail = "";
+  return {
+    append: (text: string): void => {
+      if (text.length === 0) return;
+      tail += text;
+      if (tail.length > maxChars) {
+        tail = tail.slice(tail.length - maxChars);
+      }
+    },
+    read: (): string => tail,
+  };
+};
+
 type ChildProcessTerminationHandle = Pick<
   ChildProcessSpawner.ChildProcessHandle,
   "exitCode" | "pid"
 >;
 
+/**
+ * Build the error reported when the child's stdout ends. `stderrTail`, when
+ * provided, is read only after the exit status resolves so it can include the
+ * child's final diagnostics (e.g. "No space left on device").
+ */
 export const makeTerminationError = (
   handle: ChildProcessTerminationHandle,
+  stderrTail?: Effect.Effect<string | undefined>,
 ): Effect.Effect<CodexError.CodexAppServerError> =>
-  Effect.match(handle.exitCode, {
+  Effect.matchEffect(handle.exitCode, {
     onFailure: (cause) =>
-      new CodexError.CodexAppServerTransportError({
-        operation: "read-process-exit-status",
-        pid: handle.pid,
-        cause,
-      }),
-    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code, pid: handle.pid }),
+      Effect.succeed(
+        new CodexError.CodexAppServerTransportError({
+          operation: "read-process-exit-status",
+          pid: handle.pid,
+          cause,
+        }),
+      ),
+    onSuccess: (code) => {
+      const exited = (tail: string | undefined) =>
+        new CodexError.CodexAppServerProcessExitedError({
+          code,
+          pid: handle.pid,
+          ...(tail !== undefined && tail.trim().length > 0 ? { stderrTail: tail } : {}),
+        });
+      return stderrTail === undefined
+        ? Effect.sync(() => exited(undefined))
+        : Effect.map(stderrTail, exited);
+    },
   });

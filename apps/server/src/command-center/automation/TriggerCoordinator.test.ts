@@ -1,4 +1,5 @@
 import { Automation, AutomationId, AutomationNodeId, SpaceId } from "@command-center/core";
+import { CommandCenterError } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -14,6 +15,7 @@ import {
   scheduleMatches,
   webhookIdempotencyKey,
 } from "./TriggerCoordinator.ts";
+import { AutomationRuntimeError } from "./Runtime.ts";
 
 const now = "2026-07-20T12:00:00.000Z";
 const commit = "1234567890abcdef1234567890abcdef12345678";
@@ -25,6 +27,7 @@ function automation(
   trigger:
     | { readonly type: "schedule"; readonly expression: string; readonly timezone: string }
     | { readonly type: "webhook"; readonly route: string },
+  committed = true,
 ) {
   return decodeAutomation({
     id,
@@ -43,7 +46,7 @@ function automation(
     ],
     edges: [],
     definitionDigest: digest,
-    configCommit: commit,
+    ...(committed ? { configCommit: commit } : {}),
     createdAt: now,
     updatedAt: now,
   });
@@ -116,6 +119,8 @@ it.effect("admits due schedules and exact Space-scoped webhook routes at committ
     get: () => Effect.die("unused"),
     recoverDue: () => Effect.die("unused"),
     decideApproval: () => Effect.die("unused"),
+    approveInboxDraft: () => Effect.die("unused"),
+    getInboxDraftReceipt: () => Effect.die("unused"),
   } satisfies AutomationRunsShape);
   const testLayer = layer.pipe(
     Layer.provide(Layer.succeed(CommandCenterService, service)),
@@ -156,5 +161,98 @@ it.effect("admits due schedules and exact Space-scoped webhook routes at committ
         expectedDefinitionDigest: digest,
       }),
     ]);
+  }).pipe(Effect.provide(testLayer));
+});
+
+it.effect("classifies an uncommitted schedule as a durable permanent admission fault", () => {
+  const scheduled = automation(
+    "scheduled-draft",
+    { type: "schedule", expression: "0 12 * * *", timezone: "UTC" },
+    false,
+  );
+  const service = CommandCenterService.of({
+    queryAutomations: () => Effect.succeed({ automations: [scheduled] }),
+  } as unknown as CommandCenterServiceShape);
+  const runs = AutomationRuns.of({
+    start: () => Effect.die("must not start an uncommitted definition"),
+    get: () => Effect.die("unused"),
+    recoverDue: () => Effect.die("unused"),
+    decideApproval: () => Effect.die("unused"),
+    approveInboxDraft: () => Effect.die("unused"),
+    getInboxDraftReceipt: () => Effect.die("unused"),
+  } satisfies AutomationRunsShape);
+  const testLayer = layer.pipe(
+    Layer.provide(Layer.succeed(CommandCenterService, service)),
+    Layer.provide(Layer.succeed(AutomationRuns, runs)),
+  );
+
+  return Effect.gen(function* () {
+    const coordinator = yield* AutomationTriggerCoordinator;
+    const error = yield* coordinator
+      .admitSchedule({
+        automationId: scheduled.id,
+        spaceId: scheduled.spaceId,
+        scheduledFor: now,
+      })
+      .pipe(Effect.flip);
+    expect(error).toMatchObject({
+      reason: "admission-blocked",
+      admissionFailure: {
+        classification: "permanent",
+        canonicalCode: "automation-uncommitted",
+      },
+    });
+  }).pipe(Effect.provide(testLayer));
+});
+
+it.effect("classifies a paused scheduled admission as intentional control", () => {
+  const scheduled = automation("scheduled-paused", {
+    type: "schedule",
+    expression: "0 12 * * *",
+    timezone: "UTC",
+  });
+  const service = CommandCenterService.of({
+    queryAutomations: () => Effect.succeed({ automations: [scheduled] }),
+  } as unknown as CommandCenterServiceShape);
+  const runs = AutomationRuns.of({
+    start: () =>
+      Effect.fail(
+        new CommandCenterError({
+          reason: "validation",
+          message: "Automation is paused.",
+          cause: new AutomationRuntimeError({
+            code: "automation-paused",
+            detail: "Automation is paused.",
+          }),
+        }),
+      ),
+    get: () => Effect.die("unused"),
+    recoverDue: () => Effect.die("unused"),
+    decideApproval: () => Effect.die("unused"),
+    approveInboxDraft: () => Effect.die("unused"),
+    getInboxDraftReceipt: () => Effect.die("unused"),
+  } satisfies AutomationRunsShape);
+  const testLayer = layer.pipe(
+    Layer.provide(Layer.succeed(CommandCenterService, service)),
+    Layer.provide(Layer.succeed(AutomationRuns, runs)),
+  );
+
+  return Effect.gen(function* () {
+    const coordinator = yield* AutomationTriggerCoordinator;
+    const error = yield* coordinator
+      .admitSchedule({
+        automationId: scheduled.id,
+        spaceId: scheduled.spaceId,
+        scheduledFor: now,
+      })
+      .pipe(Effect.flip);
+    expect(error).toMatchObject({
+      reason: "admission-blocked",
+      message: "Automation is paused.",
+      admissionFailure: {
+        classification: "paused",
+        canonicalCode: "automation-paused",
+      },
+    });
   }).pipe(Effect.provide(testLayer));
 });

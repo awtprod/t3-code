@@ -1,7 +1,7 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { LinkIcon, PlusIcon } from "lucide-react";
+import { useEffect } from "react";
 
-import { CommandCenterHome } from "../command-center/CommandCenterHome";
 import { Button } from "../components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
@@ -21,7 +21,15 @@ function ChatIndexRouteView() {
     if (environments.length === 0) return <HostedStaticOnboardingState />;
   }
 
-  return <CommandCenterHome />;
+  return <InboxRedirect />;
+}
+
+function InboxRedirect() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    void navigate({ to: "/inbox", search: { tab: "actionable" }, replace: true });
+  }, [navigate]);
+  return null;
 }
 
 export const Route = createFileRoute("/_chat/")({

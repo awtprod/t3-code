@@ -170,9 +170,37 @@ export function mediaKindFromPath(path: string): "image" | "video" | null {
   return mimeType.startsWith("video/") ? "video" : "image";
 }
 
+/** Browser-playable video containers the chat can surface as a play tile. */
+export const WORKSPACE_VIDEO_PREVIEW_EXTENSIONS = [
+  ".m4v",
+  ".mov",
+  ".mp4",
+  ".ogv",
+  ".webm",
+] as const;
+
+const VIDEO_MIME_TYPE_BY_PREVIEW_EXTENSION: Readonly<Record<string, string>> = {
+  ".m4v": "video/mp4",
+  ".mov": "video/quicktime",
+  ".mp4": "video/mp4",
+  ".ogv": "video/ogg",
+  ".webm": "video/webm",
+};
+
 function hasPreviewExtension(path: string, extensions: ReadonlyArray<string>): boolean {
   const pathWithoutQuery = path.split(/[?#]/, 1)[0]?.toLowerCase() ?? "";
   return extensions.some((extension) => pathWithoutQuery.endsWith(extension));
+}
+
+/**
+ * The video extension of a workspace FILESYSTEM path. `?` and `#` are literal
+ * filename characters here (the server signs and serves exactly this path),
+ * so nothing is stripped: `clip.mp4#x` is not a video, `a.webm?v=2` is not
+ * `a.webm`. Callers holding a URL must strip query/fragment themselves.
+ */
+function workspaceVideoPreviewExtension(path: string): string | undefined {
+  const lowerPath = path.toLowerCase();
+  return WORKSPACE_VIDEO_PREVIEW_EXTENSIONS.find((extension) => lowerPath.endsWith(extension));
 }
 
 export function isWorkspaceBrowserPreviewPath(path: string): boolean {
@@ -195,4 +223,10 @@ export function isWorkspaceAudioPreviewPath(path: string): boolean {
 
 export function isWorkspacePreviewEntryPath(path: string): boolean {
   return isWorkspaceBrowserPreviewPath(path) || isWorkspaceImagePreviewPath(path);
+}
+
+/** The inline video Content-Type for a workspace video path, or null for non-videos. */
+export function workspaceVideoPreviewMimeType(path: string): string | null {
+  const extension = workspaceVideoPreviewExtension(path);
+  return extension === undefined ? null : (VIDEO_MIME_TYPE_BY_PREVIEW_EXTENSION[extension] ?? null);
 }

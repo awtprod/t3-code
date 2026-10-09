@@ -123,6 +123,30 @@ describe("normalizeDispatchCommand attachments", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
+  it.effect("passes windows-file references through without claiming an upload", () =>
+    Effect.gen(function* () {
+      const reference = {
+        type: "windows-file" as const,
+        id: "wf-00000000-0000-4000-8000-0000000000bb",
+        name: "Timeline 1.mov",
+        mimeType: "video/quicktime",
+        sizeBytes: 372874603,
+        host: "editing-pc",
+        path: "C:\\Media\\Timeline 1.mov",
+      };
+      const command = turnStartCommand({ attachments: [] });
+      if (command.type !== "thread.turn.start") throw new Error("unreachable");
+      const normalized = yield* normalizeDispatchCommand({
+        ...command,
+        message: { ...command.message, attachments: [reference] },
+      });
+      if (normalized.type !== "thread.turn.start") {
+        throw new Error("Expected a thread.turn.start command.");
+      }
+      expect(normalized.message.attachments).toEqual([reference]);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect("preserves inline image attachments from existing mobile clients", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

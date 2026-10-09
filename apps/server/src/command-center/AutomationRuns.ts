@@ -5,16 +5,28 @@ import {
   type CommandCenterAutomationRunGetInput,
   type CommandCenterAutomationRunStartInput,
   CommandCenterError,
+  GoogleDraftCreateResult,
+  type CommandCenterInboxDraftApproveInput,
 } from "@t3tools/contracts";
-import type { Approval as ApprovalType } from "@command-center/core";
+import { ApprovalId, ItemId, SpaceId, type Approval as ApprovalType } from "@command-center/core";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Semaphore from "effect/Semaphore";
+import * as Schedule from "effect/Schedule";
+import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as CommandCenterService from "./Service.ts";
+import * as RepositoryChecks from "./RepositoryChecks.ts";
+import * as InboxGmailDrafts from "./InboxGmailDrafts.ts";
+import * as CommandCenterCredentialStore from "./CredentialStore.ts";
+import { makeProspectEvaluationConnector } from "./ProspectEvaluation.ts";
+import * as ProspectNotificationRelay from "../relay/ProspectNotificationRelay.ts";
 import { ServerConfig } from "../config.ts";
 import * as GoogleReadConnector from "./GoogleReadConnector.ts";
 import { googleCapabilityForDraft, googleCapabilityForOperation } from "./GoogleCapabilities.ts";
@@ -27,13 +39,24 @@ import {
   type AutomationAgentRunFailure,
 } from "./automation/AgentRunAdapter.ts";
 import * as AutomationScopedShell from "./automation/AutomationScopedShell.ts";
-import { makeSafeAutomationNodeExecutor } from "./automation/NodeExecutor.ts";
+import {
+  makeSafeAutomationNodeExecutor,
+  type ProspectNotificationResult,
+} from "./automation/NodeExecutor.ts";
 import * as AutomationRuntime from "./automation/Runtime.ts";
 
 const decodeExecution = Schema.decodeUnknownEffect(CommandCenterAutomationExecution);
+const decodeDraftResult = Schema.decodeUnknownEffect(GoogleDraftCreateResult);
 const isCommandCenterError = Schema.is(CommandCenterError);
 const isAutomationRuntimeError = Schema.is(AutomationRuntime.AutomationRuntimeError);
 const terminalStates = new Set(["succeeded", "failed", "canceled"]);
+const retryableProspectNotificationReasons =
+  new Set<ProspectNotificationRelay.ProspectNotificationRelayFailureReason>([
+    "item_load_failed",
+    "signing_failed",
+    "request_failed",
+    "timed_out",
+  ]);
 
 type JsonRecord = Readonly<Record<string, Schema.Json>>;
 
@@ -46,13 +69,42 @@ function readRequiredString(record: JsonRecord, key: string): string | undefined
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function summarizeProspectNotificationResults(
+  results: ReadonlyArray<ProspectNotificationRelay.ProspectNotificationRelayItemResult>,
+): ProspectNotificationResult {
+  const queuedCount = results.filter((result) => result.status === "queued").length;
+  const skippedCount = results.filter((result) => result.status === "skipped").length;
+  const failedCount = results.filter((result) => result.status === "failed").length;
+  const status =
+    results.length === 0
+      ? "noop"
+      : skippedCount === results.length
+        ? "skipped"
+        : queuedCount === results.length
+          ? "queued"
+          : "partial";
+  return { status, queuedCount, skippedCount, failedCount };
+}
+
+function isRetryableProspectNotificationError(
+  error: ProspectNotificationRelay.ProspectNotificationRelayBatchError,
+): boolean {
+  const failedReasons = error.results.flatMap((result) =>
+    result.status === "failed" ? [result.reason] : [],
+  );
+  const reasons = failedReasons.length === 0 ? [error.reason] : failedReasons;
+  return reasons.every((reason) => retryableProspectNotificationReasons.has(reason));
+}
+
 const toCommandCenterError = (cause: unknown): CommandCenterError => {
   if (isCommandCenterError(cause)) return cause;
   if (isAutomationRuntimeError(cause)) {
     const reason =
       cause.code === "automation-not-found" || cause.code === "execution-not-found"
         ? "not_found"
-        : cause.code === "idempotency-conflict" || cause.code === "definition-mismatch"
+        : cause.code === "idempotency-conflict" ||
+            cause.code === "definition-mismatch" ||
+            cause.code === "admission-conflict"
           ? "conflict"
           : "validation";
     return new CommandCenterError({ reason, message: cause.message, cause });
@@ -65,6 +117,19 @@ const toCommandCenterError = (cause: unknown): CommandCenterError => {
 };
 
 export interface AutomationRunsShape {
+  readonly approveInboxDraft: (
+    input: CommandCenterInboxDraftApproveInput,
+    actorSubject: string,
+  ) => Effect.Effect<
+    import("@t3tools/contracts").CommandCenterInboxDraftReceipt,
+    CommandCenterError
+  >;
+  readonly getInboxDraftReceipt: (
+    input: import("@t3tools/contracts").CommandCenterInboxDraftReceiptInput,
+  ) => Effect.Effect<
+    import("@t3tools/contracts").CommandCenterInboxDraftReceipt | null,
+    CommandCenterError
+  >;
   readonly start: (
     input: CommandCenterAutomationRunStartInput,
   ) => Effect.Effect<CommandCenterAutomationExecutionType, CommandCenterError>;
@@ -101,18 +166,87 @@ export class AutomationRuns extends Context.Service<AutomationRuns, AutomationRu
   "@awtprod/command-center/command-center/AutomationRuns",
 ) {}
 
+/**
+ * Resolve the server-owned export files a Gmail draft may attach. The requested Artifact ids are
+ * looked up directly with Space scope, so an older export stays attachable no matter how many
+ * newer Artifacts the Space holds, while an id from another Space is still rejected.
+ */
+export const resolveGoogleDraftAttachmentPaths = Effect.fn(
+  "AutomationRuns.resolveGoogleDraftAttachmentPaths",
+)(function* (input: {
+  readonly commandCenter: Pick<
+    CommandCenterService.CommandCenterService["Service"],
+    "getArtifactsByIds"
+  >;
+  readonly path: Pick<Path.Path, "join">;
+  readonly attachmentsDir: string;
+  readonly spaceId: SpaceId;
+  readonly attachmentArtifactIds: ReadonlyArray<string>;
+}) {
+  const requestedArtifactIds = input.attachmentArtifactIds;
+  const found =
+    requestedArtifactIds.length === 0
+      ? []
+      : (yield* input.commandCenter.getArtifactsByIds({
+          spaceId: input.spaceId,
+          artifactIds: requestedArtifactIds,
+        })).artifacts;
+  const foundById = new Map(
+    found
+      .filter((artifact) => artifact.spaceId === input.spaceId)
+      .map((artifact) => [artifact.id as string, artifact] as const),
+  );
+  const artifacts = requestedArtifactIds.flatMap((artifactId) => {
+    const artifact = foundById.get(artifactId);
+    return artifact === undefined ? [] : [artifact];
+  });
+  if (artifacts.length !== requestedArtifactIds.length) {
+    return yield* Effect.fail("A Gmail draft attachment is not available in this Space.");
+  }
+  const paths = artifacts.map((artifact) => {
+    const extension = artifact.name.split(".").at(-1);
+    return extension !== undefined &&
+      /^[a-z0-9]{1,10}$/iu.test(extension) &&
+      artifact.kind === "export" &&
+      artifact.locator === `cc-artifact://${artifact.id}`
+      ? input.path.join(input.attachmentsDir, "exports", `${artifact.id}.${extension}`)
+      : undefined;
+  });
+  if (paths.some((attachmentPath) => attachmentPath === undefined)) {
+    return yield* Effect.fail("Gmail drafts may attach only server-owned export artifacts.");
+  }
+  return paths.filter((attachmentPath): attachmentPath is string => attachmentPath !== undefined);
+});
+
+/** Bounded wait for in-flight drives on shutdown (systemd stops after 30 s). */
+const DRIVE_SHUTDOWN_DRAIN = Duration.seconds(20);
+
 export const layer = Layer.effect(
   AutomationRuns,
   Effect.gen(function* () {
     const runtime = yield* AutomationRuntime.AutomationRuntime;
     const commandCenter = yield* CommandCenterService.CommandCenterService;
+    const inboxDrafts = yield* InboxGmailDrafts.InboxGmailDrafts;
     const sql = yield* SqlClient.SqlClient;
+    // Drives run on the server's lifetime, not the request's: a client
+    // disconnect or RPC cancel must not interrupt a step mid-way (an unsafe
+    // step would then have to fail closed). On shutdown, in-flight drives get
+    // a bounded drain before they are interrupted.
+    const drives = yield* FiberSet.make<AutomationRuntime.AutomationExecutionSnapshot, unknown>();
+    const inboxDraftAdmission = yield* Semaphore.make(1);
+    yield* Effect.addFinalizer(() =>
+      FiberSet.awaitEmpty(drives).pipe(Effect.timeoutOption(DRIVE_SHUTDOWN_DRAIN), Effect.asVoid),
+    );
+    // Operator hold: executions created before this process started are not
+    // resumed by any path while it is set.
+    const held = yield* AutomationRuntime.readAutomationRecoveryHold;
+    const startedAt = yield* runtime.now;
+    const isHeld = (snapshot: AutomationRuntime.AutomationExecutionSnapshot) =>
+      held && snapshot.createdAt < startedAt;
     const inspectAgentRun = makeAutomationAgentRunInspector(sql);
 
-    const record = Effect.fn("AutomationRuns.record")(function* (
-      snapshot: AutomationRuntime.AutomationExecutionSnapshot,
-    ) {
-      yield* commandCenter.recordAutomationEvent({
+    const recordSnapshot = (snapshot: AutomationRuntime.AutomationExecutionSnapshot) =>
+      commandCenter.recordAutomationEvent({
         executionId: snapshot.id,
         automationId: snapshot.automationId,
         spaceId: snapshot.spaceId,
@@ -122,9 +256,25 @@ export const layer = Layer.effect(
         input: snapshot.input,
         output: snapshot.output,
         createdAt: snapshot.createdAt,
+        updatedAt: snapshot.updatedAt,
+        checkpoints: snapshot.checkpoints.map((checkpoint) => ({
+          nodeId: checkpoint.nodeId,
+          state: checkpoint.state,
+          attemptCount: checkpoint.attemptCount,
+          resolutionKey: checkpoint.resolutionKey,
+        })),
         finishedAt: snapshot.finishedAt,
         ...(snapshot.error === null ? {} : { error: snapshot.error }),
       });
+
+    const record = Effect.fn("AutomationRuns.record")(function* (
+      snapshot: AutomationRuntime.AutomationExecutionSnapshot,
+    ) {
+      // A superseded snapshot is still audited, but it must not drive the
+      // Run projection or approval gates: whoever wrote the newer runtime row
+      // records that row.
+      const { projected } = yield* recordSnapshot(snapshot);
+      if (!projected) return;
       if (snapshot.state === "waiting_approval") {
         const waiting = snapshot.checkpoints.filter(
           (checkpoint) => checkpoint.state === "waiting_approval" && checkpoint.resumeKey !== null,
@@ -151,13 +301,29 @@ export const layer = Layer.effect(
       if (!["queued", "running", "waiting_retry", "waiting_delay"].includes(initial.state)) {
         return initial;
       }
-      const lease = yield* runtime.acquireLease({
-        executionId: initial.id,
-        owner,
-        ttlMs: 30_000,
-      });
+      if (isHeld(initial)) return initial;
+      const acquired = yield* runtime
+        .acquireLease({
+          executionId: initial.id,
+          owner,
+          ttlMs: AutomationRuntime.AUTOMATION_LEASE_TTL_MS,
+        })
+        .pipe(
+          Effect.map((lease) => ({ lease })),
+          Effect.catchIf(
+            (cause) =>
+              isAutomationRuntimeError(cause) &&
+              (cause.code === "lease-denied" || cause.code === "invalid-state"),
+            () => Effect.succeed(null),
+          ),
+        );
+      // Another worker holds the live lease and is driving this execution (or
+      // it already finished); it records the result. Report the current state
+      // instead of failing.
+      if (acquired === null) return yield* runtime.get(initial.id);
+      const lease = acquired.lease;
       const command = { executionId: initial.id, owner, token: lease.token };
-      yield* Effect.gen(function* () {
+      const drive = Effect.gen(function* () {
         let current = initial;
         for (let step = 0; step < 100; step += 1) {
           if (
@@ -175,8 +341,14 @@ export const layer = Layer.effect(
             break;
           }
         }
-      }).pipe(Effect.ensuring(runtime.releaseLease(command).pipe(Effect.ignore)));
-      return yield* runtime.get(initial.id);
+      }).pipe(
+        Effect.ensuring(runtime.releaseLease(command).pipe(Effect.ignore)),
+        // Project the result from the detached fiber too: the caller may be
+        // gone (cancelled request, shutdown drain) by the time the step ends.
+        Effect.andThen(runtime.get(initial.id)),
+        Effect.tap((finished) => record(finished).pipe(Effect.retry(Schedule.recurs(2)))),
+      );
+      return yield* Fiber.join(yield* FiberSet.run(drives)(drive));
     });
 
     const applyAutomationApproval = Effect.fn("AutomationRuns.applyAutomationApproval")(function* (
@@ -354,6 +526,8 @@ export const layer = Layer.effect(
       owner: string,
     ) {
       let snapshot = yield* runtime.get(executionId);
+      // Held executions are left exactly as they are, decisions included.
+      if (isHeld(snapshot)) return snapshot;
       if (snapshot.state === "waiting_approval") {
         yield* record(snapshot);
         snapshot = yield* reconcileWaitingApproval(snapshot);
@@ -371,12 +545,14 @@ export const layer = Layer.effect(
     const recoverDue = Effect.fn("AutomationRuns.recoverDue")(function* (
       input: Parameters<AutomationRunsShape["recoverDue"]>[0],
     ) {
-      const due = yield* runtime.listRecoverable(
-        input.limit === undefined ? {} : { limit: input.limit },
-      );
-      const waitingAgents = yield* runtime.listWaitingExternal(
-        input.limit === undefined ? {} : { limit: input.limit },
-      );
+      // While held, scan only work created after start so held executions
+      // (which are left untouched) cannot fill every batch.
+      const scope = {
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+        ...(held ? { createdAtOrAfter: startedAt } : {}),
+      };
+      const due = yield* runtime.listRecoverable(scope);
+      const waitingAgents = yield* runtime.listWaitingExternal(scope);
       // A process can stop after the canonical Approval transaction commits but
       // before its checkpoint is resumed. Reconcile those durable decisions as
       // part of the same recovery pass; requested approvals remain inert.
@@ -395,11 +571,29 @@ export const layer = Layer.effect(
           }),
         ),
       ).pipe(Effect.map((groups) => groups.flat()));
+      // A process can also stop after the runtime reached waiting_approval
+      // but before the Run and its approval gate were projected. Nothing would
+      // ever show that gate, so recover it here.
+      const unprojectedGates = yield* sql<{ readonly id: string }>`
+        SELECT DISTINCT execution.id
+        FROM command_center_automation_executions execution
+        JOIN command_center_automation_node_checkpoints checkpoint
+          ON checkpoint.execution_id = execution.id AND checkpoint.state = 'waiting_approval'
+        WHERE execution.state = 'waiting_approval'
+          AND execution.created_at >= ${held ? startedAt : ""}
+          AND NOT EXISTS (
+            SELECT 1 FROM command_center_approvals approval
+            WHERE approval.id = 'automation-approval:' || execution.id || ':' || checkpoint.node_id
+          )
+        ORDER BY execution.updated_at, execution.id
+        LIMIT ${input.limit ?? 50}
+      `;
       const executionIds = [
         ...new Set([
           ...due.map((snapshot) => snapshot.id),
           ...waitingAgents.map((snapshot) => snapshot.id),
           ...waitingApprovalIds,
+          ...unprojectedGates.map((row) => row.id),
         ]),
       ];
       const results = yield* Effect.forEach(executionIds, (executionId) =>
@@ -440,7 +634,7 @@ export const layer = Layer.effect(
           message: "The automation execution was not found in the requested Space.",
         });
       }
-      if (snapshot.state === "waiting_approval") {
+      if (snapshot.state === "waiting_approval" && !isHeld(snapshot)) {
         yield* record(snapshot);
         snapshot = yield* reconcileWaitingApproval(snapshot);
       }
@@ -530,7 +724,161 @@ export const layer = Layer.effect(
       };
     }, Effect.mapError(toCommandCenterError));
 
-    return AutomationRuns.of({ start, get, recoverDue, decideApproval });
+    const approveInboxDraft: AutomationRunsShape["approveInboxDraft"] = Effect.fn(
+      "AutomationRuns.approveInboxDraft",
+    )(function* (input, actorSubject) {
+      const automations = (yield* commandCenter.queryAutomations({
+        spaceId: input.spaceId,
+        enabled: true,
+        limit: 500,
+      })).automations;
+      const templates = automations.filter((automation) => {
+        if (
+          automation.trigger.type !== "manual" ||
+          automation.configCommit === undefined ||
+          automation.nodes.length !== 2 ||
+          automation.edges.length !== 1
+        )
+          return false;
+        const approval = automation.nodes.find((node) => node.kind === "approval");
+        const draft = automation.nodes.find((node) => node.kind === "connector.write");
+        return (
+          approval !== undefined &&
+          draft !== undefined &&
+          draft.config.operation === "gmail.draft.create" &&
+          draft.config.source === "inbox.accepted" &&
+          automation.edges[0]?.sourceNodeId === approval.id &&
+          automation.edges[0]?.targetNodeId === draft.id
+        );
+      });
+      if (templates.length !== 1) {
+        return yield* new CommandCenterError({
+          reason: "validation",
+          message:
+            "This Space needs exactly one enabled Inbox Gmail draft approval flow before a draft can be created.",
+        });
+      }
+      const template = templates[0]!;
+      // Admission coalesces onto a Responsibility's active run. Another draft's
+      // run (e.g. one held across a deploy) would otherwise absorb this
+      // approval, or this approval would decide that run's gate.
+      // The check, the receipt approval and the admission run under one lock,
+      // so two different drafts approved at once cannot both pass the check
+      // and have one bound to the other's run.
+      const admitted = yield* inboxDraftAdmission.withPermits(1)(
+        Effect.gen(function* () {
+          const otherActive = yield* sql<{ readonly id: string; readonly state: string }>`
+            SELECT id, state FROM command_center_automation_executions
+            WHERE automation_id = ${template.id} AND space_id = ${input.spaceId}
+              AND state NOT IN ('succeeded', 'failed', 'canceled')
+              AND COALESCE(json_extract(input_json, '$.mutationId'), '') != ${input.mutationId}
+            LIMIT 1
+          `;
+          const blocking = otherActive[0];
+          if (blocking !== undefined) {
+            return yield* new CommandCenterError({
+              reason: "conflict",
+              message: `Another Inbox Gmail draft (run ${blocking.id}, ${blocking.state}) is still being processed in this Space. Approve this draft after it finishes.`,
+            });
+          }
+          const approvedReceipt = yield* inboxDrafts.approve(input, actorSubject);
+          if (approvedReceipt.status === "created" || approvedReceipt.status === "uncertain") {
+            return { approved: approvedReceipt };
+          }
+          yield* inboxDrafts.loadForExecution({
+            mutationId: input.mutationId,
+            spaceId: input.spaceId,
+            payloadDigest: approvedReceipt.payloadDigest,
+          });
+          // Admission only; the run is driven after the lock is released so
+          // other approvals never wait on a step.
+          yield* runtime.start({
+            automationId: template.id,
+            expectedSpaceId: input.spaceId,
+            // Never join another draft's (or a manual) run of this template.
+            coalesce: "same-input",
+            idempotencyKey: `inbox-gmail-draft:${input.mutationId}`,
+            expectedConfigCommitSha: template.configCommit!,
+            expectedDefinitionDigest: template.definitionDigest,
+            input: { mutationId: input.mutationId, payloadDigest: approvedReceipt.payloadDigest },
+          });
+          return { approved: approvedReceipt, payloadDigest: approvedReceipt.payloadDigest };
+        }),
+      );
+      const approved = admitted.approved;
+      if (!("payloadDigest" in admitted)) return approved;
+      // Same idempotency key: returns the run admitted above and drives it.
+      const execution = yield* start({
+        automationId: template.id,
+        spaceId: input.spaceId,
+        idempotencyKey: `inbox-gmail-draft:${input.mutationId}`,
+        expectedConfigCommitSha: template.configCommit!,
+        expectedDefinitionDigest: template.definitionDigest,
+        input: { mutationId: input.mutationId, payloadDigest: admitted.payloadDigest },
+      });
+      if (execution.input.mutationId !== input.mutationId) {
+        return yield* new CommandCenterError({
+          reason: "conflict",
+          message:
+            "Another Inbox Gmail draft is still being processed in this Space. Approve this draft after it finishes.",
+        });
+      }
+      const waiting = execution.checkpoints.find(
+        (checkpoint) =>
+          checkpoint.state === "waiting_approval" && checkpoint.nodeKind === "approval",
+      );
+      if (waiting === undefined) {
+        const latest = yield* inboxDrafts.receipt({ spaceId: input.spaceId, itemId: input.itemId });
+        if (
+          latest !== null &&
+          latest.revisionId === input.revisionId &&
+          latest.status === "created"
+        )
+          return latest;
+        return yield* new CommandCenterError({
+          reason: "conflict",
+          message: "The Gmail draft automation is not waiting at its approval gate.",
+        });
+      }
+      const approvalId = `automation-approval:${execution.id}:${waiting.nodeId}`;
+      const rows = yield* sql<{ readonly payloadDigest: string }>`
+        SELECT payload_digest AS "payloadDigest" FROM command_center_approvals
+        WHERE id = ${approvalId} AND status = 'requested' LIMIT 1
+      `;
+      const gate = rows[0];
+      if (gate === undefined)
+        return yield* new CommandCenterError({
+          reason: "conflict",
+          message: "The Gmail draft approval gate is unavailable.",
+        });
+      yield* inboxDrafts.loadForExecution({
+        mutationId: input.mutationId,
+        spaceId: input.spaceId,
+        payloadDigest: approved.payloadDigest,
+      });
+      yield* decideApproval({
+        approvalId: ApprovalId.make(approvalId),
+        payloadDigest: gate.payloadDigest,
+        decision: "approved",
+      });
+      const latest = yield* inboxDrafts.receipt({ spaceId: input.spaceId, itemId: input.itemId });
+      if (latest === null || latest.revisionId !== input.revisionId) {
+        return yield* new CommandCenterError({
+          reason: "persistence",
+          message: "The Gmail draft receipt is unavailable.",
+        });
+      }
+      return latest;
+    }, Effect.mapError(toCommandCenterError));
+
+    return AutomationRuns.of({
+      start,
+      get,
+      recoverDue,
+      decideApproval,
+      approveInboxDraft,
+      getInboxDraftReceipt: inboxDrafts.receipt,
+    });
   }),
 );
 
@@ -548,6 +896,110 @@ export const failClosedRuntimeLayer = Layer.unwrap(
 );
 
 /**
+ * Gmail draft executors for the safe runtime. `prepareGoogleDraft` checks the
+ * Space-scoped connection grant and resolves attachments. `executeInboxDraft`
+ * runs the `connector.write` node of an Inbox Gmail draft approval flow: it
+ * re-binds the approved receipt, claims it, and makes exactly one
+ * `createDraft` call. A created receipt short-circuits; a failed or
+ * unverified response becomes `uncertain` and is never retried.
+ */
+export const makeGoogleDraftExecutors = (dependencies: {
+  readonly commandCenter: CommandCenterService.CommandCenterServiceShape;
+  readonly inboxDrafts: InboxGmailDrafts.InboxGmailDrafts["Service"];
+  readonly google: GoogleReadConnector.GoogleReadConnectorShape;
+  readonly path: Path.Path;
+  readonly attachmentsDir: string;
+}) => {
+  const { commandCenter, inboxDrafts, google, path, attachmentsDir } = dependencies;
+  const prepareGoogleDraft = Effect.fn("AutomationRuns.prepareGoogleDraft")(function* (
+    input: import("@t3tools/contracts").GoogleDraftCreateRequest,
+  ) {
+    const requiredCapability = googleCapabilityForDraft(input.operation);
+    const connections = (yield* commandCenter.queryConnections({ spaceId: input.spaceId }))
+      .connections;
+    const connection = connections.find(
+      (candidate) =>
+        candidate.id === input.connectionId &&
+        candidate.spaceId === input.spaceId &&
+        candidate.kind === "google" &&
+        candidate.capabilities.includes(requiredCapability),
+    );
+    if (connection === undefined) {
+      return yield* Effect.fail(
+        `The requested Google connection does not grant ${requiredCapability}.`,
+      );
+    }
+    return yield* resolveGoogleDraftAttachmentPaths({
+      commandCenter,
+      path,
+      attachmentsDir,
+      spaceId: input.spaceId,
+      attachmentArtifactIds: input.attachmentArtifactIds ?? [],
+    });
+  });
+
+  const executeInboxDraft = Effect.fn("AutomationRuns.executeInboxDraft")(
+    function* (context: import("./automation/Runtime.ts").AutomationNodeExecutionContext) {
+      const runInput = context.runInput;
+      const mutationId = runInput.mutationId;
+      const payloadDigest = runInput.payloadDigest;
+      if (typeof mutationId !== "string" || typeof payloadDigest !== "string") {
+        return yield* Effect.fail(
+          "The accepted Inbox draft Run has no immutable approval binding.",
+        );
+      }
+      const bound = yield* inboxDrafts.loadForExecution({
+        mutationId,
+        spaceId: context.spaceId,
+        payloadDigest,
+      });
+      if (bound.status === "created") return bound.receipt as unknown as Schema.Json;
+      const attachmentPaths = yield* prepareGoogleDraft(bound.request);
+      if (google.createDraft === undefined) {
+        return yield* Effect.fail("Gmail draft creation is not configured on this server.");
+      }
+      yield* inboxDrafts.claim(mutationId);
+      const drafted = yield* google
+        .createDraft(bound.request, attachmentPaths, bound.accountAlias)
+        .pipe(
+          Effect.match({
+            onFailure: (error) => ({ ok: false as const, error }),
+            onSuccess: (value) => ({ ok: true as const, value }),
+          }),
+        );
+      if (!drafted.ok) {
+        yield* inboxDrafts.uncertain(mutationId, drafted.error.message);
+        return yield* Effect.fail(
+          "Gmail draft creation needs reconciliation; no automatic retry will create another draft.",
+        );
+      }
+      const result = yield* decodeDraftResult(drafted.value).pipe(
+        Effect.match({
+          onFailure: () => ({ ok: false as const }),
+          onSuccess: (value) => ({ ok: true as const, value }),
+        }),
+      );
+      if (!result.ok) {
+        yield* inboxDrafts.uncertain(
+          mutationId,
+          "The Gmail draft response did not contain a verified draft ID.",
+        );
+        return yield* Effect.fail(
+          "Gmail draft creation needs reconciliation; the draft ID was not verified.",
+        );
+      }
+      return (yield* inboxDrafts.complete(mutationId, {
+        draftId: result.value.draftId,
+        ...(result.value.messageId === undefined ? {} : { messageId: result.value.messageId }),
+        ...(result.value.threadId === undefined ? {} : { threadId: result.value.threadId }),
+      })) as unknown as Schema.Json;
+    },
+    Effect.mapError((cause) => (typeof cause === "string" ? cause : cause.message)),
+  );
+  return { prepareGoogleDraft, executeInboxDraft };
+};
+
+/**
  * Runtime layer for the deliberately small v1 executor surface. Every external
  * operation is resolved through its Space-scoped service. Agent work uses the
  * durable Run dispatcher, and shell work receives only a server-resolved
@@ -556,13 +1008,57 @@ export const failClosedRuntimeLayer = Layer.unwrap(
 export const safeRuntimeLayer = Layer.unwrap(
   Effect.gen(function* () {
     const commandCenter = yield* CommandCenterService.CommandCenterService;
+    const inboxDrafts = yield* InboxGmailDrafts.InboxGmailDrafts;
     const google = yield* GoogleReadConnector.GoogleReadConnector;
     const serverConfig = yield* ServerConfig;
     const path = yield* Path.Path;
     const scopedShell = yield* AutomationScopedShell.AutomationScopedShell;
+    const prospectNotificationRelay = yield* ProspectNotificationRelay.ProspectNotificationRelay;
+    const repositoryChecks = yield* RepositoryChecks.RepositoryChecks;
+    const credentials = yield* CommandCenterCredentialStore.make;
     const startAgentRun = yield* makeLiveAutomationAgentRunAdapter;
+    const prospectEvaluation = makeProspectEvaluationConnector({
+      credentials,
+      items: {
+        queryItems: (input) =>
+          commandCenter
+            .queryItems({ spaceId: SpaceId.make(input.spaceId) })
+            .pipe(Effect.mapError((cause) => cause.message)),
+        createItem: (input) =>
+          commandCenter
+            .createItem({ ...input, spaceId: SpaceId.make(input.spaceId) })
+            .pipe(Effect.mapError((cause) => cause.message)),
+        updateItem: (input) =>
+          commandCenter
+            .updateItem({
+              ...input,
+              itemId: ItemId.make(input.itemId),
+              spaceId: SpaceId.make(input.spaceId),
+            })
+            .pipe(Effect.mapError((cause) => cause.message)),
+      },
+    });
+    const { prepareGoogleDraft, executeInboxDraft } = makeGoogleDraftExecutors({
+      commandCenter,
+      inboxDrafts,
+      google,
+      path,
+      attachmentsDir: serverConfig.attachmentsDir,
+    });
+
     const executeNode = makeSafeAutomationNodeExecutor({
+      pollRepositoryChecks: repositoryChecks.poll,
+      executeInboxDraft,
       startAgentRun,
+      evaluateProspects: prospectEvaluation.evaluate,
+      notifyProspects: (input) =>
+        prospectNotificationRelay.notify(input).pipe(
+          Effect.map(summarizeProspectNotificationResults),
+          Effect.mapError((error) => ({
+            message: error.message,
+            retryable: isRetryableProspectNotificationError(error),
+          })),
+        ),
       runScopedShell: scopedShell.execute,
       createItem: (input) =>
         commandCenter.createItem(input).pipe(
@@ -598,54 +1094,16 @@ export const safeRuntimeLayer = Layer.unwrap(
         ),
       googleDraft: (input) =>
         Effect.gen(function* () {
-          const requiredCapability = googleCapabilityForDraft(input.operation);
-          const connections = (yield* commandCenter.queryConnections({ spaceId: input.spaceId }))
-            .connections;
-          const connection = connections.find(
-            (candidate) =>
-              candidate.id === input.connectionId &&
-              candidate.spaceId === input.spaceId &&
-              candidate.kind === "google" &&
-              candidate.capabilities.includes(requiredCapability),
-          );
-          if (connection === undefined) {
-            return yield* Effect.fail(
-              `The requested Google connection does not grant ${requiredCapability}.`,
-            );
-          }
-          const artifacts =
-            input.attachmentArtifactIds === undefined
-              ? []
-              : (yield* commandCenter.queryArtifacts({
-                  spaceId: input.spaceId,
-                  limit: 500,
-                })).artifacts.filter((artifact) =>
-                  input.attachmentArtifactIds!.includes(artifact.id),
-                );
-          if (artifacts.length !== (input.attachmentArtifactIds?.length ?? 0)) {
-            return yield* Effect.fail("A Gmail draft attachment is not available in this Space.");
-          }
-          const attachmentPaths = artifacts.map((artifact) => {
-            const extension = artifact.name.split(".").at(-1);
-            return extension !== undefined &&
-              /^[a-z0-9]{1,10}$/iu.test(extension) &&
-              artifact.kind === "export" &&
-              artifact.locator === `cc-artifact://${artifact.id}`
-              ? path.join(serverConfig.attachmentsDir, "exports", `${artifact.id}.${extension}`)
-              : undefined;
-          });
-          if (attachmentPaths.some((attachmentPath) => attachmentPath === undefined)) {
-            return yield* Effect.fail(
-              "Gmail drafts may attach only server-owned export artifacts.",
-            );
-          }
-          const resolvedAttachmentPaths = attachmentPaths.filter(
-            (attachmentPath): attachmentPath is string => attachmentPath !== undefined,
-          );
-          if (google.createDraft === undefined) {
+          const attachmentPaths = yield* prepareGoogleDraft(input);
+          if (google.createDraft === undefined)
             return yield* Effect.fail("Gmail draft creation is not configured on this server.");
-          }
-          return yield* google.createDraft(input, resolvedAttachmentPaths);
+          const created = yield* google.createDraft(input, attachmentPaths);
+          return {
+            operation: created.operation,
+            draftId: created.draftId,
+            ...(created.messageId === undefined ? {} : { messageId: created.messageId }),
+            ...(created.threadId === undefined ? {} : { threadId: created.threadId }),
+          };
         }).pipe(Effect.mapError((cause) => (typeof cause === "string" ? cause : cause.message))),
     });
     const dependencies = yield* AutomationRuntime.makeDefaultDependencies(executeNode);
@@ -655,4 +1113,4 @@ export const safeRuntimeLayer = Layer.unwrap(
       defaultRetryDelayMs: 1_000,
     });
   }),
-);
+).pipe(Layer.provide(ProspectNotificationRelay.layer));

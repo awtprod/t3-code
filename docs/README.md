@@ -46,6 +46,7 @@ source alone does not explain. Most code changes do not need an internal documen
 - [Connection runtime](./internals/connection-runtime.md)
 - [Providers](./internals/providers.md)
 - [Model classification](./internals/model-manifest.md)
+- [Model efficiency](./internals/efficiency.md)
 - [Remote environments](./internals/remote.md)
 - [Server updates](./internals/server-updates.md)
 - [Resource telemetry](./internals/resource-telemetry.md)

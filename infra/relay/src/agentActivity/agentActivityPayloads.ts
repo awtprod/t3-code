@@ -6,7 +6,10 @@ import type {
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
-import type { ApnsNotificationPayload } from "./apnsDeliveryJobs.ts";
+import type {
+  ApnsNotificationPayload,
+  ApnsThreadNotificationPayload,
+} from "./apnsDeliveryJobs.ts";
 
 export function isTerminalPhase(state: RelayAgentActivityState): boolean {
   return state.phase === "completed" || state.phase === "failed";
@@ -96,9 +99,9 @@ export function sanitizeAgentActivityAggregateState(
   };
 }
 
-export function sanitizeApnsNotificationPayload(
-  notification: ApnsNotificationPayload,
-): ApnsNotificationPayload {
+export function sanitizeApnsNotificationPayload<A extends ApnsNotificationPayload>(
+  notification: A,
+): A {
   return {
     ...notification,
     title: truncateText(notification.title, MAX_SUMMARY_TEXT_LENGTH),
@@ -109,7 +112,7 @@ export function sanitizeApnsNotificationPayload(
 
 export function notificationForActivity(
   row: RelayAgentActivityAggregateRow,
-): ApnsNotificationPayload {
+): ApnsThreadNotificationPayload {
   const activity = sanitizeAgentActivityAggregateRow(row);
   return sanitizeApnsNotificationPayload({
     title: activity.threadTitle,

@@ -85,6 +85,11 @@ const main = Effect.gen(function* () {
     relayIssuer: "http://localhost",
     fcmServiceAccount: Redacted.make(credentials),
     apns: null,
+    webPush: {
+      privateKey: Redacted.make("web-push-private-key"),
+      publicKey: "web-push-public-key",
+      subject: "https://relay.example.test",
+    },
     clerkSecretKey: Redacted.make(""),
     clerkPublishableKey: "",
     clerkJwtAudience: "",

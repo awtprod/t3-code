@@ -80,6 +80,7 @@ import {
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { GitHubRoutingSettings } from "./GitHubRoutingSettings";
+import { PublishingConnectionsSection } from "./PublishingConnectionsSection";
 import { Input } from "../ui/input";
 import { CommandShortcut } from "../ui/command";
 import {
@@ -3878,6 +3879,9 @@ export function ConnectionsSettings() {
       </SettingsSection>
       <LoadBalancingSettings environments={loadBalancingEnvironments} />
       <GitHubRoutingSettings environments={loadBalancingEnvironments} />
+      {primaryEnvironmentId === null ? null : (
+        <PublishingConnectionsSection environmentId={primaryEnvironmentId} />
+      )}
     </SettingsPageContainer>
   );
 }

@@ -2487,6 +2487,36 @@ describe("composerDraftStore model seed migration", () => {
     await useComposerDraftStore.persist.clearStorage();
   });
 
+  it.each([
+    ["sonnet", "claude-sonnet-5"],
+    ["sonnet-5.5", "claude-sonnet-5-5"],
+    ["claude-sonnet-5.5", "claude-sonnet-5-5"],
+  ])("normalizes the legacy Claude alias %s without changing its model", (alias, canonical) => {
+    const merge = useComposerDraftStore.persist.getOptions().merge;
+    if (!merge) throw new Error("Expected composer draft persistence merge");
+    const hydrated = merge(
+      {
+        draftsByThreadId: {
+          [typedThreadId]: {
+            prompt: "Continue this draft",
+            provider: "claudeAgent",
+            model: alias,
+          },
+        },
+        stickyProvider: "claudeAgent",
+        stickyModel: alias,
+      },
+      useComposerDraftStore.getState(),
+    );
+
+    expect(
+      hydrated.draftsByThreadKey[typedThreadId]?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
+    ).toEqual(modelSelection(CLAUDE_AGENT_DRIVER, canonical));
+    expect(hydrated.stickyModelSelectionByProvider[CLAUDE_AGENT_INSTANCE]).toEqual(
+      modelSelection(CLAUDE_AGENT_DRIVER, canonical),
+    );
+  });
+
   it.each([1, 2])(
     "keeps the legacy sticky Codex selection when v%s storage omitted the provider",
     async (version) => {
@@ -3426,5 +3456,64 @@ describe("composerDraftStore attachment references", () => {
     expect(merged.draftsByThreadKey[threadKeyFor(threadId, TEST_ENVIRONMENT_ID)]?.prompt).toBe(
       prompt,
     );
+  });
+});
+
+describe("composerDraftStore windows-file references", () => {
+  const threadId = ThreadId.make("thread-windows-files");
+  const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+  const clip = {
+    type: "windows-file" as const,
+    id: "wf-1",
+    name: "clip.mp4",
+    mimeType: "video/mp4",
+    sizeBytes: 1_234_567,
+    host: "editing-pc",
+    path: "C:\\Media\\clip.mp4",
+  };
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("adds, dedupes by host+path, and removes a picked reference", () => {
+    const store = useComposerDraftStore.getState();
+    store.addWindowsFile(threadRef, clip);
+    store.addWindowsFile(threadRef, { ...clip, id: "wf-dup" });
+    expect(store.getComposerDraft(threadRef)?.windowsFiles).toEqual([clip]);
+
+    store.removeWindowsFile(threadRef, "wf-1");
+    expect(store.getComposerDraft(threadRef)).toBeNull();
+  });
+
+  it("persists and hydrates the reference as plain metadata", () => {
+    const store = useComposerDraftStore.getState();
+    store.addWindowsFile(threadRef, clip);
+    const persistApi = useComposerDraftStore.persist as unknown as {
+      getOptions: () => {
+        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
+        merge: (
+          persistedState: unknown,
+          currentState: ReturnType<typeof useComposerDraftStore.getState>,
+        ) => ReturnType<typeof useComposerDraftStore.getState>;
+      };
+    };
+    const options = persistApi.getOptions();
+    const persisted = options.partialize(useComposerDraftStore.getState()) as {
+      draftsByThreadKey: Record<string, { windowsFiles?: unknown }>;
+    };
+    const key = threadKeyFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(persisted.draftsByThreadKey[key]?.windowsFiles).toEqual([clip]);
+
+    resetComposerDraftStore();
+    const hydrated = options.merge(persisted, useComposerDraftStore.getState());
+    expect(hydrated.draftsByThreadKey[key]?.windowsFiles).toEqual([clip]);
+  });
+
+  it("clears references with the rest of the composer content on send", () => {
+    const store = useComposerDraftStore.getState();
+    store.addWindowsFile(threadRef, clip);
+    store.clearComposerContent(threadRef);
+    expect(store.getComposerDraft(threadRef)).toBeNull();
   });
 });

@@ -10,7 +10,9 @@ import {
   type EfficiencyDecision,
   type EfficiencyRule,
   type EfficiencySettings,
+  type EfficiencyTierJudgment,
   type ModelSelection,
+  type TaskKind,
   ProviderInstanceId,
   type OrchestrationCommand,
   type OrchestrationThreadShell,
@@ -22,6 +24,23 @@ import { assignExperiment } from "./Experiments.ts";
 
 type TurnStartCommand = Extract<OrchestrationCommand, { readonly type: "thread.turn.start" }>;
 
+/**
+ * A resolved judge complexity judgment for this turn, produced by the caller
+ * (CommandDispatcher / preview RPC) from the {@link Judge} service. The pure
+ * routing function stays synchronous; the async judge call happens upstream.
+ */
+export interface TierJudgmentInput {
+  /** Probability-weighted rubric level in `[0, 2]` (economy..quality). */
+  readonly score: number;
+  readonly confidence: number;
+  readonly model: string;
+  /** Judged task kind (`task_kind` choice) and its confidence. */
+  readonly kind?: TaskKind;
+  readonly kindConfidence?: number;
+  /** Probability that the message continues the thread's current task. */
+  readonly continuation?: number;
+}
+
 export interface InteractiveEfficiencyInput {
   readonly command: TurnStartCommand;
   readonly thread?: OrchestrationThreadShell;
@@ -29,6 +48,10 @@ export interface InteractiveEfficiencyInput {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly projectIdOverride?: string;
   readonly attachmentCountOverride?: number;
+  readonly tierJudgment?: TierJudgmentInput;
+  /** The decision recorded on the thread's latest turn, when it was routed.
+   * A confident continuation reuses it (sticky routing). */
+  readonly priorDecision?: EfficiencyDecision;
 }
 
 export interface InteractiveEfficiencyResolution {
@@ -100,28 +123,210 @@ function effectiveRoutingMode(
   );
 }
 
-function selectedTier(input: InteractiveEfficiencyInput): {
-  readonly tier: EfficiencyTier;
-  readonly matchedRuleId?: string;
-} {
+const TIER_BY_LEVEL: ReadonlyArray<EfficiencyTier> = ["economy", "balanced", "quality"];
+
+/** Maps a probability-weighted rubric score to a tier: round, then clamp to
+ * the economy..quality range. */
+function scoreToTier(score: number): EfficiencyTier {
+  const level = Math.min(TIER_BY_LEVEL.length - 1, Math.max(0, Math.round(score)));
+  return TIER_BY_LEVEL[level]!;
+}
+
+function findMatchingRule(input: InteractiveEfficiencyInput): EfficiencyRule | undefined {
   const projectId =
     input.projectIdOverride ??
     input.command.bootstrap?.createThread?.projectId ??
     input.thread?.projectId;
-  const rule = input.settings.rules.find((candidate) =>
+  return input.settings.rules.find((candidate) =>
     matchesRule(candidate, {
       projectId,
       interactionMode: input.command.interactionMode,
       attachmentCount: input.attachmentCountOverride ?? input.command.message.attachments.length,
     }),
   );
-  const tier =
-    rule?.tier ??
+}
+
+/**
+ * Whether an explicit efficiency rule matches this interactive turn. Rules take
+ * precedence over any tier judgment, so upstream callers use this to skip the
+ * judge round-trip (latency + cost) entirely when a rule is going to win anyway.
+ */
+export function interactiveTurnMatchesRule(params: {
+  readonly settings: EfficiencySettings;
+  readonly projectId: string | undefined;
+  readonly interactionMode: "default" | "plan";
+  readonly attachmentCount: number;
+}): boolean {
+  return params.settings.rules.some((candidate) =>
+    matchesRule(candidate, {
+      projectId: params.projectId,
+      interactionMode: params.interactionMode,
+      attachmentCount: params.attachmentCount,
+    }),
+  );
+}
+
+/**
+ * Resolves the tier and the (optional) recorded judgment.
+ *
+ * Precedence: explicit rule match > sticky continuation (see
+ * {@link stickyDecision}, applied by the caller) > confidence-gated judgment >
+ * command tier > thread tier > default tier. Rules are operator intent and
+ * always win, so a judgment is only *applied* when no rule matched, tier
+ * judgment is enabled, and `confidence >= minConfidence`. The judgment is still
+ * recorded (for the log and later calibration) whenever a judgment input is
+ * present, with `applied: false` and a `reason` when it was not used.
+ */
+function selectedTier(input: InteractiveEfficiencyInput): {
+  readonly tier: EfficiencyTier;
+  readonly matchedRuleId?: string;
+  readonly judgment?: EfficiencyTierJudgment;
+} {
+  const rule = findMatchingRule(input);
+  const staticTier =
     input.command.efficiencyTier ??
     input.command.bootstrap?.createThread?.efficiencyTier ??
     input.thread?.efficiencyTier ??
     input.settings.defaultTier;
-  return rule === undefined ? { tier } : { tier, matchedRuleId: rule.id };
+
+  const baseTier = rule?.tier ?? staticTier;
+  const matchedRuleId = rule?.id;
+
+  const tj = input.tierJudgment;
+  if (tj === undefined) {
+    return matchedRuleId === undefined ? { tier: baseTier } : { tier: baseTier, matchedRuleId };
+  }
+
+  const mappedTier = scoreToTier(tj.score);
+  const enabled = input.settings.tierJudgment.enabled;
+  const minConfidence = input.settings.tierJudgment.minConfidence;
+  const applied = rule === undefined && enabled && tj.confidence >= minConfidence;
+  const reason =
+    rule !== undefined
+      ? `explicit rule '${rule.id}' takes precedence`
+      : !enabled
+        ? "tier judgment disabled"
+        : tj.confidence < minConfidence
+          ? `confidence ${tj.confidence.toFixed(2)} below minConfidence ${minConfidence}`
+          : undefined;
+  const judgment: EfficiencyTierJudgment = {
+    score: tj.score,
+    confidence: tj.confidence,
+    tier: mappedTier,
+    applied,
+    ...(reason === undefined ? {} : { reason }),
+    model: tj.model,
+    ...(tj.kind === undefined ? {} : { kind: tj.kind }),
+    ...(tj.kindConfidence === undefined ? {} : { kindConfidence: tj.kindConfidence }),
+    ...(tj.continuation === undefined ? {} : { continuation: tj.continuation }),
+  };
+  const tier = applied ? mappedTier : baseTier;
+  return {
+    tier,
+    ...(matchedRuleId === undefined ? {} : { matchedRuleId }),
+    judgment,
+  };
+}
+
+/** The judged kind to prefer specialists for: only when no rule matched, tier
+ * judgment is enabled, and the kind is confident. */
+function confidentKind(
+  input: InteractiveEfficiencyInput,
+  matchedRuleId: string | undefined,
+): TaskKind | undefined {
+  const tj = input.tierJudgment;
+  if (matchedRuleId !== undefined || !input.settings.tierJudgment.enabled) return undefined;
+  if (tj?.kind === undefined || tj.kindConfidence === undefined) return undefined;
+  return tj.kindConfidence >= input.settings.tierJudgment.minConfidence ? tj.kind : undefined;
+}
+
+function isGeneralCandidate(candidate: EfficiencySettings["candidates"][number]): boolean {
+  return candidate.taskKinds === undefined || candidate.taskKinds.length === 0;
+}
+
+/**
+ * Sticky routing: a confident continuation of a routed thread keeps that
+ * route's tier, kind, and model selection unchanged. Only when no rule matched,
+ * tier judgment is enabled, and the previous route's provider/model is still
+ * available; otherwise the turn is routed fresh.
+ */
+function stickyDecision(
+  input: InteractiveEfficiencyInput,
+  matchedRuleId: string | undefined,
+): EfficiencyDecision | undefined {
+  const prior = input.priorDecision;
+  const tj = input.tierJudgment;
+  const threshold = input.settings.tierJudgment.continuationThreshold;
+  if (prior === undefined || tj?.continuation === undefined) return undefined;
+  if (matchedRuleId !== undefined || !input.settings.tierJudgment.enabled) return undefined;
+  if (tj.continuation < threshold) return undefined;
+  const available = resolveProviderModelSelection({
+    policy: toCommandCenterSelection(prior.modelSelection),
+    providers: providerAvailability(input.providers, "interactive-routing"),
+  });
+  if (available.providerSource !== "policy") return undefined;
+  const inherited = prior.judgment;
+  const judgment: EfficiencyTierJudgment = {
+    score: tj.score,
+    confidence: tj.confidence,
+    tier: scoreToTier(tj.score),
+    applied: false,
+    reason: `continuation ${tj.continuation.toFixed(2)} kept the current route`,
+    model: tj.model,
+    ...(inherited?.kind === undefined ? {} : { kind: inherited.kind }),
+    ...(inherited?.kindConfidence === undefined
+      ? {}
+      : { kindConfidence: inherited.kindConfidence }),
+    ...(inherited?.kindApplied === undefined ? {} : { kindApplied: inherited.kindApplied }),
+    continuation: tj.continuation,
+    sticky: true,
+  };
+  return {
+    tier: prior.tier,
+    ...(prior.candidateId === undefined ? {} : { candidateId: prior.candidateId }),
+    modelSelection: prior.modelSelection,
+    source: prior.source,
+    workload: "interactive",
+    contextThresholdPercent: prior.contextThresholdPercent,
+    toolWarningThreshold: prior.toolWarningThreshold,
+    ...(prior.fallbackReason === undefined ? {} : { fallbackReason: prior.fallbackReason }),
+    ...(input.command.retryOfTurnId === undefined
+      ? {}
+      : { retryOfTurnId: input.command.retryOfTurnId }),
+    ...(prior.experimentArm === undefined ? {} : { experimentArm: prior.experimentArm }),
+    judgment,
+  };
+}
+
+function withDecision(
+  command: TurnStartCommand,
+  decision: EfficiencyDecision,
+): InteractiveEfficiencyResolution {
+  const modelSelection: ModelSelection = decision.modelSelection;
+  const tier = decision.tier;
+  return {
+    command: {
+      ...command,
+      modelSelection,
+      routingMode: "auto",
+      efficiencyTier: tier,
+      efficiencyDecision: decision,
+      ...(command.bootstrap?.createThread === undefined
+        ? {}
+        : {
+            bootstrap: {
+              ...command.bootstrap,
+              createThread: {
+                ...command.bootstrap.createThread,
+                modelSelection,
+                routingMode: "auto" as const,
+                efficiencyTier: tier,
+              },
+            },
+          }),
+    },
+    decision,
+  };
 }
 
 function candidateOverlay(
@@ -143,6 +348,9 @@ export function resolveInteractiveEfficiency(
   if (fallback === undefined) return { command: input.command };
 
   const selected = selectedTier(input);
+  const sticky = stickyDecision(input, selected.matchedRuleId);
+  if (sticky !== undefined) return withDecision(input.command, sticky);
+
   const experimentAssignment = input.settings.experiments
     .map((experiment) =>
       assignExperiment({
@@ -156,9 +364,18 @@ export function resolveInteractiveEfficiency(
     .find((assignment) => assignment !== undefined);
   const tier = experimentAssignment?.tier ?? selected.tier;
   const matchedRuleId = selected.matchedRuleId;
-  const enabledCandidates = input.settings.candidates.filter(
+  // Specialists for a confidently judged kind go first; the tier's general
+  // candidates follow exactly as before. A specialist never stands in for a
+  // kind it does not list.
+  const kind = confidentKind(input, matchedRuleId);
+  const inTier = input.settings.candidates.filter(
     (candidate) => candidate.enabled && candidate.tier === tier,
   );
+  const specialists =
+    kind === undefined
+      ? []
+      : inTier.filter((candidate) => candidate.taskKinds?.includes(kind) === true);
+  const enabledCandidates = [...specialists, ...inTier.filter(isGeneralCandidate)];
   const tierCandidates: ReadonlyArray<ProviderModelCandidate> = enabledCandidates.map(
     (candidate) => ({
       candidateId: candidate.candidateId,
@@ -209,29 +426,51 @@ export function resolveInteractiveEfficiency(
       ? {}
       : { retryOfTurnId: input.command.retryOfTurnId }),
     ...(experimentAssignment === undefined ? {} : { experimentArm: experimentAssignment.arm }),
+    ...(selected.judgment === undefined
+      ? {}
+      : {
+          judgment:
+            selected.judgment.kind === undefined
+              ? selected.judgment
+              : {
+                  ...selected.judgment,
+                  kindApplied: specialists.some(
+                    (candidate) => candidate.candidateId === selection.candidateId,
+                  ),
+                },
+        }),
   };
 
-  return {
-    command: {
-      ...input.command,
-      modelSelection: effectiveSelection,
-      routingMode: "auto",
-      efficiencyTier: tier,
-      efficiencyDecision: decision,
-      ...(input.command.bootstrap?.createThread === undefined
-        ? {}
-        : {
-            bootstrap: {
-              ...input.command.bootstrap,
-              createThread: {
-                ...input.command.bootstrap.createThread,
-                modelSelection: effectiveSelection,
-                routingMode: "auto" as const,
-                efficiencyTier: tier,
-              },
-            },
-          }),
-    },
-    decision,
-  };
+  return withDecision(input.command, decision);
+}
+
+/**
+ * Whether a routed selection is one the thread's already-bound session cannot
+ * serve: a different provider driver, or a model change on a provider that
+ * needs a new thread for one. The provider command reactor rejects both, so
+ * such a turn runs in a subagent thread instead. Unknown instances return
+ * false and keep today's behaviour.
+ */
+export function routedSelectionNeedsSubagent(input: {
+  readonly thread: OrchestrationThreadShell;
+  readonly selection: ModelSelection;
+  readonly providers: ReadonlyArray<ServerProvider>;
+}): boolean {
+  const session = input.thread.session;
+  if (session === null) return false;
+  const boundInstanceId = session.providerInstanceId ?? input.thread.modelSelection.instanceId;
+  const bound = input.providers.find((provider) => provider.instanceId === boundInstanceId);
+  const routed = input.providers.find(
+    (provider) => provider.instanceId === input.selection.instanceId,
+  );
+  if (bound === undefined || routed === undefined) return false;
+  if (bound.driver !== routed.driver) return true;
+  const modelChanges =
+    boundInstanceId !== input.selection.instanceId ||
+    input.thread.modelSelection.model !== input.selection.model;
+  return (
+    modelChanges &&
+    (bound.requiresNewThreadForModelChange === true ||
+      routed.requiresNewThreadForModelChange === true)
+  );
 }

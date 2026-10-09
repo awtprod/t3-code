@@ -11,6 +11,7 @@ import {
   AuthStandardClientScopes,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
+  type ClientOrchestrationCommand,
   CommandId,
   DEFAULT_SERVER_SETTINGS,
   type DpopFailureReason,
@@ -43,6 +44,7 @@ import {
   TurnId,
   UsageLimitSourceId,
   WS_METHODS,
+  COMMAND_CENTER_WS_METHODS,
   WsRpcGroup,
   EditorId,
   WorktreeSetupSnapshot,
@@ -109,7 +111,7 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as ServerConfig from "./config.ts";
 import * as DeviceService from "./device/DeviceService.ts";
-import { HTTP_ROUTER_CONFIG, makeRoutesLayer } from "./server.ts";
+import { HTTP_ROUTER_CONFIG, makeRoutesLayer, WebPushServicesLive } from "./server.ts";
 import {
   isThreadDetailEvent,
   resolveAvailableEditorsForConfig,
@@ -195,7 +197,10 @@ import * as AutomationDefinitionConfig from "./command-center/AutomationDefiniti
 import * as AutomationRuns from "./command-center/AutomationRuns.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
+import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
+import { makeWindowsMediaSettings } from "./command-center/WindowsMediaConfig.ts";
 import * as OrchestrationCommandDispatcher from "./orchestration/CommandDispatcher.ts";
+import * as Judge from "./efficiency/Judge.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as Data from "effect/Data";
 
@@ -570,6 +575,10 @@ const buildAppUnderTest = (options?: {
     desktopTelemetryReceiver?: Partial<
       DesktopTelemetryReceiver.DesktopTelemetryReceiver["Service"]
     >;
+    commandCenterReadiness?: Partial<
+      CommandCenterReadinessGate.CommandCenterReadinessGate["Service"]
+    >;
+    windowsMediaConnector?: Partial<WindowsMediaConnector.WindowsMediaConnector["Service"]>;
   };
 }) =>
   Effect.gen(function* () {
@@ -845,13 +854,17 @@ const buildAppUnderTest = (options?: {
       Layer.provide(vcsStatusBroadcasterLayer),
       Layer.provide(WorkspacePaths.layer),
       Layer.provide(layerConfig),
+      Layer.provide(SqlitePersistenceMemory),
     );
     const serviceLauncherClientLayer = ServiceLauncherClient.layer.pipe(
       Layer.provide(Layer.succeed(HostProcessEnvironment, {})),
     );
 
     const servedRoutesLayer = HttpRouter.serve(
-      makeRoutesLayer.pipe(Layer.provide(serviceLauncherClientLayer)),
+      makeRoutesLayer.pipe(
+        Layer.provide(serviceLauncherClientLayer),
+        Layer.provide(WebPushServicesLive.pipe(Layer.provide(SqlitePersistenceMemory))),
+      ),
       {
         disableListenLog: true,
         disableLogger: true,
@@ -1135,17 +1148,29 @@ const buildAppUnderTest = (options?: {
           }),
           Layer.mock(CommandCenterService.CommandCenterService)({}),
           Layer.mock(CommandCenterEventStream.CommandCenterEventStream)({}),
-          Layer.mock(CommandCenterReadinessGate.CommandCenterReadinessGate)({}),
+          Layer.mock(CommandCenterReadinessGate.CommandCenterReadinessGate)({
+            ...options?.layers?.commandCenterReadiness,
+          }),
           Layer.mock(AutomationDefinitionConfig.AutomationDefinitionConfig)({}),
           Layer.mock(AutomationRuns.AutomationRuns)({}),
           Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
           Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+          Layer.mock(WindowsMediaConnector.WindowsMediaConnector)({
+            settings: makeWindowsMediaSettings({
+              sshConfigPath: "/etc/cc/ssh_config",
+              hostAlias: "editing-pc",
+            }),
+            ...options?.layers?.windowsMediaConnector,
+          }),
           orchestrationCommandDispatcherLayer,
         ),
       ),
     );
 
     const appLayer = servedRoutesLayer.pipe(
+      // The tier-judgment dispatcher resolves the Judge; the harness uses a
+      // disabled Judge so behavior matches the pre-feature path.
+      Layer.provide(Judge.layerTest),
       Layer.provide(resourceTelemetryLayer),
       Layer.provide(UsageService.layerTest),
       Layer.provide(
@@ -1162,6 +1187,7 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(otlpSerializationLayer(config.otlpProtocol)),
+    ).pipe(
       Layer.provide(
         Layer.mock(ServerLifecycleEvents.ServerLifecycleEvents)({
           publish: (event) => Effect.succeed({ ...(event as any), sequence: 1 }),
@@ -2340,6 +2366,62 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       // Desktop, so port-scoped: instances scan for a free port and share
       // 127.0.0.1, and cookies are not scoped by port.
       assert.isTrue(body.auth.sessionCookieName.startsWith("t3_session_"));
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects unauthenticated web push config requests", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const url = yield* getHttpServerUrl("/api/web-push/config");
+      const response = yield* fetchEffect(url);
+
+      assert.equal(response.status, 401);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("reports web push not configured for an authenticated client without a subject", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const url = yield* getHttpServerUrl("/api/web-push/config");
+      const response = yield* fetchEffect(url, { headers: { cookie } });
+      const body = yield* responseJsonEffect<{
+        readonly configured: boolean;
+        readonly vapidPublicKey: string | null;
+      }>(response);
+
+      assert.equal(response.status, 200);
+      assert.equal(body.configured, false);
+      assert.equal(body.vapidPublicKey, null);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects a web push subscription with a disallowed endpoint host", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const url = yield* getHttpServerUrl("/api/web-push/subscription");
+      const response = yield* fetchEffect(url, {
+        method: "PUT",
+        headers: { cookie, "content-type": "application/json" },
+        body: jsonRequestBody({
+          deviceId: "device-a",
+          endpoint: "https://fcm.googleapis.com.evil.com/x",
+          p256dh: "p",
+          auth: "a",
+          preferences: {
+            notifyOnApproval: true,
+            notifyOnInput: true,
+            notifyOnCompletion: true,
+            notifyOnFailure: true,
+          },
+        }),
+      });
+
+      assert.equal(response.status, 400);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -4281,6 +4363,91 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       if (rpcError._tag === "EnvironmentAuthorizationError") {
         assert.equal(rpcError.requiredScope, "orchestration:read");
       }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves cc.windowsMedia.* only to tokens holding command-center:read", () =>
+    Effect.gen(function* () {
+      const listedPaths: string[] = [];
+      yield* buildAppUnderTest({
+        layers: {
+          commandCenterReadiness: { requireReady: Effect.void },
+          windowsMediaConnector: {
+            roots: () =>
+              Effect.succeed({ host: "editing-pc", roots: [{ label: "C:", path: "C:\\" }] }),
+            list: (path) =>
+              Effect.sync(() => {
+                listedPaths.push(path);
+                return {
+                  host: "editing-pc",
+                  path,
+                  parent: "C:\\",
+                  truncated: false,
+                  entries: [
+                    {
+                      name: "clip.mov",
+                      path: `${path}\\clip.mov`,
+                      isDir: false,
+                      sizeBytes: 42,
+                      mtime: "2026-09-27T00:00:00.0000000Z",
+                      kind: "video" as const,
+                      mimeType: "video/quicktime",
+                    },
+                  ],
+                };
+              }),
+          },
+        },
+      });
+
+      const wsUrlForScope = (scope: string) =>
+        Effect.gen(function* () {
+          const { body } = yield* exchangeAccessToken(defaultDesktopBootstrapToken, { scope });
+          const ticketResponse = yield* HttpClient.post("/api/auth/websocket-ticket", {
+            headers: { authorization: `Bearer ${body.access_token ?? ""}` },
+          });
+          const ticket = (yield* ticketResponse.json) as { readonly ticket: string };
+          return `${yield* getWsServerUrl("/ws", { authenticated: false })}?wsTicket=${encodeURIComponent(ticket.ticket)}`;
+        });
+
+      const scopedUrl = yield* wsUrlForScope("command-center:read");
+      const listing = yield* Effect.scoped(
+        withWsRpcClient(scopedUrl, (client) =>
+          client[COMMAND_CENTER_WS_METHODS.windowsMediaList]({ path: "C:\\Clips" }),
+        ),
+      );
+      assert.equal(listing.entries[0]?.name, "clip.mov");
+      assert.deepEqual(listedPaths, ["C:\\Clips"]);
+      const roots = yield* Effect.scoped(
+        withWsRpcClient(scopedUrl, (client) =>
+          client[COMMAND_CENTER_WS_METHODS.windowsMediaRoots]({}),
+        ),
+      );
+      assert.equal(roots.roots[0]?.path, "C:\\");
+
+      const unscopedUrl = yield* wsUrlForScope("orchestration:read");
+      const rejectedList = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(unscopedUrl, (client) =>
+            client[COMMAND_CENTER_WS_METHODS.windowsMediaList]({ path: "C:\\Clips" }),
+          ),
+        ),
+      );
+      const rejectedRoots = yield* Effect.flip(
+        Effect.scoped(
+          withWsRpcClient(unscopedUrl, (client) =>
+            client[COMMAND_CENTER_WS_METHODS.windowsMediaRoots]({}),
+          ),
+        ),
+      );
+      for (const rpcError of [rejectedList, rejectedRoots]) {
+        assert.equal(rpcError._tag, "EnvironmentAuthorizationError");
+        if (rpcError._tag === "EnvironmentAuthorizationError") {
+          assert.equal(rpcError.requiredScope, "command-center:read");
+        }
+      }
+      // The rejected calls never reached the connector.
+      assert.deepEqual(listedPaths, ["C:\\Clips"]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -11668,6 +11835,365 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(localStatus.mock.calls.length, 0);
         assert.equal(resolveRemoteTrackingCommit.mock.calls.length, 0);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  // Client turn starts must pass through token-efficiency routing (auto tier,
+  // sticky continuation) before they reach the engine.
+  const efficiencyClaudeProvider = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    driver: ProviderDriverKind.make("claudeAgent"),
+    enabled: true,
+    installed: true,
+    version: "1.0.0",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-01-01T00:00:00.000Z",
+    models: [
+      { slug: "claude-opus-5-5", name: "Claude Opus 5.5", isCustom: false, capabilities: null },
+    ],
+    slashCommands: [],
+    skills: [],
+  } as const;
+
+  const makeBootstrapTurnStart = (
+    routingMode: "auto" | "manual",
+  ): Extract<ClientOrchestrationCommand, { type: "thread.turn.start" }> => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    return {
+      type: "thread.turn.start",
+      commandId: CommandId.make(`cmd-efficiency-${routingMode}`),
+      threadId: ThreadId.make(`thread-efficiency-${routingMode}`),
+      message: {
+        messageId: MessageId.make(`msg-efficiency-${routingMode}`),
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      modelSelection: defaultModelSelection,
+      routingMode,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      bootstrap: {
+        createThread: {
+          projectId: defaultProjectId,
+          title: "Efficiency Thread",
+          modelSelection: defaultModelSelection,
+          routingMode,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "main",
+          worktreePath: null,
+          createdAt,
+        },
+      },
+      createdAt,
+    };
+  };
+
+  const dispatchThroughClientRpc = (input: {
+    readonly command: ClientOrchestrationCommand;
+    readonly efficiencyEnabled: boolean;
+  }) =>
+    Effect.gen(function* () {
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const settings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        efficiency: { ...DEFAULT_SERVER_SETTINGS.efficiency, enabled: input.efficiencyEnabled },
+      };
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+          providerRegistry: { getProviders: Effect.succeed([efficiencyClaudeProvider]) },
+          serverSettings: { getSettings: Effect.succeed(settings) },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand](input.command),
+        ),
+      );
+      const createCommand = dispatchedCommands.find(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+          command.type === "thread.create",
+      );
+      const turnStartCommand = dispatchedCommands.find(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
+          command.type === "thread.turn.start",
+      );
+      return { createCommand, turnStartCommand };
+    });
+
+  it.effect("routes an auto turn through efficiency and creates the bootstrap thread as auto", () =>
+    Effect.gen(function* () {
+      const { createCommand, turnStartCommand } = yield* dispatchThroughClientRpc({
+        command: makeBootstrapTurnStart("auto"),
+        efficiencyEnabled: true,
+      });
+
+      assert.isDefined(turnStartCommand?.efficiencyDecision);
+      assert.equal(turnStartCommand?.efficiencyDecision?.workload, "interactive");
+      assert.equal(turnStartCommand?.routingMode, "auto");
+      assert.equal(turnStartCommand?.modelSelection?.model, "claude-opus-5-5");
+      assert.equal(turnStartCommand?.efficiencyTier, turnStartCommand?.efficiencyDecision?.tier);
+      assert.equal(createCommand?.routingMode, "auto");
+      assert.equal(createCommand?.efficiencyTier, turnStartCommand?.efficiencyDecision?.tier);
+      assert.deepEqual(
+        createCommand?.modelSelection,
+        turnStartCommand?.efficiencyDecision?.modelSelection,
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("hands a routed turn on another driver to a subagent thread", () =>
+    Effect.gen(function* () {
+      // The thread's session is bound to Codex; auto routing picks Claude, which
+      // that session cannot run, so the turn becomes a delegation instead of a
+      // `thread.turn.start` the provider reactor would reject.
+      const threadId = ThreadId.make("thread-bound-codex");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const codexProvider = {
+        ...efficiencyClaudeProvider,
+        instanceId: ProviderInstanceId.make("codex"),
+        driver: ProviderDriverKind.make("codex"),
+        models: [{ slug: "gpt-5-codex", name: "Codex", isCustom: false, capabilities: null }],
+      };
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+          providerRegistry: {
+            getProviders: Effect.succeed([codexProvider, efficiencyClaudeProvider]),
+          },
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              efficiency: { ...DEFAULT_SERVER_SETTINGS.efficiency, enabled: true },
+            }),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: (id) =>
+              Effect.succeed(
+                Option.some(
+                  makeDefaultOrchestrationThreadShell({
+                    id,
+                    routingMode: "auto",
+                    session: {
+                      threadId: id,
+                      status: "ready",
+                      providerName: "codex",
+                      providerInstanceId: ProviderInstanceId.make("codex"),
+                      runtimeMode: "full-access",
+                      activeTurnId: null,
+                      lastError: null,
+                      updatedAt: createdAt,
+                    },
+                  }),
+                ),
+              ),
+            getThreadDetailById: () => Effect.succeed(Option.none()),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-bound-codex"),
+            threadId,
+            message: {
+              messageId: MessageId.make("msg-bound-codex"),
+              role: "user",
+              text: "implement it",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt,
+          }),
+        ),
+      );
+
+      assert.isUndefined(
+        dispatchedCommands.find((command) => command.type === "thread.turn.start"),
+      );
+      const delegate = dispatchedCommands.find(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.turn.delegate" }> =>
+          command.type === "thread.turn.delegate",
+      );
+      assert.equal(delegate?.threadId, threadId);
+      assert.equal(delegate?.message.messageId, "msg-bound-codex");
+      assert.equal(delegate?.delegation.modelSelection.instanceId, "claudeAgent");
+      assert.equal(delegate?.delegation.reuseChild, false);
+      assert.notEqual(delegate?.delegation.childThreadId, threadId);
+      assert.deepEqual(
+        delegate?.delegation.efficiencyDecision.modelSelection,
+        delegate?.delegation.modelSelection,
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("keeps plan-accept and retry turns on the thread's own provider", () =>
+    Effect.gen(function* () {
+      // Same Codex-bound thread as above, but the turns carry thread-bound
+      // context: accepting a proposed plan and retrying a turn. A fresh
+      // subagent has neither the plan nor the retried turn, so these run
+      // unrouted on the thread's provider with their metadata intact.
+      const threadId = ThreadId.make("thread-bound-codex-context");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const codexProvider = {
+        ...efficiencyClaudeProvider,
+        instanceId: ProviderInstanceId.make("codex"),
+        driver: ProviderDriverKind.make("codex"),
+        models: [{ slug: "gpt-5-codex", name: "Codex", isCustom: false, capabilities: null }],
+      };
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+          providerRegistry: {
+            getProviders: Effect.succeed([codexProvider, efficiencyClaudeProvider]),
+          },
+          serverSettings: {
+            getSettings: Effect.succeed({
+              ...DEFAULT_SERVER_SETTINGS,
+              efficiency: { ...DEFAULT_SERVER_SETTINGS.efficiency, enabled: true },
+            }),
+          },
+          projectionSnapshotQuery: {
+            getThreadShellById: (id) =>
+              Effect.succeed(
+                Option.some(
+                  makeDefaultOrchestrationThreadShell({
+                    id,
+                    routingMode: "auto",
+                    session: {
+                      threadId: id,
+                      status: "ready",
+                      providerName: "codex",
+                      providerInstanceId: ProviderInstanceId.make("codex"),
+                      runtimeMode: "full-access",
+                      activeTurnId: null,
+                      lastError: null,
+                      updatedAt: createdAt,
+                    },
+                  }),
+                ),
+              ),
+            getThreadDetailById: () => Effect.succeed(Option.none()),
+          },
+        },
+      });
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const turn = (id: string) => ({
+        type: "thread.turn.start" as const,
+        commandId: CommandId.make(`cmd-${id}`),
+        threadId,
+        message: {
+          messageId: MessageId.make(`msg-${id}`),
+          role: "user" as const,
+          text: "go",
+          attachments: [],
+        },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        createdAt,
+      });
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              ...turn("plan"),
+              sourceProposedPlan: { threadId, planId: "plan-1" },
+            });
+            yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+              ...turn("retry"),
+              retryOfTurnId: TurnId.make("turn-1"),
+            });
+          }),
+        ),
+      );
+
+      assert.isUndefined(
+        dispatchedCommands.find((command) => command.type === "thread.turn.delegate"),
+      );
+      const starts = dispatchedCommands.filter(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
+          command.type === "thread.turn.start",
+      );
+      assert.deepEqual(
+        starts.map((command) => command.message.messageId),
+        ["msg-plan", "msg-retry"],
+      );
+      assert.deepEqual(starts[0]?.sourceProposedPlan, { threadId, planId: "plan-1" });
+      assert.equal(starts[1]?.retryOfTurnId, "turn-1");
+      for (const start of starts) assert.isUndefined(start.efficiencyDecision);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("leaves the turn byte-identical when efficiency is disabled", () =>
+    Effect.gen(function* () {
+      const command = makeBootstrapTurnStart("auto");
+      const { createCommand, turnStartCommand } = yield* dispatchThroughClientRpc({
+        command,
+        efficiencyEnabled: false,
+      });
+
+      // Only the bootstrap is split off, and the normalizer's server-side
+      // `createdAt` stamp; efficiency routing adds and rewrites nothing.
+      const { bootstrap: _bootstrap, ...expectedTurnStart } = command;
+      assert.deepEqual<unknown>(turnStartCommand, {
+        ...expectedTurnStart,
+        createdAt: turnStartCommand?.createdAt ?? command.createdAt,
+      });
+      assert.isUndefined(turnStartCommand?.efficiencyDecision);
+      // The user's routing choice is still persisted on the thread.
+      assert.equal(createCommand?.routingMode, "auto");
+      assert.isUndefined(createCommand?.efficiencyTier);
+      assert.deepEqual(createCommand?.modelSelection, defaultModelSelection);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("leaves a manual turn byte-identical when efficiency is enabled", () =>
+    Effect.gen(function* () {
+      const command = makeBootstrapTurnStart("manual");
+      const { createCommand, turnStartCommand } = yield* dispatchThroughClientRpc({
+        command,
+        efficiencyEnabled: true,
+      });
+
+      // Only the bootstrap is split off, and the normalizer's server-side
+      // `createdAt` stamp; efficiency routing adds and rewrites nothing.
+      const { bootstrap: _bootstrap, ...expectedTurnStart } = command;
+      assert.deepEqual<unknown>(turnStartCommand, {
+        ...expectedTurnStart,
+        createdAt: turnStartCommand?.createdAt ?? command.createdAt,
+      });
+      assert.equal(createCommand?.routingMode, "manual");
+      assert.isUndefined(createCommand?.efficiencyTier);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("does not misattribute setup activity dispatch failures as setup launch failures", () =>

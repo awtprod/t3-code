@@ -1,10 +1,15 @@
 import {
   ArrowLeftIcon,
+  CalendarDaysIcon,
   ChartNoAxesColumnIcon,
   CircleAlertIcon,
   CommandIcon,
+  ContactRoundIcon,
   GitPullRequestIcon,
-  HomeIcon,
+  InboxIcon,
+  ListChecksIcon,
+  ListFilterIcon,
+  LightbulbIcon,
   SettingsIcon,
   SquarePenIcon,
   WorkflowIcon,
@@ -115,19 +120,59 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       ? null
       : commandCenterEnvironment.bootstrap({ environmentId, input: {} }),
   );
-  const needsYouCount = bootstrapQuery.data?.needsYou.length ?? 0;
   const { isMobile, setOpenMobile } = useSidebar();
   const closeMobileSidebar = useCallback(() => {
     if (isMobile) setOpenMobile(false);
   }, [isMobile, setOpenMobile]);
   const entries = [
-    { to: "/" as const, label: "Home", icon: HomeIcon, active: pathname === "/" },
+    {
+      to: "/inbox" as const,
+      label: "Needs You",
+      icon: InboxIcon,
+      active: pathname === "/" || pathname.startsWith("/inbox"),
+    },
     { to: "/new" as const, label: "New thread", icon: SquarePenIcon, active: pathname === "/new" },
+    {
+      to: "/command" as const,
+      label: "Command",
+      icon: CommandIcon,
+      active: pathname.startsWith("/command"),
+    },
     {
       to: "/automations" as const,
       label: "Automations",
       icon: WorkflowIcon,
       active: pathname.startsWith("/automations"),
+    },
+    {
+      to: "/responsibilities" as const,
+      label: "Responsibilities",
+      icon: ListChecksIcon,
+      active: pathname.startsWith("/responsibilities"),
+    },
+    {
+      to: "/prospects" as const,
+      label: "Prospects",
+      icon: ContactRoundIcon,
+      active: pathname.startsWith("/prospects"),
+    },
+    {
+      to: "/sprint-plan" as const,
+      label: "Sprint plan",
+      icon: CalendarDaysIcon,
+      active: pathname.startsWith("/sprint-plan"),
+    },
+    {
+      to: "/observations" as const,
+      label: "Observations",
+      icon: ListFilterIcon,
+      active: pathname.startsWith("/observations"),
+    },
+    {
+      to: "/lessons" as const,
+      label: "Lessons",
+      icon: LightbulbIcon,
+      active: pathname.startsWith("/lessons"),
     },
   ];
 
@@ -149,25 +194,11 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
             </SidebarMenuItem>
           );
         })}
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            aria-label={`Needs You, ${needsYouCount} pending`}
-            render={<Link to="/" onClick={closeMobileSidebar} />}
-            size="sm"
-          >
-            <CircleAlertIcon />
-            <span className="flex-1">Needs You</span>
-            {needsYouCount > 0 ? (
-              <Badge
-                className="min-w-5 justify-center rounded-full px-1.5"
-                size="sm"
-                variant="secondary"
-              >
-                {needsYouCount > 99 ? "99+" : needsYouCount}
-              </Badge>
-            ) : null}
-          </SidebarMenuButton>
-        </SidebarMenuItem>
+        {bootstrapQuery.error !== null && environmentId !== null ? (
+          <SidebarMenuItem className="px-2 py-1 text-xs text-muted-foreground">
+            <CircleAlertIcon className="mr-2 inline size-3.5" /> Inbox unavailable
+          </SidebarMenuItem>
+        ) : null}
       </SidebarMenu>
     </SidebarGroup>
   );

@@ -1,4 +1,7 @@
-import { COMMAND_CENTER_WS_METHODS } from "@t3tools/contracts";
+import {
+  COMMAND_CENTER_WS_METHODS,
+  COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+} from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -57,6 +60,220 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.itemId]),
       },
     }),
+    inbox: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:inbox",
+      tag: COMMAND_CENTER_WS_METHODS.inboxQuery,
+      staleTimeMs: 1_000,
+    }),
+    digest: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:digest",
+      tag: COMMAND_CENTER_WS_METHODS.digestQuery,
+      staleTimeMs: 30_000,
+    }),
+    updateDigestPreferences: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:digest-preferences-update",
+      tag: COMMAND_CENTER_WS_METHODS.digestPreferencesUpdate,
+      scheduler: commandScheduler,
+      concurrency: { mode: "serial", key: ({ environmentId }) => JSON.stringify([environmentId]) },
+    }),
+    markDigestViewed: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:digest-mark-viewed",
+      tag: COMMAND_CENTER_WS_METHODS.digestMarkViewed,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.snapshotId]),
+      },
+    }),
+    inboxDetail: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:inbox-detail",
+      tag: COMMAND_CENTER_WS_METHODS.inboxDetail,
+      staleTimeMs: 1_000,
+    }),
+    commentOnInboxItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-comment",
+      tag: COMMAND_CENTER_WS_METHODS.inboxComment,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    requestInboxChanges: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-request-changes",
+      tag: COMMAND_CENTER_WS_METHODS.inboxRequestChanges,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    createInboxCandidate: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-candidate-create",
+      tag: COMMAND_CENTER_WS_METHODS.inboxCandidateCreate,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    acceptInboxCandidate: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-candidate-accept",
+      tag: COMMAND_CENTER_WS_METHODS.inboxCandidateAccept,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    approveInboxAdjustment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-adjustment-approve",
+      tag: COMMAND_CENTER_WS_METHODS.inboxAdjustmentApprove,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    discardInboxCandidate: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-candidate-discard",
+      tag: COMMAND_CENTER_WS_METHODS.inboxCandidateDiscard,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    resolveInboxChangeRequest: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-change-request-resolve",
+      tag: COMMAND_CENTER_WS_METHODS.inboxChangeRequestResolve,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    snoozeInboxItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-snooze",
+      tag: COMMAND_CENTER_WS_METHODS.inboxSnooze,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    unsnoozeInboxItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-unsnooze",
+      tag: COMMAND_CENTER_WS_METHODS.inboxUnsnooze,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    dismissInboxItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-dismiss",
+      tag: COMMAND_CENTER_WS_METHODS.inboxDismiss,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    reopenInboxItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-reopen",
+      tag: COMMAND_CENTER_WS_METHODS.inboxReopen,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    sprintPlans: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:sprint-plans",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanList,
+      staleTimeMs: 1_000,
+    }),
+    previewSprintPlanImport: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:sprint-plan-preview-import",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanPreviewImport,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.planId]),
+      },
+    }),
+    applySprintPlanImport: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:sprint-plan-apply-import",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanApplyImport,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.planId]),
+      },
+    }),
+    sprintPlanCurrent: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:sprint-plan-current",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanGetCurrent,
+      staleTimeMs: 1_000,
+    }),
+    sprintPlanOriginal: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:sprint-plan-original",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanGetOriginal,
+      staleTimeMs: 5_000,
+    }),
+    patchSprintPlanTask: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:sprint-plan-patch-task",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanPatchTask,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.planId]),
+      },
+    }),
+    resolveSprintPlanDateConflict: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:sprint-plan-resolve-date-conflict",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanResolveDateConflict,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.planId]),
+      },
+    }),
+    sprintPlanHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:sprint-plan-history",
+      tag: COMMAND_CENTER_WS_METHODS.sprintPlanListHistory,
+      staleTimeMs: 1_000,
+    }),
+    approveInboxDraft: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:inbox-draft-approve",
+      tag: COMMAND_CENTER_WS_METHODS.inboxDraftApprove,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.itemId]),
+      },
+    }),
+    getInboxDraftReceipt: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:inbox-draft-receipt",
+      tag: COMMAND_CENTER_WS_METHODS.inboxDraftReceipt,
+    }),
     createItem: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:create-item",
       tag: COMMAND_CENTER_WS_METHODS.itemCreate,
@@ -106,6 +323,38 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.spaceId, input.connectionId]),
       },
     }),
+    publishConnections: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:publish-connections",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionsQuery,
+      staleTimeMs: 5_000,
+    }),
+    beginPublishConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:publish-connection-setup-begin",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionSetupBegin,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.provider]),
+      },
+    }),
+    completePublishConnectionSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:publish-connection-setup-complete",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionSetupComplete,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sessionId]),
+      },
+    }),
+    removePublishConnection: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:publish-connection-remove",
+      tag: COMMAND_CENTER_WS_METHODS.publishConnectionRemove,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.provider]),
+      },
+    }),
     eventReplay: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:event-replay",
       tag: COMMAND_CENTER_WS_METHODS.eventsReplay,
@@ -131,10 +380,115 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
       tag: COMMAND_CENTER_WS_METHODS.memorySearch,
       staleTimeMs: 1_000,
     }),
+    memories: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:memories",
+      tag: COMMAND_CENTER_WS_METHODS.memoryQuery,
+      staleTimeMs: 1_000,
+    }),
+    observationsList: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:observations-list",
+      tag: COMMAND_CENTER_WS_METHODS.observationsList,
+      staleTimeMs: 1_000,
+    }),
+    observationsGet: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:observations-get",
+      tag: COMMAND_CENTER_WS_METHODS.observationsGet,
+      staleTimeMs: 1_000,
+    }),
+    observationsHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:observations-history",
+      tag: COMMAND_CENTER_WS_METHODS.observationsHistory,
+      staleTimeMs: 1_000,
+    }),
+    fetchYouTubeAnalytics: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:youtube-analytics-fetch",
+      tag: COMMAND_CENTER_YOUTUBE_ANALYTICS_FETCH_METHOD,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([
+            environmentId,
+            input.spaceId,
+            input.videoId,
+            input.startDate,
+            input.endDate,
+          ]),
+      },
+    }),
+    createManualObservation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:observation-create-manual",
+      tag: COMMAND_CENTER_WS_METHODS.observationsCreateManual,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.observation.spaceId, input.observation.id]),
+      },
+    }),
+    importObservations: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:observations-import",
+      tag: COMMAND_CENTER_WS_METHODS.observationsImport,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.spaceId]),
+      },
+    }),
+    correctObservation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:observation-correct",
+      tag: COMMAND_CENTER_WS_METHODS.observationsCorrect,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.observationId]),
+      },
+    }),
+    retireObservation: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:observation-retire",
+      tag: COMMAND_CENTER_WS_METHODS.observationsRetire,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.observationId]),
+      },
+    }),
     automationDefinition: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:command-center:automation-definition",
       tag: COMMAND_CENTER_WS_METHODS.automationDefinitionGet,
       staleTimeMs: 1_000,
+    }),
+    responsibilities: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:responsibilities",
+      tag: COMMAND_CENTER_WS_METHODS.responsibilitiesList,
+      staleTimeMs: 2_000,
+    }),
+    responsibility: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:command-center:responsibility",
+      tag: COMMAND_CENTER_WS_METHODS.responsibilityGet,
+      staleTimeMs: 2_000,
+    }),
+    pauseResponsibility: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:pause-responsibility",
+      tag: COMMAND_CENTER_WS_METHODS.responsibilityPause,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.automationId]),
+      },
+    }),
+    resumeResponsibility: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:resume-responsibility",
+      tag: COMMAND_CENTER_WS_METHODS.responsibilityResume,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.spaceId, input.automationId]),
+      },
     }),
     createAutomationDefinition: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:create-automation-definition",
@@ -192,11 +546,40 @@ export function createCommandCenterEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) => JSON.stringify([environmentId, input.memoryId]),
       },
     }),
+    proposeMemory: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:propose-memory",
+      tag: COMMAND_CENTER_WS_METHODS.memoryPropose,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.spaceId]),
+      },
+    }),
     googleRead: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:command-center:google-read",
       tag: COMMAND_CENTER_WS_METHODS.googleRead,
       scheduler: commandScheduler,
       concurrency: { mode: "parallel" },
+    }),
+    // Windows media picker: read-only browse of the configured Windows host.
+    // "latest" per environment so fast folder clicks drop stale listings.
+    windowsMediaRoots: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:windows-media-roots",
+      tag: COMMAND_CENTER_WS_METHODS.windowsMediaRoots,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId }) => JSON.stringify([environmentId, "roots"]),
+      },
+    }),
+    windowsMediaList: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:command-center:windows-media-list",
+      tag: COMMAND_CENTER_WS_METHODS.windowsMediaList,
+      scheduler: commandScheduler,
+      concurrency: {
+        mode: "latest",
+        key: ({ environmentId }) => JSON.stringify([environmentId, "list"]),
+      },
     }),
   };
 }

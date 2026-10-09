@@ -41,6 +41,7 @@ import {
   ProviderDriverKind,
   resolveEnvironmentMachineKind,
   RuntimeMode,
+  SUBAGENT_STARTED_ACTIVITY_KIND,
   TerminalOpenInput,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
@@ -194,6 +195,7 @@ import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
 import { subscribePreviewAction } from "./preview/previewActionBus";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
+import { windowsFileTurnAttachments } from "./chat/windowsMediaPicker.logic";
 import {
   isSameSidebarThreadRef,
   useSidebarPendingFileDropStore,
@@ -764,6 +766,15 @@ function useLocalDispatchState(input: {
     localDispatch === null
       ? null
       : latestTurnStartFailureId(input.activeThread, latestUserMessageId);
+  const latestUserMessageDelegated =
+    latestUserMessageId !== null &&
+    (input.activeThread?.activities ?? []).some(
+      (activity) =>
+        activity.kind === SUBAGENT_STARTED_ACTIVITY_KIND &&
+        typeof activity.payload === "object" &&
+        activity.payload !== null &&
+        (activity.payload as { messageId?: unknown }).messageId === latestUserMessageId,
+    );
 
   const resetLocalDispatch = useCallback(() => {
     setLocalDispatch(null);
@@ -781,6 +792,7 @@ function useLocalDispatchState(input: {
         hasPendingUserInput: input.activePendingUserInput !== null,
         latestTurnStartFailureId: currentTurnStartFailureId,
         threadError: input.threadError,
+        latestUserMessageDelegated,
       }),
     [
       input.activeLatestTurn,
@@ -789,6 +801,7 @@ function useLocalDispatchState(input: {
       input.activeThread?.session,
       input.phase,
       input.threadError,
+      latestUserMessageDelegated,
       latestUserMessageId,
       currentTurnStartFailureId,
       localDispatch,
@@ -1617,6 +1630,7 @@ export default function ChatView(props: ChatViewProps) {
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const addComposerDraftFiles = useComposerDraftStore((store) => store.addFiles);
+  const addComposerDraftWindowsFile = useComposerDraftStore((store) => store.addWindowsFile);
   const setComposerDraftTerminalContexts = useComposerDraftStore(
     (store) => store.setTerminalContexts,
   );
@@ -2596,6 +2610,8 @@ export default function ChatView(props: ChatViewProps) {
     attachmentEnvironmentConfig?.environment.capabilities.questionAttachments === true;
   const supportsAttachmentUploads =
     attachmentEnvironmentConfig?.environment.capabilities.attachmentUploads === true;
+  const supportsWindowsMedia =
+    attachmentEnvironmentConfig?.environment.capabilities.windowsMedia === true;
   const advertisedFileAttachmentBytes =
     attachmentEnvironmentConfig?.environment.capabilities.fileAttachments?.maxUploadBytes ?? null;
   const maxFileAttachmentBytes =
@@ -7374,6 +7390,11 @@ export default function ChatView(props: ChatViewProps) {
       interactionMode: sendInteractionMode,
       interactionModeEnabled: sendInteractionModeEnabled,
     } = sendCtx;
+    // Windows file references are plain path metadata: no upload, no bytes.
+    const composerWindowsFiles = [
+      ...(useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.windowsFiles ??
+        []),
+    ];
     const annotationImageAlreadyAttached =
       directAnnotation?.image !== undefined &&
       sendContextImages.some((image) => image.id === directAnnotation.image?.id);
@@ -7422,7 +7443,7 @@ export default function ChatView(props: ChatViewProps) {
       hasSendableContent,
     } = deriveComposerSendState({
       prompt: promptForSend,
-      imageCount: composerImages.length + composerFiles.length,
+      imageCount: composerImages.length + composerFiles.length + composerWindowsFiles.length,
       terminalContexts: composerTerminalContexts,
       elementContextCount: composerPreviewAnnotations.length + composerReviewComments.length,
     });
@@ -7430,6 +7451,7 @@ export default function ChatView(props: ChatViewProps) {
       ctxSelectedProvider === "codex" &&
       composerImages.length === 0 &&
       composerFiles.length === 0 &&
+      composerWindowsFiles.length === 0 &&
       sendableComposerTerminalContexts.length === 0 &&
       composerPreviewAnnotations.length === 0 &&
       composerReviewComments.length === 0
@@ -7491,7 +7513,8 @@ export default function ChatView(props: ChatViewProps) {
       showPlanFollowUpPrompt &&
       activeProposedPlan &&
       composerImages.length === 0 &&
-      composerFiles.length === 0
+      composerFiles.length === 0 &&
+      composerWindowsFiles.length === 0
     ) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: promptForSend,
@@ -7553,6 +7576,7 @@ export default function ChatView(props: ChatViewProps) {
       sendInteractionModeEnabled &&
       composerImages.length === 0 &&
       composerFiles.length === 0 &&
+      composerWindowsFiles.length === 0 &&
       sendableComposerTerminalContexts.length === 0 &&
       composerPreviewAnnotations.length === 0 &&
       composerReviewComments.length === 0
@@ -7822,6 +7846,7 @@ export default function ChatView(props: ChatViewProps) {
 
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
+    const windowsFileAttachmentsForSend = windowsFileTurnAttachments(composerWindowsFiles);
     const turnAttachmentsPromise = Promise.all(
       composerAttachmentsSnapshot.map(async (attachment) => {
         if (turnUsesAttachmentUploads) {
@@ -7844,28 +7869,31 @@ export default function ChatView(props: ChatViewProps) {
           ...(attachment.source ? { source: attachment.source } : {}),
         };
       }),
-    );
-    const optimisticAttachments = composerAttachmentsSnapshot.map((attachment) =>
-      attachment.type === "image"
-        ? {
-            type: "image" as const,
-            id: attachment.id,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            sizeBytes: attachment.sizeBytes,
-            previewUrl: attachment.previewUrl,
-            ...(attachment.source ? { source: attachment.source } : {}),
-          }
-        : {
-            type: "file" as const,
-            id: attachment.id,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            sizeBytes: attachment.sizeBytes,
-            downloadable: false,
-            ...(attachment.source ? { source: attachment.source } : {}),
-          },
-    );
+    ).then((uploaded) => [...uploaded, ...windowsFileAttachmentsForSend]);
+    const optimisticAttachments = [
+      ...composerAttachmentsSnapshot.map((attachment) =>
+        attachment.type === "image"
+          ? {
+              type: "image" as const,
+              id: attachment.id,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              sizeBytes: attachment.sizeBytes,
+              previewUrl: attachment.previewUrl,
+              ...(attachment.source ? { source: attachment.source } : {}),
+            }
+          : {
+              type: "file" as const,
+              id: attachment.id,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              sizeBytes: attachment.sizeBytes,
+              downloadable: false,
+              ...(attachment.source ? { source: attachment.source } : {}),
+            },
+      ),
+      ...windowsFileAttachmentsForSend,
+    ];
     const shouldAnchorFirstMessage =
       activeThread.latestTurn === null &&
       !timelineMessages.some((message) => message.role === "user");
@@ -7932,6 +7960,8 @@ export default function ChatView(props: ChatViewProps) {
         titleSeed = `Image: ${firstComposerImageName}`;
       } else if (composerFilesSnapshot[0]) {
         titleSeed = `File: ${composerFilesSnapshot[0].name}`;
+      } else if (composerWindowsFiles[0]) {
+        titleSeed = `File: ${composerWindowsFiles[0].name}`;
       } else if (composerTerminalContextsSnapshot.length > 0) {
         titleSeed = formatTerminalContextLabel(composerTerminalContextsSnapshot[0]!);
       } else if (composerReviewCommentsSnapshot.length > 0) {
@@ -8188,6 +8218,8 @@ export default function ChatView(props: ChatViewProps) {
           : promptRef.current.length === 0 &&
             composerImagesRef.current.length === 0 &&
             composerFilesRef.current.length === 0 &&
+            (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.windowsFiles
+              ?.length ?? 0) === 0 &&
             composerTerminalContextsRef.current.length === 0 &&
             (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
               ?.previewAnnotations.length ?? 0) === 0 &&
@@ -8210,6 +8242,9 @@ export default function ChatView(props: ChatViewProps) {
         setComposerDraftPrompt(composerDraftTarget, messageTextForSend);
         addComposerDraftImages(composerDraftTarget, retryComposerImages);
         addComposerDraftFiles(composerDraftTarget, composerFilesSnapshot);
+        for (const windowsFile of composerWindowsFiles) {
+          addComposerDraftWindowsFile(composerDraftTarget, windowsFile);
+        }
         setComposerDraftTerminalContexts(composerDraftTarget, composerTerminalContextsSnapshot);
         setComposerDraftPreviewAnnotations(composerDraftTarget, composerPreviewAnnotationsSnapshot);
         setComposerDraftReviewComments(composerDraftTarget, composerReviewCommentsSnapshot);
@@ -9757,6 +9792,7 @@ export default function ChatView(props: ChatViewProps) {
                             attachmentUploadsCapabilityKnown={attachmentUploadsCapabilityKnown}
                             supportsAttachmentUploads={supportsAttachmentUploads}
                             supportsQuestionAttachments={supportsQuestionAttachments}
+                            supportsWindowsMedia={supportsWindowsMedia}
                             maxFileAttachmentBytes={maxFileAttachmentBytes}
                             routeKind={routeKind}
                             routeThreadRef={routeThreadRef}
