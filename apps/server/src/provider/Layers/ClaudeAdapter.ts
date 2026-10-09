@@ -1620,6 +1620,34 @@ function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStat
   return "failed";
 }
 
+/**
+ * True when a result answers a Claude-initiated turn rather than the active
+ * real turn. Claude runs turns of its own between user prompts (a resumed
+ * session first reports background tasks the previous process left behind;
+ * peer messages wake the agent), and a queued prompt waits behind them.
+ * Those turns echo no user prompt (`user_message_uuids`, newer CLIs) and carry
+ * a non-human `origin`. A result that echoes any prompt, or carries neither
+ * field (older CLIs), still completes the active turn.
+ *
+ * Upstream also matches the echoed uuid against the turn id; the fork does not
+ * send its turn id as the prompt uuid, so any echo counts as the user's.
+ */
+function isResultForOtherTurn(result: SDKResultMessage, turn: ClaudeTurnState): boolean {
+  // A synthetic turn mirrors a Claude-initiated turn, so any result is its own.
+  if (turn.synthetic) return false;
+  // Read defensively: the echo fields postdate the bundled SDK types.
+  const wire = result as { user_message_uuids?: unknown; user_message_uuid?: unknown };
+  const echoesPrompt =
+    (Array.isArray(wire.user_message_uuids) &&
+      wire.user_message_uuids.some((uuid) => typeof uuid === "string" && uuid.length > 0)) ||
+    (typeof wire.user_message_uuid === "string" && wire.user_message_uuid.length > 0);
+  if (echoesPrompt) return false;
+  const origin: unknown = result.origin;
+  if (origin === null || typeof origin !== "object") return false;
+  const kind = (origin as { kind?: unknown }).kind;
+  return typeof kind === "string" && kind !== "human";
+}
+
 const CLAUDE_USAGE_LIMIT_FAILURE =
   "Claude usage limit reached. Send the message again once the limit resets.";
 
@@ -3328,6 +3356,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const turn = context.turnState;
+    if (turn && isResultForOtherTurn(message, turn)) {
+      // Completing here would end the user's turn before its prompt runs. A
+      // `/compact` would then compact with no turn open and leave the thread
+      // looking busy.
+      yield* Effect.logInfo("claude.turn.result-for-other-turn", {
+        threadId: context.session.threadId,
+        turnId: turn.turnId,
+        origin: (message.origin as { kind?: unknown } | undefined)?.kind,
+        numTurns: message.num_turns,
+      });
+      return;
+    }
     const failureHint =
       turn?.authenticationFailureMessage ??
       (turn && turn.rejectedRateLimitTypes.size > 0 ? CLAUDE_USAGE_LIMIT_FAILURE : undefined);
