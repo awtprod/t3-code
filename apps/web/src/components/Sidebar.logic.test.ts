@@ -844,26 +844,30 @@ describe("filterSidebarProjectScopeItems", () => {
     { value: "alpha", label: "Alpha workspace" },
     { value: "beta", label: "Beta tools" },
   ] as const;
-  const filter = (query: string) =>
+  const filter = (activeScopeKey: string | null, query: string) =>
     filterSidebarProjectScopeItems({
       items,
+      activeScopeKey,
       query,
       matches: (item, candidate) =>
         item.label.toLocaleLowerCase().includes(candidate.toLocaleLowerCase()),
     });
 
-  it("shows the default row first while the query is empty", () => {
-    expect(filter("")).toEqual(items);
-    expect(filter("   ")).toEqual(items);
+  it("omits the reset row when the sidebar is already unscoped", () => {
+    expect(filter(null, "")).toEqual(items.slice(1));
   });
 
-  it("hides the default row while filtering", () => {
-    expect(filter("all")).toEqual([]);
+  it("shows the reset row first while a project scope is active", () => {
+    expect(filter("alpha", "")).toEqual(items);
+  });
+
+  it("hides the reset row while filtering an active scope", () => {
+    expect(filter("alpha", "all")).toEqual([]);
   });
 
   it("returns matching projects in source order and supports no-match results", () => {
-    expect(filter("WORK")).toEqual([items[1]]);
-    expect(filter("missing")).toEqual([]);
+    expect(filter(null, "WORK")).toEqual([items[1]]);
+    expect(filter(null, "missing")).toEqual([]);
   });
 });
 

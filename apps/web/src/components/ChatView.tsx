@@ -6,7 +6,6 @@ import {
   hasProviderUsageLimits,
   isUsageLimitsCommand,
 } from "@t3tools/shared/usageLimits";
-import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
 import { derivePendingRequests } from "@t3tools/client-runtime/pending-requests";
 import {
@@ -52,6 +51,7 @@ import { isPasteAsTextShortcut } from "@t3tools/client-runtime/text-paste";
 import { type CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import { effectiveSnoozed, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import {
+  codexFeedbackMessage,
   parseCodexFeedbackCommand,
   submitCodexFeedback,
   type CodexFeedbackSubmission,
@@ -2789,7 +2789,7 @@ export default function ChatView(props: ChatViewProps) {
           !updateFailed &&
           versionMismatchSelfUpdate !== null &&
           (versionMismatchSelfUpdate !== "desktop-managed" || !versionMismatchDesktopAppUpdate)
-            ? serverUpdateGuidance(versionMismatchSelfUpdate)
+            ? serverUpdateGuidance(versionMismatchSelfUpdate, versionMismatchServerLabel)
             : undefined,
         actions: updateInProgress ? (
           disconnectAction
@@ -3492,7 +3492,14 @@ export default function ChatView(props: ChatViewProps) {
             });
           });
 
-    const localMessages = optimisticUserMessages;
+    const localMessages = [
+      ...optimisticUserMessages,
+      ...feedbackSubmissions.flatMap((submission) =>
+        submission.status === "interrupted"
+          ? []
+          : [codexFeedbackMessage(submission), codexFeedbackMessage(submission, "assistant")],
+      ),
+    ];
     if (localMessages.length === 0) {
       return serverMessagesWithPreviewHandoff;
     }
@@ -3505,6 +3512,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     attachmentPreviewHandoffByMessageId,
     displayServerMessages,
+    feedbackSubmissions,
     optimisticUserMessages,
     projectHandoffMessagePreviews,
   ]);
@@ -4022,7 +4030,6 @@ export default function ChatView(props: ChatViewProps) {
       promptRef.current = input.text;
       composerImagesRef.current = images;
       composerTerminalContextsRef.current = [];
-      composerElementContextsRef.current = [];
       setComposerDraftPrompt(composerDraftTarget, input.text);
       addComposerDraftImages(composerDraftTarget, images);
       composerRef.current?.resetCursorState({ cursor: input.text.length, prompt: input.text });
@@ -6476,21 +6483,6 @@ export default function ChatView(props: ChatViewProps) {
     }
     void handleSwitchCheckoutToThread();
   }, [gitStatusQuery.data?.hasWorkingTreeChanges, handleSwitchCheckoutToThread]);
-  const feedbackBannerItems = useMemo(
-    () =>
-      feedbackSubmissions.flatMap((submission) => {
-        const item = feedbackBannerItem(submission, () => {
-          setFeedbackSubmissionsByThreadKey((current) => ({
-            ...current,
-            [routeThreadKey]: (current[routeThreadKey] ?? []).filter(
-              (entry) => entry.id !== submission.id,
-            ),
-          }));
-        });
-        return item ? [item] : [];
-      }),
-    [feedbackSubmissions, routeThreadKey],
-  );
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
@@ -6503,7 +6495,6 @@ export default function ChatView(props: ChatViewProps) {
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
-        ...feedbackBannerItems,
         ...usageLimitsItems,
         ...projectCloneItems,
         ...systemComposerBannerItems,
@@ -6514,7 +6505,6 @@ export default function ChatView(props: ChatViewProps) {
       ];
     }
     return [
-      ...feedbackBannerItems,
       ...usageLimitsItems,
       ...projectCloneItems,
       ...systemComposerBannerItems,
@@ -6564,7 +6554,6 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     activeBranchMismatchKey,
     backgroundLivenessBannerItem,
-    feedbackBannerItems,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,

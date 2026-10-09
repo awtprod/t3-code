@@ -8,7 +8,8 @@ import {
 import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
-import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { planPinnedReorder, sortActiveThreadsByOrderKey } from "@t3tools/client-runtime/state/thread-sort";
+import type { ThreadRouteTarget } from "../threadRoutes";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -758,6 +759,32 @@ export function resolveAdjacentThreadId<T>(input: {
   return currentIndex < threadIds.length - 1 ? (threadIds[currentIndex + 1] ?? null) : null;
 }
 
+// The settled-row timestamp helper now lives in client-runtime; re-exported
+// here so Sidebar/SidebarV2 keep a single import site for sidebar logic.
+export { resolveSettledThreadTimestamp };
+
+export function shouldNavigateAfterProjectRemoval(input: {
+  routeTarget: ThreadRouteTarget | null;
+  projectThreads: readonly {
+    environmentId: string;
+    id: string;
+  }[];
+  projectDraftId: string | null;
+}): boolean {
+  const { projectDraftId, projectThreads, routeTarget } = input;
+  if (routeTarget?.kind === "draft") {
+    return projectDraftId === routeTarget.draftId;
+  }
+  if (routeTarget?.kind !== "server") {
+    return false;
+  }
+  return projectThreads.some(
+    (thread) =>
+      thread.environmentId === routeTarget.threadRef.environmentId &&
+      thread.id === routeTarget.threadRef.threadId,
+  );
+}
+
 export function isContextMenuPointerDown(input: {
   button: number;
   ctrlKey: boolean;
@@ -898,7 +925,7 @@ function firstValidTimestamp(
   return null;
 }
 
-export { sortActiveThreadsByOrderKey as sortThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
+export const sortThreadsForSidebar = sortActiveThreadsByOrderKey;
 
 // SidebarV2 (./SidebarV2.tsx) twin of sortThreadsForSidebar; see the status
 // alias pair above for why this stays separate rather than shared.
@@ -928,12 +955,16 @@ export function searchSidebarThreads<
 
 export function filterSidebarProjectScopeItems<TItem extends { readonly value: string }>(input: {
   items: readonly TItem[];
+  activeScopeKey: string | null;
   query: string;
   matches: (item: TItem, query: string) => boolean;
 }): readonly TItem[] {
+  const projectItems = input.items.filter((item) => item.value !== "all");
   const query = input.query.trim();
-  if (query.length === 0) return input.items;
-  return input.items.filter((item) => item.value !== "all" && input.matches(item, query));
+  if (query.length > 0) {
+    return projectItems.filter((item) => input.matches(item, query));
+  }
+  return input.activeScopeKey === null ? projectItems : input.items;
 }
 
 export interface SidebarProjectScopeMenuState {

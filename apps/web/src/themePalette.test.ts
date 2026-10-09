@@ -36,6 +36,7 @@ import {
   updateCustomTheme,
   CUSTOM_THEMES_STORAGE_KEY,
   createVividThemeColors,
+  createManagedThemeColors,
   getDefaultThemeColors,
   themeColorToHex,
   toCanonicalThemeColor,

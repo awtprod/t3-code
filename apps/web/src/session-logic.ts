@@ -22,6 +22,7 @@ import {
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
   isToolLifecycleItemType,
+  ProviderDriverKind,
   type AssetResource,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
@@ -43,6 +44,8 @@ import {
 } from "./types";
 
 export type { PendingApproval, PendingUserInput } from "@t3tools/client-runtime/pending-requests";
+
+export type ProviderPickerKind = ProviderDriverKind;
 
 export const PROVIDER_OPTIONS: Array<{
   value: ProviderPickerKind;

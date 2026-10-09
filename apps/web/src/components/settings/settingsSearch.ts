@@ -807,6 +807,11 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/source-control": "environment-defaults",
   "/settings/connections": "connections",
   "/settings/archived": "project-defaults",
+  "/settings/usage": null,
+  "/settings/efficiency": null,
+  "/settings/notifications": null,
+  "/settings/databases": null,
+  "/settings/beta": null,
 };
 
 /** Search keeps the selected target. A missing row can explain its owning scope instead. */

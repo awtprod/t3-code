@@ -988,6 +988,8 @@ export function buildAskAboutLinesHandoff(input: {
   readonly url: string;
   readonly headBranch: string;
   readonly baseBranch: string;
+  readonly state: PullRequestState;
+  readonly isDraft: boolean;
   readonly comment: ReviewCommentContext;
   readonly question: string;
 }): FixFindingsHandoff {

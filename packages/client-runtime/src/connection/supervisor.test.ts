@@ -1280,6 +1280,7 @@ describe("EnvironmentSupervisor", () => {
         unregisterDevice: unused,
         registerLiveActivity: unused,
         getAgentActivitySnapshot: unused,
+        getWebPushConfig: unused(),
         resetTokenCache: Effect.void,
       });
       const httpLayer = remoteHttpClientLayer(fetchFn);

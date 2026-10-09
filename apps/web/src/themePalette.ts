@@ -545,6 +545,54 @@ type ThemeRgbColor = {
   b: number;
 };
 
+type ThemeHslColor = {
+  h: number;
+  s: number;
+  l: number;
+};
+
+function themeRgbToHsl(color: ThemeRgbColor): ThemeHslColor {
+  const red = color.r / 255;
+  const green = color.g / 255;
+  const blue = color.b / 255;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const delta = max - min;
+  const lightness = (max + min) / 2;
+
+  if (delta === 0) return { h: 0, s: 0, l: lightness };
+
+  const saturation = delta / (1 - Math.abs(2 * lightness - 1));
+  let hue = 0;
+  if (max === red) hue = ((green - blue) / delta) % 6;
+  else if (max === green) hue = (blue - red) / delta + 2;
+  else hue = (red - green) / delta + 4;
+
+  return { h: (hue * 60 + 360) % 360, s: saturation, l: lightness };
+}
+
+function themeHslToRgb(color: ThemeHslColor): ThemeRgbColor {
+  const hue = ((color.h % 360) + 360) % 360;
+  const chroma = (1 - Math.abs(2 * color.l - 1)) * color.s;
+  const hueSector = hue / 60;
+  const secondary = chroma * (1 - Math.abs((hueSector % 2) - 1));
+  const match = color.l - chroma / 2;
+  const [red, green, blue] =
+    hueSector < 1
+      ? [chroma, secondary, 0]
+      : hueSector < 2
+        ? [secondary, chroma, 0]
+        : hueSector < 3
+          ? [0, chroma, secondary]
+          : hueSector < 4
+            ? [0, secondary, chroma]
+            : hueSector < 5
+              ? [secondary, 0, chroma]
+              : [chroma, 0, secondary];
+
+  return { r: (red + match) * 255, g: (green + match) * 255, b: (blue + match) * 255 };
+}
+
 type ThemeOklch = { L: number; C: number; h: number };
 type ParsedThemeColor = { color: ThemeOklch; alpha: number };
 

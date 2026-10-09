@@ -1228,7 +1228,7 @@ describe("thread outbox", () => {
     const manager = createThreadOutboxManager({
       registry,
       storage: {
-        load: async () => [...stored.values()],
+        load: async () => ({ messages: [...stored.values()], errors: [] }),
         write: async (message) => {
           stored.set(message.messageId, message);
         },

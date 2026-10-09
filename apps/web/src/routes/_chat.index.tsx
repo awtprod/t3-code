@@ -7,6 +7,8 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/
 import { SidebarInset } from "../components/ui/sidebar";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useEnvironments } from "../state/environments";
+import { isElectron } from "../env";
+import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { APP_DISPLAY_NAME } from "~/branding";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 

@@ -16,7 +16,7 @@ function shouldShowWorkspaceConnectionStatus(state: WorkspaceState): boolean {
   );
 }
 
-function workspaceConnectionStatusLabel(state: WorkspaceState): string {
+export function workspaceConnectionStatusLabel(state: WorkspaceState): string {
   if (state.networkStatus === "offline") return "You are offline";
   if (state.connectingEnvironments.length === 1) {
     return `Reconnecting to ${state.connectingEnvironments[0]!.environmentLabel}`;

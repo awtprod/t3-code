@@ -246,7 +246,3 @@ export function readThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
   return appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
 }
 
-export function readProjects(): ReadonlyArray<EnvironmentProject> {
-  return appAtomRegistry.get(environmentProjects.projectsAtom);
-}
-

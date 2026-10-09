@@ -14,6 +14,7 @@ import {
   baseSshArgs,
   getLastNonEmptyOutputLine,
   parseSshResolveOutput,
+  resolveRemoteT3CliPackageSpec,
   runSshCommand,
 } from "./command.ts";
 import { SshCommandError } from "./errors.ts";

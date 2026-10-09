@@ -277,7 +277,6 @@ const bootstrap = Effect.gen(function* () {
   }
 
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
-  const primaryBackend = yield* pool.primary;
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   const wslBackend = yield* DesktopWslBackend.DesktopWslBackend;
 

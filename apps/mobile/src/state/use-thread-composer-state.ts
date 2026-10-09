@@ -21,6 +21,7 @@ import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { nextPastedTextFileName, pastedTextDisposition } from "@t3tools/client-runtime/text-paste";
 import {
+  codexFeedbackMessage,
   parseCodexFeedbackCommand,
   submitCodexFeedback,
   type CodexFeedbackSubmission,
@@ -178,20 +179,6 @@ export function useThreadComposerState() {
         : [],
     [queuedMessagesByThreadKey, selectedThreadKey],
   );
-  const feedbackSubmissions = useMemo(
-    () => (selectedThreadKey ? (feedbackSubmissionsByThreadKey[selectedThreadKey] ?? []) : []),
-    [feedbackSubmissionsByThreadKey, selectedThreadKey],
-  );
-  const dismissFeedback = useCallback(
-    (id: MessageId) => {
-      if (!selectedThreadKey) return;
-      setFeedbackSubmissionsByThreadKey((current) => ({
-        ...current,
-        [selectedThreadKey]: (current[selectedThreadKey] ?? []).filter((entry) => entry.id !== id),
-      }));
-    },
-    [selectedThreadKey],
-  );
   const selectedThreadMessages = selectedThreadDetail?.messages;
   const selectedThreadActivities = selectedThreadDetail?.activities;
   // A thread whose creation has not delivered its turn yet: the prompt only
@@ -201,16 +188,27 @@ export function useThreadComposerState() {
   const pendingCreationMessage = selectedThreadCreation?.message ?? null;
   const selectedThreadFeed = useMemo(() => {
     const loadedMessages = selectedThreadMessages ?? [];
+    const feedbackSubmissions = selectedThreadKey
+      ? (feedbackSubmissionsByThreadKey[selectedThreadKey] ?? [])
+      : [];
+    const feedbackMessages = feedbackSubmissions.flatMap((submission) =>
+      submission.status === "interrupted"
+        ? []
+        : [codexFeedbackMessage(submission), codexFeedbackMessage(submission, "assistant")],
+    );
     const feed =
       (selectedThreadMessages && selectedThreadActivities) || pendingCreationMessage !== null
-        ? buildThreadFeed({
-            messages:
-              pendingCreationMessage !== null &&
-              !loadedMessages.some((message) => message.id === pendingCreationMessage.messageId)
-                ? [...loadedMessages, pendingThreadCreationMessage(pendingCreationMessage)]
-                : loadedMessages,
-            activities: selectedThreadActivities ?? [],
-          })
+        ? buildThreadFeed(
+            {
+              messages:
+                pendingCreationMessage !== null &&
+                !loadedMessages.some((message) => message.id === pendingCreationMessage.messageId)
+                  ? [...loadedMessages, pendingThreadCreationMessage(pendingCreationMessage)]
+                  : loadedMessages,
+              activities: selectedThreadActivities ?? [],
+            },
+            { localMessages: feedbackMessages },
+          )
         : [];
     const pendingAcknowledgments = acknowledgedMessages.filter(
       (message) =>
@@ -228,6 +226,7 @@ export function useThreadComposerState() {
     selectedThreadKey,
     selectedThreadQueuedMessages,
     acknowledgedMessages,
+    feedbackSubmissionsByThreadKey,
   ]);
   useEffect(() => {
     const echoedIds = new Set(selectedThreadMessages?.map((message) => message.id));
@@ -820,8 +819,6 @@ export function useThreadComposerState() {
   );
 
   return {
-    feedbackSubmissions,
-    dismissFeedback,
     selectedThreadFeed,
     selectedThreadQueueCount,
     selectedThreadQueuedMessages,

@@ -281,7 +281,7 @@ export function createComposerImageThumbnail(file: File): Promise<string | null>
         dimension,
       );
       return (
-        (await encodeCanvas(surface.canvas, 1, "image/png", Number.POSITIVE_INFINITY))?.dataUrl ??
+        (await encodeToDataUrl(surface.canvas, 1, "image/png", Number.POSITIVE_INFINITY))?.dataUrl ??
         null
       );
     } catch {

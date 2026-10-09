@@ -14,9 +14,11 @@ import type {
   OrchestrationThread,
   ProjectContentMatch,
   ProjectEntryKind,
+  ThreadId,
   VcsListRefsResult,
   VcsRef,
 } from "@t3tools/contracts";
+import { useEnvironmentThread } from "./threads";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
@@ -58,6 +60,19 @@ export interface ThreadDetailView {
   readonly error: string | null;
   readonly isPending: boolean;
   readonly isDeleted: boolean;
+}
+
+export function useThreadDetail(
+  environmentId: EnvironmentId | null,
+  threadId: ThreadId | null,
+): ThreadDetailView {
+  const state = useEnvironmentThread(environmentId, threadId);
+  return {
+    data: Option.getOrNull(state.data),
+    error: Option.getOrNull(state.error),
+    isPending: state.status === "synchronizing",
+    isDeleted: state.status === "deleted",
+  };
 }
 
 /** Shared with the pull requests page, which debounces its search the same way. */
