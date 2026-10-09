@@ -1465,6 +1465,14 @@ function titleForTool(itemType: CanonicalItemType): string {
   }
 }
 
+/**
+ * The SDK passes `mcpServers` to the CLI as an inline `--mcp-config` argument,
+ * and process arguments are readable by every local user. The T3 MCP
+ * credential therefore travels in the child's environment, which only its
+ * owner can read, and the CLI expands the `${VAR}` reference when it connects.
+ */
+export const CLAUDE_T3_MCP_AUTHORIZATION_ENV = "T3_CODE_MCP_AUTHORIZATION";
+
 const SUPPORTED_CLAUDE_IMAGE_MIME_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -4881,7 +4889,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : {}),
         },
         supportedDialogKinds: ["resume_return"],
-        env: claudeEnvironment,
+        env: mcpSession
+          ? {
+              ...claudeEnvironment,
+              [CLAUDE_T3_MCP_AUTHORIZATION_ENV]: mcpSession.authorizationHeader,
+            }
+          : claudeEnvironment,
         additionalDirectories,
         ...(sandboxProviderTarget(input.threadId)
           ? {
@@ -4897,7 +4910,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   type: "http",
                   url: mcpSession.endpoint,
                   headers: {
-                    Authorization: mcpSession.authorizationHeader,
+                    Authorization: `\${${CLAUDE_T3_MCP_AUTHORIZATION_ENV}}`,
                   },
                 },
               },

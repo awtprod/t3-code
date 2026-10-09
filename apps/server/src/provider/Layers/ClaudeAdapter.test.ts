@@ -15,6 +15,7 @@ import {
   ApprovalRequestId,
   ClaudeSettings,
   EfficiencySieveSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -55,7 +56,9 @@ import {
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { BUNDLED_CLAUDE_MODEL_CATALOG } from "../ClaudeModelCatalog.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
+  CLAUDE_T3_MCP_AUTHORIZATION_ENV,
   makeClaudeAdapter,
   maybeDowngradeBashWorkerModel,
   maybeDowngradeSubagentModel,
@@ -5617,6 +5620,67 @@ describe("ClaudeAdapterLive", () => {
           }
         | undefined;
       assert.equal(resumeCursor?.resume, durableSessionId);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps the T3 MCP credential out of the CLI arguments", () => {
+    const harness = makeHarness();
+    McpProviderSession.setMcpProviderSession({
+      environmentId: EnvironmentId.make("environment-claude-mcp"),
+      threadId: THREAD_ID,
+      providerSessionId: "provider-session-claude-mcp",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      endpoint: "http://127.0.0.1:43123/mcp",
+      authorizationHeader: "Bearer synthetic-claude-mcp-credential",
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert(options !== undefined);
+      // mcpServers becomes an inline `--mcp-config` argument, readable by every
+      // local user; the credential may only travel in the child's environment.
+      assert.notInclude(
+        encodeUnknownJsonString(options.mcpServers),
+        "synthetic-claude-mcp-credential",
+      );
+      assert.deepEqual(options.mcpServers?.["t3-code"], {
+        type: "http",
+        url: "http://127.0.0.1:43123/mcp",
+        headers: { Authorization: `\${${CLAUDE_T3_MCP_AUTHORIZATION_ENV}}` },
+      });
+      assert.equal(
+        options.env?.[CLAUDE_T3_MCP_AUTHORIZATION_ENV],
+        "Bearer synthetic-claude-mcp-credential",
+      );
+    }).pipe(
+      Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(THREAD_ID))),
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("adds no MCP credential variable when the thread has no T3 MCP session", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert(options !== undefined);
+      assert.equal(options.mcpServers, undefined);
+      assert.equal(options.env?.[CLAUDE_T3_MCP_AUTHORIZATION_ENV], undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
