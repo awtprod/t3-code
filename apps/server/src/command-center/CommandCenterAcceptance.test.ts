@@ -19,6 +19,7 @@ import {
   CommandCenterCommandSubmitInput,
   CommandCenterMemoryProposeInput,
   CommandCenterRouteSelectedPayload,
+  CommandCenterSpaceBrief,
   EnvironmentId,
   GoogleReadRequest,
   GoogleReadResult,
@@ -77,6 +78,7 @@ const decodeAutomationSnapshot = Schema.decodeUnknownSync(
 const decodeCommand = Schema.decodeUnknownSync(CommandCenterCommandSubmitInput);
 const decodeMemoryPropose = Schema.decodeUnknownSync(CommandCenterMemoryProposeInput);
 const decodeMemory = Schema.decodeUnknownSync(Memory);
+const decodeSpaceBrief = Schema.decodeUnknownSync(CommandCenterSpaceBrief);
 const decodeGoogleRead = Schema.decodeUnknownSync(GoogleReadRequest);
 const decodeGoogleResult = Schema.decodeUnknownSync(GoogleReadResult);
 const decodeItemsListResult = Schema.decodeUnknownSync(
@@ -529,6 +531,7 @@ const makeToolkitLayer = (input: {
   readonly scope: McpInvocationContext.McpInvocationScope;
   readonly google: GoogleReadConnector.GoogleReadConnectorShape;
   readonly automationDefinitions?: AutomationDefinitionConfig.AutomationDefinitionConfigShape;
+  readonly providerRegistry?: ProviderRegistry.ProviderRegistryShape;
 }) =>
   CommandCenterToolkitHandlersLive.pipe(
     Layer.provideMerge(
@@ -543,7 +546,10 @@ const makeToolkitLayer = (input: {
         ),
         Layer.succeed(AutomationRuns.AutomationRuns, unusedAutomationRuns),
         Layer.succeed(MemorySearchIndex.MemorySearchIndex, unusedMemorySearch),
-        Layer.succeed(ProviderRegistry.ProviderRegistry, unusedProviderRegistry),
+        Layer.succeed(
+          ProviderRegistry.ProviderRegistry,
+          input.providerRegistry ?? unusedProviderRegistry,
+        ),
       ),
     ),
   );
@@ -1233,5 +1239,116 @@ describe("Command Center acceptance prompts", () => {
         }),
       ),
     ),
+  );
+  it.effect("routes a Space agent credential through approved Memory and the autonomy gate", () => {
+    const agentStudioSpace = decodeSpace({
+      ...studioSpace,
+      agent: { enabled: true, dailyWakeLimit: 12, debounceMinutes: 10 },
+    });
+    const agentConfig = {
+      ...loadedConfig,
+      spaces: [agentStudioSpace, systemSpace, personalSpace],
+    } satisfies LoadedCommandCenterConfig;
+    const agentScope: McpInvocationContext.McpInvocationScope = {
+      environmentId: EnvironmentId.make("environment-acceptance"),
+      threadId: ThreadId.make("cc-space-agent-example-studio"),
+      providerSessionId: "space-agent-session",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      capabilities: new Set(CAPABILITY_NAMES),
+      spaceId: agentStudioSpace.id,
+      memoryWriteMode: "remember",
+      role: "space-agent",
+      issuedAt: Date.parse(fixtureTimestamp),
+    };
+    const noProviders = ProviderRegistry.ProviderRegistry.of({
+      ...unusedProviderRegistry,
+      getProviders: Effect.succeed([]),
+    });
+    const invoke = <Name extends keyof typeof CommandCenterToolkit.tools>(
+      service: CommandCenterServiceShape,
+      name: Name,
+      input: unknown,
+    ) =>
+      Effect.gen(function* () {
+        const toolkit = yield* CommandCenterToolkit;
+        const outputStream = yield* toolkit.handle(name, input as never);
+        return Array.from(yield* outputStream.pipe(Stream.runCollect));
+      }).pipe(
+        Effect.provide(
+          makeToolkitLayer({
+            service,
+            scope: agentScope,
+            google: makeMockGoogleConnector().service,
+            providerRegistry: noProviders,
+          }),
+        ),
+      );
+
+    return Effect.gen(function* () {
+      const service = yield* CommandCenterService;
+      const sql = yield* SqlClient.SqlClient;
+      const [memoryOutput] = yield* invoke(service, "cc_memory_propose", {
+        requestId: "space-agent-acceptance-memory",
+        spaceId: agentStudioSpace.id,
+        kind: "decision",
+        content: "Ship sample releases on Fridays.",
+        confidence: 0.3,
+      });
+      const [runOutput] = yield* invoke(service, "cc_runs_start", {
+        commandId: "space-agent-acceptance-run",
+        text: "Summarize the Example Studio app",
+      });
+      const [briefOutput] = yield* invoke(service, "cc_space_brief", {});
+      const runs = yield* sql<{ readonly id: string }>`SELECT id FROM command_center_runs`;
+
+      expect(memoryOutput?.isFailure).toBe(false);
+      expect(decodeMemory(memoryOutput?.result)).toMatchObject({
+        status: "approved",
+        provenance: { kind: "agent", sourceRef: "cc-space-agent-example-studio" },
+      });
+      expect(runOutput?.isFailure).toBe(false);
+      expect(runOutput?.result).toMatchObject({
+        proposal: "decision",
+        item: { kind: "decision", status: "review", metadata: { spaceAgent: true } },
+      });
+      expect(runs).toEqual([]);
+      const brief = decodeSpaceBrief(briefOutput?.result);
+      expect(brief.spaceId).toBe(agentStudioSpace.id);
+      expect(brief.brief).toContain("Ship sample releases on Fridays.");
+    }).pipe(Effect.provide(makeTestLayer(agentConfig)));
+  });
+
+  it.effect("cuts off a live Space agent credential once its agent is no longer enabled", () =>
+    Effect.gen(function* () {
+      const service = yield* CommandCenterService;
+      const error = yield* Effect.gen(function* () {
+        const toolkit = yield* CommandCenterToolkit;
+        const outputStream = yield* toolkit.handle("cc_items_list", { spaceId: studioSpace.id });
+        return Array.from(yield* outputStream.pipe(Stream.runCollect));
+      }).pipe(
+        Effect.flip,
+        Effect.provide(
+          makeToolkitLayer({
+            service,
+            google: makeMockGoogleConnector().service,
+            scope: {
+              environmentId: EnvironmentId.make("environment-acceptance"),
+              threadId: ThreadId.make("cc-space-agent-example-studio"),
+              providerSessionId: "space-agent-session",
+              providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+              capabilities: new Set(CAPABILITY_NAMES),
+              spaceId: studioSpace.id,
+              memoryWriteMode: "remember",
+              role: "space-agent",
+              issuedAt: Date.parse(fixtureTimestamp),
+            },
+          }),
+        ),
+      );
+      expect(error).toMatchObject({
+        _tag: "CommandCenterError",
+        message: "This Space agent is disabled or no longer allowed to use this tool.",
+      });
+    }).pipe(Effect.provide(makeTestLayer(loadedConfig))),
   );
 });

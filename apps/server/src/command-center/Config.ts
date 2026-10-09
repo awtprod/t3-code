@@ -3,12 +3,21 @@ import {
   type Automation as AutomationType,
   CapabilityName,
   Connection,
+  SPACE_AGENT_DEFAULT_DAILY_WAKE_LIMIT,
+  SPACE_AGENT_DEFAULT_DEBOUNCE_MINUTES,
+  SPACE_AGENT_MAX_CHECK_INS,
   Space,
+  SpaceAgentClockTime,
   ObservationEligibilityPolicy,
   type Connection as ConnectionType,
   type Space as SpaceType,
+  type SpaceAgentConfig as SpaceAgentConfigSchema,
 } from "@command-center/core";
 import { CommandCenterError, type CommandCenterConfigHealth } from "@t3tools/contracts";
+import {
+  isValidAutomationTimeZone,
+  parseAutomationCronExpression,
+} from "@t3tools/shared/automationSchedule";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -57,6 +66,75 @@ const RootConfigFile = Schema.Struct({
   ),
 });
 
+const SpaceAgentConfigFile = Schema.Struct({
+  enabled: Schema.Boolean,
+  model: Schema.optional(Schema.Struct({ provider: NonEmpty, model: NonEmpty })),
+  checkIns: Schema.optional(
+    Schema.Struct({
+      cron: Schema.Array(NonEmpty).check(Schema.isMaxLength(SPACE_AGENT_MAX_CHECK_INS)),
+      timezone: NonEmpty,
+    }),
+  ),
+  quietHours: Schema.optional(
+    Schema.Struct({
+      start: SpaceAgentClockTime,
+      end: SpaceAgentClockTime,
+      timezone: NonEmpty,
+    }),
+  ),
+  dailyWakeLimit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 48 }))),
+  debounceMinutes: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 120 })),
+  ),
+});
+type SpaceAgentConfigFile = typeof SpaceAgentConfigFile.Type;
+
+/**
+ * Normalize the optional `agent` block of a Space config file. Returns the
+ * canonical agent settings with defaults applied, `undefined` when the block is
+ * absent, or an error message for a value the schema cannot express (cron
+ * syntax, IANA timezone).
+ */
+export const normalizeSpaceAgentConfig = (
+  raw: SpaceAgentConfigFile | undefined,
+):
+  | { readonly ok: true; readonly agent: (typeof SpaceAgentConfigSchema)["Encoded"] | undefined }
+  | { readonly ok: false; readonly message: string } => {
+  if (raw === undefined) return { ok: true, agent: undefined };
+  for (const expression of raw.checkIns?.cron ?? []) {
+    if (parseAutomationCronExpression(expression) === undefined) {
+      return {
+        ok: false,
+        message: `agent.checkIns.cron has an invalid expression '${expression}'.`,
+      };
+    }
+  }
+  for (const [field, timezone] of [
+    ["agent.checkIns.timezone", raw.checkIns?.timezone],
+    ["agent.quietHours.timezone", raw.quietHours?.timezone],
+  ] as const) {
+    if (timezone !== undefined && !isValidAutomationTimeZone(timezone)) {
+      return { ok: false, message: `${field} is not a valid IANA timezone.` };
+    }
+  }
+  if (raw.quietHours !== undefined && raw.quietHours.start === raw.quietHours.end) {
+    return { ok: false, message: "agent.quietHours start and end must differ." };
+  }
+  return {
+    ok: true,
+    agent: {
+      enabled: raw.enabled,
+      ...(raw.model === undefined
+        ? {}
+        : { model: { providerId: raw.model.provider, modelId: raw.model.model } }),
+      ...(raw.checkIns === undefined ? {} : { checkIns: raw.checkIns }),
+      ...(raw.quietHours === undefined ? {} : { quietHours: raw.quietHours }),
+      dailyWakeLimit: raw.dailyWakeLimit ?? SPACE_AGENT_DEFAULT_DAILY_WAKE_LIMIT,
+      debounceMinutes: raw.debounceMinutes ?? SPACE_AGENT_DEFAULT_DEBOUNCE_MINUTES,
+    },
+  };
+};
+
 const SpaceConfigFile = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   id: NonEmpty,
@@ -83,6 +161,7 @@ const SpaceConfigFile = Schema.Struct({
     provider: NonEmpty,
     model: NonEmpty,
   }),
+  agent: Schema.optional(SpaceAgentConfigFile),
 });
 
 const RuntimeGoogleConnectionsFile = Schema.Struct({
@@ -326,6 +405,11 @@ export const layer = Layer.effect(
         }
       }
 
+      const agent = normalizeSpaceAgentConfig(raw.agent);
+      if (!agent.ok) {
+        return yield* configError(`Space '${raw.id}' has an invalid agent block: ${agent.message}`);
+      }
+
       return yield* decodeCanonicalSpace({
         id: raw.id,
         slug: raw.id,
@@ -348,6 +432,7 @@ export const layer = Layer.effect(
                 providerId: raw.routing.provider,
                 modelId: raw.routing.model,
               },
+        ...(agent.agent === undefined ? {} : { agent: agent.agent }),
         // Keep the configured assignment on the Space even while a Connection
         // is disabled. Routing may use this non-secret metadata to select the
         // intended Space, but only enabled Connections are projected below and

@@ -181,6 +181,7 @@ import * as CommandCenterConfig from "./command-center/Config.ts";
 import * as ConnectionHealth from "./command-center/ConnectionHealth.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as RunRecoveryCoordinator from "./command-center/RunRecoveryCoordinator.ts";
+import * as SpaceAgent from "./command-center/SpaceAgent.ts";
 import * as RunLifecycle from "./command-center/RunLifecycle.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import { webhookHttpRouteLayer } from "./command-center/WebhookHttp.ts";
@@ -718,6 +719,12 @@ const RunRecoveryCoordinatorLayerLive = RunRecoveryCoordinator.layer.pipe(
   Layer.provide(PersistenceLayerLive),
 );
 
+const SpaceAgentLayerLive = SpaceAgent.layer.pipe(
+  Layer.provide(CommandCenterRunDispatchLayerLive),
+  Layer.provide(CommandCenterBaseLayerLive),
+  Layer.provide(PersistenceLayerLive),
+);
+
 const InstagramPublishLayerLive = InstagramPublishLive.layer.pipe(
   Layer.provide(InstagramTokenStore.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provide(OrchestrationProjectionSnapshotQueryLive),
@@ -739,6 +746,7 @@ const CommandCenterLayerLive = Layer.mergeAll(
   CommandCenterRunDispatchLayerLive,
   RunRecoveryCoordinatorLayerLive,
   RunLifecycleLayerLive,
+  SpaceAgentLayerLive,
 ).pipe(Layer.provide(OrchestrationProjectionSnapshotQueryLive));
 
 const PreviewLayerLive = Layer.empty.pipe(

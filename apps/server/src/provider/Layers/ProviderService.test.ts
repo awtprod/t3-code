@@ -2672,6 +2672,7 @@ describe("agent browser access", () => {
     settings: TestSettings,
     starts: ReadonlyArray<SessionPreparation>,
     settingsReadFails = false,
+    scopedThreads: ReadonlySet<string> = new Set(),
   ) =>
     Effect.gen(function* () {
       const issued: Array<McpSessionRegistry.McpCredentialRequest> = [];
@@ -2713,6 +2714,7 @@ describe("agent browser access", () => {
             return undefined;
           }),
         revokeMcpCredential: (threadId) => Effect.sync(() => void revoked.push(threadId)),
+        hasMcpThreadScope: (threadId) => Effect.succeed(scopedThreads.has(threadId)),
       }).pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
@@ -2897,6 +2899,23 @@ describe("agent browser access", () => {
       ]);
 
       assert.deepEqual(result.issued, []);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("still issues a credential to a Command Center-scoped thread with browser off", () =>
+    Effect.gen(function* () {
+      const scoped = asThreadId("cc-space-agent-browser-off");
+      const result = yield* startSessionsWith(
+        { enableAgentBrowserAccess: false },
+        [{ threadId: scoped }, { threadId: asThreadId("thread-unscoped-browser-off") }],
+        false,
+        new Set([scoped]),
+      );
+
+      assert.deepEqual(
+        result.issued.map((request) => request.threadId),
+        [scoped],
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

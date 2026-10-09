@@ -267,3 +267,93 @@ it.effect("does not keep credentials of other threads alive", () =>
     expect(yield* registry.resolve(token)).toBeUndefined();
   }),
 );
+
+it.effect("derives a durable Space agent scope that survives revocation and restart", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("cc-space-agent-space-example");
+    const spaceId = SpaceId.make("space-example");
+    let enabled = true;
+    const resolveThreadScope: McpSessionRegistry.McpThreadScopeResolver = (candidate) =>
+      Effect.succeed(
+        enabled && candidate === threadId
+          ? {
+              spaceId,
+              capabilities: new Set(["cc.memory.read", "cc.memory.propose"] as const),
+              memoryWriteMode: "remember" as const,
+              role: "space-agent" as const,
+            }
+          : undefined,
+      );
+    const issueAndResolve = (registry: McpSessionRegistry.McpSessionRegistryShape) =>
+      Effect.gen(function* () {
+        const issued = yield* registry.issue({
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          capabilities: new Set(["preview"]),
+        });
+        return yield* registry.resolve(issued.config.authorizationHeader.replace(/^Bearer\s+/, ""));
+      });
+    const makeResolvingRegistry = () =>
+      McpSessionRegistry.__testing
+        .make({ now: () => 1_000, livenessWindowMs: 100, resolveThreadScope })
+        .pipe(
+          Effect.provideService(HttpServer.HttpServer, fakeHttpServer),
+          Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
+          Effect.provide(NodeServices.layer),
+        );
+
+    const registry = yield* makeResolvingRegistry();
+    const first = yield* issueAndResolve(registry);
+    expect(first?.role).toBe("space-agent");
+    expect(first?.memoryWriteMode).toBe("remember");
+    expect([...((first?.capabilities ?? new Set()) as ReadonlySet<string>)]).toEqual([
+      "cc.memory.read",
+      "cc.memory.propose",
+    ]);
+
+    // A provider-session stop revokes the thread and clears registered scopes.
+    yield* registry.revokeThread(threadId);
+    yield* registry.unregisterThreadScope(threadId);
+    expect((yield* issueAndResolve(registry))?.role).toBe("space-agent");
+
+    // A fresh registry (server restart) has no registered scopes at all.
+    const restarted = yield* makeResolvingRegistry();
+    expect((yield* restarted.scopeForThread(threadId))?.spaceId).toBe(spaceId);
+
+    // Disabling the agent removes the scope on the next issue.
+    enabled = false;
+    const disabled = yield* issueAndResolve(restarted);
+    expect(disabled?.role).toBeUndefined();
+    expect(disabled?.spaceId).toBeUndefined();
+    expect([...((disabled?.capabilities ?? new Set()) as ReadonlySet<string>)]).toEqual([
+      "preview",
+    ]);
+  }),
+);
+
+it.effect("fails closed when the durable scope resolver fails", () =>
+  Effect.gen(function* () {
+    const registry = yield* McpSessionRegistry.__testing
+      .make({
+        now: () => 1_000,
+        livenessWindowMs: 100,
+        resolveThreadScope: () => Effect.die("projection unavailable"),
+      })
+      .pipe(
+        Effect.provideService(HttpServer.HttpServer, fakeHttpServer),
+        Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
+        Effect.provide(NodeServices.layer),
+      );
+    const threadId = ThreadId.make("cc-space-agent-space-example");
+    expect(yield* registry.scopeForThread(threadId)).toBeUndefined();
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+    });
+    const resolved = yield* registry.resolve(
+      issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+    );
+    expect(resolved?.spaceId).toBeUndefined();
+    expect(resolved?.role).toBeUndefined();
+  }),
+);

@@ -1237,7 +1237,8 @@ it.effect("real migration loader upgrades 071 through the reserved stack and 078
       const history = yield* sql<{
         maximum: number;
       }>`SELECT MAX(migration_id) AS maximum FROM effect_sql_migrations`;
-      expect(history[0]!.maximum).toBe(78);
+      // Later migrations may follow 078; the reserved stack must reach it.
+      expect(history[0]!.maximum).toBeGreaterThanOrEqual(78);
       const table = yield* sql<{
         name: string;
       }>`SELECT name FROM sqlite_master WHERE name = 'command_center_instagram_reels'`;
