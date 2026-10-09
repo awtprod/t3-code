@@ -25,9 +25,14 @@ on:
         description: "Version to stamp into the app (defaults to apps/server/package.json)"
         required: false
         type: string
+      verify_artifact_run_id:
+        description: "Verify an existing successful installer run on Windows instead of building"
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: desktop-windows-build-${{ github.ref }}
@@ -35,6 +40,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ !inputs.verify_artifact_run_id }}
     name: Build Windows x64
     runs-on: windows-2025
     timeout-minutes: 60
@@ -154,3 +160,94 @@ jobs:
             echo
             echo "Unsigned build: SmartScreen will warn on first run (More info → Run anyway)."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-packaged-pairing:
+    if: ${{ inputs.verify_artifact_run_id }}
+    name: Verify packaged Windows pairing
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Download and verify exact installer provenance
+        id: payload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN_ID: ${{ inputs.verify_artifact_run_id }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:ARTIFACT_RUN_ID -notmatch '^\d+$') { throw "Invalid artifact run ID" }
+          if ($env:EXPECTED_VERSION -notmatch '^\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$') { throw "Expected version required" }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:ARTIFACT_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Cannot read artifact provenance" }
+          if ($run.conclusion -ne "success" -or $run.path -ne ".github/workflows/desktop-windows-build.yml" -or $run.head_branch -ne "fix/desktop-saved-environment-recovery") { throw "Unexpected artifact provenance" }
+          if ($run.head_sha -notmatch '^[a-f0-9]{40}$') { throw "Invalid source commit" }
+          New-Item -ItemType Directory -Force windows-pairing-artifact, windows-pairing-evidence | Out-Null
+          gh run download $env:ARTIFACT_RUN_ID --repo $env:GITHUB_REPOSITORY --name command-center-windows-x64 --dir windows-pairing-artifact
+          if ($LASTEXITCODE -ne 0) { throw "Artifact download failed" }
+          $installer = @(Get-ChildItem windows-pairing-artifact -Filter *.exe)
+          if ($installer.Count -ne 1) { throw "Expected exactly one installer" }
+          $declared = (Get-Content windows-pairing-artifact/SHA256SUMS.txt).Split(' ')[0]
+          $actual = (Get-FileHash $installer[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $declared) { throw "Installer checksum mismatch" }
+          git fetch --depth=1 origin $run.head_sha
+          if ($LASTEXITCODE -ne 0) { throw "Cannot fetch exact artifact source" }
+          git show "$($run.head_sha):packages/client-runtime/src/connection/registry.ts" | Set-Content -Encoding utf8 expected-registry.ts
+          if ($LASTEXITCODE -ne 0) { throw "Cannot export exact registry source" }
+          $sevenZip = Join-Path $env:ProgramFiles "7-Zip/7z.exe"
+          & $sevenZip x $installer[0].FullName "-owindows-pairing-extracted" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Installer extraction failed" }
+          $nested = @(Get-ChildItem windows-pairing-extracted -Recurse -Filter app-64.7z)
+          if ($nested.Count -ne 1) { throw "Expected exactly one x64 application payload" }
+          & $sevenZip x $nested[0].FullName "-owindows-pairing-app" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Payload extraction failed" }
+          $app = @(Get-ChildItem windows-pairing-app -Filter *.exe | Where-Object Name -NotMatch 'uninstall')
+          if ($app.Count -ne 1) { throw "Expected exactly one packaged application" }
+          $metadata = @{ artifactRunId = $run.id; artifactRunUrl = $run.html_url; artifactCommit = $run.head_sha; version = $env:EXPECTED_VERSION; installerSha256 = $actual; verificationCommit = $env:GITHUB_SHA; productionAccess = $false }
+          $metadata | ConvertTo-Json | Set-Content windows-pairing-evidence/provenance.json
+          "executable=$($app[0].FullName)" >> $env:GITHUB_OUTPUT
+          "commit=$($run.head_sha)" >> $env:GITHUB_OUTPUT
+
+      - name: Block packaged application external traffic
+        shell: pwsh
+        env:
+          APP_EXECUTABLE: ${{ steps.payload.outputs.executable }}
+        run: |
+          # Disposable CI host only. Windows loopback traffic bypasses this rule;
+          # all non-loopback traffic from the packaged Electron process is blocked.
+          New-NetFirewallRule -DisplayName "CC synthetic pairing smoke" -Direction Outbound -Action Block -Program $env:APP_EXECUTABLE -Profile Any -RemoteAddress Any -ErrorAction Stop | Out-Null
+
+      - name: Exercise packaged Electron and Windows secure storage
+        shell: pwsh
+        env:
+          APP_EXECUTABLE: ${{ steps.payload.outputs.executable }}
+          ARTIFACT_COMMIT: ${{ steps.payload.outputs.commit }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          node apps/desktop/scripts/pairing-smoke/run.mjs $env:APP_EXECUTABLE windows-pairing-evidence $env:ARTIFACT_COMMIT $env:EXPECTED_VERSION expected-registry.ts
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows pairing verification failed" }
+
+      - name: Upload redacted Windows verification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-pairing-verification
+          path: |
+            windows-pairing-evidence/*.json
+            windows-pairing-evidence/*.png
+          if-no-files-found: warn
+          retention-days: 14

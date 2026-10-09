@@ -1,0 +1,154 @@
+{
+  "efficiency": {
+    "enabled": false,
+    "defaultTier": "economy",
+    "candidates": [
+      {
+        "candidateId": "claude-economy-opus-5-5",
+        "tier": "economy",
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-5-5",
+        "options": [{ "id": "effort", "value": "low" }],
+        "enabled": true
+      },
+      {
+        "candidateId": "claude-balanced-opus-5-5",
+        "tier": "balanced",
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-5-5",
+        "options": [{ "id": "effort", "value": "medium" }],
+        "enabled": true
+      },
+      {
+        "candidateId": "claude-quality-opus-5-5",
+        "tier": "quality",
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-5-5",
+        "options": [{ "id": "effort", "value": "high" }],
+        "enabled": true
+      },
+      {
+        "candidateId": "claude-balanced-review-opus-4-8",
+        "tier": "balanced",
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-4-8",
+        "options": [{ "id": "effort", "value": "medium" }],
+        "enabled": true,
+        "taskKinds": ["review"]
+      },
+      {
+        "candidateId": "codex-quality-review-astra",
+        "tier": "quality",
+        "instanceId": "codex",
+        "model": "gpt-6-astra",
+        "options": [{ "id": "reasoningEffort", "value": "high" }],
+        "enabled": true,
+        "taskKinds": ["review"]
+      },
+      {
+        "candidateId": "claude-balanced-implement-opus-4-8",
+        "tier": "balanced",
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-4-8",
+        "options": [{ "id": "effort", "value": "medium" }],
+        "enabled": true,
+        "taskKinds": ["implement"]
+      },
+      {
+        "candidateId": "claude-quality-implement-opus-4-8",
+        "tier": "quality",
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-4-8",
+        "options": [{ "id": "effort", "value": "high" }],
+        "enabled": true,
+        "taskKinds": ["implement"]
+      }
+    ],
+    "rules": [],
+    "contextThresholds": { "economy": 65, "balanced": 80, "quality": 90 },
+    "toolWarnings": { "economy": 6, "balanced": 12, "quality": 24 },
+    "experiments": [],
+    "judge": {
+      "transport": "off",
+      "model": "jev-latest",
+      "apiKeyEnv": "TYPESAFE_API_KEY",
+      "timeoutMs": 15000,
+      "maxStateChars": 120000
+    },
+    "tierJudgment": { "enabled": false, "minConfidence": 0.6, "continuationThreshold": 0.8 },
+    "sieve": {
+      "mode": "off",
+      "tools": ["Read", "Grep"],
+      "minChars": 1500,
+      "blockLines": 25,
+      "maxBlocks": 200,
+      "dropBelow": 0.1,
+      "keepAbove": 0.5,
+      "minPruneRatio": 0.2
+    }
+  },
+  "enableLegacyTokenStreaming": false,
+  "enableProviderUpdateChecks": true,
+  "enableAgentBrowserAccess": true,
+  "sidebarAutoSettleAfterDays": 3,
+  "sidebarAutoSettleOnMerge": true,
+  "backgroundActivity": { "schemaVersion": 1, "profile": "balanced", "overrides": {} },
+  "automaticGitFetchInterval": 30000,
+  "providerHealthRefreshInterval": 300000,
+  "backgroundActivityProfile": "balanced",
+  "defaultTheme": "",
+  "defaultThemeSetAt": "",
+  "defaultThreadEnvMode": "local",
+  "newWorktreesStartFromOrigin": true,
+  "addProjectBaseDirectory": "",
+  "textGenerationModelSelection": {
+    "instanceId": "codex",
+    "model": "gpt-6-luna",
+    "options": [{ "id": "reasoningEffort", "value": "low" }]
+  },
+  "sourceControlWritingStyle": {
+    "mode": "repo_conventions",
+    "customInstructions": "",
+    "followChangeRequestTemplates": true
+  },
+  "sourceControlWriterModelSelection": null,
+  "providers": {
+    "codex": {
+      "enabled": true,
+      "binaryPath": "codex",
+      "homePath": "",
+      "shadowHomePath": "",
+      "launchArgs": "",
+      "autoApproveReadOnlyPermissions": false,
+      "customModels": []
+    },
+    "claudeAgent": {
+      "enabled": true,
+      "binaryPath": "claude",
+      "homePath": "",
+      "customModels": [],
+      "launchArgs": "",
+      "autoCompactWindow": ""
+    },
+    "kimi": { "enabled": false, "binaryPath": "kimi", "homePath": "", "customModels": [] },
+    "cursor": {
+      "enabled": false,
+      "binaryPath": "cursor-agent",
+      "apiEndpoint": "",
+      "customModels": []
+    },
+    "grok": { "enabled": false, "binaryPath": "grok", "customModels": [] },
+    "opencode": {
+      "enabled": false,
+      "binaryPath": "opencode",
+      "serverUrl": "",
+      "serverPassword": "",
+      "customModels": []
+    }
+  },
+  "providerInstances": {},
+  "databaseConnections": {},
+  "observability": { "otlpTracesUrl": "", "otlpMetricsUrl": "" },
+  "usagePricingOverrides": [],
+  "worktreeCleanupAfterDays": 7
+}
