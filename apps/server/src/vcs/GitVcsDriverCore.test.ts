@@ -1081,6 +1081,29 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         assert.strictEqual(contents.newContents, "# branch change\nunchanged context\n");
       }),
     );
+
+    it.effect("skips untracked diffs instead of diffing hundreds of untracked files", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* Effect.forEach(
+          Array.from({ length: 501 }, (_, index) => `bulk/${index}.txt`),
+          (file) => writeTextFile(cwd, file, "x\n"),
+          { concurrency: 32, discard: true },
+        );
+        yield* writeTextFile(cwd, "README.md", "changed\n");
+
+        const status = yield* driver.statusDetailsLocal(cwd);
+        assert.isTrue(status.hasWorkingTreeChanges);
+
+        const preview = yield* driver.getReviewDiffPreview({ cwd });
+        const workingTree = preview.sources.find((source) => source.kind === "working-tree");
+        assert.isTrue(workingTree?.truncated);
+        assert.include(workingTree?.diff, "README.md");
+        assert.notInclude(workingTree?.diff, "bulk/");
+      }),
+    );
   });
 
   describe("repository status", () => {

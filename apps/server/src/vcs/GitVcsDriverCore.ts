@@ -56,6 +56,10 @@ const RANGE_DIFF_SUMMARY_MAX_OUTPUT_BYTES = 19_000;
 const RANGE_DIFF_PATCH_MAX_OUTPUT_BYTES = 59_000;
 const REVIEW_DIFF_PATCH_MAX_OUTPUT_BYTES = 120_000;
 const REVIEW_UNTRACKED_DIFF_MAX_OUTPUT_BYTES = 80_000;
+// Each untracked file costs one `git diff --no-index` process, so the preview's cost grows
+// with the file count (500 files took about 4 seconds, 5,000 about 30). Past this many, the
+// untracked diffs are skipped and the preview is reported truncated instead.
+const REVIEW_UNTRACKED_MAX_FILES = 500;
 const REVIEW_DIFF_FILE_MAX_OUTPUT_BYTES = 1024 * 1024;
 const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 120_000;
 const STATUS_UPSTREAM_REFRESH_INTERVAL = Duration.seconds(15);
@@ -2248,6 +2252,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const untrackedPaths = splitNullSeparatedGitStdoutPaths(untrackedResult);
     if (untrackedPaths.length === 0) {
       return { diff: "", truncated: untrackedResult.stdoutTruncated };
+    }
+    if (untrackedPaths.length > REVIEW_UNTRACKED_MAX_FILES) {
+      return { diff: "", truncated: true };
     }
 
     const diffs = yield* Effect.forEach(
