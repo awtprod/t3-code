@@ -1427,6 +1427,26 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         }
       }),
     );
+
+    it.effect("reads working-tree totals without rewriting the git index", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const indexPath = pathService.join(cwd, ".git", "index");
+        // A stale mtime makes README.md stat-dirty; porcelain `git diff` would refresh it
+        // and write the index back, racing the user's own git commands for index.lock.
+        yield* fileSystem.utimes(pathService.join(cwd, "README.md"), 0, 0);
+        const before = yield* fileSystem.readFile(indexPath);
+
+        const status = yield* driver.statusDetailsLocal(cwd);
+
+        assert.equal(status.hasWorkingTreeChanges, false);
+        assert.deepStrictEqual(yield* fileSystem.readFile(indexPath), before);
+      }),
+    );
   });
 
   describe("refName operations", () => {
