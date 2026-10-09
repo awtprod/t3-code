@@ -69,6 +69,7 @@ import { ConnectionHealth, layer as connectionHealthLayer } from "./ConnectionHe
 import { configProjectionFingerprint, type ConfigSyncState } from "./ConfigProjection.ts";
 import { CommandApprovalPayload, makeCommandApprovalPayload } from "./CommandApproval.ts";
 import { spaceAgentRunAuthorizedEventId } from "./SpaceAgentIds.ts";
+import { isSpaceAgentItemMetadata, recordSpaceAgentReply } from "./SpaceAgentReplies.ts";
 import { loadSpaceBriefInput, renderSpaceBrief } from "./SpaceBrief.ts";
 
 const decodeSpace = Schema.decodeUnknownEffect(Space);
@@ -513,6 +514,12 @@ const lessonEvidenceRef = (sourceRef: string | undefined) => {
   }
 };
 
+/** A Space agent acting through the MCP Item tools. */
+export interface CommandCenterItemActor {
+  readonly kind: "space-agent";
+  readonly threadId: string;
+}
+
 export interface CommandCenterServiceShape {
   readonly bootstrap: Effect.Effect<CommandCenterBootstrap, CommandCenterError>;
   readonly syncConfiguration: (input?: {
@@ -614,11 +621,19 @@ export interface CommandCenterServiceShape {
     CommandCenterCommandSubmitResultType | CommandCenterSpaceAgentProposalResult,
     CommandCenterError
   >;
+  /** `actor` marks the Item as a Space agent's (agent provenance + `metadata.spaceAgent`). */
   readonly createItem: (
     input: CommandCenterItemCreateInput,
+    actor?: CommandCenterItemActor,
   ) => Effect.Effect<ItemType, CommandCenterError>;
+  /**
+   * Without `actor` the change is the user's: a status change on a Space agent
+   * Item is queued as a reply for the agent. With `actor` the audit event is the
+   * agent's and no reply is queued.
+   */
   readonly updateItem: (
     input: CommandCenterItemUpdateInput,
+    actor?: CommandCenterItemActor,
   ) => Effect.Effect<CommandCenterItemUpdateResultType, CommandCenterError>;
   readonly recordArtifact: (input: {
     readonly artifact: ArtifactType;
@@ -3079,7 +3094,7 @@ export const layer = Layer.effect(
     );
 
     const createItem = Effect.fn("CommandCenter.createItem")(
-      function* (input: CommandCenterItemCreateInput) {
+      function* (input: CommandCenterItemCreateInput, actor?: CommandCenterItemActor) {
         yield* requireConfiguredSpace(input.spaceId);
         const existing = yield* sql<ItemRow>`
         SELECT id, space_id AS "spaceId", kind, status, title, body, priority,
@@ -3108,8 +3123,11 @@ export const layer = Layer.effect(
           description: input.description,
           dueAt: input.dueAt,
           artifactIds: [],
-          provenance: { kind: "user", capturedAt: now },
-          metadata: {},
+          provenance:
+            actor === undefined
+              ? { kind: "user", capturedAt: now }
+              : { kind: "agent", sourceRef: actor.threadId, capturedAt: now },
+          metadata: actor === undefined ? {} : { spaceAgent: true, threadId: actor.threadId },
           createdAt: now,
           updatedAt: now,
         }).pipe(Effect.mapError((cause) => persistenceError("Could not create Item.", cause)));
@@ -3127,7 +3145,7 @@ export const layer = Layer.effect(
             )
           `;
             yield* appendAudit({
-              actorKind: "user",
+              actorKind: actor === undefined ? "user" : "agent",
               action: "cc.items.create",
               spaceId: item.spaceId,
               payload: { itemId: item.id, kind: item.kind },
@@ -3143,7 +3161,7 @@ export const layer = Layer.effect(
     );
 
     const updateItem = Effect.fn("CommandCenter.updateItem")(
-      function* (input: CommandCenterItemUpdateInput) {
+      function* (input: CommandCenterItemUpdateInput, actor?: CommandCenterItemActor) {
         yield* requireConfiguredSpace(input.spaceId);
         const patchFields = Object.keys(input.patch);
         if (
@@ -3235,9 +3253,24 @@ export const layer = Layer.effect(
             }
 
             const updatedItem = yield* decodeItemRow(updatedRow);
+            if (
+              actor === undefined &&
+              current.status !== updatedItem.status &&
+              isSpaceAgentItemMetadata(updatedItem.metadata)
+            ) {
+              yield* recordSpaceAgentReply(sql, {
+                sourceId: eventId,
+                spaceId: updatedItem.spaceId,
+                itemId: updatedItem.id,
+                itemTitle: updatedItem.title,
+                kind: "status",
+                body: `Status changed from ${current.status} to ${updatedItem.status}.`,
+                occurredAt: updatedAt,
+              });
+            }
             yield* appendAudit({
               eventId,
-              actorKind: "user",
+              actorKind: actor === undefined ? "user" : "agent",
               action: "cc.items.changed",
               spaceId: updatedItem.spaceId,
               payload: {

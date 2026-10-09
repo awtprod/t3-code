@@ -95,3 +95,43 @@ activity row, so older history counts as brief context, not as a wake.
 - **RPCs.** `cc.spaceAgent.list` adds `paused`, `lastWakeAt`, `lastWakeReason`,
   `wakesToday`, and `pendingEvents`. `cc.spaceAgent.setPaused` (operate scope)
   stops automatic wakes only. Manual wakes still work while paused.
+
+## Replies
+
+When Andrew comments, requests changes, dismisses or changes the status of an
+Item whose metadata has `spaceAgent: true`, the server records a pending reply in
+`command_center_space_agent_replies` (migration 082). The reply is written inside
+the same transaction as the Inbox mutation or `updateItem`. A unique `source_id`
+(the mutation or audit event id) makes it idempotent. Status changes made by the
+agent itself (actor passed to `updateItem`) are not recorded.
+
+The waker checks for pending replies on every tick, after the check-in and before
+the event debounce. Replies wake the agent straight away, with no 10-minute debounce.
+Pause, quiet hours, backoff and busy-thread rules still apply. The wake reason is
+`reply`. Every wake delivers whatever replies are pending inside a `<replies>` block,
+oldest first, capped at 20 rows and 4000 characters with 800 characters per reply.
+Each line shows the item id, the clipped title and the reply text, and the block is
+marked as untrusted data. Rows are marked delivered only after the turn is sent.
+
+Budget: reply wakes do **not** count against `dailyWakeLimit`. They are Andrew's
+direct answer to something the agent asked, so a busy event day should not hold
+them back. They still add to `wakes_today`, so they use up the budget left for
+event wakes.
+
+## Agent Items
+
+`cc_items_create` called with a space-agent credential stamps the Item with
+`metadata.spaceAgent = true` and `threadId`, gives it agent provenance (sourceRef
+is the agent thread) and records the audit actor as `agent`.
+
+`cc_items_update` (requires `cc.items.write`, own Space only) lets the agent change
+`status`, `title` and `description` through `Service.updateItem`. An empty patch is
+rejected.
+
+## Push
+
+`LocalWebPushNotifier` follows the event stream from the audit head, so restarts do
+not replay old events. When an agent creates an Item that `itemNeedsYou` reports as
+needing Andrew (a needs-you or decision Item), it sends a web push. The push is gated
+by the subscription's `notifyOnInput` preference and deep-links to the agent's
+thread. Other agent Items do not trigger a push.

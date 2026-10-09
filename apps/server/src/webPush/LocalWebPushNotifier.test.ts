@@ -1,4 +1,5 @@
 import type {
+  CommandCenterEventEnvelope,
   EnvironmentId,
   OrchestrationProjectShell,
   OrchestrationThreadShell,
@@ -12,6 +13,9 @@ import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+
+import { CommandCenterEventStream } from "../command-center/EventStream.ts";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
@@ -125,7 +129,10 @@ const makeHarness = Effect.fn(function* (seedThreads?: readonly OrchestrationThr
     Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
       streamDomainEvents: Stream.empty,
     }),
-    webPushSubscriptionsLayer.pipe(Layer.provide(SqlitePersistenceMemory)),
+    Layer.mock(CommandCenterEventStream)({ changes: () => Stream.empty }),
+  ).pipe(
+    Layer.provideMerge(webPushSubscriptionsLayer),
+    Layer.provideMerge(SqlitePersistenceMemory),
   );
 
   return { harness, depsLayer };
@@ -252,4 +259,118 @@ it.effect(
         }).pipe(Effect.provide(depsLayer));
       }),
     ),
+);
+
+const insertAgentItem = (input: {
+  readonly id: string;
+  readonly kind: string;
+  readonly status: string;
+  readonly metadataJson: string;
+}) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      INSERT INTO command_center_spaces (id, slug, name, kind, created_at, updated_at)
+      VALUES ('acme', 'acme', 'Acme', 'business', ${FIXED_UPDATED_AT}, ${FIXED_UPDATED_AT})
+      ON CONFLICT (id) DO NOTHING
+    `;
+    yield* sql`
+      INSERT INTO command_center_items (
+        id, space_id, kind, status, title, metadata_json, created_at, updated_at
+      ) VALUES (
+        ${input.id}, 'acme', ${input.kind}, ${input.status}, 'Which example vendor?',
+        ${input.metadataJson}, ${FIXED_UPDATED_AT}, ${FIXED_UPDATED_AT}
+      )
+    `;
+  });
+
+const itemCreated = (
+  itemId: string,
+  actorKind = "agent",
+  change: "created" | "updated" = "created",
+): CommandCenterEventEnvelope =>
+  ({
+    _tag: "ItemChanged",
+    sequence: 1,
+    eventId: `event-${itemId}`,
+    previousHash: null,
+    eventHash: "hash",
+    actorKind,
+    spaceId: "acme",
+    runId: null,
+    occurredAt: FIXED_UPDATED_AT,
+    payload: { itemId, change, kind: "decision", status: "captured" },
+  }) as unknown as CommandCenterEventEnvelope;
+
+it.effect("pushes a Space agent question to the agent thread, gated by notifyOnInput", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { harness, depsLayer } = yield* makeHarness();
+      yield* Effect.gen(function* () {
+        const store = yield* WebPushSubscriptions;
+        yield* store.upsert(SUBSCRIPTION);
+        yield* store.upsert({
+          ...SUBSCRIPTION,
+          deviceId: "device-b",
+          endpoint: "https://fcm.googleapis.com/fcm/send/b",
+          preferences: { ...PREFERENCES, notifyOnInput: false },
+        });
+        yield* insertAgentItem({
+          id: "question",
+          kind: "decision",
+          status: "captured",
+          metadataJson: `{"spaceAgent":true}`,
+        });
+        const notifier = yield* makeNotifier;
+        yield* notifier.processItemEvent(itemCreated("question"));
+        const sends = yield* Ref.get(harness.sends);
+        assert.equal(sends.length, 1);
+        assert.equal(sends[0]?.endpoint, SUBSCRIPTION.endpoint);
+        assert.deepStrictEqual(sends[0]?.payload, {
+          title: "Which example vendor?",
+          body: "Needs you: your Space agent has a question",
+          environmentId: ENV_ID,
+          threadId: "cc-space-agent-acme",
+          deepLink: "/threads/env-1/cc-space-agent-acme",
+        });
+      }).pipe(Effect.provide(depsLayer));
+    }),
+  ),
+);
+
+it.effect("stays quiet for the agent's non-decision Items, user Items, and updates", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { harness, depsLayer } = yield* makeHarness();
+      yield* Effect.gen(function* () {
+        const store = yield* WebPushSubscriptions;
+        yield* store.upsert(SUBSCRIPTION);
+        yield* insertAgentItem({
+          id: "agent-task",
+          kind: "task",
+          status: "captured",
+          metadataJson: `{"spaceAgent":true}`,
+        });
+        yield* insertAgentItem({
+          id: "unmarked-decision",
+          kind: "decision",
+          status: "captured",
+          metadataJson: "{}",
+        });
+        yield* insertAgentItem({
+          id: "agent-decision",
+          kind: "decision",
+          status: "review",
+          metadataJson: `{"spaceAgent":true}`,
+        });
+        const notifier = yield* makeNotifier;
+        yield* notifier.processItemEvent(itemCreated("agent-task"));
+        yield* notifier.processItemEvent(itemCreated("unmarked-decision"));
+        yield* notifier.processItemEvent(itemCreated("agent-decision", "user"));
+        yield* notifier.processItemEvent(itemCreated("agent-decision", "agent", "updated"));
+        yield* notifier.processItemEvent(itemCreated("missing"));
+        assert.equal((yield* Ref.get(harness.sends)).length, 0);
+      }).pipe(Effect.provide(depsLayer));
+    }),
+  ),
 );

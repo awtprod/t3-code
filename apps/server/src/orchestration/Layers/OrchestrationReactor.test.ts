@@ -115,6 +115,7 @@ describe("OrchestrationReactor", () => {
           Layer.succeed(LocalWebPushNotifier, {
             processThread: () => Effect.void,
             seedFromSnapshot: Effect.void,
+            processItemEvent: () => Effect.void,
             start: () => {
               started.push("local-web-push-notifier");
               return Effect.void;

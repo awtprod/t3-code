@@ -18,6 +18,9 @@ import {
   CommandCenterCommandSubmitInput,
   CommandCenterCommandSubmitResult,
   CommandCenterItemCreateInput,
+  CommandCenterItemUpdateInput,
+  CommandCenterItemUpdatePatch,
+  CommandCenterItemUpdateResult,
   CommandCenterMcpCapabilityUnavailableError,
   CommandCenterMemoryProposeInput,
   CommandCenterMemorySearchInput,
@@ -109,6 +112,34 @@ export const CommandCenterItemCreateTool = commandCenterCapability(
     dependencies,
   })
     .annotate(Tool.Title, "Create Command Center Item")
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true),
+  "cc.items.write",
+);
+
+/** `cc_items_update` takes only the status, title, and description of the full patch. */
+export const CommandCenterItemsUpdateToolInput = Schema.Struct({
+  itemId: CommandCenterItemUpdateInput.fields.itemId,
+  spaceId: CommandCenterItemUpdateInput.fields.spaceId,
+  expectedUpdatedAt: CommandCenterItemUpdateInput.fields.expectedUpdatedAt,
+  patch: Schema.Struct({
+    status: CommandCenterItemUpdatePatch.fields.status,
+    title: CommandCenterItemUpdatePatch.fields.title,
+    description: CommandCenterItemUpdatePatch.fields.description,
+  }),
+});
+
+export const CommandCenterItemUpdateTool = commandCenterCapability(
+  Tool.make("cc_items_update", {
+    description:
+      "Change the status, title, or description of an Item in a specific Space. Pass the Item's current updatedAt.",
+    parameters: CommandCenterItemsUpdateToolInput,
+    success: CommandCenterItemUpdateResult,
+    failure,
+    dependencies,
+  })
+    .annotate(Tool.Title, "Update Command Center Item")
     .annotate(Tool.Readonly, false)
     .annotate(Tool.Destructive, false)
     .annotate(Tool.Idempotent, true),
@@ -307,6 +338,7 @@ export const CommandCenterToolkit = Toolkit.make(
   CommandCenterSpacesListTool,
   CommandCenterItemsListTool,
   CommandCenterItemCreateTool,
+  CommandCenterItemUpdateTool,
   CommandCenterMemoryListTool,
   CommandCenterMemoryProposeTool,
   CommandCenterMemorySearchTool,

@@ -47,7 +47,8 @@ it("records the committed static-context baseline", () => {
     // 2026-09: +40 bytes for the `repository.checks` source-node configuration.
     // 2026-10: +117 bytes for the read-only `cc_space_brief` Space agent tool.
     // 2026-10: +271 bytes for the read-only `cc_space_activity` feed tool.
-    mcp: { toolCount: 38, schemaBytes: 26_357, toolkitCounts: [14, 15, 9] },
+    // 2026-10: +560 bytes for `cc_items_update` (status/title/description only).
+    mcp: { toolCount: 39, schemaBytes: 26_917, toolkitCounts: [14, 16, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

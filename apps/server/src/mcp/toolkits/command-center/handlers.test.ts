@@ -351,3 +351,174 @@ describe("cc_space_activity scoping", () => {
     }),
   );
 });
+
+const itemScope = (
+  overrides: Partial<McpInvocationContext.McpInvocationScope> = {},
+): McpInvocationContext.McpInvocationScope => ({
+  environmentId: EnvironmentId.make("environment-1"),
+  threadId: ThreadId.make("cc-space-agent-acme"),
+  providerSessionId: "session-1",
+  providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+  capabilities: new Set(["cc.items.write"]),
+  spaceId: SpaceId.make("acme"),
+  role: "space-agent",
+  issuedAt: 0,
+  ...overrides,
+});
+
+const ITEM_UPDATED_AT = "2026-10-09T12:00:00.000Z";
+
+const invokeItemTool = (
+  scope: McpInvocationContext.McpInvocationScope,
+  name: "cc_items_create" | "cc_items_update",
+  input: unknown,
+) =>
+  Effect.gen(function* () {
+    const calls: Array<{
+      readonly method: string;
+      readonly input: unknown;
+      readonly actor: unknown;
+    }> = [];
+    const item = {
+      id: "item-1",
+      spaceId: "acme",
+      kind: "decision",
+      status: "review",
+      priority: "normal",
+      title: "Pick a vendor",
+      artifactIds: [],
+      provenance: { kind: "agent", capturedAt: ITEM_UPDATED_AT },
+      metadata: { spaceAgent: true },
+      createdAt: ITEM_UPDATED_AT,
+      updatedAt: ITEM_UPDATED_AT,
+    };
+    const outputs = yield* Effect.gen(function* () {
+      const toolkit = yield* CommandCenterToolkit;
+      const stream = yield* toolkit.handle(name, input as never);
+      return Array.from(yield* Stream.runCollect(stream)).map((output) => output.isFailure);
+    }).pipe(
+      Effect.catch(() => Effect.succeed([true])),
+      Effect.provide(
+        CommandCenterToolkitHandlersLive.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+              Layer.mock(CommandCenterService.CommandCenterService)({
+                getConfiguredSpace: () =>
+                  Effect.succeed({
+                    agent: { enabled: true },
+                    policy: { allowedCapabilities: ["cc.items.write"] },
+                  } as never),
+                createItem: (request, actor) =>
+                  Effect.sync(() => {
+                    calls.push({ method: "createItem", input: request, actor });
+                    return item as never;
+                  }),
+                updateItem: (request, actor) =>
+                  Effect.sync(() => {
+                    calls.push({ method: "updateItem", input: request, actor });
+                    return { item, duplicate: false } as never;
+                  }),
+              }),
+              Layer.mock(AutomationRuns.AutomationRuns)({}),
+              Layer.mock(GoogleReadConnector.GoogleReadConnector)({}),
+              Layer.mock(MemorySearchIndex.MemorySearchIndex)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.mock(SpaceActivity.SpaceActivity)({}),
+              Layer.succeed(
+                ReadinessGate.CommandCenterReadinessGate,
+                ReadinessGate.CommandCenterReadinessGate.of({
+                  state: Effect.succeed("ready"),
+                  requireReady: Effect.void,
+                  markReady: Effect.void,
+                  markFailed: Effect.void,
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    return { outputs, calls };
+  });
+
+const updateInput = (overrides: Record<string, unknown> = {}) => ({
+  itemId: "item-1",
+  spaceId: "acme",
+  expectedUpdatedAt: ITEM_UPDATED_AT,
+  patch: { status: "done", description: "Went with the example vendor." },
+  ...overrides,
+});
+
+describe("Command Center MCP Item writes", () => {
+  it("exposes only status, title, and description on cc_items_update", () => {
+    const tool = Object.values(CommandCenterToolkit.tools).find(
+      (candidate) => candidate.name === "cc_items_update",
+    )!;
+    const schema = Tool.getJsonSchema(tool) as {
+      readonly properties?: {
+        readonly patch?: { readonly properties?: Readonly<Record<string, unknown>> };
+      };
+    };
+    expect(Object.keys(schema.properties?.patch?.properties ?? {}).toSorted()).toEqual([
+      "description",
+      "status",
+      "title",
+    ]);
+  });
+
+  it.effect("updates a Space agent's Item as the agent", () =>
+    Effect.gen(function* () {
+      const { outputs, calls } = yield* invokeItemTool(
+        itemScope(),
+        "cc_items_update",
+        updateInput(),
+      );
+      expect(outputs).toEqual([false]);
+      expect(calls).toEqual([
+        {
+          method: "updateItem",
+          input: updateInput(),
+          actor: { kind: "space-agent", threadId: "cc-space-agent-acme" },
+        },
+      ]);
+    }),
+  );
+
+  it.effect("refuses another Space, missing write capability, and an empty patch", () =>
+    Effect.gen(function* () {
+      for (const [scope, input] of [
+        [itemScope(), updateInput({ spaceId: "example" })],
+        [itemScope({ capabilities: new Set(["cc.items.read"]) }), updateInput()],
+        [itemScope(), updateInput({ patch: {} })],
+      ] as const) {
+        const { outputs, calls } = yield* invokeItemTool(scope, "cc_items_update", input);
+        expect(outputs).toEqual([true]);
+        expect(calls).toEqual([]);
+      }
+    }),
+  );
+
+  it.effect("marks Items the Space agent creates, and leaves other credentials as the user", () =>
+    Effect.gen(function* () {
+      const createInput = {
+        requestId: "request-1",
+        spaceId: "acme",
+        kind: "decision",
+        priority: "normal",
+        title: "Pick a vendor",
+      };
+      const agent = yield* invokeItemTool(itemScope(), "cc_items_create", createInput);
+      expect(agent.outputs).toEqual([false]);
+      expect(agent.calls[0]?.actor).toEqual({
+        kind: "space-agent",
+        threadId: "cc-space-agent-acme",
+      });
+
+      const { role: _role, ...userScope } = itemScope();
+      const user = yield* invokeItemTool(userScope, "cc_items_create", createInput);
+      expect(user.outputs).toEqual([false]);
+      expect(user.calls[0]?.actor).toBeUndefined();
+    }),
+  );
+});

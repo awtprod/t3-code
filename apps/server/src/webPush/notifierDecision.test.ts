@@ -8,6 +8,8 @@ import {
   decidePublishAction,
   isNotificationFreshEnough,
   notificationAllowedForPreferences,
+  isSpaceAgentQuestion,
+  spaceAgentQuestionAllowedForPreferences,
 } from "./notifierDecision.ts";
 
 function makeState(
@@ -176,6 +178,38 @@ describe("buildThreadNotificationPayload", () => {
     expect(payload.deepLink).toBe("/threads/env-1/thread-1");
     expect(Object.keys(payload).sort()).toEqual(
       ["body", "deepLink", "environmentId", "threadId", "title"].sort(),
+    );
+  });
+});
+
+describe("isSpaceAgentQuestion", () => {
+  const question = {
+    kind: "decision",
+    status: "captured",
+    priority: "normal",
+    metadata: { spaceAgent: true },
+  };
+
+  it("is true only for the agent's Needs You Items", () => {
+    expect(isSpaceAgentQuestion(question)).toBe(true);
+    expect(isSpaceAgentQuestion({ ...question, kind: "approval" })).toBe(true);
+    expect(isSpaceAgentQuestion({ ...question, kind: "task", status: "review" })).toBe(true);
+    expect(isSpaceAgentQuestion({ ...question, kind: "task" })).toBe(false);
+    expect(isSpaceAgentQuestion({ ...question, metadata: {} })).toBe(false);
+    expect(isSpaceAgentQuestion({ ...question, metadata: { spaceAgent: "true" } })).toBe(false);
+    expect(isSpaceAgentQuestion({ ...question, metadata: null })).toBe(false);
+  });
+
+  it("follows the input preference", () => {
+    const preferences = {
+      notifyOnApproval: true,
+      notifyOnInput: false,
+      notifyOnCompletion: true,
+      notifyOnFailure: true,
+    };
+    expect(spaceAgentQuestionAllowedForPreferences(preferences)).toBe(false);
+    expect(spaceAgentQuestionAllowedForPreferences({ ...preferences, notifyOnInput: true })).toBe(
+      true,
     );
   });
 });
