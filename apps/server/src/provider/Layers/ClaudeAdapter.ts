@@ -18,6 +18,7 @@ import {
   type PermissionResult,
   type PermissionUpdate,
   type SDKMessage,
+  type SDKRateLimitInfo,
   type SDKResultMessage,
   type SettingSource,
   type SDKUserMessage,
@@ -90,7 +91,9 @@ import {
   sandboxProviderTarget,
   spawnClaudeInSandbox,
 } from "../../sandbox/SandboxProviderProcess.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
+import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import {
   BUNDLED_CLAUDE_MODEL_CATALOG,
   type ClaudeModelCatalog,
@@ -162,6 +165,10 @@ interface ClaudeTurnState {
   latestAssistantUsage: unknown | undefined;
   compactedSinceLatestAssistantUsage: boolean;
   nextSyntheticAssistantBlockIndex: number;
+  /** Set when the CLI reported an expired login during this turn. */
+  authenticationFailureMessage: string | undefined;
+  /** Usage windows currently rejecting this turn, by `rateLimitType`. */
+  rejectedRateLimitTypes: Set<string>;
 }
 
 interface AssistantTextBlockState {
@@ -336,6 +343,8 @@ interface ClaudeSessionContext {
    * `task.user_request` (slice B).
    */
   lastUserRequestText: string | undefined;
+  /** Limits already announced for the running turn, keyed `window:resetsAt`. */
+  announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
   stopped: boolean;
 }
 
@@ -566,6 +575,61 @@ function isInterruptedResult(result: SDKResultMessage): boolean {
       errors.includes("interrupted by user") ||
       errors.includes("aborted"))
   );
+}
+
+/**
+ * Window labels for usage-limit rows. Newer CLIs report windows the bundled SDK
+ * types do not list yet (`seven_day_overage_included`), so the lookup is by
+ * own key: an unknown window renders without a label instead of failing.
+ */
+const CLAUDE_USAGE_LIMIT_WINDOWS = {
+  five_hour: "5-hour",
+  seven_day: "7-day",
+  seven_day_opus: "7-day Opus",
+  seven_day_sonnet: "7-day Sonnet",
+  seven_day_overage_included: "7-day model",
+  overage: "overage",
+} satisfies Record<
+  NonNullable<SDKRateLimitInfo["rateLimitType"]> | "seven_day_overage_included",
+  string
+>;
+
+/** Beyond this the reset time is not credible, so the row ships without a wait. */
+const CLAUDE_USAGE_LIMIT_MAX_WAIT_MS = 30 * 24 * 60 * 60 * 1000;
+
+function claudeUsageLimitWindowLabel(rateLimitType: unknown): string | undefined {
+  return typeof rateLimitType === "string" &&
+    Object.hasOwn(CLAUDE_USAGE_LIMIT_WINDOWS, rateLimitType)
+    ? CLAUDE_USAGE_LIMIT_WINDOWS[rateLimitType as keyof typeof CLAUDE_USAGE_LIMIT_WINDOWS]
+    : undefined;
+}
+
+/**
+ * `resetsAt` is epoch seconds. The row states the remaining wait rather than a
+ * wall-clock time: this renders on the server, while the row is read on clients
+ * that may sit in another timezone and locale, and that carry their own
+ * timestamp preference. A wait reads the same everywhere.
+ */
+function describeClaudeUsageLimit(info: SDKRateLimitInfo, nowMs: number): string {
+  const label = claudeUsageLimitWindowLabel(info.rateLimitType);
+  const resetsAtMs = typeof info.resetsAt === "number" ? info.resetsAt * 1000 : undefined;
+  const waitMs =
+    resetsAtMs === undefined || !Number.isFinite(nowMs) ? undefined : resetsAtMs - nowMs;
+  const wait =
+    waitMs !== undefined && waitMs > 0 && waitMs <= CLAUDE_USAGE_LIMIT_MAX_WAIT_MS
+      ? formatClaudeUsageLimitWait(waitMs)
+      : undefined;
+  return `Claude usage limit reached. This turn is paused until the ${
+    label ? `${label} ` : ""
+  }limit resets${wait ? ` in ${wait}` : ""}.`;
+}
+
+function formatClaudeUsageLimitWait(waitMs: number): string {
+  const totalMinutes = Math.ceil(waitMs / 60_000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours === 0) return `${totalMinutes}m`;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 
 function asRuntimeItemId(value: string): RuntimeItemId {
@@ -1401,6 +1465,14 @@ function titleForTool(itemType: CanonicalItemType): string {
   }
 }
 
+/**
+ * The SDK passes `mcpServers` to the CLI as an inline `--mcp-config` argument,
+ * and process arguments are readable by every local user. The T3 MCP
+ * credential therefore travels in the child's environment, which only its
+ * owner can read, and the CLI expands the `${VAR}` reference when it connects.
+ */
+export const CLAUDE_T3_MCP_AUTHORIZATION_ENV = "T3_CODE_MCP_AUTHORIZATION";
+
 const SUPPORTED_CLAUDE_IMAGE_MIME_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -1465,12 +1537,23 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     readonly attachmentsDir: string;
     readonly boundInstanceId: ProviderInstanceId;
     readonly modelCatalog: ClaudeModelCatalog;
+    /** Names of the skills Claude Code can run for this session's cwd. */
+    readonly skillNames: ReadonlySet<string>;
   },
 ) {
   const text = buildPromptText(input, dependencies.boundInstanceId, dependencies.modelCatalog);
   const sdkContent: Array<Record<string, unknown>> = [];
 
-  if (text.length > 0) {
+  // Claude Code expands a skill only from the LAST text block, and only when
+  // `/name` is its first character. A `$skill` chip anywhere in the prompt is
+  // therefore split into [leading text, "/name trailing text"] so the CLI
+  // runs it natively and the prose around it survives. See ClaudeSkillDispatch.
+  const dispatch = planClaudeSkillDispatch(text, dependencies.skillNames);
+  if (dispatch) {
+    if (dispatch.leadingText !== undefined) {
+      sdkContent.push({ type: "text", text: dispatch.leadingText });
+    }
+  } else if (text.length > 0) {
     sdkContent.push({ type: "text", text });
   }
 
@@ -1521,6 +1604,12 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     );
   }
 
+  // Images go before the command block: a text block after them still
+  // expands, a command block followed by an image does not.
+  if (dispatch) {
+    sdkContent.push({ type: "text", text: dispatch.commandText });
+  }
+
   return buildUserMessage({ sdkContent });
 });
 
@@ -1537,6 +1626,77 @@ function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStat
     return "cancelled";
   }
   return "failed";
+}
+
+/**
+ * True when a result answers a Claude-initiated turn rather than the active
+ * real turn. Claude runs turns of its own between user prompts (a resumed
+ * session first reports background tasks the previous process left behind;
+ * peer messages wake the agent), and a queued prompt waits behind them.
+ * Those turns echo no user prompt (`user_message_uuids`, newer CLIs) and carry
+ * a non-human `origin`. A result that echoes any prompt, or carries neither
+ * field (older CLIs), still completes the active turn.
+ *
+ * Upstream also matches the echoed uuid against the turn id; the fork does not
+ * send its turn id as the prompt uuid, so any echo counts as the user's.
+ */
+function isResultForOtherTurn(result: SDKResultMessage, turn: ClaudeTurnState): boolean {
+  // A synthetic turn mirrors a Claude-initiated turn, so any result is its own.
+  if (turn.synthetic) return false;
+  // Read defensively: the echo fields postdate the bundled SDK types.
+  const wire = result as { user_message_uuids?: unknown; user_message_uuid?: unknown };
+  const echoesPrompt =
+    (Array.isArray(wire.user_message_uuids) &&
+      wire.user_message_uuids.some((uuid) => typeof uuid === "string" && uuid.length > 0)) ||
+    (typeof wire.user_message_uuid === "string" && wire.user_message_uuid.length > 0);
+  if (echoesPrompt) return false;
+  const origin: unknown = result.origin;
+  if (origin === null || typeof origin !== "object") return false;
+  const kind = (origin as { kind?: unknown }).kind;
+  return typeof kind === "string" && kind !== "human";
+}
+
+export const CLAUDE_BACKGROUND_WORK_BLOCKS_REPLACEMENT =
+  "Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
+
+const CLAUDE_USAGE_LIMIT_FAILURE =
+  "Claude usage limit reached. Send the message again once the limit resets.";
+
+/**
+ * Turn status and error for a result, given what the turn already reported.
+ *
+ * The CLI ends a turn whose requests kept failing as an API error, often on a
+ * success-tagged result (`terminal_reason: "api_error"`, or `is_error: true`
+ * with nothing listed) that would otherwise read as a completed turn. When the
+ * turn already reported why (an expired login, a rejected usage window),
+ * `failureHint` names that cause instead. Every other outcome names its own
+ * cause and keeps it: listed errors, overload (529), interrupts, cancels.
+ */
+function resultOutcome(
+  result: SDKResultMessage,
+  failureHint: string | undefined,
+): { status: ProviderRuntimeTurnStatus; errorMessage: string | undefined } {
+  const status = turnStatusFromResult(result);
+  const errorMessage = resultUserFacingError(result);
+  if (failureHint === undefined || status === "interrupted" || status === "cancelled") {
+    return { status, errorMessage };
+  }
+  // Newer CLIs than the bundled SDK types send `api_error`; read it as a string.
+  const terminalReason: string | undefined = result.terminal_reason;
+  const endedAsApiError =
+    terminalReason === "api_error" || (result.subtype === "success" && result.is_error === true);
+  if (!endedAsApiError || (result.subtype === "success" && result.api_error_status === 529)) {
+    return { status, errorMessage };
+  }
+  // Success results carry no typed error list, but a success-tagged failure
+  // may still list one; CLI diagnostic entries never become the banner.
+  const listedErrors: ReadonlyArray<unknown> =
+    "errors" in result && Array.isArray(result.errors) ? result.errors : [];
+  const listedError = listedErrors.find(
+    (error): error is string =>
+      typeof error === "string" && error.length > 0 && !error.startsWith("[ede_diagnostic]"),
+  );
+  return { status: "failed", errorMessage: listedError ?? failureHint };
 }
 
 function streamKindFromDeltaType(deltaType: string): ClaudeTextStreamKind {
@@ -3110,6 +3270,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         latestAssistantUsage: undefined,
         compactedSinceLatestAssistantUsage: false,
         nextSyntheticAssistantBlockIndex: -1,
+        authenticationFailureMessage: undefined,
+        rejectedRateLimitTypes: new Set(),
       };
       context.session = {
         ...context.session,
@@ -3168,6 +3330,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (context.turnState) {
+      // The CLI can report authentication failure before ending the turn as a
+      // generic API error, so retain that evidence for the result fallback.
+      // Subagent snapshots returned above, so a nested login failure never
+      // speaks for the parent turn.
+      if (message.error === "authentication_failed") {
+        context.turnState.authenticationFailureMessage = claudeSignedOutMessage({
+          configDir: claudeEnvironment.CLAUDE_CONFIG_DIR,
+          cwd: path.resolve(context.session.cwd ?? "."),
+        });
+      }
       context.turnState.items.push(message.message);
       if (
         normalizeClaudeActiveTokenUsage(
@@ -3194,8 +3366,23 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    const status = turnStatusFromResult(message);
-    const errorMessage = resultUserFacingError(message);
+    const turn = context.turnState;
+    if (turn && isResultForOtherTurn(message, turn)) {
+      // Completing here would end the user's turn before its prompt runs. A
+      // `/compact` would then compact with no turn open and leave the thread
+      // looking busy.
+      yield* Effect.logInfo("claude.turn.result-for-other-turn", {
+        threadId: context.session.threadId,
+        turnId: turn.turnId,
+        origin: (message.origin as { kind?: unknown } | undefined)?.kind,
+        numTurns: message.num_turns,
+      });
+      return;
+    }
+    const failureHint =
+      turn?.authenticationFailureMessage ??
+      (turn && turn.rejectedRateLimitTypes.size > 0 ? CLAUDE_USAGE_LIMIT_FAILURE : undefined);
+    const { status, errorMessage } = resultOutcome(message, failureHint);
 
     if (status === "failed") {
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
@@ -3744,6 +3931,55 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           rateLimits: message,
         },
       });
+      // An older or newer CLI can omit the info block; telemetry above still
+      // carries the raw event, but there is nothing to describe.
+      const rateLimitInfo: SDKRateLimitInfo | undefined =
+        message.rate_limit_info && typeof message.rate_limit_info === "object"
+          ? message.rate_limit_info
+          : undefined;
+      if (rateLimitInfo === undefined) return;
+      // A rejected window parks the turn inside the SDK: no further messages
+      // arrive and no result lands, so without a row the thread just spins.
+      // Warnings (allowed_warning) still have headroom and stay quiet, an
+      // account spending provisioned overage keeps running despite the reject,
+      // and between turns there is no turn to report as paused.
+      const overageAllowed =
+        rateLimitInfo.overageStatus === "allowed" ||
+        rateLimitInfo.overageStatus === "allowed_warning" ||
+        rateLimitInfo.isUsingOverage === true ||
+        rateLimitInfo.overageInUse === true;
+      const blocked = rateLimitInfo.status === "rejected" && !overageAllowed;
+      const limitType = rateLimitInfo.rateLimitType ?? "unknown";
+      const limitKey = `${limitType}:${rateLimitInfo.resetsAt ?? "unknown"}`;
+      if (context.turnState) {
+        // Current blocking evidence is independent of whether its warning has
+        // already been shown. A recovery can omit or advance the reset time;
+        // its window type remains stable without clearing another window.
+        if (blocked) context.turnState.rejectedRateLimitTypes.add(limitType);
+        else if (
+          rateLimitInfo.status === "allowed" ||
+          rateLimitInfo.status === "allowed_warning" ||
+          overageAllowed
+        ) {
+          context.turnState.rejectedRateLimitTypes.delete(limitType);
+        }
+      }
+      if (blocked && context.turnState !== undefined) {
+        // Tracked per turn as a set of limit identities, not as the rendered
+        // row: a parked window re-fires while the remaining wait shrinks, and a
+        // turn can park on more than one window, so a single slot would let an
+        // interleaved repeat through. A new turn — including a synthetic one —
+        // starts a fresh set and announces its pause again.
+        const turnId = context.turnState.turnId;
+        if (context.announcedUsageLimits?.turnId !== turnId) {
+          context.announcedUsageLimits = { turnId, keys: new Set() };
+        }
+        if (!context.announcedUsageLimits.keys.has(limitKey)) {
+          context.announcedUsageLimits.keys.add(limitKey);
+          const notice = describeClaudeUsageLimit(rateLimitInfo, Date.parse(stamp.createdAt));
+          yield* emitRuntimeWarning(context, notice, rateLimitInfo);
+        }
+      }
       return;
     }
   });
@@ -4656,7 +4892,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : {}),
         },
         supportedDialogKinds: ["resume_return"],
-        env: claudeEnvironment,
+        env: mcpSession
+          ? {
+              ...claudeEnvironment,
+              [CLAUDE_T3_MCP_AUTHORIZATION_ENV]: mcpSession.authorizationHeader,
+            }
+          : claudeEnvironment,
         additionalDirectories,
         ...(sandboxProviderTarget(input.threadId)
           ? {
@@ -4672,7 +4913,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   type: "http",
                   url: mcpSession.endpoint,
                   headers: {
-                    Authorization: mcpSession.authorizationHeader,
+                    Authorization: `\${${CLAUDE_T3_MCP_AUTHORIZATION_ENV}}`,
                   },
                 },
               },
@@ -4764,6 +5005,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
+        announcedUsageLimits: undefined,
         lastUserRequestText: undefined,
         stopped: false,
       };
@@ -4924,6 +5166,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         latestAssistantUsage: undefined,
         compactedSinceLatestAssistantUsage: false,
         nextSyntheticAssistantBlockIndex: -1,
+        authenticationFailureMessage: undefined,
+        rejectedRateLimitTypes: new Set(),
       };
 
       const updatedAt = yield* nowIso;
@@ -4958,11 +5202,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
+    // Re-scan on every send: skills are added and switched off mid-session,
+    // and the scan is a few directory reads. A skill switched off via
+    // skillOverrides, or reserved for the agent with `user-invocable: false`,
+    // is left as prose: the CLI would answer `/name` with a notice instead of
+    // running it.
+    const skills = yield* discoverClaudeSkills(
+      claudeSettings,
+      context.session.cwd,
+      claudeEnvironment,
+    ).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
     const message = yield* buildUserMessageEffect(input, {
       fileSystem,
       attachmentsDir: serverConfig.attachmentsDir,
       boundInstanceId,
       modelCatalog,
+      skillNames: new Set(
+        skills
+          .filter((skill) => skill.enabled && skill.userInvocable !== false)
+          .map((skill) => skill.name),
+      ),
     });
 
     yield* Queue.offer(context.promptQueue, {
@@ -5078,6 +5340,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const listSessions: ClaudeAdapterShape["listSessions"] = () =>
     Effect.sync(() => Array.from(sessions.values(), ({ session }) => ({ ...session })));
 
+  // Background agents and shells run inside the CLI process, so a replacement
+  // session (a setting change the CLI cannot apply in place) would kill them
+  // and lose their results. Stop is the way out: it closes the process.
+  const sessionReplacementBlocker: NonNullable<ClaudeAdapterShape["sessionReplacementBlocker"]> = (
+    threadId,
+  ) =>
+    Effect.sync(() => {
+      const context = sessions.get(threadId);
+      return context !== undefined && !context.stopped && context.liveTaskIds.size > 0
+        ? CLAUDE_BACKGROUND_WORK_BLOCKS_REPLACEMENT
+        : undefined;
+    });
+
   const hasSession: ClaudeAdapterShape["hasSession"] = (threadId) =>
     Effect.sync(() => {
       const context = sessions.get(threadId);
@@ -5127,6 +5402,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     stopSession,
     listSessions,
     hasSession,
+    sessionReplacementBlocker,
     stopAll,
     get streamEvents() {
       return Stream.fromQueue(runtimeEventQueue);

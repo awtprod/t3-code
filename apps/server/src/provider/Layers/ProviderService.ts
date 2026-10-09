@@ -58,7 +58,11 @@ import {
   providerTurnMetricAttributes,
   withMetrics,
 } from "../../observability/Metrics.ts";
-import { type ProviderAdapterError, ProviderValidationError } from "../Errors.ts";
+import {
+  type ProviderAdapterError,
+  ProviderAdapterRequestError,
+  ProviderValidationError,
+} from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
@@ -666,6 +670,27 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  // Starting a session closes this thread's live session on the target adapter
+  // and, through `stopStaleSessionsForThread`, on every other adapter. Refuse
+  // while any of them still runs work the user has not stopped.
+  const findSessionReplacementBlocker = Effect.fn("findSessionReplacementBlocker")(function* (
+    threadId: ThreadId,
+  ) {
+    for (const [, adapter] of yield* getAdapterEntries) {
+      if (adapter.sessionReplacementBlocker === undefined) continue;
+      if (!(yield* adapter.hasSession(threadId))) continue;
+      const detail = yield* adapter.sessionReplacementBlocker(threadId);
+      if (detail !== undefined) {
+        return new ProviderAdapterRequestError({
+          provider: adapter.provider,
+          method: "session/replace",
+          detail,
+        });
+      }
+    }
+    return undefined;
+  });
+
   const stopStaleSessionsForThread = Effect.fn("stopStaleSessionsForThread")(function* (input: {
     readonly threadId: ThreadId;
     readonly currentInstanceId: ProviderInstanceId;
@@ -811,6 +836,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
+        // Checked before anything below rebinds the sandbox or rotates the MCP
+        // credential a surviving live session is using.
+        const replacementBlocked = yield* findSessionReplacementBlocker(threadId);
+        if (replacementBlocked !== undefined) {
+          return yield* replacementBlocked;
+        }
         if (executionTarget?.kind === "sandbox") {
           bindSandboxProviderTarget(executionTarget, sandboxBindingOwner);
           // Push the thread's credential document into its sidecar before the
