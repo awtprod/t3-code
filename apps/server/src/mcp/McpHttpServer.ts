@@ -458,7 +458,14 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                 },
                 ...(screenshotPath === undefined ? {} : { screenshotPath }),
               };
-              const bounded = boundSnapshotMetadata(metadata);
+              // The agent-facing text is bounded from the raw page (upstream's
+              // SnapshotMetadata shape); structuredContent keeps the fork's
+              // ModelResultEnvelope caps from ToolResultBudget.
+              const bounded = boundSnapshotMetadata({
+                ...page,
+                screenshot: metadata.screenshot,
+                ...(screenshotPath === undefined ? {} : { screenshotPath }),
+              });
               return new McpSchema.CallToolResult({
                 isError: false,
                 structuredContent: metadata,

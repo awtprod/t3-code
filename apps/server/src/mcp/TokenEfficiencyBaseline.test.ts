@@ -37,7 +37,9 @@ it("records the committed static-context baseline", () => {
     collaborationInstructions: { defaultBytes: 2_071, planBytes: 10_302 },
     // 2026-09: +1,938 bytes for the optional `database` selector on the nine
     // Supabase tools (multi-database projects).
-    mcp: { toolCount: 36, schemaBytes: 25_457, toolkitCounts: [14, 13, 9] },
+    // 2026-10: effect rc.112 JSON Schema output (-108 bytes) plus object-root
+    // input schemas for cc_spaces_list and cc_google_read (+16 bytes).
+    mcp: { toolCount: 36, schemaBytes: 25_365, toolkitCounts: [14, 13, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

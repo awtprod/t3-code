@@ -30,6 +30,31 @@ const threadId = ThreadId.make("thread-mcp-test");
 const tabId = PreviewTabId.make("tab-mcp-test");
 const alternateTabId = PreviewTabId.make("tab-mcp-alternate");
 const decodeJsonText = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+// preview_snapshot's structuredContent keeps Command Center's ToolResultBudget
+// envelopes (MODEL_RESULT_LIMITS); only the agent-facing text block is bounded
+// by boundSnapshotMetadata. Small fixtures fit every cap, so each capped field
+// is wrapped untouched.
+const withinBudget = <A>(value: A) => ({ value, truncated: false, omittedCount: 0 });
+const budgetedSnapshot = <
+  A extends {
+    readonly visibleText: unknown;
+    readonly interactiveElements: unknown;
+    readonly accessibilityTree: unknown;
+    readonly consoleEntries: unknown;
+    readonly networkEntries: unknown;
+    readonly actionTimeline: unknown;
+  },
+>(
+  metadata: A,
+) => ({
+  ...metadata,
+  visibleText: withinBudget(metadata.visibleText),
+  interactiveElements: withinBudget(metadata.interactiveElements),
+  accessibilityTree: withinBudget(metadata.accessibilityTree),
+  consoleEntries: withinBudget(metadata.consoleEntries),
+  networkEntries: withinBudget(metadata.networkEntries),
+  actionTimeline: withinBudget(metadata.actionTimeline),
+});
 const invocation = {
   environmentId,
   threadId,
@@ -273,7 +298,7 @@ it.effect.each([
         const metadata = { ...page, title: `Snapshot ${call}`, screenshot };
         const { accessibilityTree: _tree, ...boundedMetadata } = metadata;
         expect(snapshot.isError).toBe(false);
-        expect(snapshot.structuredContent).toEqual(metadata);
+        expect(snapshot.structuredContent).toEqual(budgetedSnapshot(metadata));
         const [identity, text, ...rest] = snapshot.content;
         expect(identity?.type === "text" ? decodeJsonText(identity.text) : null).toEqual({
           url: page.url,
@@ -312,7 +337,9 @@ it.effect.each([
         "text",
         "image",
       ]);
-      expect(nextDefault.structuredContent).toEqual({ ...page, title: "Snapshot 7", screenshot });
+      expect(nextDefault.structuredContent).toEqual(
+        budgetedSnapshot({ ...page, title: "Snapshot 7", screenshot }),
+      );
       expect(requests).toBe(7);
     }),
   ).pipe(Effect.provide(TestLayer)),
@@ -485,9 +512,10 @@ it.effect("keeps the snapshot text under the agent's output ceiling", () =>
       expect(parsed.consoleEntries[0]?.text).toBe("entry 60");
       expect(notice?.type === "text" ? notice.text : "").toContain("accessibilityTree");
       expect(notice?.type === "text" ? notice.text : "").toContain("60 older console entries");
-      // The structured result is untouched; only the text the agent reads is bounded.
+      // The structured result carries the ToolResultBudget envelope rather than the
+      // bounded text: the oversized tree is truncated and says so.
       expect(snapshot.structuredContent).toMatchObject({
-        accessibilityTree: oversized.accessibilityTree,
+        accessibilityTree: { truncated: true },
       });
     }),
   ).pipe(Effect.provide(TestLayer)),
