@@ -1,6 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import {
   CommandCenterMcpCapabilityUnavailableError,
+  DatabaseToolError,
   EnvironmentId,
   McpCapabilityUnavailableError,
   PreviewAutomationUnavailableError,
@@ -10,6 +11,19 @@ import {
 import * as Effect from "effect/Effect";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+
+// `requireMcpCapability` returns a union of per-capability effects that share
+// their success value and context but each carry a distinct error type. Collapse
+// that union to the merged effect type (error channels widen covariantly) so
+// `.pipe` sees one concrete effect instead of an unresolvable union.
+type RequireMcpCapabilityEffect = Effect.Effect<
+  McpInvocationContext.McpInvocationScope,
+  | CommandCenterMcpCapabilityUnavailableError
+  | DatabaseToolError
+  | McpCapabilityUnavailableError
+  | PreviewAutomationUnavailableError,
+  McpInvocationContext.McpInvocationContext
+>;
 
 it.effect("reports the scoped credential context when preview capability is unavailable", () => {
   const invocation: McpInvocationContext.McpInvocationScope = {
@@ -101,7 +115,9 @@ it.effect("reports other missing capabilities with the neutral error", () => {
   };
 
   return Effect.gen(function* () {
-    const error = yield* McpInvocationContext.requireMcpCapability("pull-requests").pipe(
+    const pullRequestsCheck: RequireMcpCapabilityEffect =
+      McpInvocationContext.requireMcpCapability("pull-requests");
+    const error = yield* pullRequestsCheck.pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
       Effect.flip,
     );
@@ -109,7 +125,9 @@ it.effect("reports other missing capabilities with the neutral error", () => {
     expect(error).toBeInstanceOf(McpCapabilityUnavailableError);
     expect(error).toMatchObject({ capability: "pull-requests", threadId: invocation.threadId });
 
-    const scope = yield* McpInvocationContext.requireMcpCapability("preview").pipe(
+    const previewCheck: RequireMcpCapabilityEffect =
+      McpInvocationContext.requireMcpCapability("preview");
+    const scope = yield* previewCheck.pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
     );
     expect(scope).toBe(invocation);

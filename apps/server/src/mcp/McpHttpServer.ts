@@ -20,7 +20,7 @@ import * as DeviceService from "../device/DeviceService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
-import { requiredCapabilityFromMeta } from "./ToolCapability.ts";
+import { capabilitiesAllow, requiredCapabilityFromMeta } from "./ToolCapability.ts";
 import {
   MODEL_RESULT_LIMITS,
   capFirst,
@@ -70,17 +70,7 @@ const unauthorized = HttpServerResponse.jsonUnsafe(
 export const toolVisibleToCapabilities = (
   tool: McpSchema.Tool,
   capabilities: ReadonlySet<McpInvocationContext.McpCapability>,
-): boolean => {
-  const required = requiredCapabilityFromMeta(tool._meta);
-  if (required === undefined) return true;
-  if (required === "cc.connections.google.read") {
-    return (
-      capabilities.has(required) ||
-      Array.from(capabilities).some((capability) => capability.startsWith("cc.connections.google."))
-    );
-  }
-  return capabilities.has(required);
-};
+): boolean => capabilitiesAllow(requiredCapabilityFromMeta(tool._meta), capabilities);
 
 type AuthenticatedHttpEffect = Effect.Effect<
   HttpServerResponse.HttpServerResponse,
@@ -128,11 +118,12 @@ const makeMcpAuthMiddleware = McpSessionRegistry.McpSessionRegistry.pipe(
           });
           return unauthorized;
         }
+        // Per-credential `tools/list` visibility is enforced by the per-tool
+        // `EnabledWhen` predicate attached in ToolCapability.requireCapability,
+        // which reads this invocation off the fiber; nothing extra to provide
+        // here beyond the invocation context itself.
         return yield* httpEffect.pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-          Effect.provideService(McpServer.McpListToolFilter, (tool) =>
-            toolVisibleToCapabilities(tool, invocation.capabilities),
-          ),
           Effect.map(normalizeMcpHttpResponse),
         );
       }),
