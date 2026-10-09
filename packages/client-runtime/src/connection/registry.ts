@@ -395,7 +395,12 @@ export const make = Effect.gen(function* () {
     yield* withLeaseLock(
       environmentId,
       Effect.gen(function* () {
-        if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
+        const platformManaged = (yield* Ref.get(platformEnvironmentIds)).has(environmentId);
+        const activeTarget = (yield* SubscriptionRef.get(entries)).get(environmentId)?.target;
+        const savePrimaryBearer =
+          registration._tag === "BearerConnectionRegistration" &&
+          activeTarget?._tag === "PrimaryConnectionTarget";
+        if (platformManaged && !savePrimaryBearer) {
           return;
         }
         yield* registrations.register(registration);
@@ -404,7 +409,11 @@ export const make = Effect.gen(function* () {
           next.set(environmentId, registration.target);
           return next;
         });
-        yield* installEntryLocked(entry);
+        // Pairing may repair the primary's saved bearer while its current
+        // platform-managed connection stays in use until the next launch.
+        if (!platformManaged) {
+          yield* installEntryLocked(entry);
+        }
       }),
     );
   });
