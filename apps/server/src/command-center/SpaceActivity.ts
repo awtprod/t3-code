@@ -22,12 +22,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-/** Thread ids of the Space agents themselves; their turns are never activity. */
-export const SPACE_AGENT_THREAD_ID_PREFIX = "cc-space-agent-";
-
-export const isSpaceAgentThreadId = (threadId: string): boolean =>
-  threadId.startsWith(SPACE_AGENT_THREAD_ID_PREFIX);
-
 export const SPACE_ACTIVITY_SUMMARY_CHARS = 1_000;
 export const SPACE_ACTIVITY_TITLE_CHARS = 200;
 /** Rows kept per Space; older rows are pruned on insert. */
@@ -168,10 +162,18 @@ interface ActivityRow {
 const persistenceError = (message: string) => (cause: unknown) =>
   new CommandCenterError({ reason: "persistence", message, cause });
 
-export const make = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
-
-  const recent: SpaceActivityShape["recent"] = (input) => {
+/**
+ * The newest activity rows of a Space (newest first, limit clamped to 1..50).
+ * Shared by `SpaceActivity.recent` and the Space brief loader, which only has
+ * a `SqlClient`.
+ */
+export const queryRecentSpaceActivity = (input: {
+  readonly spaceId: string;
+  readonly since?: string;
+  readonly limit?: number;
+}): Effect.Effect<ReadonlyArray<SpaceActivityEntry>, CommandCenterError, SqlClient.SqlClient> =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
     const limit = Math.min(
       SPACE_ACTIVITY_MAX_LIMIT,
       Math.max(1, Math.floor(input.limit ?? DEFAULT_LIMIT)),
@@ -179,12 +181,13 @@ export const make = Effect.gen(function* () {
     // Rows store canonical ISO instants, so `since` is normalized to compare.
     const sinceTime = input.since === undefined ? undefined : DateTime.make(input.since);
     if (sinceTime !== undefined && Option.isNone(sinceTime)) {
-      return Effect.fail(
-        new CommandCenterError({ reason: "validation", message: "`since` is not a timestamp." }),
-      );
+      return yield* new CommandCenterError({
+        reason: "validation",
+        message: "`since` is not a timestamp.",
+      });
     }
     const since = sinceTime === undefined ? null : DateTime.formatIso(sinceTime.value);
-    return sql<ActivityRow>`
+    const rows = yield* sql<ActivityRow>`
       SELECT occurred_at AS "occurredAt", title, status, summary, url,
         source_kind AS "sourceKind", source_id AS "sourceId"
       FROM command_center_space_activity
@@ -192,11 +195,15 @@ export const make = Effect.gen(function* () {
         AND (${since} IS NULL OR occurred_at > ${since})
       ORDER BY occurred_at DESC, id DESC
       LIMIT ${limit}
-    `.pipe(
-      Effect.map((rows) => rows.map(({ url, ...row }) => (url === null ? row : { ...row, url }))),
-      Effect.mapError(persistenceError("Could not read Space activity.")),
-    );
-  };
+    `.pipe(Effect.mapError(persistenceError("Could not read Space activity.")));
+    return rows.map(({ url, ...row }) => (url === null ? row : { ...row, url }));
+  });
+
+export const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+
+  const recent: SpaceActivityShape["recent"] = (input) =>
+    queryRecentSpaceActivity(input).pipe(Effect.provideService(SqlClient.SqlClient, sql));
 
   const record: SpaceActivityShape["record"] = (input) => {
     const text = input.text ?? "";
