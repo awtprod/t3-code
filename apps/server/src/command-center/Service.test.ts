@@ -2922,3 +2922,156 @@ it.effect("stores Space agent Memory as approved with agent provenance on its th
     expect(brief.brief).toContain("[procedure] Release builds run from the Desktop Windows Build");
   }).pipe(Effect.provide(makeTestLayer(withStudioAgent(loadedConfig)))),
 );
+
+const readSpaceAgentReplies = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* sql<{
+    readonly itemId: string;
+    readonly itemTitle: string;
+    readonly kind: string;
+    readonly body: string;
+  }>`
+    SELECT item_id AS "itemId", item_title AS "itemTitle", kind, body
+    FROM command_center_space_agent_replies
+    ORDER BY id
+  `;
+});
+
+it.effect("marks Space agent Items and queues the user's replies on them for the agent", () =>
+  Effect.gen(function* () {
+    const service = yield* CommandCenterService;
+    const inbox = yield* makeInbox;
+    const sql = yield* SqlClient.SqlClient;
+    const actor = { kind: "space-agent", threadId: "cc-space-agent-example-studio" } as const;
+
+    const question = yield* service.createItem(
+      {
+        requestId: "agent-question",
+        spaceId: studioSpace.id,
+        kind: "decision",
+        priority: "normal",
+        title: "Which sample vendor?",
+      },
+      actor,
+    );
+    expect(question.provenance).toMatchObject({
+      kind: "agent",
+      sourceRef: "cc-space-agent-example-studio",
+    });
+    expect(question.metadata).toEqual({
+      spaceAgent: true,
+      threadId: "cc-space-agent-example-studio",
+    });
+    const createdAudit = yield* sql<{ readonly actorKind: string }>`
+      SELECT actor_kind AS "actorKind" FROM command_center_audit_events
+      WHERE action = 'cc.items.create' AND payload_json LIKE ${`%${question.id}%`}
+    `;
+    expect(createdAudit).toEqual([{ actorKind: "agent" }]);
+
+    const userItem = yield* service.createItem({
+      requestId: "user-item",
+      spaceId: studioSpace.id,
+      kind: "decision",
+      priority: "normal",
+      title: "A user decision",
+    });
+    expect(userItem.provenance.kind).toBe("user");
+    expect(userItem.metadata).toEqual({});
+
+    // The agent's own edit is audited as the agent and queues nothing.
+    yield* service.updateItem(
+      decodeItemUpdate({
+        itemId: question.id,
+        spaceId: question.spaceId,
+        expectedUpdatedAt: question.updatedAt,
+        patch: { status: "review", description: "Two sample vendors quoted." },
+      }),
+      actor,
+    );
+    expect(yield* readSpaceAgentReplies).toEqual([]);
+
+    // Comments and change requests on the agent's Item are queued.
+    yield* inbox.comment(
+      {
+        spaceId: studioSpace.id,
+        itemId: question.id,
+        mutationId: "reply-comment",
+        expectedVersion: (yield* inbox.detail({ spaceId: studioSpace.id, itemId: question.id }))
+          .state.version,
+        text: "Go with the example vendor.",
+      },
+      { subject: "reviewer" },
+    );
+    yield* inbox.requestChanges(
+      {
+        spaceId: studioSpace.id,
+        itemId: question.id,
+        mutationId: "reply-change",
+        expectedVersion: (yield* inbox.detail({ spaceId: studioSpace.id, itemId: question.id }))
+          .state.version,
+        text: "Add the price.",
+      },
+      { subject: "reviewer" },
+    );
+    // A comment on a user Item is not.
+    yield* inbox.comment(
+      {
+        spaceId: studioSpace.id,
+        itemId: userItem.id,
+        mutationId: "user-comment",
+        expectedVersion: 0,
+        text: "Just a note.",
+      },
+      { subject: "reviewer" },
+    );
+
+    // The user's status decision is queued once.
+    const latest = (yield* service.bootstrap).items.find((item) => item.id === question.id)!;
+    const decided = decodeItemUpdate({
+      itemId: question.id,
+      spaceId: question.spaceId,
+      expectedUpdatedAt: latest.updatedAt,
+      patch: { status: "done" },
+    });
+    yield* service.updateItem(decided);
+    yield* service.updateItem(decided);
+
+    yield* inbox.dismiss(
+      {
+        spaceId: studioSpace.id,
+        itemId: question.id,
+        mutationId: "reply-dismiss",
+        expectedVersion: (yield* inbox.detail({ spaceId: studioSpace.id, itemId: question.id }))
+          .state.version,
+      },
+      { subject: "reviewer" },
+    );
+
+    expect(yield* readSpaceAgentReplies).toEqual([
+      {
+        itemId: question.id,
+        itemTitle: "Which sample vendor?",
+        kind: "comment",
+        body: "Go with the example vendor.",
+      },
+      {
+        itemId: question.id,
+        itemTitle: "Which sample vendor?",
+        kind: "change-request",
+        body: "Add the price.",
+      },
+      {
+        itemId: question.id,
+        itemTitle: "Which sample vendor?",
+        kind: "status",
+        body: "Status changed from review to done.",
+      },
+      {
+        itemId: question.id,
+        itemTitle: "Which sample vendor?",
+        kind: "dismissed",
+        body: "Dismissed from the Inbox.",
+      },
+    ]);
+  }).pipe(Effect.provide(makeTestLayer())),
+);

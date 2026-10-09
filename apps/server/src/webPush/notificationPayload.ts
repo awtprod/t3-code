@@ -1,5 +1,9 @@
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
-import { agentAwarenessStatusWord } from "@t3tools/shared/agentAwareness";
+import {
+  agentAwarenessStatusWord,
+  buildAgentAwarenessDeepLink,
+} from "@t3tools/shared/agentAwareness";
 
 import type { WebPushThreadNotificationPayload } from "./WebPushSender.ts";
 
@@ -29,5 +33,25 @@ export function buildThreadNotificationPayload(
     environmentId: state.environmentId,
     threadId: state.threadId,
     deepLink: state.deepLink,
+  };
+}
+
+/**
+ * A Space agent question rings as a notification for the agent's thread: the
+ * title is the Item title, and the deep link opens the agent's conversation,
+ * where the Item and its reply loop live (the service worker only accepts
+ * thread deep links).
+ */
+export function buildSpaceAgentQuestionPayload(input: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly itemTitle: string;
+}): WebPushThreadNotificationPayload {
+  return {
+    title: clipNotificationText(input.itemTitle),
+    body: clipNotificationText("Needs you: your Space agent has a question"),
+    environmentId: input.environmentId,
+    threadId: input.threadId,
+    deepLink: buildAgentAwarenessDeepLink(input),
   };
 }

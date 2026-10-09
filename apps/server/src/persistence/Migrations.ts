@@ -91,6 +91,7 @@ import Migration0078 from "./Migrations/078_InstagramReelReceipts.ts";
 import Migration0079 from "./Migrations/079_CommandCenterSpaceAgent.ts";
 import Migration0080 from "./Migrations/080_CommandCenterSpaceActivity.ts";
 import Migration0081 from "./Migrations/081_CommandCenterSpaceAgentState.ts";
+import Migration0082 from "./Migrations/082_CommandCenterSpaceAgentReplies.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -180,6 +181,7 @@ export const migrationEntries = [
   [79, "CommandCenterSpaceAgent", Migration0079],
   [80, "CommandCenterSpaceActivity", Migration0080],
   [81, "CommandCenterSpaceAgentState", Migration0081],
+  [82, "CommandCenterSpaceAgentReplies", Migration0082],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

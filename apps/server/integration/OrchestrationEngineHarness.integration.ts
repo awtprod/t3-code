@@ -636,6 +636,7 @@ export const makeOrchestrationIntegrationHarness = (
           start: () => Effect.void,
           processThread: () => Effect.void,
           seedFromSnapshot: Effect.void,
+          processItemEvent: () => Effect.void,
         }),
       ),
     );

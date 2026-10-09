@@ -40,6 +40,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { makeCommandCenterAuditLog } from "./AuditLog.ts";
 import { make as makeObservations } from "./Observations.ts";
+import { isSpaceAgentItemMetadata, recordSpaceAgentReply } from "./SpaceAgentReplies.ts";
 import { makeSprintPlanService } from "./SprintPlan.ts";
 
 const DEFAULT_HISTORY_LIMIT = 50;
@@ -894,6 +895,17 @@ export const make = Effect.gen(function* () {
                 ${validated.text}, ${context.subject}, ${now}
               )
             `;
+            if (isSpaceAgentItemMetadata(state.metadataJson)) {
+              yield* recordSpaceAgentReply(sql, {
+                sourceId: `inbox:${kind}:${validated.mutationId}`,
+                spaceId: validated.spaceId,
+                itemId: validated.itemId,
+                itemTitle: state.title,
+                kind,
+                body: validated.text,
+                occurredAt: now,
+              });
+            }
             if (kind === "change-request") {
               const invalidated = yield* sql<{
                 readonly id: string;
@@ -1290,6 +1302,17 @@ export const make = Effect.gen(function* () {
           return yield* conflictError(
             `The Inbox item cannot transition from '${state.lifecycle}'.`,
           );
+        }
+        if (target === "dismissed" && isSpaceAgentItemMetadata(state.metadataJson)) {
+          yield* recordSpaceAgentReply(sql, {
+            sourceId: `inbox:dismissed:${input.mutationId}`,
+            spaceId: input.spaceId,
+            itemId: input.itemId,
+            itemTitle: state.title,
+            kind: "dismissed",
+            body: "Dismissed from the Inbox.",
+            occurredAt: now,
+          });
         }
         const updatedAt = nextUpdatedAt(state.stateUpdatedAt, now);
         const changed = yield* sql<{ readonly version: number }>`

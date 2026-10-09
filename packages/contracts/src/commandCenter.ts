@@ -210,7 +210,12 @@ export const CommandCenterSpaceBrief = Schema.Struct({
 });
 export type CommandCenterSpaceBrief = typeof CommandCenterSpaceBrief.Type;
 
-export const CommandCenterSpaceAgentWakeReason = Schema.Literals(["event", "check-in", "manual"]);
+export const CommandCenterSpaceAgentWakeReason = Schema.Literals([
+  "event",
+  "check-in",
+  "manual",
+  "reply",
+]);
 export type CommandCenterSpaceAgentWakeReason = typeof CommandCenterSpaceAgentWakeReason.Type;
 
 export const CommandCenterSpaceAgentSummary = Schema.Struct({

@@ -1,4 +1,4 @@
-import { CommandCenterError } from "@t3tools/contracts";
+import { CommandCenterError, type CommandCenterItemUpdateInput } from "@t3tools/contracts";
 import { RepositoryId, SpaceId } from "@command-center/core";
 import * as Effect from "effect/Effect";
 
@@ -272,6 +272,13 @@ export const memoryWriteOperationForScope = (scope: {
   readonly memoryWriteMode?: McpInvocationContext.McpMemoryWriteMode;
 }): "remember" | "propose" => (scope.memoryWriteMode === "remember" ? "remember" : "propose");
 
+/** Space agent scopes act as the agent; every other credential keeps the default actor. */
+const spaceAgentItemActor = (scope: {
+  readonly role?: string | undefined;
+  readonly threadId: string;
+}): CommandCenterService.CommandCenterItemActor | undefined =>
+  scope.role === "space-agent" ? { kind: "space-agent", threadId: scope.threadId } : undefined;
+
 const handlers = {
   cc_spaces_list: (_input) =>
     Effect.gen(function* () {
@@ -295,9 +302,28 @@ const handlers = {
     }),
   cc_items_create: (input) =>
     Effect.gen(function* () {
-      yield* requireScopedSpace("cc.items.write", input.spaceId);
+      const scope = yield* requireScopedSpace("cc.items.write", input.spaceId);
       const service = yield* CommandCenterService.CommandCenterService;
-      return yield* service.createItem(input);
+      return yield* service.createItem(input, spaceAgentItemActor(scope));
+    }),
+  cc_items_update: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.items.write", input.spaceId);
+      const service = yield* CommandCenterService.CommandCenterService;
+      const patch = Object.fromEntries(
+        Object.entries(input.patch).filter(([, value]) => value !== undefined),
+      ) as CommandCenterItemUpdateInput["patch"];
+      if (Object.keys(patch).length === 0) {
+        return yield* new CommandCenterError({
+          reason: "validation",
+          message: "An Item update must change the status, title, or description.",
+        });
+      }
+      return yield* service.updateItem(
+        { ...input, patch },
+        // Non-agent credentials keep the user-actor path the Inbox UI uses.
+        spaceAgentItemActor(scope),
+      );
     }),
   cc_memory_list: ({ spaceId }) =>
     Effect.gen(function* () {
