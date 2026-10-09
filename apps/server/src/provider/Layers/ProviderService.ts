@@ -670,6 +670,27 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  // Starting a session closes this thread's live session on the target adapter
+  // and, through `stopStaleSessionsForThread`, on every other adapter. Refuse
+  // while any of them still runs work the user has not stopped.
+  const findSessionReplacementBlocker = Effect.fn("findSessionReplacementBlocker")(function* (
+    threadId: ThreadId,
+  ) {
+    for (const [, adapter] of yield* getAdapterEntries) {
+      if (adapter.sessionReplacementBlocker === undefined) continue;
+      if (!(yield* adapter.hasSession(threadId))) continue;
+      const detail = yield* adapter.sessionReplacementBlocker(threadId);
+      if (detail !== undefined) {
+        return new ProviderAdapterRequestError({
+          provider: adapter.provider,
+          method: "session/replace",
+          detail,
+        });
+      }
+    }
+    return undefined;
+  });
+
   const stopStaleSessionsForThread = Effect.fn("stopStaleSessionsForThread")(function* (input: {
     readonly threadId: ThreadId;
     readonly currentInstanceId: ProviderInstanceId;
@@ -815,19 +836,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
-        // Starting over a live session closes it. Refuse while it still runs
-        // work the user has not stopped, before anything below rebinds the
-        // sandbox or rotates the MCP credential that live session is using.
-        const replacementBlocker =
-          adapter.sessionReplacementBlocker === undefined
-            ? undefined
-            : yield* adapter.sessionReplacementBlocker(threadId);
-        if (replacementBlocker !== undefined) {
-          return yield* new ProviderAdapterRequestError({
-            provider: adapter.provider,
-            method: "session/replace",
-            detail: replacementBlocker,
-          });
+        // Checked before anything below rebinds the sandbox or rotates the MCP
+        // credential a surviving live session is using.
+        const replacementBlocked = yield* findSessionReplacementBlocker(threadId);
+        if (replacementBlocked !== undefined) {
+          return yield* replacementBlocked;
         }
         if (executionTarget?.kind === "sandbox") {
           bindSandboxProviderTarget(executionTarget, sandboxBindingOwner);
