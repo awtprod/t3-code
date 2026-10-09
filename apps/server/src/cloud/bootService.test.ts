@@ -29,7 +29,7 @@ const linuxPlan = {
   program: [linuxRuntime, "__service-launcher"],
   baseDir: "/home/theo/.t3",
   logPath: "/home/theo/.t3/userdata/logs/boot-service.log",
-  unitPath: "/home/theo/.config/systemd/user/command-center.service",
+  unitPath: "~/.config/systemd/user/command-center.service",
 };
 
 it("runs the pinned runtime's own executable as the systemd launcher", () => {
@@ -45,7 +45,7 @@ it("reads the served T3 home back out of a rendered unit or plist", () => {
     program: [`${baseDir}/runtime/versions/1.2.3/t3`, "__service-launcher"],
     baseDir,
     logPath: `${baseDir}/userdata/logs/boot-service.log`,
-    unitPath: "/home/theo/.config/systemd/user/command-center.service",
+    unitPath: "~/.config/systemd/user/command-center.service",
   });
 
   expect(
@@ -150,12 +150,16 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   const timeouts = new Map<string, unknown>();
   const control: {
     failCommand: string | undefined;
+    failureCode: number;
+    failureStderr: string;
     stateAfterStop?: string;
     linger: string;
     enabled: boolean;
     active: boolean;
   } = {
     failCommand: undefined,
+    failureCode: 1,
+    failureStderr: "",
     linger: "yes",
     enabled: true,
     active: true,
@@ -192,9 +196,13 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
                   ? "enabled\n"
                   : "disabled\n"
                 : "",
-        stderr: "",
+        stderr: failed ? control.failureStderr : "",
         code: ChildProcessSpawner.ExitCode(
-          failed || (input.args[1] === "is-active" && !control.active) ? 1 : 0,
+          failed
+            ? control.failureCode
+            : input.args[1] === "is-active" && !control.active
+              ? 1
+              : 0,
         ),
         timedOut: false,
         stdoutTruncated: false,
@@ -808,7 +816,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   it.effect("preserves the launch agent when uninstall cannot stop it", () =>
     Effect.gen(function* () {
       const { service, control } = yield* makeHarness("darwin");
-      yield* service.install;
+      yield* service.install();
       control.failCommand = "launchctl bootout --wait gui/501/com.t3tools.t3code.service";
       control.failureCode = 1;
       control.failureStderr = "Boot-out failed: 1: Operation not permitted";
@@ -823,13 +831,13 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   it.effect("does not rewrite an installed launch agent when bootout really fails", () =>
     Effect.gen(function* () {
       const { service, fs, control } = yield* makeHarness("darwin");
-      const plan = yield* service.install;
+      const plan = yield* service.install();
       const before = yield* fs.readFileString(plan.unitPath);
       control.failCommand = "launchctl bootout --wait gui/501/com.t3tools.t3code.service";
       control.failureCode = 1;
       control.failureStderr = "Boot-out failed: 1: Operation not permitted";
 
-      const failure = yield* service.install.pipe(Effect.flip);
+      const failure = yield* service.install().pipe(Effect.flip);
 
       expect(failure._tag).toBe("BootServiceCommandError");
       expect(yield* fs.readFileString(plan.unitPath)).toBe(before);

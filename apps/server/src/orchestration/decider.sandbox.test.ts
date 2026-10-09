@@ -49,6 +49,7 @@ function readModel(
         proposedPlans: [],
         activities: [],
         checkpoints: [],
+        pullRequests: [],
         session: null,
       },
     ],

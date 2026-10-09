@@ -23,7 +23,6 @@ import {
   ProjectId,
   MessageId,
   OrchestrationThreadShell,
-  ProjectId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -37,7 +36,7 @@ import {
   serializeAssistantCitation,
 } from "@t3tools/shared/assistantCitations";
 import { createModelSelection } from "@t3tools/shared/model";
-import { it, assert, describe, expect, vi } from "@effect/vitest";
+import { afterAll, it, assert, describe, expect, vi } from "@effect/vitest";
 
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
@@ -709,6 +708,7 @@ it.effect("ProviderServiceLive propagates targeted-interrupt directory persisten
       ProviderSessionDirectory.ProviderSessionDirectory,
       ProviderSessionDirectory.ProviderSessionDirectory.of({
         upsert: () => Effect.void,
+        recordImportedTranscript: () => Effect.fail(persistenceError),
         getProvider: () => Effect.fail(persistenceError),
         getBinding: () => Effect.fail(persistenceError),
         listThreadIds: () => Effect.succeed([]),
@@ -716,6 +716,7 @@ it.effect("ProviderServiceLive propagates targeted-interrupt directory persisten
       }),
     );
     const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(NodeServices.layer),
       Layer.provide(providerAdapterLayer),
       Layer.provide(directoryLayer),
       Layer.provide(defaultServerSettingsLayer),
@@ -773,6 +774,7 @@ it.effect("ProviderServiceLive propagates targeted-interrupt registry failures",
     const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
     const providerLayer = Layer.mergeAll(
       makeProviderServiceLive().pipe(
+        Layer.provide(NodeServices.layer),
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(defaultServerSettingsLayer),
@@ -1189,8 +1191,6 @@ const makeContinuationCompatEnv = ({ keyA, keyB }: { keyA: string; keyB: string 
           ? Effect.succeed(infoFor(instanceB, keyB))
           : Effect.fail(unsupported()),
     listInstances: () => Effect.succeed([instanceA, instanceB]),
-    listProviders: () => Effect.succeed([driverKind] as const),
-    streamChanges: Stream.empty,
     subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
       PubSub.subscribe(pubsub),
     ),
@@ -5422,7 +5422,7 @@ describe("agent browser access", () => {
           Effect.sync(() => {
             issued.push({
               threadId: request.threadId,
-              capabilities: [...request.capabilities].toSorted(),
+              capabilities: [...(request.capabilities ?? [])].toSorted(),
             });
             return undefined;
           }),
@@ -5463,25 +5463,15 @@ describe("agent browser access", () => {
 
       yield* Effect.gen(function* () {
         const provider = yield* ProviderService.ProviderService;
-        const serverSettings = yield* ServerSettings.ServerSettingsService;
-        for (const start of starts) {
-          if (start.enableAgentBrowserAccess !== undefined) {
-            yield* serverSettings.updateSettings({
-              enableAgentBrowserAccess: start.enableAgentBrowserAccess,
-            });
-          }
-          yield* provider.startSession(start.threadId, {
-            provider: CODEX_DRIVER,
-            providerInstanceId: codexInstanceId,
-            threadId: start.threadId,
-            runtimeMode: "full-access",
-            ...(start.projectId === undefined ? {} : { projectId: start.projectId }),
-            ...(start.cwd === undefined ? {} : { cwd: start.cwd }),
-          });
-        }
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
       }).pipe(Effect.provide(providerLayer));
 
-      return { issued, revoked };
+      return issued;
     });
 
   // The capability on the credential is the observable that matters: a session

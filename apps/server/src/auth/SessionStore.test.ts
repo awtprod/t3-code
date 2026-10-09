@@ -94,6 +94,8 @@ const makeConnectionRepositoryHarness = (connectionFailure?: PersistenceSqlError
     const readRecord = Ref.get(lastConnectedAt).pipe(Effect.map(connectionSessionRecord));
     const repository = AuthSessions.AuthSessionRepository.of({
       create: () => Effect.void,
+      createReplacingActive: () => Effect.succeed([]),
+      createIfAbsent: () => Effect.void,
       getById: () => readRecord.pipe(Effect.map(Option.some)),
       listActive: () => readRecord.pipe(Effect.map((record) => [record])),
       revoke: () => Effect.succeed(false),

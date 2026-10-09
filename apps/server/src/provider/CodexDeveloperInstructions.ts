@@ -43,7 +43,7 @@ const browserToolInstructions = (availability: boolean | T3CodeToolAvailability)
   }`;
 };
 
-const codexPlanModeDeveloperInstructions = (
+export const codexPlanModeDeveloperInstructions = (
   browserToolsAvailable: boolean | T3CodeToolAvailability,
 ): string => `<collaboration_mode># Plan Mode (Conversational)
 
@@ -176,7 +176,7 @@ If the user stays in Plan mode and asks for revisions after a prior \`<proposed_
 ${browserToolInstructions(browserToolsAvailable)}
 </collaboration_mode>`;
 
-const codexDefaultModeDeveloperInstructions = (
+export const codexDefaultModeDeveloperInstructions = (
   browserToolsAvailable: boolean | T3CodeToolAvailability,
 ): string => `<collaboration_mode># Collaboration Mode: Default
 

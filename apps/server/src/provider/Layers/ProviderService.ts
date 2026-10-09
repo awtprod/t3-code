@@ -29,7 +29,6 @@ import {
   ProviderUploadFeedbackInput,
   ThreadId,
   TurnId,
-  type ProjectId,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,

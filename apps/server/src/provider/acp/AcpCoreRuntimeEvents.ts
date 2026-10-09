@@ -9,6 +9,7 @@ import {
   type ProviderRuntimeEvent,
   type RuntimeRequestId,
   type ThreadId,
+  type ToolLifecycleItemType,
   type TurnId,
 } from "@t3tools/contracts";
 

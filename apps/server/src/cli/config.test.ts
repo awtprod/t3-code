@@ -95,6 +95,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: Option.none<boolean>(),
         tailscaleServeEnabled: Option.none<boolean>(),
         tailscaleServePort: Option.none<number>(),
+        previewGatewayEnabled: Option.none<boolean>(),
+        previewGatewayPort: Option.none<number>(),
+        previewGatewayServePort: Option.none<number>(),
       };
       const configLayer = ConfigProvider.layer(
         ConfigProvider.fromEnv({
@@ -139,6 +142,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: Option.none<boolean>(),
         tailscaleServeEnabled: Option.none<boolean>(),
         tailscaleServePort: Option.none<number>(),
+        previewGatewayEnabled: Option.none<boolean>(),
+        previewGatewayPort: Option.none<number>(),
+        previewGatewayServePort: Option.none<number>(),
       };
       const configLayer = ConfigProvider.layer(
         ConfigProvider.fromEnv({ env: { T3CODE_DEV_AUTH_TOKEN: secret } }),
@@ -787,6 +793,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -830,6 +839,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -875,6 +887,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          previewGatewayEnabled: Option.none(),
+          previewGatewayPort: Option.none(),
+          previewGatewayServePort: Option.none(),
         },
         Option.none(),
       ).pipe(

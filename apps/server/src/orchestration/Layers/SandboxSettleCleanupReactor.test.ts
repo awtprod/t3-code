@@ -70,6 +70,7 @@ const thread = (id: string, sandboxState: OrchestrationThread["sandbox"]): Orche
   proposedPlans: [],
   activities: [],
   checkpoints: [],
+  pullRequests: [],
   session: null,
 });
 

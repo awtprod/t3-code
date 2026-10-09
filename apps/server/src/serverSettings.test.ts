@@ -7,7 +7,6 @@ import {
   ProjectScript,
   ProviderDriverKind,
   ProviderInstanceId,
-  ProjectId,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,

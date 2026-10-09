@@ -1224,7 +1224,7 @@ export const make = Effect.gen(function* () {
       readonly executionTarget?: ProviderExecutionTarget;
     },
   ) {
-    const thread = yield* resolveThreadShell(threadId);
+    const thread = yield* resolveThreadDetail(threadId);
     if (!thread) {
       return yield* Effect.die(new Error(`Thread '${threadId}' was not found in read model.`));
     }
@@ -1567,7 +1567,7 @@ export const make = Effect.gen(function* () {
     readonly turnRequestSequence?: number;
     readonly executionTarget?: ProviderExecutionTarget;
   }) {
-    const thread = yield* resolveThreadShell(input.threadId);
+    const thread = yield* resolveThreadDetail(input.threadId);
     if (!thread) {
       return yield* Effect.die(
         new Error(`Thread '${input.threadId}' was not found in read model.`),
@@ -2774,7 +2774,7 @@ export const make = Effect.gen(function* () {
       return;
     }
 
-    const thread = yield* resolveThreadShell(event.payload.threadId);
+    const thread = yield* resolveThreadDetail(event.payload.threadId);
     if (!thread) {
       return;
     }

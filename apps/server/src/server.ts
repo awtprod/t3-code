@@ -483,7 +483,9 @@ const AutomationDefinitionConfigLayerLive = AutomationDefinitionConfig.layer.pip
 );
 
 const AutomationScheduleInterpreterLayerLive = AutomationScheduleInterpreter.layer.pipe(
-  Layer.provideMerge(TextGeneration.layer),
+  Layer.provideMerge(
+    TextGeneration.layer.pipe(Layer.provide(SourceControlProviderRegistryLayerLive)),
+  ),
   Layer.provide(ServerSettingsLayerLive),
 );
 

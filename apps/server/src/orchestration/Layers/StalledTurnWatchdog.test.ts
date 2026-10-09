@@ -110,6 +110,7 @@ function makeShell(
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    pullRequests: [],
     ...overrides,
     settledOverride: overrides.settledOverride ?? null,
     settledAt: overrides.settledAt ?? null,
@@ -168,6 +169,7 @@ describe("StalledTurnWatchdog", () => {
     const providerService: ProviderServiceShape = {
       startSession: () => unsupported(),
       sendTurn: () => unsupported(),
+      compactThread: () => unsupported(),
       interruptTurn,
       respondToRequest: () => unsupported(),
       respondToUserInput: () => unsupported(),
@@ -175,6 +177,7 @@ describe("StalledTurnWatchdog", () => {
       listSessions: () => Effect.succeed([]),
       getCapabilities: () => unsupported(),
       getInstanceInfo: () => unsupported(),
+      assertConversationRollbackSupported: () => unsupported(),
       rollbackConversation: () => unsupported(),
       uploadFeedback: () => unsupported(),
       streamEvents: Stream.empty,
@@ -193,13 +196,23 @@ describe("StalledTurnWatchdog", () => {
       Layer.provideMerge(
         Layer.succeed(OrchestrationEngineService, {
           readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
           dispatch,
           streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.die("unused"),
           latestSequence: Effect.succeed(0),
         }),
       ),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
+          getUserInputActivity: () => Effect.die("unused"),
+          listActivitiesByKind: () => Effect.die("unused"),
+          getEventReplayStats: () => Effect.die("unused"),
+          getProjectShells: () => Effect.die("unused"),
+          getImportedAgentSessionSources: () => Effect.die("unused"),
+          getThreadRuntimeContext: () => Effect.die("unused"),
+          getTurnStartMessage: () => Effect.die("unused"),
           getCommandReadModel: () => Effect.die("unused"),
           getSnapshot: () => Effect.die("unused"),
           getShellSnapshot: () => Effect.succeed(input.snapshot),

@@ -5,7 +5,6 @@ import {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { compareSemverVersions } from "@t3tools/shared/semver";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Config from "effect/Config";
@@ -542,6 +541,7 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
   options?: {
     readonly binaryPath?: string | null;
     readonly env?: NodeJS.ProcessEnv;
+    readonly platform?: NodeJS.Platform | undefined;
   },
 ) {
   const platform = options?.platform ?? (yield* HostProcessPlatform);

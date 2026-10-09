@@ -575,7 +575,10 @@ const integrationLayer = Layer.mergeAll(
   Layer.provide(OrchestrationEventStoreLive),
   Layer.provide(OrchestrationCommandReceiptRepositoryLive),
   Layer.provide(RepositoryIdentityResolver.layer),
-  Layer.provide(SqlitePersistenceMemory),
+  // Export the shared in-memory SqlClient so the per-test ProviderCommandReactor
+  // layer (provided into the effect body) reacts against the same database the
+  // engine persisted commands to.
+  Layer.provideMerge(SqlitePersistenceMemory),
   Layer.provideMerge(integrationServerConfig),
   Layer.provideMerge(NodeServices.layer),
 );

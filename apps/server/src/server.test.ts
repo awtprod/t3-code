@@ -4665,7 +4665,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             });
             assert.equal(paired.response.status, 200);
           }),
-        (frame) => frames.push(frame),
+        { onMessage: (frame) => frames.push(frame) },
       );
     }).pipe(Effect.scoped, Effect.provide(NodeHttpServer.layerTest)),
   );

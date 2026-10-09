@@ -22,6 +22,7 @@ import { removeAntigravitySessionFiles } from "../provider/acp/AntigravitySessio
 import type { AcpSessionRuntime } from "../provider/acp/AcpSessionRuntime.ts";
 import type * as TextGeneration from "./TextGeneration.ts";
 import {
+  buildAutomationSchedulePrompt,
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
@@ -405,10 +406,20 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
       };
     });
 
+  const generateAutomationSchedule: TextGeneration.TextGeneration["Service"]["generateAutomationSchedule"] =
+    Effect.fn("AntigravityTextGeneration.generateAutomationSchedule")(function* (input) {
+      return yield* runAntigravityJson({
+        operation: "generateAutomationSchedule",
+        ...buildAutomationSchedulePrompt({ text: input.text, timezone: input.timezone }),
+        modelSelection: input.modelSelection,
+      });
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateAutomationSchedule,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

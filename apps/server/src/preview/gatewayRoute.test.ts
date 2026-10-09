@@ -182,6 +182,8 @@ const buildGatewayUnderTest = Effect.fnUntraced(function* (options?: {
     otlpMetricsUrl: undefined,
     otlpExportIntervalMs: 10_000,
     otlpServiceName: "t3-server",
+    otlpHeaders: undefined,
+    otlpProtocol: "http/json",
     mode: "web",
     // Zero keeps the backend out of `selfPorts`, so the only port the gateway
     // refuses as "its own" is the ephemeral one the test server actually bound.

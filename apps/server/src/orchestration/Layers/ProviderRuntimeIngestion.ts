@@ -1630,6 +1630,19 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
+  // The session-exit auto-resume gate reads `hasPendingApprovals`,
+  // `hasPendingUserInput`, and `archivedAt` off the thread — fields the
+  // lightweight runtime context (a Pick) omits. The full shell carries those
+  // three fields, so the handler resolves `thread` from the shell exactly as
+  // the fork did before the upstream merge swapped in the runtime context. The
+  // shell is a superset of the runtime context, so it satisfies every other
+  // field the handler reads off `thread`.
+  const resolveThreadShell = Effect.fn("resolveThreadShell")(function* (threadId: ThreadId) {
+    return yield* projectionSnapshotQuery
+      .getThreadShellById(threadId)
+      .pipe(Effect.map(Option.getOrUndefined));
+  });
+
   const resolveThreadDetail = Effect.fn("resolveThreadDetail")(function* (
     threadId: ThreadId,
     activityKinds: ReadonlyArray<string> = [],
@@ -2362,7 +2375,7 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const thread = yield* resolveThreadRuntimeContext(event.threadId);
+      const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
 
       let loadedThreadDetail: OrchestrationThread | null | undefined;
