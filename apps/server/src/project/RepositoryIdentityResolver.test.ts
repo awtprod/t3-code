@@ -118,7 +118,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       const refreshed = yield* resolver.resolve("/repo/packages/web", { refresh: true });
       expect(refreshed?.rootPath).toBe("/repo/packages/web");
       expect(yield* resolver.resolve("/repo/packages/web")).toEqual(refreshed);
-      expect(calls.slice(2)).toEqual([
+      expect(calls.slice(2).map(withoutHardenedConfig)).toEqual([
         ["-C", "/repo/packages/web", "rev-parse", "--show-toplevel"],
         ["-C", "/repo/packages/web", "remote", "-v"],
       ]);

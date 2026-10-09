@@ -175,7 +175,9 @@ it.layer(testLayer)("CodexDriver", (it) => {
               "-g",
               "--prefix",
               installPath,
-              "--allow-scripts=@openai/codex",
+              // Command Center allows every install script for the update
+              // (providerMaintenance.ts: transitive native builds need them).
+              "--dangerously-allow-all-scripts",
               "@openai/codex@latest",
             ],
           });

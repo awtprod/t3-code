@@ -46,8 +46,9 @@ it("records the committed static-context baseline", () => {
     // contradiction fields on the existing memory proposal tool.
     // 2026-09: +40 bytes for the `repository.checks` source-node configuration.
     // 2026-10: effect rc.112 JSON Schema output plus object-root input schemas
-    // for cc_spaces_list and cc_google_read (upstream catch-up sync).
-    mcp: { toolCount: 36, schemaBytes: 25_365, toolkitCounts: [14, 13, 9] },
+    // for cc_spaces_list and cc_google_read (upstream catch-up sync); main's
+    // +512 bytes above (prospect, memory correction, repository.checks) on top.
+    mcp: { toolCount: 36, schemaBytes: 25_877, toolkitCounts: [14, 13, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

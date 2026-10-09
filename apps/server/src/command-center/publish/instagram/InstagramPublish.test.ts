@@ -24,7 +24,7 @@ import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import { runMigrations } from "../../../persistence/Migrations.ts";
+import { migrationManifest, runMigrations } from "../../../persistence/Migrations.ts";
 import migration, {
   createInstagramReelTable,
 } from "../../../persistence/Migrations/078_InstagramReelReceipts.ts";
@@ -1237,7 +1237,8 @@ it.effect("real migration loader upgrades 071 through the reserved stack and 078
       const history = yield* sql<{
         maximum: number;
       }>`SELECT MAX(migration_id) AS maximum FROM effect_sql_migrations`;
-      expect(history[0]!.maximum).toBe(78);
+      // Upstream migrations follow 078, so the loader runs through the last registered one.
+      expect(history[0]!.maximum).toBe(migrationManifest.at(-1)![0]);
       const table = yield* sql<{
         name: string;
       }>`SELECT name FROM sqlite_master WHERE name = 'command_center_instagram_reels'`;

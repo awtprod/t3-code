@@ -628,8 +628,8 @@ describe("orchestration projector", () => {
         const afterSupersededRunning = yield* projectEvent(
           afterCreate,
           makeEvent({
-            sequence: 1,
-            type: "thread.created",
+            sequence: 2,
+            type: "thread.session-set",
             aggregateKind: "thread",
             aggregateId: "thread-atomic",
             occurredAt: "2026-02-23T10:00:05.000Z",
@@ -646,11 +646,6 @@ describe("orchestration projector", () => {
                 lastError: null,
                 updatedAt: "2026-02-23T10:00:05.000Z",
               },
-              runtimeMode: "full-access",
-              branch: null,
-              worktreePath: null,
-              createdAt,
-              updatedAt: createdAt,
             },
           }),
         );

@@ -31,6 +31,14 @@ import {
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import { HOST_GIT_HARDENED_CONFIG_ARGS } from "./HostGitSecurity.ts";
 
+// Command Center: host Git runs as `git -c <hardened config>... -c safe.directory=<cwd> <subcommand>`
+// (HostGitSecurity), so spawner fakes match the subcommand after the leading `-c` pairs.
+const gitSubcommandArgs = (args: ReadonlyArray<string>): ReadonlyArray<string> => {
+  let index = 0;
+  while (args[index] === "-c") index += 2;
+  return args.slice(index);
+};
+
 const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-git-vcs-driver-test-",
 });
@@ -246,7 +254,8 @@ it.effect.each([{ timeoutMs: null }, { timeoutMs: 30_001 }])(
             active++;
             yield* Queue.offer(starts, undefined);
             const gate =
-              ChildProcess.isStandardCommand(command) && command.args[0] === "push"
+              ChildProcess.isStandardCommand(command) &&
+              gitSubcommandArgs(command.args)[0] === "push"
                 ? slowGate
                 : fastGate;
             return ChildProcessSpawner.makeHandle({
@@ -1285,7 +1294,8 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           if (!ChildProcess.isStandardCommand(command)) {
             return Effect.die("expected a standard Git command");
           }
-          return command.args[0] === "ls-files" && command.args[1] === "--others"
+          return gitSubcommandArgs(command.args)[0] === "ls-files" &&
+            gitSubcommandArgs(command.args)[1] === "--others"
             ? Effect.succeed(makeNonRepositoryHandle())
             : delegate.spawn(command);
         });
@@ -1864,24 +1874,25 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
   });
 
   describe("worktree operations", () => {
-    it.effect("uses parallel checkout without skipping filters or hooks", () =>
+    // Command Center: host Git runs with `core.hooksPath=/dev/null` (see
+    // "keeps configured fsmonitor and checkout callbacks inactive"), so the smudge filter records
+    // the effective checkout.workers instead of upstream's post-checkout hook.
+    it.effect("uses parallel checkout without skipping filters", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
         const { initialBranch } = yield* initRepoWithCommit(cwd);
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const driver = yield* GitVcsDriver.GitVcsDriver;
-        yield* git(cwd, ["config", "filter.test.smudge", "sed s/original/filtered/g"]);
+        yield* git(cwd, [
+          "config",
+          "filter.test.smudge",
+          "git config checkout.workers > checkout-workers; sed s/original/filtered/g",
+        ]);
         yield* writeTextFile(cwd, ".gitattributes", "asset.txt filter=test\n");
         yield* writeTextFile(cwd, "asset.txt", "original\n");
         yield* git(cwd, ["add", "."]);
         yield* git(cwd, ["commit", "-m", "filtered asset"]);
-        yield* writeTextFile(
-          cwd,
-          ".git/hooks/post-checkout",
-          "#!/bin/sh\ngit config checkout.workers > checkout-workers\nexit 0\n",
-        );
-        yield* fs.chmod(path.join(cwd, ".git/hooks/post-checkout"), 0o755);
         const worktreePath = path.join(yield* makeTmpDir("git-worktrees-"), "parallel");
 
         yield* driver.createWorktree({
@@ -2168,8 +2179,8 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           Effect.gen(function* () {
             if (
               ChildProcess.isStandardCommand(command) &&
-              command.args[0] === "worktree" &&
-              command.args[1] === "remove"
+              gitSubcommandArgs(command.args)[0] === "worktree" &&
+              gitSubcommandArgs(command.args)[1] === "remove"
             ) {
               yield* Deferred.succeed(removalStarted, undefined);
               yield* Effect.sleep("31 seconds");
@@ -2367,7 +2378,8 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
             Effect.gen(function* () {
               if (!ChildProcess.isStandardCommand(command))
                 return yield* Effect.die("unexpected command");
-              if (command.args[0] !== "fetch") return yield* delegate.spawn(command);
+              if (gitSubcommandArgs(command.args)[0] !== "fetch")
+                return yield* delegate.spawn(command);
               attempts.push(command.args);
               yield* Deferred.succeed(started, undefined);
               return ChildProcessSpawner.makeHandle({
@@ -2556,18 +2568,16 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    // Skipped: deadlocks (hangs until the test timeout, regardless of the
-    // configured timeout value) as merged verbatim from upstream commit
-    // 86fb47afd. Unmodified by any conflict resolution in the upstream sync
-    // that introduced it — needs its own investigation into how
-    // pushCurrentBranch's command-timeout override interacts with TestClock.
-    it.effect.skip("allows pushes to run longer than the default command timeout", () =>
+    it.effect("allows pushes to run longer than the default command timeout", () =>
       Effect.gen(function* () {
         const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
         const pushStarted = yield* Deferred.make<void>();
         const delayedPushSpawner = ChildProcessSpawner.make((command) =>
           Effect.gen(function* () {
-            if (ChildProcess.isStandardCommand(command) && command.args[0] === "push") {
+            if (
+              ChildProcess.isStandardCommand(command) &&
+              gitSubcommandArgs(command.args)[0] === "push"
+            ) {
               yield* Deferred.succeed(pushStarted, undefined);
               yield* Effect.sleep("31 seconds");
             }

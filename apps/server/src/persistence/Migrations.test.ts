@@ -176,8 +176,10 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))("runMigrations guard", 
 
 describe("stacked Instagram migration manifest", () => {
   it("registers every reserved dependency before 078 exactly once", () => {
-    assert.strictEqual(migrationManifest.length, 74);
-    assert.deepStrictEqual(migrationManifest.slice(-7), [
+    // 74 fork entries through 078, then upstream's 079-087.
+    assert.strictEqual(migrationManifest.length, 83);
+    const instagramIndex = migrationManifest.findIndex(([id]) => id === 78);
+    assert.deepStrictEqual(migrationManifest.slice(instagramIndex - 6, instagramIndex + 1), [
       [72, "CommandCenterResponsibilities"],
       [73, "CommandCenterObservations"],
       [74, "CommandCenterSprintPlanAdjustments"],

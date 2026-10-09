@@ -238,7 +238,9 @@ it.effect("launches Cursor in classic IDE mode through the Windows command shim"
     );
 
     assert.ok(spawned);
-    assert.equal(spawned.command, '^"C:\\Program^ Files\\Cursor\\bin\\cursor.CMD^"');
+    // Command Center escapes the executable without quoting it (shared/shell.ts
+    // escapeWindowsShellCommand); cmd.exe would treat ^" as a literal quote.
+    assert.equal(spawned.command, "C:\\Program^ Files\\Cursor\\bin\\cursor.CMD");
     assert.deepEqual(spawned.args, [
       '^"--classic^"',
       '^"--goto^"',

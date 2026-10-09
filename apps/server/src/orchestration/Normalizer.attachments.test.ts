@@ -471,7 +471,7 @@ describe("question attachments", () => {
   it.effect("enforces the total response limit and claims duplicate filenames independently", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
-      const id = `pending-${attachmentUuid}-txt`;
+      const id = `${pendingAttachmentId}-txt`;
       NodeFS.writeFileSync(NodePath.join(config.attachmentsDir, `${id}.txt`), "report");
       const attachment = {
         type: "file" as const,
@@ -544,7 +544,7 @@ describe("question attachments", () => {
   it.effect("preserves a __proto__ question key and cleans up its claimed files", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
-      const id = `pending-${attachmentUuid}`;
+      const id = pendingAttachmentId;
       NodeFS.writeFileSync(NodePath.join(config.attachmentsDir, `${id}.png`), "pixels");
       const command: ClientOrchestrationCommand = {
         type: "thread.user-input.respond",
@@ -574,8 +574,8 @@ describe("question attachments", () => {
     () =>
       Effect.gen(function* () {
         const config = yield* ServerConfig.ServerConfig;
-        const imageId = `pending-${attachmentUuid}`;
-        const fileId = `pending-${attachmentUuid}-txt`;
+        const imageId = pendingAttachmentId;
+        const fileId = `${pendingAttachmentId}-txt`;
         NodeFS.writeFileSync(NodePath.join(config.attachmentsDir, `${imageId}.png`), "pixels");
         NodeFS.writeFileSync(NodePath.join(config.attachmentsDir, `${fileId}.txt`), "report");
         const command: ClientOrchestrationCommand = {
@@ -635,7 +635,7 @@ describe("question attachments", () => {
   it.effect("removes all claimed copies if a later question upload is missing", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
-      const id = `pending-${attachmentUuid}`;
+      const id = pendingAttachmentId;
       NodeFS.writeFileSync(NodePath.join(config.attachmentsDir, `${id}.png`), "pixels");
       const result = yield* normalizeDispatchCommand({
         type: "thread.user-input.respond",

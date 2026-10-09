@@ -1251,7 +1251,7 @@ it.effect(
           provider: CODEX_DRIVER,
           providerInstanceId: instanceB,
           resumeCursor: seededCursor,
-          runtimePayload: { cwd: "/tmp/seeded-b" },
+          runtimePayload: { cwd: fixtureCwd("seeded-b") },
           runtimeMode: "full-access",
         });
         // The resume resolves to instance A, which shares B's continuation key.
@@ -1268,7 +1268,7 @@ it.effect(
       // Compatible switch: B's persisted cursor + cwd flow to the resolved
       // instance A, so the resume continues the same conversation.
       assert.deepEqual(startInput?.resumeCursor, seededCursor);
-      assert.equal(startInput?.cwd, "/tmp/seeded-b");
+      assert.equal(startInput?.cwd, fixtureCwd("seeded-b"));
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
@@ -2093,7 +2093,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         provider: CODEX_DRIVER,
         providerInstanceId: codexInstanceId,
         threadId,
-        cwd: "/tmp/project-targeted-interrupt",
+        cwd: fixtureCwd("project-targeted-interrupt"),
         runtimeMode: "full-access",
       });
       const target: ProviderTurnTargetIdentity = {
@@ -2116,7 +2116,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         provider: CODEX_DRIVER,
         providerInstanceId: codexInstanceId,
         threadId,
-        cwd: "/tmp/project-targeted-interrupt-noop",
+        cwd: fixtureCwd("project-targeted-interrupt-noop"),
         runtimeMode: "full-access",
       });
       const target: ProviderTurnTargetIdentity = {

@@ -130,6 +130,9 @@ const withTempDirectory = <A, E, R>(
     (root) => Effect.promise(() => NodeFSP.rm(root, { recursive: true, force: true })),
   );
 
+// Command Center's default home (os-jank resolveBaseDir) is ~/.command-center.
+const DEFAULT_HOME_DIRECTORY = ".command-center";
+
 describe("t3 app", () => {
   it.effect("rejects SSH before it tries to reach a desktop app", () =>
     withTempDirectory("t3-app-ssh-test-", (root) =>
@@ -211,7 +214,7 @@ describe("t3 app", () => {
     withTempDirectory("t3-app-preferred-test-", (root) =>
       Effect.gen(function* () {
         vi.mocked(NodeOS.homedir).mockReturnValue(root);
-        const baseDir = NodePath.join(root, ".t3");
+        const baseDir = NodePath.join(root, DEFAULT_HOME_DIRECTORY);
         const desktop = yield* fakeDesktop({ baseDir });
         const development = yield* fakeDesktop({ baseDir, stateSubdirectory: "dev" });
 
@@ -227,7 +230,7 @@ describe("t3 app", () => {
     withTempDirectory("t3-app-dev-test-", (root) =>
       Effect.gen(function* () {
         vi.mocked(NodeOS.homedir).mockReturnValue(root);
-        const baseDir = NodePath.join(root, ".t3");
+        const baseDir = NodePath.join(root, DEFAULT_HOME_DIRECTORY);
         const development = yield* fakeDesktop({ baseDir, stateSubdirectory: "dev" });
 
         yield* runCli(["app"]);
@@ -261,7 +264,7 @@ describe("t3 app", () => {
       withTempDirectory("t3-app-response-test-", (root) =>
         Effect.gen(function* () {
           vi.mocked(NodeOS.homedir).mockReturnValue(root);
-          const baseDir = NodePath.join(root, ".t3");
+          const baseDir = NodePath.join(root, DEFAULT_HOME_DIRECTORY);
           const desktop = yield* fakeDesktop({
             baseDir,
             reply: (request) =>
