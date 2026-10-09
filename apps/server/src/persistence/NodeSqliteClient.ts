@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -25,6 +26,7 @@ import { SqlError, classifySqliteError } from "effect/unstable/sql/SqlError";
 import * as Statement from "effect/unstable/sql/Statement";
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name";
+const ROLLBACK_TRANSACTION = "ROLLBACK";
 
 export const TypeId: TypeId = "~local/sqlite-node/SqliteClient";
 
@@ -91,6 +93,22 @@ const checkNodeSqliteCompat = () => {
   return Effect.void;
 };
 
+/**
+ * `node:sqlite` reports the SQLite result code as `errcode`, while
+ * `classifySqliteError` reads `errno`. Copy it across so busy, locked and
+ * constraint failures get their own reasons instead of `UnknownError`.
+ */
+const classifyError = (cause: unknown, message: string, operation: string) => {
+  if (
+    Predicate.hasProperty(cause, "errcode") &&
+    typeof cause.errcode === "number" &&
+    !Predicate.hasProperty(cause, "errno")
+  ) {
+    Object.assign(cause, { errno: cause.errcode });
+  }
+  return classifySqliteError(cause, { message, operation });
+};
+
 const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   options: SqliteClientConfig,
   openDatabase: () => NodeSqlite.DatabaseSync,
@@ -108,10 +126,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
       try: openDatabase,
       catch: (cause) =>
         new SqlError({
-          reason: classifySqliteError(cause, {
-            message: "Failed to open database",
-            operation: "open",
-          }),
+          reason: classifyError(cause, "Failed to open database", "open"),
         }),
     });
     yield* Scope.addFinalizer(
@@ -120,10 +135,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         try: () => db.close(),
         catch: (cause) =>
           new SqlError({
-            reason: classifySqliteError(cause, {
-              message: "Failed to close database",
-              operation: "close",
-            }),
+            reason: classifyError(cause, "Failed to close database", "close"),
           }),
       }).pipe(Effect.orDie),
     );
@@ -144,10 +156,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         try: () => db.prepare(sql),
         catch: (cause) =>
           new SqlError({
-            reason: classifySqliteError(cause, {
-              message: "Failed to prepare statement",
-              operation: "prepare",
-            }),
+            reason: classifyError(cause, "Failed to prepare statement", "prepare"),
           }),
       });
 
@@ -173,10 +182,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         } catch (cause) {
           return Effect.fail(
             new SqlError({
-              reason: classifySqliteError(cause, {
-                message: "Failed to execute statement",
-                operation: "execute",
-              }),
+              reason: classifyError(cause, "Failed to execute statement", "execute"),
             }),
           );
         }
@@ -206,10 +212,7 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
             },
             catch: (cause) =>
               new SqlError({
-                reason: classifySqliteError(cause, {
-                  message: "Failed to execute statement",
-                  operation: "execute",
-                }),
+                reason: classifyError(cause, "Failed to execute statement", "execute"),
               }),
           }),
         (statement) =>
@@ -221,10 +224,11 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
             },
             catch: (cause) =>
               new SqlError({
-                reason: classifySqliteError(cause, {
-                  message: "Failed to reset statement result mode",
-                  operation: "resetResultMode",
-                }),
+                reason: classifyError(
+                  cause,
+                  "Failed to reset statement result mode",
+                  "resetResultMode",
+                ),
               }),
           }).pipe(Effect.orDie),
       );
@@ -250,6 +254,14 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
         );
       },
       executeUnprepared(sql, params, rowTransform) {
+        // This effect version's withTransaction also rolls back when BEGIN itself failed,
+        // e.g. BEGIN IMMEDIATE timing out on another process's write lock. SQLite then has
+        // no transaction open, and the failing ROLLBACK would turn the typed lock timeout
+        // into a defect. Some supported Node versions lack `isTransaction`, so only an
+        // explicit false skips the ROLLBACK.
+        if (sql === ROLLBACK_TRANSACTION && db.isTransaction === false) {
+          return Effect.succeed([]);
+        }
         const effect = prepare(sql).pipe(
           Effect.flatMap((statement) => runStatement(statement, params ?? [], false)),
         );
@@ -278,6 +290,14 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
     acquirer,
     compiler,
     transactionAcquirer,
+    // A deferred BEGIN only takes the write lock at the first write. If another
+    // process commits after this transaction's first read, that write fails at
+    // once with SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot wait out. Taking
+    // the lock up front makes it wait instead, at the cost of serializing
+    // read-only transactions behind other processes' writers. Read-only
+    // connections cannot write, so they keep the deferred BEGIN.
+    beginTransaction: options.readonly === true ? "BEGIN" : "BEGIN IMMEDIATE",
+    rollback: ROLLBACK_TRANSACTION,
     spanAttributes: [
       ...(options.spanAttributes ? Object.entries(options.spanAttributes) : []),
       [ATTR_DB_SYSTEM_NAME, "sqlite"],
