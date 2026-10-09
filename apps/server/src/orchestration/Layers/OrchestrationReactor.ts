@@ -12,6 +12,7 @@ import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { SandboxLifecycleReactor } from "../Services/SandboxLifecycleReactor.ts";
 import { SandboxSettleCleanupReactor } from "../Services/SandboxSettleCleanupReactor.ts";
+import { SpaceActivityReactor } from "../Services/SpaceActivityReactor.ts";
 import { SubagentDelegationReactor } from "../Services/SubagentDelegationReactor.ts";
 import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
@@ -26,6 +27,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const sandboxLifecycleReactor = yield* SandboxLifecycleReactor;
   const sandboxSettleCleanupReactor = yield* SandboxSettleCleanupReactor;
   const subagentDelegationReactor = yield* SubagentDelegationReactor;
+  const spaceActivityReactor = yield* SpaceActivityReactor;
   const threadSettlementReactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
   const localWebPushNotifier = yield* LocalWebPushNotifier;
@@ -38,6 +40,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* sandboxLifecycleReactor.start();
     yield* sandboxSettleCleanupReactor.start();
     yield* subagentDelegationReactor.start();
+    yield* spaceActivityReactor.start();
     yield* threadSettlementReactor.start();
     yield* agentAwarenessRelay.start();
     yield* localWebPushNotifier.start();
@@ -54,6 +57,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* sandboxLifecycleReactor.drain;
     yield* sandboxSettleCleanupReactor.drain;
     yield* subagentDelegationReactor.drain;
+    yield* spaceActivityReactor.drain;
   });
 
   return {

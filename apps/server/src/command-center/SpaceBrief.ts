@@ -8,6 +8,8 @@ import {
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { queryRecentSpaceActivity } from "./SpaceActivity.ts";
+
 /**
  * Character budgets for the Space brief. The brief is injected into provider
  * prompts, so every section and every entry is bounded independently.
@@ -23,6 +25,7 @@ export const SPACE_BRIEF_LIMITS = {
   /** Rows read from storage before budgeting; the char budget is the real cap. */
   memoryRows: 200,
   itemRows: 100,
+  activityRows: 20,
 } as const;
 
 export interface SpaceBriefMemory {
@@ -50,7 +53,7 @@ export interface SpaceBriefActivity {
   readonly url?: string | undefined;
 }
 
-/** The activity section stays empty until the Space activity feed exists. */
+/** No activity: the brief then renders no activity section. */
 export const EMPTY_SPACE_ACTIVITY: ReadonlyArray<SpaceBriefActivity> = [];
 
 export interface SpaceBriefInput {
@@ -221,6 +224,22 @@ export const loadSpaceBriefInput = Effect.fn("SpaceBrief.loadInput")(function* (
     ORDER BY updated_at DESC
     LIMIT ${SPACE_BRIEF_LIMITS.itemRows}
   `;
+  // The activity feed spans every repository in the Space, so (like the
+  // `cc_space_activity` tool) a repository-scoped brief leaves it out. A feed
+  // that cannot be read drops the section rather than the brief.
+  const activity =
+    input.repositoryId === undefined
+      ? yield* queryRecentSpaceActivity({
+          spaceId: input.space.id,
+          limit: SPACE_BRIEF_LIMITS.activityRows,
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Space brief activity is unavailable", {
+              message: error.message,
+            }).pipe(Effect.as(EMPTY_SPACE_ACTIVITY)),
+          ),
+        )
+      : EMPTY_SPACE_ACTIVITY;
   return {
     space: input.space,
     memories: memoryRows.map((row) => ({
@@ -230,6 +249,6 @@ export const loadSpaceBriefInput = Effect.fn("SpaceBrief.loadInput")(function* (
       ...(row.repositoryRef === null ? {} : { repositoryId: row.repositoryRef }),
     })),
     openItems: itemRows,
-    activity: EMPTY_SPACE_ACTIVITY,
+    activity,
   } satisfies SpaceBriefInput;
 });

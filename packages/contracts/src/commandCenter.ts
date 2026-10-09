@@ -35,7 +35,7 @@ import {
   TrimmedString,
 } from "@command-center/core";
 import * as Schema from "effect/Schema";
-import { ThreadId as AssetThreadId } from "./baseSchemas.ts";
+import { ThreadId as AssetThreadId, NonNegativeInt } from "./baseSchemas.ts";
 
 export const COMMAND_CENTER_WS_METHODS = {
   bootstrap: "cc.bootstrap",
@@ -118,6 +118,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   youtubeAnalyticsFetch: "cc.youtube.analytics.fetch",
   spaceAgentList: "cc.spaceAgent.list",
   spaceAgentWake: "cc.spaceAgent.wake",
+  spaceAgentSetPaused: "cc.spaceAgent.setPaused",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
@@ -208,6 +209,9 @@ export const CommandCenterSpaceBrief = Schema.Struct({
 });
 export type CommandCenterSpaceBrief = typeof CommandCenterSpaceBrief.Type;
 
+export const CommandCenterSpaceAgentWakeReason = Schema.Literals(["event", "check-in", "manual"]);
+export type CommandCenterSpaceAgentWakeReason = typeof CommandCenterSpaceAgentWakeReason.Type;
+
 export const CommandCenterSpaceAgentSummary = Schema.Struct({
   spaceId: SpaceId,
   displayName: TrimmedNonEmptyString,
@@ -215,6 +219,14 @@ export const CommandCenterSpaceAgentSummary = Schema.Struct({
   /** The agent thread, once it has been created. */
   threadId: Schema.NullOr(AssetThreadId),
   model: Schema.NullOr(CommandCenterModelSelection),
+  /** Automatic wakes (events and check-ins) are suspended; manual wakes still work. */
+  paused: Schema.Boolean,
+  lastWakeAt: Schema.NullOr(Timestamp),
+  lastWakeReason: Schema.NullOr(CommandCenterSpaceAgentWakeReason),
+  /** Wakes of every kind on the agent's current local day. */
+  wakesToday: NonNegativeInt,
+  /** Activity rows recorded since the last delivered wake. */
+  pendingEvents: NonNegativeInt,
 });
 export type CommandCenterSpaceAgentSummary = typeof CommandCenterSpaceAgentSummary.Type;
 
@@ -231,6 +243,19 @@ export const CommandCenterSpaceAgentWakeResult = Schema.Struct({
   threadId: AssetThreadId,
 });
 export type CommandCenterSpaceAgentWakeResult = typeof CommandCenterSpaceAgentWakeResult.Type;
+
+export const CommandCenterSpaceAgentSetPausedInput = Schema.Struct({
+  spaceId: SpaceId,
+  paused: Schema.Boolean,
+});
+export type CommandCenterSpaceAgentSetPausedInput =
+  typeof CommandCenterSpaceAgentSetPausedInput.Type;
+export const CommandCenterSpaceAgentSetPausedResult = Schema.Struct({
+  spaceId: SpaceId,
+  paused: Schema.Boolean,
+});
+export type CommandCenterSpaceAgentSetPausedResult =
+  typeof CommandCenterSpaceAgentSetPausedResult.Type;
 
 /**
  * Client acknowledgement sent only after the route receipt has been rendered.

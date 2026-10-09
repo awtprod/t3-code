@@ -176,8 +176,11 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))("runMigrations guard", 
 
 describe("stacked Instagram migration manifest", () => {
   it("registers every reserved dependency before 078 exactly once", () => {
-    assert.strictEqual(migrationManifest.length, 75);
-    assert.deepStrictEqual(migrationManifest.slice(-7), [
+    const ids = migrationManifest.map(([id]) => id);
+    assert.strictEqual(new Set(ids).size, ids.length);
+    const at078 = ids.indexOf(78);
+    assert.deepStrictEqual(migrationManifest.slice(at078 - 6, at078 + 2), [
+      [72, "CommandCenterResponsibilities"],
       [73, "CommandCenterObservations"],
       [74, "CommandCenterSprintPlanAdjustments"],
       [75, "CommandCenterDigest"],
@@ -185,6 +188,13 @@ describe("stacked Instagram migration manifest", () => {
       [77, "CommandCenterInboxGmailDrafts"],
       [78, "InstagramReelReceipts"],
       [79, "CommandCenterSpaceAgent"],
+    ]);
+  });
+
+  it("registers the Space agent wake state after the Space activity feed", () => {
+    assert.deepStrictEqual(migrationManifest.slice(-2), [
+      [80, "CommandCenterSpaceActivity"],
+      [81, "CommandCenterSpaceAgentState"],
     ]);
   });
 });

@@ -200,6 +200,7 @@ import * as YouTubeAnalytics from "./command-center/publish/youtube/YouTubeAnaly
 import { googleCapabilityForOperation } from "./command-center/GoogleCapabilities.ts";
 import * as RunDispatcher from "./command-center/RunDispatcher.ts";
 import * as SpaceAgent from "./command-center/SpaceAgent.ts";
+import * as SpaceAgentWaker from "./command-center/SpaceAgentWaker.ts";
 import * as ReadinessGate from "./command-center/ReadinessGate.ts";
 import { commandCenterProviderAvailability } from "./command-center/ProviderAvailability.ts";
 import { commandCenterRpcRequiresReadiness } from "./command-center/RpcAuthorization.ts";
@@ -647,6 +648,22 @@ const makeWsRpcLayer = (
               new CommandCenterError({
                 reason: "config",
                 message: "Space agents are unavailable in this environment.",
+              }),
+            ),
+          onSome: use,
+        });
+      const spaceAgentWaker = yield* Effect.serviceOption(SpaceAgentWaker.SpaceAgentWaker);
+      const withSpaceAgentWaker = <A>(
+        use: (
+          service: SpaceAgentWaker.SpaceAgentWakerShape,
+        ) => Effect.Effect<A, CommandCenterError>,
+      ): Effect.Effect<A, CommandCenterError> =>
+        Option.match(spaceAgentWaker, {
+          onNone: () =>
+            Effect.fail(
+              new CommandCenterError({
+                reason: "config",
+                message: "Space agent wakes are unavailable in this environment.",
               }),
             ),
           onSome: use,
@@ -1694,12 +1711,17 @@ const makeWsRpcLayer = (
         [COMMAND_CENTER_WS_METHODS.spaceAgentWake]: (input) =>
           observeRpcEffect(
             COMMAND_CENTER_WS_METHODS.spaceAgentWake,
-            withSpaceAgent((service) =>
-              service.sendTurn(input.spaceId, {
-                text: SpaceAgent.SPACE_AGENT_MANUAL_WAKE_TEXT,
-                reason: "manual",
-              }),
+            withSpaceAgentWaker((service) =>
+              service.deliverWake(input.spaceId, { kind: "manual" }),
             ).pipe(Effect.map(({ threadId }) => ({ spaceId: input.spaceId, threadId }))),
+            { "rpc.aggregate": "command-center" },
+          ),
+        [COMMAND_CENTER_WS_METHODS.spaceAgentSetPaused]: (input) =>
+          observeRpcEffect(
+            COMMAND_CENTER_WS_METHODS.spaceAgentSetPaused,
+            withSpaceAgentWaker((service) => service.setPaused(input.spaceId, input.paused)).pipe(
+              Effect.map(({ paused }) => ({ spaceId: input.spaceId, paused })),
+            ),
             { "rpc.aggregate": "command-center" },
           ),
         [COMMAND_CENTER_WS_METHODS.eventsReplay]: (input) =>

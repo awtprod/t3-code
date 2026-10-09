@@ -8,6 +8,9 @@ export const SPACE_AGENT_THREAD_ID_PREFIX = "cc-space-agent-";
 export const spaceAgentThreadId = (spaceId: string): string =>
   `${SPACE_AGENT_THREAD_ID_PREFIX}${spaceId}`;
 
+export const isSpaceAgentThreadId = (threadId: string): boolean =>
+  threadId.startsWith(SPACE_AGENT_THREAD_ID_PREFIX);
+
 export const spaceIdFromSpaceAgentThreadId = (threadId: string): string | undefined => {
   if (!threadId.startsWith(SPACE_AGENT_THREAD_ID_PREFIX)) return undefined;
   const spaceId = threadId.slice(SPACE_AGENT_THREAD_ID_PREFIX.length);
