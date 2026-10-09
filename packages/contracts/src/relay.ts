@@ -70,10 +70,12 @@ export const RelayDeviceRegistrationRequest = Schema.Struct({
   webPushAuth: Schema.optional(TrimmedNonEmptyString),
   preferences: RelayAgentAwarenessPreferences,
 }).check(
+  // iOS needs its version; Android needs its API level; neither Android nor web
+  // (Command Center's Web Push registrations) may carry Apple routing fields.
   Schema.makeFilter((device) =>
     device.platform === "ios"
       ? device.iosMajorVersion !== undefined
-      : device.androidApiLevel !== undefined &&
+      : (device.platform !== "android" || device.androidApiLevel !== undefined) &&
         device.iosMajorVersion === undefined &&
         device.apsEnvironment === undefined &&
         device.pushToStartToken === undefined,

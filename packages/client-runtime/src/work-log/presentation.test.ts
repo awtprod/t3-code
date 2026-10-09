@@ -568,7 +568,7 @@ describe("resolveViewedImageAsset", () => {
     });
   });
 
-  it("keeps workspace files under similarly named directories as workspace files", () => {
+  it("keeps workspace files under similarly named directories as workspace paths", () => {
     expect(
       resolveViewedImageAsset("/workspace/dev/attachments/logo.png", {
         threadId,
@@ -576,7 +576,7 @@ describe("resolveViewedImageAsset", () => {
       }),
     ).toEqual({
       resource: {
-        _tag: "workspace-file",
+        _tag: "media-file",
         threadId,
         path: "/workspace/dev/attachments/logo.png",
       },
@@ -842,16 +842,16 @@ describe("workEntryVideoPath", () => {
 describe("resolveVideoClipAsset", () => {
   const threadId = ThreadId.make("thread-1");
 
-  it("resolves workspace clips to workspace-file resources", () => {
+  it("resolves workspace clips to media-file resources", () => {
     expect(
       resolveVideoClipAsset("out/clip.mp4", { threadId, workspaceRoot: "/workspace" }),
     ).toEqual({
-      resource: { _tag: "workspace-file", threadId, path: "/workspace/out/clip.mp4" },
+      resource: { _tag: "media-file", threadId, path: "/workspace/out/clip.mp4" },
       name: "clip.mp4",
     });
   });
 
-  it("gives attachment clips an inline video mime", () => {
+  it("resolves attachment clips by their stored path", () => {
     const attachmentId =
       "11111111-1111-4111-8111-111111111111-22222222-2222-4222-8222-222222222222";
     expect(
@@ -860,10 +860,9 @@ describe("resolveVideoClipAsset", () => {
       }),
     ).toEqual({
       resource: {
-        _tag: "attachment",
-        attachmentId,
-        fileName: `${attachmentId}.webm`,
-        mimeType: "video/webm",
+        _tag: "media-file",
+        threadId,
+        path: `/var/lib/t3/userdata/attachments/${attachmentId}.webm`,
       },
       name: `${attachmentId}.webm`,
     });
@@ -880,7 +879,7 @@ describe("resolveVideoClipAsset", () => {
     expect(
       resolveVideoClipAsset("out/clip.mp4?v=2#t=5", { threadId, workspaceRoot: "/w" }),
     ).toEqual({
-      resource: { _tag: "workspace-file", threadId, path: "/w/out/clip.mp4" },
+      resource: { _tag: "media-file", threadId, path: "/w/out/clip.mp4" },
       name: "clip.mp4",
     });
     // A `#` that would cut the name to a non-video is never tiled.

@@ -11,7 +11,6 @@ import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import {
   isWorkspaceImagePreviewPath,
-  isWorkspaceVideoPreviewPath,
   workspaceVideoPreviewMimeType,
 } from "@t3tools/shared/filePreview";
 
@@ -597,9 +596,17 @@ function shellSegments(command: string): ShellWord[][] {
   return segments.filter((segment) => segment.length > 0);
 }
 
+/**
+ * Work-log video tiles only surface containers a browser plays inline (the
+ * fork's preview set); upstream's isWorkspaceVideoPreviewPath is broader.
+ */
+function isBrowserPlayableVideoPath(path: string): boolean {
+  return workspaceVideoPreviewMimeType(path) !== null;
+}
+
 function isLiteralVideoOutputPath(path: string): boolean {
   return (
-    isWorkspaceVideoPreviewPath(path) &&
+    isBrowserPlayableVideoPath(path) &&
     !UNEXPANDED_SHELL_WORD_PATTERN.test(path) &&
     !PATH_QUERY_OR_FRAGMENT_PATTERN.test(path) &&
     !URI_LIKE_PATH_PATTERN.test(path)
@@ -689,13 +696,13 @@ export function workEntryVideoPath(entry: WorkLogPresentationEntry): string | nu
     action === "read" &&
     detail !== undefined &&
     !/[\r\n]/.test(detail) &&
-    isWorkspaceVideoPreviewPath(detail) &&
+    isBrowserPlayableVideoPath(detail) &&
     !PATH_QUERY_OR_FRAGMENT_PATTERN.test(detail)
   ) {
     return detail;
   }
   const changedVideo = entry.changedFiles?.findLast(
-    (path) => isWorkspaceVideoPreviewPath(path) && !PATH_QUERY_OR_FRAGMENT_PATTERN.test(path),
+    (path) => isBrowserPlayableVideoPath(path) && !PATH_QUERY_OR_FRAGMENT_PATTERN.test(path),
   );
   if (changedVideo !== undefined) return changedVideo;
   const command = entry.command?.trim();

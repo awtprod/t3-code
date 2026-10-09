@@ -279,11 +279,44 @@ const resolveEnvironmentPortTarget = (
   };
 };
 
+/**
+ * Command Center: in a remote environment a loopback URL names the server's own
+ * dev server, which only the authenticated preview gateway can reach. Route it
+ * there when the server publishes a gateway; otherwise keep upstream's
+ * explicit-URL behaviour (navigate exactly as typed).
+ */
+const resolveLoopbackUrlViaGateway = (
+  environmentId: EnvironmentId,
+  url: string,
+): PreviewUrlResolution | null => {
+  const gateway = readServerConfig(environmentId)?.previewGateway;
+  if (gateway === undefined) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(normalizePreviewUrl(url));
+  } catch {
+    return null;
+  }
+  if (!isLoopbackHost(parsed.hostname)) return null;
+  const environmentUrl = readEnvironmentUrl(environmentId);
+  if (isLocalLoopbackHost(environmentUrl.hostname.replace(/^\[|\]$/g, ""))) return null;
+  return buildGatewayResolution({
+    environmentId,
+    gateway,
+    environmentUrl,
+    port: Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80)),
+    path: `${parsed.pathname}${parsed.search}${parsed.hash}`,
+    requestedUrl: url,
+  });
+};
+
 export function resolveBrowserNavigationTarget(
   environmentId: EnvironmentId,
   target: BrowserNavigationTarget,
 ): PreviewUrlResolution {
   if (target.kind === "url") {
+    const viaGateway = resolveLoopbackUrlViaGateway(environmentId, target.url);
+    if (viaGateway) return viaGateway;
     return {
       requestedUrl: target.url,
       resolvedUrl: target.url,

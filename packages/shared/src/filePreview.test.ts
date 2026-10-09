@@ -57,7 +57,12 @@ describe("workspace file previews", () => {
 
   // Filesystem paths: `?`/`#` are literal filename characters, never stripped,
   // so client classification matches the exact file the server resolves.
-  it.each(["clip.mp4.txt", "clip.mkv", "mp4", "notes.md", "a.webm?v=2", "data.mp4#x", "a.mp4?/b"])(
+  it("keeps non-browser-playable containers out of the inline video preview set", () => {
+    // Upstream classifies .mkv as video; only the inline-playback MIME map excludes it.
+    expect(workspaceVideoPreviewMimeType("clip.mkv")).toBeNull();
+  });
+
+  it.each(["clip.mp4.txt", "mp4", "notes.md", "a.webm?v=2", "data.mp4#x", "a.mp4?/b"])(
     "rejects non-video path %s",
     (path) => {
       expect(isWorkspaceVideoPreviewPath(path)).toBe(false);
