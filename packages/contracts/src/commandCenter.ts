@@ -119,6 +119,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   spaceAgentList: "cc.spaceAgent.list",
   spaceAgentWake: "cc.spaceAgent.wake",
   spaceAgentSetPaused: "cc.spaceAgent.setPaused",
+  spaceAgentActivity: "cc.spaceAgent.activity",
 } as const;
 
 export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
@@ -256,6 +257,41 @@ export const CommandCenterSpaceAgentSetPausedResult = Schema.Struct({
 });
 export type CommandCenterSpaceAgentSetPausedResult =
   typeof CommandCenterSpaceAgentSetPausedResult.Type;
+
+/** Most activity rows one `cc.spaceAgent.activity` call returns. */
+export const COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT = 100;
+
+export const CommandCenterSpaceAgentActivityInput = Schema.Struct({
+  spaceId: SpaceId,
+  /** Rows to return, newest first. Defaults to 20. */
+  limit: Schema.optional(
+    Schema.Int.check(
+      Schema.isBetween({ minimum: 1, maximum: COMMAND_CENTER_SPACE_AGENT_ACTIVITY_MAX_LIMIT }),
+    ),
+  ),
+});
+export type CommandCenterSpaceAgentActivityInput = typeof CommandCenterSpaceAgentActivityInput.Type;
+
+/** One row of a Space's activity feed (a finished thread turn or Run). */
+export const CommandCenterSpaceActivityEntry = Schema.Struct({
+  occurredAt: Timestamp,
+  title: Schema.String,
+  status: Schema.String,
+  summary: Schema.String,
+  /** The newest GitHub pull request URL the source mentioned, if any. */
+  url: Schema.optional(Schema.String),
+  sourceKind: Schema.Literals(["thread", "run"]),
+  sourceId: Schema.String,
+});
+export type CommandCenterSpaceActivityEntry = typeof CommandCenterSpaceActivityEntry.Type;
+
+export const CommandCenterSpaceAgentActivityResult = Schema.Struct({
+  spaceId: SpaceId,
+  /** Newest first. */
+  entries: Schema.Array(CommandCenterSpaceActivityEntry),
+});
+export type CommandCenterSpaceAgentActivityResult =
+  typeof CommandCenterSpaceAgentActivityResult.Type;
 
 /**
  * Client acknowledgement sent only after the route receipt has been rendered.

@@ -185,6 +185,11 @@ it.layer(testLayer)("SpaceActivity service", (it) => {
       expect(count?.n).toBe(SPACE_ACTIVITY_RETENTION);
       const newest = yield* activity.recent({ spaceId: "acme", limit: 500 });
       expect(newest).toHaveLength(50);
+      // A caller-supplied ceiling (the `cc.spaceAgent.activity` RPC uses 100).
+      expect(yield* activity.recent({ spaceId: "acme", limit: 500, maxLimit: 100 })).toHaveLength(
+        100,
+      );
+      expect(yield* activity.recent({ spaceId: "acme", maxLimit: 100 })).toHaveLength(20);
       expect(newest[0]?.occurredAt).toBe(secondsAfterNow(SPACE_ACTIVITY_RETENTION + 4));
       const since = yield* activity.recent({
         spaceId: "acme",

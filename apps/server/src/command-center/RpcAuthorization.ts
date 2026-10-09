@@ -14,6 +14,7 @@ export const COMMAND_CENTER_RPC_SCOPE_ENTRIES = [
   [COMMAND_CENTER_WS_METHODS.spaceAgentList, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.spaceAgentWake, AuthCommandCenterOperateScope],
   [COMMAND_CENTER_WS_METHODS.spaceAgentSetPaused, AuthCommandCenterOperateScope],
+  [COMMAND_CENTER_WS_METHODS.spaceAgentActivity, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.eventsReplay, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.eventsSubscribe, AuthCommandCenterReadScope],
   [COMMAND_CENTER_WS_METHODS.timelineQuery, AuthCommandCenterReadScope],
