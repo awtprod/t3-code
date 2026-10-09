@@ -71,6 +71,7 @@ import {
   type SieveSettings as SieveSettingsLike,
 } from "../../efficiency/ToolResultSieve.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeSieveSettings = Schema.decodeSync(EfficiencySieveSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
@@ -189,6 +190,7 @@ function makeHarness(config?: {
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
   readonly toolResultSieve?: ClaudeAdapterLiveOptions["toolResultSieve"];
+  readonly environment?: ClaudeAdapterLiveOptions["environment"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -199,6 +201,7 @@ function makeHarness(config?: {
     | undefined;
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
+    ...(config?.environment ? { environment: config.environment } : {}),
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
     modelCatalog: Effect.succeed(SYNTHETIC_CLAUDE_MODEL_CATALOG),
     createQuery: (input) => {
@@ -3694,6 +3697,425 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  const AUTH_FAILURE_ASSISTANT = {
+    type: "assistant",
+    session_id: "sdk-session-auth",
+    uuid: "assistant-auth",
+    parent_tool_use_id: null,
+    error: "authentication_failed",
+    is_api_error_message: true,
+    message: {
+      id: "assistant-message-auth",
+      model: "<synthetic>",
+      content: [{ type: "text", text: "Not logged in · Please run /login" }],
+    },
+  } as unknown as SDKMessage;
+
+  const completedTurn = (runtimeEvents: ReadonlyArray<ProviderRuntimeEvent>) => {
+    const event = runtimeEvents[runtimeEvents.length - 1];
+    assert.equal(event?.type, "turn.completed");
+    assert(event?.type === "turn.completed");
+    return event.payload;
+  };
+
+  // The fork does not map terminal reasons to failures on its own yet
+  // (upstream 560afffdea rode on an SDK bump), so cases whose outcome names
+  // its own cause only assert that the login latch does not speak over it.
+  it.effect.each([
+    {
+      name: "an api_error terminal reason",
+      result: { subtype: "success", is_error: false, terminal_reason: "api_error", errors: [] },
+      state: "failed",
+      errorMessage: /claude auth login/,
+    },
+    {
+      name: "an is_error success with no terminal reason",
+      result: { subtype: "success", is_error: true, errors: [] },
+      state: "failed",
+      errorMessage: /claude auth login/,
+    },
+    {
+      name: "a terminal reason of its own",
+      result: {
+        subtype: "success",
+        is_error: false,
+        terminal_reason: "prompt_too_long",
+        errors: [],
+      },
+      state: undefined,
+      errorMessage: "not-auth",
+    },
+    {
+      name: "a listed tool failure",
+      result: {
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Tool execution failed: EACCES"],
+      },
+      state: "failed",
+      errorMessage: /EACCES/,
+    },
+    {
+      name: "a user interrupt",
+      result: {
+        subtype: "error_during_execution",
+        is_error: true,
+        terminal_reason: "aborted_tools",
+        errors: [],
+      },
+      state: "interrupted",
+      errorMessage: undefined,
+    },
+    {
+      name: "a cancellation",
+      result: { subtype: "error_during_execution", is_error: true, errors: ["cancelled"] },
+      state: "cancelled",
+      errorMessage: /cancelled/,
+    },
+  ] as const)(
+    "reports the real cause when an expired login is followed by $name",
+    ({ result, state, errorMessage }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+
+        const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+
+        harness.query.emit(AUTH_FAILURE_ASSISTANT);
+        harness.query.emit({
+          type: "result",
+          ...result,
+          session_id: "sdk-session-auth",
+          uuid: "result-auth",
+        } as unknown as SDKMessage);
+
+        const payload = completedTurn(Array.from(yield* Fiber.join(runtimeEventsFiber)));
+        if (state !== undefined) assert.equal(payload.state, state);
+        if (errorMessage === undefined) {
+          assert.equal(payload.errorMessage, undefined);
+        } else if (errorMessage === "not-auth") {
+          assert.notMatch(payload.errorMessage ?? "", /claude auth login/);
+        } else {
+          assert.match(payload.errorMessage ?? "", errorMessage);
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("fails a usage-limited turn with the limit it parked on", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+
+      const nowMs = yield* Clock.currentTimeMillis;
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "five_hour",
+          resetsAt: Math.floor(nowMs / 1000) + 2 * 60 * 60,
+        },
+        session_id: "sdk-session-limit",
+        uuid: "rate-limit-rejected",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        terminal_reason: "api_error",
+        errors: [],
+        session_id: "sdk-session-limit",
+        uuid: "result-limit",
+      } as unknown as SDKMessage);
+
+      const payload = completedTurn(Array.from(yield* Fiber.join(runtimeEventsFiber)));
+      assert.equal(payload.state, "failed");
+      assert.equal(
+        payload.errorMessage,
+        "Claude usage limit reached. Send the message again once the limit resets.",
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  // An api_error the fork already reports as failed, with nothing listed: the
+  // latch decides whether the banner names a cause, so each evidence shape
+  // below shows when it does and when the evidence was withdrawn.
+  const API_ERROR_FAILURE = {
+    subtype: "error_during_execution",
+    is_error: true,
+    terminal_reason: "api_error",
+    errors: [],
+  };
+
+  it.effect.each([
+    {
+      name: "listed error with api_error",
+      evidence: "auth",
+      result: { ...API_ERROR_FAILURE, errors: ["Tool execution failed: EACCES"] },
+      expected: /EACCES/,
+      expectedState: "failed",
+    },
+    {
+      name: "overload with api_error",
+      evidence: "auth",
+      result: {
+        subtype: "success",
+        is_error: true,
+        terminal_reason: "api_error",
+        api_error_status: 529,
+        errors: [],
+      },
+      expected: "not-auth",
+      expectedState: undefined,
+    },
+    {
+      name: "listed error on an is_error success",
+      evidence: "auth",
+      result: {
+        subtype: "success",
+        is_error: true,
+        errors: ["Tool execution failed: EACCES"],
+      },
+      expected: /EACCES/,
+      expectedState: "failed",
+    },
+    {
+      name: "recovered same window",
+      evidence: "recovered",
+      result: API_ERROR_FAILURE,
+      expected: undefined,
+      expectedState: "failed",
+    },
+    {
+      name: "nested assistant does not poison parent",
+      evidence: "nested-auth",
+      result: API_ERROR_FAILURE,
+      expected: undefined,
+      expectedState: "failed",
+    },
+    ...[
+      "recovered-missing-reset",
+      "recovered-next-reset",
+      "recovered-warning",
+      "two-windows-recovered",
+    ].map((evidence) => ({
+      name: evidence,
+      evidence,
+      result: API_ERROR_FAILURE,
+      expected: undefined,
+      expectedState: "failed",
+    })),
+    ...["two-windows-one-recovered", "rejected-again"].map((evidence) => ({
+      name: evidence,
+      evidence,
+      result: API_ERROR_FAILURE,
+      expected: /usage limit reached/,
+      expectedState: "failed",
+    })),
+    {
+      name: "successful turn stays successful",
+      evidence: "recovered",
+      result: { subtype: "success", is_error: false, errors: [] },
+      expected: undefined,
+      expectedState: "completed",
+    },
+  ])(
+    "preserves terminal failure evidence after $name",
+    ({ evidence, result, expected, expectedState }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "synthetic hello",
+          attachments: [],
+        });
+        if (evidence === "auth" || evidence === "nested-auth") {
+          harness.query.emit({
+            type: "assistant",
+            session_id: "sdk-audit",
+            uuid: "audit-auth",
+            parent_tool_use_id: evidence === "nested-auth" ? "synthetic-parent-tool" : null,
+            error: "authentication_failed",
+            is_api_error_message: true,
+            message: {
+              id: "audit-message",
+              model: "synthetic-audit-model",
+              content: [{ type: "text", text: "Not logged in. Please run /login" }],
+            },
+          } as unknown as SDKMessage);
+        } else {
+          const nowMs = yield* Clock.currentTimeMillis;
+          const resetsAt = Math.floor(nowMs / 1000) + 7200;
+          harness.query.emit({
+            type: "rate_limit_event",
+            rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt },
+            session_id: "sdk-audit",
+            uuid: "audit-limit-rejected",
+          } as unknown as SDKMessage);
+          if (evidence.startsWith("two-windows")) {
+            harness.query.emit({
+              type: "rate_limit_event",
+              rate_limit_info: { status: "rejected", rateLimitType: "seven_day", resetsAt },
+              session_id: "sdk-audit",
+              uuid: "audit-weekly-rejected",
+            } as unknown as SDKMessage);
+          }
+          harness.query.emit({
+            type: "rate_limit_event",
+            rate_limit_info: {
+              status: evidence === "recovered-warning" ? "allowed_warning" : "allowed",
+              rateLimitType: "five_hour",
+              ...(evidence === "recovered-missing-reset"
+                ? {}
+                : {
+                    resetsAt: evidence === "recovered-next-reset" ? resetsAt + 18000 : resetsAt,
+                  }),
+            },
+            session_id: "sdk-audit",
+            uuid: "audit-limit-allowed",
+          } as unknown as SDKMessage);
+          if (evidence === "two-windows-recovered" || evidence === "rejected-again") {
+            harness.query.emit({
+              type: "rate_limit_event",
+              rate_limit_info: {
+                status: evidence === "rejected-again" ? "rejected" : "allowed",
+                rateLimitType: evidence === "rejected-again" ? "five_hour" : "seven_day",
+                resetsAt,
+              },
+              session_id: "sdk-audit",
+              uuid: "audit-final-quota-update",
+            } as unknown as SDKMessage);
+          }
+        }
+        harness.query.emit({
+          type: "result",
+          ...result,
+          session_id: "sdk-audit",
+          uuid: "audit-result",
+        } as unknown as SDKMessage);
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const complete = events.at(-1);
+        assert(complete?.type === "turn.completed");
+        if (expectedState !== undefined) assert.equal(complete.payload.state, expectedState);
+        if (expected === "not-auth") {
+          assert.notMatch(complete.payload.errorMessage ?? "", /claude auth login/);
+        } else if (expected instanceof RegExp) {
+          assert.match(complete.payload.errorMessage ?? "", expected);
+        } else {
+          assert.equal(complete.payload.errorMessage, undefined);
+        }
+        if (evidence === "rejected-again")
+          assert.equal(events.filter((event) => event.type === "runtime.warning").length, 1);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect.each([
+    { homePath: "./synthetic config's $literal", inherited: undefined },
+    { homePath: "", inherited: ".synthetic config's $literal" },
+    { homePath: "", inherited: " /synthetic/path with edge spaces " },
+  ])(
+    "reports the same Claude config and cwd used by the spawned query ($homePath, $inherited)",
+    ({ homePath, inherited }) => {
+      const harness = makeHarness({
+        claudeConfig: { homePath },
+        environment: { ...process.env, CLAUDE_CONFIG_DIR: inherited },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const cwd = NodePath.resolve("/tmp/synthetic-audit-project");
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          cwd,
+        });
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "synthetic",
+          attachments: [],
+        });
+        harness.query.emit(AUTH_FAILURE_ASSISTANT);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          terminal_reason: "api_error",
+          errors: [],
+          session_id: "sdk-session-auth",
+          uuid: "result-auth",
+        } as unknown as SDKMessage);
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const completed = events.at(-1);
+        assert(completed?.type === "turn.completed");
+        const actualQuery = harness.getLastCreateQueryInput();
+        assert(actualQuery !== undefined);
+        const expectedConfigDir = homePath ? NodePath.resolve(homePath) : inherited;
+        assert.equal(actualQuery.options.env?.CLAUDE_CONFIG_DIR, expectedConfigDir);
+        assert.equal(actualQuery.options.cwd, cwd);
+        assert(
+          completed.payload.errorMessage?.includes(
+            `CLAUDE_CONFIG_DIR set to ${encodeUnknownJsonString(expectedConfigDir)}`,
+          ),
+        );
+        assert(completed.payload.errorMessage?.includes(`from ${encodeUnknownJsonString(cwd)}`));
+        assert(!completed.payload.errorMessage?.includes("CLAUDE_CONFIG_DIR="));
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("consumes Claude command lifecycle notifications silently", () => {
     const harness = makeHarness();

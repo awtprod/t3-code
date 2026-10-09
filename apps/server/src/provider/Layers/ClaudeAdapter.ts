@@ -91,7 +91,7 @@ import {
   sandboxProviderTarget,
   spawnClaudeInSandbox,
 } from "../../sandbox/SandboxProviderProcess.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import {
@@ -165,6 +165,10 @@ interface ClaudeTurnState {
   latestAssistantUsage: unknown | undefined;
   compactedSinceLatestAssistantUsage: boolean;
   nextSyntheticAssistantBlockIndex: number;
+  /** Set when the CLI reported an expired login during this turn. */
+  authenticationFailureMessage: string | undefined;
+  /** Usage windows currently rejecting this turn, by `rateLimitType`. */
+  rejectedRateLimitTypes: Set<string>;
 }
 
 interface AssistantTextBlockState {
@@ -1614,6 +1618,46 @@ function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStat
     return "cancelled";
   }
   return "failed";
+}
+
+const CLAUDE_USAGE_LIMIT_FAILURE =
+  "Claude usage limit reached. Send the message again once the limit resets.";
+
+/**
+ * Turn status and error for a result, given what the turn already reported.
+ *
+ * The CLI ends a turn whose requests kept failing as an API error, often on a
+ * success-tagged result (`terminal_reason: "api_error"`, or `is_error: true`
+ * with nothing listed) that would otherwise read as a completed turn. When the
+ * turn already reported why (an expired login, a rejected usage window),
+ * `failureHint` names that cause instead. Every other outcome names its own
+ * cause and keeps it: listed errors, overload (529), interrupts, cancels.
+ */
+function resultOutcome(
+  result: SDKResultMessage,
+  failureHint: string | undefined,
+): { status: ProviderRuntimeTurnStatus; errorMessage: string | undefined } {
+  const status = turnStatusFromResult(result);
+  const errorMessage = resultUserFacingError(result);
+  if (failureHint === undefined || status === "interrupted" || status === "cancelled") {
+    return { status, errorMessage };
+  }
+  // Newer CLIs than the bundled SDK types send `api_error`; read it as a string.
+  const terminalReason: string | undefined = result.terminal_reason;
+  const endedAsApiError =
+    terminalReason === "api_error" || (result.subtype === "success" && result.is_error === true);
+  if (!endedAsApiError || (result.subtype === "success" && result.api_error_status === 529)) {
+    return { status, errorMessage };
+  }
+  // Success results carry no typed error list, but a success-tagged failure
+  // may still list one; CLI diagnostic entries never become the banner.
+  const listedErrors: ReadonlyArray<unknown> =
+    "errors" in result && Array.isArray(result.errors) ? result.errors : [];
+  const listedError = listedErrors.find(
+    (error): error is string =>
+      typeof error === "string" && error.length > 0 && !error.startsWith("[ede_diagnostic]"),
+  );
+  return { status: "failed", errorMessage: listedError ?? failureHint };
 }
 
 function streamKindFromDeltaType(deltaType: string): ClaudeTextStreamKind {
@@ -3187,6 +3231,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         latestAssistantUsage: undefined,
         compactedSinceLatestAssistantUsage: false,
         nextSyntheticAssistantBlockIndex: -1,
+        authenticationFailureMessage: undefined,
+        rejectedRateLimitTypes: new Set(),
       };
       context.session = {
         ...context.session,
@@ -3245,6 +3291,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (context.turnState) {
+      // The CLI can report authentication failure before ending the turn as a
+      // generic API error, so retain that evidence for the result fallback.
+      // Subagent snapshots returned above, so a nested login failure never
+      // speaks for the parent turn.
+      if (message.error === "authentication_failed") {
+        context.turnState.authenticationFailureMessage = claudeSignedOutMessage({
+          configDir: claudeEnvironment.CLAUDE_CONFIG_DIR,
+          cwd: path.resolve(context.session.cwd ?? "."),
+        });
+      }
       context.turnState.items.push(message.message);
       if (
         normalizeClaudeActiveTokenUsage(
@@ -3271,8 +3327,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    const status = turnStatusFromResult(message);
-    const errorMessage = resultUserFacingError(message);
+    const turn = context.turnState;
+    const failureHint =
+      turn?.authenticationFailureMessage ??
+      (turn && turn.rejectedRateLimitTypes.size > 0 ? CLAUDE_USAGE_LIMIT_FAILURE : undefined);
+    const { status, errorMessage } = resultOutcome(message, failureHint);
 
     if (status === "failed") {
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
@@ -3827,20 +3886,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         message.rate_limit_info && typeof message.rate_limit_info === "object"
           ? message.rate_limit_info
           : undefined;
+      if (rateLimitInfo === undefined) return;
       // A rejected window parks the turn inside the SDK: no further messages
       // arrive and no result lands, so without a row the thread just spins.
       // Warnings (allowed_warning) still have headroom and stay quiet, an
       // account spending provisioned overage keeps running despite the reject,
       // and between turns there is no turn to report as paused.
-      if (
-        rateLimitInfo !== undefined &&
-        rateLimitInfo.status === "rejected" &&
-        rateLimitInfo.overageStatus !== "allowed" &&
-        rateLimitInfo.overageStatus !== "allowed_warning" &&
-        rateLimitInfo.isUsingOverage !== true &&
-        rateLimitInfo.overageInUse !== true &&
-        context.turnState !== undefined
-      ) {
+      const overageAllowed =
+        rateLimitInfo.overageStatus === "allowed" ||
+        rateLimitInfo.overageStatus === "allowed_warning" ||
+        rateLimitInfo.isUsingOverage === true ||
+        rateLimitInfo.overageInUse === true;
+      const blocked = rateLimitInfo.status === "rejected" && !overageAllowed;
+      const limitType = rateLimitInfo.rateLimitType ?? "unknown";
+      const limitKey = `${limitType}:${rateLimitInfo.resetsAt ?? "unknown"}`;
+      if (context.turnState) {
+        // Current blocking evidence is independent of whether its warning has
+        // already been shown. A recovery can omit or advance the reset time;
+        // its window type remains stable without clearing another window.
+        if (blocked) context.turnState.rejectedRateLimitTypes.add(limitType);
+        else if (
+          rateLimitInfo.status === "allowed" ||
+          rateLimitInfo.status === "allowed_warning" ||
+          overageAllowed
+        ) {
+          context.turnState.rejectedRateLimitTypes.delete(limitType);
+        }
+      }
+      if (blocked && context.turnState !== undefined) {
         // Tracked per turn as a set of limit identities, not as the rendered
         // row: a parked window re-fires while the remaining wait shrinks, and a
         // turn can park on more than one window, so a single slot would let an
@@ -3850,7 +3923,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (context.announcedUsageLimits?.turnId !== turnId) {
           context.announcedUsageLimits = { turnId, keys: new Set() };
         }
-        const limitKey = `${rateLimitInfo.rateLimitType ?? "unknown"}:${rateLimitInfo.resetsAt ?? "unknown"}`;
         if (!context.announcedUsageLimits.keys.has(limitKey)) {
           context.announcedUsageLimits.keys.add(limitKey);
           const notice = describeClaudeUsageLimit(rateLimitInfo, Date.parse(stamp.createdAt));
@@ -5038,6 +5110,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         latestAssistantUsage: undefined,
         compactedSinceLatestAssistantUsage: false,
         nextSyntheticAssistantBlockIndex: -1,
+        authenticationFailureMessage: undefined,
+        rejectedRateLimitTypes: new Set(),
       };
 
       const updatedAt = yield* nowIso;
