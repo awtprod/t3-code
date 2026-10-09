@@ -46,7 +46,8 @@ it("records the committed static-context baseline", () => {
     // contradiction fields on the existing memory proposal tool.
     // 2026-09: +40 bytes for the `repository.checks` source-node configuration.
     // 2026-10: +117 bytes for the read-only `cc_space_brief` Space agent tool.
-    mcp: { toolCount: 37, schemaBytes: 26_086, toolkitCounts: [14, 14, 9] },
+    // 2026-10: +271 bytes for the read-only `cc_space_activity` feed tool.
+    mcp: { toolCount: 38, schemaBytes: 26_357, toolkitCounts: [14, 15, 9] },
     commandCenter: {
       previousPerEntryBudgetBytes: 6_000,
       previousEntryLimit: 6,

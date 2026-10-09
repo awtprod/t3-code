@@ -1949,6 +1949,7 @@ it.effect(
       Layer.provide(ThreadPlanProgress.layer),
       Layer.provideMerge(
         Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+          resolveRemoteKeys: () => Effect.succeed([]),
           resolve: (cwd: string) =>
             Effect.sync(() => {
               resolveCalls.push(cwd);

@@ -1,7 +1,14 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layer as spaceActivityLayer, SpaceActivity } from "./SpaceActivity.ts";
 import {
   EMPTY_SPACE_ACTIVITY,
+  loadSpaceBriefInput,
   SPACE_BRIEF_LIMITS,
   type SpaceBriefItem,
   type SpaceBriefMemory,
@@ -119,4 +126,47 @@ describe("Space brief", () => {
     expect(brief.indexOf("Newer thread")).toBeLessThan(brief.indexOf("Older thread"));
     expect(brief).toContain("[failed] Newer thread: tests failed <https://example.com/pr/1>");
   });
+});
+
+const briefLayer = Layer.mergeAll(SqlitePersistenceMemory, NodeServices.layer);
+const BRIEF_NOW = "2026-10-09T12:00:00.000Z";
+
+it.layer(briefLayer)("Space brief activity", (it) => {
+  it.effect("shows recent Space activity and omits the section when there is none", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO command_center_spaces (id, slug, name, kind, created_at, updated_at)
+        VALUES ('space-example', 'space-example', 'Example', 'business', ${BRIEF_NOW}, ${BRIEF_NOW})
+      `;
+      const load = (repositoryId?: string) =>
+        loadSpaceBriefInput({ space, now: BRIEF_NOW, repositoryId }).pipe(
+          Effect.map(renderSpaceBrief),
+        );
+
+      expect(yield* load()).not.toContain("Recent Space activity");
+
+      const activity = yield* Effect.provide(SpaceActivity, spaceActivityLayer);
+      yield* activity.record({
+        spaceId: "space-example",
+        occurredAt: BRIEF_NOW,
+        sourceKind: "thread",
+        sourceId: "thread-1",
+        projectId: null,
+        title: "Ship the feed",
+        status: "completed",
+        text: "Opened https://github.com/awtprod/t3-code/pull/9",
+        eventSequence: 1,
+      });
+      const brief = yield* load();
+      expect(brief).toContain("Recent Space activity");
+      expect(brief).toContain("[completed] Ship the feed");
+      // The feed spans every repository, so a repository-scoped brief omits it.
+      expect(yield* load("repo-a")).not.toContain("Recent Space activity");
+
+      // An unreadable feed drops the section, not the brief.
+      yield* sql`DROP TABLE command_center_space_activity`;
+      expect(yield* load()).not.toContain("Recent Space activity");
+    }),
+  );
 });

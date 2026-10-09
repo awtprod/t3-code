@@ -31,6 +31,12 @@ export class RepositoryIdentityResolver extends Context.Service<
   RepositoryIdentityResolver,
   {
     readonly resolve: (cwd: string) => Effect.Effect<RepositoryIdentity | null>;
+    /**
+     * Canonical keys of every fetch remote of the repository at `cwd` (empty
+     * when it is not a repository). `resolve` reports only the primary one; a
+     * fork's origin is usually not it, because `upstream` wins.
+     */
+    readonly resolveRemoteKeys: (cwd: string) => Effect.Effect<ReadonlyArray<string>>;
   }
 >()("@awtprod/command-center/project/RepositoryIdentityResolver") {}
 
@@ -134,11 +140,11 @@ const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.
   },
 );
 
-const resolveRepositoryIdentityFromCacheKey = Effect.fn(
-  "RepositoryIdentityResolver.resolveFromCacheKey",
+const resolveRemoteFetchUrlsFromCacheKey = Effect.fn(
+  "RepositoryIdentityResolver.resolveRemotesFromCacheKey",
 )(function* (
   cacheKey: string,
-): Effect.fn.Return<RepositoryIdentity | null, never, ProcessRunner.ProcessRunner> {
+): Effect.fn.Return<ReadonlyMap<string, string> | null, never, ProcessRunner.ProcessRunner> {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const gitExecutable = resolveTrustedHostExecutable("git", { writableRoots: [cacheKey] });
   if (gitExecutable === undefined) return null;
@@ -155,8 +161,7 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
     return null;
   }
 
-  const remote = pickPrimaryRemote(parseRemoteFetchUrls(remoteResult.value.stdout));
-  return remote ? buildRepositoryIdentity({ ...remote, rootPath: cacheKey }) : null;
+  return parseRemoteFetchUrls(remoteResult.value.stdout);
 });
 
 export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
@@ -180,16 +185,16 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
     },
   );
 
-  const repositoryIdentityCache = yield* Cache.makeWith<string, RepositoryIdentity | null>(
+  const remoteFetchUrlCache = yield* Cache.makeWith<string, ReadonlyMap<string, string> | null>(
     (cacheKey) =>
-      resolveRepositoryIdentityFromCacheKey(cacheKey).pipe(
+      resolveRemoteFetchUrlsFromCacheKey(cacheKey).pipe(
         Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
       ),
     {
       capacity: cacheCapacity,
       timeToLive: Exit.match({
         onSuccess: (value) =>
-          value === null
+          value === null || value.size === 0
             ? (options.negativeCacheTtl ?? DEFAULT_NEGATIVE_CACHE_TTL)
             : (options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL),
         onFailure: () => Duration.zero,
@@ -197,15 +202,35 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
     },
   );
 
+  const remoteFetchUrls = Effect.fn("RepositoryIdentityResolver.remoteFetchUrls")(function* (
+    cwd: string,
+  ) {
+    const cacheKey = yield* Cache.get(repositoryRootCache, cwd);
+    if (cacheKey === null) return null;
+    const remotes = yield* Cache.get(remoteFetchUrlCache, cacheKey);
+    return remotes === null ? null : { cacheKey, remotes };
+  });
+
   const resolve: RepositoryIdentityResolver["Service"]["resolve"] = Effect.fn(
     "RepositoryIdentityResolver.resolve",
   )(function* (cwd) {
-    const cacheKey = yield* Cache.get(repositoryRootCache, cwd);
-    if (cacheKey === null) return null;
-    return yield* Cache.get(repositoryIdentityCache, cacheKey);
+    const resolved = yield* remoteFetchUrls(cwd);
+    const remote = resolved === null ? null : pickPrimaryRemote(resolved.remotes);
+    return resolved === null || remote === null
+      ? null
+      : buildRepositoryIdentity({ ...remote, rootPath: resolved.cacheKey });
   });
 
-  return RepositoryIdentityResolver.of({ resolve });
+  const resolveRemoteKeys: RepositoryIdentityResolver["Service"]["resolveRemoteKeys"] = Effect.fn(
+    "RepositoryIdentityResolver.resolveRemoteKeys",
+  )(function* (cwd) {
+    const resolved = yield* remoteFetchUrls(cwd);
+    if (resolved === null) return [];
+    const keys = [...resolved.remotes.values()].map(normalizeGitRemoteUrl);
+    return [...new Set(keys.filter((key) => key.length > 0))];
+  });
+
+  return RepositoryIdentityResolver.of({ resolve, resolveRemoteKeys });
 });
 
 export const layer = Layer.effect(RepositoryIdentityResolver, make()).pipe(
