@@ -3491,7 +3491,6 @@ describe("composerDraftStore windows-file references", () => {
     store.addWindowsFile(threadRef, clip);
     const persistApi = useComposerDraftStore.persist as unknown as {
       getOptions: () => {
-        partialize: (state: ReturnType<typeof useComposerDraftStore.getState>) => unknown;
         merge: (
           persistedState: unknown,
           currentState: ReturnType<typeof useComposerDraftStore.getState>,
@@ -3499,7 +3498,8 @@ describe("composerDraftStore windows-file references", () => {
       };
     };
     const options = persistApi.getOptions();
-    const persisted = options.partialize(useComposerDraftStore.getState()) as {
+    // The persist option captures state lazily; this is the shape it writes.
+    const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState()) as {
       draftsByThreadKey: Record<string, { windowsFiles?: unknown }>;
     };
     const key = threadKeyFor(threadId, TEST_ENVIRONMENT_ID);

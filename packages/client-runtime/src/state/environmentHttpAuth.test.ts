@@ -98,6 +98,8 @@ const THREAD = {
     activities: [],
     checkpoints: [],
     session: null,
+    // Command Center's sandbox field decodes with a null default.
+    sandbox: null,
   },
   page: { beforeCursor: null, hasMore: false, snapshotSequence: 2 },
 } satisfies OrchestrationThreadDetailSnapshot;

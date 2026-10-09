@@ -126,7 +126,9 @@ describe("device listing compatibility", () => {
           Layer.mock(EnvironmentLinker.EnvironmentLinker, {}),
           Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
-          Layer.mock(WebPushSubscriptions.WebPushSubscriptions, {}),
+          Layer.mock(WebPushSubscriptions.WebPushSubscriptions, {
+            listForUser: () => Effect.succeed([]),
+          }),
           Layer.mock(Devices.Devices, {
             listForUser: ({ userId }) => {
               expect(userId).toBe("user-1");

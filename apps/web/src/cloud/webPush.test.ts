@@ -31,6 +31,22 @@ import {
 } from "./webPush";
 
 const WEB_PUSH_STORAGE_KEY = "t3code:web-push:v1";
+
+// useLocalStorage resolves `window.localStorage` per call, so every stubbed
+// window carries one Map-backed Storage shared across the file.
+const storageItems = new Map<string, string>();
+const memoryLocalStorage = {
+  getItem: (key: string) => storageItems.get(key) ?? null,
+  setItem: (key: string, value: string) => void storageItems.set(key, value),
+  removeItem: (key: string) => void storageItems.delete(key),
+  clear: () => storageItems.clear(),
+  key: (index: number) => [...storageItems.keys()][index] ?? null,
+  get length() {
+    return storageItems.size;
+  },
+} satisfies Storage;
+const stubWindow = (props: Record<string, unknown>) =>
+  vi.stubGlobal("window", { localStorage: memoryLocalStorage, ...props });
 // Valid base64url; applicationServerKeyBytes must be able to atob-decode it.
 const VAPID_KEY = "BExampleKey";
 
@@ -82,7 +98,7 @@ function installBrowser(options?: {
   const getSubscription = vi.fn(() => Promise.resolve(existing));
   const registration = { pushManager: { getSubscription, subscribe } };
 
-  vi.stubGlobal("window", {
+  stubWindow({
     isSecureContext: true,
     matchMedia: () => ({ matches: false }),
     // Only the `"PushManager"/"Notification" in window` presence check matters.
@@ -141,6 +157,7 @@ function installPrimaryClient(overrides?: {
 }
 
 afterEach(() => {
+  stubWindow({});
   removeLocalStorageItem(WEB_PUSH_STORAGE_KEY);
   __setLocalWebPushServerApiForTests();
   vi.unstubAllGlobals();
@@ -155,12 +172,12 @@ describe("webPushSupport", () => {
 
   it("reports insecure-context when the page is not secure", () => {
     installBrowser();
-    vi.stubGlobal("window", { isSecureContext: false, matchMedia: () => ({ matches: false }) });
+    stubWindow({ isSecureContext: false, matchMedia: () => ({ matches: false }) });
     expect(webPushSupport()).toEqual({ supported: false, reason: "insecure-context" });
   });
 
   it("reports ios-needs-install for iOS Safari without the Push API", () => {
-    vi.stubGlobal("window", {
+    stubWindow({
       isSecureContext: true,
       matchMedia: () => ({ matches: false }),
     });
@@ -172,7 +189,7 @@ describe("webPushSupport", () => {
   });
 
   it("reports no-push-api on a non-iOS browser without the Push API", () => {
-    vi.stubGlobal("window", { isSecureContext: true, matchMedia: () => ({ matches: false }) });
+    stubWindow({ isSecureContext: true, matchMedia: () => ({ matches: false }) });
     vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Linux) Firefox", serviceWorker: {} });
     expect(webPushSupport()).toEqual({ supported: false, reason: "no-push-api" });
   });
