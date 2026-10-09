@@ -85,6 +85,7 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { SandboxSettleCleanupReactorLive } from "./orchestration/Layers/SandboxSettleCleanupReactor.ts";
 import { SubagentDelegationReactorLive } from "./orchestration/Layers/SubagentDelegationReactor.ts";
+import { SpaceActivityReactorLive } from "./orchestration/Layers/SpaceActivityReactor.ts";
 import { SandboxLifecycleReactorLive } from "./orchestration/Layers/SandboxLifecycleReactor.ts";
 import { SandboxRuntimeManagerLive } from "./sandbox/SandboxRuntimeManager.ts";
 import * as ThreadSettlementReactor from "./orchestration/ThreadSettlementReactor.ts";
@@ -171,6 +172,7 @@ import * as AutomationScheduleInterpreter from "./command-center/automation/Sche
 import * as AutomationScopedShell from "./command-center/automation/AutomationScopedShell.ts";
 import * as VerifiedScopedShell from "./command-center/automation/VerifiedScopedShell.ts";
 import * as MemorySearchIndex from "./command-center/MemorySearchIndex.ts";
+import * as SpaceActivity from "./command-center/SpaceActivity.ts";
 import * as GoogleReadConnector from "./command-center/GoogleReadConnector.ts";
 import * as WindowsMediaConnector from "./command-center/WindowsMediaConnector.ts";
 import * as GoogleConnectionSetup from "./command-center/GoogleConnectionSetup.ts";
@@ -397,6 +399,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(SandboxLifecycleReactorLive),
   Layer.provideMerge(SandboxSettleCleanupReactorLive),
   Layer.provideMerge(SubagentDelegationReactorLive),
+  Layer.provideMerge(SpaceActivityReactorLive),
   Layer.provideMerge(ThreadSettlementReactor.layer),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
@@ -523,6 +526,7 @@ const CommandCenterBaseLayerLive = Layer.mergeAll(
   CommandCenterEventStream.layer,
   Observations.layer,
   MemorySearchIndex.layer,
+  SpaceActivity.layer,
   GoogleReadConnectorLayerLive,
   WindowsMediaConnectorLayerLive,
   GoogleConnectionSetupLayerLive,

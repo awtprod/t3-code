@@ -10,6 +10,7 @@ import * as MemorySearchIndex from "../../../command-center/MemorySearchIndex.ts
 import * as GoogleReadConnector from "../../../command-center/GoogleReadConnector.ts";
 import { googleCapabilityForOperation } from "../../../command-center/GoogleCapabilities.ts";
 import * as ReadinessGate from "../../../command-center/ReadinessGate.ts";
+import * as SpaceActivity from "../../../command-center/SpaceActivity.ts";
 import { commandCenterProviderAvailability } from "../../../command-center/ProviderAvailability.ts";
 import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -635,6 +636,25 @@ const handlers = {
         contentTrust: "untrusted-external" as const,
         artifact,
         sizeBytes: exported.sizeBytes,
+      };
+    }),
+  cc_space_activity: ({ since, limit }) =>
+    Effect.gen(function* () {
+      const scope = yield* requireScopedSpace("cc.items.read");
+      if (scope.repositoryId !== undefined) {
+        return yield* new CommandCenterError({
+          reason: "validation",
+          message:
+            "Space activity spans every repository; a repository-scoped credential cannot read it.",
+        });
+      }
+      const activity = yield* SpaceActivity.SpaceActivity;
+      return {
+        activity: yield* activity.recent({
+          spaceId: scope.spaceId,
+          ...(since === undefined ? {} : { since }),
+          ...(limit === undefined ? {} : { limit }),
+        }),
       };
     }),
 } satisfies Parameters<typeof CommandCenterToolkit.toLayer>[0];
