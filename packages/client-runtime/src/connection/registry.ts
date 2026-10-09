@@ -440,7 +440,12 @@ export const make = Effect.gen(function* () {
           const persistedTarget = (yield* Ref.get(persistedTargetsByEnvironment)).get(
             target.environmentId,
           );
-          if (persistedTarget !== undefined) {
+          // Desktop remote-primary startup needs the saved bearer on every launch.
+          // Keep its recovery record while the platform primary owns the runtime.
+          const preservePrimaryBearer =
+            registration._tag === "PrimaryConnectionRegistration" &&
+            persistedTarget?._tag === "BearerConnectionTarget";
+          if (persistedTarget !== undefined && !preservePrimaryBearer) {
             yield* registrations.remove(persistedTarget).pipe(
               Effect.tap(() =>
                 Ref.update(persistedTargetsByEnvironment, (current) => {

@@ -840,6 +840,176 @@ describe("EnvironmentRegistry", () => {
     }),
   );
 
+  it.effect(
+    "keeps a same-ID repaired bearer across two remote-primary launches until explicit removal",
+    () =>
+      Effect.gen(function* () {
+        const repairedCredential = new BearerConnectionCredential({ token: "replacement-bearer" });
+        const remotePrimary = new PrimaryConnectionTarget({
+          environmentId: BEARER_TARGET.environmentId,
+          label: BEARER_TARGET.label,
+          httpBaseUrl: BEARER_PROFILE.httpBaseUrl,
+          wsBaseUrl: BEARER_PROFILE.wsBaseUrl,
+        });
+        const harness = yield* makeHarness(
+          [BEARER_TARGET],
+          [BEARER_PROFILE],
+          [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]],
+        );
+
+        // Temporary local launch: an already-connected remote remains user-owned.
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.registerPlatform(new PrimaryConnectionRegistration({ target: TARGET }));
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            BEARER_TARGET.environmentId,
+            (state) => state.phase === "connected",
+          );
+          yield* registry.register(
+            new BearerConnectionRegistration({
+              target: BEARER_TARGET,
+              profile: BEARER_PROFILE,
+              credential: repairedCredential,
+            }),
+          );
+          expect((yield* Ref.get(harness.storedTargets)).size).toBe(1);
+          expect((yield* Ref.get(harness.storedProfiles)).size).toBe(1);
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
+          ).toEqual(repairedCredential);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+
+        // Each separate provision creates a fresh registry, as on full app launch.
+        for (const _launch of [1, 2]) {
+          yield* Effect.gen(function* () {
+            const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+            expect(
+              (yield* SubscriptionRef.get(registry.entries)).get(remotePrimary.environmentId)
+                ?.target,
+            ).toEqual(BEARER_TARGET);
+            yield* registry.start;
+            yield* awaitConnectionState(
+              registry,
+              remotePrimary.environmentId,
+              (state) => state.phase === "connected",
+            );
+            yield* registry.registerPlatform(
+              new PrimaryConnectionRegistration({ target: remotePrimary }),
+            );
+            yield* awaitConnectionState(
+              registry,
+              remotePrimary.environmentId,
+              (state) => state.phase === "connected",
+            );
+            expect(
+              (yield* SubscriptionRef.get(registry.entries)).get(remotePrimary.environmentId)
+                ?.target,
+            ).toEqual(remotePrimary);
+            expect(
+              (yield* Ref.get(harness.storedTargets)).get(remotePrimary.environmentId),
+            ).toEqual(BEARER_TARGET);
+            expect(
+              (yield* Ref.get(harness.storedProfiles)).get(BEARER_TARGET.connectionId),
+            ).toEqual(BEARER_PROFILE);
+            expect(
+              (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
+            ).toEqual(repairedCredential);
+            const removal = yield* registry.remove(remotePrimary.environmentId).pipe(Effect.flip);
+            expect(removal._tag).toBe("PlatformEnvironmentRemovalError");
+            // A generic pairing for the active primary still cannot replace it.
+            yield* registry.register(
+              new BearerConnectionRegistration({
+                target: BEARER_TARGET,
+                profile: BEARER_PROFILE,
+                credential: BEARER_CREDENTIAL,
+              }),
+            );
+            expect(
+              (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
+            ).toEqual(repairedCredential);
+          }).pipe(Effect.provide(harness.layer), Effect.scoped);
+        }
+
+        // Back in a local launch, explicit Disconnect must erase the saved bearer.
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* Ref.update(harness.storedRemoteTokens, (current) =>
+            new Map(current).set(
+              BEARER_TARGET.environmentId,
+              new TokenStore.RemoteDpopAccessToken({
+                environmentId: BEARER_TARGET.environmentId,
+                label: BEARER_TARGET.label,
+                endpoint: {
+                  httpBaseUrl: BEARER_PROFILE.httpBaseUrl,
+                  wsBaseUrl: BEARER_PROFILE.wsBaseUrl,
+                  providerKind: "cloudflare_tunnel",
+                },
+                accessToken: "cached-remote-token",
+                expiresAtEpochMs: Number.MAX_SAFE_INTEGER,
+                dpopThumbprint: "thumbprint",
+              }),
+            ),
+          );
+          yield* registry.registerPlatform(new PrimaryConnectionRegistration({ target: TARGET }));
+          yield* registry.start;
+          yield* awaitConnectionState(
+            registry,
+            BEARER_TARGET.environmentId,
+            (state) => state.phase === "connected",
+          );
+          yield* registry.remove(BEARER_TARGET.environmentId);
+          expect((yield* Ref.get(harness.storedTargets)).has(BEARER_TARGET.environmentId)).toBe(
+            false,
+          );
+          expect((yield* Ref.get(harness.storedProfiles)).has(BEARER_TARGET.connectionId)).toBe(
+            false,
+          );
+          expect((yield* Ref.get(harness.storedCredentials)).has(BEARER_TARGET.connectionId)).toBe(
+            false,
+          );
+          expect(
+            (yield* Ref.get(harness.storedRemoteTokens)).has(BEARER_TARGET.environmentId),
+          ).toBe(false);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          expect(
+            (yield* SubscriptionRef.get(registry.entries)).has(BEARER_TARGET.environmentId),
+          ).toBe(false);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+
+  it.effect("still removes a saved SSH registration shadowed by a platform primary", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([SSH_CONNECTION], [SSH_PROFILE]);
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.registerPlatform(
+          new PrimaryConnectionRegistration({
+            target: new PrimaryConnectionTarget({
+              environmentId: SSH_CONNECTION.environmentId,
+              label: SSH_CONNECTION.label,
+              httpBaseUrl: TARGET.httpBaseUrl,
+              wsBaseUrl: TARGET.wsBaseUrl,
+            }),
+          }),
+        );
+        expect((yield* Ref.get(harness.storedTargets)).has(SSH_CONNECTION.environmentId)).toBe(
+          false,
+        );
+        expect((yield* Ref.get(harness.storedProfiles)).has(SSH_CONNECTION.connectionId)).toBe(
+          false,
+        );
+        expect((yield* Ref.get(harness.storedRemoteTokens)).has(SSH_CONNECTION.environmentId)).toBe(
+          false,
+        );
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
   it.effect("rechecks platform ownership after waiting for the environment lease", () =>
     Effect.gen(function* () {
       const registrationStarted = yield* Deferred.make<void>();

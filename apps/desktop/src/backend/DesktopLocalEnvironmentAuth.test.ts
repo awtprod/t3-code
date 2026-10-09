@@ -241,6 +241,27 @@ function recoveryHarness(
 }
 
 describe("saved remote primary recovery", () => {
+  it.effect("validates the replacement saved bearer in two fresh desktop auth instances", () =>
+    Effect.gen(function* () {
+      const savedCatalog = encodedRemoteCatalog.replace("remote-token", "replacement-bearer");
+      for (const _launch of [1, 2]) {
+        const harness = recoveryHarness({ catalog: () => Option.some(savedCatalog) });
+        yield* Effect.gen(function* () {
+          const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+          assert.equal(yield* auth.getBearerToken, "replacement-bearer");
+          const session = yield* auth.recoverRemotePrimarySession(remoteSettings.remoteBackendUrl);
+          assert.isTrue(session.authenticated);
+          assert.equal(session.sessionMethod, "bearer-access-token");
+          assert.equal(harness.requests[1]?.authorization, "Bearer replacement-bearer");
+          assert.deepEqual(
+            harness.requests.map((request) => request.method),
+            ["GET", "GET"],
+          );
+        }).pipe(Effect.provide(harness.layer));
+      }
+    }),
+  );
+
   it.effect("reloads a newer saved bearer and validates it using only read-only requests", () => {
     let catalog = Option.some(encodedRemoteCatalog);
     const harness = recoveryHarness({ catalog: () => catalog });
@@ -348,6 +369,11 @@ describe("saved remote primary recovery", () => {
           .pipe(Effect.flip);
         assert.equal(error._tag, "DesktopSavedEnvironmentRecoveryError");
         assert.notInclude(error.message, "synthetic-token-private");
+        assert.notInclude(error.message, "No credential is saved");
+        assert.include(
+          error.message,
+          sessionStatus === 200 ? "rejected the saved credential" : "could not be validated",
+        );
         assert.deepEqual(
           harness.requests.map((request) => request.method),
           ["GET", "GET"],
