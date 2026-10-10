@@ -281,7 +281,14 @@ async function launchPackaged(mode) {
   return { app, launch };
 }
 try {
-  for (const mode of ["seed", "repair-active-primary", "cold-reconnect", "cold-reopen"]) {
+  for (const mode of [
+    "seed",
+    "repair-active-primary",
+    "cold-auto-open",
+    "cold-auto-repeat",
+    "cold-reconnect",
+    "cold-reopen",
+  ]) {
     if (mode === "cold-reconnect") control.rejectBearer = true;
     const { app, launch } = await launchPackaged(mode);
     const context = app.browser.contexts()[0];
@@ -314,6 +321,30 @@ try {
       launch.syntheticChromeProfileDirectories,
       evidence.launches[0].syntheticChromeProfileDirectories,
     );
+    const automaticColdLaunch = mode === "cold-auto-open" || mode === "cold-auto-repeat";
+    if (automaticColdLaunch) {
+      // Admission must precede any harness catalog/token read or recovery call.
+      // No clicks, navigation or native authentication calls occur in these phases.
+      await page.waitForFunction(() =>
+        document.body.innerText.includes("This environment has no Spaces."),
+      );
+      NodeAssert.equal(
+        await page
+          .getByRole("button", { name: "Reconnect saved environment", exact: true })
+          .count(),
+        0,
+      );
+      NodeAssert.equal(
+        await page.getByText("Pair with this environment", { exact: true }).count(),
+        0,
+      );
+      launch.automaticRemoteAppOpenedAt = new Date().toISOString();
+      launch.harnessReconnectClicks = 0;
+      launch.harnessRecoveryCallsBeforeAdmission = 0;
+      launch.harnessBearerReadsBeforeAdmission = 0;
+      launch.automaticStartupAuthenticated = true;
+      launch.loadedEmptyInbox = true;
+    }
     if (mode === "seed") {
       NodeAssert.equal(
         await page.evaluate(
@@ -335,7 +366,9 @@ try {
       );
       NodeAssert.equal(launch.crossProcessSecureStorageRoundTrip, true);
       if (mode === "repair-active-primary") {
-        await page.waitForFunction(() => document.body.innerText.includes("Loading Inbox"));
+        await page.waitForFunction(() =>
+          document.body.innerText.includes("This environment has no Spaces."),
+        );
         await page.evaluate(() => {
           window.location.hash = "/settings/connections";
         });
@@ -361,7 +394,9 @@ try {
         await page
           .getByRole("button", { name: "Reconnect saved environment", exact: true })
           .waitFor({ state: "hidden" });
-        await page.waitForFunction(() => document.body.innerText.includes("Loading Inbox"));
+        await page.waitForFunction(() =>
+          document.body.innerText.includes("This environment has no Spaces."),
+        );
         launch.buttonFinishedAt = new Date().toISOString();
         launch.buttonRequests = records.slice(start);
         NodeAssert.ok(
@@ -389,7 +424,9 @@ try {
         NodeAssert.equal(launch.nativeBearerMatches, true);
       }
       if (mode === "cold-reopen") {
-        await page.waitForFunction(() => document.body.innerText.includes("Loading Inbox"));
+        await page.waitForFunction(() =>
+          document.body.innerText.includes("This environment has no Spaces."),
+        );
         const recover = () =>
           page.evaluate(async (url) => {
             try {
@@ -410,7 +447,7 @@ try {
         NodeAssert.equal((await recover()).authenticated, true);
         launch.negativeControlsPassed = true;
       }
-      if (mode === "cold-reconnect" || mode === "cold-reopen") {
+      if (mode.startsWith("cold-")) {
         const deadline = Date.now() + 15000;
         const hasUpgrade = () =>
           records
@@ -424,6 +461,21 @@ try {
           launch.requests.some(
             (request) => request.path === "/api/auth/session" && request.syntheticBearerMatches,
           ),
+        );
+        NodeAssert.ok(
+          launch.requests.some(
+            (request) =>
+              request.path === "/api/orchestration/shell" &&
+              request.method === "GET" &&
+              request.syntheticBearerMatches,
+          ),
+          "Each cold launch must load the bearer-gated remote shell",
+        );
+        NodeAssert.ok(
+          launch.requests.some(
+            (request) => request.method === "RPC" && request.tag === "cc.bootstrap",
+          ),
+          "Each cold launch must load the remote Inbox bootstrap",
         );
         NodeAssert.equal(
           launch.requests.some((request) =>

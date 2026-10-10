@@ -223,6 +223,28 @@ export function makeServer({
               values: [{ version: 1, type: "snapshot", config }],
             }),
           );
+        else if (message.tag === "cc.bootstrap")
+          ws.send(
+            JSON.stringify({
+              _tag: "Exit",
+              requestId: message.id,
+              exit: {
+                _tag: "Success",
+                value: {
+                  timezone: "Etc/UTC",
+                  spaces: [],
+                  items: [],
+                  needsYou: [],
+                  runs: [],
+                  approvals: [],
+                  automations: [],
+                  connections: [],
+                  memories: [],
+                  configHealth: { status: "loaded", configDirectory: process.env.FIXTURE_ROOT },
+                },
+              },
+            }),
+          );
         else if (message.tag === "server.getConfig")
           ws.send(
             JSON.stringify({
