@@ -32,7 +32,7 @@ import {
 const BooleanFromSqliteInt = Schema.Number.pipe(
   Schema.decodeTo(
     Schema.Boolean,
-    SchemaTransformation.transformOrFail({
+    SchemaTransformation.transformEffect({
       decode: (value: number) => Effect.succeed(value !== 0),
       encode: (value: boolean) => Effect.succeed(value ? 1 : 0),
     }),
@@ -45,7 +45,7 @@ const BooleanFromSqliteInt = Schema.Number.pipe(
 const NullableConcreteRequestSequenceFromSqlite = Schema.Number.pipe(
   Schema.decodeTo(
     Schema.NullOr(NonNegativeInt),
-    SchemaTransformation.transformOrFail({
+    SchemaTransformation.transformEffect({
       decode: (value: number) => Effect.succeed(value === 0 ? null : value),
       encode: (value: number | null) => Effect.succeed(value ?? 0),
     }),
@@ -471,9 +471,8 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
       ),
       Effect.flatMap((rowOption) =>
         Option.match(rowOption, {
-          onNone: () => Effect.succeed(Option.none()),
-          onSome: (row) =>
-            Effect.succeed(Option.some(row as Schema.Schema.Type<typeof ProjectionTurnById>)),
+          onNone: () => Effect.succeedNone,
+          onSome: (row) => Effect.succeedSome(row as Schema.Schema.Type<typeof ProjectionTurnById>),
         }),
       ),
     );

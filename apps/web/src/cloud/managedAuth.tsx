@@ -14,6 +14,8 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useAtomCommand } from "../state/use-atom-command";
 import { resolveRelayClerkTokenOptions } from "./publicConfig";
 
+// The active session's Clerk token reader, kept for relay calls made outside
+// the managed relay runtime (web push registration).
 let relayTokenProvider: (() => Promise<string | null>) | null = null;
 
 export async function readManagedRelayClerkToken(): Promise<string | null> {

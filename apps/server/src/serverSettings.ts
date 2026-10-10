@@ -146,15 +146,23 @@ function databaseConnectionSecretName(connectionId: string): string {
 }
 
 /**
- * On disk the hub key is replaced by this marker and the real value lives in
- * the secret store, mirroring provider environment secrets. A client that
- * sends the marker back means "keep what you have".
+ * On disk a hub key or Bitbucket token is replaced by this marker and the
+ * real value lives in the secret store, mirroring provider environment
+ * secrets. A client that sends the marker back means "keep what you have".
  */
-const USAGE_LIMIT_SOURCE_KEY_REDACTED = "\u2022\u2022\u2022\u2022\u2022\u2022";
+const SECRET_REDACTED = "\u2022\u2022\u2022\u2022\u2022\u2022";
 
 function usageLimitSourceSecretName(sourceId: string): string {
   return `usage-limit-source-${Buffer.from(sourceId, "utf8").toString("base64url")}`;
 }
+
+const BITBUCKET_SECRET_NAMES = {
+  accessToken: "bitbucket-access-token",
+  apiToken: "bitbucket-api-token",
+} as const;
+const BITBUCKET_SECRET_FIELDS = ["accessToken", "apiToken"] as const;
+
+const redactSecret = (value: string) => (value.length > 0 ? SECRET_REDACTED : "");
 
 function redactProviderEnvironmentVariable(
   variable: ProviderInstanceEnvironmentVariable,
@@ -204,15 +212,21 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
       id,
       {
         ...source,
-        managementKey: source.managementKey.length > 0 ? USAGE_LIMIT_SOURCE_KEY_REDACTED : "",
+        managementKey: redactSecret(source.managementKey),
       },
     ]),
   );
+  const bitbucket = {
+    ...settings.bitbucket,
+    accessToken: redactSecret(settings.bitbucket.accessToken),
+    apiToken: redactSecret(settings.bitbucket.apiToken),
+  };
   return {
     ...settings,
     providerInstances,
     databaseConnections: databaseConnections as ServerSettings["databaseConnections"],
     usageLimitSources,
+    bitbucket,
   };
 }
 
@@ -582,6 +596,35 @@ const make = Effect.gen(function* () {
     ),
   );
 
+  /**
+   * Moves Bitbucket tokens hand-edited into settings.json into the secret store as they load,
+   * so plaintext does not stay on disk. If the store is unavailable, the token keeps working
+   * from the file and the move is retried on the next load.
+   */
+  const moveInlineBitbucketTokens = (settings: ServerSettings) =>
+    Effect.gen(function* () {
+      const bitbucket = { ...settings.bitbucket };
+      let moved = false;
+      for (const field of BITBUCKET_SECRET_FIELDS) {
+        const value = bitbucket[field];
+        if (value.length === 0 || value === SECRET_REDACTED) continue;
+        const stored = yield* secretStore
+          .set(BITBUCKET_SECRET_NAMES[field], textEncoder.encode(value))
+          .pipe(
+            Effect.as(true),
+            Effect.catch(() =>
+              Effect.logWarning("failed to move a Bitbucket token into the secret store", {
+                field,
+              }).pipe(Effect.as(false)),
+            ),
+          );
+        if (!stored) continue;
+        bitbucket[field] = SECRET_REDACTED;
+        moved = true;
+      }
+      return moved ? { ...settings, bitbucket } : settings;
+    });
+
   const loadSettingsFromDisk = Effect.gen(function* () {
     let settings = DEFAULT_SERVER_SETTINGS;
     let persisted: typeof PersistedOptionalProviderSettings.Type = {};
@@ -666,10 +709,12 @@ const make = Effect.gen(function* () {
     const folded = settingsFileTrusted
       ? foldLegacyProjectSettings(loaded, legacyProjectRows)
       : loaded;
-    if (folded !== loaded) {
-      yield* writeSettingsAtomically(folded);
+    // Only rewrite a file that decoded cleanly; an untrusted one stays for the user to repair.
+    const migrated = settingsFileTrusted ? yield* moveInlineBitbucketTokens(folded) : folded;
+    if (migrated !== loaded) {
+      yield* writeSettingsAtomically(migrated);
     }
-    return folded;
+    return migrated;
   });
 
   const settingsCache = yield* Cache.make<typeof cacheKey, ServerSettings, ServerSettingsError>({
@@ -720,7 +765,7 @@ const make = Effect.gen(function* () {
       }
       const usageLimitSources: Record<string, UsageLimitSourceConfig> = {};
       for (const [sourceId, source] of Object.entries(settings.usageLimitSources)) {
-        if (source.managementKey !== USAGE_LIMIT_SOURCE_KEY_REDACTED) {
+        if (source.managementKey !== SECRET_REDACTED) {
           usageLimitSources[sourceId] = source;
           continue;
         }
@@ -736,10 +781,23 @@ const make = Effect.gen(function* () {
           managementKey: Option.isSome(secret) ? textDecoder.decode(secret.value) : "",
         };
       }
+      const bitbucket = { ...settings.bitbucket };
+      for (const field of BITBUCKET_SECRET_FIELDS) {
+        if (bitbucket[field] !== SECRET_REDACTED) continue;
+        const secret = yield* secretStore
+          .get(BITBUCKET_SECRET_NAMES[field])
+          .pipe(
+            Effect.mapError(
+              (cause) => new ServerSettingsError({ settingsPath, operation: "read-secret", cause }),
+            ),
+          );
+        bitbucket[field] = Option.isSome(secret) ? textDecoder.decode(secret.value) : "";
+      }
       return {
         ...settings,
         providerInstances: providerInstances as ServerSettings["providerInstances"],
         usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
+        bitbucket,
       };
     });
 
@@ -762,14 +820,22 @@ const make = Effect.gen(function* () {
       Stream.map(resolveTextGenerationProvider),
     );
 
-  const persistProviderEnvironmentSecrets = (
-    current: ServerSettings,
-    next: ServerSettings,
-  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
-    Effect.gen(function* () {
+  type SecretChange = {
+    readonly secretName: string;
+    readonly providerInstanceId?: string;
+    readonly environmentVariable?: string;
+    readonly databaseConnectionId?: string;
+  } & (
+    | { readonly kind: "write"; readonly value: Uint8Array }
+    | { readonly kind: "remove"; readonly operation: "remove-secret" | "remove-stale-secret" }
+  );
+
+  const persistProviderEnvironmentSecrets = (current: ServerSettings, next: ServerSettings) =>
+    Effect.sync(() => {
       const providerInstances: Record<string, ProviderInstanceConfig> = {
         ...next.providerInstances,
       };
+      const changes: SecretChange[] = [];
 
       const nextSecretKeys = new Set<string>();
       for (const [instanceId, instance] of Object.entries(next.providerInstances)) {
@@ -778,18 +844,13 @@ const make = Effect.gen(function* () {
         for (const variable of instance.environment) {
           const secretName = providerEnvironmentSecretName({ instanceId, name: variable.name });
           if (!variable.sensitive) {
-            yield* secretStore.remove(secretName).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ServerSettingsError({
-                    settingsPath,
-                    operation: "remove-secret",
-                    providerInstanceId: instanceId,
-                    environmentVariable: variable.name,
-                    cause,
-                  }),
-              ),
-            );
+            changes.push({
+              kind: "remove",
+              secretName,
+              operation: "remove-secret",
+              providerInstanceId: instanceId,
+              environmentVariable: variable.name,
+            });
             environment.push(redactProviderEnvironmentVariable(variable));
             continue;
           }
@@ -808,32 +869,22 @@ const make = Effect.gen(function* () {
           const value = inlineValue ?? variable.value;
           if (!variable.valueRedacted || inlineValue !== undefined) {
             if (value.length > 0) {
-              yield* secretStore.set(secretName, textEncoder.encode(value)).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ServerSettingsError({
-                      settingsPath,
-                      operation: "write-secret",
-                      providerInstanceId: instanceId,
-                      environmentVariable: variable.name,
-                      cause,
-                    }),
-                ),
-              );
+              changes.push({
+                kind: "write",
+                secretName,
+                value: textEncoder.encode(value),
+                providerInstanceId: instanceId,
+                environmentVariable: variable.name,
+              });
               environment.push({ ...variable, value: "", valueRedacted: true });
             } else {
-              yield* secretStore.remove(secretName).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ServerSettingsError({
-                      settingsPath,
-                      operation: "remove-secret",
-                      providerInstanceId: instanceId,
-                      environmentVariable: variable.name,
-                      cause,
-                    }),
-                ),
-              );
+              changes.push({
+                kind: "remove",
+                secretName,
+                operation: "remove-secret",
+                providerInstanceId: instanceId,
+                environmentVariable: variable.name,
+              });
               const { valueRedacted: _omit, ...rest } = variable;
               environment.push(rest);
             }
@@ -853,67 +904,71 @@ const make = Effect.gen(function* () {
           if (!variable.sensitive) continue;
           const secretName = providerEnvironmentSecretName({ instanceId, name: variable.name });
           if (nextSecretKeys.has(secretName)) continue;
-          yield* secretStore.remove(secretName).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ServerSettingsError({
-                  settingsPath,
-                  operation: "remove-stale-secret",
-                  providerInstanceId: instanceId,
-                  environmentVariable: variable.name,
-                  cause,
-                }),
-            ),
-          );
+          changes.push({
+            kind: "remove",
+            secretName,
+            operation: "remove-stale-secret",
+            providerInstanceId: instanceId,
+            environmentVariable: variable.name,
+          });
         }
       }
 
       const usageLimitSources: Record<string, UsageLimitSourceConfig> = {};
       for (const [sourceId, source] of Object.entries(next.usageLimitSources)) {
         const secretName = usageLimitSourceSecretName(sourceId);
-        if (source.managementKey === USAGE_LIMIT_SOURCE_KEY_REDACTED) {
-          // Unchanged from the client's point of view; the store already has it.
+        if (source.managementKey === SECRET_REDACTED) {
           usageLimitSources[sourceId] = source;
           continue;
         }
         if (source.managementKey.length === 0) {
-          yield* secretStore
-            .remove(secretName)
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ServerSettingsError({ settingsPath, operation: "remove-secret", cause }),
-              ),
-            );
+          changes.push({ kind: "remove", secretName, operation: "remove-secret" });
           usageLimitSources[sourceId] = source;
           continue;
         }
-        yield* secretStore
-          .set(secretName, textEncoder.encode(source.managementKey))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ServerSettingsError({ settingsPath, operation: "write-secret", cause }),
-            ),
-          );
-        usageLimitSources[sourceId] = { ...source, managementKey: USAGE_LIMIT_SOURCE_KEY_REDACTED };
+        changes.push({
+          kind: "write",
+          secretName,
+          value: textEncoder.encode(source.managementKey),
+        });
+        usageLimitSources[sourceId] = { ...source, managementKey: SECRET_REDACTED };
       }
       for (const sourceId of Object.keys(current.usageLimitSources)) {
         if (sourceId in next.usageLimitSources) continue;
-        yield* secretStore
-          .remove(usageLimitSourceSecretName(sourceId))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ServerSettingsError({ settingsPath, operation: "remove-stale-secret", cause }),
-            ),
-          );
+        changes.push({
+          kind: "remove",
+          secretName: usageLimitSourceSecretName(sourceId),
+          operation: "remove-stale-secret",
+        });
+      }
+
+      const bitbucket = { ...next.bitbucket };
+      for (const field of BITBUCKET_SECRET_FIELDS) {
+        let value = bitbucket[field];
+        if (value === SECRET_REDACTED) {
+          // The marker keeps what is saved. A plaintext value hand-edited into settings.json
+          // is not in the secret store yet, so move it there instead of dropping it.
+          const inline = current.bitbucket[field];
+          if (inline === SECRET_REDACTED || inline.length === 0) continue;
+          value = inline;
+        }
+        const secretName = BITBUCKET_SECRET_NAMES[field];
+        if (value.length === 0) {
+          changes.push({ kind: "remove", secretName, operation: "remove-secret" });
+          continue;
+        }
+        changes.push({ kind: "write", secretName, value: textEncoder.encode(value) });
+        bitbucket[field] = SECRET_REDACTED;
       }
 
       return {
-        ...next,
-        providerInstances: providerInstances as ServerSettings["providerInstances"],
-        usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
+        settings: {
+          ...next,
+          providerInstances: providerInstances as ServerSettings["providerInstances"],
+          usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
+          bitbucket,
+        },
+        changes,
       };
     });
 
@@ -948,12 +1003,16 @@ const make = Effect.gen(function* () {
       };
     });
 
-  const persistDatabaseConnectionSecrets = (
-    current: ServerSettings,
-    next: ServerSettings,
-  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
-    Effect.gen(function* () {
+  /**
+   * Plans the secret-store writes for database connection access tokens. Like
+   * persistProviderEnvironmentSecrets, nothing is written here: the changes are
+   * applied together with the provider secrets so a failed settings write rolls
+   * them back too.
+   */
+  const persistDatabaseConnectionSecrets = (current: ServerSettings, next: ServerSettings) =>
+    Effect.sync(() => {
       const databaseConnections: Record<string, DatabaseConnection> = {};
+      const changes: SecretChange[] = [];
       const nextSecretKeys = new Set<string>();
 
       for (const [connectionId, connection] of Object.entries(next.databaseConnections)) {
@@ -965,17 +1024,12 @@ const make = Effect.gen(function* () {
         }
 
         if (connection.accessToken.length > 0) {
-          yield* secretStore.set(secretName, textEncoder.encode(connection.accessToken)).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ServerSettingsError({
-                  settingsPath,
-                  operation: "write-secret",
-                  databaseConnectionId: connectionId,
-                  cause,
-                }),
-            ),
-          );
+          changes.push({
+            kind: "write",
+            secretName,
+            value: textEncoder.encode(connection.accessToken),
+            databaseConnectionId: connectionId,
+          });
           nextSecretKeys.add(secretName);
           databaseConnections[connectionId] = {
             ...connection,
@@ -985,17 +1039,12 @@ const make = Effect.gen(function* () {
           continue;
         }
 
-        yield* secretStore.remove(secretName).pipe(
-          Effect.mapError(
-            (cause) =>
-              new ServerSettingsError({
-                settingsPath,
-                operation: "remove-secret",
-                databaseConnectionId: connectionId,
-                cause,
-              }),
-          ),
-        );
+        changes.push({
+          kind: "remove",
+          secretName,
+          operation: "remove-secret",
+          databaseConnectionId: connectionId,
+        });
         const { accessTokenRedacted: _omit, ...withoutRedaction } = connection;
         databaseConnections[connectionId] = withoutRedaction;
       }
@@ -1003,24 +1052,160 @@ const make = Effect.gen(function* () {
       for (const connectionId of Object.keys(current.databaseConnections)) {
         const secretName = databaseConnectionSecretName(connectionId);
         if (nextSecretKeys.has(secretName)) continue;
-        yield* secretStore.remove(secretName).pipe(
-          Effect.mapError(
-            (cause) =>
-              new ServerSettingsError({
-                settingsPath,
-                operation: "remove-stale-secret",
-                databaseConnectionId: connectionId,
-                cause,
-              }),
-          ),
-        );
+        changes.push({
+          kind: "remove",
+          secretName,
+          operation: "remove-stale-secret",
+          databaseConnectionId: connectionId,
+        });
       }
 
       return {
-        ...next,
-        databaseConnections: databaseConnections as ServerSettings["databaseConnections"],
+        settings: {
+          ...next,
+          databaseConnections: databaseConnections as ServerSettings["databaseConnections"],
+        },
+        changes,
       };
     });
+
+  const rollbackProviderEnvironmentSecretWrites = (
+    writes: ReadonlyArray<{
+      readonly secretName: string;
+      readonly previousValue: Option.Option<Uint8Array>;
+      readonly providerInstanceId?: string;
+      readonly environmentVariable?: string;
+      readonly databaseConnectionId?: string;
+    }>,
+  ) =>
+    Effect.forEach(
+      writes.toReversed(),
+      (write) =>
+        (Option.isSome(write.previousValue)
+          ? secretStore.set(write.secretName, write.previousValue.value)
+          : secretStore.remove(write.secretName)
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to roll back provider environment secret", {
+              providerInstanceId: write.providerInstanceId,
+              environmentVariable: write.environmentVariable,
+              databaseConnectionId: write.databaseConnectionId,
+              cause,
+            }),
+          ),
+        ),
+      { discard: true },
+    );
+
+  const applyProviderEnvironmentSecretChanges = (changes: ReadonlyArray<SecretChange>) => {
+    const applied: Array<{
+      readonly secretName: string;
+      readonly previousValue: Option.Option<Uint8Array>;
+      readonly providerInstanceId?: string;
+      readonly environmentVariable?: string;
+      readonly databaseConnectionId?: string;
+    }> = [];
+    const rollback = Effect.suspend(() => rollbackProviderEnvironmentSecretWrites(applied));
+    return Effect.forEach(
+      changes,
+      (change) =>
+        Effect.gen(function* () {
+          const previousValue = yield* secretStore.get(change.secretName).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({
+                  settingsPath,
+                  operation: "read-secret",
+                  providerInstanceId: change.providerInstanceId,
+                  environmentVariable: change.environmentVariable,
+                  databaseConnectionId: change.databaseConnectionId,
+                  cause,
+                }),
+            ),
+          );
+          // A store operation may mutate before reporting an error (for example chmod after rename).
+          applied.push({ ...change, previousValue });
+          yield* (
+            change.kind === "write"
+              ? secretStore.set(change.secretName, change.value)
+              : secretStore.remove(change.secretName)
+          ).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ServerSettingsError({
+                  settingsPath,
+                  operation: change.kind === "write" ? "write-secret" : change.operation,
+                  providerInstanceId: change.providerInstanceId,
+                  environmentVariable: change.environmentVariable,
+                  databaseConnectionId: change.databaseConnectionId,
+                  cause,
+                }),
+            ),
+          );
+        }),
+      { discard: true },
+    ).pipe(
+      Effect.tapError(() => rollback),
+      Effect.as(rollback),
+    );
+  };
+
+  const updateSettings = (
+    patch: ServerSettingsPatch,
+  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+    writeSemaphore.withPermits(1)(
+      // The theme CLI writes settings.json from another process, so updates
+      // re-read the file under the shared lock and merge onto it instead of a
+      // possibly stale cache.
+      withServerSettingsFileLock(
+        settingsPath,
+        Effect.gen(function* () {
+          const current = yield* loadSettingsFromDisk;
+          const updated = applyServerSettingsPatch(current, patch);
+          const persistedProvider = yield* persistProviderEnvironmentSecrets(current, updated);
+          const persistedDatabase = yield* persistDatabaseConnectionSecrets(
+            current,
+            persistedProvider.settings,
+          );
+          const next = yield* normalizeServerSettings(persistedDatabase.settings);
+          const materialized = yield* Effect.uninterruptibleMask(() =>
+            Effect.gen(function* () {
+              const rollbackSecretChanges = yield* applyProviderEnvironmentSecretChanges([
+                ...persistedProvider.changes,
+                ...persistedDatabase.changes,
+              ]);
+              const materializedExit = yield* Effect.exit(
+                materializeProviderEnvironmentSecrets(next).pipe(
+                  Effect.flatMap(materializeDatabaseConnectionSecrets),
+                ),
+              );
+              if (Exit.isFailure(materializedExit)) {
+                yield* rollbackSecretChanges;
+                return yield* Effect.failCause(materializedExit.cause);
+              }
+              const writeExit = yield* Effect.exit(writeSettingsAtomically(next));
+              if (Exit.isFailure(writeExit)) {
+                yield* rollbackSecretChanges;
+                return yield* Effect.failCause(writeExit.cause);
+              }
+              return materializedExit.value;
+            }),
+          );
+          yield* Cache.set(settingsCache, cacheKey, next);
+          yield* emitChange(next);
+          return resolveTextGenerationProvider(materialized);
+        }),
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, pathService),
+        Effect.mapError((cause) =>
+          cause._tag === "ServerSettingsFileLockError" ||
+          cause._tag === "ServerSettingsFileLockBusyError"
+            ? new ServerSettingsError({ settingsPath, operation: "write-file", cause })
+            : cause,
+        ),
+      ),
+    );
 
   const revalidateAndEmit = writeSemaphore.withPermits(1)(
     Effect.gen(function* () {
@@ -1098,40 +1283,7 @@ const make = Effect.gen(function* () {
       Effect.flatMap(materializeDatabaseConnectionSecrets),
       Effect.map(resolveTextGenerationProvider),
     ),
-    updateSettings: (patch) =>
-      writeSemaphore.withPermits(1)(
-        withServerSettingsFileLock(
-          settingsPath,
-          Effect.gen(function* () {
-            const current = yield* loadSettingsFromDisk;
-            const nextWithProviderSecrets = yield* persistProviderEnvironmentSecrets(
-              current,
-              applyServerSettingsPatch(current, patch),
-            );
-            const nextPersisted = yield* persistDatabaseConnectionSecrets(
-              current,
-              nextWithProviderSecrets,
-            );
-            const next = yield* normalizeServerSettings(nextPersisted);
-            yield* writeSettingsAtomically(next);
-            yield* Cache.set(settingsCache, cacheKey, next);
-            yield* emitChange(next);
-            const materialized = yield* materializeProviderEnvironmentSecrets(next).pipe(
-              Effect.flatMap(materializeDatabaseConnectionSecrets),
-            );
-            return resolveTextGenerationProvider(materialized);
-          }),
-        ).pipe(
-          Effect.provideService(FileSystem.FileSystem, fs),
-          Effect.provideService(Path.Path, pathService),
-          Effect.mapError((cause) =>
-            cause._tag === "ServerSettingsFileLockError" ||
-            cause._tag === "ServerSettingsFileLockBusyError"
-              ? new ServerSettingsError({ settingsPath, operation: "write-file", cause })
-              : cause,
-          ),
-        ),
-      ),
+    updateSettings,
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));
     },

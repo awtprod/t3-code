@@ -1,6 +1,10 @@
 import { withAgentDeviceEnvironment } from "../../mcp/McpProviderSession.ts";
 import { AntigravitySettings, ProviderDriverKind, ProviderSetupError } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  NodeRuntimeUnavailableError,
+  nodeRuntimeUnavailableMessage,
+} from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -29,8 +33,7 @@ import {
   buildAntigravityAcpSpawnInput,
   isAntigravitySignInRequiredError,
   prepareAntigravityProfile,
-  resolveAntigravityProfileDirectory,
-  resolveAntigravityRuntimeTempDirectory,
+  resolveAntigravityInstanceDirectories,
   type AntigravityAuthConfig,
 } from "../antigravityAuthSupport.ts";
 import {
@@ -59,6 +62,7 @@ import { discoverAntigravitySkills, resolveAntigravityUserHome } from "./Antigra
 
 const DRIVER = ProviderDriverKind.make("antigravity");
 const decodeSettings = Schema.decodeSync(AntigravitySettings);
+const isNodeRuntimeUnavailableError = Schema.is(NodeRuntimeUnavailableError);
 
 export type AntigravityDriverEnv =
   | AntigravityInstallation
@@ -98,15 +102,34 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       const authConfigIssue = antigravityAuthConfigIssue(auth);
       const processEnvironment = mergeProviderInstanceEnvironment(environment);
       const userHome = resolveAntigravityUserHome(yield* HostProcessPlatform, processEnvironment);
-      const profileDirectory = resolveAntigravityProfileDirectory(
+      const directories = yield* resolveAntigravityInstanceDirectories(
         serverConfig.stateDir,
         instanceId,
+      ).pipe(
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(Path.Path, path),
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER,
+              instanceId,
+              detail: "Could not resolve the Antigravity profile directory.",
+              cause,
+            }),
+        ),
       );
+      const profileDirectory = directories.profile;
       // No process of this instance exists yet, so every runtime temp
-      // directory left under the profile is an orphan from a killed server.
-      yield* removeAntigravityRuntimeTempDirs(
-        resolveAntigravityRuntimeTempDirectory(profileDirectory),
-      ).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
+      // directory it owns is an orphan from a killed server. Older builds
+      // unpacked inside the profile.
+      for (const directory of [
+        directories.runtimeTemp,
+        path.join(profileDirectory, "antigravity-acp", "tmp"),
+      ]) {
+        yield* removeAntigravityRuntimeTempDirs(directory).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+        );
+      }
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER,
         instanceId,
@@ -160,10 +183,21 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
           baseEnv: processEnvironment,
           auth,
           userHome,
+          tempDirectory: directories.runtimeTemp,
         }).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.mapError((cause) =>
+            isNodeRuntimeUnavailableError(cause.cause)
+              ? new ProviderSetupError({
+                  instanceId,
+                  operation: "start",
+                  detail: nodeRuntimeUnavailableMessage("Antigravity sign-in"),
+                  cause,
+                })
+              : cause,
+          ),
         );
         // Each process unpacks into its own directory that dies with the
         // runtime scope, after the child is killed. A shared directory would
@@ -422,7 +456,8 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
                 instanceId,
                 detail: isAntigravitySignInRequiredError(cause)
                   ? "Sign in to Antigravity in provider settings before refreshing models."
-                  : cause._tag === "ProviderSetupError" && cause.operation === "configure"
+                  : cause._tag === "ProviderSetupError" &&
+                      (cause.operation === "configure" || cause.operation === "start")
                     ? cause.detail
                     : "Could not refresh Antigravity models. The previous model list is unchanged.",
                 cause,

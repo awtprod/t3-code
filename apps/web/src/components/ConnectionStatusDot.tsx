@@ -11,7 +11,6 @@ export function connectionPhaseDotClassName(phase: EnvironmentConnectionPhase): 
     case "connecting":
     case "reconnecting":
       return "bg-warning";
-    case "unsupported":
     case "error":
       return "bg-destructive";
     default:
@@ -70,7 +69,7 @@ export function ConnectionStatusDot({
   return (
     <Tooltip>
       <TooltipTrigger render={dot} />
-      <TooltipPopup side="top" className="max-w-80 whitespace-pre-wrap leading-tight">
+      <TooltipPopup side="top" className="whitespace-pre-wrap">
         {tooltipText}
       </TooltipPopup>
     </Tooltip>

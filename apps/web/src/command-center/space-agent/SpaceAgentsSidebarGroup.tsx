@@ -5,7 +5,6 @@ import { memo, useCallback } from "react";
 
 import {
   SidebarGroup,
-  SidebarGroupLabel,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
@@ -27,7 +26,12 @@ export function SpaceAgentsSidebarGroupView(props: SpaceAgentsSidebarGroupViewPr
   if (props.agents.length === 0) return null;
   return (
     <SidebarGroup className="px-2 pt-1 pb-1" data-testid="sidebar-space-agents">
-      <SidebarGroupLabel className="h-6 px-2 text-xs">Spaces</SidebarGroupLabel>
+      <div
+        className="flex h-6 shrink-0 items-center px-2 font-medium text-sidebar-muted-foreground text-xs"
+        data-slot="sidebar-group-label"
+      >
+        Spaces
+      </div>
       <SidebarMenu>
         {props.agents.map((agent) => {
           const threadId = agent.threadId;

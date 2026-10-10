@@ -1,3 +1,4 @@
+import * as ByteSize from "effect/ByteSize";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -573,7 +574,7 @@ export const layer = Layer.effect(
                 message: "The Google Drive export did not create a regular file.",
               });
             }
-            if (info.size > FileSystem.Size(MAX_GOOGLE_DRIVE_EXPORT_BYTES)) {
+            if (info.size > ByteSize.bytes(MAX_GOOGLE_DRIVE_EXPORT_BYTES)) {
               return yield* new GoogleReadConnectorError({
                 reason: "output",
                 message: `The Google Drive export exceeds the ${MAX_GOOGLE_DRIVE_EXPORT_BYTES}-byte limit.`,

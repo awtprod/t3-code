@@ -35,6 +35,8 @@ const REVIEWED_PUBLIC_UPSTREAM_COMMITS = [
   // pingdotgg/t3code upstream head merged in the 2026-09 catch-up sync (beta.103 -> rc.112),
   // reviewed as public on 2026-09-18.
   "eed974c122e192de45b54b7dac7ca1a51448c08f",
+  // pingdotgg/t3code tag v0.0.45 merged in the 2026-10 sync, reviewed as public on 2026-10-09.
+  "6c8fed35dded9ff71c5b46807125457acbb76be6",
 ] as const;
 
 const args = new Set(process.argv.slice(2));

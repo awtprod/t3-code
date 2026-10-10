@@ -110,15 +110,17 @@ export function SpaceAgentThreadControlsView(props: SpaceAgentThreadControlsView
             </span>
           ) : null}
         </PopoverTrigger>
-        <PopoverPopup side="bottom" align="end" className="w-96" viewportClassName="p-1">
-          <div className="flex items-baseline justify-between gap-2 px-2 pt-1 pb-1.5">
-            <span className="text-xs font-medium">{agent.displayName} activity</span>
-            <span className="text-[10px] text-muted-foreground">
-              {agent.wakesToday} wakes today
-            </span>
-          </div>
-          <div className="max-h-96 overflow-y-auto">
-            <SpaceAgentActivityList entries={props.activity} error={props.activityError} />
+        <PopoverPopup side="bottom" align="end" className="w-96" padding="none">
+          <div className="p-1">
+            <div className="flex items-baseline justify-between gap-2 px-2 pt-1 pb-1.5">
+              <span className="text-xs font-medium">{agent.displayName} activity</span>
+              <span className="text-[10px] text-muted-foreground">
+                {agent.wakesToday} wakes today
+              </span>
+            </div>
+            <div className="max-h-96 overflow-y-auto">
+              <SpaceAgentActivityList entries={props.activity} error={props.activityError} />
+            </div>
           </div>
         </PopoverPopup>
       </Popover>

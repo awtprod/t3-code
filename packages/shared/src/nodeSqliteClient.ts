@@ -9,6 +9,7 @@ import * as NodeSqlite from "node:sqlite";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
@@ -37,11 +38,6 @@ export interface SqliteClientConfig {
   readonly transformResultNames?: ((str: string) => string) | undefined;
   readonly transformQueryNames?: ((str: string) => string) | undefined;
 }
-
-export interface SqliteMemoryClientConfig extends Omit<
-  SqliteClientConfig,
-  "filename" | "readonly"
-> {}
 
 export class UnsupportedNodeSqliteVersionError extends Schema.TaggedError<UnsupportedNodeSqliteVersionError>()(
   "UnsupportedNodeSqliteVersionError",
@@ -104,9 +100,8 @@ const classifyError = (cause: unknown, message: string, operation: string) => {
   return classifySqliteError(cause, { message, operation });
 };
 
-const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
+const make = Effect.fn("makeWithDatabase")(function* (
   options: SqliteClientConfig,
-  openDatabase: () => NodeSqlite.DatabaseSync,
 ): Effect.fn.Return<Client.SqlClient, SqlError, Scope.Scope | Reactivity.Reactivity> {
   yield* checkNodeSqliteCompat();
 
@@ -118,7 +113,11 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   const makeConnection = Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const db = yield* Effect.try({
-      try: openDatabase,
+      try: () =>
+        new NodeSqlite.DatabaseSync(options.filename, {
+          readOnly: options.readonly ?? false,
+          allowExtension: options.allowExtension ?? false,
+        }),
       catch: (cause) =>
         new SqlError({
           reason: classifyError(cause, "Failed to open database", "open"),
@@ -155,10 +154,11 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
           }),
       });
 
-    const prepareCache = yield* Cache.make({
+    const prepareCache = yield* Cache.makeWith(prepare, {
       capacity: options.prepareCacheSize ?? 200,
-      timeToLive: options.prepareCacheTTL ?? Duration.minutes(10),
-      lookup: prepare,
+      // A transient prepare failure must not outlive the lock or missing schema.
+      timeToLive: (exit) =>
+        Exit.isSuccess(exit) ? (options.prepareCacheTTL ?? Duration.minutes(10)) : Duration.zero,
     });
 
     const runStatement = (
@@ -301,39 +301,14 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
   });
 });
 
-const make = (
-  options: SqliteClientConfig,
-): Effect.Effect<Client.SqlClient, SqlError, Scope.Scope | Reactivity.Reactivity> =>
-  makeWithDatabase(
-    options,
-    () =>
-      new NodeSqlite.DatabaseSync(options.filename, {
-        readOnly: options.readonly ?? false,
-        allowExtension: options.allowExtension ?? false,
-      }),
-  );
-
-const makeMemory = (
-  config: SqliteMemoryClientConfig = {},
-): Effect.Effect<Client.SqlClient, SqlError, Scope.Scope | Reactivity.Reactivity> =>
-  makeWithDatabase(
-    {
-      ...config,
-      filename: ":memory:",
-      readonly: false,
-    },
-    () => {
-      const database = new NodeSqlite.DatabaseSync(":memory:", {
-        allowExtension: config.allowExtension ?? false,
-      });
-      return database;
-    },
-  );
-
 export const layer = (config: SqliteClientConfig): Layer.Layer<Client.SqlClient, SqlError> =>
   Layer.effect(Client.SqlClient, make(config)).pipe(Layer.provide(Reactivity.layer));
 
+/**
+ * An in-memory database. Command Center tests use this; it is the same client
+ * as `layer` with `filename: ":memory:"`.
+ */
 export const layerMemory = (
-  config: SqliteMemoryClientConfig = {},
+  config: Omit<SqliteClientConfig, "filename" | "readonly"> = {},
 ): Layer.Layer<Client.SqlClient, SqlError> =>
-  Layer.effect(Client.SqlClient, makeMemory(config)).pipe(Layer.provide(Reactivity.layer));
+  layer({ ...config, filename: ":memory:", readonly: false });

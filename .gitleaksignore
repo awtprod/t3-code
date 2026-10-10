@@ -54,3 +54,14 @@ apps/server/src/httpResponseErrorGuard.test.ts:generic-api-key:61
 .repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:415
 .repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:468
 .repos/alchemy-effect/packages/alchemy/test/Output.test.ts:generic-api-key:851
+
+# Exact staged false-positive fingerprints from the public Alchemy and Effect reference corpora as
+# vendored by pingdotgg/t3code tag v0.0.45 (byte-identical to the tag). Immutable `.repos/` fixtures
+# only; never add application findings.
+.repos/alchemy-effect/packages/alchemy/src/Cloudflare/Auth/OAuthClient.ts:generic-api-key:9
+.repos/alchemy-effect/packages/alchemy/test/Auth/fixtures/v0-home/credentials/work/cf-stored.json:generic-api-key:3
+.repos/alchemy-effect/packages/alchemy/test/Auth/Migration.test.ts:generic-api-key:106
+.repos/alchemy-effect/packages/alchemy/test/Docker/Docker.test.ts:generic-api-key:301
+.repos/alchemy-effect/website/src/content/docs/cli/profile.mdx:generic-api-key:190
+.repos/effect-smol/packages/platform/deno/test/fixtures/tls/key.pem:private-key:1
+.repos/effect-smol/packages/platform/node/test/fixtures/tls/key.pem:private-key:1

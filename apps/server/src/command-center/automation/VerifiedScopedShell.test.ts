@@ -293,7 +293,10 @@ it.layer(NodeServices.layer)("Verified scoped shell admission", (it) => {
 const RUN_LIVE_BWRAP =
   NodeProcess.platform === "linux" && NodeProcess.env.CC_SCOPED_SHELL_LIVE === "1";
 
-describe.runIf(RUN_LIVE_BWRAP).sequential("Verified scoped shell live Bubblewrap boundary", () => {
+// Suites run sequentially by default here (no `sequence.concurrent` in the test config).
+describe.runIf(RUN_LIVE_BWRAP)(
+  "Verified scoped shell live Bubblewrap boundary",
+  () => {
   it.layer(NodeServices.layer)("live execution", (it) => {
     const prepare = Effect.fn("VerifiedScopedShell.test.prepare")(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

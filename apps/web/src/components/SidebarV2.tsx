@@ -129,9 +129,9 @@ import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
   prStatusIndicator,
   resolveThreadPr,
-  settledPrHoverColorClass,
   terminalStatusFromRunningIds,
   type TerminalStatusIndicator,
+  type ThreadPr,
 } from "./ThreadStatusIndicators";
 import {
   resolveSnoozePresets,
@@ -159,13 +159,8 @@ import {
 import { Input } from "./ui/input";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
-import {
-  SidebarContent,
-  SidebarGroup,
-  SidebarMenuButton,
-  SidebarSeparator,
-  useSidebar,
-} from "./ui/sidebar";
+import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
+import { Separator } from "./ui/separator";
 import {
   SidebarChromeFooter,
   SidebarChromeHeader,
@@ -381,27 +376,41 @@ function SnoozePopoverButton(props: {
       >
         <ClockIcon className="size-3" />
       </PopoverTrigger>
-      <PopoverPopup side="bottom" align="end" className="w-56" viewportClassName="p-1">
-        {presets.map((preset) => (
-          <button
-            key={preset.id}
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpenChange(false);
-              onSnooze(preset);
-            }}
-            className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground/90 hover:bg-accent hover:text-foreground"
-          >
-            <span className="flex-1">{preset.label}</span>
-            <span className="font-mono text-[10px] text-muted-foreground/60 tabular-nums">
-              {preset.whenLabel}
-            </span>
-          </button>
-        ))}
+      <PopoverPopup side="bottom" align="end" className="w-56" padding="none">
+        <div className="p-1">
+          {presets.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenChange(false);
+                onSnooze(preset);
+              }}
+              className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground/90 hover:bg-accent hover:text-foreground"
+            >
+              <span className="flex-1">{preset.label}</span>
+              <span className="font-mono text-[10px] text-muted-foreground/60 tabular-nums">
+                {preset.whenLabel}
+              </span>
+            </button>
+          ))}
+        </div>
       </PopoverPopup>
     </Popover>
   );
+}
+
+// Hover tint for the PR glyph on settled rows (the row's `group/v2-row` hover).
+function settledPrHoverColorClass(state: NonNullable<ThreadPr>["state"]): string {
+  switch (state) {
+    case "open":
+      return "group-hover/v2-row:text-emerald-600 dark:group-hover/v2-row:text-emerald-300/90";
+    case "merged":
+      return "group-hover/v2-row:text-violet-600 dark:group-hover/v2-row:text-violet-300/90";
+    case "closed":
+      return "group-hover/v2-row:text-red-600 dark:group-hover/v2-row:text-red-300/90";
+  }
 }
 
 const SidebarV2Row = memo(function SidebarV2Row(props: {
@@ -2593,8 +2602,11 @@ export default function SidebarV2() {
           api.contextMenu.show(
             buildThreadActionMenuItems({
               branch: thread.branch ?? null,
+              // SidebarV2 has no project-scoped list or auto-settle handlers.
+              projectFilter: null,
               isPinned,
               isSettled,
+              autoSettleEnabled: true,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
@@ -2602,6 +2614,7 @@ export default function SidebarV2() {
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
               supports: {
                 settlement: supportsSettlement,
+                autoSettleOptOut: false,
                 snooze: supportsSnooze,
                 pinning: supportsPinning,
                 titleRegeneration: supportsTitleRegeneration,
@@ -2858,7 +2871,11 @@ export default function SidebarV2() {
         fixedHeader={
           <>
             <SidebarCommandCenterNavigation />
-            <SidebarSeparator className="mx-2 w-auto" />
+            <Separator
+              className="mx-2 w-auto! bg-sidebar-border"
+              data-sidebar="separator"
+              data-slot="sidebar-separator"
+            />
             {/* Keep the search controls above the stage backdrop fade. */}
             <SidebarGroup className="relative z-[1] gap-1 p-[var(--sidebar-content-inset)]">
               <div className="flex items-center gap-1">
@@ -3060,9 +3077,8 @@ export default function SidebarV2() {
                           ) ?? null
                         }
                         projectFavicon={
-                          projectFaviconByKey.get(
-                            `${thread.environmentId}:${thread.projectId}`,
-                          ) ?? null
+                          projectFaviconByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
+                          null
                         }
                         environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
                         providerEntryByInstanceId={providerEntryByInstanceId}
@@ -3166,9 +3182,8 @@ export default function SidebarV2() {
                           ) ?? null
                         }
                         projectFavicon={
-                          projectFaviconByKey.get(
-                            `${thread.environmentId}:${thread.projectId}`,
-                          ) ?? null
+                          projectFaviconByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
+                          null
                         }
                         providerEntryByInstanceId={providerEntryByInstanceId}
                         timestampFormat={timestampFormat}

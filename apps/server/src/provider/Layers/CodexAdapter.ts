@@ -23,6 +23,7 @@ import {
   type ToolActivityNativeAppReference,
   type ToolActivitySource,
   type ProviderUserInputAnswers,
+  type ServerProviderModel,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
@@ -112,11 +113,14 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
 const isCommandCenterCodexHomeIsolationError = Schema.is(CommandCenterCodexHomeIsolationError);
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
+import { classifyCodexManagedError } from "../CodexManagedErrors.ts";
 const PROVIDER = ProviderDriverKind.make("codex");
 
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  /** The provider's model list; supplies model display names for runtime info. */
+  readonly models?: Effect.Effect<ReadonlyArray<ServerProviderModel>>;
   readonly makeRuntime?: (
     options: CodexSessionRuntimeOptions,
   ) => Effect.Effect<
@@ -124,6 +128,12 @@ export interface CodexAdapterLiveOptions {
     CodexSessionRuntimeError,
     ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
   >;
+  readonly resolveRuntime?: Effect.Effect<
+    import("../CodexManagedRuntime.ts").CodexEffectiveRuntime,
+    import("@t3tools/contracts").ProviderSetupError,
+    Scope.Scope
+  >;
+  readonly onManagedConnectionRevoked?: Effect.Effect<void>;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   /** Trusted source containing the auth.json copied into isolated Command Center homes. */
@@ -201,6 +211,8 @@ interface CodexAdapterSessionContext {
   readonly turnRequestCorrelation: CodexTurnRequestCorrelation;
   readonly sendLock: Semaphore.Semaphore;
   readonly turnTokenUsage: CodexTurnTokenUsageState;
+  readonly startInput: Parameters<CodexAdapterShape["startSession"]>[0];
+  readonly runtimeRevision?: string;
   stopped: boolean;
 }
 
@@ -984,6 +996,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_change_approval";
     case "mcpServer/elicitation/request":
       return "mcp_elicitation_approval";
+    case "item/permissions/requestApproval":
+      return "permission_approval";
     case "applyPatchApproval":
       return "apply_patch_approval";
     case "execCommandApproval":
@@ -1011,6 +1025,8 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_change_approval";
     case "mcp-elicitation":
       return "mcp_elicitation_approval";
+    case "permission":
+      return "permission_approval";
     default:
       return "unknown";
   }
@@ -1678,6 +1694,20 @@ function mapToRuntimeEvents(
         }
         case "mcpServer/elicitation/request":
           return elicitation?.message;
+        case "item/permissions/requestApproval": {
+          const payload = readPayload(
+            EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
+            event.payload,
+          );
+          const requestedPaths = [
+            ...(payload?.permissions.fileSystem?.read ?? []),
+            ...(payload?.permissions.fileSystem?.write ?? []),
+          ];
+          return (
+            nonEmptyDetail(payload?.reason) ??
+            (requestedPaths.length > 0 ? `Access: ${requestedPaths.join(", ")}` : undefined)
+          );
+        }
         case "applyPatchApproval": {
           const payload = readPayload(
             EffectCodexSchema.ServerRequest__ApplyPatchApprovalParams,
@@ -2598,14 +2628,34 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           yield* Effect.suspend(() => stopSessionInternal(existing));
         }
 
+        const sessionScope = yield* Scope.make("sequential");
+        let sessionScopeTransferred = false;
+        yield* Effect.addFinalizer(() =>
+          sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
+        );
+        const resolved = options?.resolveRuntime
+          ? yield* options.resolveRuntime.pipe(
+              Effect.provideService(Scope.Scope, sessionScope),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: cause.detail,
+                  }),
+              ),
+            )
+          : undefined;
+        const effectiveConfig = resolved?.config ?? codexConfig;
+        const effectiveEnvironment = resolved?.environment ?? options?.environment;
         const serviceTier =
-          input.modelSelection?.instanceId === boundInstanceId
+          !resolved && input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
         const sandboxTarget = sandboxProviderTarget(input.threadId);
         const commandCenterThread =
           isCommandCenterThreadId(input.threadId) && sandboxTarget === undefined;
-        const sourceEnvironment = options?.environment ?? process.env;
+        const sourceEnvironment = effectiveEnvironment ?? process.env;
         const commandCenterIsolationIssue = commandCenterProviderIsolationIssue({
           threadId: input.threadId,
           provider: PROVIDER,
@@ -2694,7 +2744,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           if (options?.commandCenterSourceHomePath) {
             return path.resolve(expandHomePath(options.commandCenterSourceHomePath));
           }
-          const configured = codexConfig.homePath.trim();
+          const configured = effectiveConfig.homePath.trim();
           if (configured.length > 0) return path.resolve(expandHomePath(configured));
           const environmentHome = sourceEnvironment.CODEX_HOME?.trim();
           if (environmentHome) return path.resolve(expandHomePath(environmentHome));
@@ -2729,7 +2779,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               fileSystem,
               path,
               crypto,
-              runtimeExecutablePath: commandCenterRuntimeExecutable ?? codexConfig.binaryPath,
+              runtimeExecutablePath: commandCenterRuntimeExecutable ?? effectiveConfig.binaryPath,
               platform: hostPlatform,
               writableRoots: [cwd, serverConfig.worktreesDir],
             }).pipe(
@@ -2785,7 +2835,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 ...McpProviderSession.withAgentDeviceEnvironment(sourceEnvironment, mcpSession),
                 T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
               }
-            : options?.environment;
+            : effectiveEnvironment;
         const mcpAppServerArgs = mcpSession
           ? [
               "-c",
@@ -2802,13 +2852,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd,
-          binaryPath: commandCenterRuntimeExecutable ?? codexConfig.binaryPath,
+          ...(options?.models ? { models: options.models } : {}),
+          binaryPath: commandCenterRuntimeExecutable ?? effectiveConfig.binaryPath,
           ...(runtimeEnvironment ? { environment: runtimeEnvironment } : {}),
-          launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
+          launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, effectiveEnvironment),
           ...(commandCenterHome
             ? { homePath: commandCenterHome.homePath }
-            : codexConfig.homePath
-              ? { homePath: codexConfig.homePath }
+            : effectiveConfig.homePath
+              ? { homePath: effectiveConfig.homePath }
               : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
@@ -2883,11 +2934,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const startRuntimeAttempt = Effect.fn("CodexAdapter.startRuntimeAttempt")(function* (
           attemptInput: CodexSessionRuntimeOptions,
         ) {
-          const sessionScope = yield* Scope.make("sequential");
-          let sessionScopeTransferred = false;
-          yield* Effect.addFinalizer(() =>
-            sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
-          );
+          // Reuses the session scope opened before `resolveRuntime`, so a managed
+          // runtime's access lease lives exactly as long as the session.
           const runtime = yield* createRuntime(attemptInput).pipe(
             Effect.provideService(Scope.Scope, sessionScope),
             Effect.provideService(
@@ -2954,6 +3002,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 if (errorPayload?.error.codexErrorInfo === "usageLimitExceeded") return;
               }
 
+              const managedError = options?.resolveRuntime
+                ? classifyCodexManagedError(event.payload)
+                : undefined;
+              if (managedError?.revoke && options?.onManagedConnectionRevoked)
+                yield* options.onManagedConnectionRevoked;
               let usageLimitError: ProviderRuntimeEvent | undefined;
               let usageLimitMessage: string | undefined;
               if (event.method === "turn/completed") {
@@ -2965,7 +3018,18 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   completedPayload?.turn.status === "failed"
                     ? completedPayload.turn.error
                     : undefined;
-                if (turnError?.codexErrorInfo === "usageLimitExceeded") {
+                if (turnError && managedError) {
+                  usageLimitMessage = managedError.message;
+                  usageLimitError = {
+                    ...runtimeEventBase(event, event.threadId),
+                    type: "runtime.error",
+                    payload: {
+                      message: managedError.message,
+                      code: managedError.code,
+                      class: "provider_error",
+                    },
+                  };
+                } else if (turnError?.codexErrorInfo === "usageLimitExceeded") {
                   usageLimitMessage = codexUsageLimitMessage(rateLimits, event.createdAt);
                   usageLimitError = {
                     ...runtimeEventBase(event, event.threadId),
@@ -2984,12 +3048,27 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 event.threadId,
                 turnRequestCorrelation,
               ).map((runtimeEvent) => {
+                if (managedError && runtimeEvent.type === "runtime.error")
+                  return {
+                    ...runtimeEvent,
+                    payload: {
+                      ...runtimeEvent.payload,
+                      message: managedError.message,
+                      detail: managedError.message,
+                      code: managedError.code,
+                    },
+                  } satisfies ProviderRuntimeEvent;
+
                 if (runtimeEvent.type === "turn.completed" && runtimeEvent.turnId) {
                   return {
                     ...runtimeEvent,
                     payload: {
                       ...runtimeEvent.payload,
-                      ...(usageLimitMessage ? { errorMessage: usageLimitMessage } : {}),
+                      ...(managedError
+                        ? { errorMessage: managedError.message }
+                        : usageLimitMessage
+                          ? { errorMessage: usageLimitMessage }
+                          : {}),
                       tokenUsage: completeCodexTurnTokenUsage(
                         turnTokenUsage,
                         String(runtimeEvent.turnId),
@@ -3041,7 +3120,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               ),
             );
           sessionScopeTransferred = true;
-          return { eventFiber, runtime, sessionScope, started } as const;
+          return { eventFiber, runtime, started } as const;
         });
 
         const attempt = yield* startRuntimeAttempt(runtimeInput).pipe(
@@ -3055,7 +3134,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }),
           ),
         );
-        const { eventFiber, runtime, sessionScope, started } = attempt;
+        const { eventFiber, runtime, started } = attempt;
 
         sessions.set(input.threadId, {
           threadId: input.threadId,
@@ -3065,6 +3144,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           turnRequestCorrelation,
           sendLock,
           turnTokenUsage,
+          startInput: input,
+          ...(resolved ? { runtimeRevision: resolved.revision } : {}),
           stopped: false,
         });
 
@@ -3087,40 +3168,52 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         detail: `Invalid attachment id '${attachment.id}'.`,
       });
     }
-    const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "turn/start",
-            detail: `Failed to read attachment file: ${cause.message}.`,
-            cause,
-          }),
-      ),
-    );
     return {
-      type: "image" as const,
-      url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+      type: "localImage" as const,
+      path: attachmentPath,
     };
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    // Codex ingests images only. Anything else would be base64-encoded as an
-    // image and rejected or misread; generic files reach the agent through the
-    // path line ProviderService puts in the prompt.
+    // Codex ingests images only. Anything else would be inlined as an image
+    // and rejected or misread; generic files reach the agent through the path
+    // line ProviderService puts in the prompt. Images are passed by path
+    // instead of base64 so the turn/start request does not scale with file
+    // size; the CLI reads the file itself.
     const codexAttachments = yield* Effect.forEach(
       (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
       (attachment) => resolveAttachment(input, attachment),
       { concurrency: 1 },
     );
 
-    const session = yield* requireSession(input.threadId);
+    let session = yield* requireSession(input.threadId);
+    if (options?.resolveRuntime) {
+      const next = yield* options.resolveRuntime.pipe(
+        Effect.scoped,
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: cause.detail,
+            }),
+        ),
+      );
+      if (next.revision !== session.runtimeRevision) {
+        const previous = yield* session.runtime.getSession;
+        yield* startSession({
+          ...session.startInput,
+          ...(previous.resumeCursor ? { resumeCursor: previous.resumeCursor } : {}),
+        });
+        session = yield* requireSession(input.threadId);
+      }
+    }
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
         : undefined;
     const serviceTier =
-      input.modelSelection?.instanceId === boundInstanceId
+      !options?.resolveRuntime && input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
     // Serialize the RPC so the pre-response correlation slot names exactly one

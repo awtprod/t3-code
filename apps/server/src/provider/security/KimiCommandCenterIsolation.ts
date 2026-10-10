@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off
+import * as ByteSize from "effect/ByteSize";
 import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
 
@@ -17,7 +18,7 @@ import { KimiRuntimeError } from "../kimiRuntime.ts";
 import { isSupportedKimiVersion, parseKimiVersion } from "../kimiRuntime.ts";
 import { spawnAndCollect } from "../providerSnapshot.ts";
 
-const MAX_KIMI_CONFIG_BYTES = FileSystem.Size(2 * 1024 * 1024);
+const MAX_KIMI_CONFIG_BYTES = ByteSize.bytes(2 * 1024 * 1024);
 const SANDBOX_HOME = "/tmp/kimi-home";
 export const KIMI_SANDBOX_WORKSPACE = "/workspace";
 

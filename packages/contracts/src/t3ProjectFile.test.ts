@@ -107,4 +107,10 @@ describe("T3ProjectFile", () => {
       decode({ sandbox: { image: `desktop@sha256:${"a".repeat(64)}`, previewPorts: [0] } }),
     ).toThrow();
   });
+
+  it("decodes worktreeSubmodules and rejects unknown modes", () => {
+    expect(decode({ worktreeSubmodules: "none" }).worktreeSubmodules).toBe("none");
+    expect(decode({ worktreeSubmodules: "top-level" }).worktreeSubmodules).toBe("top-level");
+    expect(() => decode({ worktreeSubmodules: "shallow" })).toThrow();
+  });
 });

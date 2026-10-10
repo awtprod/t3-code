@@ -392,13 +392,22 @@ const proxyWebSocket = Effect.fnUntraced(function* (port: number) {
     protocols.length > 0 ? { protocols: [...protocols] } : {},
   ).pipe(Effect.provide(Socket.layerWebSocketConstructorGlobal));
 
-  const writeUpstream = yield* upstream.writer;
-  const writeDownstream = yield* downstream.writer;
+  const upstreamWriter = yield* upstream.writer;
+  const downstreamWriter = yield* downstream.writer;
 
-  yield* Effect.raceFirst(
-    upstream.runRaw((chunk) => writeDownstream(chunk)),
-    downstream.runRaw((chunk) => writeUpstream(chunk)),
-  ).pipe(
+  // Every socket termination, a clean close included, fails `pull` with a
+  // SocketError, so each pump only ends by failing.
+  const pump = (from: Socket.Socket, to: Socket.Writer) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { pull } = yield* from.reader;
+        while (true) {
+          yield* to.writeAll(yield* pull);
+        }
+      }),
+    );
+
+  yield* Effect.raceFirst(pump(upstream, downstreamWriter), pump(downstream, upstreamWriter)).pipe(
     // A socket closing is how this ends, not a failure to report.
     Effect.catchTag("SocketError", (error) =>
       Effect.logDebug("Preview gateway websocket closed", { port, reason: error.reason._tag }),

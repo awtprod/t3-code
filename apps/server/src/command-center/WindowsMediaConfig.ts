@@ -168,10 +168,10 @@ export function makeWindowsMediaSettings(input: {
 }
 
 const WindowsMediaEnvConfig = Config.all({
-  enabled: Config.boolean("CC_WINDOWS_MEDIA_ENABLED").pipe(Config.option),
-  sshConfigPath: Config.string("CC_WINDOWS_MEDIA_SSH_CONFIG").pipe(Config.option),
-  hostAlias: Config.string("CC_WINDOWS_MEDIA_SSH_ALIAS").pipe(Config.option),
-  roots: Config.string("CC_WINDOWS_MEDIA_ROOTS").pipe(Config.option),
+  enabled: Config.Boolean("CC_WINDOWS_MEDIA_ENABLED").pipe(Config.option),
+  sshConfigPath: Config.String("CC_WINDOWS_MEDIA_SSH_CONFIG").pipe(Config.option),
+  hostAlias: Config.String("CC_WINDOWS_MEDIA_SSH_ALIAS").pipe(Config.option),
+  roots: Config.String("CC_WINDOWS_MEDIA_ROOTS").pipe(Config.option),
 });
 
 /**

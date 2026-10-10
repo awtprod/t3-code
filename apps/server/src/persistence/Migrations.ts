@@ -91,7 +91,7 @@ import Migration0079 from "./Migrations/079_CommandCenterSpaceAgent.ts";
 import Migration0080 from "./Migrations/080_CommandCenterSpaceActivity.ts";
 import Migration0081 from "./Migrations/081_CommandCenterSpaceAgentState.ts";
 import Migration0082 from "./Migrations/082_CommandCenterSpaceAgentReplies.ts";
-// Upstream-added migrations (T3 Code upstream 044-052), renumbered to 083-091
+// Upstream-added migrations (T3 Code upstream 044-054), renumbered to 083-093
 // so they append after the fork's highest migration (082). See
 // docs/operations/upstream-sync.md.
 import Migration0083 from "./Migrations/083_ClearAutomaticProjectModelDefaults.ts";
@@ -103,6 +103,8 @@ import Migration0088 from "./Migrations/088_ProjectionThreadsActiveOrderKey.ts";
 import Migration0089 from "./Migrations/089_ProjectionThreadPullRequests.ts";
 import Migration0090 from "./Migrations/090_ProjectionThreadMessageContext.ts";
 import Migration0091 from "./Migrations/091_ProjectionThreadTitleState.ts";
+import Migration0092 from "./Migrations/092_PullRequestFilesViewed.ts";
+import Migration0093 from "./Migrations/093_ProjectionThreadsAutoSettleDisabledAt.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -193,9 +195,9 @@ export const migrationEntries = [
   [80, "CommandCenterSpaceActivity", Migration0080],
   [81, "CommandCenterSpaceAgentState", Migration0081],
   [82, "CommandCenterSpaceAgentReplies", Migration0082],
-  // Upstream-added migrations (T3 Code upstream 044-052) renumbered to 083-091,
+  // Upstream-added migrations (T3 Code upstream 044-054) renumbered to 083-093,
   // appended after the fork's 082, preserving upstream's relative order
-  // (044->83 ... 052->91).
+  // (044->83 ... 054->93).
   [83, "ClearAutomaticProjectModelDefaults", Migration0083],
   [84, "ProjectionProjectsAutoPull", Migration0084],
   [85, "RepairAutomaticSettlementTimestamps", Migration0085],
@@ -205,6 +207,8 @@ export const migrationEntries = [
   [89, "ProjectionThreadPullRequests", Migration0089],
   [90, "ProjectionThreadMessageContext", Migration0090],
   [91, "ProjectionThreadTitleState", Migration0091],
+  [92, "PullRequestFilesViewed", Migration0092],
+  [93, "ProjectionThreadsAutoSettleDisabledAt", Migration0093],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

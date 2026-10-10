@@ -5,9 +5,10 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 export const TrimmedString = Schema.String.pipe(
   Schema.decodeTo(
     Schema.String,
-    SchemaTransformation.transformOrFail({
-      decode: (value) => Effect.succeed(value.trim()),
-      encode: (value) => Effect.succeed(value.trim()),
+    SchemaTransformation.transformEffect({
+      // rc.115 renamed transformOrFail to transformEffect.
+      decode: (value: string) => Effect.succeed(value.trim()),
+      encode: (value: string) => Effect.succeed(value.trim()),
     }),
   ),
 );

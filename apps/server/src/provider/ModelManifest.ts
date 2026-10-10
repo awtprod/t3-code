@@ -35,6 +35,7 @@ import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { hasValidClaudeManifestAdapters } from "./ClaudeModelManifest.ts";
 import bundledManifestJson from "./model-manifest.json" with { type: "json" };
+import { ProviderCompatibilityPolicy } from "./providerCompatibility.ts";
 import type { ServerProviderDraft } from "./providerSnapshot.ts";
 
 const MODEL_MANIFEST_URL =
@@ -90,6 +91,7 @@ const ModelManifestEnvelopeSchema = Schema.Struct({
    * files still decode; they count as older than any dated bundle.
    */
   updatedAt: Schema.optional(Schema.String),
+  compatibility: Schema.optional(Schema.Array(ProviderCompatibilityPolicy)),
   currentModels: Schema.Record(Schema.String, Schema.Array(Schema.String)),
   providers: Schema.optional(Schema.Record(Schema.String, ManifestProviderCatalog)),
 });
@@ -323,6 +325,8 @@ export class ModelManifest extends Context.Service<
     readonly current: Effect.Effect<ModelManifestData>;
     /** Manifest after a TTL-gated remote refresh; never fails. */
     readonly refresh: Effect.Effect<ModelManifestData>;
+    /** Explicit refresh bypasses freshness and retry timers, retaining last-good data. */
+    readonly forceRefresh: Effect.Effect<ModelManifestData>;
     /** Forks `refresh` into the service's own scope. Drivers call this from
      * provider checks: the fetch is process-shared state, so it must survive
      * the teardown of whichever instance happened to trigger it. */
@@ -334,6 +338,7 @@ export class ModelManifest extends Context.Service<
 const BundledOnlyModelManifest: ModelManifest["Service"] = {
   current: Effect.succeed(BUNDLED_MODEL_MANIFEST),
   refresh: Effect.succeed(BUNDLED_MODEL_MANIFEST),
+  forceRefresh: Effect.succeed(BUNDLED_MODEL_MANIFEST),
   refreshInBackground: Effect.void,
 };
 
@@ -377,7 +382,7 @@ export const make = Effect.gen(function* () {
     }),
   );
 
-  const refresh = Effect.fn("ModelManifest.refresh")(function* () {
+  const refresh = Effect.fn("ModelManifest.refresh")(function* (force = false) {
     yield* ensureDiskCacheLoaded;
     const now = yield* Clock.currentTimeMillis;
     // A timestamp in the future means the wall clock moved backwards (the
@@ -385,8 +390,8 @@ export const make = Effect.gen(function* () {
     // it as expired: the refetch rewrites both timestamps and self-heals.
     const isWithin = (sinceMs: number | null, windowMs: number) =>
       sinceMs !== null && now >= sinceMs && now - sinceMs < windowMs;
-    if (isWithin(fetchedAtMs, MANIFEST_TTL_MS)) return manifest;
-    if (isWithin(lastAttemptMs, MANIFEST_RETRY_MS)) return manifest;
+    if (!force && isWithin(fetchedAtMs, MANIFEST_TTL_MS)) return manifest;
+    if (!force && isWithin(lastAttemptMs, MANIFEST_RETRY_MS)) return manifest;
 
     // The same switch that gates provider CLI update checks. It stops network
     // fetches only: a manifest already cached on disk from an earlier fetch
@@ -406,7 +411,11 @@ export const make = Effect.gen(function* () {
       Effect.timeout(FETCH_TIMEOUT_MS),
       Effect.catchCause(() => Effect.succeed(null)),
     );
-    if (fetched === null) return manifest;
+    // A CDN can still serve an earlier edit after a release. Apply the same
+    // freshness rule as the disk cache so it cannot undo bundled version gates.
+    if (fetched === null || manifestUpdatedAtMs(fetched) < manifestUpdatedAtMs(manifest)) {
+      return manifest;
+    }
 
     manifest = fetched;
     fetchedAtMs = now;
@@ -417,7 +426,7 @@ export const make = Effect.gen(function* () {
           Effect.provideService(Path.Path, path),
         ),
       ),
-      Effect.catchCause(() => Effect.void),
+      Effect.ignoreCause,
     );
     return manifest;
   });
@@ -427,6 +436,7 @@ export const make = Effect.gen(function* () {
   return ModelManifest.of({
     current: ensureDiskCacheLoaded.pipe(Effect.map(() => manifest)),
     refresh: guardedRefresh,
+    forceRefresh: refreshSemaphore.withPermits(1)(refresh(true)),
     refreshInBackground: Effect.forkIn(guardedRefresh, serviceScope).pipe(Effect.asVoid),
   });
 });

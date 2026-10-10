@@ -207,6 +207,8 @@ describe("StalledTurnWatchdog", () => {
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
           getUserInputActivity: () => Effect.die("unused"),
+          listThreadsWithPullRequests: () => Effect.die("unused"),
+          getDeletedWorktreeThreads: () => Effect.die("unused"),
           listActivitiesByKind: () => Effect.die("unused"),
           getEventReplayStats: () => Effect.die("unused"),
           getProjectShells: () => Effect.die("unused"),

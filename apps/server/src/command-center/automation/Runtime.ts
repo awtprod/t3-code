@@ -408,7 +408,7 @@ export const AUTOMATION_RECOVERY_HOLD_ENV = "COMMAND_CENTER_AUTOMATION_RECOVERY_
 
 /** Unset or false-like means not held; any other value holds (fails closed). */
 export const readAutomationRecoveryHold = Effect.gen(function* () {
-  const raw = yield* Config.string(AUTOMATION_RECOVERY_HOLD_ENV).pipe(
+  const raw = yield* Config.String(AUTOMATION_RECOVERY_HOLD_ENV).pipe(
     Config.withDefault(""),
     Effect.orElseSucceed(() => "true"),
   );

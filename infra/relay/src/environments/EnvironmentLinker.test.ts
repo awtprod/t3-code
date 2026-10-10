@@ -128,9 +128,7 @@ function testLayer(input?: {
         }),
         Layer.succeed(EnvironmentLinks.EnvironmentLinks, {
           upsert: input?.upsert ?? (() => Effect.void),
-          listUsersForEnvironment: () => Effect.succeed([]),
           listDeliveryUsersForEnvironment: () => Effect.succeed([]),
-          listPublicKeysForEnvironment: () => Effect.succeed([]),
           listForUser: () => Effect.succeed([]),
           getForUser: () => Effect.succeed(null),
           revokeForUser: () => Effect.succeed(false),
@@ -141,8 +139,9 @@ function testLayer(input?: {
           revokeForEnvironmentPublicKey: () => Effect.succeed(false),
         }),
         Layer.succeed(ManagedEndpointProvider.ManagedEndpointProvider, {
+          reconcileOrigin: () => Effect.succeed("ready"),
           prepareDeprovision: () => Effect.succeed(null),
-          deprovision: input?.deprovision ?? (() => Effect.void),
+          deprovision: input?.deprovision ?? (() => Effect.succeed(true)),
           release: () => Effect.succeed(true),
           provision: () =>
             Effect.succeed({
@@ -248,6 +247,7 @@ describe("EnvironmentLinker", () => {
           deprovision: (input) =>
             Effect.sync(() => {
               deprovisionedEnvironmentId = input.environmentId;
+              return true;
             }),
         }),
       ),

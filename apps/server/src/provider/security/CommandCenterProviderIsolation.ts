@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as ByteSize from "effect/ByteSize";
 import * as NodePath from "node:path";
 import * as NodeModule from "node:module";
 
@@ -35,7 +36,7 @@ const COMMAND_CENTER_CODEX_DARWIN_RUNTIME_ALIASES = [
   "codex-execve-wrapper",
 ] as const;
 
-const MAX_LOCAL_GIT_CONFIG_BYTES = FileSystem.Size(1024 * 1024);
+const MAX_LOCAL_GIT_CONFIG_BYTES = ByteSize.bytes(1024 * 1024);
 
 interface SecureControlFileIdentity {
   readonly type: FileSystem.File.Type;
