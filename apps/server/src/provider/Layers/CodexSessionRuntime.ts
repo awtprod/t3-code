@@ -2970,68 +2970,10 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
-    yield* client.handleServerRequest("item/permissions/requestApproval", (payload) =>
-      Effect.gen(function* () {
-        const requestId = ApprovalRequestId.make(
-          yield* randomUUIDv4("app-permission-approval-request"),
-        );
-        const turnId = TurnId.make(payload.turnId);
-        const itemId = ProviderItemId.make(payload.itemId);
-        const decision = yield* Deferred.make<ProviderApprovalDecision>();
-
-        yield* Ref.update(pendingApprovalsRef, (current) => {
-          const next = new Map(current);
-          next.set(requestId, {
-            requestId,
-            jsonRpcId: payload.itemId,
-            requestKind: "permission",
-            turnId,
-            itemId,
-            decision,
-          });
-          return next;
-        });
-        yield* Ref.update(approvalCorrelationsRef, (current) => {
-          const next = new Map(current);
-          next.set(payload.itemId, {
-            requestId,
-            requestKind: "permission",
-            turnId,
-            itemId,
-          });
-          return next;
-        });
-
-        yield* emitEvent({
-          kind: "request",
-          threadId: options.threadId,
-          method: "item/permissions/requestApproval",
-          requestId,
-          requestKind: "permission",
-          ...(turnId ? { turnId } : {}),
-          ...(itemId ? { itemId } : {}),
-          payload,
-        });
-
-        const resolved = yield* Deferred.await(decision).pipe(
-          Effect.ensuring(
-            Ref.update(pendingApprovalsRef, (current) => {
-              const next = new Map(current);
-              next.delete(requestId);
-              return next;
-            }),
-          ),
-        );
-        // Approving grants the requested profile; denying answers with an
-        // empty grant so the app-server treats the permission as withheld.
-        const grantedPermissions =
-          resolved === "accept" || resolved === "acceptForSession" ? payload.permissions : {};
-        return {
-          permissions: grantedPermissions,
-          ...(resolved === "acceptForSession" ? { scope: "session" as const } : {}),
-        } satisfies EffectCodexSchema.PermissionsRequestApprovalResponse;
-      }),
-    );
+    // Upstream registers a second "item/permissions/requestApproval" handler here
+    // (requestKind "permission"). Command Center keeps its sandbox-escalation handler
+    // above instead: a later registration would replace it and silently disable
+    // autoApproveReadOnlyPermissions, and ingestion keys on CODEX_PERMISSION_REQUEST_KIND.
 
     yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
       Effect.gen(function* () {

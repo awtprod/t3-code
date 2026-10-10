@@ -250,6 +250,7 @@ function makeThreadOpenResponse(
       ephemeral: false,
       modelProvider: "openai",
       preview: "",
+      projectId: null,
       sessionId: "session-test",
       updatedAt: 1_776_470_400,
       source: "cli",

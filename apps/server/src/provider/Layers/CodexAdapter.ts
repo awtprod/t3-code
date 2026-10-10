@@ -95,7 +95,10 @@ import {
   sandboxProviderTarget,
 } from "../../sandbox/SandboxProviderProcess.ts";
 import { readSandboxCodexChatgptAuth } from "../../sandbox/SandboxCodexAuth.ts";
-import { describeCodexPermissionRequest } from "../security/CodexPermissionEscalation.ts";
+import {
+  CODEX_PERMISSION_REQUEST_KIND,
+  describeCodexPermissionRequest,
+} from "../security/CodexPermissionEscalation.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
   type CodexRateLimitSnapshot,
@@ -270,7 +273,6 @@ interface CodexTurnTokenUsageState {
   activeTurnId: string | undefined;
   readonly byTurnId: Map<string, CodexTurnTokenUsageAccumulator>;
 }
-
 
 function mapCodexRuntimeError(
   threadId: ThreadId,
@@ -986,6 +988,19 @@ function describeFileChanges(
   return remaining > 0 ? `${described.join("\n")}\n+${remaining} more` : described.join("\n");
 }
 
+/**
+ * Codex sends app permission prompts and sandbox escalations on the same
+ * `item/permissions/requestApproval` method. Command Center's sandbox
+ * escalation handler stamps CODEX_PERMISSION_REQUEST_KIND; upstream's app
+ * permission handler stamps "permission".
+ */
+function isCodexSandboxEscalation(event: ProviderEvent): boolean {
+  return (
+    event.method === "item/permissions/requestApproval" &&
+    event.requestKind === CODEX_PERMISSION_REQUEST_KIND
+  );
+}
+
 function toRequestTypeFromMethod(method: string): CanonicalRequestType {
   switch (method) {
     case "item/commandExecution/requestApproval":
@@ -1699,6 +1714,11 @@ function mapToRuntimeEvents(
             EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
             event.payload,
           );
+          if (isCodexSandboxEscalation(event)) {
+            // The persisted approval activity keeps only `detail`, so the
+            // requested paths are folded in here or the prompt is unreviewable.
+            return payload ? describeCodexPermissionRequest(payload) : undefined;
+          }
           const requestedPaths = [
             ...(payload?.permissions.fileSystem?.read ?? []),
             ...(payload?.permissions.fileSystem?.write ?? []),
@@ -1725,15 +1745,6 @@ function mapToRuntimeEvents(
             event.payload,
           );
           return payload?.reason ?? payload?.command.join(" ");
-        }
-        case "item/permissions/requestApproval": {
-          const payload = readPayload(
-            EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
-            event.payload,
-          );
-          // The persisted approval activity keeps only `detail`, so the
-          // requested paths are folded in here or the prompt is unreviewable.
-          return payload ? describeCodexPermissionRequest(payload) : undefined;
         }
         case "item/tool/call": {
           const payload = readPayload(
@@ -2979,8 +2990,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   (event.method === "collabAgent/activity" &&
                     collabPayload?.activityKind === "started");
                 if (isCollabSpawn && event.turnId === turnTokenUsage.activeTurnId) {
-                  getCodexTurnAccumulator(turnTokenUsage, turnTokenUsage.activeTurnId).hasSubagents =
-                    true;
+                  getCodexTurnAccumulator(
+                    turnTokenUsage,
+                    turnTokenUsage.activeTurnId,
+                  ).hasSubagents = true;
                 }
               }
 

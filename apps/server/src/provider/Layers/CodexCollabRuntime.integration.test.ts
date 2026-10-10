@@ -24,6 +24,7 @@ import { assert, describe } from "vite-plus/test";
 
 import wireFixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
 import { makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
+import { CODEX_PERMISSION_REQUEST_KIND } from "../security/CodexPermissionEscalation.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 const ROOT = wireFixture.rootThreadId;
@@ -661,7 +662,12 @@ describe("CodexSessionRuntime collab integration", () => {
           if (event.method === "item/permissions/requestApproval") {
             return Deferred.succeed(requestedReady, event);
           }
-          if (event.method === "serverRequest/resolved" && event.requestKind === "permission") {
+          // Command Center's sandbox-escalation handler owns this method and stamps
+          // CODEX_PERMISSION_REQUEST_KIND rather than upstream's "permission".
+          if (
+            event.method === "serverRequest/resolved" &&
+            event.requestKind === CODEX_PERMISSION_REQUEST_KIND
+          ) {
             return Deferred.succeed(settledReady, event);
           }
           return Effect.void;
@@ -700,8 +706,9 @@ describe("CodexSessionRuntime collab integration", () => {
       const answer = recorded[0];
       assert.isDefined(answer);
       assert.equal(answer.label, "perm-1");
-      // Cancelled approvals withhold the grant: an empty permission profile.
-      assert.deepEqual(answer.result, { permissions: {} });
+      // Cancelled approvals withhold the grant: an empty permission profile,
+      // scoped to the turn (Command Center's handler always names the scope).
+      assert.deepEqual(answer.result, { permissions: {}, scope: "turn" });
 
       yield* runtime.close;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),

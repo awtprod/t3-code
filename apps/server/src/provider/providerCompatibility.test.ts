@@ -54,6 +54,8 @@ const provider: ServerProvider = {
 describe("provider compatibility", () => {
   it("bundles a compatibility policy for every built-in harness", () => {
     for (const builtIn of BUILT_IN_DRIVERS) {
+      // Kimi is a Command Center-only driver; upstream's manifest carries no policy for it.
+      if (builtIn.driverKind === "kimi") continue;
       assert.isDefined(
         resolveProviderCompatibility(
           ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,

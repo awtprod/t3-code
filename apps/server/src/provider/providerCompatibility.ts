@@ -7,7 +7,6 @@ import {
 } from "@t3tools/contracts";
 import { satisfiesSemverRange } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
-import packageJson from "../../package.json" with { type: "json" };
 
 // Deliberately uses the shared CLI gate syntax: comparator groups joined by ||.
 // Prereleases and unrecognized release tags remain unknown.
@@ -24,6 +23,11 @@ const VersionRange = TrimmedNonEmptyString.pipe(
     ),
   ),
 );
+// Command Center keeps its own server release numbering (package.json), but the
+// bundled and remote compatibility policies are keyed on the upstream T3 Code
+// release whose provider integrations this fork carries. Bump on upstream syncs.
+export const T3_CODE_COMPATIBILITY_VERSION = "0.0.44";
+
 const Policy = Schema.Struct({
   driver: TrimmedNonEmptyString,
   t3CodeRange: VersionRange,
@@ -60,7 +64,7 @@ export function resolveProviderCompatibility(
   policies: ReadonlyArray<ProviderCompatibilityPolicy> | undefined,
   driver: ProviderDriverKind,
   version: string | null,
-  t3CodeVersion = packageJson.version,
+  t3CodeVersion = T3_CODE_COMPATIBILITY_VERSION,
 ): ServerProviderCompatibilityAdvisory | undefined {
   const policy = policies?.find(
     (entry) => entry.driver === driver && satisfiesSemverRange(t3CodeVersion, entry.t3CodeRange),

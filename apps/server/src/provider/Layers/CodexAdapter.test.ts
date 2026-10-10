@@ -313,6 +313,7 @@ const makeCodexAppServerSpawner = Effect.fn("makeCodexAppServerSpawner")(functio
                   ephemeral: false,
                   modelProvider: "openai",
                   preview: "",
+                  projectId: null,
                   sessionId: "session-test",
                   updatedAt: 1_776_470_400,
                   source: "cli",
@@ -4247,6 +4248,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         method: "item/tool/requestUserInput",
         requestId: ApprovalRequestId.make("req-user-input-2"),
         payload: {
+          isBlocking: true,
           itemId: "item-user-input-2",
           threadId: "thread-1",
           turnId: "turn-1",
