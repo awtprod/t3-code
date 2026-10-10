@@ -292,13 +292,10 @@ export default defineConfig({
         },
       },
       {
-        // Command Center debt: these fork-only shells restyle sidebar and inset primitives
-        // throughout and predate the shadcn rules above. Moving them onto variants is a
-        // design change tracked separately from the upstream sync; new files stay covered.
-        files: [
-          "apps/web/src/command-center/CommandCenterShell.tsx",
-          "apps/web/src/components/SidebarV2.tsx",
-        ],
+        // Command Center debt: this unmounted fork-only sidebar restyles sidebar and inset
+        // primitives throughout and predates the shadcn rules above. Whether it is kept or
+        // deleted is an open product decision; new files stay covered.
+        files: ["apps/web/src/components/SidebarV2.tsx"],
         rules: {
           "shadcn/no-restyle": "off",
           "shadcn/no-arbitrary-values": "off",
