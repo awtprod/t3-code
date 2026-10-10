@@ -1,0 +1,160 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  // Exported types are part of our contracts even before they have consumers.
+  "rules": { "types": "off", "nsTypes": "off" },
+  // These executables are supplied by the OS or installed separately from npm.
+  "ignoreBinaries": ["eas", "file", "mkfifo", "pkill", "pkg-config", "plutil", "sips"],
+  "ignoreIssues": {
+    // Upstream-owned exports whose consumers Command Center replaced; kept verbatim to
+    // keep syncs clean.
+    "apps/server/src/provider/acp/AcpRuntimeModel.ts": ["exports"],
+    "packages/shared/src/hostClassification.ts": ["exports"],
+    // Command Center exports inside upstream-shared files, left as they are so these
+    // files change only when a sync needs them to.
+    "apps/desktop/src/electron/ElectronProtocol.ts": ["exports"],
+    "apps/server/src/cli/config.ts": ["exports"],
+    "apps/server/src/mcp/McpHttpServer.ts": ["exports"],
+    "apps/server/src/mcp/McpSessionRegistry.ts": ["exports"],
+    "apps/server/src/mcp/toolkits/preview/tools.ts": ["exports"],
+    "apps/server/src/persistence/Migrations.ts": ["exports"],
+    "apps/server/src/provider/Layers/CodexSessionRuntime.ts": ["exports"],
+    "apps/server/src/provider/providerCompatibility.ts": ["exports"],
+    "apps/web/src/components/Sidebar.logic.ts": ["exports"],
+    "apps/web/src/components/ThreadStatusIndicators.tsx": ["exports"],
+    "apps/web/src/environments/primary/target.ts": ["exports"],
+    "apps/web/src/session-logic.ts": ["exports"],
+    "apps/web/src/state/server.ts": ["exports"],
+    "apps/web/src/themePalette.ts": ["exports"],
+    "packages/client-runtime/src/operations/commands.ts": ["exports"],
+    "packages/contracts/src/environmentHttp.ts": ["exports"],
+    "packages/contracts/src/orchestration.ts": ["exports"],
+    "packages/contracts/src/rpc.ts": ["exports"],
+    "packages/contracts/src/settings.ts": ["exports"],
+    "packages/effect-codex-app-server/src/_internal/stdio.ts": ["exports"],
+    "packages/shared/src/filePreview.ts": ["exports"],
+    "packages/ssh/src/tunnel.ts": ["exports"],
+  },
+  "workspaces": {
+    ".": {
+      // Keep vendored reference repositories outside the root project.
+      "project": ["*.{js,mjs,cjs,ts,mts,cts}", ".github/**/*.cjs"],
+      "entry": [".github/scripts/thread-transfer-report.cjs"],
+      "vite": { "entry": [".github/**/*.test.cjs"] },
+      "vitest": { "entry": [".github/**/*.test.cjs"] },
+    },
+    "scripts": {
+      // Knip loads its preprocessor through a CLI option; native verification and
+      // worktree setup (from t3.json) run directly, and the pre-commit hook
+      // (.vite-hooks/pre-commit) runs the staged gitleaks gate.
+      "entry": [
+        "knip-schemas.ts",
+        "mobile-native-client.ts",
+        "setup-worktree.ts",
+        "gitleaks-staged.ts",
+      ],
+    },
+    "apps/server": {
+      // Vite+ pack entries and the launcher used by installed background services.
+      "entry": [
+        "src/bin.ts!",
+        "src/claude-history-worker.ts!",
+        "scripts/cli.ts",
+        "scripts/evaluate-thread-titles.ts",
+        "scripts/measure-pr-preview.ts",
+        "scripts/update-test-shard-weights.ts",
+        "src/provider/testFixtures/*.mjs",
+        // Run by hand against a real container runtime (see the file header).
+        "integration/sandboxCanary.integration.ts",
+      ],
+      // Command Center's sandbox barrel; callers import the modules directly.
+      "ignoreIssues": { "src/sandbox/index.ts": ["files"] },
+      // Keep the transitive Effect runtime pinned for standalone npm installs.
+      // The Vite+ web build prerequisite.
+      "ignoreDependencies": ["@effect/platform-node-shared", "@t3tools/web"],
+    },
+    "apps/desktop": {
+      // Electron loads these bundles by filename rather than importing them.
+      "entry": [
+        "gnome-extension/extension.js!",
+        "src/electron/WindowsForegroundFocusWorker.ts!",
+        "src/snapShot/GlobalShiftShortcutWorker.ts!",
+        "src/snapShot/RegionSnapShotWorker.ts!",
+        "src/snapShot/SnapShotAccessibilityWorker.ts!",
+        "src/boot.ts!",
+        "src/compileCache.ts!",
+        "src/main.ts!",
+        "src/preload.ts!",
+        "src/preview-pick-preload.ts!",
+        "src/preview-pip-preload.ts!",
+        "src/mac-permission-preload.ts!",
+        "src/preview/Annotation.css!",
+      ],
+      // The injected runtime resolves Playwright by string; release tooling runs
+      // electron-builder from this workspace, outside its package scripts.
+      "ignoreDependencies": ["playwright-core", "electron-builder"],
+    },
+    "apps/web": {
+      // Vitest loads this through the per-file @vitest-environment directive.
+      "ignoreDependencies": ["jsdom"],
+      // Worktree setup (scripts/setup-worktree.ts) runs this directly; src/pwa.ts
+      // registers the service worker by URL.
+      "entry": ["scripts/warm-dep-cache.ts", "public/service-worker.js"],
+      "ignoreIssues": {
+        // UI component modules are copied and adapted as cohesive sets. Keep their
+        // named subcomponents even before they have callers; the file audit still
+        // reports an entire component module when nothing imports it.
+        "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"],
+        // Command Center barrels; callers import the modules directly.
+        "src/command-center/index.ts": ["files"],
+        "src/command-center/automation/index.ts": ["files"],
+        // Command Center's sidebar redesign, behind the Beta settings toggle but
+        // not mounted yet.
+        "src/components/SidebarV2.tsx": ["files"],
+      },
+    },
+    "apps/mobile": {
+      // Expo loads plugins by string; Metro embeds the browser entry in the native WebView.
+      "entry": [
+        "index.ts!",
+        "plugins/*.cjs",
+        "scripts/generate-device-stream.mts",
+        "src/features/devices/device-stream.browser.ts!",
+      ],
+      // Fonts are configured as asset paths; Expo autolinks the native packages.
+      "ignoreDependencies": [
+        "@expo-google-fonts/dm-sans",
+        "@t3tools/mobile-review-diff-native",
+        "@t3tools/mobile-terminal-native",
+      ],
+      // Command Center's usage analytics screen, left unrouted by an earlier upstream sync.
+      "ignoreIssues": { "src/features/settings/SettingsUsageRouteScreen.tsx": ["files"] },
+    },
+    "apps/mobile/modules/t3-markdown-text": {
+      // React Native codegen discovers component specifications by filename.
+      "entry": ["src/*NativeComponent.ts!"],
+    },
+    "infra/relay": {
+      "entry": ["alchemy.run.ts!", "src/persistence/schema.ts!"],
+    },
+    "packages/*": {
+      // These workspace packages are private to this monorepo.
+      "includeEntryExports": true,
+    },
+    "packages/sandbox-bridge": {
+      "includeEntryExports": true,
+      // build.ts bundles each binary into the sandbox image.
+      "entry": ["src/bin/*.ts"],
+    },
+    "packages/effect-acp": {
+      "includeEntryExports": true,
+      "entry": ["test/fixtures/*.ts"],
+      // Generated upstream protocol definitions are retained as a complete set.
+      "ignoreIssues": { "src/_generated/**": ["exports", "types"] },
+    },
+    "packages/effect-codex-app-server": {
+      "includeEntryExports": true,
+      "entry": ["test/fixtures/*.ts"],
+      "ignoreIssues": { "src/_generated/**": ["exports", "types"] },
+    },
+  },
+}

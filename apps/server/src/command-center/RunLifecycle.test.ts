@@ -346,6 +346,7 @@ const threadShell = (input: {
   archivedAt: null,
   settledOverride: null,
   settledAt: null,
+  pullRequests: [],
   session: null,
   latestUserMessageAt: fixtureTime,
   hasPendingApprovals: false,

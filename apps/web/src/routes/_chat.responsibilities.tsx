@@ -126,7 +126,7 @@ function ResponsibilitiesRouteView() {
   };
 
   return (
-    <SidebarInset className="h-full min-h-0 overflow-auto bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-auto">
       <ResponsibilitiesScreen
         actionError={actionError}
         actionPending={actionPending}

@@ -18,6 +18,7 @@ import {
   resolveServerSelfUpdateCapability,
   resolveVersionMismatch,
   serverUpdateGuidance,
+  supportsDesktopAppUpdate,
 } from "./versionSkew";
 
 const MISMATCH_HINT =
@@ -192,12 +193,33 @@ describe("versionSkew", () => {
     expect(resolveServerSelfUpdateCapability(null)).toBeNull();
   });
 
+  it("detects remote desktop-app update support from config descriptors", () => {
+    const descriptor = (desktopAppUpdate?: boolean) => ({
+      environment: {
+        environmentId: EnvironmentId.make("environment-desktop"),
+        label: "Desktop",
+        platform: { os: "darwin", arch: "arm64" } as const,
+        serverVersion: "9.9.9",
+        capabilities: {
+          repositoryIdentity: true,
+          serverSelfUpdate: "desktop-managed" as const,
+          ...(desktopAppUpdate === undefined ? {} : { desktopAppUpdate }),
+        },
+      },
+    });
+
+    expect(supportsDesktopAppUpdate(descriptor(true))).toBe(true);
+    expect(supportsDesktopAppUpdate(descriptor(false))).toBe(false);
+    expect(supportsDesktopAppUpdate(descriptor())).toBe(false);
+    expect(supportsDesktopAppUpdate(null)).toBe(false);
+  });
+
   it("matches version-drift guidance to the advertised update path", () => {
     expect(serverUpdateGuidance("respawn", "Remote server")).toBe(
       "Update the Remote server so they stay in sync.",
     );
     expect(serverUpdateGuidance("desktop-managed", "Desktop server")).toBe(
-      "The Desktop server is run by the T3 Code desktop app on its machine — update the desktop app there to sync them.",
+      "The Desktop server is run by the Command Center desktop app on its machine — update the desktop app there to sync them.",
     );
     expect(serverUpdateGuidance(null, "Local server")).toBe(
       "Relaunch the Local server with the copied command to sync them.",

@@ -8,7 +8,6 @@ export {
   type ResolveAutomationsScreenStatusInput,
 } from "./AutomationsScreen.logic";
 export {
-  AUTOMATION_CANVAS_PADDING,
   AUTOMATION_NODE_HEIGHT,
   AUTOMATION_NODE_WIDTH,
   addAutomationNode,

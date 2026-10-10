@@ -122,7 +122,7 @@ export const COMMAND_CENTER_WS_METHODS = {
   spaceAgentActivity: "cc.spaceAgent.activity",
 } as const;
 
-export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterError>()(
+export class CommandCenterError extends Schema.TaggedError<CommandCenterError>()(
   "CommandCenterError",
   {
     reason: Schema.Literals([
@@ -139,7 +139,7 @@ export class CommandCenterError extends Schema.TaggedErrorClass<CommandCenterErr
   },
 ) {}
 
-export class CommandCenterMcpCapabilityUnavailableError extends Schema.TaggedErrorClass<CommandCenterMcpCapabilityUnavailableError>()(
+export class CommandCenterMcpCapabilityUnavailableError extends Schema.TaggedError<CommandCenterMcpCapabilityUnavailableError>()(
   "CommandCenterMcpCapabilityUnavailableError",
   {
     capability: CapabilityName,
@@ -1070,7 +1070,7 @@ export type GoogleDraftCreateResult = typeof GoogleDraftCreateResult.Type;
 
 /** Upper bounds that keep a Windows directory listing websocket-sized. */
 export const WINDOWS_MEDIA_MAX_ENTRIES = 2_000;
-export const WINDOWS_MEDIA_PATH_MAX_CHARS = 4_096;
+const WINDOWS_MEDIA_PATH_MAX_CHARS = 4_096;
 
 export const WindowsMediaPath = TrimmedNonEmptyString.check(
   Schema.isMaxLength(WINDOWS_MEDIA_PATH_MAX_CHARS),

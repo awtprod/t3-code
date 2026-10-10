@@ -23,18 +23,18 @@ export const YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upl
 export const YOUTUBE_ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly";
 export const YOUTUBE_READ_SCOPE = "https://www.googleapis.com/auth/youtube.readonly";
 /** `openid email` lets the connection show which Google account authorized it. */
-export const YOUTUBE_OAUTH_SCOPES = [
+const YOUTUBE_OAUTH_SCOPES = [
   YOUTUBE_UPLOAD_SCOPE,
   YOUTUBE_ANALYTICS_SCOPE,
   YOUTUBE_READ_SCOPE,
   "openid",
   "email",
 ] as const;
-export const YOUTUBE_OAUTH_REDIRECT_URI = "http://127.0.0.1/oauth2/callback";
+const YOUTUBE_OAUTH_REDIRECT_URI = "http://127.0.0.1/oauth2/callback";
 
-export const GOOGLE_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
-export const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-export const GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
+const GOOGLE_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+const GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
 
 /** Env vars carrying the dedicated YouTube Desktop OAuth client. */
 export const YOUTUBE_OAUTH_CLIENT_ID_ENV = "COMMAND_CENTER_YOUTUBE_OAUTH_CLIENT_ID";

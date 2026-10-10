@@ -15,8 +15,11 @@ import { SandboxSettleCleanupReactor } from "../Services/SandboxSettleCleanupRea
 import { SpaceActivityReactor } from "../Services/SpaceActivityReactor.ts";
 import { SubagentDelegationReactor } from "../Services/SubagentDelegationReactor.ts";
 import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
+import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
+import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 import { LocalWebPushNotifier } from "../../webPush/LocalWebPushNotifier.ts";
+import * as StorageCleanup from "../../storageCleanup.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
@@ -29,8 +32,11 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const subagentDelegationReactor = yield* SubagentDelegationReactor;
   const spaceActivityReactor = yield* SpaceActivityReactor;
   const threadSettlementReactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
+  const pullRequestSyncReactor = yield* PullRequestSyncReactor.PullRequestSyncReactor;
+  const threadPullRequestReactor = yield* ThreadPullRequestReactor.ThreadPullRequestReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
   const localWebPushNotifier = yield* LocalWebPushNotifier;
+  const storageCleanup = yield* StorageCleanup.StorageCleanup;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
     yield* providerRuntimeIngestion.start();
@@ -39,11 +45,14 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* threadDeletionReactor.start();
     yield* sandboxLifecycleReactor.start();
     yield* sandboxSettleCleanupReactor.start();
+    yield* threadPullRequestReactor.start();
     yield* subagentDelegationReactor.start();
     yield* spaceActivityReactor.start();
     yield* threadSettlementReactor.start();
+    yield* pullRequestSyncReactor.start();
     yield* agentAwarenessRelay.start();
     yield* localWebPushNotifier.start();
+    yield* storageCleanup.start();
   });
 
   const drain: OrchestrationReactorShape["drain"] = Effect.gen(function* () {

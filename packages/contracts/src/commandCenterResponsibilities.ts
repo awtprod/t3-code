@@ -57,7 +57,7 @@ export const CommandCenterResponsibilityPauseInput = Schema.Struct({
 export type CommandCenterResponsibilityPauseInput =
   typeof CommandCenterResponsibilityPauseInput.Type;
 
-export class CommandCenterResponsibilityError extends Schema.TaggedErrorClass<CommandCenterResponsibilityError>()(
+export class CommandCenterResponsibilityError extends Schema.TaggedError<CommandCenterResponsibilityError>()(
   "CommandCenterResponsibilityError",
   {
     code: Schema.Literals([

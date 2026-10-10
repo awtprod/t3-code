@@ -32,7 +32,7 @@ export interface WindowsMediaSettings {
   readonly roots: ReadonlyArray<string> | null;
 }
 
-export class WindowsMediaConfigError extends Error {
+class WindowsMediaConfigError extends Error {
   override readonly name = "WindowsMediaConfigError";
 }
 
@@ -83,7 +83,7 @@ export const isDriveRoot = (path: string): boolean =>
   path.length === 3 && path[1] === ":" && path.endsWith("\\");
 
 /** Case-insensitive "is `path` the root itself or somewhere beneath it". */
-export function isWithinRoot(path: string, root: string): boolean {
+function isWithinRoot(path: string, root: string): boolean {
   const p = lower(path);
   const r = lower(root);
   if (p === r) return true;
@@ -118,7 +118,7 @@ export function windowsParentPath(
   return parent;
 }
 
-export function parseWindowsMediaRoots(raw: string | undefined): ReadonlyArray<string> | null {
+function parseWindowsMediaRoots(raw: string | undefined): ReadonlyArray<string> | null {
   if (raw === undefined || raw.trim().length === 0) return null;
   const roots: string[] = [];
   for (const entry of raw.split("|")) {
@@ -168,10 +168,10 @@ export function makeWindowsMediaSettings(input: {
 }
 
 const WindowsMediaEnvConfig = Config.all({
-  enabled: Config.boolean("CC_WINDOWS_MEDIA_ENABLED").pipe(Config.option),
-  sshConfigPath: Config.string("CC_WINDOWS_MEDIA_SSH_CONFIG").pipe(Config.option),
-  hostAlias: Config.string("CC_WINDOWS_MEDIA_SSH_ALIAS").pipe(Config.option),
-  roots: Config.string("CC_WINDOWS_MEDIA_ROOTS").pipe(Config.option),
+  enabled: Config.Boolean("CC_WINDOWS_MEDIA_ENABLED").pipe(Config.option),
+  sshConfigPath: Config.String("CC_WINDOWS_MEDIA_SSH_CONFIG").pipe(Config.option),
+  hostAlias: Config.String("CC_WINDOWS_MEDIA_SSH_ALIAS").pipe(Config.option),
+  roots: Config.String("CC_WINDOWS_MEDIA_ROOTS").pipe(Config.option),
 });
 
 /**
@@ -213,7 +213,7 @@ export const readWindowsMediaSettings: Effect.Effect<WindowsMediaSettings> = Eff
 
 const POSIX_SINGLE_QUOTE = /'/gu;
 /** Quote one word for a POSIX shell (the agent's Bash tool). */
-export const posixShellQuote = (value: string): string =>
+const posixShellQuote = (value: string): string =>
   `'${value.replace(POSIX_SINGLE_QUOTE, `'\\''`)}'`;
 
 /**

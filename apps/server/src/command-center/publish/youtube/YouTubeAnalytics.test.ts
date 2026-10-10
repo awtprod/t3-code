@@ -6,7 +6,7 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import * as NodeSqliteClient from "../../../persistence/NodeSqliteClient.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import baseMigration from "../../../persistence/Migrations/033_CommandCenterCore.ts";
 import observationMigration from "../../../persistence/Migrations/073_CommandCenterObservations.ts";
 import { make as makeObservations, ObservationService } from "../../Observations.ts";

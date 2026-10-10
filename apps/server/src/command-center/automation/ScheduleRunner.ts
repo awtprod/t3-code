@@ -21,7 +21,7 @@ const DEFAULT_POLL_INTERVAL = Duration.seconds(15);
 const MAX_CATCH_UP_MINUTES = 60;
 const MINUTE_MS = 60_000;
 
-export class AutomationScheduleRunnerError extends Schema.TaggedErrorClass<AutomationScheduleRunnerError>()(
+export class AutomationScheduleRunnerError extends Schema.TaggedError<AutomationScheduleRunnerError>()(
   "AutomationScheduleRunnerError",
   {
     reason: Schema.Literals(["invalid-occurrence", "persistence"]),

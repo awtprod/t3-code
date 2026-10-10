@@ -634,6 +634,7 @@ describe("routedSelectionNeedsSubagent", () => {
     archivedAt: null,
     settledOverride: null,
     settledAt: null,
+    pullRequests: [],
     session,
     latestUserMessageAt: null,
     hasPendingApprovals: false,

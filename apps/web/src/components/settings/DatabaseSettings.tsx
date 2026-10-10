@@ -437,7 +437,7 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
           </span>
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="truncate text-[13px] font-semibold text-foreground">
+              <span className="truncate text-sm font-semibold text-foreground">
                 {options.showProject ? (project?.title ?? connection.projectId) : name}
               </span>
               {connection.isDefault && options.siblingCount > 0 ? (
@@ -452,14 +452,12 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
                 {connection.readOnly ? "Read only" : "Write access"}
               </Badge>
             </div>
-            <p className="truncate font-mono text-[11px] text-muted-foreground">
+            <p className="truncate font-mono text-2xs text-muted-foreground">
               {connection.label.length > 0 || options.showProject
                 ? `${options.showProject ? `${name} · ` : ""}${connection.projectRef}`
                 : connection.projectRef}
             </p>
-            <p className="truncate text-[11px] text-muted-foreground/70">
-              {connection.workspaceRoot}
-            </p>
+            <p className="truncate text-2xs text-muted-foreground/70">{connection.workspaceRoot}</p>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -540,7 +538,7 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
                     <div className="truncate text-xs font-semibold text-foreground">
                       {project.title}
                     </div>
-                    <div className="truncate text-[11px] text-muted-foreground/70">
+                    <div className="truncate text-2xs text-muted-foreground/70">
                       {projectConnections.length === 1
                         ? "1 database"
                         : `${projectConnections.length} databases`}
@@ -587,7 +585,7 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
               agent provider processes.
             </DialogDescription>
           </DialogHeader>
-          <DialogPanel className="space-y-4">
+          <DialogPanel>
             <label className="grid gap-1.5">
               <span className="text-xs font-medium text-foreground">Local project</span>
               <Select
@@ -609,7 +607,7 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
                 </SelectPopup>
               </Select>
               {projects.length === 0 ? (
-                <span className="text-[11px] text-muted-foreground">
+                <span className="text-2xs text-muted-foreground">
                   Add a local project to this environment first.
                 </span>
               ) : null}
@@ -629,8 +627,8 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
               <span
                 className={
                   labelError === null
-                    ? "text-[11px] text-muted-foreground"
-                    : "text-[11px] text-destructive"
+                    ? "text-2xs text-muted-foreground"
+                    : "text-2xs text-destructive"
                 }
               >
                 {labelError ??
@@ -646,7 +644,7 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
                 placeholder="abcdefghijklmnopqrst"
                 spellCheck={false}
               />
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-2xs text-muted-foreground">
                 Found in the Supabase dashboard URL or Project Settings.
               </span>
             </label>
@@ -675,7 +673,7 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
                 autoComplete="off"
                 spellCheck={false}
               />
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-2xs text-muted-foreground">
                 {existingConnection?.accessTokenRedacted
                   ? "Leave blank to keep the stored token."
                   : "Stored only by the Command Center server."}
@@ -685,7 +683,7 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
             <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-3 py-3">
               <div className="space-y-0.5">
                 <div className="text-xs font-medium text-foreground">Read-only mode</div>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   Recommended. Disables migrations and restricts SQL to read-only operations.
                 </p>
               </div>
@@ -700,7 +698,7 @@ function EnvironmentDatabaseSettings({ environmentId }: { readonly environmentId
               <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-3 py-3">
                 <div className="space-y-0.5">
                   <div className="text-xs font-medium text-foreground">Use as default</div>
-                  <p className="text-[11px] text-muted-foreground">
+                  <p className="text-2xs text-muted-foreground">
                     Threads that do not name a database use the default. Prefer a read-only database
                     here.
                   </p>

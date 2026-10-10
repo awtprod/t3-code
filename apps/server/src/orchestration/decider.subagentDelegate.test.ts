@@ -47,6 +47,7 @@ function makeReadModel(
         proposedPlans: [],
         activities: [],
         checkpoints: [],
+        pullRequests: [],
         session: null,
         ...(sandbox === undefined ? {} : { sandbox }),
       },

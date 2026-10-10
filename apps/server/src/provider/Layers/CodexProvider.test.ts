@@ -81,6 +81,11 @@ it("uses standard routing when the catalog has no default service tier", () => {
         name: "Fast",
         description: "1.5x speed, increased usage",
       },
+      {
+        id: "ultrafast",
+        name: "Ultrafast",
+        description: "The fastest available responses for latency-sensitive work.",
+      },
     ],
     supportedReasoningEfforts: [],
   });
@@ -96,6 +101,11 @@ it("uses standard routing when the catalog has no default service tier", () => {
           id: "priority",
           label: "Fast",
           description: "1.5x speed, increased usage",
+        },
+        {
+          id: "ultrafast",
+          label: "Ultrafast",
+          description: "Even faster, more expensive",
         },
       ],
       currentValue: "default",
@@ -134,6 +144,23 @@ it("falls back to the GPT-5.6 family when GPT-6 is unavailable", () => {
   ]);
 
   assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-5.6-sol");
+});
+
+it("ranks qualified Codex models while preserving their wire ids", () => {
+  const models = applyPreferredCodexDefaultModel([
+    {
+      slug: "openai.gpt-5.6-luna",
+      name: "Luna",
+      isCustom: false,
+      isDefault: true,
+      capabilities: null,
+    },
+    { slug: "openai.gpt-5.6-sol", name: "Sol", isCustom: false, capabilities: null },
+  ]);
+  assert.deepStrictEqual(
+    models.filter((model) => model.isDefault).map((model) => model.slug),
+    ["openai.gpt-5.6-sol"],
+  );
 });
 
 it("keeps Codex's own default when no preferred model is available", () => {

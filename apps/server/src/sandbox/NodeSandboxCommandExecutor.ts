@@ -22,7 +22,7 @@ const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
  * otherwise only deliverable through a PATH wrapper (see
  * `deploy/openclaw/sandbox/podman-wrapper.sh`).
  */
-export const FORWARDED_RUNTIME_ENV = [
+const FORWARDED_RUNTIME_ENV = [
   "XDG_RUNTIME_DIR",
   "HOME",
   "CONTAINER_HOST",

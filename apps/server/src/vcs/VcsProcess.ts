@@ -1,7 +1,10 @@
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Match from "effect/Match";
+import * as Schedule from "effect/Schedule";
+import * as Semaphore from "effect/Semaphore";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
@@ -31,12 +34,14 @@ export interface VcsProcessInput {
   readonly cwd: string;
   readonly spawnCwd?: string;
   readonly stdin?: string;
+  readonly onStdoutChunk?: (chunk: Uint8Array) => void;
   readonly env?: NodeJS.ProcessEnv;
   /** Use `false` only with a complete allowlisted environment. */
   readonly extendEnv?: boolean;
   readonly allowNonZeroExit?: boolean;
   readonly timeoutMs?: number;
   readonly maxOutputBytes?: number;
+  readonly outputMode?: ProcessRunner.ProcessRunInput["outputMode"];
   readonly appendTruncationMarker?: boolean;
 }
 
@@ -61,6 +66,8 @@ export class VcsProcess extends Context.Service<
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
 const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
+const VCS_PROCESS_CONCURRENCY = 8;
+const GITHUB_PROCESS_CONCURRENCY = 4;
 
 function protectedHostExecutable(
   command: string,
@@ -83,6 +90,8 @@ function protectedHostExecutable(
       return null;
   }
 }
+
+export const CHECKPOINT_CAPTURE_OPERATION = "GitVcsDriver.checkpoints.captureCheckpoint";
 
 const classifyNonZeroExit = (command: string, stderr: string): VcsProcessExitFailureKind => {
   const normalized = stderr.toLowerCase();
@@ -130,10 +139,17 @@ const classifyNonZeroExit = (command: string, stderr: string): VcsProcessExitFai
   return "command-failed";
 };
 
+// Classify before discarding stderr; keep paths and process output out of errors.
+const isTransientGitExit = (stderr: string) =>
+  /unable to create [^\n]*\.lock['"]?: file exists/i.test(stderr) ||
+  /(?:unable to stat|lstat\(|error: open\()[^\n]+: no such file or directory/i.test(stderr);
+
 export const make = Effect.gen(function* () {
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const vcsProcesses = yield* Semaphore.make(VCS_PROCESS_CONCURRENCY);
+  const githubProcesses = yield* Semaphore.make(GITHUB_PROCESS_CONCURRENCY);
 
-  const run = Effect.fn("VcsProcess.run")(function* (input: VcsProcessInput) {
+  const runUnbounded = Effect.fn("VcsProcess.runUnbounded")(function* (input: VcsProcessInput) {
     const baseError = {
       operation: input.operation,
       command: input.command,
@@ -192,6 +208,7 @@ export const make = Effect.gen(function* () {
         cwd: input.cwd,
         ...(input.spawnCwd !== undefined ? { spawnCwd: input.spawnCwd } : {}),
         ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
+        ...(input.onStdoutChunk !== undefined ? { onStdoutChunk: input.onStdoutChunk } : {}),
         ...(protectedEnvironment !== undefined
           ? {
               env: protectedEnvironment,
@@ -205,7 +222,7 @@ export const make = Effect.gen(function* () {
             : {}),
         timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         maxOutputBytes: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
-        outputMode: "truncate",
+        outputMode: input.outputMode ?? "truncate",
         truncatedMarker: input.appendTruncationMarker ? OUTPUT_TRUNCATED_MARKER : "",
         timeoutBehavior: "error",
       })
@@ -244,6 +261,7 @@ export const make = Effect.gen(function* () {
     }
 
     if (!input.allowNonZeroExit && result.code !== 0) {
+      const failureKind = classifyNonZeroExit(input.command, result.stderr);
       return yield* VcsProcessExitError.fromProcessExit(
         baseError,
         {
@@ -251,7 +269,10 @@ export const make = Effect.gen(function* () {
           stderr: result.stderr,
           stderrTruncated: result.stderrTruncated,
         },
-        classifyNonZeroExit(input.command, result.stderr),
+        failureKind,
+        input.command === "git" &&
+          failureKind === "command-failed" &&
+          isTransientGitExit(result.stderr),
       );
     }
 
@@ -264,6 +285,31 @@ export const make = Effect.gen(function* () {
       stdoutInvalidUtf8: result.stdoutInvalidUtf8 ?? false,
       stderrInvalidUtf8: result.stderrInvalidUtf8 ?? false,
     } satisfies VcsProcessOutput;
+  });
+
+  const run = Effect.fn("VcsProcess.run")(function* (input: VcsProcessInput) {
+    const bounded = vcsProcesses.withPermits(1)(runUnbounded(input));
+    if (
+      input.command === "git" &&
+      input.operation === CHECKPOINT_CAPTURE_OPERATION &&
+      input.onStdoutChunk === undefined
+    ) {
+      // Retry the failed command, retaining the private index/tree and recovery's outer deadline.
+      return yield* bounded.pipe(
+        Effect.tapError((error) =>
+          Effect.logDebug("checkpoint Git command failed", {
+            operation: input.operation,
+            errorTag: error._tag,
+          }),
+        ),
+        Effect.retry({
+          times: 2,
+          while: (error) => error._tag === "VcsProcessExitError" && error.retryable === true,
+          schedule: Schedule.spaced(Duration.millis(75)),
+        }),
+      );
+    }
+    return yield* input.command === "gh" ? githubProcesses.withPermits(1)(bounded) : bounded;
   });
 
   return VcsProcess.of({ run });

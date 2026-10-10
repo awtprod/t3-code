@@ -16,6 +16,8 @@
 
 // @effect-diagnostics nodeBuiltinImport:off - this test binds real listeners to
 // prove two routers can coexist, which needs the Node server the app itself uses.
+import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
+import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import * as NodeHttp from "node:http";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
@@ -66,7 +68,7 @@ const makePortCapturingHttpServerLayer = (capture: (port: number) => void) =>
   Layer.effectDiscard(
     Effect.gen(function* () {
       const server = yield* HttpServer.HttpServer;
-      capture((server.address as HttpServer.TcpAddress).port);
+      capture((server.address as { readonly port: number }).port);
     }),
   ).pipe(Layer.provideMerge(makeEphemeralHttpServerLayer()));
 
@@ -85,8 +87,11 @@ const buildBothRoutersUnderTest = Effect.fnUntraced(function* () {
     traceMaxFiles: 10,
     otlpTracesUrl: undefined,
     otlpMetricsUrl: undefined,
-    otlpExportIntervalMs: 10_000,
-    otlpServiceName: "t3-server",
+    otlpLogsUrl: undefined,
+    otlpTracesExport: DEFAULT_SIGNAL_EXPORT,
+    otlpMetricsExport: DEFAULT_SIGNAL_EXPORT,
+    otlpLogsExport: DEFAULT_SIGNAL_EXPORT,
+    otelEnvironment: OtelEnvironment.none,
     mode: "web",
     port: 0,
     host: "127.0.0.1",

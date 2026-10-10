@@ -70,7 +70,7 @@ export interface WindowsMediaPickerViewProps {
 }
 
 /** Stateless body of the picker so it can render without a live server. */
-export function WindowsMediaPickerView(props: WindowsMediaPickerViewProps) {
+function WindowsMediaPickerView(props: WindowsMediaPickerViewProps) {
   const { location, roots, listing, showAllFiles } = props;
   const host =
     listing.status === "ready"

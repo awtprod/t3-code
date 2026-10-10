@@ -6,7 +6,6 @@
  *
  * @module WorkspacePaths
  */
-import * as NodeOS from "node:os";
 
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -17,11 +16,12 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { expandHomePathWith } from "../pathExpansion.ts";
 
 /** The probe is a liveness check, not real work; it must not hang a create. */
 const PROBE_TIMEOUT_MS = 10_000;
 
-export class WorkspaceRootNotExistsError extends Schema.TaggedErrorClass<WorkspaceRootNotExistsError>()(
+export class WorkspaceRootNotExistsError extends Schema.TaggedError<WorkspaceRootNotExistsError>()(
   "WorkspaceRootNotExistsError",
   {
     workspaceRoot: Schema.String,
@@ -33,7 +33,7 @@ export class WorkspaceRootNotExistsError extends Schema.TaggedErrorClass<Workspa
   }
 }
 
-export class WorkspaceRootCreateFailedError extends Schema.TaggedErrorClass<WorkspaceRootCreateFailedError>()(
+export class WorkspaceRootCreateFailedError extends Schema.TaggedError<WorkspaceRootCreateFailedError>()(
   "WorkspaceRootCreateFailedError",
   {
     workspaceRoot: Schema.String,
@@ -46,7 +46,7 @@ export class WorkspaceRootCreateFailedError extends Schema.TaggedErrorClass<Work
   }
 }
 
-export class WorkspaceRootStatFailedError extends Schema.TaggedErrorClass<WorkspaceRootStatFailedError>()(
+export class WorkspaceRootStatFailedError extends Schema.TaggedError<WorkspaceRootStatFailedError>()(
   "WorkspaceRootStatFailedError",
   {
     workspaceRoot: Schema.String,
@@ -60,7 +60,7 @@ export class WorkspaceRootStatFailedError extends Schema.TaggedErrorClass<Worksp
   }
 }
 
-export class WorkspaceRootNotDirectoryError extends Schema.TaggedErrorClass<WorkspaceRootNotDirectoryError>()(
+export class WorkspaceRootNotDirectoryError extends Schema.TaggedError<WorkspaceRootNotDirectoryError>()(
   "WorkspaceRootNotDirectoryError",
   {
     workspaceRoot: Schema.String,
@@ -72,7 +72,7 @@ export class WorkspaceRootNotDirectoryError extends Schema.TaggedErrorClass<Work
   }
 }
 
-export class WorkspacePathOutsideRootError extends Schema.TaggedErrorClass<WorkspacePathOutsideRootError>()(
+export class WorkspacePathOutsideRootError extends Schema.TaggedError<WorkspacePathOutsideRootError>()(
   "WorkspacePathOutsideRootError",
   {
     workspaceRoot: Schema.String,
@@ -95,7 +95,7 @@ export class WorkspacePathOutsideRootError extends Schema.TaggedErrorClass<Works
  * created by a human under their own account while the server runs as a
  * dedicated service account; the two numbers are what make that diagnosable.
  */
-export class WorkspaceRootUnusableError extends Schema.TaggedErrorClass<WorkspaceRootUnusableError>()(
+export class WorkspaceRootUnusableError extends Schema.TaggedError<WorkspaceRootUnusableError>()(
   "WorkspaceRootUnusableError",
   {
     workspaceRoot: Schema.String,
@@ -167,16 +167,6 @@ export class WorkspacePaths extends Context.Service<
 
 function toPosixRelativePath(input: string): string {
   return input.replaceAll("\\", "/");
-}
-
-function expandHomePath(input: string, path: Path.Path): string {
-  if (input === "~") {
-    return NodeOS.homedir();
-  }
-  if (input.startsWith("~/") || input.startsWith("~\\")) {
-    return path.join(NodeOS.homedir(), input.slice(2));
-  }
-  return input;
 }
 
 /**
@@ -304,7 +294,7 @@ export const make = Effect.gen(function* () {
   const normalizeWorkspaceRoot: WorkspacePaths["Service"]["normalizeWorkspaceRoot"] = Effect.fn(
     "WorkspacePaths.normalizeWorkspaceRoot",
   )(function* (workspaceRoot, options) {
-    const normalizedWorkspaceRoot = path.resolve(expandHomePath(workspaceRoot.trim(), path));
+    const normalizedWorkspaceRoot = path.resolve(expandHomePathWith(workspaceRoot.trim(), path));
     let workspaceStat = yield* statWorkspaceRoot(
       workspaceRoot,
       normalizedWorkspaceRoot,

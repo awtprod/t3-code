@@ -158,7 +158,7 @@ const PROVIDER_STORE_EXCLUDES = [
  */
 const PROVIDER_STORE_DIRECTORIES = ["sessions", "projects"] as const;
 
-export class SandboxRuntimeError extends Error {
+class SandboxRuntimeError extends Error {
   override readonly name = "SandboxRuntimeError";
   readonly stderr: string;
   constructor(message: string, stderr = "") {

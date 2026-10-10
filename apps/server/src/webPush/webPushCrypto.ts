@@ -15,7 +15,7 @@ import * as Schema from "effect/Schema";
 // Workers. apnsJwt.ts is the sibling precedent for the deterministic-ES256
 // approach: identical input yields the byte-identical JWT on every isolate.
 
-export class WebPushCryptoError extends Schema.TaggedErrorClass<WebPushCryptoError>()(
+export class WebPushCryptoError extends Schema.TaggedError<WebPushCryptoError>()(
   "WebPushCryptoError",
   {
     stage: Schema.Literals(["subscription-keys", "encrypt", "vapid-jwt", "vapid-public-key"]),

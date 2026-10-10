@@ -20,7 +20,7 @@ function selected(value: string | null | undefined): string {
   return value ?? "none";
 }
 
-export function renderCommandApprovalProposal(input: {
+function renderCommandApprovalProposal(input: {
   readonly command: CommandSubmissionType;
   readonly route: RouteDecisionType;
 }): string {

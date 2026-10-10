@@ -17,7 +17,6 @@ const workspaceFiles = [
   "apps/desktop/package.json",
   "apps/web/package.json",
   "apps/mobile/package.json",
-  "apps/mobile/deps/react-native-nitro-markdown-0.5.0.tgz",
   "apps/mobile/modules/t3-markdown-text/package.json",
   "apps/mobile/modules/t3-review-diff/package.json",
   "apps/mobile/modules/t3-terminal/package.json",
@@ -220,7 +219,10 @@ async function assertNoCaseInsensitiveTrackedPathCollisions(): Promise<void> {
     }
     canonicalPaths.set(canonicalPath, trackedPath);
 
-    if (/\.[cm]?[jt]sx?$/u.test(trackedPath)) {
+    // .repos/ holds read-only upstream reference checkouts that nothing imports or builds
+    // (vendored Alchemy ships Runner.ts beside runner.mjs). Exact-path collisions above
+    // still cover them; only the module-resolution check skips them.
+    if (!trackedPath.startsWith(".repos/") && /\.[cm]?[jt]sx?$/u.test(trackedPath)) {
       const canonicalModulePath = trackedPath
         .replace(/\.[cm]?[jt]sx?$/u, "")
         .normalize("NFC")
@@ -245,6 +247,12 @@ const tempRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-release-s
 
 try {
   await assertNoCaseInsensitiveTrackedPathCollisions();
+
+  // Upstream also runs .github/scripts/relay-state-output.test.cjs here. It exercises
+  // upstream's alchemy-state relay step; Command Center's release.yml reads relay state
+  // through the relay deploy script instead, so that fixture does not apply. The file is
+  // kept verbatim from upstream but not run.
+
   copyWorkspaceManifestFixture(tempRoot);
 
   NodeChildProcess.execFileSync(

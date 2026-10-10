@@ -52,7 +52,7 @@ export const GATEWAY_TARGET_HOST = "127.0.0.1";
  * The Chrome/Node debugger range is the sharpest of these: `9229` speaks the
  * inspector protocol, which is remote code execution by design.
  */
-export const BLOCKED_GATEWAY_PORTS: ReadonlySet<number> = new Set([
+const BLOCKED_GATEWAY_PORTS: ReadonlySet<number> = new Set([
   2049, // NFS
   2375, // Docker daemon, plaintext — container create is root on the host
   2376, // Docker daemon, TLS
@@ -86,10 +86,10 @@ export const BLOCKED_GATEWAY_PORTS: ReadonlySet<number> = new Set([
  * once, and every port in the range speaks a protocol that evaluates arbitrary
  * code in the target process.
  */
-export const BLOCKED_DEBUGGER_PORT_RANGE = { first: 9222, last: 9239 } as const;
+const BLOCKED_DEBUGGER_PORT_RANGE = { first: 9222, last: 9239 } as const;
 
 /** Whether a port hosts a service the gateway must never expose. */
-export function isBlockedGatewayPort(port: number): boolean {
+function isBlockedGatewayPort(port: number): boolean {
   if (BLOCKED_GATEWAY_PORTS.has(port)) return true;
   return port >= BLOCKED_DEBUGGER_PORT_RANGE.first && port <= BLOCKED_DEBUGGER_PORT_RANGE.last;
 }
@@ -203,7 +203,7 @@ function normalizePathAndQuery(pathAndQuery: string): string {
  * the far side is arbitrary user code. A bearer token handed to it is reusable
  * against the control plane.
  */
-export const GATEWAY_STRIPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set([
+const GATEWAY_STRIPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set([
   "host",
   "connection",
   "keep-alive",
@@ -219,7 +219,7 @@ export const GATEWAY_STRIPPED_REQUEST_HEADERS: ReadonlySet<string> = new Set([
 ]);
 
 /** Response headers that are connection-scoped and must not be relayed downstream. */
-export const GATEWAY_STRIPPED_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
+const GATEWAY_STRIPPED_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
   "connection",
   "keep-alive",
   "proxy-authenticate",

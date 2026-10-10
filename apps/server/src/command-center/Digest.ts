@@ -366,6 +366,6 @@ export const make = Effect.fn("CommandCenterDigest.make")(function* (
   return CommandCenterDigest.of({ query, updatePreferences, markViewed });
 });
 
-export const layer = (dependencies: DigestDependencies) =>
+const layer = (dependencies: DigestDependencies) =>
   Layer.effect(CommandCenterDigest, make(dependencies));
 export const liveLayer = layer({ now: Effect.map(DateTime.now, DateTime.formatIso) });

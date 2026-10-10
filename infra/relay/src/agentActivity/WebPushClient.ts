@@ -19,7 +19,7 @@ const WEB_PUSH_TTL_SECONDS = 60 * 60;
 export const VAPID_JWT_WINDOW_SECONDS = 6 * 60 * 60;
 const VAPID_JWT_LIFETIME_SECONDS = 12 * 60 * 60;
 
-export class WebPushHttpRequestError extends Schema.TaggedErrorClass<WebPushHttpRequestError>()(
+export class WebPushHttpRequestError extends Schema.TaggedError<WebPushHttpRequestError>()(
   "WebPushHttpRequestError",
   {
     endpointOrigin: Schema.String,

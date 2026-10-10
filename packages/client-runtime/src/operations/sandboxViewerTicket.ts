@@ -23,7 +23,7 @@ export interface SandboxViewerTicket {
   readonly expiresAt: string;
 }
 
-export class SandboxViewerTicketError extends Schema.TaggedErrorClass<SandboxViewerTicketError>()(
+export class SandboxViewerTicketError extends Schema.TaggedError<SandboxViewerTicketError>()(
   "SandboxViewerTicketError",
   { message: Schema.String, cause: Schema.optional(Schema.Unknown) },
 ) {}

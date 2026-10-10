@@ -30,7 +30,7 @@ export class AutomationScheduleInterpreter extends Context.Service<
   "@awtprod/command-center/command-center/automation/ScheduleInterpreter/AutomationScheduleInterpreter",
 ) {}
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const settings = yield* ServerSettings.ServerSettingsService;
   const textGeneration = yield* TextGeneration.TextGeneration;

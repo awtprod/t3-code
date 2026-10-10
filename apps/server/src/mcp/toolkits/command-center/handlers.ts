@@ -22,7 +22,7 @@ const bySpace = <A extends { readonly spaceId: string }>(
 ): ReadonlyArray<A> =>
   spaceId === undefined ? values : values.filter((value) => value.spaceId === spaceId);
 
-export const requireScopedSpace = Effect.fn("CommandCenterToolkit.requireScopedSpace")(function* (
+const requireScopedSpace = Effect.fn("CommandCenterToolkit.requireScopedSpace")(function* (
   capability: Parameters<typeof McpInvocationContext.requireCommandCenterCapability>[0],
   requestedSpaceId?: string,
 ) {

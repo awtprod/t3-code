@@ -81,7 +81,7 @@ const PRIORITY_ORDER: Readonly<Record<ItemPriority, number>> = {
 /**
  * Collapse whitespace so stored text cannot fake a section header, then clip.
  */
-export const clipBriefLine = (value: string, maxChars: number): string => {
+const clipBriefLine = (value: string, maxChars: number): string => {
   const single = value.replace(/\s+/gu, " ").trim();
   if (single.length <= maxChars) return single;
   return `${single.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
@@ -106,7 +106,7 @@ const fillBudget = (lines: ReadonlyArray<string>, budgetChars: number): string =
     : `${selected.join("\n")}\n[${omitted} more not shown: brief budget reached]`;
 };
 
-export const orderBriefMemories = (
+const orderBriefMemories = (
   memories: ReadonlyArray<SpaceBriefMemory>,
 ): ReadonlyArray<SpaceBriefMemory> =>
   memories
@@ -116,9 +116,7 @@ export const orderBriefMemories = (
         MEMORY_KIND_ORDER[left.kind] - MEMORY_KIND_ORDER[right.kind] || byRecency(left, right),
     );
 
-export const orderBriefItems = (
-  items: ReadonlyArray<SpaceBriefItem>,
-): ReadonlyArray<SpaceBriefItem> =>
+const orderBriefItems = (items: ReadonlyArray<SpaceBriefItem>): ReadonlyArray<SpaceBriefItem> =>
   items
     .filter((item) => item.status !== "done" && item.status !== "canceled")
     .toSorted(

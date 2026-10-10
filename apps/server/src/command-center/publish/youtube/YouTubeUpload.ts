@@ -17,11 +17,11 @@ import * as NodeFSP from "node:fs/promises";
 
 import type { FetchLike } from "./YouTubeOAuth.ts";
 
-export const YOUTUBE_UPLOAD_ENDPOINT = "https://www.googleapis.com/upload/youtube/v3/videos";
+const YOUTUBE_UPLOAD_ENDPOINT = "https://www.googleapis.com/upload/youtube/v3/videos";
 /** Chunk sizes must be multiples of 256 KiB (except the final chunk). */
 export const UPLOAD_CHUNK_GRANULARITY = 256 * 1024;
-export const DEFAULT_UPLOAD_CHUNK_SIZE = 32 * UPLOAD_CHUNK_GRANULARITY; // 8 MiB
-export const DEFAULT_UPLOAD_MAX_RETRIES = 6;
+const DEFAULT_UPLOAD_CHUNK_SIZE = 32 * UPLOAD_CHUNK_GRANULARITY; // 8 MiB
+const DEFAULT_UPLOAD_MAX_RETRIES = 6;
 
 export type YouTubePrivacyStatus = "private" | "unlisted" | "public";
 

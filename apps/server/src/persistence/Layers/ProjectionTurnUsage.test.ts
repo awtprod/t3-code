@@ -6,7 +6,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { runMigrations } from "../Migrations.ts";
-import * as NodeSqliteClient from "../NodeSqliteClient.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { ProjectionTurnUsageRepository } from "../Services/ProjectionTurnUsage.ts";
 import { ProjectionTurnUsageRepositoryLive } from "./ProjectionTurnUsage.ts";
 

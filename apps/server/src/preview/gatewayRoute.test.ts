@@ -1,4 +1,6 @@
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
+import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 
@@ -28,6 +30,7 @@ import {
   HttpServer,
 } from "effect/unstable/http";
 import * as Cookies from "effect/unstable/http/Cookies";
+import * as NetAddress from "effect/unstable/net/NetAddress";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -180,8 +183,11 @@ const buildGatewayUnderTest = Effect.fnUntraced(function* (options?: {
     traceMaxFiles: 10,
     otlpTracesUrl: undefined,
     otlpMetricsUrl: undefined,
-    otlpExportIntervalMs: 10_000,
-    otlpServiceName: "t3-server",
+    otlpLogsUrl: undefined,
+    otlpTracesExport: DEFAULT_SIGNAL_EXPORT,
+    otlpMetricsExport: DEFAULT_SIGNAL_EXPORT,
+    otlpLogsExport: DEFAULT_SIGNAL_EXPORT,
+    otelEnvironment: OtelEnvironment.none,
     mode: "web",
     // Zero keeps the backend out of `selfPorts`, so the only port the gateway
     // refuses as "its own" is the ephemeral one the test server actually bound.
@@ -233,7 +239,7 @@ const buildGatewayUnderTest = Effect.fnUntraced(function* (options?: {
   const sessions = Context.get(context, SessionStore.SessionStore);
 
   const server = yield* HttpServer.HttpServer;
-  const address = server.address as HttpServer.TcpAddress;
+  const address = server.address as NetAddress.InetAddress;
 
   const issueSessionCookie = (
     scopes?: ReadonlyArray<

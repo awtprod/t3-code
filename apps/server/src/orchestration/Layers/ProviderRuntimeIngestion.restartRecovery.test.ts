@@ -27,6 +27,9 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "../../config.ts";
+import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
+import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -58,6 +61,7 @@ const at = (second: number) => `2026-09-09T00:00:${String(second).padStart(2, "0
 const providerService: ProviderServiceShape = {
   startSession: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
   sendTurn: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
+  compactThread: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
   interruptTurn: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
   respondToRequest: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
   respondToUserInput: () => Effect.die(new Error("provider calls are forbidden in restart tests")),
@@ -78,6 +82,8 @@ const providerService: ProviderServiceShape = {
       },
     });
   },
+  assertConversationRollbackSupported: () =>
+    Effect.die(new Error("provider calls are forbidden in restart tests")),
   rollbackConversation: () =>
     Effect.die(new Error("provider calls are forbidden in restart tests")),
   streamEvents: Stream.empty,
@@ -108,6 +114,8 @@ function makeTestLayer(dbPath: string, workspaceRoot: string) {
         getBinding: () => Effect.succeed(Option.none()),
       }),
     ),
+    Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
+    Layer.provideMerge(VcsProcess.layer),
     Layer.provide(ServerSettingsService.layerTest()),
     Layer.provide(ServerConfig.layerTest(workspaceRoot, workspaceRoot)),
     Layer.provide(NodeServices.layer),

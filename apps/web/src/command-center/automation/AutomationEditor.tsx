@@ -66,6 +66,7 @@ import {
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "~/components/ui/input-group";
 import { Textarea } from "~/components/ui/textarea";
 import { cn } from "~/lib/utils";
 
@@ -300,7 +301,7 @@ const AutomationNodeCard = memo(function AutomationNodeCard({
       data-slot="automation-node"
     >
       <Handle
-        className="!size-4 !border-[3px] !border-card !bg-muted-foreground transition-transform hover:!scale-125"
+        className="!size-4 !border-3 !border-card !bg-muted-foreground transition-transform hover:!scale-125"
         isConnectable={!readOnly}
         position={Position.Left}
         type="target"
@@ -330,7 +331,7 @@ const AutomationNodeCard = memo(function AutomationNodeCard({
               />
             ) : null}
           </div>
-          <p className="text-[0.6875rem] font-medium uppercase tracking-wide text-muted-foreground">
+          <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
             {presentation.label}
           </p>
         </div>
@@ -365,7 +366,7 @@ const AutomationNodeCard = memo(function AutomationNodeCard({
         </button>
       </div>
       <Handle
-        className="!size-4 !border-[3px] !border-card !bg-primary transition-transform hover:!scale-125"
+        className="!size-4 !border-3 !border-card !bg-primary transition-transform hover:!scale-125"
         isConnectable={!readOnly}
         position={Position.Right}
         type="source"
@@ -453,17 +454,18 @@ function ConfigJsonEditor({
   return (
     <details className="rounded-xl border bg-muted/20 p-3">
       <summary className="cursor-pointer text-xs font-medium">Advanced configuration</summary>
-      <Textarea
-        aria-label={`Advanced configuration for ${node.id}`}
-        className="mt-3 font-mono text-xs"
-        disabled={readOnly}
-        onBlur={apply}
-        onChange={(event) => setDraft(event.currentTarget.value)}
-        rows={10}
-        value={draft}
-      />
+      <div className="mt-3 font-mono">
+        <Textarea
+          aria-label={`Advanced configuration for ${node.id}`}
+          disabled={readOnly}
+          onBlur={apply}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          rows={10}
+          value={draft}
+        />
+      </div>
       {error ? <p className="mt-1 text-xs text-destructive">{error}</p> : null}
-      <p className="mt-2 text-[0.6875rem] leading-relaxed text-muted-foreground">
+      <p className="mt-2 text-2xs leading-relaxed text-muted-foreground">
         Use this only for settings that do not have a guided field. Unknown keys are preserved.
       </p>
     </details>
@@ -552,7 +554,7 @@ function TextAreaField({
   return (
     <Field label={label}>
       <Textarea
-        className="mt-1 text-sm"
+        className="mt-1"
         disabled={readOnly}
         onChange={(event) => onChange(event.currentTarget.value)}
         placeholder={placeholder}
@@ -1748,18 +1750,19 @@ function StepPicker({
       className="absolute left-4 top-4 z-40 w-[min(22rem,calc(100%-2rem))] rounded-2xl border bg-popover p-3 text-popover-foreground shadow-xl"
     >
       <div className="flex items-center gap-2">
-        <div className="relative flex-1">
-          <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
+        <InputGroup className="flex-1">
+          <InputGroupAddon>
+            <SearchIcon aria-hidden className="text-muted-foreground" />
+          </InputGroupAddon>
+          <InputGroupInput
             autoFocus
-            className="pl-8"
             nativeInput
             onChange={(event) => setQuery(event.currentTarget.value)}
             placeholder="Search steps…"
             size="sm"
             value={query}
           />
-        </div>
+        </InputGroup>
         <Button aria-label="Close step picker" onClick={onClose} size="icon-sm" variant="ghost">
           <XIcon />
         </Button>
@@ -1767,7 +1770,7 @@ function StepPicker({
       <div className="mt-3 max-h-[26rem] space-y-3 overflow-y-auto">
         {grouped.map((group) => (
           <section key={group.category}>
-            <h3 className="px-1 text-[0.6875rem] font-semibold uppercase tracking-wide text-muted-foreground">
+            <h3 className="px-1 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
               {group.category}
             </h3>
             <div className="mt-1 space-y-1">
@@ -1907,10 +1910,10 @@ function ScheduleEditor({
         <Clock3Icon className="size-4 text-primary" />
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold">{describeAutomationSchedule(trigger.expression)}</p>
-          <p className="truncate text-[0.6875rem] text-muted-foreground">{trigger.timezone}</p>
+          <p className="truncate text-2xs text-muted-foreground">{trigger.timezone}</p>
         </div>
         {currentOccurrences.length > 0 ? (
-          <span className="text-[0.6875rem] text-muted-foreground">
+          <span className="text-2xs text-muted-foreground">
             Next: {new Date(currentOccurrences[0]!).toLocaleString()}
           </span>
         ) : null}
@@ -1968,7 +1971,7 @@ function ScheduleEditor({
             <CheckCircle2Icon className="mt-0.5 size-4 text-success" />
             <div className="min-w-0 flex-1">
               <p className="text-xs font-semibold">{interpretation.summary}</p>
-              <ul className="mt-1 text-[0.6875rem] text-muted-foreground">
+              <ul className="mt-1 text-2xs text-muted-foreground">
                 {interpretation.nextOccurrences.map((value) => (
                   <li key={value}>
                     {new Date(value).toLocaleString(undefined, {
@@ -2558,15 +2561,16 @@ function AutomationEditorInner({
       <header className="shrink-0 border-b bg-card px-4 py-3">
         <div className="flex flex-wrap items-center gap-3">
           <CircleDotIcon className="size-4 text-primary" />
-          <Input
-            aria-label="Automation name"
-            className="min-w-48 flex-1 font-semibold"
-            disabled={readOnly}
-            nativeInput
-            onChange={(event) => publishEdit({ ...definition, name: event.currentTarget.value })}
-            size="sm"
-            value={definition.name}
-          />
+          <div className="min-w-48 flex-1 font-semibold">
+            <Input
+              aria-label="Automation name"
+              disabled={readOnly}
+              nativeInput
+              onChange={(event) => publishEdit({ ...definition, name: event.currentTarget.value })}
+              size="sm"
+              value={definition.name}
+            />
+          </div>
           <Field label="Starts">
             <select
               aria-label="Automation trigger type"

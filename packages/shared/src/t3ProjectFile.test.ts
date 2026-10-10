@@ -37,6 +37,7 @@ describe("buildT3ProjectFileJsonSchema", () => {
       "iconPath",
       "sandbox",
       "scripts",
+      "worktreeSubmodules",
     ]);
     expect(schema.required).toBeUndefined();
     expect(schema.properties.iconPath?.description).toContain("Workspace-relative path");
@@ -45,6 +46,7 @@ describe("buildT3ProjectFileJsonSchema", () => {
     const script = schema.properties.scripts?.items;
     expect(script?.required).toEqual(["name", "command"]);
     expect(Object.keys(script?.properties ?? {}).sort()).toEqual([
+      "async",
       "autoOpenPreview",
       "command",
       "icon",

@@ -29,6 +29,7 @@
  *
  * @module Judge
  */
+import * as ByteSize from "effect/ByteSize";
 import type { EfficiencyJudgeSettings } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -780,7 +781,7 @@ export interface JudgeDeps {
  * the current settings (transport changes at runtime) while tests pass a fixed
  * config.
  */
-export const makeJudge = (getConfig: () => ResolvedJudgeConfig, deps: JudgeDeps): JudgeShape => {
+const makeJudge = (getConfig: () => ResolvedJudgeConfig, deps: JudgeDeps): JudgeShape => {
   const ask = (request: JudgeRequest, meta?: JudgeMeta): Effect.Effect<JudgeResult, JudgeError> =>
     Effect.gen(function* () {
       const config = getConfig();
@@ -886,7 +887,7 @@ export const makeJudge = (getConfig: () => ResolvedJudgeConfig, deps: JudgeDeps)
 export const makeTestJudge = (config: ResolvedJudgeConfig, fetchImpl: typeof fetch): JudgeShape =>
   makeJudge(() => config, { fetchImpl, sideEffects: NO_SIDE_EFFECTS });
 
-const MAX_DECISION_LOG_BYTES = FileSystem.MiB(20);
+const MAX_DECISION_LOG_BYTES = ByteSize.mebibytes(20);
 
 const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettingsService;

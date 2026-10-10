@@ -10,7 +10,6 @@ import * as NodeCrypto from "node:crypto";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -18,7 +17,7 @@ import * as AutomationTriggerCoordinator from "./automation/TriggerCoordinator.t
 import * as CommandCenterCredentialStore from "./CredentialStore.ts";
 
 export const COMMAND_CENTER_WEBHOOK_SECRET_NAME = "command-center-webhooks";
-export const COMMAND_CENTER_WEBHOOK_TIMESTAMP_SKEW_MS = 5 * 60 * 1_000;
+const COMMAND_CENTER_WEBHOOK_TIMESTAMP_SKEW_MS = 5 * 60 * 1_000;
 export const COMMAND_CENTER_WEBHOOK_HEADERS = {
   credentialId: "x-command-center-credential-id",
   spaceId: "x-command-center-space-id",
@@ -55,7 +54,7 @@ const decodeJson = Schema.decodeUnknownSync(Schema.Json);
 const isWebhookRoute = Schema.is(CommandCenterWebhookRoute);
 const isWebhookDeliveryId = Schema.is(CommandCenterWebhookDeliveryId);
 
-export class WebhookAdmissionError extends Schema.TaggedErrorClass<WebhookAdmissionError>()(
+export class WebhookAdmissionError extends Schema.TaggedError<WebhookAdmissionError>()(
   "WebhookAdmissionError",
   {
     reason: Schema.Literals([
@@ -300,5 +299,3 @@ export const make = Effect.gen(function* () {
   const triggers = yield* AutomationTriggerCoordinator.make;
   return makeWebhookAdmission({ secrets, triggers });
 });
-
-export const layer = Layer.effect(WebhookAdmission, make);

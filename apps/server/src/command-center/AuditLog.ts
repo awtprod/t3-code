@@ -7,7 +7,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeUtil from "node:util";
 
 export type CommandCenterAuditHashVersion = 1 | 2;
-export const COMMAND_CENTER_AUDIT_HASH_VERSION = 2 as const;
+const COMMAND_CENTER_AUDIT_HASH_VERSION = 2 as const;
 
 export interface CommandCenterAuditInput {
   readonly eventId?: string;
@@ -78,7 +78,7 @@ export const commandCenterAuditHashDocument = (input: {
     : encodeJson({ hashVersion: 2, eventId: input.eventId, ...event });
 };
 
-export class CommandCenterAuditReplayConflictError extends Schema.TaggedErrorClass<CommandCenterAuditReplayConflictError>()(
+export class CommandCenterAuditReplayConflictError extends Schema.TaggedError<CommandCenterAuditReplayConflictError>()(
   "CommandCenterAuditReplayConflictError",
   {
     eventId: Schema.String,

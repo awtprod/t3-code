@@ -67,6 +67,7 @@ const thread = (input: Partial<OrchestrationThread>): OrchestrationThread => ({
   proposedPlans: [],
   activities: [],
   checkpoints: [],
+  pullRequests: [],
   session: null,
   ...input,
 });

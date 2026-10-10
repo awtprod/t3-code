@@ -7,9 +7,9 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstab
 import { WebhookAdmissionError, make as makeWebhookAdmission } from "./WebhookAdmission.ts";
 import { CommandCenterNotReadyError, CommandCenterReadinessGate } from "./ReadinessGate.ts";
 
-export const COMMAND_CENTER_WEBHOOK_HTTP_PATH = "/api/command-center/webhooks";
+const COMMAND_CENTER_WEBHOOK_HTTP_PATH = "/api/command-center/webhooks";
 
-class WebhookBodyReadError extends Schema.TaggedErrorClass<WebhookBodyReadError>()(
+class WebhookBodyReadError extends Schema.TaggedError<WebhookBodyReadError>()(
   "WebhookBodyReadError",
   {
     reason: Schema.Literals(["invalid-length", "payload-too-large", "read-failed"]),
@@ -127,7 +127,7 @@ export const collectBoundedWebhookBody = (input: {
   );
 };
 
-export const readBoundedWebhookBody = (
+const readBoundedWebhookBody = (
   request: HttpServerRequest.HttpServerRequest,
 ): Effect.Effect<Uint8Array, WebhookBodyReadError> =>
   collectBoundedWebhookBody({

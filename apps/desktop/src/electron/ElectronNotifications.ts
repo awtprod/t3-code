@@ -30,7 +30,7 @@ export class ElectronNotifications extends Context.Service<
 // macOS and Windows. Entries are released on click or close.
 const liveNotifications = new Set<Electron.Notification>();
 
-export const make = ElectronNotifications.of({
+const make = ElectronNotifications.of({
   show: (input) =>
     Effect.sync(() => {
       if (!Electron.Notification.isSupported()) {

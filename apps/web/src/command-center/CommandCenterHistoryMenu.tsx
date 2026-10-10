@@ -36,7 +36,7 @@ export function CommandCenterHistoryMenu({
         <MessageSquareIcon className="size-3.5" />
         <span className="hidden sm:inline">History</span>
       </PopoverTrigger>
-      <PopoverPopup align="start" className="w-80 max-w-[calc(100vw-2rem)] p-0">
+      <PopoverPopup align="start" width="md" padding="none" className="max-w-[calc(100vw-2rem)]">
         <div className="flex items-center gap-2 border-b px-3 py-2">
           <div className="min-w-0 flex-1 text-xs font-medium">Recent commands</div>
           <Button onClick={onNewConversation} size="xs" variant="ghost">
@@ -70,12 +70,12 @@ export function CommandCenterHistoryMenu({
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-xs font-medium">{conversation.title}</span>
                     {conversation.preview ? (
-                      <span className="mt-0.5 block truncate text-[0.6875rem] text-muted-foreground">
+                      <span className="mt-0.5 block truncate text-2xs text-muted-foreground">
                         {conversation.preview}
                       </span>
                     ) : null}
                   </span>
-                  <span className="shrink-0 text-[0.625rem] text-muted-foreground/70">
+                  <span className="shrink-0 text-3xs text-muted-foreground/70">
                     {conversation.updatedAtLabel}
                   </span>
                 </button>

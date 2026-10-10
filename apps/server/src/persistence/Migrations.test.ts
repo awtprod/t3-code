@@ -13,7 +13,7 @@ import {
   migrationManifest,
   runMigrations,
 } from "./Migrations.ts";
-import * as NodeSqliteClient from "./NodeSqliteClient.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const seedApplied = (ids: ReadonlyArray<number>) =>
   Effect.gen(function* () {
@@ -192,7 +192,8 @@ describe("stacked Instagram migration manifest", () => {
   });
 
   it("registers the Space agent wake state and replies after the Space activity feed", () => {
-    assert.deepStrictEqual(migrationManifest.slice(-3), [
+    const at080 = migrationManifest.findIndex(([id]) => id === 80);
+    assert.deepStrictEqual(migrationManifest.slice(at080, at080 + 3), [
       [80, "CommandCenterSpaceActivity"],
       [81, "CommandCenterSpaceAgentState"],
       [82, "CommandCenterSpaceAgentReplies"],

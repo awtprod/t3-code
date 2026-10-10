@@ -30,7 +30,7 @@ export function resolveProspectsSpace(
   );
 }
 
-export function isProspectItem(item: Item): boolean {
+function isProspectItem(item: Item): boolean {
   return item.kind === "decision" && item.id.startsWith(PROSPECT_ITEM_PREFIX);
 }
 

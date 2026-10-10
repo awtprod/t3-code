@@ -116,9 +116,9 @@ import {
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   resolveAdjacentThreadId,
-  resolveSettledTimestamp,
+  resolveSettledThreadTimestamp,
   resolveSidebarV2Status,
-  searchSidebarThreadsByTitle,
+  searchSidebarThreads,
   resolveWorkingStartedAt,
   shouldNavigateAfterProjectRemoval,
   sortLogicalProjectsForSidebar,
@@ -129,9 +129,9 @@ import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
   prStatusIndicator,
   resolveThreadPr,
-  settledPrHoverColorClass,
   terminalStatusFromRunningIds,
   type TerminalStatusIndicator,
+  type ThreadPr,
 } from "./ThreadStatusIndicators";
 import {
   resolveSnoozePresets,
@@ -139,7 +139,7 @@ import {
   snoozeWakeLabel,
   type SnoozePreset,
 } from "./Sidebar.snooze";
-import { ProjectFavicon } from "./ProjectFavicon";
+import { ProjectFavicon, type ProjectFaviconProject } from "./ProjectFavicon";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
@@ -159,13 +159,8 @@ import {
 import { Input } from "./ui/input";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
-import {
-  SidebarContent,
-  SidebarGroup,
-  SidebarMenuButton,
-  SidebarSeparator,
-  useSidebar,
-} from "./ui/sidebar";
+import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
+import { Separator } from "./ui/separator";
 import {
   SidebarChromeFooter,
   SidebarChromeHeader,
@@ -196,10 +191,10 @@ function threadTimeLabel(thread: SidebarThreadSummary): string {
 }
 
 // Settled rows read "how long ago did this wrap up", matching their sort
-// key: both go through resolveSettledTimestamp so label and order can't
+// key: both go through resolveSettledThreadTimestamp so label and order can't
 // disagree.
 function settledTimeLabel(thread: SidebarThreadSummary): string {
-  const timestamp = resolveSettledTimestamp(thread);
+  const timestamp = resolveSettledThreadTimestamp(thread);
   return timestamp === null ? "" : compactSidebarTimeLabel(formatRelativeTimeLabel(timestamp));
 }
 
@@ -245,6 +240,7 @@ function SidebarV2ThreadTooltip({
   thread,
   projectTitle,
   projectCwd,
+  projectFavicon,
   environmentLabel,
   driverKind,
   modelInstanceId,
@@ -256,6 +252,7 @@ function SidebarV2ThreadTooltip({
   thread: SidebarThreadSummary;
   projectTitle: string | null;
   projectCwd: string | null;
+  projectFavicon: ProjectFaviconProject | null;
   environmentLabel: string | null;
   driverKind: ProviderInstanceEntry["driverKind"] | null;
   modelInstanceId: string;
@@ -282,11 +279,14 @@ function SidebarV2ThreadTooltip({
         <div className="grid gap-1.5 pl-0.5 text-xs text-muted-foreground">
           {projectTitle ? (
             <div className="flex min-w-0 items-center gap-2">
-              <ProjectFavicon
-                environmentId={thread.environmentId}
-                cwd={projectCwd ?? ""}
-                className="size-3 shrink-0 stroke-muted-foreground"
-              />
+              {projectFavicon ? (
+                <ProjectFavicon
+                  project={projectFavicon}
+                  className="size-3 shrink-0 stroke-muted-foreground"
+                />
+              ) : (
+                <FolderIcon className="size-3 shrink-0 stroke-muted-foreground" />
+              )}
               <div className="min-w-0 truncate text-foreground/75">{projectTitle}</div>
             </div>
           ) : null}
@@ -376,27 +376,41 @@ function SnoozePopoverButton(props: {
       >
         <ClockIcon className="size-3" />
       </PopoverTrigger>
-      <PopoverPopup side="bottom" align="end" className="w-56" viewportClassName="p-1">
-        {presets.map((preset) => (
-          <button
-            key={preset.id}
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpenChange(false);
-              onSnooze(preset);
-            }}
-            className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground/90 hover:bg-accent hover:text-foreground"
-          >
-            <span className="flex-1">{preset.label}</span>
-            <span className="font-mono text-[10px] text-muted-foreground/60 tabular-nums">
-              {preset.whenLabel}
-            </span>
-          </button>
-        ))}
+      <PopoverPopup side="bottom" align="end" className="w-56" padding="none">
+        <div className="p-1">
+          {presets.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenChange(false);
+                onSnooze(preset);
+              }}
+              className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground/90 hover:bg-accent hover:text-foreground"
+            >
+              <span className="flex-1">{preset.label}</span>
+              <span className="font-mono text-[10px] text-muted-foreground/60 tabular-nums">
+                {preset.whenLabel}
+              </span>
+            </button>
+          ))}
+        </div>
       </PopoverPopup>
     </Popover>
   );
+}
+
+// Hover tint for the PR glyph on settled rows (the row's `group/v2-row` hover).
+function settledPrHoverColorClass(state: NonNullable<ThreadPr>["state"]): string {
+  switch (state) {
+    case "open":
+      return "group-hover/v2-row:text-emerald-600 dark:group-hover/v2-row:text-emerald-300/90";
+    case "merged":
+      return "group-hover/v2-row:text-violet-600 dark:group-hover/v2-row:text-violet-300/90";
+    case "closed":
+      return "group-hover/v2-row:text-red-600 dark:group-hover/v2-row:text-red-300/90";
+  }
 }
 
 const SidebarV2Row = memo(function SidebarV2Row(props: {
@@ -430,6 +444,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
   environmentLabel: string | null;
   projectCwd: string | null;
   projectTitle: string | null;
+  projectFavicon: ProjectFaviconProject | null;
   providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
   timestampFormat: TimestampFormat;
   onThreadClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
@@ -619,6 +634,7 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
       thread={thread}
       projectTitle={props.projectTitle}
       projectCwd={props.projectCwd}
+      projectFavicon={props.projectFavicon}
       environmentLabel={props.environmentLabel}
       driverKind={driverKind}
       modelInstanceId={modelInstanceId}
@@ -881,12 +897,15 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                   "opacity-40 grayscale group-hover/v2-row:opacity-100 group-hover/v2-row:grayscale-0",
               )}
             >
-              <ProjectFavicon
-                environmentId={thread.environmentId}
-                cwd={props.projectCwd ?? ""}
-                className="size-4"
-                fallbackIcon={MessageSquareIcon}
-              />
+              {props.projectFavicon ? (
+                <ProjectFavicon
+                  project={props.projectFavicon}
+                  className="size-4"
+                  fallbackIcon={MessageSquareIcon}
+                />
+              ) : (
+                <MessageSquareIcon className="size-4" />
+              )}
             </span>
             {title}
             {terminalStatusIcon}
@@ -1005,11 +1024,11 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
         >
           <div className="relative z-10 h-[4.875rem] px-[var(--sidebar-row-content-inset)] py-[var(--sidebar-content-inset)]">
             <div className="flex h-5 min-w-0 items-center gap-1.5">
-              <ProjectFavicon
-                environmentId={thread.environmentId}
-                cwd={props.projectCwd ?? ""}
-                className="size-4 shrink-0"
-              />
+              {props.projectFavicon ? (
+                <ProjectFavicon project={props.projectFavicon} className="size-4 shrink-0" />
+              ) : (
+                <FolderIcon className="size-4 shrink-0" />
+              )}
               {props.projectTitle ? (
                 <span
                   className={cn(
@@ -1208,6 +1227,7 @@ const SidebarV2SearchResultRow = memo(function SidebarV2SearchResultRow(props: {
   thread: SidebarThreadSummary;
   projectCwd: string | null;
   projectTitle: string | null;
+  projectFavicon: ProjectFaviconProject | null;
   environmentLabel: string | null;
   providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
   isHighlighted: boolean;
@@ -1276,12 +1296,15 @@ const SidebarV2SearchResultRow = memo(function SidebarV2SearchResultRow(props: {
             />
           }
         >
-          <ProjectFavicon
-            environmentId={thread.environmentId}
-            cwd={props.projectCwd ?? ""}
-            className="size-4 shrink-0"
-            fallbackIcon={MessageSquareIcon}
-          />
+          {props.projectFavicon ? (
+            <ProjectFavicon
+              project={props.projectFavicon}
+              className="size-4 shrink-0"
+              fallbackIcon={MessageSquareIcon}
+            />
+          ) : (
+            <MessageSquareIcon className="size-4 shrink-0" />
+          )}
           <span className="min-w-0 flex-1 truncate">{thread.title}</span>
           <span className="shrink-0 text-xs text-muted-foreground/55 tabular-nums">
             {threadTimeLabel(thread)}
@@ -1291,6 +1314,7 @@ const SidebarV2SearchResultRow = memo(function SidebarV2SearchResultRow(props: {
           thread={thread}
           projectTitle={props.projectTitle}
           projectCwd={props.projectCwd}
+          projectFavicon={props.projectFavicon}
           environmentLabel={props.environmentLabel}
           driverKind={driverKind}
           modelInstanceId={modelInstanceId}
@@ -1472,6 +1496,15 @@ export default function SidebarV2() {
           `${project.environmentId}:${project.id}`,
           project.workspaceRoot,
         ]),
+      ),
+    [projects],
+  );
+  // The whole project record the favicon needs (title + icon override travel
+  // with the favicon path), keyed identically to the scalar maps.
+  const projectFaviconByKey = useMemo(
+    () =>
+      new Map<string, ProjectFaviconProject>(
+        projects.map((project) => [`${project.environmentId}:${project.id}`, project]),
       ),
     [projects],
   );
@@ -1790,7 +1823,7 @@ export default function SidebarV2() {
     [activeThreads, pinnedThreads, settledThreads, snoozedThreads],
   );
   const threadSearchResults = useMemo(
-    () => searchSidebarThreadsByTitle(searchableThreads, threadSearchQuery),
+    () => searchSidebarThreads(searchableThreads, threadSearchQuery),
     [searchableThreads, threadSearchQuery],
   );
   const threadSearchResultOrderKey = threadSearchResults
@@ -2569,8 +2602,11 @@ export default function SidebarV2() {
           api.contextMenu.show(
             buildThreadActionMenuItems({
               branch: thread.branch ?? null,
+              // SidebarV2 has no project-scoped list or auto-settle handlers.
+              projectFilter: null,
               isPinned,
               isSettled,
+              autoSettleEnabled: true,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
@@ -2578,6 +2614,7 @@ export default function SidebarV2() {
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
               supports: {
                 settlement: supportsSettlement,
+                autoSettleOptOut: false,
                 snooze: supportsSnooze,
                 pinning: supportsPinning,
                 titleRegeneration: supportsTitleRegeneration,
@@ -2834,7 +2871,11 @@ export default function SidebarV2() {
         fixedHeader={
           <>
             <SidebarCommandCenterNavigation />
-            <SidebarSeparator className="mx-2 w-auto" />
+            <Separator
+              className="mx-2 w-auto! bg-sidebar-border"
+              data-sidebar="separator"
+              data-slot="sidebar-separator"
+            />
             {/* Keep the search controls above the stage backdrop fade. */}
             <SidebarGroup className="relative z-[1] gap-1 p-[var(--sidebar-content-inset)]">
               <div className="flex items-center gap-1">
@@ -2924,11 +2965,7 @@ export default function SidebarV2() {
                       }
                     >
                       {scopedProjectGroup ? (
-                        <ProjectFavicon
-                          environmentId={scopedProjectGroup.environmentId}
-                          cwd={scopedProjectGroup.workspaceRoot}
-                          className="size-4 shrink-0"
-                        />
+                        <ProjectFavicon project={scopedProjectGroup} className="size-4 shrink-0" />
                       ) : (
                         <FolderIcon className="size-4 shrink-0" />
                       )}
@@ -2961,11 +2998,7 @@ export default function SidebarV2() {
                               closeOnClick
                               className="h-8 min-h-8 px-1 py-0 text-sm font-medium [&>span:last-child]:flex [&>span:last-child]:min-w-0 [&>span:last-child]:items-center [&>span:last-child]:gap-2"
                             >
-                              <ProjectFavicon
-                                environmentId={project.environmentId}
-                                cwd={project.workspaceRoot}
-                                className="size-4 shrink-0"
-                              />
+                              <ProjectFavicon project={project} className="size-4 shrink-0" />
                               <span className="min-w-0 truncate text-sm">
                                 {project.displayName}
                               </span>
@@ -3042,6 +3075,10 @@ export default function SidebarV2() {
                           projectDisplayNameByKey.get(
                             `${thread.environmentId}:${thread.projectId}`,
                           ) ?? null
+                        }
+                        projectFavicon={
+                          projectFaviconByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
+                          null
                         }
                         environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
                         providerEntryByInstanceId={providerEntryByInstanceId}
@@ -3143,6 +3180,10 @@ export default function SidebarV2() {
                           projectDisplayNameByKey.get(
                             `${thread.environmentId}:${thread.projectId}`,
                           ) ?? null
+                        }
+                        projectFavicon={
+                          projectFaviconByKey.get(`${thread.environmentId}:${thread.projectId}`) ??
+                          null
                         }
                         providerEntryByInstanceId={providerEntryByInstanceId}
                         timestampFormat={timestampFormat}

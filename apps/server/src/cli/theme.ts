@@ -56,7 +56,7 @@ const decodeThemeFileJsonExit = Schema.decodeUnknownExit(
 );
 const isEnvironmentThemeId = Schema.is(EnvironmentThemeId);
 
-export class ThemeSettingsUnreadableError extends Schema.TaggedErrorClass<ThemeSettingsUnreadableError>()(
+export class ThemeSettingsUnreadableError extends Schema.TaggedError<ThemeSettingsUnreadableError>()(
   "ThemeSettingsUnreadableError",
   { settingsPath: Schema.String, cause: Schema.Defect() },
 ) {
@@ -65,7 +65,7 @@ export class ThemeSettingsUnreadableError extends Schema.TaggedErrorClass<ThemeS
   }
 }
 
-export class ThemeSettingsMalformedError extends Schema.TaggedErrorClass<ThemeSettingsMalformedError>()(
+export class ThemeSettingsMalformedError extends Schema.TaggedError<ThemeSettingsMalformedError>()(
   "ThemeSettingsMalformedError",
   { settingsPath: Schema.String, cause: Schema.Defect() },
 ) {
@@ -74,7 +74,7 @@ export class ThemeSettingsMalformedError extends Schema.TaggedErrorClass<ThemeSe
   }
 }
 
-export class ThemeSettingsBusyError extends Schema.TaggedErrorClass<ThemeSettingsBusyError>()(
+export class ThemeSettingsBusyError extends Schema.TaggedError<ThemeSettingsBusyError>()(
   "ThemeSettingsBusyError",
   { settingsPath: Schema.String, attempts: Schema.Number },
 ) {
@@ -83,7 +83,7 @@ export class ThemeSettingsBusyError extends Schema.TaggedErrorClass<ThemeSetting
   }
 }
 
-export class ThemeSettingsWriteError extends Schema.TaggedErrorClass<ThemeSettingsWriteError>()(
+export class ThemeSettingsWriteError extends Schema.TaggedError<ThemeSettingsWriteError>()(
   "ThemeSettingsWriteError",
   { settingsPath: Schema.String, cause: Schema.Defect() },
 ) {
@@ -92,7 +92,7 @@ export class ThemeSettingsWriteError extends Schema.TaggedErrorClass<ThemeSettin
   }
 }
 
-export class ThemeFileUnreadableError extends Schema.TaggedErrorClass<ThemeFileUnreadableError>()(
+export class ThemeFileUnreadableError extends Schema.TaggedError<ThemeFileUnreadableError>()(
   "ThemeFileUnreadableError",
   // Optional: a path that never existed has no underlying failure to carry,
   // and a manufactured string there would only look like a real one.
@@ -103,7 +103,7 @@ export class ThemeFileUnreadableError extends Schema.TaggedErrorClass<ThemeFileU
   }
 }
 
-export class ThemeFileInvalidError extends Schema.TaggedErrorClass<ThemeFileInvalidError>()(
+export class ThemeFileInvalidError extends Schema.TaggedError<ThemeFileInvalidError>()(
   "ThemeFileInvalidError",
   { filePath: Schema.String, cause: Schema.Defect() },
 ) {
@@ -112,7 +112,7 @@ export class ThemeFileInvalidError extends Schema.TaggedErrorClass<ThemeFileInva
   }
 }
 
-export class ThemeFileTooLargeError extends Schema.TaggedErrorClass<ThemeFileTooLargeError>()(
+export class ThemeFileTooLargeError extends Schema.TaggedError<ThemeFileTooLargeError>()(
   "ThemeFileTooLargeError",
   { filePath: Schema.String, limit: Schema.Number },
 ) {
@@ -121,7 +121,7 @@ export class ThemeFileTooLargeError extends Schema.TaggedErrorClass<ThemeFileToo
   }
 }
 
-export class ThemeFileColorlessError extends Schema.TaggedErrorClass<ThemeFileColorlessError>()(
+export class ThemeFileColorlessError extends Schema.TaggedError<ThemeFileColorlessError>()(
   "ThemeFileColorlessError",
   { filePath: Schema.String },
 ) {
@@ -130,7 +130,7 @@ export class ThemeFileColorlessError extends Schema.TaggedErrorClass<ThemeFileCo
   }
 }
 
-export class ThemePublishError extends Schema.TaggedErrorClass<ThemePublishError>()(
+export class ThemePublishError extends Schema.TaggedError<ThemePublishError>()(
   "ThemePublishError",
   { themesDir: Schema.String, cause: Schema.Defect() },
 ) {
@@ -142,7 +142,7 @@ export class ThemePublishError extends Schema.TaggedErrorClass<ThemePublishError
 const INVALID_THEME_ID_REASON =
   "is not a valid theme id (lowercase letters, digits, and hyphens; not an appearance keyword)";
 
-export class ThemeIdUnknownError extends Schema.TaggedErrorClass<ThemeIdUnknownError>()(
+export class ThemeIdUnknownError extends Schema.TaggedError<ThemeIdUnknownError>()(
   "ThemeIdUnknownError",
   { themeId: Schema.String, known: Schema.Array(Schema.String) },
 ) {
@@ -151,7 +151,7 @@ export class ThemeIdUnknownError extends Schema.TaggedErrorClass<ThemeIdUnknownE
   }
 }
 
-export class ThemeIdInvalidError extends Schema.TaggedErrorClass<ThemeIdInvalidError>()(
+export class ThemeIdInvalidError extends Schema.TaggedError<ThemeIdInvalidError>()(
   "ThemeIdInvalidError",
   { themeId: Schema.String },
 ) {
@@ -161,7 +161,7 @@ export class ThemeIdInvalidError extends Schema.TaggedErrorClass<ThemeIdInvalidE
 }
 
 /** A filename that cannot be a theme id, where --id is the way out. */
-export class ThemeFileIdInvalidError extends Schema.TaggedErrorClass<ThemeFileIdInvalidError>()(
+export class ThemeFileIdInvalidError extends Schema.TaggedError<ThemeFileIdInvalidError>()(
   "ThemeFileIdInvalidError",
   { themeId: Schema.String, filePath: Schema.String },
 ) {
@@ -170,7 +170,7 @@ export class ThemeFileIdInvalidError extends Schema.TaggedErrorClass<ThemeFileId
   }
 }
 
-export class ThemeTargetMissingError extends Schema.TaggedErrorClass<ThemeTargetMissingError>()(
+export class ThemeTargetMissingError extends Schema.TaggedError<ThemeTargetMissingError>()(
   "ThemeTargetMissingError",
   {},
 ) {
@@ -179,8 +179,8 @@ export class ThemeTargetMissingError extends Schema.TaggedErrorClass<ThemeTarget
   }
 }
 
-const envCommandCenterHome = Config.string("COMMAND_CENTER_HOME").pipe(Config.option);
-const envT3Home = Config.string("T3CODE_HOME").pipe(Config.option);
+const envCommandCenterHome = Config.String("COMMAND_CENTER_HOME").pipe(Config.option);
+const envT3Home = Config.String("T3CODE_HOME").pipe(Config.option);
 
 const resolveThemePaths = Effect.fn(function* (explicitBaseDir: Option.Option<string>) {
   // Same precedence as the rest of the CLI: --base-dir, then COMMAND_CENTER_HOME,
@@ -270,12 +270,13 @@ const publishThemeFile = Effect.fn(function* (input: {
       Effect.mapError((cause) => new ThemeFileUnreadableError({ filePath: input.filePath, cause })),
     );
   if (info.type !== "File") {
-    return yield* Effect.fail(new ThemeFileUnreadableError({ filePath: input.filePath }));
+    return yield* new ThemeFileUnreadableError({ filePath: input.filePath });
   }
   if (Number(info.size) > MAX_THEME_FILE_BYTES) {
-    return yield* Effect.fail(
-      new ThemeFileTooLargeError({ filePath: input.filePath, limit: MAX_THEME_FILE_BYTES }),
-    );
+    return yield* new ThemeFileTooLargeError({
+      filePath: input.filePath,
+      limit: MAX_THEME_FILE_BYTES,
+    });
   }
 
   // An explicit source path is the user's own input, and a symlink there is a
@@ -291,17 +292,15 @@ const publishThemeFile = Effect.fn(function* (input: {
     );
   const raw = readThemeFileGuarded(resolvedSource, MAX_THEME_FILE_BYTES);
   if (raw === null) {
-    return yield* Effect.fail(new ThemeFileUnreadableError({ filePath: input.filePath }));
+    return yield* new ThemeFileUnreadableError({ filePath: input.filePath });
   }
 
   const decoded = decodeThemeFileJsonExit(raw);
   if (decoded._tag === "Failure") {
-    return yield* Effect.fail(
-      new ThemeFileInvalidError({ filePath: input.filePath, cause: decoded.cause }),
-    );
+    return yield* new ThemeFileInvalidError({ filePath: input.filePath, cause: decoded.cause });
   }
   if (!environmentThemeFileHasColors(decoded.value)) {
-    return yield* Effect.fail(new ThemeFileColorlessError({ filePath: input.filePath }));
+    return yield* new ThemeFileColorlessError({ filePath: input.filePath });
   }
 
   const fileBasename = path.basename(input.filePath, ".json");
@@ -309,7 +308,7 @@ const publishThemeFile = Effect.fn(function* (input: {
   // The same rules the watcher applies when it reads the directory back, so a
   // publish cannot report success for a file that will then be skipped.
   if (!isEnvironmentThemeId(themeId) || UNPUBLISHABLE_THEME_IDS.has(themeId)) {
-    return yield* Effect.fail(new ThemeFileIdInvalidError({ themeId, filePath: input.filePath }));
+    return yield* new ThemeFileIdInvalidError({ themeId, filePath: input.filePath });
   }
 
   const destinationPath = path.join(input.themesDir, `${themeId}.json`);
@@ -448,11 +447,11 @@ const resolvableThemeIds = Effect.fn(function* (themesDir: string) {
 
 const themeSetCommand = Command.make("set", {
   baseDir: baseDirFlag,
-  id: Flag.string("id").pipe(
+  id: Flag.String("id").pipe(
     Flag.withDescription("Theme id to publish a file under, instead of its filename."),
     Flag.optional,
   ),
-  theme: Argument.string("theme").pipe(
+  theme: Argument.String("theme").pipe(
     Argument.withDescription(
       'A theme id (a built-in, or one this machine publishes — themes/nightfall.json is "nightfall"), or a path to a theme JSON file to publish and set in one step.',
     ),
@@ -464,7 +463,7 @@ const themeSetCommand = Command.make("set", {
       const fs = yield* FileSystem.FileSystem;
       const target = yield* expandHomePath(flags.theme.trim());
       if (target.length === 0) {
-        return yield* Effect.fail(new ThemeTargetMissingError());
+        return yield* new ThemeTargetMissingError();
       }
       const paths = yield* resolveThemePaths(flags.baseDir);
 

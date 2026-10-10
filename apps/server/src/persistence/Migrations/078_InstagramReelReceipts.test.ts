@@ -1,10 +1,9 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import * as NodeSqliteClient from "../NodeSqliteClient.ts";
-import { migrationManifest, MigrationsLive, runMigrations } from "../Migrations.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { migrationManifest, runMigrations } from "../Migrations.ts";
 import migration from "./078_InstagramReelReceipts.ts";
 
 const inspectHistory = Effect.gen(function* () {
@@ -26,8 +25,8 @@ const inspectHistory = Effect.gen(function* () {
 it.layer(NodeSqliteClient.layerMemory())("default startup migration layer", (it) => {
   it.effect("fresh SQLite reaches 078 without any publishing flag or media config", () =>
     Effect.gen(function* () {
-      // This is the unconditional layer on the server startup path.
-      yield* Effect.scoped(Layer.build(MigrationsLive));
+      // The server startup path (persistence/Layers/Sqlite.ts) runs exactly this.
+      yield* runMigrations();
       yield* inspectHistory;
       assert.deepStrictEqual(yield* runMigrations(), []);
     }),

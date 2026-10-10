@@ -287,9 +287,8 @@ const makeProviderTurnSendClaimRepository = Effect.gen(function* () {
           threadId: input.threadId,
           requestSequence: input.requestSequence,
         }).pipe(
-          Effect.map(
-            (barrier): ProviderTurnSendClaimOutcome =>
-              barrier._tag === "Some" ? { _tag: "canceled" } : { _tag: "superseded" },
+          Effect.map((barrier): ProviderTurnSendClaimOutcome =>
+            barrier._tag === "Some" ? { _tag: "canceled" } : { _tag: "superseded" },
           ),
         );
       }),

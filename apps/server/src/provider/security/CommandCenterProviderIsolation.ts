@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as ByteSize from "effect/ByteSize";
 import * as NodePath from "node:path";
 import * as NodeModule from "node:module";
 
@@ -14,7 +15,7 @@ import * as Schema from "effect/Schema";
 
 import { trustedHostExecutablePath, unsafeHostGitConfigKey } from "../../vcs/HostGitSecurity.ts";
 
-export const COMMAND_CENTER_THREAD_ID_PREFIX = "cc:";
+const COMMAND_CENTER_THREAD_ID_PREFIX = "cc:";
 export const COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX = "cc:interactive:";
 export const COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX = "cc:automation:";
 
@@ -35,7 +36,7 @@ const COMMAND_CENTER_CODEX_DARWIN_RUNTIME_ALIASES = [
   "codex-execve-wrapper",
 ] as const;
 
-const MAX_LOCAL_GIT_CONFIG_BYTES = FileSystem.Size(1024 * 1024);
+const MAX_LOCAL_GIT_CONFIG_BYTES = ByteSize.bytes(1024 * 1024);
 
 interface SecureControlFileIdentity {
   readonly type: FileSystem.File.Type;
@@ -195,7 +196,7 @@ export function commandCenterProviderEnvironment(
   };
 }
 
-export class CommandCenterManagedWorktreeIsolationError extends Schema.TaggedErrorClass<CommandCenterManagedWorktreeIsolationError>()(
+export class CommandCenterManagedWorktreeIsolationError extends Schema.TaggedError<CommandCenterManagedWorktreeIsolationError>()(
   "CommandCenterManagedWorktreeIsolationError",
   {
     issue: Schema.String,
@@ -207,7 +208,7 @@ export class CommandCenterManagedWorktreeIsolationError extends Schema.TaggedErr
   }
 }
 
-export class CommandCenterCodexHomeIsolationError extends Schema.TaggedErrorClass<CommandCenterCodexHomeIsolationError>()(
+export class CommandCenterCodexHomeIsolationError extends Schema.TaggedError<CommandCenterCodexHomeIsolationError>()(
   "CommandCenterCodexHomeIsolationError",
   {
     issue: Schema.String,

@@ -95,7 +95,7 @@ type SpaceAgentConfigFile = typeof SpaceAgentConfigFile.Type;
  * absent, or an error message for a value the schema cannot express (cron
  * syntax, IANA timezone).
  */
-export const normalizeSpaceAgentConfig = (
+const normalizeSpaceAgentConfig = (
   raw: SpaceAgentConfigFile | undefined,
 ):
   | { readonly ok: true; readonly agent: (typeof SpaceAgentConfigSchema)["Encoded"] | undefined }

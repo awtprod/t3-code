@@ -10,6 +10,7 @@ import {
   IsoDateTime,
   MessageId,
   ModelSelection,
+  OrchestrationMessageContext,
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
@@ -22,12 +23,14 @@ import {
   type RuntimeMode as RuntimeModeType,
   type EfficiencyTier as EfficiencyTierType,
   type ThreadRoutingMode as ThreadRoutingModeType,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 import { DraftComposerAttachmentSchema } from "../lib/composer-image-schema";
 import type { DraftComposerAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
+import { resolveProviderInteractionMode } from "./legacy-plan-mode";
 
 const THREAD_OUTBOX_SCHEMA_VERSION = 4;
 const THREAD_OUTBOX_MAX_RETRY_DELAY_MS = 16_000;
@@ -51,6 +54,7 @@ export const QueuedThreadMessageSchema = Schema.Struct({
   messageId: MessageId,
   commandId: CommandId,
   text: Schema.String,
+  context: Schema.optional(OrchestrationMessageContext),
   attachments: Schema.Array(DraftComposerAttachmentSchema),
   modelSelection: Schema.optional(ModelSelection),
   runtimeMode: Schema.optional(RuntimeMode),
@@ -82,6 +86,7 @@ export interface QueuedThreadMessage {
   readonly messageId: MessageId;
   readonly commandId: CommandId;
   readonly text: string;
+  readonly context?: OrchestrationMessageContext;
   readonly attachments: ReadonlyArray<DraftComposerAttachment>;
   readonly modelSelection?: ModelSelectionType;
   readonly runtimeMode?: RuntimeModeType;
@@ -103,11 +108,19 @@ export interface ThreadSettingsSnapshot {
 export function resolveQueuedThreadSettings(
   message: QueuedThreadMessage,
   thread: ThreadSettingsSnapshot,
+  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "showInteractionModeToggle">> = [],
 ): ThreadSettingsSnapshot & { readonly routingMode: ThreadRoutingModeType } {
+  const modelSelection = message.modelSelection ?? thread.modelSelection;
+  const provider = providers.find(
+    (candidate) => candidate.instanceId === modelSelection.instanceId,
+  );
   return {
-    modelSelection: message.modelSelection ?? thread.modelSelection,
+    modelSelection,
     runtimeMode: message.runtimeMode ?? thread.runtimeMode,
-    interactionMode: message.interactionMode ?? thread.interactionMode,
+    interactionMode: resolveProviderInteractionMode(
+      provider,
+      message.interactionMode ?? thread.interactionMode,
+    ),
     routingMode: message.routingMode ?? thread.routingMode ?? "manual",
     efficiencyTier: message.efficiencyTier ?? thread.efficiencyTier,
   };
@@ -196,11 +209,9 @@ export type ThreadOutboxDispatchStep =
   | { readonly step: "send" };
 
 /**
- * Orders the resolved delivery action against the file-capability gate. The
- * gate applies only to a message that will send: a message whose thread
- * already exists (or is gone) must be removed even while the server config is
- * still loading, and a missing config defers with a retry instead of parking
- * the message forever.
+ * Wait for provider and file capabilities before sending. Cleanup does not
+ * need config: a creation whose thread exists, or a message whose thread is
+ * gone, can still be removed while config loads.
  */
 export function resolveThreadOutboxDispatchStep(input: {
   readonly deliveryAction: ThreadOutboxDeliveryAction;
@@ -211,11 +222,11 @@ export function resolveThreadOutboxDispatchStep(input: {
   if (input.deliveryAction !== "send") {
     return { step: input.deliveryAction };
   }
-  if (input.fileAttachments.length === 0) {
-    return { step: "send" };
-  }
   if (input.serverConfig === null) {
     return { step: "retry" };
+  }
+  if (input.fileAttachments.length === 0) {
+    return { step: "send" };
   }
   const maxBytes = input.serverConfig.maxFileUploadBytes;
   if (maxBytes === undefined) {
@@ -254,14 +265,30 @@ function errorMessage(error: unknown): string | null {
   return typeof error === "string" ? error : null;
 }
 
+/**
+ * Only a failure the server actually decided (`OrchestrationDispatchCommandError`,
+ * or an authorization rejection) means the payload itself is bad. The other
+ * typed failures a queued send can hit are transport-shaped: a socket that
+ * dropped mid-request (`RpcClientError` wrapping a Socket read/write/close
+ * reason), or an environment that is not connected or not registered. Those
+ * are matched by tag, not by message text, because a `SocketReadError` message
+ * is just "An error occurred during Read". A wrong answer here restores the
+ * pending task into a draft and it disappears from the list.
+ */
 export function shouldRetryThreadOutboxDelivery(error: unknown): boolean {
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "_tag" in error &&
-    error._tag === "ConnectionTransientError"
-  ) {
-    return true;
+  if (typeof error === "object" && error !== null && "_tag" in error) {
+    switch (error._tag) {
+      case "OrchestrationDispatchCommandError":
+      case "EnvironmentAuthorizationError":
+        return false;
+      case "ConnectionTransientError":
+      case "RpcClientError":
+      case "EnvironmentRpcUnavailableError":
+      case "EnvironmentNotRegisteredError":
+        return true;
+      default:
+        break;
+    }
   }
   return isTransportConnectionErrorMessage(errorMessage(error));
 }

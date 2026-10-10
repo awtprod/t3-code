@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-export class MemorySearchIndexError extends Schema.TaggedErrorClass<MemorySearchIndexError>()(
+export class MemorySearchIndexError extends Schema.TaggedError<MemorySearchIndexError>()(
   "MemorySearchIndexError",
   {
     reason: Schema.Literals(["invalid-query", "persistence"]),

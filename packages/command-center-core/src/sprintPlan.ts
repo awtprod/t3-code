@@ -114,7 +114,7 @@ export interface ParsedSprintPlanSource {
   readonly taskCount: number;
 }
 
-export class SprintPlanValidationError extends Schema.TaggedErrorClass<SprintPlanValidationError>()(
+export class SprintPlanValidationError extends Schema.TaggedError<SprintPlanValidationError>()(
   "SprintPlanValidationError",
   {
     message: Schema.String,

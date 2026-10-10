@@ -6,7 +6,7 @@ export interface WorkspaceConnectionStatusPresentation {
   readonly showsProgress: boolean;
 }
 
-export function shouldShowWorkspaceConnectionStatus(state: WorkspaceState): boolean {
+function shouldShowWorkspaceConnectionStatus(state: WorkspaceState): boolean {
   return (
     state.networkStatus === "offline" ||
     state.connectionError !== null ||

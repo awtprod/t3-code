@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - WebSocket proxying requires a captured duplex docker/podman exec process.
 // @effect-diagnostics runEffectInsideEffect:off - Node stream callbacks bridge into the acquired downstream Socket writer.
-// @effect-diagnostics outdatedApi:off - Socket.runRaw currently remains on the compatibility surface.
 // @effect-diagnostics globalTimers:off - Captured bridge child owns a bounded handshake timer and exact process-group cleanup.
 // @effect-diagnostics globalTimersInEffect:off - Node stream callback timer guards an external process handshake.
+import * as ByteSize from "effect/ByteSize";
 import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Data from "effect/Data";
@@ -249,7 +249,7 @@ export const sandboxPreviewResolveHttpRouteLayer = HttpRouter.add(
         ? undefined
         : new Uint8Array(
             yield* request.arrayBuffer.pipe(
-              Effect.provideService(HttpIncomingMessage.MaxBodySize, FileSystem.MiB(8)),
+              Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.mebibytes(8)),
               Effect.mapError((cause) => new PreviewProxyHttpError({ cause })),
             ),
           );
@@ -339,7 +339,7 @@ const relayPreviewWebSocket = Effect.fnUntraced(function* (
 ) {
   const hostPlatform = yield* HostProcessPlatform;
   const downstream = yield* Effect.orDie(request.upgrade);
-  const writeDownstream = yield* downstream.writer;
+  const downstreamWriter = yield* downstream.writer;
   const child = NodeChildProcess.spawn(command.executable, [...command.args], {
     stdio: ["pipe", "pipe", "ignore"],
     shell: false,
@@ -377,7 +377,7 @@ const relayPreviewWebSocket = Effect.fnUntraced(function* (
         const payload = new Uint8Array(buffer.subarray(4, length + 4));
         buffer = buffer.subarray(length + 4);
         pending = pending
-          .then(() => Effect.runPromise(writeDownstream(payload)))
+          .then(() => Effect.runPromise(downstreamWriter.write(payload)))
           .then(() => undefined);
       }
     };
@@ -394,19 +394,27 @@ const relayPreviewWebSocket = Effect.fnUntraced(function* (
       terminate();
     });
   });
-  const send = downstream.runRaw((chunk) =>
-    Effect.sync(() => {
-      const payload =
-        typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk as Uint8Array);
-      if (payload.length > 1024 * 1024) {
-        terminate();
-        return;
+  const forwardChunk = (chunk: Uint8Array | string) => {
+    const payload = typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk);
+    if (payload.length > 1024 * 1024) {
+      terminate();
+      return;
+    }
+    const header = Buffer.allocUnsafe(4);
+    header.writeUInt32BE(payload.length);
+    child.stdin.write(Buffer.concat([header, payload]));
+  };
+  // rc.115 sockets fail `pull` with a SocketError on every close, a clean one
+  // included; the viewer going away is how this relay ends, not a failure.
+  const send = Effect.scoped(
+    Effect.gen(function* () {
+      const { pull } = yield* downstream.reader;
+      while (true) {
+        const chunks = yield* pull;
+        yield* Effect.sync(() => chunks.forEach(forwardChunk));
       }
-      const header = Buffer.allocUnsafe(4);
-      header.writeUInt32BE(payload.length);
-      child.stdin.write(Buffer.concat([header, payload]));
     }),
-  );
+  ).pipe(Effect.catchTag("SocketError", () => Effect.void));
   yield* send.pipe(Effect.raceFirst(receive), Effect.ensuring(Effect.sync(terminate)));
   return HttpServerResponse.empty();
 });

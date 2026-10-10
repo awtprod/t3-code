@@ -323,7 +323,7 @@ export function automationConfigIsSafeForGit(value: unknown): boolean {
 const compareText = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
 
-export function normalizeJson(value: Schema.Json): Schema.Json {
+function normalizeJson(value: Schema.Json): Schema.Json {
   if (Array.isArray(value)) {
     return value.map(normalizeJson);
   }

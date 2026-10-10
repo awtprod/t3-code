@@ -119,7 +119,7 @@ export interface ResponsibilityDetail extends ResponsibilityStatus {
   readonly history: ReadonlyArray<ResponsibilityHistoryEntry>;
 }
 
-export class ResponsibilityError extends Schema.TaggedErrorClass<ResponsibilityError>()(
+export class ResponsibilityError extends Schema.TaggedError<ResponsibilityError>()(
   "ResponsibilityError",
   {
     code: Schema.Literals([

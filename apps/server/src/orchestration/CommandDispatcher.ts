@@ -139,7 +139,7 @@ export class OrchestrationCommandDispatcher extends Context.Service<
   OrchestrationCommandDispatcherShape
 >()("@awtprod/command-center/orchestration/CommandDispatcher/OrchestrationCommandDispatcher") {}
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;

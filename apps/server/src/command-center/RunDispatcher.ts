@@ -60,8 +60,8 @@ export {
   isProvisionableRepositoryRemote,
 } from "./RepositoryProvisioningPolicy.ts";
 
-export const COMMAND_CENTER_SYSTEM_PROJECT_ID = ProjectId.make("command-center:system");
-export const COMMAND_CENTER_DEFAULT_MODEL = "gpt-6-terra";
+const COMMAND_CENTER_SYSTEM_PROJECT_ID = ProjectId.make("command-center:system");
+const COMMAND_CENTER_DEFAULT_MODEL = "gpt-6-terra";
 
 export const commandCenterModelSelection = (input: {
   readonly providerId: string;
@@ -81,7 +81,7 @@ const decodeRepositories = Schema.decodeUnknownEffect(Schema.Array(RepositoryBin
 const decodeUnknownJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
-export class RunDispatcherError extends Schema.TaggedErrorClass<RunDispatcherError>()(
+export class RunDispatcherError extends Schema.TaggedError<RunDispatcherError>()(
   "RunDispatcherError",
   {
     reason: Schema.Literals([
@@ -451,7 +451,7 @@ export const selectPriorContext = (
  * Role for a Space's always-on agent thread. It shares the prompt contract of
  * `routerRole` below: Space policy, not this text, is what enforces autonomy.
  */
-export const SPACE_AGENT_ROLE = [
+const SPACE_AGENT_ROLE = [
   "Command Center Space agent role",
   "You are the always-on agent for this Space. You keep track of what is going on, what has happened, and how things work here, and you act on it without being asked.",
   "Keep memory current with cc_memory_propose: record durable facts, how-things-work procedures, and decisions as they become clear. Your memory writes are saved as approved, so write only what you are confident is true and lasting.",

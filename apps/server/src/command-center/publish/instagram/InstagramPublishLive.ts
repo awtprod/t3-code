@@ -151,10 +151,10 @@ export const layer = Layer.effect(
       inspect,
       host: makeLiveReelHost({
         receiptPath: Option.getOrUndefined(
-          yield* Config.option(Config.string("INSTAGRAM_REEL_MEDIA_RECEIPT_PATH")),
+          yield* Config.option(Config.String("INSTAGRAM_REEL_MEDIA_RECEIPT_PATH")),
         ),
         urlPath: Option.getOrUndefined(
-          yield* Config.option(Config.string("INSTAGRAM_REEL_MEDIA_URL_PATH")),
+          yield* Config.option(Config.String("INSTAGRAM_REEL_MEDIA_URL_PATH")),
         ),
       }),
     });

@@ -32,6 +32,11 @@ const REVIEWED_PUBLIC_UPSTREAM_COMMITS = [
   "c0995d2eaf8ec787b3318ed1169ae266ed1529f8",
   // Earlier merged pingdotgg/t3code upstream commit, reviewed as public on 2026-09-09.
   "27732293373fbb081a966b437ae022afe77db16b",
+  // pingdotgg/t3code upstream head merged in the 2026-09 catch-up sync (beta.103 -> rc.112),
+  // reviewed as public on 2026-09-18.
+  "eed974c122e192de45b54b7dac7ca1a51448c08f",
+  // pingdotgg/t3code tag v0.0.45 merged in the 2026-10 sync, reviewed as public on 2026-10-09.
+  "6c8fed35dded9ff71c5b46807125457acbb76be6",
 ] as const;
 
 const args = new Set(process.argv.slice(2));
@@ -342,7 +347,11 @@ function scanHistoricalRevisions() {
       );
 
       const object = `${commit}:${relativePath}`;
-      if (git(["cat-file", "-t", object]).trim() !== "blob") continue;
+      // tryGit (not git): a changed path may be a gitlink/tree, or a gitlink whose
+      // submodule commit object is not present locally (uninitialized vendored
+      // submodules, or pruned by gc). cat-file then exits non-zero; treat any
+      // non-blob or unresolvable object as "nothing to scan" rather than crashing.
+      if (tryGit(["cat-file", "-t", object]).trim() !== "blob") continue;
       const size = Number(git(["cat-file", "-s", object]).trim());
       if (!Number.isFinite(size) || size > MAX_TEXT_FILE_BYTES) {
         historicalFindings.push(

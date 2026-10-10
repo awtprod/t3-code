@@ -11,6 +11,7 @@ import {
   getThemePreferenceMode,
   isKnownThemePreference,
   getCustomThemes,
+  getStandardThemeColors,
   getStoredCustomThemeCollection,
   invalidateCustomThemes,
   installCustomTheme,
@@ -34,8 +35,8 @@ import {
   OCEAN_THEME,
   updateCustomTheme,
   CUSTOM_THEMES_STORAGE_KEY,
-  createManagedThemeColors,
   createVividThemeColors,
+  createManagedThemeColors,
   getDefaultThemeColors,
   themeColorToHex,
   toCanonicalThemeColor,
@@ -135,6 +136,21 @@ describe("theme files", () => {
     expect(asHex(dark.error)).not.toBe(asHex(darkDefaults.error));
   });
 
+  it("keeps the stock sidebar and chat on distinct surfaces in both appearances", () => {
+    expectThemeColors(getStandardThemeColors("light"), {
+      canvas: "#fcfcfc",
+      sidebar: "#fafafa",
+      sidebarRowActive: "#ffffff",
+      messageSurface: "#f4f4f5",
+    });
+    expectThemeColors(getStandardThemeColors("dark"), {
+      canvas: "#0a0a0a",
+      sidebar: "#000000",
+      sidebarRowActive: "#1a1b1b",
+      messageSurface: "#141414",
+    });
+  });
+
   it("derives readable, distinctive vivid palettes from exact seeds", () => {
     const seeds: ReadonlyArray<["light" | "dark", string, string]> = [
       ["light", "#f4f9f2", "#1d8a4e"],
@@ -145,6 +161,12 @@ describe("theme files", () => {
       ["light", "#111827", "#8ab4f8"],
       ["dark", "#f5ecf5", "#a84370"],
     ];
+    const channels = (value: string) =>
+      [1, 3, 5].map((index) => Number.parseInt(asHex(value).slice(index, index + 2), 16)) as [
+        number,
+        number,
+        number,
+      ];
     for (const [appearance, canvas, accent] of seeds) {
       const colors = createVividThemeColors(appearance, canvas, accent);
       // Exact seeds are honored.
@@ -157,6 +179,9 @@ describe("theme files", () => {
       expect(contrastRatio(colors.textMuted, colors.canvas)).toBeGreaterThanOrEqual(4.5);
       expect(contrastRatio(colors.textMuted, colors.canvas)).toBeLessThan(5.5);
       expect(contrastRatio(colors.mutedForeground, colors.muted)).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(colors.mutedForeground, colors.muted)).toBeLessThan(
+        contrastRatio(colors.text, colors.muted),
+      );
       expect(contrastRatio(colors.placeholder, colors.surfaceRaised)).toBeGreaterThanOrEqual(4.5);
       expect(contrastRatio(colors.placeholder, colors.surfaceRaised)).toBeLessThan(
         contrastRatio(colors.text, colors.surfaceRaised),
@@ -177,6 +202,17 @@ describe("theme files", () => {
       expect(colors.messageAction).not.toBe(colors.accent);
       // Update family follows the theme, not the default palette.
       expect(asHex(colors.update)).toBe(accent);
+      // Semantic statuses stay red and amber instead of inheriting a brand tint.
+      const [errorRed, errorGreen, errorBlue] = channels(colors.error);
+      expect(errorRed).toBeGreaterThan(errorGreen * 2);
+      expect(errorRed).toBeGreaterThan(errorBlue * 2);
+      expect(contrastRatio(colors.error, "#ffffff")).toBeGreaterThanOrEqual(2.5);
+      expect(contrastRatio(colors.errorForeground, colors.errorSurface)).toBeGreaterThanOrEqual(
+        4.5,
+      );
+      const [warnRed, warnGreen, warnBlue] = channels(colors.warning);
+      expect(warnRed).toBeGreaterThan(warnBlue);
+      expect(warnGreen).toBeGreaterThan(warnBlue);
     }
   });
 
@@ -186,8 +222,8 @@ describe("theme files", () => {
     const inverted = [
       createVividThemeColors("light", "#111827", "#8ab4f8"),
       createVividThemeColors("dark", "#f5ecf5", "#a84370"),
-      createManagedThemeColors("light", "#0d1117", "#69b1ff", { exactSeeds: true }),
-      createManagedThemeColors("dark", "#fdfdfd", "#c2571b", { exactSeeds: true }),
+      createVividThemeColors("light", "#0d1117", "#69b1ff"),
+      createVividThemeColors("dark", "#fdfdfd", "#c2571b"),
     ];
     for (const colors of inverted) {
       expect(contrastRatio(colors.errorForeground, colors.errorSurface)).toBeGreaterThanOrEqual(

@@ -37,6 +37,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { HttpServer } from "effect/unstable/http";
+import * as NetAddress from "effect/unstable/net/NetAddress";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
@@ -260,7 +261,7 @@ const makeMockGoogleConnector = (): MockGoogleConnector => {
 };
 
 const fakeHttpServer = HttpServer.HttpServer.of({
-  address: { _tag: "TcpAddress", hostname: "127.0.0.1", port: 43123 },
+  address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
   serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
 });
 const fakeEnvironment = ServerEnvironment.ServerEnvironment.of({
@@ -519,6 +520,8 @@ const unusedProviderRegistry = ProviderRegistry.ProviderRegistry.of({
   getProviders: Effect.die("Provider lookup is not used by this acceptance path."),
   refresh: () => Effect.die("Provider refresh is not used by this acceptance path."),
   refreshInstance: () => Effect.die("Provider refresh is not used by this acceptance path."),
+  refreshWorkspaceSnapshot: () =>
+    Effect.die("Provider refresh is not used by this acceptance path."),
   getProviderMaintenanceCapabilitiesForInstance: () =>
     Effect.die("Provider maintenance is not used by this acceptance path."),
   setProviderMaintenanceActionState: () =>

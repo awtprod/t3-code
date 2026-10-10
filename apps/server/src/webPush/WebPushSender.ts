@@ -24,10 +24,10 @@ const WEB_PUSH_TTL_SECONDS = 60 * 60;
 const WEB_PUSH_REQUEST_TIMEOUT = "15 seconds";
 // VAPID JWTs may live up to 24h. Quantize expiry so a deterministically signed
 // JWT is reused across a window and the cache never re-signs per origin.
-export const VAPID_JWT_WINDOW_SECONDS = 6 * 60 * 60;
+const VAPID_JWT_WINDOW_SECONDS = 6 * 60 * 60;
 const VAPID_JWT_LIFETIME_SECONDS = 12 * 60 * 60;
 
-export class WebPushHttpRequestError extends Schema.TaggedErrorClass<WebPushHttpRequestError>()(
+export class WebPushHttpRequestError extends Schema.TaggedError<WebPushHttpRequestError>()(
   "WebPushHttpRequestError",
   {
     endpointOrigin: Schema.String,
@@ -41,7 +41,7 @@ export class WebPushHttpRequestError extends Schema.TaggedErrorClass<WebPushHttp
   }
 }
 
-export class WebPushNotConfiguredError extends Schema.TaggedErrorClass<WebPushNotConfiguredError>()(
+export class WebPushNotConfiguredError extends Schema.TaggedError<WebPushNotConfiguredError>()(
   "WebPushNotConfiguredError",
   {},
 ) {
@@ -50,7 +50,7 @@ export class WebPushNotConfiguredError extends Schema.TaggedErrorClass<WebPushNo
   }
 }
 
-export class WebPushEndpointNotAllowedError extends Schema.TaggedErrorClass<WebPushEndpointNotAllowedError>()(
+export class WebPushEndpointNotAllowedError extends Schema.TaggedError<WebPushEndpointNotAllowedError>()(
   "WebPushEndpointNotAllowedError",
   {
     endpoint: Schema.String,

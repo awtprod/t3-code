@@ -534,12 +534,14 @@ export function EfficiencySettingsPanel() {
           description="Export, tune, and re-import stable candidate IDs, provider/model mappings, metadata rules, and opt-in experiments. Unknown model strength is never guessed."
         >
           <div className="space-y-2 px-1 pt-3 pb-3">
-            <Textarea
-              className="min-h-80 font-mono text-xs"
-              value={json}
-              onChange={(event) => setJson(event.target.value)}
-              spellCheck={false}
-            />
+            <div className="font-mono">
+              <Textarea
+                className="min-h-80"
+                value={json}
+                onChange={(event) => setJson(event.target.value)}
+                spellCheck={false}
+              />
+            </div>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setJson(JSON.stringify(efficiency, null, 2))}>
                 Export current

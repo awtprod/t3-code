@@ -13,7 +13,7 @@ import * as Schema from "effect/Schema";
 
 export const COMMAND_CENTER_OBSERVATION_BATCH_MAX_COUNT = 100;
 export const COMMAND_CENTER_OBSERVATION_BATCH_MAX_BYTES = 256 * 1_024;
-export const COMMAND_CENTER_OBSERVATION_LIST_MAX_LIMIT = 100;
+const COMMAND_CENTER_OBSERVATION_LIST_MAX_LIMIT = 100;
 
 const reason = TrimmedNonEmptyString.check(Schema.isMaxLength(2_048));
 const version = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));

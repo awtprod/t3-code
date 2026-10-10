@@ -9,7 +9,8 @@ on:
       upstream_ref:
         description: Exact fetched ref (refs/tags/... or refs/remotes/upstream/...)
         required: false
-        default: refs/remotes/upstream/main
+        # Upstream deleted v1 orchestration after v0.0.45; Command Center still runs on it.
+        default: refs/tags/v0.0.45
         type: string
       expected_commit:
         description: Optional full 40-character commit the ref must resolve to
@@ -27,7 +28,8 @@ permissions:
   pull-requests: write
 
 env:
-  UPSTREAM_REF: ${{ inputs.upstream_ref || 'refs/remotes/upstream/main' }}
+  # Pinned to the last upstream tag that still ships v1 orchestration (see the input default).
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'refs/tags/v0.0.45' }}
   EXPECTED_COMMIT: ${{ inputs.expected_commit || '' }}
   SYNC_BOT_NAME: github-actions[bot]
   SYNC_BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com

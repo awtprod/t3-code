@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as ByteSize from "effect/ByteSize";
 import * as NodeCrypto from "node:crypto";
 import * as NodeProcess from "node:process";
 
@@ -25,10 +26,10 @@ import {
 } from "./VerifiedScopedShell.ts";
 
 export const AUTOMATION_SCOPED_SHELL_MANIFEST_FILE = "scoped-shell-allowlist.json";
-export const AUTOMATION_SCOPED_SHELL_MANIFEST_VERSION = 1 as const;
+const AUTOMATION_SCOPED_SHELL_MANIFEST_VERSION = 1 as const;
 
-const MAX_MANIFEST_BYTES = FileSystem.Size(1024 * 1024);
-const MAX_LOCAL_GIT_CONFIG_BYTES = FileSystem.Size(1024 * 1024);
+const MAX_MANIFEST_BYTES = ByteSize.bytes(1024 * 1024);
+const MAX_LOCAL_GIT_CONFIG_BYTES = ByteSize.bytes(1024 * 1024);
 const MAX_MANIFEST_ENTRIES = 256;
 const ALLOWLIST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
@@ -76,7 +77,7 @@ export const AutomationScopedShellErrorCode = Schema.Literals([
 ]);
 export type AutomationScopedShellErrorCode = typeof AutomationScopedShellErrorCode.Type;
 
-export class AutomationScopedShellError extends Schema.TaggedErrorClass<AutomationScopedShellError>()(
+export class AutomationScopedShellError extends Schema.TaggedError<AutomationScopedShellError>()(
   "AutomationScopedShellError",
   {
     code: AutomationScopedShellErrorCode,

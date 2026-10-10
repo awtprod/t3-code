@@ -93,6 +93,7 @@ const snapshot: OrchestrationReadModel = {
       proposedPlans: [],
       activities: [],
       checkpoints: [],
+      pullRequests: [],
       session: null,
     },
   ],

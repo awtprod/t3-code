@@ -55,7 +55,7 @@ interface TransitionInput {
   readonly allowedPreviousStates?: ReadonlyArray<"queued" | "running">;
 }
 
-export class RunLifecycleError extends Schema.TaggedErrorClass<RunLifecycleError>()(
+export class RunLifecycleError extends Schema.TaggedError<RunLifecycleError>()(
   "RunLifecycleError",
   {
     reason: Schema.Literals(["persistence", "projection"]),

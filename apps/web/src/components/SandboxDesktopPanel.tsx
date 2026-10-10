@@ -72,7 +72,6 @@ export function SandboxDesktopPanel(props: SandboxDesktopPanelProps) {
     setViewerUrl(null);
     if (desktopReady) void requestViewer();
     // A new desktop session always requires a fresh one-time ticket.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [desktopReady, sandbox?.desktop.sessionId]);
   const busy = props.busy === true || actionBusy;
   const runAction = async (action: () => Promise<{ readonly _tag?: string }>) => {
@@ -158,7 +157,7 @@ export function SandboxDesktopPanel(props: SandboxDesktopPanelProps) {
       {humanController ? (
         <div
           role="status"
-          className="border-b bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+          className="border-b bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
         >
           You control this desktop. Agent commands remain paused until you explicitly resume.
         </div>

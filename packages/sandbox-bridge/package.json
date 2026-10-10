@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "node build.ts",
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "tsc --noEmit",
     "test": "node build.ts && vp test run"
   },
   "devDependencies": {

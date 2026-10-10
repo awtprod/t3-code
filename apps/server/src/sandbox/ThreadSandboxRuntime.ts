@@ -21,14 +21,14 @@ export type LegacyHostExecutionTarget = {
 
 export type ProviderExecutionTarget = SandboxExecutionTarget | LegacyHostExecutionTarget;
 
-export class ThreadSandboxNotReadyError extends Schema.TaggedErrorClass<ThreadSandboxNotReadyError>()(
+export class ThreadSandboxNotReadyError extends Schema.TaggedError<ThreadSandboxNotReadyError>()(
   "ThreadSandboxNotReadyError",
   { threadId: Schema.String, detail: Schema.String },
 ) {}
 
 export interface ThreadSandboxRuntimeShape {
   readonly ensureReady: (
-    thread: OrchestrationThread,
+    thread: Pick<OrchestrationThread, "id" | "sandbox">,
     legacyCwd: string | undefined,
   ) => Effect.Effect<ProviderExecutionTarget, ThreadSandboxNotReadyError>;
 }

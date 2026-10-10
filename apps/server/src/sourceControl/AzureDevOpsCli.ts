@@ -30,7 +30,7 @@ const azureDevOpsCommandErrorFields = {
   cause: Schema.Defect(),
 };
 
-export class AzureDevOpsCliUnavailableError extends Schema.TaggedErrorClass<AzureDevOpsCliUnavailableError>()(
+export class AzureDevOpsCliUnavailableError extends Schema.TaggedError<AzureDevOpsCliUnavailableError>()(
   "AzureDevOpsCliUnavailableError",
   azureDevOpsCommandErrorFields,
 ) {
@@ -43,7 +43,7 @@ export class AzureDevOpsCliUnavailableError extends Schema.TaggedErrorClass<Azur
   }
 }
 
-export class AzureDevOpsCliAuthenticationError extends Schema.TaggedErrorClass<AzureDevOpsCliAuthenticationError>()(
+export class AzureDevOpsCliAuthenticationError extends Schema.TaggedError<AzureDevOpsCliAuthenticationError>()(
   "AzureDevOpsCliAuthenticationError",
   azureDevOpsCommandErrorFields,
 ) {
@@ -56,7 +56,7 @@ export class AzureDevOpsCliAuthenticationError extends Schema.TaggedErrorClass<A
   }
 }
 
-export class AzureDevOpsCliRateLimitError extends Schema.TaggedErrorClass<AzureDevOpsCliRateLimitError>()(
+export class AzureDevOpsCliRateLimitError extends Schema.TaggedError<AzureDevOpsCliRateLimitError>()(
   "AzureDevOpsCliRateLimitError",
   azureDevOpsCommandErrorFields,
 ) {
@@ -69,7 +69,7 @@ export class AzureDevOpsCliRateLimitError extends Schema.TaggedErrorClass<AzureD
   }
 }
 
-export class AzureDevOpsPullRequestNotFoundError extends Schema.TaggedErrorClass<AzureDevOpsPullRequestNotFoundError>()(
+export class AzureDevOpsPullRequestNotFoundError extends Schema.TaggedError<AzureDevOpsPullRequestNotFoundError>()(
   "AzureDevOpsPullRequestNotFoundError",
   azureDevOpsCommandErrorFields,
 ) {
@@ -82,7 +82,7 @@ export class AzureDevOpsPullRequestNotFoundError extends Schema.TaggedErrorClass
   }
 }
 
-export class AzureDevOpsCommandFailedError extends Schema.TaggedErrorClass<AzureDevOpsCommandFailedError>()(
+export class AzureDevOpsCommandFailedError extends Schema.TaggedError<AzureDevOpsCommandFailedError>()(
   "AzureDevOpsCommandFailedError",
   azureDevOpsCommandErrorFields,
 ) {
@@ -138,7 +138,7 @@ const azureDevOpsDecodeErrorFields = {
   cause: Schema.Defect(),
 };
 
-export class AzureDevOpsPullRequestListDecodeError extends Schema.TaggedErrorClass<AzureDevOpsPullRequestListDecodeError>()(
+export class AzureDevOpsPullRequestListDecodeError extends Schema.TaggedError<AzureDevOpsPullRequestListDecodeError>()(
   "AzureDevOpsPullRequestListDecodeError",
   {
     operation: Schema.Literal("listPullRequests"),
@@ -154,7 +154,7 @@ export class AzureDevOpsPullRequestListDecodeError extends Schema.TaggedErrorCla
   }
 }
 
-export class AzureDevOpsPullRequestDecodeError extends Schema.TaggedErrorClass<AzureDevOpsPullRequestDecodeError>()(
+export class AzureDevOpsPullRequestDecodeError extends Schema.TaggedError<AzureDevOpsPullRequestDecodeError>()(
   "AzureDevOpsPullRequestDecodeError",
   {
     operation: Schema.Literal("getPullRequest"),
@@ -176,7 +176,7 @@ const AzureDevOpsRepositoryDecodeOperation = Schema.Literals([
   "createRepository",
 ]);
 
-export class AzureDevOpsRepositoryDecodeError extends Schema.TaggedErrorClass<AzureDevOpsRepositoryDecodeError>()(
+export class AzureDevOpsRepositoryDecodeError extends Schema.TaggedError<AzureDevOpsRepositoryDecodeError>()(
   "AzureDevOpsRepositoryDecodeError",
   {
     operation: AzureDevOpsRepositoryDecodeOperation,
@@ -204,8 +204,6 @@ export const AzureDevOpsCliError = Schema.Union([
 ]);
 export type AzureDevOpsCliError = typeof AzureDevOpsCliError.Type;
 
-export const isAzureDevOpsCliError = Schema.is(AzureDevOpsCliError);
-
 export interface AzureDevOpsRepositoryCloneUrls {
   readonly nameWithOwner: string;
   readonly url: string;
@@ -219,6 +217,7 @@ export class AzureDevOpsCli extends Context.Service<
       readonly cwd: string;
       readonly args: ReadonlyArray<string>;
       readonly timeoutMs?: number;
+      readonly maxOutputBytes?: number;
     }) => Effect.Effect<VcsProcess.VcsProcessOutput, AzureDevOpsCliError>;
 
     readonly listPullRequests: (input: {
@@ -352,6 +351,7 @@ function decodeAzureDevOpsJson<S extends Schema.Top>(
   );
 }
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const process = yield* VcsProcess.VcsProcess;
 
@@ -373,6 +373,7 @@ export const make = Effect.gen(function* () {
             }
           : {}),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
       })
       .pipe(
         Effect.mapError((error) =>

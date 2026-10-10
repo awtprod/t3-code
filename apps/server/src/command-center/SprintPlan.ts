@@ -197,7 +197,7 @@ export interface SprintPlanDateResolutionInput {
   readonly provenance: SprintPlanMutationProvenance;
 }
 
-export class SprintPlanServiceError extends Schema.TaggedErrorClass<SprintPlanServiceError>()(
+export class SprintPlanServiceError extends Schema.TaggedError<SprintPlanServiceError>()(
   "SprintPlanServiceError",
   {
     reason: Schema.Literals(["validation", "not-found", "conflict", "persistence"]),

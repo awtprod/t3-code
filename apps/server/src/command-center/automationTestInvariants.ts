@@ -10,7 +10,7 @@ import { canonicalAutomationRunState } from "./Service.ts";
  * audit chain verifies and every canonical Run projection agrees with its
  * durable runtime execution (no projection left behind or moved backwards).
  */
-export const automationInvariants = Effect.gen(function* () {
+const automationInvariants = Effect.gen(function* () {
   const audit = yield* makeCommandCenterAuditLog;
   const verification = yield* audit.verify;
   if (!verification.valid) {

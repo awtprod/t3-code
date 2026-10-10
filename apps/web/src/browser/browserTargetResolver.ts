@@ -279,35 +279,44 @@ const resolveEnvironmentPortTarget = (
   };
 };
 
+/**
+ * Command Center: in a remote environment a loopback URL names the server's own
+ * dev server, which only the authenticated preview gateway can reach. Route it
+ * there when the server publishes a gateway; otherwise keep upstream's
+ * explicit-URL behaviour (navigate exactly as typed).
+ */
+const resolveLoopbackUrlViaGateway = (
+  environmentId: EnvironmentId,
+  url: string,
+): PreviewUrlResolution | null => {
+  const gateway = readServerConfig(environmentId)?.previewGateway;
+  if (gateway === undefined) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(normalizePreviewUrl(url));
+  } catch {
+    return null;
+  }
+  if (!isLoopbackHost(parsed.hostname)) return null;
+  const environmentUrl = readEnvironmentUrl(environmentId);
+  if (isLocalLoopbackHost(environmentUrl.hostname.replace(/^\[|\]$/g, ""))) return null;
+  return buildGatewayResolution({
+    environmentId,
+    gateway,
+    environmentUrl,
+    port: Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80)),
+    path: `${parsed.pathname}${parsed.search}${parsed.hash}`,
+    requestedUrl: url,
+  });
+};
+
 export function resolveBrowserNavigationTarget(
   environmentId: EnvironmentId,
   target: BrowserNavigationTarget,
 ): PreviewUrlResolution {
   if (target.kind === "url") {
-    let parsed: URL | null = null;
-    try {
-      parsed = new URL(normalizePreviewUrl(target.url));
-    } catch {
-      // Preserve the existing direct-navigation behavior so the preview host
-      // reports malformed URL errors through its normal navigation path.
-    }
-    if (parsed && isLoopbackHost(parsed.hostname)) {
-      const environmentUrl = readEnvironmentUrl(environmentId);
-      if (parsed.hostname === "0.0.0.0" || !isLocalLoopbackHost(environmentUrl.hostname)) {
-        return resolveEnvironmentPortTarget(
-          environmentId,
-          {
-            kind: "environment-port",
-            port: Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80)),
-            protocol: parsed.protocol === "https:" ? "https" : "http",
-            path: `${parsed.pathname}${parsed.search}${parsed.hash}`,
-          },
-          environmentUrl,
-          target.url,
-          parsed,
-        );
-      }
-    }
+    const viaGateway = resolveLoopbackUrlViaGateway(environmentId, target.url);
+    if (viaGateway) return viaGateway;
     return {
       requestedUrl: target.url,
       resolvedUrl: target.url,
@@ -321,10 +330,20 @@ export function resolveBrowserNavigationTarget(
 export function resolveDiscoveredServerUrl(environmentId: EnvironmentId, rawUrl: string): string {
   try {
     const normalizedUrl = normalizePreviewUrl(rawUrl);
-    return resolveBrowserNavigationTarget(environmentId, {
-      kind: "url",
-      url: normalizedUrl,
-    }).resolvedUrl;
+    const parsed = new URL(normalizedUrl);
+    if (!isLoopbackHost(parsed.hostname)) return normalizedUrl;
+    return resolveEnvironmentPortTarget(
+      environmentId,
+      {
+        kind: "environment-port",
+        port: Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80)),
+        protocol: parsed.protocol === "https:" ? "https" : "http",
+        path: `${parsed.pathname}${parsed.search}${parsed.hash}`,
+      },
+      readEnvironmentUrl(environmentId),
+      rawUrl,
+      parsed,
+    ).resolvedUrl;
   } catch {
     return rawUrl;
   }

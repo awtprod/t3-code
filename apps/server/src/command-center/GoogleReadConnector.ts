@@ -1,3 +1,4 @@
+import * as ByteSize from "effect/ByteSize";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -24,7 +25,7 @@ import { ConnectionHealth } from "./ConnectionHealth.ts";
 import { googleKeyringEnvironment } from "./GoogleKeyring.ts";
 
 export const PINNED_GOG_VERSION = "0.15.0";
-export const MAX_GOOGLE_DRIVE_EXPORT_BYTES = 64 * 1024 * 1024;
+const MAX_GOOGLE_DRIVE_EXPORT_BYTES = 64 * 1024 * 1024;
 
 export const hasPinnedGogVersion = (output: string): boolean =>
   /(?:^|[^0-9.])0\.15\.0(?:$|[^0-9.])/u.test(output);
@@ -84,9 +85,9 @@ export const GOOGLE_READ_COMMAND_ALLOWLIST = [
   "drive.get",
   "drive.download",
 ] as const;
-export const GOOGLE_DRAFT_COMMAND_ALLOWLIST = ["gmail.drafts.create"] as const;
+const GOOGLE_DRAFT_COMMAND_ALLOWLIST = ["gmail.drafts.create"] as const;
 
-export class GoogleReadConnectorError extends Schema.TaggedErrorClass<GoogleReadConnectorError>()(
+export class GoogleReadConnectorError extends Schema.TaggedError<GoogleReadConnectorError>()(
   "GoogleReadConnectorError",
   {
     reason: Schema.Literals(["configuration", "version", "process", "output"]),
@@ -573,7 +574,7 @@ export const layer = Layer.effect(
                 message: "The Google Drive export did not create a regular file.",
               });
             }
-            if (info.size > FileSystem.Size(MAX_GOOGLE_DRIVE_EXPORT_BYTES)) {
+            if (info.size > ByteSize.bytes(MAX_GOOGLE_DRIVE_EXPORT_BYTES)) {
               return yield* new GoogleReadConnectorError({
                 reason: "output",
                 message: `The Google Drive export exceeds the ${MAX_GOOGLE_DRIVE_EXPORT_BYTES}-byte limit.`,

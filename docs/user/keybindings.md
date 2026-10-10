@@ -1,10 +1,60 @@
 # Keybindings
 
-T3 Code reads keybindings from:
+Customize shortcuts in **Settings → Keybindings** on web and desktop. That page
+also lists the command IDs and defaults available in your version.
 
-- `~/.command-center/userdata/keybindings.json`
+## Composer controls
 
-The file must be a JSON array of rules:
+In **Settings → General → Send shortcut**, choose whether Enter sends, requires
+`mod+Enter` for multiline prompts, or always requires `mod+Enter`. `Shift+Enter`
+inserts a new line. This applies to the web and desktop composer at desktop widths.
+
+**Follow-up behavior** chooses Queue or Steer while the agent runs. Use
+`mod+Enter` to do the opposite for one message. When sending requires `mod+Enter`,
+use `mod+Shift+Enter` for the opposite action. In a new thread, `mod+Enter` keeps
+starting the thread in the background.
+
+Use `mod+shift+m` to choose a model and `mod+shift+h` to choose a host.
+Use `mod+shift+e` for effort, `mod+shift+a` for access mode, `mod+shift+x` for the
+workspace, and `mod+shift+g` for the Git branch. The workspace menu includes the
+current checkout, a new worktree, and the previous worktree when available.
+Use `mod+shift+l` to reuse the previous worktree directly.
+
+In the model picker, press Left in an empty search field or Shift+Tab to reach
+the provider list. Use Up/Down to move and Enter to choose. Right returns to
+model search. `mod+shift+up` and `mod+shift+down` switch providers directly and clear the
+search. These provider shortcuts can also be changed in Settings.
+
+These shortcuts run inside the focused web or desktop client. `mod` uses Command
+on macOS and Ctrl on Windows and Linux, including GNOME, KDE Plasma, Niri, and
+Hyprland. If a custom desktop shortcut takes the same keys, choose another binding
+in Settings.
+
+## Copy pull request references
+
+With a PR open in the right panel or on the Pull Requests page, use `mod+shift+c`
+to copy its URL and `mod+shift+k` to copy its number with a `#` prefix.
+Both shortcuts can be changed in Settings. Search for “Copy Link or Thread ID”
+or “Copy Number”. They copy the selected PR and leave terminal input alone.
+
+## iPad
+
+With a hardware keyboard, use `Cmd+1` through `Cmd+9` to open the first nine
+displayed threads. The shortcuts follow the current list filters and order.
+`Cmd+K` opens the command palette to search commands, projects, and threads.
+Use the arrow keys and Return to choose a result, or `Cmd+1` through `Cmd+9` to
+choose directly. Escape or `Cmd+K` closes the palette. Start a search with `>`
+to show only actions.
+
+In the composer, Return sends and `Shift+Return` inserts a new line. `Cmd+Return`
+also sends. To make Return insert a new line instead, change the Return key
+behavior in Settings → Keyboard.
+
+## Edit the configuration file
+
+Keybindings live on the environment's machine, in
+`~/.command-center/userdata/keybindings.json` by default. You can edit this file directly.
+It is a JSON array of rules:
 
 ```json
 [
@@ -13,144 +63,84 @@ The file must be a JSON array of rules:
 ]
 ```
 
-See the full schema for more details: [`packages/contracts/src/keybindings.ts`](../../packages/contracts/src/keybindings.ts)
+Command Center creates the file with its defaults and adds new defaults on later startups.
+New defaults do not replace commands you customized. If a new default overlaps one
+of your shortcuts, [rule order](#precedence) decides which runs.
+Invalid rules are ignored; if the file cannot be parsed, Command Center uses defaults.
 
-## Defaults
+## Rule shape
+
+Each rule requires a `key` shortcut and a `command` ID. An optional `when`
+expression restricts when it runs.
+
+Project scripts use `script.{id}.run`, such as `script.test.run`.
+
+## Key syntax
+
+Join modifiers and a key with `+`, such as `mod+shift+d` or `ctrl+l`.
+`mod` means Command on macOS and Control elsewhere. Other modifiers are
+`cmd` / `meta`, `ctrl` / `control`, `alt` / `option`, and `shift`.
+
+## When conditions
+
+Available context keys are `terminalFocus`, `terminalOpen`, `previewFocus`,
+`previewOpen`, `modelPickerOpen`, `usagePageOpen`, `editableFocus`, `isWeb`, and `isDesktop`.
+`editableFocus` is true while a text field, the composer, or another editor has
+the keyboard. `isWeb` is true in a browser tab. `isDesktop` is true in the
+desktop app. Unknown keys evaluate to `false`.
+
+`mod+1` through `mod+9` jump to the first nine threads, and to models while the
+model picker is open. Those defaults use `isDesktop` so they do not steal the
+browser's tab-switch shortcuts. Remove that condition in Settings if you want
+the same jumps in a browser.
+
+Combine keys with `!` for not, `&&` for and, `||` for or, and parentheses:
 
 ```json
-[
-  { "key": "mod+j", "command": "terminal.toggle" },
-  { "key": "mod+d", "command": "terminal.split", "when": "terminalFocus" },
-  { "key": "mod+n", "command": "terminal.new", "when": "terminalFocus" },
-  { "key": "mod+w", "command": "terminal.close", "when": "terminalFocus" },
-  { "key": "mod+shift+j", "command": "preview.toggle" },
-  { "key": "mod+r", "command": "preview.refresh", "when": "previewFocus" },
-  { "key": "mod+l", "command": "preview.focusUrl", "when": "previewFocus" },
-  { "key": "mod+=", "command": "preview.zoomIn", "when": "previewFocus" },
-  { "key": "mod+-", "command": "preview.zoomOut", "when": "previewFocus" },
-  { "key": "mod+0", "command": "preview.resetZoom", "when": "previewFocus" },
-  { "key": "mod+k", "command": "commandPalette.toggle", "when": "!terminalFocus" },
-  { "key": "mod+n", "command": "chat.new", "when": "!terminalFocus" },
-  { "key": "mod+shift+o", "command": "chat.new", "when": "!terminalFocus" },
-  { "key": "mod+shift+n", "command": "chat.newLocal", "when": "!terminalFocus" },
-  { "key": "mod+o", "command": "editor.openFavorite" }
-]
+{ "key": "mod+j", "command": "terminal.toggle", "when": "terminalOpen && !terminalFocus" }
 ```
 
-For most up to date defaults, see [`DEFAULT_KEYBINDINGS` in `apps/server/src/keybindings.ts`](../../apps/server/src/keybindings.ts)
+## Precedence
 
-## Configuration
+The last rule whose key and condition both match wins, even if it belongs to a
+different command. Put a more specific rule after a general one when they share
+a shortcut.
 
-### Rule Shape
+## Commands with special behavior
 
-Each entry supports:
+`thread.stop` interrupts the running turn in the focused thread. It has no default
+shortcut; assign one in **Settings → Keybindings**.
 
-- `key` (required): shortcut string, like `mod+j`, `ctrl+k`, `cmd+shift+d`
-- `command` (required): action ID
-- `when` (optional): boolean expression controlling when the shortcut is active
+`thread.undo` (`mod+z` by default) reverses the actions shown in the notice at the
+bottom of the sidebar, such as unpin, settle, snooze, or archive. Consecutive
+actions of the same kind undo together. The notice remains available for five
+seconds after the latest action. The default shortcut skips text fields and
+terminals so native undo keeps working there.
 
-Invalid rules are ignored. Invalid config files are ignored. Warnings are logged by the server.
+`navigation.back` (`mod+[` by default) and `navigation.forward` (`mod+]`) move
+through the pages you have visited, like a browser's back and forward buttons.
 
-### Available Commands
+`chat.new` may ask you to choose a project when there is more than one.
+`chat.newLocal` skips that chooser. Both use your
+[new-thread defaults](./thread-sidebar.md#start-a-thread). `chat.newWithoutProject`
+(`mod+alt+n`) starts a thread [without a project](./thread-sidebar.md#start-without-a-project).
 
-- `terminal.toggle`: open/close terminal drawer
-- `terminal.split`: split terminal (in focused terminal context by default)
-- `terminal.new`: create new terminal (in focused terminal context by default)
-- `terminal.close`: close/kill the focused terminal (in focused terminal context by default)
-- `preview.toggle`: open/close the in-app browser preview panel (desktop app only)
-- `preview.refresh`: reload the active preview tab (in focused preview context by default)
-- `preview.focusUrl`: focus the URL input of the preview panel (in focused preview context by default)
-- `preview.zoomIn`: zoom the preview viewport in one step (in focused preview context by default)
-- `preview.zoomOut`: zoom the preview viewport out one step (in focused preview context by default)
-- `preview.resetZoom`: reset the preview zoom to 100% (in focused preview context by default)
-- `commandPalette.toggle`: open or close the global command palette
-- `filePicker.toggle`: open or close file search for the active project
-- `projectSearch.toggle`: search inside the active project's files
-- `themeEditor.toggle`: open or close the floating theme editor
-- `chat.new`: create a new chat thread preserving the active thread's branch/worktree state
-- `chat.newLocal`: create a new chat thread for the active project in a new environment (local/worktree determined by app settings (default `local`))
-- `editor.openFavorite`: open current project/worktree in the last-used editor
-- `script.{id}.run`: run a project script by id (for example `script.test.run`)
+## Reserved shortcuts
 
-### Key Syntax
+In the desktop app, `mod+w` closes the focused terminal or the active right-panel
+tab. When nothing remains to close, it closes the window. In a browser, `mod+w`
+closes the browser tab; rebind `rightPanel.close` and `terminal.close` to an available
+shortcut such as `alt+w`.
 
-Supported modifiers:
+Many defaults include `!terminalFocus` so they do not intercept terminal input.
+Keep that condition when remapping them if you want the same behavior.
 
-- `mod` (`cmd` on macOS, `ctrl` on non-macOS)
-- `cmd` / `meta`
-- `ctrl` / `control`
-- `shift`
-- `alt` / `option`
+## Desktop quit shortcut
 
-`filePicker.toggle` opens file search for the active project and defaults to `mod+p`.
-`projectSearch.toggle` searches inside the active project's files and defaults to `mod+shift+f`.
-Repeating either shortcut closes that search, and switching shortcuts replaces the open search.
-`themeEditor.toggle` opens or closes the floating theme editor and defaults to
-`mod+alt+shift+t`. Select a color label to spotlight the elements that use it; select the label
-again to clear the spotlight. The swatch and hex field keep that color selected while you edit it.
-Advanced mode groups related app tokens into a smaller set of color families. Changing a family
-updates its paired text and interaction states while leaving every unrelated imported color intact.
-Use **Inspect** to pick an element in the app and reveal its color token. Inspect disarms after one
-successful pick; its hover glow and badge preview the element and color family that click will select.
-**Cancel** or `Escape` exits Inspect and clears its selection and spotlight.
+Use `Cmd+Q` on macOS or `Ctrl+Q` on Windows and Linux. In the default **Hold** mode,
+hold for 1.2 seconds or press twice within 500 milliseconds. Holding requires
+keyboard repeat; if repeat is disabled, use two presses or the application menu.
 
-`rightPanel.toggleMaximized` maximizes or restores the open right panel. It has no default shortcut,
-so add one in **Settings** → **Keybindings** if you want to use it.
-
-`thread.copyReference` copies the active thread's pull request link, or its thread ID when no pull
-request is available. Its default shortcut is `mod+shift+c`, and it does not replace terminal copy
-while the terminal has focus.
-
-`thread.settle` settles the active thread or restores it when it is already settled. Its default
-shortcut is `mod+shift+s`, and it does not run while the terminal has focus.
-
-`thread.pin` pins the active thread to the pinned section of the sidebar, or unpins it when it is
-already pinned. Its default shortcut is `mod+shift+p`, and it does not run while the terminal has
-focus. See [Organizing threads](./thread-sidebar.md) for how pinned threads are ordered.
-
-The command palette searches settings, active thread titles, projects, branches, user messages, and
-final agent responses across connected environments. A setting result opens its exact control or
-section. Message matches show one labeled excerpt while keeping the thread's project, branch, and
-machine context visible. Message search begins after two characters and uses SQLite's ASCII
-case-insensitive matching.
-
-Examples:
-
-- `mod+j`
-- `mod+shift+d`
-- `ctrl+l`
-- `cmd+k`
-
-Background submission from a new thread is the exception. `mod+enter` starts that thread and opens
-another new thread with the same workspace mode and base branch. **New worktree** remains selected,
-but the new thread does not reuse the worktree created for the thread that just started.
-
-### `when` Conditions
-
-Currently available context keys:
-
-- `terminalFocus`
-- `terminalOpen`
-- `previewFocus`
-- `previewOpen`
-
-Supported operators:
-
-- `!` (not)
-- `&&` (and)
-- `||` (or)
-- parentheses: `(` `)`
-
-Examples:
-
-- `"when": "terminalFocus"`
-- `"when": "terminalOpen && !terminalFocus"`
-- `"when": "terminalFocus || terminalOpen"`
-
-Unknown condition keys evaluate to `false`.
-
-### Precedence
-
-- Rules are evaluated in array order.
-- For a key event, the last rule where both `key` matches and `when` evaluates to `true` wins.
-- That means precedence is across commands, not only within the same command.
+Change **Settings → General → Confirmations → Quit shortcut** to **Direct** for a
+single press or **Double press** for two presses only. Choosing **Quit** from the
+application menu always quits immediately.

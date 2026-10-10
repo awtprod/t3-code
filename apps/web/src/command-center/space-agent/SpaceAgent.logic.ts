@@ -3,7 +3,7 @@ import type { CommandCenterSpaceAgentSummary } from "@t3tools/contracts";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 
 /** Mirrors the server's `SPACE_AGENT_THREAD_ID_PREFIX` (`SpaceAgentIds.ts`). */
-export const SPACE_AGENT_THREAD_ID_PREFIX = "cc-space-agent-";
+const SPACE_AGENT_THREAD_ID_PREFIX = "cc-space-agent-";
 
 export const SPACE_AGENT_ACTIVITY_LIMIT = 20;
 

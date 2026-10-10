@@ -96,13 +96,23 @@ export class EnvironmentThemeService extends Context.Service<
  * blocking the open, and the descriptor/path identity check covers platforms
  * where O_NOFOLLOW is ineffective. Returns null for anything that is not the
  * same small regular file at open and validation time.
+ *
+ * Windows has neither flag (the constants are undefined, and OR-ing them in
+ * is a no-op), so the symlink check there is an lstat before the open. That
+ * leaves a window a swap could slip through, which the descriptor-bound
+ * checks below then narrow to "a regular file at that path".
  */
-export const readFileGuarded = (filePath: string, maxBytes: number): string | null => {
+export const readThemeFileGuarded = (filePath: string, maxBytes: number): string | null => {
   let fd: number;
   try {
+    if (NodeFS.constants.O_NOFOLLOW === undefined && NodeFS.lstatSync(filePath).isSymbolicLink()) {
+      return null;
+    }
     fd = NodeFS.openSync(
       filePath,
-      NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW | NodeFS.constants.O_NONBLOCK,
+      NodeFS.constants.O_RDONLY |
+        (NodeFS.constants.O_NOFOLLOW ?? 0) |
+        (NodeFS.constants.O_NONBLOCK ?? 0),
     );
   } catch {
     return null;
@@ -133,9 +143,6 @@ export const readFileGuarded = (filePath: string, maxBytes: number): string | nu
     NodeFS.closeSync(fd);
   }
 };
-
-/** Compatibility name used by the theme service and CLI. */
-export const readThemeFileGuarded = readFileGuarded;
 
 /**
  * Every theme the directory actually publishes. A file that is missing,

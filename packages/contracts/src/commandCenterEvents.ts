@@ -224,7 +224,7 @@ export const CommandCenterTimelinePage = Schema.Struct({
 });
 export type CommandCenterTimelinePage = typeof CommandCenterTimelinePage.Type;
 
-export class CommandCenterEventStreamError extends Schema.TaggedErrorClass<CommandCenterEventStreamError>()(
+export class CommandCenterEventStreamError extends Schema.TaggedError<CommandCenterEventStreamError>()(
   "CommandCenterEventStreamError",
   {
     reason: Schema.Literals(["query", "decode", "hash-chain", "hash-mismatch"]),

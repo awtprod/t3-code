@@ -129,7 +129,7 @@ function TaskEditor({
         <label className="mt-4 block text-sm font-medium">
           Note
           <Textarea
-            className="mt-1 min-h-24 text-base sm:text-sm"
+            className="mt-1 min-h-24"
             maxLength={8_192}
             onChange={(event) => setNote(event.target.value)}
             value={note}
@@ -139,7 +139,7 @@ function TaskEditor({
         <label className="mt-4 block text-sm font-medium">
           Day label
           <Input
-            className="mt-1 min-h-11 text-base sm:min-h-8 sm:text-sm"
+            className="mt-1 min-h-11 sm:min-h-8"
             maxLength={8_192}
             onChange={(event) => setDay(event.target.value)}
             value={day}
@@ -159,7 +159,7 @@ function TaskEditor({
       <label className="mt-4 block text-sm font-medium">
         Reason for this change
         <Textarea
-          className="mt-1 min-h-20 text-base sm:text-sm"
+          className="mt-1 min-h-20"
           maxLength={4_096}
           onChange={(event) => setReason(event.target.value)}
           placeholder="What changed, or why are you reversing completion?"
@@ -577,7 +577,7 @@ function SprintPlanRouteView() {
   };
 
   return (
-    <SidebarInset className="h-full min-h-0 overflow-auto bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-auto">
       <main className="mx-auto flex w-full max-w-6xl flex-col gap-5 px-4 pt-14 pb-12 sm:px-6 sm:pt-5">
         <header className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -716,7 +716,7 @@ function SprintPlanRouteView() {
                 <label className="mt-3 block max-w-sm text-sm font-medium">
                   Plan ID
                   <Input
-                    className="mt-1 min-h-11 text-base sm:min-h-8 sm:text-sm"
+                    className="mt-1 min-h-11 sm:min-h-8"
                     maxLength={256}
                     onChange={(event) => {
                       importRevision.current++;
@@ -770,7 +770,7 @@ function SprintPlanRouteView() {
                       SHA-256 {preview.sourceSha256}
                     </p>
                     {preview.sourceDateConflicts.length > 0 && (
-                      <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
+                      <div className="rounded-lg border border-warning/40 bg-warning/5 p-3">
                         <p className="font-medium">
                           {preview.sourceDateConflicts.length} source date clarification
                           {preview.sourceDateConflicts.length === 1 ? "" : "s"}
@@ -935,13 +935,15 @@ function SprintPlanRouteView() {
                     including metadata outside the task view.
                   </p>
                   {showSourceJson && (
-                    <Textarea
-                      className="mt-3 h-64 font-mono text-xs"
-                      readOnly
-                      value={
-                        view === "original" ? original.data!.sourceJson : current.data.sourceJson
-                      }
-                    />
+                    <div className="mt-3 font-mono">
+                      <Textarea
+                        className="h-64"
+                        readOnly
+                        value={
+                          view === "original" ? original.data!.sourceJson : current.data.sourceJson
+                        }
+                      />
+                    </div>
                   )}
                 </details>
                 <details className="rounded-xl border border-border bg-card p-4" open={false}>
@@ -996,7 +998,7 @@ function SprintPlanRouteView() {
                   </StateCard>
                 </div>
                 {view === "current" && current.data.baselineNormalized.dateConflicts.length > 0 && (
-                  <section className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
+                  <section className="rounded-xl border border-warning/40 bg-warning/5 p-4">
                     <h2 className="font-semibold">Source date clarifications</h2>
                     <p className="mt-1 text-sm text-muted-foreground">
                       A conflict leaves the imported wording intact. Record a reviewed date
@@ -1085,7 +1087,7 @@ function SprintPlanRouteView() {
                                 {task.done ? "Completed" : "Open"}
                               </span>
                               {conflictIds.has(task.id) && (
-                                <span className="rounded bg-amber-500/10 px-2 py-1 text-amber-700 dark:text-amber-300">
+                                <span className="rounded bg-warning/10 px-2 py-1 text-warning-foreground">
                                   Source date needs clarification
                                 </span>
                               )}

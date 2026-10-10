@@ -347,6 +347,9 @@ const TRUSTED_OVERRIDE_KEYS = [
   "GIT_COMMITTER_EMAIL",
   "GIT_COMMITTER_DATE",
   "GIT_TRACE2_EVENT",
+  // Only shortens Git's progress delay; worktree creation sets it so checkout
+  // progress reaches the stderr pipe.
+  "GIT_PROGRESS_DELAY",
 ] as const;
 
 function readEnvironment(source: NodeJS.ProcessEnv, key: string): string | undefined {

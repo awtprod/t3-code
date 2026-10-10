@@ -49,7 +49,7 @@ const hash = (value: Schema.Json) =>
 export const bindingDigest = (binding: InstagramReelBinding) =>
   hash(["instagram-reel-v1", binding]);
 /** One permanent account/asset/due identity, independent of caption, window and approval. */
-export const logicalIdentity = (b: InstagramReelBinding) =>
+const logicalIdentity = (b: InstagramReelBinding) =>
   hash(["instagram-reel-v1", b.accountId, b.sha256, b.dueUtc]);
 const IdResponse = Schema.Struct({ id: Schema.String.check(Schema.isPattern(/^[0-9]{5,30}$/)) });
 const StatusResponse = Schema.Struct({

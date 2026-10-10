@@ -58,13 +58,13 @@ import {
   wakeCountersOn,
 } from "./SpaceAgentWakeState.ts";
 
-export const SPACE_AGENT_WAKE_TICK = Duration.seconds(30);
+const SPACE_AGENT_WAKE_TICK = Duration.seconds(30);
 /** A check-in slot missed by downtime still fires while younger than this. */
-export const SPACE_AGENT_CHECK_IN_CATCH_UP_MINUTES = 120;
-export const SPACE_AGENT_WAKE_DELTA_MAX_ROWS = 20;
+const SPACE_AGENT_CHECK_IN_CATCH_UP_MINUTES = 120;
+const SPACE_AGENT_WAKE_DELTA_MAX_ROWS = 20;
 export const SPACE_AGENT_WAKE_DELTA_MAX_CHARS = 3_000;
-export const SPACE_AGENT_WAKE_REPLIES_MAX_ROWS = 20;
-export const SPACE_AGENT_WAKE_REPLIES_MAX_CHARS = 4_000;
+const SPACE_AGENT_WAKE_REPLIES_MAX_ROWS = 20;
+const SPACE_AGENT_WAKE_REPLIES_MAX_CHARS = 4_000;
 const REPLY_TEXT_CHARS = 800;
 const DELTA_SNIPPET_CHARS = 240;
 const DELTA_TITLE_CHARS = 120;
@@ -137,7 +137,7 @@ const epochOf = (iso: string): number | undefined => {
 };
 
 /** Whether `epochMs` falls inside the agent's quiet hours (local clock). */
-export const isSpaceAgentQuietTime = (
+const isSpaceAgentQuietTime = (
   agent: Pick<SpaceAgentConfigType, "checkIns" | "quietHours">,
   epochMs: number,
 ): boolean =>

@@ -140,7 +140,8 @@ export function useLiveRefresh(
   const viewId = key ?? fallbackViewId;
 
   useEffect(() => {
-    if (!enabled) return;
+    // No document (non-DOM renderers, SSR): nothing to watch for visibility or focus.
+    if (!enabled || typeof document === "undefined") return;
     const read = (now: number) => {
       lastRefreshedAtByView.set(viewId, now);
       latest.current?.();

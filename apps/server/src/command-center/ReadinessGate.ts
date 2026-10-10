@@ -6,7 +6,7 @@ import * as Schema from "effect/Schema";
 
 export type CommandCenterReadinessState = "pending" | "ready" | "failed";
 
-export class CommandCenterNotReadyError extends Schema.TaggedErrorClass<CommandCenterNotReadyError>()(
+export class CommandCenterNotReadyError extends Schema.TaggedError<CommandCenterNotReadyError>()(
   "CommandCenterNotReadyError",
   {
     state: Schema.Literals(["pending", "failed"]),

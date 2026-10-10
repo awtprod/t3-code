@@ -88,6 +88,7 @@ export interface DiffCheckpointsInput extends TargetedInput {
   readonly toCheckpointRef: CheckpointRef;
   readonly fallbackFromToHead?: boolean;
   readonly ignoreWhitespace: boolean;
+  readonly format?: "patch" | "numstat";
 }
 
 export interface DeleteCheckpointRefsInput extends TargetedInput {
@@ -126,8 +127,9 @@ export class CheckpointStore extends Context.Service<
     ) => Effect.Effect<boolean, CheckpointStoreError>;
 
     /**
-     * Compute a patch diff between two checkpoint refs.
+     * Compute a diff between two checkpoint refs. Defaults to a full patch.
      *
+     * Numstat output has NUL-delimited paths for file summaries.
      * Can optionally treat a missing "from" ref as `HEAD`.
      */
     readonly diffCheckpoints: (
@@ -145,6 +147,7 @@ export class CheckpointStore extends Context.Service<
   }
 >()("@awtprod/command-center/checkpointing/CheckpointStore") {}
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const vcsRegistry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const sandboxRuntime = yield* SandboxRuntimeManager;

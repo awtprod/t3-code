@@ -18,8 +18,8 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import type * as Scope from "effect/Scope";
 
-export const VERIFIED_SCOPED_SHELL_BWRAP_PATH = "/usr/bin/bwrap";
-export const VERIFIED_SCOPED_SHELL_PRLIMIT_PATH = "/usr/bin/prlimit";
+const VERIFIED_SCOPED_SHELL_BWRAP_PATH = "/usr/bin/bwrap";
+const VERIFIED_SCOPED_SHELL_PRLIMIT_PATH = "/usr/bin/prlimit";
 
 /**
  * Host-resource ceilings are intentionally platform-owned rather than
@@ -126,7 +126,7 @@ export const VerifiedScopedShellErrorCode = Schema.Literals([
 ]);
 export type VerifiedScopedShellErrorCode = typeof VerifiedScopedShellErrorCode.Type;
 
-export class VerifiedScopedShellError extends Schema.TaggedErrorClass<VerifiedScopedShellError>()(
+export class VerifiedScopedShellError extends Schema.TaggedError<VerifiedScopedShellError>()(
   "VerifiedScopedShellError",
   {
     code: VerifiedScopedShellErrorCode,

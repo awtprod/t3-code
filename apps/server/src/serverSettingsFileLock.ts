@@ -13,7 +13,7 @@ import { makeRuntimeSqliteLayer } from "./persistence/Layers/Sqlite.ts";
 const LOCK_ATTEMPTS = 40;
 const LOCK_RETRY_DELAY = Duration.millis(25);
 
-export class ServerSettingsFileLockError extends Schema.TaggedErrorClass<ServerSettingsFileLockError>()(
+export class ServerSettingsFileLockError extends Schema.TaggedError<ServerSettingsFileLockError>()(
   "ServerSettingsFileLockError",
   {
     settingsPath: Schema.String,
@@ -26,7 +26,7 @@ export class ServerSettingsFileLockError extends Schema.TaggedErrorClass<ServerS
   }
 }
 
-export class ServerSettingsFileLockBusyError extends Schema.TaggedErrorClass<ServerSettingsFileLockBusyError>()(
+export class ServerSettingsFileLockBusyError extends Schema.TaggedError<ServerSettingsFileLockBusyError>()(
   "ServerSettingsFileLockBusyError",
   { settingsPath: Schema.String, attempts: Schema.Number },
 ) {

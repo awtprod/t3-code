@@ -46,11 +46,11 @@ export function SpaceAgentActivityList(props: {
             <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
               {entry.title}
             </span>
-            <span className="shrink-0 text-[10px] text-muted-foreground/70 tabular-nums">
+            <span className="shrink-0 text-3xs text-muted-foreground/70 tabular-nums">
               {formatRelativeTimeLabel(entry.occurredAt)}
             </span>
           </div>
-          <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+          <div className="flex min-w-0 items-center gap-2 text-2xs text-muted-foreground">
             <span className="shrink-0 capitalize">{entry.status}</span>
             {entry.url ? (
               <a
@@ -83,11 +83,11 @@ export interface SpaceAgentThreadControlsViewProps {
   readonly onWake: () => void;
 }
 
-export function SpaceAgentThreadControlsView(props: SpaceAgentThreadControlsViewProps) {
+function SpaceAgentThreadControlsView(props: SpaceAgentThreadControlsViewProps) {
   const { agent } = props;
   return (
     <div className="flex shrink-0 items-center gap-1.5" data-testid="space-agent-thread-controls">
-      <span className="hidden text-[11px] text-muted-foreground @3xl/header-actions:inline">
+      <span className="hidden text-2xs text-muted-foreground @3xl/header-actions:inline">
         {agent.paused ? "Paused · " : ""}
         {spaceAgentLastWakeLabel(agent)}
       </span>
@@ -105,20 +105,20 @@ export function SpaceAgentThreadControlsView(props: SpaceAgentThreadControlsView
           <ActivityIcon />
           <span className="sr-only @3xl/header-actions:not-sr-only">Activity</span>
           {agent.pendingEvents > 0 ? (
-            <span className="rounded-sm bg-primary/12 px-1 text-[10px] text-primary tabular-nums">
+            <span className="rounded-sm bg-primary/12 px-1 text-3xs text-primary tabular-nums">
               {agent.pendingEvents}
             </span>
           ) : null}
         </PopoverTrigger>
-        <PopoverPopup side="bottom" align="end" className="w-96" viewportClassName="p-1">
-          <div className="flex items-baseline justify-between gap-2 px-2 pt-1 pb-1.5">
-            <span className="text-xs font-medium">{agent.displayName} activity</span>
-            <span className="text-[10px] text-muted-foreground">
-              {agent.wakesToday} wakes today
-            </span>
-          </div>
-          <div className="max-h-96 overflow-y-auto">
-            <SpaceAgentActivityList entries={props.activity} error={props.activityError} />
+        <PopoverPopup side="bottom" align="end" className="w-96" padding="none">
+          <div className="p-1">
+            <div className="flex items-baseline justify-between gap-2 px-2 pt-1 pb-1.5">
+              <span className="text-xs font-medium">{agent.displayName} activity</span>
+              <span className="text-3xs text-muted-foreground">{agent.wakesToday} wakes today</span>
+            </div>
+            <div className="max-h-96 overflow-y-auto">
+              <SpaceAgentActivityList entries={props.activity} error={props.activityError} />
+            </div>
           </div>
         </PopoverPopup>
       </Popover>

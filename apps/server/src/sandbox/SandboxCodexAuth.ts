@@ -30,7 +30,7 @@ export interface SandboxCodexChatgptAuth {
   readonly chatgptAccountId: string;
 }
 
-export class SandboxCodexAuthError extends Schema.TaggedErrorClass<SandboxCodexAuthError>()(
+export class SandboxCodexAuthError extends Schema.TaggedError<SandboxCodexAuthError>()(
   "SandboxCodexAuthError",
   {
     issue: Schema.String,

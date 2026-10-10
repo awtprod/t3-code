@@ -117,11 +117,11 @@ function AutomationsLoading() {
       role="status"
     >
       <div className="w-full space-y-2 md:w-64">
-        <Skeleton className="h-16 w-full rounded-xl" />
-        <Skeleton className="h-16 w-full rounded-xl" />
-        <Skeleton className="h-16 w-full rounded-xl" />
+        <Skeleton shape="card" className="h-16 w-full" />
+        <Skeleton shape="card" className="h-16 w-full" />
+        <Skeleton shape="card" className="h-16 w-full" />
       </div>
-      <Skeleton className="min-h-[28rem] flex-1 rounded-2xl" />
+      <Skeleton shape="card" className="min-h-[28rem] flex-1" />
       <span className="sr-only">Loading committed automation definitions</span>
     </div>
   );
@@ -169,7 +169,7 @@ function AutomationEmptyState({
   const Icon = content.icon;
 
   return (
-    <Empty className="bg-background" data-slot={`automations-${status}`}>
+    <Empty data-slot={`automations-${status}`}>
       <EmptyHeader>
         <EmptyMedia variant="icon">
           <Icon />
@@ -265,7 +265,7 @@ export function AutomationsScreen({
   };
 
   return (
-    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-slot="automations-screen">
         <header
           className={cn(
@@ -285,14 +285,14 @@ export function AutomationsScreen({
             <div className="min-w-0 flex-1">
               <h1 className="truncate text-sm font-semibold">Automations</h1>
             </div>
-            <span className="hidden items-center gap-1.5 text-[0.6875rem] text-muted-foreground sm:flex">
+            <span className="hidden items-center gap-1.5 text-2xs text-muted-foreground sm:flex">
               <LockKeyholeIcon />
               Private config
             </span>
             {environmentId !== null &&
             environmentId !== undefined &&
             environmentOptions.length > 0 ? (
-              <label className="no-drag flex min-w-0 items-center gap-1.5 text-[0.6875rem] text-muted-foreground">
+              <label className="flex min-w-0 items-center gap-1.5 text-2xs text-muted-foreground [-webkit-app-region:no-drag]">
                 <ServerIcon className="size-3.5 shrink-0" />
                 <span className="hidden sm:inline">Runs on</span>
                 <select
@@ -385,7 +385,7 @@ export function AutomationsScreen({
               {editorError}
             </p>
           ) : configCommitSha ? (
-            <p className="mt-1 truncate text-[0.6875rem] text-muted-foreground">
+            <p className="mt-1 truncate text-2xs text-muted-foreground">
               Loaded from config commit {configCommitSha.slice(0, 10)} on{" "}
               {selectedEnvironment?.label ?? "the selected environment"}
             </p>
@@ -473,7 +473,7 @@ export function AutomationsScreen({
             <aside className="hidden w-60 shrink-0 border-r bg-sidebar md:block">
               <div className="border-b px-3 py-3">
                 <div className="text-xs font-medium">Definitions</div>
-                <p className="mt-0.5 text-[0.6875rem] text-muted-foreground">
+                <p className="mt-0.5 text-2xs text-muted-foreground">
                   Committed private configuration
                 </p>
               </div>
@@ -492,7 +492,7 @@ export function AutomationsScreen({
             <aside className="max-h-52 w-full shrink-0 border-b bg-sidebar md:max-h-none md:w-60 md:border-b-0 md:border-r">
               <div className="border-b px-3 py-3">
                 <div className="text-xs font-medium">Definitions</div>
-                <p className="mt-0.5 text-[0.6875rem] text-muted-foreground">
+                <p className="mt-0.5 text-2xs text-muted-foreground">
                   {automations.length} committed automation{automations.length === 1 ? "" : "s"}
                 </p>
               </div>
@@ -504,8 +504,8 @@ export function AutomationsScreen({
                       <button
                         aria-current={selected ? "page" : undefined}
                         className={cn(
-                          "w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-sidebar-accent",
-                          selected && "bg-sidebar-accent text-sidebar-accent-foreground",
+                          "w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent",
+                          selected && "bg-accent text-accent-foreground",
                         )}
                         key={automation.id}
                         onClick={() => selectAutomation(automation.id)}
@@ -522,7 +522,7 @@ export function AutomationsScreen({
                             />
                           ) : null}
                         </span>
-                        <span className="mt-1 flex items-center gap-1.5 text-[0.6875rem] text-muted-foreground">
+                        <span className="mt-1 flex items-center gap-1.5 text-2xs text-muted-foreground">
                           <Clock3Icon className="size-3" />
                           {triggerLabel(automation)} · {automationSpaceName(automation, spaces)}
                         </span>
