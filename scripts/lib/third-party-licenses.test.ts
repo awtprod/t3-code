@@ -276,6 +276,30 @@ describe("third-party license generation", () => {
     ).rejects.toThrow("does not include a license or notice file");
   });
 
+  it("treats workspace packages as first-party and still checks their dependencies", async () => {
+    const fixture = await createFixture();
+    const workspaceRoot = NodePath.join(fixture.root, "node_modules", "@command-center", "core");
+    await writeJson(fixture.appManifest, {
+      name: "fixture-app",
+      dependencies: { "@command-center/core": "workspace:*" },
+    });
+    await writeJson(NodePath.join(workspaceRoot, "package.json"), {
+      name: "@command-center/core",
+      version: "0.0.0",
+      private: true,
+      main: "index.js",
+      dependencies: { "demo-dependency": "1.2.3" },
+    });
+    await NodeFSP.writeFile(NodePath.join(workspaceRoot, "index.js"), "export {};\n", "utf8");
+
+    const manifest = await generateThirdPartyLicenseManifest({
+      configFile: fixture.configFile,
+      packageManifests: [{ bundle: "web", path: fixture.appManifest }],
+    });
+
+    expect(manifest.entries.map((entry) => entry.name)).toEqual(["demo-asset", "demo-dependency"]);
+  });
+
   it("collects nested notices even when a package also has a root license", async () => {
     const fixture = await createFixture();
     await NodeFSP.mkdir(NodePath.join(fixture.dependencyRoot, "dist", "third-party"), {
