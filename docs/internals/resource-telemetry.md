@@ -48,3 +48,31 @@ A WSL backend needs a Linux monitor even though Electron runs on Windows. Window
 desktop packages currently supply only the Windows executable, so native process
 telemetry for the WSL backend is unavailable. The inherited Electron power feed
 still works.
+
+## Host usage
+
+The Resources pane reads [`HostUsage`](../../apps/server/src/resourceTelemetry/HostUsage.ts),
+which covers the whole host rather than the server's process tree. It answers what
+is filling the disks and which processes hold an outsized share of the machine.
+
+- Disks: one `statfs` per filesystem the server writes to (state, runtime,
+  worktrees, project workspaces, temp), grouped by device so bind mounts collapse
+  into the disk they live on. A one-minute sampler keeps an hour of free-space
+  readings for the fill rate and time-until-full estimate.
+- Processes: read from `/proc` only when a client asks, with a five-second cache
+  shared by every socket. CPU and write rates need two readings, so a cold read
+  waits one second for the second sample. Another user's I/O counters and working
+  directory are hidden from the server, so those columns can be empty.
+  Command lines are redacted before they leave the server because agent CLIs
+  receive credentials as arguments.
+- Disk scan: on demand only. One `nice -n 19 du -x -d 2` per scan root, run one at
+  a time. Roots are each repository directory under the worktrees directory, the
+  parent of each project workspace (never `/`, a home directory, or a directory
+  that holds home directories), and the runtime base directory.
+- Reclaim deletes only git-ignored build output, found with the same checks the
+  worktree cleanup sweep uses. It refuses anything outside a scan root, anything
+  that is not a checkout, home directories, and checkouts with a live process inside
+  or a busy thread. Live processes are only visible on Linux, so reclaim is disabled
+  on other platforms.
+  The daily sweep remains the automatic path; reclaim is the manual one for
+  checkouts the sweep never sees, such as builds outside thread worktrees.
