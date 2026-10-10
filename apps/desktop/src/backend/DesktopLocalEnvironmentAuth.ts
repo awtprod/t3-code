@@ -1,9 +1,13 @@
-import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
+import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
+import {
+  bootstrapRemoteBearerSession,
+  fetchRemoteSessionState,
+} from "@t3tools/client-runtime/authorization";
 import {
   ConnectionCatalogDocument,
   type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
 } from "@t3tools/client-runtime/platform";
-import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
+import { PRIMARY_LOCAL_ENVIRONMENT_ID, type AuthSessionState } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -42,12 +46,24 @@ export const DesktopLocalEnvironmentAuthError = Schema.Union([
 ]);
 export type DesktopLocalEnvironmentAuthError = typeof DesktopLocalEnvironmentAuthError.Type;
 
+export class DesktopSavedEnvironmentRecoveryError extends Schema.TaggedError<DesktopSavedEnvironmentRecoveryError>()(
+  "DesktopSavedEnvironmentRecoveryError",
+  { message: Schema.String },
+) {}
+
 export class DesktopLocalEnvironmentAuth extends Context.Service<
   DesktopLocalEnvironmentAuth,
   {
     readonly getBearerToken: Effect.Effect<string | null, DesktopLocalEnvironmentAuthError>;
+    readonly recoverRemotePrimarySession: (
+      expectedHttpBaseUrl: string,
+    ) => Effect.Effect<AuthSessionState, DesktopSavedEnvironmentRecoveryError>;
   }
 >()("@t3tools/desktop/backend/DesktopLocalEnvironmentAuth") {}
+
+const decodeConnectionCatalog = Schema.decodeEffect(
+  Schema.fromJsonString(ConnectionCatalogDocument),
+);
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
@@ -57,6 +73,45 @@ export const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const tokenRef = yield* Ref.make(Option.none<string>());
   const mutex = yield* Semaphore.make(1);
+
+  const readSavedRemoteCredential = Effect.fn(
+    "desktop.localEnvironmentAuth.readSavedRemoteCredential",
+  )(
+    function* (remoteHttpBaseUrl: string, existingOnly = false) {
+      const encodedCatalog = yield* existingOnly
+        ? connectionCatalogStore.getExisting
+        : connectionCatalogStore.get;
+      if (Option.isNone(encodedCatalog)) {
+        return Option.none();
+      }
+      const catalog: ConnectionCatalogDocumentType = yield* decodeConnectionCatalog(
+        encodedCatalog.value,
+      );
+      const profile = catalog.profiles.find(
+        (candidate: ConnectionCatalogDocumentType["profiles"][number]) =>
+          candidate._tag === "BearerConnectionProfile" &&
+          DesktopAppSettings.normalizeRemoteBackendUrl(candidate.httpBaseUrl) === remoteHttpBaseUrl,
+      );
+      if (profile === undefined) {
+        return Option.none();
+      }
+      const storedCredential = catalog.credentials.find(
+        (candidate: ConnectionCatalogDocumentType["credentials"][number]) =>
+          candidate.connectionId === profile.connectionId,
+      );
+      if (
+        storedCredential === undefined ||
+        storedCredential.credential._tag !== "BearerConnectionCredential"
+      ) {
+        return Option.none();
+      }
+      return Option.some({
+        token: storedCredential.credential.token,
+        environmentId: profile.environmentId,
+      });
+    },
+    Effect.mapError((cause) => new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause })),
+  );
 
   const getBearerToken = mutex
     .withPermits(1)(
@@ -74,46 +129,10 @@ export const make = Effect.gen(function* () {
           if (remoteHttpBaseUrl === null) {
             return null;
           }
-          const encodedCatalog = yield* connectionCatalogStore.get.pipe(
-            Effect.mapError(
-              (cause) => new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause }),
-            ),
-          );
-          if (Option.isNone(encodedCatalog)) {
-            return null;
-          }
-          const decodeCatalog = Schema.decodeEffect(
-            Schema.fromJsonString(ConnectionCatalogDocument),
-          );
-          const catalog: ConnectionCatalogDocumentType = yield* decodeCatalog(
-            encodedCatalog.value,
-          ).pipe(
-            Effect.mapError(
-              (cause) => new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause }),
-            ),
-          );
-          const profile = catalog.profiles.find(
-            (candidate: ConnectionCatalogDocumentType["profiles"][number]) =>
-              candidate._tag === "BearerConnectionProfile" &&
-              DesktopAppSettings.normalizeRemoteBackendUrl(candidate.httpBaseUrl) ===
-                remoteHttpBaseUrl,
-          );
-          if (profile === undefined) {
-            return null;
-          }
-          const storedCredential = catalog.credentials.find(
-            (candidate: ConnectionCatalogDocumentType["credentials"][number]) =>
-              candidate.connectionId === profile.connectionId,
-          );
-          if (
-            storedCredential === undefined ||
-            storedCredential.credential._tag !== "BearerConnectionCredential"
-          ) {
-            return null;
-          }
-          const token = storedCredential.credential.token;
-          yield* Ref.set(tokenRef, Option.some(token));
-          return token;
+          const saved = yield* readSavedRemoteCredential(remoteHttpBaseUrl);
+          if (Option.isNone(saved)) return null;
+          yield* Ref.set(tokenRef, Option.some(saved.value.token));
+          return saved.value.token;
         }
 
         const instances = yield* pool.list;
@@ -149,7 +168,92 @@ export const make = Effect.gen(function* () {
     )
     .pipe(Effect.withSpan("desktop.localEnvironmentAuth.getBearerToken"));
 
-  return DesktopLocalEnvironmentAuth.of({ getBearerToken });
+  const recoverRemotePrimarySession = Effect.fn(
+    "desktop.localEnvironmentAuth.recoverRemotePrimarySession",
+  )(function* (expectedHttpBaseUrl: string) {
+    return yield* mutex.withPermits(1)(
+      Effect.gen(function* () {
+        yield* Ref.set(tokenRef, Option.none());
+        const settings = yield* appSettings.get;
+        if (settings.primaryBackendMode !== "remote" || isLocalExecutionOverride()) {
+          return yield* new DesktopSavedEnvironmentRecoveryError({
+            message:
+              "Saved-environment recovery requires the current remote primary. No settings were changed.",
+          });
+        }
+        const endpoint = DesktopAppSettings.normalizeRemoteBackendUrl(settings.remoteBackendUrl);
+        if (
+          endpoint === null ||
+          endpoint !== DesktopAppSettings.normalizeRemoteBackendUrl(expectedHttpBaseUrl)
+        ) {
+          return yield* new DesktopSavedEnvironmentRecoveryError({
+            message:
+              "The selected server changed. Recovery stopped without changing the primary environment.",
+          });
+        }
+        const saved = yield* readSavedRemoteCredential(endpoint, true).pipe(
+          Effect.mapError(
+            () =>
+              new DesktopSavedEnvironmentRecoveryError({
+                message: "The saved credential could not be loaded on this device.",
+              }),
+          ),
+        );
+        if (Option.isNone(saved)) {
+          return yield* new DesktopSavedEnvironmentRecoveryError({
+            message: "No credential is saved on this device for the selected server.",
+          });
+        }
+        const descriptor = yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl: endpoint }).pipe(
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.mapError(
+            () =>
+              new DesktopSavedEnvironmentRecoveryError({
+                message:
+                  "The selected server could not be verified. Try reconnecting when it is reachable.",
+              }),
+          ),
+        );
+        if (descriptor.environmentId !== saved.value.environmentId) {
+          return yield* new DesktopSavedEnvironmentRecoveryError({
+            message: "This server does not match the saved environment. Recovery stopped.",
+          });
+        }
+        const session = yield* fetchRemoteSessionState({
+          httpBaseUrl: endpoint,
+          bearerToken: saved.value.token,
+        }).pipe(
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.mapError(
+            () =>
+              new DesktopSavedEnvironmentRecoveryError({
+                message: "The saved credential could not be validated by the selected server.",
+              }),
+          ),
+        );
+        if (!session.authenticated || session.sessionMethod !== "bearer-access-token") {
+          return yield* new DesktopSavedEnvironmentRecoveryError({
+            message:
+              "The selected server rejected the saved credential. It may have expired or been revoked.",
+          });
+        }
+        const current = yield* appSettings.get;
+        if (
+          current.primaryBackendMode !== "remote" ||
+          isLocalExecutionOverride() ||
+          DesktopAppSettings.normalizeRemoteBackendUrl(current.remoteBackendUrl) !== endpoint
+        ) {
+          return yield* new DesktopSavedEnvironmentRecoveryError({
+            message: "The selected server changed during verification. Recovery stopped.",
+          });
+        }
+        yield* Ref.set(tokenRef, Option.some(saved.value.token));
+        return session;
+      }),
+    );
+  });
+
+  return DesktopLocalEnvironmentAuth.of({ getBearerToken, recoverRemotePrimarySession });
 });
 
 export const layer = Layer.effect(DesktopLocalEnvironmentAuth, make);

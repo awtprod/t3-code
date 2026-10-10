@@ -20,6 +20,8 @@ import {
 
 import { PrimaryEnvironmentHttpClient } from "./httpClient";
 import { runPrimaryHttp } from "../../lib/runtime";
+import { clearDesktopPrimaryBearerToken } from "./desktopAuth";
+import { resolvePrimaryEnvironmentHttpUrl } from "./target";
 
 const PrimaryEnvironmentRequestOperation = Schema.Literals([
   "fetch-session-state",
@@ -138,6 +140,7 @@ type ServerAuthGateState =
       errorMessage?: string;
     };
 
+let authGateRevision = 0;
 let bootstrapPromise: Promise<ServerAuthGateState> | null = null;
 let resolvedAuthenticatedGateState: ServerAuthGateState | null = null;
 const AUTH_SESSION_ESTABLISH_TIMEOUT_MS = 2_000;
@@ -350,6 +353,28 @@ export async function submitServerAuthCredential(credential: string): Promise<vo
   stripPairingTokenFromUrl();
 }
 
+export async function reconnectSavedDesktopEnvironment(): Promise<void> {
+  authGateRevision += 1;
+  resolvedAuthenticatedGateState = null;
+  bootstrapPromise = null;
+  clearDesktopPrimaryBearerToken();
+  const bridge = window.desktopBridge;
+  if (!bridge?.recoverRemotePrimarySession) {
+    throw new Error(
+      "This desktop version needs an update to reconnect saved environments from this screen.",
+    );
+  }
+  try {
+    const session = await bridge.recoverRemotePrimarySession(resolvePrimaryEnvironmentHttpUrl("/"));
+    if (!session.authenticated || session.sessionMethod !== "bearer-access-token") {
+      throw new Error("The selected server did not accept the saved credential.");
+    }
+    resolvedAuthenticatedGateState = { status: "authenticated" };
+  } finally {
+    clearDesktopPrimaryBearerToken();
+  }
+}
+
 export async function createServerPairingCredential(input?: {
   readonly label?: string;
   readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
@@ -442,7 +467,10 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
     }
   }
 
-  const nextPromise = previousPromise
+  // Recovery from the pairing gate bumps the revision; an older bootstrap then
+  // re-resolves instead of reporting its now-stale result to any caller.
+  const revision = authGateRevision;
+  const bootstrap = previousPromise
     ? previousPromise
         .catch(() => undefined)
         .then(() => {
@@ -450,9 +478,11 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
           return bootstrapServerAuth(urlCredential);
         })
     : bootstrapServerAuth(urlCredential);
-  bootstrapPromise = nextPromise;
-  return nextPromise
+  const nextPromise: Promise<ServerAuthGateState> = bootstrap
     .then((result) => {
+      if (revision !== authGateRevision) {
+        return resolveInitialServerAuthGateState();
+      }
       if (bootstrapPromise === nextPromise && result.status === "authenticated") {
         resolvedAuthenticatedGateState = result;
       }
@@ -463,9 +493,12 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
         bootstrapPromise = null;
       }
     });
+  bootstrapPromise = nextPromise;
+  return nextPromise;
 }
 
 export function __resetServerAuthBootstrapForTests() {
+  authGateRevision += 1;
   bootstrapPromise = null;
   resolvedAuthenticatedGateState = null;
 }

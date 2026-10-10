@@ -249,6 +249,12 @@ Remote-primary mode persists across ordinary launches. The desktop loads its web
 remote server and sends HTTP and WebSocket traffic directly to it using the saved pairing session.
 Projects, files, git state, terminals, and provider sessions therefore remain on the remote machine.
 
+If the pairing screen appears after you have already saved this remote environment, choose
+**Reconnect saved environment**. Command Center reloads the credential saved on this device and
+checks it with the selected server before opening the workspace. Missing, expired, revoked, or
+unreadable credentials remain blocked with an explanation. If the screen says a desktop update is
+required, install a desktop version that supports this recovery action.
+
 If the remote server is unavailable, Command Center shows a local recovery window. It never falls
 back to Windows automatically. You can retry, edit the endpoint, quit, or select **Start local for
 this launch**. The last option relaunches with a conspicuous local-override indicator and leaves the
