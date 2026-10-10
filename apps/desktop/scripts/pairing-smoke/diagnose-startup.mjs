@@ -390,7 +390,8 @@ async function run(
         .then((session) => session.send("Browser.close"))
         .catch(() => {});
     }
-    if (child.exitCode === null && !record.error) {
+    const hasExited = () => child.exitCode !== null || child.signalCode !== null;
+    if (!hasExited() && !record.error) {
       await Promise.race([
         exit,
         new Promise((resolve) => {
@@ -401,9 +402,9 @@ async function run(
           }, 5000);
         }),
       ]);
-    } else if (child.exitCode === null) child.kill();
+    } else if (!hasExited()) child.kill();
     clearTimeout(timer);
-    if (child.exitCode === null)
+    if (!hasExited())
       await Promise.race([
         exit,
         new Promise((resolve) => {
@@ -411,9 +412,8 @@ async function run(
         }),
       ]);
     clearTimeout(timer);
-    NodeAssert.notEqual(
-      child.exitCode,
-      null,
+    NodeAssert.ok(
+      hasExited(),
       "Captured diagnostic process must exit before resetting its profile",
     );
     if (debug && record.debuggeeProcessId) {
@@ -488,7 +488,7 @@ async function runControl(extended) {
       }),
     ]);
     clearTimeout(timer);
-    if (child.exitCode === null) {
+    if (child.exitCode === null && child.signalCode === null) {
       await Promise.race([
         exited,
         new Promise((resolve) => {
@@ -501,9 +501,8 @@ async function runControl(extended) {
     if (NodeFS.existsSync(receiptPath))
       result.receipt = JSON.parse(NodeFS.readFileSync(receiptPath, "utf8"));
     save();
-    NodeAssert.notEqual(
-      child.exitCode,
-      null,
+    NodeAssert.ok(
+      child.exitCode !== null || child.signalCode !== null,
       "Captured upstream control must exit before profile reset",
     );
     if (result.receipt?.result !== "passed" || result.exitCode !== 0) break;
