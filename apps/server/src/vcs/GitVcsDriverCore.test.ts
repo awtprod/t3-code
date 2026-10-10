@@ -1076,8 +1076,8 @@ for (const scenario of [
         Effect.gen(function* () {
           if (!ChildProcess.isStandardCommand(command))
             return yield* Effect.die("expected Git command");
-          if (command.args[0] !== "fetch") return makeNonRepositoryHandle();
-          assert.deepEqual(command.args, ["fetch", "--quiet", "origin"]);
+          if (gitSubcommandArgs(command.args)[0] !== "fetch") return makeNonRepositoryHandle();
+          assert.deepEqual(gitSubcommandArgs(command.args), ["fetch", "--quiet", "origin"]);
           assert.equal(command.options.env?.LC_ALL, "C");
           assert.equal(command.options.env?.GIT_TERMINAL_PROMPT, "0");
           yield* Ref.update(attempts, (count) => count + 1);
@@ -2679,23 +2679,34 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
 
     it.effect("resolves the submodule mode from the option, then t3.json", () =>
       Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
         const pathService = yield* Path.Path;
 
-        const previousAllowedProtocol = process.env.GIT_ALLOW_PROTOCOL;
-        process.env.GIT_ALLOW_PROTOCOL = "file";
-        yield* Effect.addFinalizer(() =>
-          Effect.sync(() => {
-            if (previousAllowedProtocol === undefined) {
-              delete process.env.GIT_ALLOW_PROTOCOL;
-            } else {
-              process.env.GIT_ALLOW_PROTOCOL = previousAllowedProtocol;
+        // Command Center: the hardened host Git scrubs `GIT_ALLOW_PROTOCOL`, so
+        // local `file:` submodules are never cloned into a worktree (see "does
+        // not fetch repository-controlled submodule URLs"). Seed them with
+        // command-line config and assert the `submodule update` each mode runs
+        // instead of the populated paths upstream checks.
+        const allowFileTransport = ["-c", "protocol.file.allow=always"] as const;
+        const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const submoduleUpdates = yield* Ref.make<Array<ReadonlyArray<string>>>([]);
+        const recordingSpawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            if (ChildProcess.isStandardCommand(command)) {
+              const args = gitSubcommandArgs(command.args);
+              if (args[0] === "submodule" && args[1] === "update") {
+                yield* Ref.update(submoduleUpdates, (current) => [...current, args]);
+              }
             }
+            return yield* delegate.spawn(command);
           }),
         );
+        const driver = yield* makeGitVcsDriverCore().pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, recordingSpawner),
+          Effect.provide(ServerConfigLayer),
+        );
 
-        // inner -> nested, so a recursive init populates nested/NESTED.md and
-        // a top-level init leaves it empty.
+        // inner -> nested, so a recursive init would populate nested/NESTED.md
+        // and a top-level init would leave it empty.
         const nestedRepo = yield* makeTmpDir("git-nested-");
         yield* initRepoWithCommit(nestedRepo);
         yield* writeTextFile(nestedRepo, "NESTED.md", "# nested\n");
@@ -2704,15 +2715,14 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         const innerRepo = yield* makeTmpDir("git-inner-");
         yield* initRepoWithCommit(innerRepo);
         yield* writeTextFile(innerRepo, "INNER.md", "# inner\n");
-        yield* git(innerRepo, ["submodule", "add", nestedRepo, "nested"]);
+        yield* git(innerRepo, [...allowFileTransport, "submodule", "add", nestedRepo, "nested"]);
         yield* git(innerRepo, ["add", "."]);
         yield* git(innerRepo, ["commit", "-m", "inner"]);
 
         const cwd = yield* makeTmpDir();
         const { initialBranch } = yield* initRepoWithCommit(cwd);
-        yield* git(cwd, ["submodule", "add", innerRepo, "inner"]);
+        yield* git(cwd, [...allowFileTransport, "submodule", "add", innerRepo, "inner"]);
         yield* git(cwd, ["commit", "-m", "add submodule"]);
-        const driver = yield* GitVcsDriver.GitVcsDriver;
         const worktreesDir = yield* makeTmpDir("git-worktrees-");
 
         const createWithMode = Effect.fn(function* (
@@ -2726,6 +2736,7 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           yield* git(cwd, ["commit", "--allow-empty", "-m", `submodules: ${fileMode}`]);
           const worktreePath = pathService.join(worktreesDir, branch);
           const disabled = yield* Ref.make<"settings" | "t3.json" | false>(false);
+          yield* Ref.set(submoduleUpdates, []);
           yield* driver.createWorktree(
             { cwd, path: worktreePath, refName: initialBranch, newRefName: branch },
             {
@@ -2735,38 +2746,32 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           );
           return {
             disabled: yield* Ref.get(disabled),
-            inner: yield* fileSystem.exists(pathService.join(worktreePath, "inner", "INNER.md")),
-            nested: yield* fileSystem.exists(
-              pathService.join(worktreePath, "inner", "nested", "NESTED.md"),
-            ),
+            updates: yield* Ref.get(submoduleUpdates),
           };
         });
 
+        const recursive = [["submodule", "update", "--init", "--recursive"]];
+        const topLevel = [["submodule", "update", "--init"]];
         assert.deepEqual(yield* createWithMode("recursive", "recursive"), {
           disabled: false,
-          inner: true,
-          nested: true,
+          updates: recursive,
         });
         assert.deepEqual(yield* createWithMode("top-level", "top-level"), {
           disabled: false,
-          inner: true,
-          nested: false,
+          updates: topLevel,
         });
         // A resolved setting outranks the file in both directions.
         assert.deepEqual(yield* createWithMode("recursive", "setting-none", "none"), {
           disabled: "settings",
-          inner: false,
-          nested: false,
+          updates: [],
         });
         assert.deepEqual(yield* createWithMode("none", "setting-wins", "top-level"), {
           disabled: false,
-          inner: true,
-          nested: false,
+          updates: topLevel,
         });
         assert.deepEqual(yield* createWithMode("none", "none"), {
           disabled: "t3.json",
-          inner: false,
-          nested: false,
+          updates: [],
         });
       }),
     );

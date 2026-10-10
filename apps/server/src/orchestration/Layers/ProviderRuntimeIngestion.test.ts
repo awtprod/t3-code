@@ -743,6 +743,17 @@ describe("ProviderRuntimeIngestion", () => {
       expect(completedThread?.latestTurn).toMatchObject({ turnId: nextTurnId, state: "completed" });
     }
 
+    // Command Center adopts a sequence-less start's oldest pending placeholder
+    // only when the provider directory already tracks that turn as active.
+    harness.setProviderSession({
+      provider: base.provider,
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      createdAt: "2026-01-01T00:00:05.000Z",
+      updatedAt: "2026-01-01T00:00:05.000Z",
+      activeTurnId: asTurnId("opencode-pending-turn"),
+    });
     harness.emit({
       ...base,
       type: "turn.started",

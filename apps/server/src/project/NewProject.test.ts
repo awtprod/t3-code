@@ -10,7 +10,33 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { createNewProjectFolder } from "./NewProject.ts";
 
-const TestLayer = GitVcsDriver.layer.pipe(
+// Command Center's hardened host Git (vcs/HostGitSecurity.ts) drops inherited
+// GIT_* variables and nulls the global config, so a test identity only reaches
+// Git through the per-command env; forward the identity variables set below.
+const IDENTITY_ENV_KEYS = [
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+] as const;
+const IdentityForwardingGitVcsDriver = Layer.effect(
+  GitVcsDriver.GitVcsDriver,
+  Effect.gen(function* () {
+    const inner = yield* GitVcsDriver.GitVcsDriver;
+    return GitVcsDriver.GitVcsDriver.of({
+      ...inner,
+      execute: (input) => {
+        const identity: NodeJS.ProcessEnv = {};
+        for (const key of IDENTITY_ENV_KEYS) {
+          if (process.env[key] !== undefined) identity[key] = process.env[key];
+        }
+        return inner.execute({ ...input, env: { ...identity, ...input.env } });
+      },
+    });
+  }),
+).pipe(Layer.provide(GitVcsDriver.layer));
+
+const TestLayer = IdentityForwardingGitVcsDriver.pipe(
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-new-project-" })),
   Layer.provideMerge(VcsProcess.layer),
   Layer.provideMerge(NodeServices.layer),

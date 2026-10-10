@@ -139,7 +139,7 @@ it.effect("caches narrow previews and invalidates them after refresh or mutation
     assert.deepStrictEqual(previews[0], {
       ...ref,
       title: "Change request 1",
-      url: "https://host/pull/1",
+      url: "https://example.com/pull/1",
       author: { login: "octocat", name: null, avatarUrl: null },
       state: "open",
       isDraft: false,

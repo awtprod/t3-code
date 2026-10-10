@@ -1032,9 +1032,10 @@ for (const { platform, installPath, editor, args } of [
           ),
         );
         assert.ok(spawned);
+        // Command Center escapes the .cmd executable without quoting it (shared/shell.ts).
         assert.equal(
           spawned.command,
-          executable.endsWith(".cmd") ? `^"${executable.replaceAll(" ", "^ ")}^"` : executable,
+          executable.endsWith(".cmd") ? executable.replaceAll(" ", "^ ") : executable,
         );
         assert.deepEqual(spawned.args, args);
         assert.equal(spawned.options.shell, executable.endsWith(".cmd"));

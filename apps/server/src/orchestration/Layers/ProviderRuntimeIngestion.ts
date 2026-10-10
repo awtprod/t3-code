@@ -7,6 +7,7 @@ import {
   type OrchestrationMessage,
   type OrchestrationProposedPlan,
   type OrchestrationThread,
+  type OrchestrationThreadShell,
   OrchestrationProposedPlanId,
   CheckpointRef,
   classifyTaskAgentKind,
@@ -2565,8 +2566,18 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const thread = yield* resolveThreadShell(event.threadId);
+      // Most events (every streamed delta) need only the one-query runtime
+      // context; the few that read shell-only fields load the shell lazily.
+      const thread = yield* resolveThreadRuntimeContext(event.threadId);
       if (!thread) return;
+      let loadedThreadShell: OrchestrationThreadShell | null | undefined;
+      const getThreadShell = () =>
+        Effect.gen(function* () {
+          if (loadedThreadShell === undefined) {
+            loadedThreadShell = (yield* resolveThreadShell(thread.id)) ?? null;
+          }
+          return loadedThreadShell;
+        });
 
       let loadedThreadDetail: OrchestrationThread | null | undefined;
       const getLoadedThreadDetail = () =>
@@ -2826,6 +2837,13 @@ const make = Effect.gen(function* () {
           }
           if (event.type === "session.exited" && activeTurnId !== null) {
             return { turnId: activeTurnId, state: "interrupted" } as const;
+          }
+          // An accepted abort closes the turn it names (or the active one) the
+          // same way: interrupted, without successful-settlement evidence.
+          const abortedTurnId =
+            event.type === "turn.aborted" ? (eventTurnId ?? activeTurnId) : null;
+          if (abortedTurnId !== null) {
+            return { turnId: abortedTurnId, state: "interrupted" } as const;
           }
           if (
             event.type === "turn.started" &&
@@ -3479,8 +3497,10 @@ const make = Effect.gen(function* () {
         // that gains a recoverable exit path must gain a resume cursor in the
         // same change.
         const declaredNonRecoverable = event.payload.recoverable === false;
-        const parkedOnHuman = thread.hasPendingApprovals || thread.hasPendingUserInput;
-        const archived = thread.archivedAt !== null;
+        const threadShell = yield* getThreadShell();
+        const parkedOnHuman =
+          threadShell?.hasPendingApprovals === true || threadShell?.hasPendingUserInput === true;
+        const archived = threadShell === null || threadShell.archivedAt !== null;
         // A surviving pending turn-start row (turn_id NULL) means a turn was
         // requested but never started — turn.started deletes the row, so one that
         // outlives the crash was orphaned. This distinguishes a queued *new*
@@ -4307,8 +4327,8 @@ const make = Effect.gen(function* () {
           yield* rememberTaskDescription(thread.id, event.payload.taskId, description);
         }
       }
-      // Usage attribution reads the thread shell: the per-event path must not
-      // hydrate thread detail (upstream's one-lifecycle-query-per-event budget).
+      // Usage attribution reads the lazily loaded thread shell: the per-event
+      // path must not hydrate thread detail (upstream's one-lifecycle-query-per-event budget).
       if (event.type === "turn.usage.recorded") {
         yield* projectionTurnUsageRepository.record({
           threadId: thread.id,
@@ -4320,18 +4340,21 @@ const make = Effect.gen(function* () {
           usage: event.payload.usage,
         });
       } else if (event.type === "thread.token-usage.updated" || event.type === "turn.completed") {
+        const model = (yield* getThreadShell())?.modelSelection.model;
         const usage =
-          event.type === "thread.token-usage.updated"
-            ? usageRecordFromTokenSnapshot(
-                event,
-                thread.modelSelection.model,
-                isCommandCenterThreadId(thread.id) ? "automation" : "interactive",
-              )
-            : usageRecordFromTurnCompletion(
-                event,
-                thread.modelSelection.model,
-                isCommandCenterThreadId(thread.id) ? "automation" : "interactive",
-              );
+          model === undefined
+            ? undefined
+            : event.type === "thread.token-usage.updated"
+              ? usageRecordFromTokenSnapshot(
+                  event,
+                  model,
+                  isCommandCenterThreadId(thread.id) ? "automation" : "interactive",
+                )
+              : usageRecordFromTurnCompletion(
+                  event,
+                  model,
+                  isCommandCenterThreadId(thread.id) ? "automation" : "interactive",
+                );
         if (usage && event.turnId) {
           yield* projectionTurnUsageRepository.record({
             threadId: thread.id,
