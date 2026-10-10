@@ -29,6 +29,11 @@ on:
         description: "Verify an existing successful installer run on Windows instead of building"
         required: false
         type: string
+      diagnose_windows_startup:
+        description: "Compare existing pairing.2 and pairing.3 Windows startup with native diagnostics"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -40,7 +45,7 @@ concurrency:
 
 jobs:
   build:
-    if: ${{ !inputs.verify_artifact_run_id }}
+    if: ${{ !inputs.verify_artifact_run_id && !inputs.diagnose_windows_startup }}
     name: Build Windows x64
     runs-on: windows-2025
     timeout-minutes: 60
@@ -162,7 +167,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   verify-packaged-pairing:
-    if: ${{ inputs.verify_artifact_run_id }}
+    if: ${{ inputs.verify_artifact_run_id && !inputs.diagnose_windows_startup }}
     name: Verify packaged Windows pairing
     runs-on: windows-2025
     timeout-minutes: 20
@@ -268,5 +273,94 @@ jobs:
           path: |
             windows-pairing-evidence/*.json
             windows-pairing-evidence/*.png
+          if-no-files-found: warn
+          retention-days: 14
+
+  diagnose-windows-startup:
+    if: ${{ inputs.diagnose_windows_startup }}
+    name: Compare shipped Windows startup
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Verify and extract shipped baseline and repaired installers
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force windows-startup-diagnosis | Out-Null
+          $expected = @(
+            @{ id=37999068380; version='0.0.29-pairing.2'; commit='a9ae6268c7375d94fb4ca7aab648f1532f4634ca' },
+            @{ id=38004694929; version='0.0.29-pairing.3'; commit='f27ff1901dc220b564b849013e07cc0952aa87b8' }
+          )
+          $artifacts = @()
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip/7z.exe'
+          foreach ($item in $expected) {
+            $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$($item.id)" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $run.conclusion -ne 'success' -or $run.head_sha -ne $item.commit -or $run.path -ne '.github/workflows/desktop-windows-build.yml') { throw 'Unexpected source provenance' }
+            $directory = "windows-startup-payload-$($item.id)"
+            gh run download $item.id --repo $env:GITHUB_REPOSITORY --name command-center-windows-x64 --dir "$directory/installer"
+            if ($LASTEXITCODE -ne 0) { throw 'Artifact download failed' }
+            $installer = @(Get-ChildItem "$directory/installer" -Filter *.exe)
+            if ($installer.Count -ne 1) { throw 'Expected one installer' }
+            $declared = (Get-Content "$directory/installer/SHA256SUMS.txt").Split(' ')[0]
+            $actual = (Get-FileHash $installer[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $declared) { throw 'Installer checksum mismatch' }
+            & $sevenZip x $installer[0].FullName "-o$directory/nsis" -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS extraction failed' }
+            $nested = @(Get-ChildItem "$directory/nsis" -Recurse -Filter app-64.7z)
+            if ($nested.Count -ne 1) { throw 'Expected one x64 payload' }
+            & $sevenZip x $nested[0].FullName "-o$directory/app" -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Full application extraction failed' }
+            $app = @(Get-ChildItem "$directory/app" -Filter *.exe | Where-Object Name -NotMatch 'uninstall')
+            if ($app.Count -ne 1) { throw 'Expected one application' }
+            New-NetFirewallRule -DisplayName "CC diagnostic $($item.id)" -Direction Outbound -Action Block -Program $app[0].FullName -Profile Any -RemoteAddress Any -ErrorAction Stop | Out-Null
+            $artifacts += @{ runId=$item.id; version=$item.version; commit=$item.commit; executable=$app[0].FullName; installerSha256=$actual; nestedPayloadSha256=(Get-FileHash $nested[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+          }
+          ConvertTo-Json -InputObject $artifacts -Depth 5 | Set-Content windows-startup-diagnosis/artifacts.json
+
+      - name: Prepare Microsoft native debugger
+        id: debugger
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64/cdb.exe'
+          if (!(Test-Path $kits)) {
+            # Official supported Windows SDK; install only debugging tools on this disposable runner.
+            $setup = Join-Path $env:RUNNER_TEMP 'cc-winsdk-debugger-setup.exe'
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2382321' -OutFile $setup
+            $signature = Get-AuthenticodeSignature $setup
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw 'SDK installer signature not trusted' }
+            $process = Start-Process -FilePath $setup -ArgumentList '/features OptionId.WindowsDesktopDebuggers /quiet /norestart /ceip off' -PassThru
+            if (!$process.WaitForExit(300000)) { Stop-Process -Id $process.Id; throw 'Debugger installation timed out' }
+            if ($process.ExitCode -notin @(0,3010)) { throw "Debugger installation failed: $($process.ExitCode)" }
+          }
+          if (!(Test-Path $kits)) { throw 'Microsoft CDB unavailable after installation' }
+          "path=$kits" >> $env:GITHUB_OUTPUT
+
+      - name: Compare ordinary launch, isolated environments and native exception stacks
+        shell: pwsh
+        env:
+          CDB_PATH: ${{ steps.debugger.outputs.path }}
+        run: |
+          node apps/desktop/scripts/pairing-smoke/diagnose-startup.mjs windows-startup-diagnosis/artifacts.json windows-startup-diagnosis $env:CDB_PATH
+          if ($LASTEXITCODE -ne 0) { throw 'Windows startup comparison failed to complete' }
+
+      - name: Upload safe native startup evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-startup-diagnosis
+          path: |
+            windows-startup-diagnosis/*.json
+            windows-startup-diagnosis/*.png
           if-no-files-found: warn
           retention-days: 14
