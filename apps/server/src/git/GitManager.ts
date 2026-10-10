@@ -70,7 +70,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import { detectPrTemplate } from "../sourceControl/PrTemplateDetection.ts";
 import type { ChangeRequest } from "@t3tools/contracts";
-import { readFileGuarded } from "../environmentTheme.ts";
+import { readThemeFileGuarded } from "../environmentTheme.ts";
 
 export interface GitActionProgressReporter {
   readonly publish: (event: GitActionProgressEvent) => Effect.Effect<void, never>;
@@ -758,7 +758,8 @@ export const make = Effect.gen(function* () {
     // Only direct, regular root files are instructions. Symlinked entries are
     // ignored even when their target remains inside the repository.
     return (
-      readFileGuarded(path.join(root, fileName), MAX_REPOSITORY_INSTRUCTION_BYTES)?.trim() ?? ""
+      readThemeFileGuarded(path.join(root, fileName), MAX_REPOSITORY_INSTRUCTION_BYTES)?.trim() ??
+      ""
     );
   };
 

@@ -102,7 +102,7 @@ export class EnvironmentThemeService extends Context.Service<
  * leaves a window a swap could slip through, which the descriptor-bound
  * checks below then narrow to "a regular file at that path".
  */
-export const readFileGuarded = (filePath: string, maxBytes: number): string | null => {
+export const readThemeFileGuarded = (filePath: string, maxBytes: number): string | null => {
   let fd: number;
   try {
     if (NodeFS.constants.O_NOFOLLOW === undefined && NodeFS.lstatSync(filePath).isSymbolicLink()) {
@@ -143,9 +143,6 @@ export const readFileGuarded = (filePath: string, maxBytes: number): string | nu
     NodeFS.closeSync(fd);
   }
 };
-
-/** Compatibility name used by the theme service and CLI. */
-export const readThemeFileGuarded = readFileGuarded;
 
 /**
  * Every theme the directory actually publishes. A file that is missing,
