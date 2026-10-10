@@ -4,6 +4,36 @@
   "rules": { "types": "off", "nsTypes": "off" },
   // These executables are supplied by the OS or installed separately from npm.
   "ignoreBinaries": ["eas", "file", "mkfifo", "pkill", "pkg-config", "plutil", "sips"],
+  "ignoreIssues": {
+    // Upstream-owned exports whose consumers Command Center replaced; kept verbatim to
+    // keep syncs clean.
+    "apps/server/src/provider/acp/AcpRuntimeModel.ts": ["exports"],
+    "packages/shared/src/hostClassification.ts": ["exports"],
+    // Command Center exports inside upstream-shared files, left as they are so these
+    // files change only when a sync needs them to.
+    "apps/desktop/src/electron/ElectronProtocol.ts": ["exports"],
+    "apps/server/src/cli/config.ts": ["exports"],
+    "apps/server/src/mcp/McpHttpServer.ts": ["exports"],
+    "apps/server/src/mcp/McpSessionRegistry.ts": ["exports"],
+    "apps/server/src/mcp/toolkits/preview/tools.ts": ["exports"],
+    "apps/server/src/persistence/Migrations.ts": ["exports"],
+    "apps/server/src/provider/Layers/CodexSessionRuntime.ts": ["exports"],
+    "apps/server/src/provider/providerCompatibility.ts": ["exports"],
+    "apps/web/src/components/Sidebar.logic.ts": ["exports"],
+    "apps/web/src/components/ThreadStatusIndicators.tsx": ["exports"],
+    "apps/web/src/environments/primary/target.ts": ["exports"],
+    "apps/web/src/session-logic.ts": ["exports"],
+    "apps/web/src/state/server.ts": ["exports"],
+    "apps/web/src/themePalette.ts": ["exports"],
+    "packages/client-runtime/src/operations/commands.ts": ["exports"],
+    "packages/contracts/src/environmentHttp.ts": ["exports"],
+    "packages/contracts/src/orchestration.ts": ["exports"],
+    "packages/contracts/src/rpc.ts": ["exports"],
+    "packages/contracts/src/settings.ts": ["exports"],
+    "packages/effect-codex-app-server/src/_internal/stdio.ts": ["exports"],
+    "packages/shared/src/filePreview.ts": ["exports"],
+    "packages/ssh/src/tunnel.ts": ["exports"],
+  },
   "workspaces": {
     ".": {
       // Keep vendored reference repositories outside the root project.
