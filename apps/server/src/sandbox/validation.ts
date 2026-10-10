@@ -8,7 +8,7 @@ const SAFE_ENV_KEY = /^[A-Z_][A-Z0-9_]*$/;
 const SAFE_BRANCH = /^(?![-/.])(?!.*(?:\.\.|\/\/|@\{|[~^:?*[\u005c]))[a-zA-Z0-9._/-]{1,200}$/;
 const FORBIDDEN_TARGETS = ["/", "/home", "/root", "/run", "/tmp", "/etc", "/usr", "/var/run"];
 
-export class SandboxValidationError extends Error {
+class SandboxValidationError extends Error {
   override readonly name = "SandboxValidationError";
 }
 
@@ -108,7 +108,7 @@ export function validateCache(cache: SandboxCache): void {
   }
 }
 
-export function validateSandboxPath(path: string, field: string): void {
+function validateSandboxPath(path: string, field: string): void {
   if (!SAFE_ABSOLUTE_PATH.test(path) || path.includes("..") || path.includes("//")) {
     throw new SandboxValidationError(`${field} must be a normalized absolute sandbox path`);
   }

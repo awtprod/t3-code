@@ -41,8 +41,8 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
 export const PROSPECT_NOTIFICATION_RELAY_TIMEOUT_MS = 5_000;
-export const PROSPECT_NOTIFICATION_RELAY_MAX_RESPONSE_BYTES = 32 * 1024;
-export const PROSPECT_NOTIFICATION_MAX_ITEMS = 10;
+const PROSPECT_NOTIFICATION_RELAY_MAX_RESPONSE_BYTES = 32 * 1024;
+const PROSPECT_NOTIFICATION_MAX_ITEMS = 10;
 
 const PROSPECT_EVALUATION_MARKER_MAX_LENGTH = 16_000;
 const PROSPECT_EVALUATION_EXECUTION_ID_MAX_LENGTH = 256;

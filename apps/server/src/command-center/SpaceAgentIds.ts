@@ -2,7 +2,7 @@
  * Stable identifiers for a Space's always-on agent. Kept dependency-free so the
  * dispatcher, MCP registry, and activity feed can share them.
  */
-export const SPACE_AGENT_THREAD_ID_PREFIX = "cc-space-agent-";
+const SPACE_AGENT_THREAD_ID_PREFIX = "cc-space-agent-";
 
 /** The one persistent agent thread of a Space. Deliberately not a `cc:` Run thread. */
 export const spaceAgentThreadId = (spaceId: string): string =>

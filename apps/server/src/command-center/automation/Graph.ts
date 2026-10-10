@@ -158,9 +158,3 @@ export function analyzeAutomationGraph(definition: AutomationDefinition): Automa
 
   return { issues, orderedNodeIds, stages, predecessorIds };
 }
-
-export function validateAutomationGraph(
-  definition: AutomationDefinition,
-): ReadonlyArray<AutomationValidationIssue> {
-  return analyzeAutomationGraph(definition).issues;
-}

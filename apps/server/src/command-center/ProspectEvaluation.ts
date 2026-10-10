@@ -1171,21 +1171,3 @@ export function makeProspectEvaluationConnector(
 
   return { evaluate };
 }
-
-export const PROSPECT_EVALUATION_RUNTIME_CONSTANTS = {
-  credentialPrefix: "prospect-evaluation.profile.",
-  supabaseUrl: SUPABASE_URL,
-  gatewayUrl: JEV_URL,
-  embeddingOrigin: EMBEDDING_ORIGIN,
-  embeddingDimensions: EMBEDDING_DIMENSIONS,
-  routerModel: ROUTER_MODEL,
-  policyVersion: POLICY_VERSION,
-  maxLimit: 10,
-  maxCandidateScan: MAX_CANDIDATE_SCAN,
-  maxMemories: MAX_MEMORIES,
-  maxFeedbackPerCycle: MAX_FEEDBACK_PER_CYCLE,
-  maxModelCallsPerCycle: 40,
-  requestTimeoutMs: DEFAULT_TIMEOUT_MS,
-  maxRequestBytes: MAX_REQUEST_BYTES,
-  maxResponseBytes: MAX_RESPONSE_BYTES,
-} as const;

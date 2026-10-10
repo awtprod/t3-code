@@ -10,8 +10,8 @@ import {
 import * as Schema from "effect/Schema";
 
 export const COMMAND_CENTER_INBOX_MAX_COMMENT_CHARS = 20_000;
-export const COMMAND_CENTER_INBOX_MAX_HISTORY_PAGE = 100;
-export const COMMAND_CENTER_INBOX_MAX_LIST_PAGE = 100;
+const COMMAND_CENTER_INBOX_MAX_HISTORY_PAGE = 100;
+const COMMAND_CENTER_INBOX_MAX_LIST_PAGE = 100;
 export const COMMAND_CENTER_INBOX_MAX_PROPOSAL_BYTES = 64 * 1024;
 
 const ShortIdentity = TrimmedNonEmptyString.check(Schema.isMaxLength(200));

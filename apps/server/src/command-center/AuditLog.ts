@@ -7,7 +7,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeUtil from "node:util";
 
 export type CommandCenterAuditHashVersion = 1 | 2;
-export const COMMAND_CENTER_AUDIT_HASH_VERSION = 2 as const;
+const COMMAND_CENTER_AUDIT_HASH_VERSION = 2 as const;
 
 export interface CommandCenterAuditInput {
   readonly eventId?: string;

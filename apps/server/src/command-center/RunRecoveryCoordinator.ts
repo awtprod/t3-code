@@ -227,7 +227,7 @@ export const makeWithDependencies = Effect.fn("RunRecoveryCoordinator.makeWithDe
   },
 );
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const commandCenter = yield* CommandCenterService.CommandCenterService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;

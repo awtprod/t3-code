@@ -108,7 +108,7 @@ export const terminalThreadOutcome = (event: OrchestrationEvent): ThreadOutcome 
 const isThreadTerminalEvent = (event: OrchestrationEvent): event is ThreadTerminalEvent =>
   terminalThreadOutcome(event) !== undefined;
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery;
   const eventStream = yield* CommandCenterEventStream;

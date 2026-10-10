@@ -101,7 +101,7 @@ export function sandboxPreviewProxyRequired(previewPorts?: ReadonlyArray<number>
  * one long thread's transcript alone reached ~30MB, so the default is set well
  * above ordinary threads while still bounding the pathological ones.
  */
-export function resolveSandboxStoreMaxBytes(): number {
+function resolveSandboxStoreMaxBytes(): number {
   const raw = Number.parseInt(process.env.T3_SANDBOX_STORE_MAX_BYTES?.trim() ?? "", 10);
   return Number.isFinite(raw) && raw > 0 ? raw : 50 * 1024 * 1024;
 }
@@ -118,7 +118,7 @@ export function resolveSandboxStoreMaxBytes(): number {
  * An explicit `T3_SANDBOX_ARTIFACT_MAX_AGE_SECONDS=0` disables the sweep;
  * anything unparseable or negative falls back to the default.
  */
-export function resolveSandboxArtifactMaxAgeSeconds(): number {
+function resolveSandboxArtifactMaxAgeSeconds(): number {
   const raw = Number.parseInt(process.env.T3_SANDBOX_ARTIFACT_MAX_AGE_SECONDS?.trim() ?? "", 10);
   return Number.isFinite(raw) && raw >= 0 ? raw : 30 * 24 * 60 * 60;
 }

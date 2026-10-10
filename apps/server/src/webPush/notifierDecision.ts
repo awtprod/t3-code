@@ -8,7 +8,7 @@ import { agentAwarenessPublishIdentity } from "../relay/AgentAwarenessRelay.ts";
 
 // A finished thread older than this is not worth ringing: the user has moved on.
 // Mirrors infra/relay/src/agentActivity/ApnsDeliveries.ts TERMINAL_NOTIFICATION_FRESHNESS_MS.
-export const TERMINAL_NOTIFICATION_FRESHNESS_MS = 2 * 60 * 1_000;
+const TERMINAL_NOTIFICATION_FRESHNESS_MS = 2 * 60 * 1_000;
 
 const NULL_IDENTITY = agentAwarenessPublishIdentity(null);
 
@@ -20,7 +20,7 @@ const NOTIFIABLE_PHASES = new Set<RelayAgentActivityState["phase"]>([
   "failed",
 ]);
 
-export function isNotifiablePhase(phase: RelayAgentActivityState["phase"]): boolean {
+function isNotifiablePhase(phase: RelayAgentActivityState["phase"]): boolean {
   return NOTIFIABLE_PHASES.has(phase);
 }
 

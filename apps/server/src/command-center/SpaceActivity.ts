@@ -22,8 +22,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-export const SPACE_ACTIVITY_SUMMARY_CHARS = 1_000;
-export const SPACE_ACTIVITY_TITLE_CHARS = 200;
+const SPACE_ACTIVITY_SUMMARY_CHARS = 1_000;
+const SPACE_ACTIVITY_TITLE_CHARS = 200;
 /** Rows kept per Space; older rows are pruned on insert. */
 export const SPACE_ACTIVITY_RETENTION = 500;
 export const SPACE_ACTIVITY_MAX_LIMIT = 50;
@@ -85,7 +85,7 @@ const bindingMatchesProject = (
 export const findPullRequestUrl = (text: string): string | undefined =>
   text.slice(-PULL_REQUEST_SCAN_CHARS).match(PULL_REQUEST_URL)?.at(-1);
 
-export const clipSummary = (text: string | null | undefined): string =>
+const clipSummary = (text: string | null | undefined): string =>
   truncate(text ?? "", SPACE_ACTIVITY_SUMMARY_CHARS - 3);
 
 const clipTitle = (text: string): string => {
@@ -203,7 +203,7 @@ export const queryRecentSpaceActivity = (
     return rows.map(({ url, ...row }) => (url === null ? row : { ...row, url }));
   });
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const recent: SpaceActivityShape["recent"] = (input) =>

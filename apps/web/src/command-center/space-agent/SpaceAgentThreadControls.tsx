@@ -83,7 +83,7 @@ export interface SpaceAgentThreadControlsViewProps {
   readonly onWake: () => void;
 }
 
-export function SpaceAgentThreadControlsView(props: SpaceAgentThreadControlsViewProps) {
+function SpaceAgentThreadControlsView(props: SpaceAgentThreadControlsViewProps) {
   const { agent } = props;
   return (
     <div className="flex shrink-0 items-center gap-1.5" data-testid="space-agent-thread-controls">

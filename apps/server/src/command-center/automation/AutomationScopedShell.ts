@@ -26,7 +26,7 @@ import {
 } from "./VerifiedScopedShell.ts";
 
 export const AUTOMATION_SCOPED_SHELL_MANIFEST_FILE = "scoped-shell-allowlist.json";
-export const AUTOMATION_SCOPED_SHELL_MANIFEST_VERSION = 1 as const;
+const AUTOMATION_SCOPED_SHELL_MANIFEST_VERSION = 1 as const;
 
 const MAX_MANIFEST_BYTES = ByteSize.bytes(1024 * 1024);
 const MAX_LOCAL_GIT_CONFIG_BYTES = ByteSize.bytes(1024 * 1024);

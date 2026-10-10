@@ -2,7 +2,6 @@ import * as NodeCrypto from "node:crypto";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -281,5 +280,3 @@ export const make = Effect.gen(function* () {
     ...(key === null ? {} : { key }),
   });
 });
-
-export const layer = Layer.effect(CommandCenterCredentialStore, make);

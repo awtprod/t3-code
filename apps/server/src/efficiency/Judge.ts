@@ -781,7 +781,7 @@ export interface JudgeDeps {
  * the current settings (transport changes at runtime) while tests pass a fixed
  * config.
  */
-export const makeJudge = (getConfig: () => ResolvedJudgeConfig, deps: JudgeDeps): JudgeShape => {
+const makeJudge = (getConfig: () => ResolvedJudgeConfig, deps: JudgeDeps): JudgeShape => {
   const ask = (request: JudgeRequest, meta?: JudgeMeta): Effect.Effect<JudgeResult, JudgeError> =>
     Effect.gen(function* () {
       const config = getConfig();

@@ -64,7 +64,7 @@ export class WindowsMediaConnectorError extends Schema.TaggedError<WindowsMediaC
 const PS_EMIT = `$j=ConvertTo-Json -InputObject $o -Depth 5 -Compress
 [Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($j)))`;
 
-export const WINDOWS_MEDIA_LIST_SCRIPT = `$ErrorActionPreference='Stop'
+const WINDOWS_MEDIA_LIST_SCRIPT = `$ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 $max=${WINDOWS_MEDIA_MAX_ENTRIES}
 try{
@@ -79,7 +79,7 @@ $o=@{ok=$true;t=($all.Count -gt $max);e=$e}}
 }catch{$o=@{ok=$false;code='error';err=$_.Exception.Message}}
 ${PS_EMIT}`;
 
-export const WINDOWS_MEDIA_ROOTS_SCRIPT = `$ErrorActionPreference='Stop'
+const WINDOWS_MEDIA_ROOTS_SCRIPT = `$ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 try{
 $r=@(Get-PSDrive -PSProvider FileSystem|ForEach-Object{@{n=$_.Name;root=$_.Root;l=[string]$_.Description}})
@@ -97,7 +97,7 @@ const ROOTS_ENCODED = encodePowerShellCommand(WINDOWS_MEDIA_ROOTS_SCRIPT);
  * The full ssh argv. Only settings (validated alias, absolute config path) and
  * the static encoded script appear here — never the requested path.
  */
-export function windowsMediaSshArgs(
+function windowsMediaSshArgs(
   settings: Pick<WindowsMediaSettings, "sshConfigPath" | "hostAlias">,
   operation: "list" | "roots",
 ): ReadonlyArray<string> {
@@ -165,7 +165,7 @@ const AUDIO_MIME: Record<string, string> = {
   ogg: "audio/ogg",
 };
 
-export function classifyWindowsMediaEntry(
+function classifyWindowsMediaEntry(
   name: string,
   isDir: boolean,
 ): { readonly kind: WindowsMediaEntryKind; readonly mimeType: string } {
@@ -209,7 +209,7 @@ const toArray = <A>(value: ReadonlyArray<A> | A | null | undefined): ReadonlyArr
   value === null || value === undefined ? [] : Array.isArray(value) ? value : [value as A];
 
 /** Decode the connector's base64(UTF-8 JSON) stdout. Exposed for tests. */
-export const decodeWindowsMediaOutput = (stdout: string) =>
+const decodeWindowsMediaOutput = (stdout: string) =>
   Effect.gen(function* () {
     const line =
       stdout
@@ -235,7 +235,7 @@ export const decodeWindowsMediaOutput = (stdout: string) =>
     );
   });
 
-export function toListResult(input: {
+function toListResult(input: {
   readonly host: string;
   readonly path: string;
   readonly roots: ReadonlyArray<string> | null;
@@ -293,7 +293,7 @@ export class WindowsMediaConnector extends Context.Service<
   WindowsMediaConnectorShape
 >()("@awtprod/command-center/command-center/WindowsMediaConnector") {}
 
-export const make = (settings: WindowsMediaSettings) =>
+const make = (settings: WindowsMediaSettings) =>
   Effect.gen(function* () {
     const runner = yield* ProcessRunner;
 

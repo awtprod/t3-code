@@ -15,7 +15,7 @@ import * as Schema from "effect/Schema";
 
 import { trustedHostExecutablePath, unsafeHostGitConfigKey } from "../../vcs/HostGitSecurity.ts";
 
-export const COMMAND_CENTER_THREAD_ID_PREFIX = "cc:";
+const COMMAND_CENTER_THREAD_ID_PREFIX = "cc:";
 export const COMMAND_CENTER_INTERACTIVE_THREAD_ID_PREFIX = "cc:interactive:";
 export const COMMAND_CENTER_AUTOMATION_THREAD_ID_PREFIX = "cc:automation:";
 

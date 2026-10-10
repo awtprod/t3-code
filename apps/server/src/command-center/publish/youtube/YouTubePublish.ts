@@ -59,7 +59,7 @@ export class YouTubePublish extends Context.Service<YouTubePublish, YouTubePubli
   "@awtprod/command-center/command-center/publish/youtube/YouTubePublish",
 ) {}
 
-export const DEFAULT_YOUTUBE_CATEGORY_ID = "22";
+const DEFAULT_YOUTUBE_CATEGORY_ID = "22";
 const TITLE_MAX = 100;
 const DESCRIPTION_MAX = 5000;
 const TAGS_TOTAL_MAX = 500;
@@ -124,9 +124,7 @@ export interface YouTubePublishOptions {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
-export const make = Effect.fn("YouTubePublish.make")(function* (
-  options: YouTubePublishOptions = {},
-) {
+const make = Effect.fn("YouTubePublish.make")(function* (options: YouTubePublishOptions = {}) {
   const tokens = yield* YouTubeTokenStore;
   const context = yield* Effect.context<never>();
   const runExit = Effect.runPromiseExitWith(context);
@@ -190,5 +188,3 @@ export const make = Effect.fn("YouTubePublish.make")(function* (
 
 export const makeLayer = (options: YouTubePublishOptions = {}) =>
   Layer.effect(YouTubePublish, make(options));
-
-export const layer = makeLayer();

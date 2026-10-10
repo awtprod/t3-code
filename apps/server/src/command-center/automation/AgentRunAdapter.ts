@@ -277,7 +277,7 @@ const commandCenterFailure = (cause: CommandCenterError): AutomationAgentRunFail
     cause.reason === "config" || cause.reason === "persistence" || cause.reason === "connector",
 });
 
-export function makeAutomationAgentRunParentLinker(
+function makeAutomationAgentRunParentLinker(
   sql: SqlClient.SqlClient,
 ): AutomationAgentRunAdapterDependencies["linkParent"] {
   return (input) =>

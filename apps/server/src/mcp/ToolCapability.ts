@@ -6,7 +6,7 @@ import { McpSchema, Tool } from "effect/unstable/ai";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import type { McpCapability } from "./McpInvocationContext.ts";
 
-export const REQUIRED_CAPABILITY_META_KEY = "t3.requiredCapability";
+const REQUIRED_CAPABILITY_META_KEY = "t3.requiredCapability";
 
 /**
  * Whether a credential holding `capabilities` may see and use a tool that

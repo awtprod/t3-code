@@ -13,9 +13,9 @@
  */
 
 /** Distance in CSS pixels between the highlight and the floating label. */
-export const LABEL_GAP = 4;
+const LABEL_GAP = 4;
 /** Minimum padding the label keeps from any viewport edge. */
-export const VIEWPORT_MARGIN = 4;
+const VIEWPORT_MARGIN = 4;
 
 export function computeLabelPosition(input: {
   targetLeft: number;

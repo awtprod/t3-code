@@ -106,7 +106,7 @@ const unavailable = (provider: CommandCenterPublishProvider) =>
   });
 
 /** Build the registry from whichever providers this environment implements. */
-export const make = Effect.fn("PublishConnections.make")(function* (
+const make = Effect.fn("PublishConnections.make")(function* (
   providers: ReadonlyArray<PublishConnectionProvider>,
 ) {
   const crypto = yield* Crypto.Crypto;
@@ -197,7 +197,7 @@ export const make = Effect.fn("PublishConnections.make")(function* (
 });
 
 /** Instagram: paste a long-lived token; validated with GET /me and stored in the secret store. */
-export const instagramConnectionProvider = Effect.gen(function* () {
+const instagramConnectionProvider = Effect.gen(function* () {
   const store = yield* InstagramTokenStore;
   return {
     provider: "instagram",
@@ -209,7 +209,7 @@ export const instagramConnectionProvider = Effect.gen(function* () {
 });
 
 /** YouTube: open Google's consent page, paste back the 127.0.0.1 address; the refresh token is stored. */
-export const youTubeConnectionProvider = Effect.gen(function* () {
+const youTubeConnectionProvider = Effect.gen(function* () {
   const store = yield* YouTubeTokenStore;
   return {
     provider: "youtube",

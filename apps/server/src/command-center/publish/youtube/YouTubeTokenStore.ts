@@ -38,7 +38,7 @@ import {
 export const YOUTUBE_CONNECTION_SECRET = "command-center-youtube-connection";
 
 /** Refresh the in-memory access token when it is this close to expiry. */
-export const ACCESS_TOKEN_REFRESH_SKEW_MS = 2 * 60 * 1000;
+const ACCESS_TOKEN_REFRESH_SKEW_MS = 2 * 60 * 1000;
 
 const StoredYouTubeConnection = Schema.Struct({
   version: Schema.Literal(1),
@@ -112,19 +112,17 @@ const callGoogle = <A>(run: () => Promise<A>) =>
         : connectorError("Google could not be reached. Try again in a moment.", cause),
   });
 
-export const YOUTUBE_CLIENT_NOT_CONFIGURED_DETAIL = `YouTube needs a Google Desktop OAuth client on this environment: set ${YOUTUBE_OAUTH_CLIENT_ID_ENV} and ${YOUTUBE_OAUTH_CLIENT_SECRET_ENV}, or store the downloaded client JSON as the ${YOUTUBE_OAUTH_CLIENT_SECRET_NAME} secret.`;
+const YOUTUBE_CLIENT_NOT_CONFIGURED_DETAIL = `YouTube needs a Google Desktop OAuth client on this environment: set ${YOUTUBE_OAUTH_CLIENT_ID_ENV} and ${YOUTUBE_OAUTH_CLIENT_SECRET_ENV}, or store the downloaded client JSON as the ${YOUTUBE_OAUTH_CLIENT_SECRET_NAME} secret.`;
 
 const isoFromMillis = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
 
-export const disconnectedYouTubeConnection = {
+const disconnectedYouTubeConnection = {
   provider: "youtube",
   state: "disconnected",
   setupMode: "oauth-redirect",
 } as const satisfies CommandCenterPublishConnection;
 
-export function youTubeConnectionSummary(
-  stored: StoredYouTubeConnection,
-): CommandCenterPublishConnection {
+function youTubeConnectionSummary(stored: StoredYouTubeConnection): CommandCenterPublishConnection {
   const label = stored.channelTitle ?? stored.email;
   return {
     provider: "youtube",
@@ -165,7 +163,7 @@ export interface YouTubeTokenStoreOptions {
   readonly revokeEndpoint?: string;
 }
 
-export const make = Effect.fn("YouTubeTokenStore.make")(function* (
+const make = Effect.fn("YouTubeTokenStore.make")(function* (
   options: YouTubeTokenStoreOptions = {},
 ) {
   const secrets = yield* ServerSecretStore;

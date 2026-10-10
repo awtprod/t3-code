@@ -882,19 +882,6 @@ export const layer = Layer.effect(
   }),
 );
 
-const failClosedExecutor: AutomationRuntime.AutomationNodeExecutor = (context) =>
-  Effect.fail(
-    `No v1 executor is enabled for automation node '${context.node.id}' (${context.node.kind}).`,
-  );
-
-export const failClosedRuntimeLayer = Layer.unwrap(
-  AutomationRuntime.makeDefaultDependencies(failClosedExecutor).pipe(
-    Effect.map((dependencies) =>
-      AutomationRuntime.layer({ ...dependencies, defaultMaxAttempts: 1 }),
-    ),
-  ),
-);
-
 /**
  * Gmail draft executors for the safe runtime. `prepareGoogleDraft` checks the
  * Space-scoped connection grant and resolves attachments. `executeInboxDraft`

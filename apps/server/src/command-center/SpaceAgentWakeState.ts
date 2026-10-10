@@ -14,7 +14,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { localDateAt } from "./DigestPeriod.ts";
 
 /** Used when neither check-ins nor quiet hours name a timezone. */
-export const SPACE_AGENT_DEFAULT_TIMEZONE = "America/New_York";
+const SPACE_AGENT_DEFAULT_TIMEZONE = "America/New_York";
 
 export interface SpaceAgentWakeStateRow {
   readonly spaceId: string;

@@ -11,7 +11,7 @@ import type { EfficiencyDecision, TaskKind } from "@t3tools/contracts";
 import type { JudgeAnswer, JudgeRequest } from "./Judge.ts";
 import type { TierJudgmentInput } from "./EfficiencyRouting.ts";
 
-export const TIER_JUDGMENT_OPERATION = "tier-judgment";
+const TIER_JUDGMENT_OPERATION = "tier-judgment";
 
 /** The first slice of user text the judge sees (also applied to `taskMessage`). */
 export const TIER_JUDGMENT_MESSAGE_CHARS = 4000;

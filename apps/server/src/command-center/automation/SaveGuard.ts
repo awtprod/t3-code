@@ -35,7 +35,7 @@ export type AutomationSaveGuardResult =
       readonly issues: ReadonlyArray<AutomationValidationIssue>;
     };
 
-export function expectedDigestMatches(
+function expectedDigestMatches(
   expectedDigest: AutomationDefinitionDigest | null,
   currentDigest: AutomationDefinitionDigest | null,
 ): boolean {

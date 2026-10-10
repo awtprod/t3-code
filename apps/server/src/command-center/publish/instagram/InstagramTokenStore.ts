@@ -19,10 +19,10 @@ import { InstagramApiError, InstagramClient, type FetchLike } from "./client.ts"
 export const INSTAGRAM_CONNECTION_SECRET = "command-center-instagram-connection";
 
 /** Long-lived Instagram tokens last ~60 days from issue/refresh. */
-export const LONG_LIVED_TOKEN_TTL_DAYS = 60;
+const LONG_LIVED_TOKEN_TTL_DAYS = 60;
 
 /** Refresh when the token is this many days from expiry. */
-export const DEFAULT_REFRESH_THRESHOLD_DAYS = 15;
+const DEFAULT_REFRESH_THRESHOLD_DAYS = 15;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -127,13 +127,13 @@ export function parseRefreshedToken(
 
 const isoFromMillis = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
 
-export const disconnectedInstagramConnection = {
+const disconnectedInstagramConnection = {
   provider: "instagram",
   state: "disconnected",
   setupMode: "paste-token",
 } as const satisfies CommandCenterPublishConnection;
 
-export function instagramConnectionSummary(
+function instagramConnectionSummary(
   stored: StoredInstagramConnection,
   nowMs: number,
 ): CommandCenterPublishConnection {
@@ -160,7 +160,7 @@ export interface InstagramTokenStoreOptions {
   readonly baseUrl?: string;
 }
 
-export const make = Effect.fn("InstagramTokenStore.make")(function* (
+const make = Effect.fn("InstagramTokenStore.make")(function* (
   options: InstagramTokenStoreOptions = {},
 ) {
   const slot = yield* makePublishCredentialSlot({

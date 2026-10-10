@@ -20,7 +20,7 @@ import { spawnAndCollect } from "../providerSnapshot.ts";
 
 const MAX_KIMI_CONFIG_BYTES = ByteSize.bytes(2 * 1024 * 1024);
 const SANDBOX_HOME = "/tmp/kimi-home";
-export const KIMI_SANDBOX_WORKSPACE = "/workspace";
+const KIMI_SANDBOX_WORKSPACE = "/workspace";
 
 const KIMI_AUTOMATION_TOOLS = [
   "Agent",

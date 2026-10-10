@@ -30,7 +30,7 @@ const writeTool = <T extends Tool.Any>(tool: T): T =>
  * to more than one Supabase project (staging and production, say) can be
  * addressed explicitly. Omit it to use the project's only or default database.
  */
-export const DatabaseSelectorFields = {
+const DatabaseSelectorFields = {
   database: Schema.optional(
     Schema.String.annotate({
       description:
@@ -58,7 +58,7 @@ const makeTool = <Name extends string, Fields extends Schema.Struct.Fields>(
     : requireCapability(writeTool(tool), "database.write");
 };
 
-export const SupabaseListTablesTool = makeTool(
+const SupabaseListTablesTool = makeTool(
   "supabase_list_tables",
   "List Supabase tables",
   "List tables in a Supabase project connected to this thread's local project.",
@@ -69,7 +69,7 @@ export const SupabaseListTablesTool = makeTool(
   "read",
 );
 
-export const SupabaseListExtensionsTool = makeTool(
+const SupabaseListExtensionsTool = makeTool(
   "supabase_list_extensions",
   "List Supabase extensions",
   "List Postgres extensions in the Supabase project connected to this thread.",
@@ -77,7 +77,7 @@ export const SupabaseListExtensionsTool = makeTool(
   "read",
 );
 
-export const SupabaseListMigrationsTool = makeTool(
+const SupabaseListMigrationsTool = makeTool(
   "supabase_list_migrations",
   "List Supabase migrations",
   "List database migrations in the Supabase project connected to this thread.",
@@ -85,7 +85,7 @@ export const SupabaseListMigrationsTool = makeTool(
   "read",
 );
 
-export const SupabaseApplyMigrationTool = makeTool(
+const SupabaseApplyMigrationTool = makeTool(
   "supabase_apply_migration",
   "Apply Supabase migration",
   "Apply a named SQL migration to the connected Supabase project. Unavailable for read-only connections.",
@@ -93,7 +93,7 @@ export const SupabaseApplyMigrationTool = makeTool(
   "write",
 );
 
-export const SupabaseExecuteSqlTool = makeTool(
+const SupabaseExecuteSqlTool = makeTool(
   "supabase_execute_sql",
   "Execute Supabase SQL",
   "Execute SQL against the connected Supabase project. In read-only mode, Supabase enforces read-only SQL.",
@@ -101,7 +101,7 @@ export const SupabaseExecuteSqlTool = makeTool(
   "write",
 );
 
-export const SupabaseGetAdvisorsTool = makeTool(
+const SupabaseGetAdvisorsTool = makeTool(
   "supabase_get_advisors",
   "Get Supabase advisors",
   "Get security or performance advisors for the connected Supabase project.",
@@ -109,7 +109,7 @@ export const SupabaseGetAdvisorsTool = makeTool(
   "read",
 );
 
-export const SupabaseGetProjectUrlTool = makeTool(
+const SupabaseGetProjectUrlTool = makeTool(
   "supabase_get_project_url",
   "Get Supabase project URL",
   "Get the API URL for the connected Supabase project.",
@@ -117,7 +117,7 @@ export const SupabaseGetProjectUrlTool = makeTool(
   "read",
 );
 
-export const SupabaseGetPublishableKeysTool = makeTool(
+const SupabaseGetPublishableKeysTool = makeTool(
   "supabase_get_publishable_keys",
   "Get Supabase publishable keys",
   "Get client-safe publishable API keys for the connected Supabase project.",
@@ -125,7 +125,7 @@ export const SupabaseGetPublishableKeysTool = makeTool(
   "read",
 );
 
-export const SupabaseGenerateTypescriptTypesTool = makeTool(
+const SupabaseGenerateTypescriptTypesTool = makeTool(
   "supabase_generate_typescript_types",
   "Generate Supabase TypeScript types",
   "Generate TypeScript types from the connected Supabase project's database schema.",

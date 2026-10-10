@@ -1,11 +1,10 @@
 // @effect-diagnostics globalFetch:off preferSchemaOverJson:off globalDate:off globalTimers:off
 import type { FetchLike } from "./YouTubeOAuth.ts";
 
-export const YOUTUBE_ANALYTICS_REPORT_ENDPOINT =
-  "https://youtubeanalytics.googleapis.com/v2/reports";
+const YOUTUBE_ANALYTICS_REPORT_ENDPOINT = "https://youtubeanalytics.googleapis.com/v2/reports";
 export const YOUTUBE_ANALYTICS_MAX_RESPONSE_BYTES = 64 * 1024;
-export const YOUTUBE_ANALYTICS_TIMEOUT_MS = 10_000;
-export const YOUTUBE_ANALYTICS_MAX_DAYS = 31;
+const YOUTUBE_ANALYTICS_TIMEOUT_MS = 10_000;
+const YOUTUBE_ANALYTICS_MAX_DAYS = 31;
 
 export class YouTubeAnalyticsReportError extends Error {
   readonly status: number | undefined;
@@ -66,7 +65,7 @@ export function validateYouTubeAnalyticsPeriod(
   return undefined;
 }
 
-export function youtubeAnalyticsReportUrl(request: YouTubeAnalyticsReportRequest): URL {
+function youtubeAnalyticsReportUrl(request: YouTubeAnalyticsReportRequest): URL {
   const url = new URL(YOUTUBE_ANALYTICS_REPORT_ENDPOINT);
   url.searchParams.set("ids", `channel==${request.channelId}`);
   url.searchParams.set("startDate", request.startDate);

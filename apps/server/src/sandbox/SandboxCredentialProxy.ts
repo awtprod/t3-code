@@ -14,7 +14,7 @@ import * as NodeUtil from "node:util";
  * upstream name, carrying a per-thread bearer token. The sidecar validates that
  * token, strips it, injects the real header, and streams the response back.
  */
-export const CREDENTIAL_PROXY_PORT = 8288;
+const CREDENTIAL_PROXY_PORT = 8288;
 export const CREDENTIAL_PROXY_ALIAS = "credential-proxy";
 /** Split so the literal never reads as a hardcoded credential endpoint to scanners. */
 export const CREDENTIAL_PROXY_BASE_URL = [
@@ -90,12 +90,8 @@ export function threadCredentialProxyBinding(
   return bindings.get(threadId);
 }
 
-export function unbindThreadCredentialProxy(threadId: string): void {
-  bindings.delete(threadId);
-}
-
 /** Registers the running sidecar so session start can push documents to it. */
-export function registerThreadCredentialProxySidecar(
+function registerThreadCredentialProxySidecar(
   threadId: string,
   runtime: ThreadCredentialProxySidecar,
 ): void {
@@ -168,7 +164,7 @@ export function resolveSandboxCredentialUpstreams(): ReadonlyArray<SandboxCreden
   return upstreams;
 }
 
-export class SandboxCredentialProxyError extends Error {
+class SandboxCredentialProxyError extends Error {
   override readonly name = "SandboxCredentialProxyError";
 }
 

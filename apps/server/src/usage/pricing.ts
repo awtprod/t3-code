@@ -17,7 +17,7 @@ export interface UsagePriceRate {
 
 const KIMI = "kimi";
 
-export const BUILT_IN_USAGE_PRICING: ReadonlyArray<
+const BUILT_IN_USAGE_PRICING: ReadonlyArray<
   UsagePriceRate & { readonly driver: string; readonly model: string }
 > = [
   {

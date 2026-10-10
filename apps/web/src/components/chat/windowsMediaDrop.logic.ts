@@ -19,7 +19,7 @@ export function splitWindowsPath(path: string): { folder: string; name: string }
 }
 
 /** Whether a local path looks like an absolute Windows path (drive or UNC). */
-export function isAbsoluteWindowsPath(path: string): boolean {
+function isAbsoluteWindowsPath(path: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 
@@ -28,7 +28,7 @@ export function isAbsoluteWindowsPath(path: string): boolean {
  * (case-insensitive, as NTFS is) and same byte size. Returns the reference
  * attachment when verified, null otherwise.
  */
-export function verifiedWindowsFileReference(input: {
+function verifiedWindowsFileReference(input: {
   readonly id: string;
   readonly file: { readonly name: string; readonly size: number };
   readonly localName: string;

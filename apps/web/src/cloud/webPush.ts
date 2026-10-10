@@ -41,7 +41,7 @@ export type WebPushRegistrationRecord = typeof WebPushRegistrationRecord.Type;
 
 export type WebPushEventPreferences = WebPushRegistrationRecord["preferences"];
 
-export const defaultWebPushEventPreferences: WebPushEventPreferences = {
+const defaultWebPushEventPreferences: WebPushEventPreferences = {
   notifyOnApproval: true,
   notifyOnInput: true,
   notifyOnCompletion: true,

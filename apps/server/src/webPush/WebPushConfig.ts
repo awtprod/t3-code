@@ -12,7 +12,7 @@ import { vapidPublicKeyFromPem } from "./webPushCrypto.ts";
 // The contact the push service operator can reach if this deployment misbehaves
 // (RFC 8292 `sub`). Apple rejects `mailto:localhost`-style values, so it is
 // never baked into the repo — the operator supplies it out of band.
-export const WEB_PUSH_SUBJECT_ENV = "T3CODE_WEB_PUSH_SUBJECT";
+const WEB_PUSH_SUBJECT_ENV = "T3CODE_WEB_PUSH_SUBJECT";
 
 const VAPID_KEY_PAIR_SECRET = "web-push-vapid-key-pair";
 const KEY_PAIR_RESOURCE = "web push VAPID key pair";

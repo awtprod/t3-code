@@ -1070,7 +1070,7 @@ export type GoogleDraftCreateResult = typeof GoogleDraftCreateResult.Type;
 
 /** Upper bounds that keep a Windows directory listing websocket-sized. */
 export const WINDOWS_MEDIA_MAX_ENTRIES = 2_000;
-export const WINDOWS_MEDIA_PATH_MAX_CHARS = 4_096;
+const WINDOWS_MEDIA_PATH_MAX_CHARS = 4_096;
 
 export const WindowsMediaPath = TrimmedNonEmptyString.check(
   Schema.isMaxLength(WINDOWS_MEDIA_PATH_MAX_CHARS),

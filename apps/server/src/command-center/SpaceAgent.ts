@@ -46,7 +46,7 @@ import {
 } from "./SpaceAgentWakeState.ts";
 
 /** Default model for a Space agent with no agent or Space model configured. */
-export const SPACE_AGENT_DEFAULT_MODEL: SpaceModelSelection = {
+const SPACE_AGENT_DEFAULT_MODEL: SpaceModelSelection = {
   providerId: ProviderId.make("claudeAgent"),
   modelId: ModelId.make(CLAUDE_WORKER_FALLBACK_MODEL),
 };
@@ -107,12 +107,12 @@ const agentError = (
   new CommandCenterError({ reason, message, ...(cause === undefined ? {} : { cause }) });
 
 /** The agent model: agent block, then the Space default, then Opus 5.5. */
-export const resolveSpaceAgentModel = (
+const resolveSpaceAgentModel = (
   space: Pick<SpaceType, "agent" | "modelDefaults">,
 ): SpaceModelSelection => space.agent?.model ?? space.modelDefaults ?? SPACE_AGENT_DEFAULT_MODEL;
 
 /** MCP scope of an enabled Space agent thread. Memory writes are approved. */
-export const spaceAgentScope = (
+const spaceAgentScope = (
   space: Pick<SpaceType, "id" | "agent" | "policy" | "lifecycle">,
 ): McpSessionRegistry.McpThreadScope | undefined =>
   space.agent?.enabled === true && space.lifecycle === "active"
@@ -129,7 +129,7 @@ export const spaceAgentScope = (
  * dispatcher's own project/binding matching rules. Ambiguous or conflicting
  * bindings are skipped rather than guessed.
  */
-export const selectSpaceAgentRepositoryProject = (input: {
+const selectSpaceAgentRepositoryProject = (input: {
   readonly space: Pick<SpaceType, "id" | "repositories">;
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
 }): OrchestrationProjectShell | undefined => {
@@ -149,7 +149,7 @@ export const selectSpaceAgentRepositoryProject = (input: {
   return undefined;
 };
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const service = yield* CommandCenterService.CommandCenterService;
   const projection = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const commandDispatcher = yield* OrchestrationCommandDispatcher.OrchestrationCommandDispatcher;

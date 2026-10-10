@@ -18,11 +18,10 @@
  * that calls into it; `ClaudeDriver` builds it from `ServerSettingsService`
  * and the `Judge` service.
  */
-import { EfficiencySieveSettings } from "@t3tools/contracts";
+import type { EfficiencySieveSettings } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
 
 import type { JudgeAnswer, JudgeMeta, JudgeQuestion, JudgeShape } from "./Judge.ts";
 
@@ -36,16 +35,14 @@ import type { JudgeAnswer, JudgeMeta, JudgeQuestion, JudgeShape } from "./Judge.
 export type SieveSettings = EfficiencySieveSettings;
 export type SieveMode = EfficiencySieveSettings["mode"];
 
-/** Fully-defaulted sieve settings (mode "off"), via the contracts schema. */
-export const DEFAULT_SIEVE_SETTINGS: SieveSettings = Schema.decodeSync(EfficiencySieveSettings)({});
-
 /**
  * Tools the sieve will ever consider. `Bash` is never sieved in v1 (re-running
  * has side effects and there is no recall cache) even if a mis-configured
- * settings payload lists it. The adapter's `PostToolUse` matcher is built from
- * this constant; live `settings.tools` narrows further inside the sieve.
+ * settings payload lists it. The Claude adapter's `PostToolUse` matcher
+ * (`SIEVE_HOOK_MATCHER_TOOLS`) lists the same tools; live `settings.tools`
+ * narrows further inside the sieve.
  */
-export const SIEVE_SUPPORTED_TOOLS: ReadonlyArray<string> = ["Read", "Grep"];
+const SIEVE_SUPPORTED_TOOLS: ReadonlySet<string> = new Set(["Read", "Grep"]);
 
 // ---------------------------------------------------------------------------
 // Public input / decision types.
@@ -111,7 +108,7 @@ export interface SieveOutcome {
 // Pure helpers.
 // ---------------------------------------------------------------------------
 
-export function blockId(index: number): string {
+function blockId(index: number): string {
   return `b${String(index + 1).padStart(3, "0")}`;
 }
 
@@ -524,7 +521,7 @@ export const sieveToolResult = (
     // Bash is never sieved in v1; live settings.tools narrows the supported set.
     if (input.toolName === "Bash") return skip("bash_never_sieved");
     if (!settings.tools.some((tool) => tool === input.toolName)) return skip("tool_not_enabled");
-    if (!SIEVE_SUPPORTED_TOOLS.includes(input.toolName)) return skip("tool_unsupported");
+    if (!SIEVE_SUPPORTED_TOOLS.has(input.toolName)) return skip("tool_unsupported");
     // Subagent tool calls carry an agent_id; pass through unjudged in v1.
     if (input.agentId !== undefined && input.agentId !== "") return skip("subagent");
 
