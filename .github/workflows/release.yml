@@ -368,10 +368,10 @@ jobs:
     name: Build WSL node-pty (linux-x64)
     # Same gating as relay_public_config: only the commit SHA is needed, so this
     # runs alongside preflight. See the condition comment there.
-    needs: [check_changes]
+    needs: [resolve_commit]
     if: |
-      !failure() && !cancelled() &&
-      (github.event_name != 'schedule' || needs.check_changes.outputs.has_changes == 'true')
+      needs.resolve_commit.result == 'success' &&
+      (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
