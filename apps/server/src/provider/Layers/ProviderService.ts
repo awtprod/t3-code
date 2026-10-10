@@ -1650,6 +1650,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        // A native conversation stays with the instance that owns it: switching
+        // to another instance of the same driver is only allowed when the two
+        // share a continuation key. A removed previous instance fails its
+        // lookup, so its conversation is never adopted by a fallback instance.
+        if (
+          persistedBinding?.provider === resolvedProvider &&
+          persistedBinding.providerInstanceId !== resolvedInstanceId &&
+          (input.resumeCursor != null || persistedBinding.resumeCursor != null)
+        ) {
+          const previousInstanceId = yield* requireBindingInstanceId(
+            "ProviderService.startSession",
+            persistedBinding,
+          );
+          const previousInfo = yield* registry.getInstanceInfo(previousInstanceId);
+          if (
+            previousInfo.continuationIdentity.continuationKey !==
+            instanceInfo.continuationIdentity.continuationKey
+          ) {
+            return yield* toValidationError(
+              "ProviderService.startSession",
+              `Thread '${threadId}' cannot switch from instance '${previousInstanceId}' to '${resolvedInstanceId}' because their provider resume state is incompatible.`,
+            );
+          }
+        }
         // The persisted binding's resume cursor (and cwd) belong to the instance
         // the thread last ran on. They remain valid for the resolved instance
         // when it is the same instance OR a continuation-compatible one (shared

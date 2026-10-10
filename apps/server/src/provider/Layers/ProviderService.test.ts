@@ -1353,7 +1353,7 @@ it.effect(
 );
 
 it.effect(
-  "ProviderServiceLive drops the persisted cursor when the instance switch is not continuation-compatible",
+  "ProviderServiceLive refuses an instance switch that is not continuation-compatible",
   () =>
     Effect.gen(function* () {
       const { instanceA, instanceB, codexA, testLayer } = makeContinuationCompatEnv({
@@ -1363,7 +1363,7 @@ it.effect(
       const threadId = asThreadId("thread-continuation-incompat");
       const seededCursor = { opaque: "seeded-cursor-b" };
 
-      yield* Effect.gen(function* () {
+      const { error, originalBinding, bindingAfter } = yield* Effect.gen(function* () {
         const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
         const provider = yield* ProviderService.ProviderService;
         yield* directory.upsert({
@@ -1374,21 +1374,27 @@ it.effect(
           runtimePayload: { cwd: "/tmp/seeded-b" },
           runtimeMode: "full-access",
         });
-        yield* provider.startSession(threadId, {
-          provider: CODEX_DRIVER,
-          providerInstanceId: instanceA,
-          threadId,
-          runtimeMode: "full-access",
-        });
+        const originalBinding = yield* directory.getBinding(threadId);
+        const error = yield* Effect.flip(
+          provider.startSession(threadId, {
+            provider: CODEX_DRIVER,
+            providerInstanceId: instanceA,
+            threadId,
+            runtimeMode: "full-access",
+          }),
+        );
+        const bindingAfter = yield* directory.getBinding(threadId);
+        return { error, originalBinding, bindingAfter };
       }).pipe(Effect.provide(testLayer));
 
-      assert.equal(codexA.startSession.mock.calls.length, 1);
-      const startInput = codexA.startSession.mock.calls[0]?.[0];
       // Incompatible switch: A does not share B's continuation key, so B's
-      // cursor/cwd must NOT leak — resuming would silently start a fresh
-      // conversation on A. The adapter receives no inherited cursor/cwd.
-      assert.notDeepEqual(startInput?.resumeCursor, seededCursor);
-      assert.equal(startInput?.cwd, undefined);
+      // native conversation must neither leak into A (resuming would silently
+      // start a fresh conversation there) nor be replaced by a fresh A session
+      // that drops B's cursor from the binding. The start is refused.
+      assert.equal(error._tag, "ProviderValidationError");
+      assert.include(error.message, "provider resume state is incompatible");
+      assert.equal(codexA.startSession.mock.calls.length, 0);
+      assert.deepEqual(bindingAfter, originalBinding);
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
