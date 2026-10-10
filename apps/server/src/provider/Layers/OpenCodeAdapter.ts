@@ -2806,6 +2806,33 @@ export function makeOpenCodeAdapter(
       // the async iterable unwinds cleanly.
       // @effect-diagnostics-next-line abortControllerInEffect:off - aborted by a scope finalizer to cancel the SDK's event.subscribe fetch
       const eventsAbortController = new AbortController();
+      // Upstream's disconnect warning (#9653): the SDK reports each SSE error
+      // through `onSseError`; surface one `runtime.warning` per disconnect and
+      // re-arm it once the server reconnects (`server.connected`).
+      let lastStreamError: unknown;
+      let warnedAboutDisconnect = false;
+      const streamErrors = yield* Queue.unbounded<unknown>();
+      yield* Scope.addFinalizer(context.sessionScope, Queue.shutdown(streamErrors));
+      yield* Stream.fromQueue(streamErrors).pipe(
+        Stream.runForEach((cause) =>
+          Effect.gen(function* () {
+            if (warnedAboutDisconnect) return;
+            warnedAboutDisconnect = true;
+            yield* emit({
+              ...(yield* buildEventBase({
+                threadId: context.session.threadId,
+                turnId: context.activeTurnId,
+              })),
+              type: "runtime.warning",
+              payload: {
+                message: "OpenCode connection lost. Reconnecting.",
+                detail: openCodeRuntimeErrorDetail(cause),
+              },
+            });
+          }),
+        ),
+        Effect.forkIn(context.sessionScope),
+      );
 
       // Fibers forked into `context.sessionScope` are interrupted
       // automatically when the scope closes — no bookkeeping required.
@@ -2835,6 +2862,10 @@ export function makeOpenCodeAdapter(
               // own (uncontrolled, TestClock-invisible) error retries so it
               // surfaces stream ends promptly to this loop.
               sseMaxRetryAttempts: 1,
+              onSseError: (cause) => {
+                lastStreamError = cause;
+                Queue.offerUnsafe(streamErrors, cause);
+              },
             }),
           ).pipe(
             // Recover a terminal `idle` that may have landed while the stream
@@ -2855,6 +2886,10 @@ export function makeOpenCodeAdapter(
                 Stream.runForEach((event) =>
                   Effect.gen(function* () {
                     sawEvent = true;
+                    if (event.type === "server.connected") {
+                      lastStreamError = undefined;
+                      warnedAboutDisconnect = false;
+                    }
                     yield* handleSubscribedEvent(context, event);
                   }),
                 ),
@@ -2882,7 +2917,9 @@ export function makeOpenCodeAdapter(
               context,
               Exit.isFailure(exit)
                 ? openCodeRuntimeErrorDetail(Cause.squash(exit.cause))
-                : "OpenCode event stream ended repeatedly without recovering.",
+                : lastStreamError !== undefined
+                  ? `OpenCode event stream disconnected: ${openCodeRuntimeErrorDetail(lastStreamError)}`
+                  : "OpenCode event stream ended repeatedly without recovering.",
             );
             return;
           }
@@ -3320,7 +3357,6 @@ export function makeOpenCodeAdapter(
               type: "turn.started",
               payload: {
                 model: modelSelection?.model ?? context.session.model,
-                ...(variant ? { effort: variant } : {}),
                 // Echo the requesting event's sequence so the projector adopts the
                 // placeholder this turn was started for. Only on a real turn
                 // boundary: a steer folds into a turn whose placeholder was

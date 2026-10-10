@@ -461,6 +461,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         ) => {
           runtimeMock.state.eventSubscribeCount += 1;
           runtimeMock.state.eventSubscribeObserved?.();
+          runtimeMock.state.eventStreamError = options?.onSseError ?? null;
           // Queued script: drive one reconnect cycle. Yield the scripted events
           // (interleaving prompt echoes exactly like the default path) and then
           // end — a clean EOF the adapter recovers from by resubscribing.
@@ -532,7 +533,10 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
               yield runtimeMock.state.promptEchoEvents.shift();
             }
           })();
-          return { stream: makeSubscriptionStream(defaultGen, true) };
+          // `endEventStream` turns the default long-lived subscription into a clean EOF.
+          return {
+            stream: makeSubscriptionStream(defaultGen, () => !runtimeMock.state.endEventStream),
+          };
         },
       },
       permission: {
@@ -661,14 +665,14 @@ const advanceTestClock = (ms: number) =>
  * `Stream.fromAsyncIterable` registers an `iter.return()` scope finalizer only
  * when one exists, and awaiting `iter.return()` on a generator suspended at a
  * non-settling `await` deadlocks scope teardown. Without a `return` method
- * Effect simply abandons the pending pull on interruption. When `park` is true
+ * Effect simply abandons the pending pull on interruption. When `park` is (or returns) true
  * the stream never ends after the generator drains (models a long-lived
  * subscription); otherwise it ends cleanly (a clean EOF that drives the
  * adapter's reconnect loop).
  */
 function makeSubscriptionStream(
   gen: AsyncGenerator<unknown, void, unknown>,
-  park: boolean,
+  park: boolean | (() => boolean),
 ): AsyncIterable<unknown> {
   return {
     [Symbol.asyncIterator]() {
@@ -682,7 +686,7 @@ function makeSubscriptionStream(
             }
             drained = true;
           }
-          if (park) {
+          if (typeof park === "function" ? park() : park) {
             return new Promise<IteratorResult<unknown>>(() => {});
           }
           return { value: undefined, done: true };
@@ -8085,11 +8089,19 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         runtimeMock.state.abortImplementation = async () => {
           throw new Error("server unreachable");
         };
+        // Fork: a clean EOF resubscribes with backoff (cff0df772c) and only ends
+        // the session after 5 consecutive event-less reconnects; keep the turn
+        // busy so the post-subscribe reconciliation cannot complete it first.
+        runtimeMock.state.sessionStatus = "busy";
+        runtimeMock.state.eventStreamQueue = [[], [], [], [], []];
         endStream.resolve({
           id: "evt-busy",
           type: "session.status",
           properties: { sessionID: request.sessionID, status: { type: "busy" } },
         });
+        for (const backoffMs of [250, 500, 1_000, 2_000, 4_000]) {
+          yield* advanceTestClock(backoffMs);
+        }
         const exited = yield* Fiber.join(exitedFiber);
         NodeAssert.equal(
           exited.some((event) => event.type === "request.resolved"),
