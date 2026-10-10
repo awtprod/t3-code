@@ -1019,8 +1019,6 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "exec_command_approval";
     case "item/tool/requestUserInput":
       return "tool_user_input";
-    case "item/permissions/requestApproval":
-      return "permissions_approval";
     case "item/tool/call":
       return "dynamic_tool_call";
     case "account/chatgptAuthTokens/refresh":
@@ -1763,7 +1761,11 @@ function mapToRuntimeEvents(
         ...runtimeEventBase(event, canonicalThreadId),
         type: "request.opened",
         payload: {
-          requestType: toRequestTypeFromMethod(event.method),
+          // Sandbox escalations keep Command Center's request type; app
+          // permission prompts take upstream's "permission_approval".
+          requestType: isCodexSandboxEscalation(event)
+            ? "permissions_approval"
+            : toRequestTypeFromMethod(event.method),
           ...(detail ? { detail } : {}),
           ...(elicitationApproval
             ? {
