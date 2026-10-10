@@ -28,7 +28,7 @@ export class ThreadSandboxNotReadyError extends Schema.TaggedError<ThreadSandbox
 
 export interface ThreadSandboxRuntimeShape {
   readonly ensureReady: (
-    thread: OrchestrationThread,
+    thread: Pick<OrchestrationThread, "id" | "sandbox">,
     legacyCwd: string | undefined,
   ) => Effect.Effect<ProviderExecutionTarget, ThreadSandboxNotReadyError>;
 }

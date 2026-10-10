@@ -8,6 +8,8 @@ import {
   type ModelSelection,
   NonNegativeInt,
   type OrchestrationEvent,
+  type OrchestrationThread,
+  type OrchestrationThreadShell,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
   SandboxId,
@@ -362,7 +364,7 @@ export const make = Effect.gen(function* () {
         // snapshot or by the parked pull, never missed by both.
         yield* Effect.yieldNow;
         const current = Option.getOrUndefined(
-          yield* projectionSnapshotQuery.getThreadDetailById(threadId),
+          yield* projectionSnapshotQuery.getThreadShellById(threadId),
         );
         if (current === undefined) {
           return yield* new ProviderAdapterRequestError({
@@ -374,7 +376,7 @@ export const make = Effect.gen(function* () {
         if (current.sandbox?.lifecycle !== "provisioning") return current;
         yield* Fiber.join(settledEvent);
         const settled = Option.getOrUndefined(
-          yield* projectionSnapshotQuery.getThreadDetailById(threadId),
+          yield* projectionSnapshotQuery.getThreadShellById(threadId),
         );
         if (settled === undefined) {
           return yield* new ProviderAdapterRequestError({
@@ -401,7 +403,7 @@ export const make = Effect.gen(function* () {
   });
   const ensureExecutionTarget = Effect.fn("ProviderCommandReactor.ensureExecutionTarget")(
     function* (
-      initialThread: Parameters<typeof threadSandboxRuntime.ensureReady>[0],
+      initialThread: OrchestrationThread | OrchestrationThreadShell,
       legacyCwd: string | undefined,
     ) {
       const thread =
@@ -443,7 +445,7 @@ export const make = Effect.gen(function* () {
           const cached = provisionedTargets.get(thread.id);
           if (cached !== undefined) {
             const currentSandbox = Option.getOrUndefined(
-              yield* projectionSnapshotQuery.getThreadDetailById(thread.id),
+              yield* projectionSnapshotQuery.getThreadShellById(thread.id),
             )?.sandbox;
             if (
               currentSandbox != null &&
@@ -688,7 +690,7 @@ export const make = Effect.gen(function* () {
             ),
           );
           const readyThread = Option.getOrUndefined(
-            yield* projectionSnapshotQuery.getThreadDetailById(thread.id),
+            yield* projectionSnapshotQuery.getThreadShellById(thread.id),
           );
           if (readyThread?.sandbox !== null && readyThread?.sandbox !== undefined) {
             yield* orchestrationEngine.dispatch({
@@ -1125,7 +1127,8 @@ export const make = Effect.gen(function* () {
       readonly titleSeed?: string;
     },
   ) {
-    const thread = yield* resolveThreadDetail(threadId);
+    // Metadata only: a turn start must not decode unrelated message bodies.
+    const thread = yield* resolveThreadShell(threadId);
     if (!thread) {
       return yield* Effect.die(new Error(`Thread '${threadId}' was not found in read model.`));
     }
@@ -1478,7 +1481,8 @@ export const make = Effect.gen(function* () {
     readonly executionTarget?: ProviderExecutionTarget;
     readonly titleSeed?: string;
   }) {
-    const thread = yield* resolveThreadDetail(input.threadId);
+    // Metadata only; message bodies are loaded below solely for cold-start recovery.
+    const thread = yield* resolveThreadShell(input.threadId);
     if (!thread) {
       return yield* Effect.die(
         new Error(`Thread '${input.threadId}' was not found in read model.`),
@@ -1494,9 +1498,12 @@ export const make = Effect.gen(function* () {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
+    const recoveryMessages = sessionStart.shouldRecoverConversation
+      ? ((yield* resolveThreadDetail(input.threadId))?.messages ?? [])
+      : [];
     const providerInput = sessionStart.shouldRecoverConversation
       ? recoverProviderInputFromThread({
-          messages: thread.messages,
+          messages: recoveryMessages,
           currentMessageId: input.messageId,
           currentMessageText: normalizedInput,
         })
@@ -1504,7 +1511,7 @@ export const make = Effect.gen(function* () {
     if (sessionStart.shouldRecoverConversation && providerInput !== normalizedInput) {
       yield* Effect.logInfo("provider command reactor seeded a fresh sandbox conversation", {
         threadId: input.threadId,
-        recoveredMessageCount: thread.messages.filter(
+        recoveredMessageCount: recoveryMessages.filter(
           (message) => message.id !== input.messageId && !message.streaming,
         ).length,
       });
@@ -2676,7 +2683,9 @@ export const make = Effect.gen(function* () {
       return;
     }
 
-    const thread = yield* resolveThreadDetail(event.payload.threadId);
+    // Metadata only (as upstream): getTurnStartMessage supplies the message, so a
+    // turn start never decodes unrelated message bodies.
+    const thread = yield* resolveThreadShell(event.payload.threadId);
     if (!thread) {
       return;
     }

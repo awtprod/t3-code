@@ -406,7 +406,7 @@ export const makeOrchestrationIntegrationHarness = (
       generateThreadTitle: () => Effect.succeed({ title: "New thread" }),
     } as unknown as TextGeneration["Service"]);
     const threadSandboxRuntimeLayer = Layer.succeed(ThreadSandboxRuntime, {
-      ensureReady: (thread: OrchestrationThread) =>
+      ensureReady: (thread: Pick<OrchestrationThread, "id" | "sandbox">) =>
         Effect.succeed({
           kind: "sandbox" as const,
           threadId: thread.id,

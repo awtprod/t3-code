@@ -500,27 +500,40 @@ describe("ProviderCommandReactor", () => {
             Effect.gen(function* () {
               const query = yield* ProjectionSnapshotQuery;
               let firstRead = true;
+              // The reactor reads threads through both the shell (upstream's metadata
+              // read, adopted by the merge) and the detail query, so both count as one
+              // sequence of thread reads for the injected failure and the first-read block.
+              const interceptThreadRead = <A, E, R>(
+                operation: "getThreadShellById" | "getThreadDetailById",
+                read: Effect.Effect<A, E, R>,
+              ): Effect.Effect<A, E | PersistenceSqlError, R> => {
+                threadDetailReadAttempts += 1;
+                if (threadDetailReadAttempts === input?.threadDetailReadFailureAt) {
+                  return Effect.fail(
+                    new PersistenceSqlError({
+                      operation,
+                      detail: "Injected thread detail read failure",
+                    }),
+                  );
+                }
+                if (input?.blockFirstThreadRead !== true || !firstRead) {
+                  return read;
+                }
+                firstRead = false;
+                return Deferred.succeed(blockedThreadReadStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseBlockedThreadRead)),
+                  Effect.andThen(read),
+                );
+              };
               return {
                 ...query,
-                getThreadDetailById: (threadId: ThreadId) => {
-                  threadDetailReadAttempts += 1;
-                  if (threadDetailReadAttempts === input?.threadDetailReadFailureAt) {
-                    return Effect.fail(
-                      new PersistenceSqlError({
-                        operation: "getThreadDetailById",
-                        detail: "Injected thread detail read failure",
-                      }),
-                    );
-                  }
-                  if (input?.blockFirstThreadRead !== true || !firstRead) {
-                    return query.getThreadDetailById(threadId);
-                  }
-                  firstRead = false;
-                  return Deferred.succeed(blockedThreadReadStarted, undefined).pipe(
-                    Effect.andThen(Deferred.await(releaseBlockedThreadRead)),
-                    Effect.andThen(query.getThreadDetailById(threadId)),
-                  );
-                },
+                getThreadShellById: (threadId: ThreadId) =>
+                  interceptThreadRead("getThreadShellById", query.getThreadShellById(threadId)),
+                getThreadDetailById: (threadId, detailQuery) =>
+                  interceptThreadRead(
+                    "getThreadDetailById",
+                    query.getThreadDetailById(threadId, detailQuery),
+                  ),
               } satisfies ProjectionSnapshotQuery["Service"];
             }),
           ).pipe(Layer.provide(projectionSnapshotLayer))
@@ -2214,12 +2227,26 @@ describe("ProviderCommandReactor", () => {
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
       const titleGenerated = yield* Deferred.make<void>();
+      // Fork: a sandbox session that does not natively resume replays the persisted
+      // transcript (which must decode bodies), so start from a resumable binding.
+      const resumeCursor = { threadId: "resumable-session-id" };
       const harness = yield* Effect.promise(() =>
         createHarness({
           unreadableHistory: true,
+          providerStore: "preserved",
           startSessionEffect: (session) =>
-            Deferred.succeed(started, undefined).pipe(Effect.as(session)),
+            Deferred.succeed(started, undefined).pipe(Effect.as({ ...session, resumeCursor })),
         }),
+      );
+      yield* Effect.promise(() =>
+        harness.runEffect(
+          harness.providerSessionDirectory.upsert({
+            threadId: ThreadId.make("thread-1"),
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            resumeCursor,
+          }),
+        ),
       );
       harness.generateThreadTitle.mockReturnValue(
         Deferred.succeed(titleGenerated, undefined).pipe(Effect.as({ title: "Generated title" })),
