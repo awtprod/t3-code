@@ -442,7 +442,12 @@ export const make = Effect.gen(function* () {
     yield* withLeaseLock(
       environmentId,
       Effect.gen(function* () {
-        if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
+        const platformManaged = (yield* Ref.get(platformEnvironmentIds)).has(environmentId);
+        const activeTarget = (yield* SubscriptionRef.get(entries)).get(environmentId)?.target;
+        const savePrimaryBearer =
+          registration._tag === "BearerConnectionRegistration" &&
+          activeTarget?._tag === "PrimaryConnectionTarget";
+        if (platformManaged && !savePrimaryBearer) {
           return;
         }
         // Editing a saved environment must preserve its disabled state.
@@ -458,7 +463,10 @@ export const make = Effect.gen(function* () {
                   ? { unsupportedReason: previous.unsupportedReason }
                   : {}),
               };
+        // Saving the primary's recovery bearer leaves the active primary entry
+        // (and the GitHub routing trust granted to it) in place.
         if (
+          !platformManaged &&
           previous !== undefined &&
           gitHubRoutingConnectionKey(previous) !== gitHubRoutingConnectionKey(entry)
         ) {
@@ -478,7 +486,11 @@ export const make = Effect.gen(function* () {
           next.set(environmentId, registration.target);
           return next;
         });
-        yield* installEntryLocked(entry);
+        // Pairing may repair the primary's saved bearer while its current
+        // platform-managed connection stays in use until the next launch.
+        if (!platformManaged) {
+          yield* installEntryLocked(entry);
+        }
       }),
     );
   });
@@ -499,9 +511,19 @@ export const make = Effect.gen(function* () {
           const persistedTarget = (yield* Ref.get(persistedTargetsByEnvironment)).get(
             target.environmentId,
           );
+          // Desktop remote-primary startup needs the saved bearer on every launch.
+          // Keep its recovery record while the platform primary owns the runtime.
+          const preservePrimaryBearer =
+            registration._tag === "PrimaryConnectionRegistration" &&
+            persistedTarget?._tag === "BearerConnectionTarget";
+          // The preserved recovery bearer is not a shadowed user connection, so
+          // it must not reset GitHub routing trust on every launch.
+          const previousIsPreservedBearer =
+            preservePrimaryBearer && previous?.target._tag === "BearerConnectionTarget";
           if (
-            persistedTarget !== undefined ||
+            (persistedTarget !== undefined && !preservePrimaryBearer) ||
             (previous !== undefined &&
+              !previousIsPreservedBearer &&
               gitHubRoutingConnectionKey(previous) !== gitHubRoutingConnectionKey(entry))
           ) {
             const revoked = yield* githubRoutingPermissions.forget(target.environmentId).pipe(
@@ -539,7 +561,7 @@ export const make = Effect.gen(function* () {
             );
           }
 
-          if (persistedTarget !== undefined) {
+          if (persistedTarget !== undefined && !preservePrimaryBearer) {
             yield* registrations.remove(persistedTarget).pipe(
               Effect.tap(() =>
                 Ref.update(persistedTargetsByEnvironment, (current) => {

@@ -1248,6 +1248,8 @@ export interface DesktopBridge {
   getLocalEnvironmentEnabled?: () => boolean;
   setLocalEnvironmentEnabled?: (enabled: boolean) => Promise<void>;
   getLocalEnvironmentBearerToken: () => Promise<string | null>;
+  /** Validate the existing saved credential for the unchanged remote primary. */
+  recoverRemotePrimarySession?: (expectedHttpBaseUrl: string) => Promise<AuthSessionState>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   getConnectionCatalog?: () => Promise<string | null>;

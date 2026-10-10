@@ -1,6 +1,9 @@
 import { describe, expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 
 import { isLocalExecutionOverride, LOCAL_EXECUTION_ONCE_SWITCH } from "./primaryBackend.ts";
+
+vi.mock("electron", () => ({ net: {} }));
 
 describe("primary backend launch override", () => {
   it("requires the explicit one-launch switch", () => {

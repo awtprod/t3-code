@@ -1,3 +1,4 @@
+import { vi } from "vite-plus/test";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { ConnectionCatalogDocument } from "@t3tools/client-runtime/platform";
@@ -17,6 +18,9 @@ import * as DesktopSavedEnvironments from "../settings/DesktopSavedEnvironments.
 import * as DesktopConfig from "./DesktopConfig.ts";
 import * as DesktopConnectionCatalogStore from "./DesktopConnectionCatalogStore.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+
+// All Electron services are injected; prevent loading a native runtime in unit tests.
+vi.mock("electron", () => ({ net: {}, safeStorage: {} }));
 
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
@@ -186,6 +190,9 @@ describe("DesktopConnectionCatalogStore", () => {
           }),
         );
 
+        assert.deepStrictEqual(yield* store.getExisting, Option.none());
+        assert.isFalse(yield* fileSystem.exists(`${environment.stateDir}/connection-catalog.json`));
+
         const migrated = yield* store.get;
         assert.isTrue(Option.isSome(migrated));
         if (Option.isNone(migrated)) {
@@ -242,6 +249,7 @@ describe("DesktopConnectionCatalogStore", () => {
           '{"version":1,"records":[]}',
         );
         assert.deepEqual(yield* store.get, migrated);
+        assert.deepEqual(yield* store.getExisting, migrated);
       }),
     ),
   );
@@ -465,6 +473,8 @@ describe("DesktopConnectionCatalogStore", () => {
         const preservedCatalog = yield* fileSystem.readFileString(catalogPath);
         yield* Ref.set(failDecrypt, true);
 
+        const readOnlyError = yield* store.getExisting.pipe(Effect.flip);
+        assert.equal(readOnlyError._tag, "DesktopConnectionCatalogStoreProtectionError");
         assert.deepStrictEqual(yield* store.get, Option.none());
         assert.equal(yield* fileSystem.readFileString(catalogPath), preservedCatalog);
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
