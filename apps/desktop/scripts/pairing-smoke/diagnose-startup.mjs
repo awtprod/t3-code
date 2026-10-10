@@ -257,8 +257,9 @@ async function run(
   evidence.launches.push(record);
   const symbolCache = NodePath.join(root, "symbols");
   const symbolPath = `srv*${symbolCache}*https://msdl.microsoft.com/download/symbols;srv*${symbolCache}*https://symbols.electronjs.org`;
-  const commands =
-    '.printf "PAIRING_DEBUGGEE_PID=%d\\n", @$tpid; .lines -e; sxe -c ".echo PAIRING_NATIVE_EXCEPTION_FIRST_CHANCE_ORIGIN; .lastevent; .exr -1; .ecxr; ln @rip; k 30; lm; q" bp; g';
+  const capture =
+    ".echo PAIRING_NATIVE_EXCEPTION_FIRST_CHANCE_ORIGIN; .lastevent; .exr -1; .ecxr; ln @rip; k 30; lm; q";
+  const commands = `.printf "PAIRING_DEBUGGEE_PID=%d\\n", @$tpid; .lines -e; sxe -c "${capture}" bpe; sxe -c "${capture}" av; sx; g`;
   const child = NodeChildProcess.spawn(
     debug ? debuggerPath : artifact.executable,
     debug

@@ -202,7 +202,13 @@ async function launchPackaged(mode) {
   if (priorLaunch) NodeAssert.equal(priorLaunch.terminationConfirmed, true);
   const child = NodeChildProcess.spawn(
     NodePath.resolve(executable),
-    ["--remote-debugging-port=0", "--disable-gpu", "--enable-logging=stderr", "--v=1"],
+    [
+      `--user-data-dir=${NodePath.join(env.APPDATA, "command-center")}`,
+      "--remote-debugging-port=0",
+      "--disable-gpu",
+      "--enable-logging=stderr",
+      "--v=1",
+    ],
     { env, stdio: ["ignore", "pipe", "pipe"] },
   );
   const launch = {
@@ -210,6 +216,7 @@ async function launchPackaged(mode) {
     pid: child.pid,
     startedAt: new Date().toISOString(),
     launcher: "direct packaged executable; renderer CDP only; no Node debugger",
+    browserProfile: "explicit synthetic user-data-dir; same profile for every launch",
     startupLog: "",
     requestsStart: records.length,
     priorProcessId: priorLaunch?.pid ?? null,
