@@ -173,6 +173,39 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       active: pathname.startsWith("/lessons"),
     },
   ];
+  const inboxUnavailable = bootstrapQuery.error !== null && environmentId !== null;
+
+  if (isMobile) {
+    // The phone drawer is mostly for switching threads. Wrapping chips keep
+    // every destination one tap away in about a third of the rows' height.
+    return (
+      <SidebarGroup>
+        <nav aria-label="Command Center" className="flex flex-wrap gap-1">
+          {entries.map((entry) => {
+            const Icon = entry.icon;
+            return (
+              <Link
+                key={entry.label}
+                aria-current={entry.active ? "page" : undefined}
+                className="inline-flex h-8 items-center gap-1.5 rounded-full bg-sidebar-control-surface px-2 text-xs font-medium text-sidebar-muted-foreground ring-1 ring-sidebar-border outline-hidden focus-visible:ring-2 focus-visible:ring-ring active:bg-sidebar-row-active data-[active=true]:bg-sidebar-row-selected data-[active=true]:text-sidebar-foreground [&>svg]:size-3.5 [&>svg]:shrink-0"
+                data-active={entry.active}
+                onClick={closeMobileSidebar}
+                to={entry.to}
+              >
+                <Icon />
+                <span>{entry.label}</span>
+              </Link>
+            );
+          })}
+        </nav>
+        {inboxUnavailable ? (
+          <div className="px-2 pt-2 text-xs text-muted-foreground">
+            <CircleAlertIcon className="mr-2 inline size-3.5" /> Inbox unavailable
+          </div>
+        ) : null}
+      </SidebarGroup>
+    );
+  }
 
   return (
     <SidebarGroup>
@@ -192,7 +225,7 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
             </SidebarMenuItem>
           );
         })}
-        {bootstrapQuery.error !== null && environmentId !== null ? (
+        {inboxUnavailable ? (
           <SidebarMenuItem>
             <div className="px-2 py-1 text-xs text-muted-foreground">
               <CircleAlertIcon className="mr-2 inline size-3.5" /> Inbox unavailable
