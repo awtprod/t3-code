@@ -14,8 +14,14 @@
     },
     "scripts": {
       // Knip loads its preprocessor through a CLI option; native verification and
-      // worktree setup (from t3.json) run directly.
-      "entry": ["knip-schemas.ts", "mobile-native-client.ts", "setup-worktree.ts"],
+      // worktree setup (from t3.json) run directly, and the pre-commit hook
+      // (.vite-hooks/pre-commit) runs the staged gitleaks gate.
+      "entry": [
+        "knip-schemas.ts",
+        "mobile-native-client.ts",
+        "setup-worktree.ts",
+        "gitleaks-staged.ts",
+      ],
     },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.
@@ -27,7 +33,11 @@
         "scripts/measure-pr-preview.ts",
         "scripts/update-test-shard-weights.ts",
         "src/provider/testFixtures/*.mjs",
+        // Run by hand against a real container runtime (see the file header).
+        "integration/sandboxCanary.integration.ts",
       ],
+      // Command Center's sandbox barrel; callers import the modules directly.
+      "ignoreIssues": { "src/sandbox/index.ts": ["files"] },
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // The Vite+ web build prerequisite.
       "ignoreDependencies": ["@effect/platform-node-shared", "@t3tools/web"],
@@ -56,12 +66,21 @@
     "apps/web": {
       // Vitest loads this through the per-file @vitest-environment directive.
       "ignoreDependencies": ["jsdom"],
-      // Worktree setup (scripts/setup-worktree.ts) runs this directly.
-      "entry": ["scripts/warm-dep-cache.ts"],
-      // UI component modules are copied and adapted as cohesive sets. Keep their
-      // named subcomponents even before they have callers; the file audit still
-      // reports an entire component module when nothing imports it.
-      "ignoreIssues": { "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"] },
+      // Worktree setup (scripts/setup-worktree.ts) runs this directly; src/pwa.ts
+      // registers the service worker by URL.
+      "entry": ["scripts/warm-dep-cache.ts", "public/service-worker.js"],
+      "ignoreIssues": {
+        // UI component modules are copied and adapted as cohesive sets. Keep their
+        // named subcomponents even before they have callers; the file audit still
+        // reports an entire component module when nothing imports it.
+        "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"],
+        // Command Center barrels; callers import the modules directly.
+        "src/command-center/index.ts": ["files"],
+        "src/command-center/automation/index.ts": ["files"],
+        // Command Center's sidebar redesign, behind the Beta settings toggle but
+        // not mounted yet.
+        "src/components/SidebarV2.tsx": ["files"],
+      },
     },
     "apps/mobile": {
       // Expo loads plugins by string; Metro embeds the browser entry in the native WebView.
@@ -77,6 +96,8 @@
         "@t3tools/mobile-review-diff-native",
         "@t3tools/mobile-terminal-native",
       ],
+      // Command Center's usage analytics screen, left unrouted by an earlier upstream sync.
+      "ignoreIssues": { "src/features/settings/SettingsUsageRouteScreen.tsx": ["files"] },
     },
     "apps/mobile/modules/t3-markdown-text": {
       // React Native codegen discovers component specifications by filename.
@@ -88,6 +109,11 @@
     "packages/*": {
       // These workspace packages are private to this monorepo.
       "includeEntryExports": true,
+    },
+    "packages/sandbox-bridge": {
+      "includeEntryExports": true,
+      // build.ts bundles each binary into the sandbox image.
+      "entry": ["src/bin/*.ts"],
     },
     "packages/effect-acp": {
       "includeEntryExports": true,
