@@ -191,7 +191,7 @@ const extraWindowsKeys = [
   "processor_revision",
 ];
 const flags = ["--remote-debugging-port=0", "--disable-gpu", "--enable-logging=stderr", "--v=1"];
-function profileEnvironment(extended) {
+function profileEnvironment(extended, precreateBrowserProfile = false) {
   // Reuse the exact same physical profile path after each captured process exits.
   const profile = NodePath.join(root, "isolated-profile");
   NodeFS.rmSync(profile, { recursive: true, force: true });
@@ -220,6 +220,9 @@ function profileEnvironment(extended) {
     NodePath.join(env.COMMAND_CENTER_HOME, "userdata"),
   ])
     NodeFS.mkdirSync(directory, { recursive: true });
+  if (precreateBrowserProfile)
+    for (const name of ["Command Center", "command-center"])
+      NodeFS.mkdirSync(NodePath.join(env.APPDATA, name), { recursive: true });
   NodeFS.writeFileSync(
     NodePath.join(env.COMMAND_CENTER_HOME, "userdata", "desktop-settings.json"),
     JSON.stringify({ primaryBackendMode: "remote", remoteBackendUrl: endpoint }),
@@ -233,9 +236,11 @@ async function run(
   debug = false,
   plain = false,
   applicationCwd = false,
+  launchFlags,
+  precreateBrowserProfile = false,
 ) {
-  const env = profileEnvironment(extended);
-  const actualFlags = plain ? [] : flags;
+  const env = profileEnvironment(extended, precreateBrowserProfile);
+  const actualFlags = launchFlags ?? (plain ? [] : flags);
   const cwd = applicationCwd ? NodePath.dirname(artifact.executable) : process.cwd();
   const record = {
     artifactRunId: artifact.runId,
@@ -243,6 +248,7 @@ async function run(
     startedAt: new Date().toISOString(),
     environmentKeys: Object.keys(env).sort(),
     flags: actualFlags,
+    precreatedBrowserProfile: precreateBrowserProfile,
     cwd,
     startupLog: "",
     windowOpened: false,
@@ -252,12 +258,11 @@ async function run(
   const symbolCache = NodePath.join(root, "symbols");
   const symbolPath = `srv*${symbolCache}*https://msdl.microsoft.com/download/symbols;srv*${symbolCache}*https://symbols.electronjs.org`;
   const commands =
-    '.printf "PAIRING_DEBUGGEE_PID=%d\\n", @$tpid; sxe -c ".echo PAIRING_NATIVE_EXCEPTION_FIRST_CHANCE_ORIGIN; .lastevent; .exr -1; .ecxr; k 30; lm; q" bp; g';
+    '.printf "PAIRING_DEBUGGEE_PID=%d\\n", @$tpid; .lines -e; sxe -c ".echo PAIRING_NATIVE_EXCEPTION_FIRST_CHANCE_ORIGIN; .lastevent; .exr -1; .ecxr; ln @rip; k 30; lm; q" bp; g';
   const child = NodeChildProcess.spawn(
     debug ? debuggerPath : artifact.executable,
     debug
       ? [
-          "-g",
           "-G",
           "-noshell",
           "-nosqm",
@@ -429,7 +434,7 @@ async function run(
     save();
   }
 }
-async function runControl(extended) {
+async function runControl(extended, launchFlags = []) {
   const env = profileEnvironment(extended);
   const directory = NodePath.join(root, "control-app");
   NodeFS.mkdirSync(directory, { recursive: true });
@@ -442,7 +447,10 @@ async function runControl(extended) {
     NodePath.join(directory, "main.cjs"),
   );
   const record = {
-    mode: extended ? "standard-windows-environment" : "original-minimal-environment",
+    mode:
+      (extended ? "standard-windows-environment" : "original-minimal-environment") +
+      (launchFlags.length ? "-original-launch-flags" : ""),
+    flags: launchFlags,
     executableSha256: sha256(NodeFS.readFileSync(controlExecutable)),
     environmentKeys: Object.keys(env).sort(),
     stages: [],
@@ -452,7 +460,7 @@ async function runControl(extended) {
     const receiptPath = NodePath.join(root, `upstream-control-${record.mode}-${stage}.json`);
     const result = { stage, startedAt: new Date().toISOString(), startupLog: "" };
     record.stages.push(result);
-    const child = NodeChildProcess.spawn(controlExecutable, [directory], {
+    const child = NodeChildProcess.spawn(controlExecutable, [directory, ...launchFlags], {
       env: { ...env, CC_DIAGNOSTIC_STAGE: stage, CC_DIAGNOSTIC_RECEIPT: receiptPath },
       cwd: process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -515,9 +523,21 @@ try {
   for (const artifact of artifacts) await run(artifact, "standard-windows-environment", true);
   for (const artifact of artifacts)
     await run(artifact, "application-working-directory", false, false, false, true);
+  for (const artifact of artifacts.toReversed())
+    await run(artifact, "ordinary-launch-reversed-order", false, false, true);
+  for (const [mode, isolatedFlags, plain] of [
+    ["renderer-debugger-only", ["--remote-debugging-port=0"], false],
+    ["gpu-disabled-only", ["--disable-gpu"], true],
+    ["verbose-logging-only", ["--enable-logging=stderr", "--v=1"], true],
+  ])
+    for (const artifact of artifacts)
+      await run(artifact, mode, false, false, plain, false, isolatedFlags);
+  for (const artifact of artifacts)
+    await run(artifact, "precreated-browser-profile", false, false, false, false, flags, true);
   if (controlExecutable && NodeFS.existsSync(controlExecutable)) {
     await runControl(false);
     await runControl(true);
+    await runControl(false, flags);
   } else evidence.upstreamControlUnavailable = true;
   if (debuggerPath && NodeFS.existsSync(debuggerPath)) {
     for (const artifact of artifacts.filter((artifact) =>

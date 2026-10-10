@@ -150,10 +150,15 @@ const saveEvidence = () =>
     `${JSON.stringify(evidence, null, 2)}\n`,
   );
 async function closeElectron(app) {
-  if (app.child.exitCode !== null) return false;
+  const hasExited = () => app.child.exitCode !== null || app.child.signalCode !== null;
+  if (hasExited()) {
+    app.launch.terminationConfirmed = true;
+    app.launch.exitedBeforeShutdown = true;
+    return false;
+  }
   let timer;
   let forced = false;
-  const exited = NodeEvents.once(app.child, "exit");
+  const exited = app.exited;
   app.browser
     ?.newBrowserCDPSession()
     .then((session) => session.send("Browser.close"))
@@ -172,10 +177,29 @@ async function closeElectron(app) {
   } finally {
     clearTimeout(timer);
   }
+  if (!hasExited()) {
+    try {
+      await Promise.race([
+        exited,
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Packaged process did not exit after shutdown")),
+            5000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  NodeAssert.ok(hasExited(), "Packaged process must exit before reopening");
+  app.launch.terminationConfirmed = true;
   await app.browser?.close().catch(() => {});
   return forced;
 }
 async function launchPackaged(mode) {
+  const priorLaunch = evidence.launches.at(-1);
+  if (priorLaunch) NodeAssert.equal(priorLaunch.terminationConfirmed, true);
   const child = NodeChildProcess.spawn(
     NodePath.resolve(executable),
     ["--remote-debugging-port=0", "--disable-gpu", "--enable-logging=stderr", "--v=1"],
@@ -187,10 +211,23 @@ async function launchPackaged(mode) {
     startedAt: new Date().toISOString(),
     launcher: "direct packaged executable; renderer CDP only; no Node debugger",
     startupLog: "",
+    requestsStart: records.length,
+    priorProcessId: priorLaunch?.pid ?? null,
+    priorProcessTerminationConfirmed: priorLaunch?.terminationConfirmed ?? null,
   };
+  if (priorLaunch) NodeAssert.notEqual(child.pid, priorLaunch.pid);
   evidence.launches.push(launch);
   const app = {
     child,
+    launch,
+    exited: new Promise((resolve) => {
+      child.once("exit", (code, signal) => {
+        launch.exitCode = code;
+        launch.exitSignal = signal;
+        launch.exitedAt = new Date().toISOString();
+        resolve();
+      });
+    }),
     browser: null,
     process: () => child,
     windows: () => app.browser?.contexts()[0]?.pages() || [],
@@ -366,6 +403,28 @@ try {
         NodeAssert.equal((await recover()).authenticated, true);
         launch.negativeControlsPassed = true;
       }
+      if (mode === "cold-reconnect" || mode === "cold-reopen") {
+        const deadline = Date.now() + 15000;
+        const hasUpgrade = () =>
+          records
+            .slice(launch.requestsStart)
+            .some((request) => request.method === "UPGRADE" && request.validSyntheticTicket);
+        while (!hasUpgrade() && Date.now() < deadline)
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        launch.requests = records.slice(launch.requestsStart);
+        NodeAssert.ok(hasUpgrade(), "Each cold launch must establish its own authenticated socket");
+        NodeAssert.ok(
+          launch.requests.some(
+            (request) => request.path === "/api/auth/session" && request.syntheticBearerMatches,
+          ),
+        );
+        NodeAssert.equal(
+          launch.requests.some((request) =>
+            ["/oauth/token", "/api/auth/browser-session"].includes(request.path),
+          ),
+          false,
+        );
+      }
     }
     const protectedCatalog = NodeFS.readFileSync(
       NodePath.join(state, "connection-catalog.json"),
@@ -383,6 +442,10 @@ try {
     saveEvidence();
     launch.forcedShutdown = await closeElectron(electron);
     electron = null;
+    NodeAssert.ok(!launch.exitedBeforeShutdown, "Packaged app must remain running until shutdown");
+    NodeAssert.equal(launch.forcedShutdown, false, "Cold launch requires normal app shutdown");
+    NodeAssert.equal(launch.exitCode, 0, "Normal app shutdown must not crash");
+    NodeAssert.equal(launch.exitSignal, null, "Normal app shutdown must not require a signal");
     launch.closedAt = new Date().toISOString();
     saveEvidence();
   }
