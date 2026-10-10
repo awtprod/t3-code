@@ -1,7 +1,6 @@
 name: Deploy T3 Connect relay
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
