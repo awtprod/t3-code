@@ -2579,8 +2579,7 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
 
   // The turn genuinely may still be running server-side, but once the status
   // leaves "working" the label stops claiming we can see progress.
-  const labelClassName =
-    status === "working" ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400";
+  const labelClassName = status === "working" ? "text-muted-foreground" : "text-warning-foreground";
   // One span for every label so the setup-to-working handoff swaps text in
   // place instead of remounting the row.
   const shimmer = isPreparingWorktree || isCompacting;
@@ -4683,10 +4682,10 @@ function SubagentWorkEntryRow({ workEntry }: { workEntry: TimelineWorkEntry }) {
     state === "failed"
       ? "text-destructive"
       : state === "completed"
-        ? "text-emerald-600 dark:text-emerald-400"
+        ? "text-success-foreground"
         : state === "suspended"
-          ? "text-amber-600 dark:text-amber-400"
-          : "text-sky-600 dark:text-sky-400";
+          ? "text-warning-foreground"
+          : "text-info-foreground";
   return (
     <div className="my-1 flex gap-2 rounded-lg border border-border/55 bg-muted/20 px-2.5 py-2">
       <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md bg-accent/55">
@@ -4695,15 +4694,15 @@ function SubagentWorkEntryRow({ workEntry }: { workEntry: TimelineWorkEntry }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 text-xs">
           <span className="truncate font-medium text-foreground/90">{name}</span>
-          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+          <span className="rounded bg-muted px-1.5 py-0.5 text-3xs text-muted-foreground">
             {provider}
           </span>
-          <span className={cn("ms-auto text-[10px] font-medium capitalize", statusClass)}>
+          <span className={cn("ms-auto text-3xs font-medium capitalize", statusClass)}>
             {state}
           </span>
         </div>
         {summary ? (
-          <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">{summary}</p>
+          <p className="mt-1 line-clamp-2 text-2xs leading-4 text-muted-foreground">{summary}</p>
         ) : null}
       </div>
     </div>

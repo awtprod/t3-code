@@ -262,7 +262,7 @@ export function Messages({
         <span className="mb-4 flex size-12 items-center justify-center rounded-2xl border bg-card shadow-sm">
           <SparklesIcon className="size-5 text-primary" />
         </span>
-        <h2 className="max-w-full text-pretty font-heading text-lg font-semibold">
+        <h2 className="max-w-full text-pretty text-lg font-semibold">
           {selectedSpaceName === undefined
             ? "What do you want to move forward?"
             : `${selectedSpaceName} is ready`}
@@ -528,7 +528,7 @@ function CommandCenterOverview({
           <p className="text-xs font-medium text-muted-foreground">
             {selectedSpaceName ?? "Across all Spaces"}
           </p>
-          <h2 className="mt-1 font-heading text-xl font-semibold">A useful place to start</h2>
+          <h2 className="mt-1 text-xl font-semibold">A useful place to start</h2>
         </div>
         <span className="hidden text-xs text-muted-foreground sm:block">
           Updated from live context

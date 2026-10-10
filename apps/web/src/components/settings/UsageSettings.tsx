@@ -56,7 +56,7 @@ function Metric({
     <div className="rounded-xl border border-border/60 bg-card/45 p-4">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 text-xl font-semibold tabular-nums tracking-tight">{value}</div>
-      {note ? <div className="mt-1 text-[11px] text-muted-foreground/70">{note}</div> : null}
+      {note ? <div className="mt-1 text-2xs text-muted-foreground/70">{note}</div> : null}
     </div>
   );
 }

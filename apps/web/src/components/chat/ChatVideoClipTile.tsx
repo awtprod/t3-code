@@ -97,7 +97,7 @@ export const ChatVideoClipTile = memo(function ChatVideoClipTile(props: {
           <PlayIcon aria-hidden className="ms-0.5 size-5 fill-current" />
         </span>
       </span>
-      <span className="absolute inset-x-0 bottom-0 truncate bg-linear-to-t from-black/70 to-transparent px-2 pt-4 pb-1 text-start text-[11px]">
+      <span className="absolute inset-x-0 bottom-0 truncate bg-linear-to-t from-black/70 to-transparent px-2 pt-4 pb-1 text-start text-2xs">
         {props.name}
       </span>
     </button>

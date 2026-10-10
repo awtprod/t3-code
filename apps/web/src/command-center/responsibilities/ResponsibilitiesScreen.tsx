@@ -41,13 +41,12 @@ function HealthPill({ health }: { readonly health: CommandCenterResponsibilitySt
     <span
       className={cn(
         "inline-flex min-h-7 items-center rounded-full border px-2.5 text-xs font-medium",
-        health === "healthy" &&
-          "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+        health === "healthy" && "border-success/30 bg-success/10 text-success-foreground",
         (health === "paused" || health === "disabled") &&
           "border-muted-foreground/25 bg-muted text-muted-foreground",
         health === "blocked" && "border-destructive/30 bg-destructive/10 text-destructive",
         health === "temporarily-failing" &&
-          "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+          "border-warning/30 bg-warning/10 text-warning-foreground",
         health === "unknown" && "border-border bg-muted/50 text-muted-foreground",
       )}
     >
@@ -131,7 +130,7 @@ export function ResponsibilitiesScreen({
           Space
           <select
             aria-label="Responsibilities Space"
-            className="min-h-11 rounded-[var(--control-radius)] border border-input bg-background px-3 text-base shadow-xs/5 sm:min-h-9 sm:text-sm"
+            className="min-h-11 rounded-md border border-input bg-background px-3 text-base shadow-xs/5 sm:min-h-9 sm:text-sm"
             onChange={(event) => onSpaceChange(event.target.value)}
             value={spaceId}
           >
@@ -330,7 +329,7 @@ export function ResponsibilitiesScreen({
                 ) : null}
 
                 {selected.incident ? (
-                  <div className="mt-5 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
+                  <div className="mt-5 rounded-lg border border-warning/30 bg-warning/5 p-4 text-sm">
                     <div className="flex items-center gap-2 font-semibold">
                       <CircleAlertIcon className="size-4" />{" "}
                       {selected.incident.state === "blocked"

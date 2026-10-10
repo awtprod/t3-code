@@ -956,7 +956,7 @@ export function CommandCenterHome({
       : null;
 
   return (
-    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none">
       <CommandCenterShell
         digest={<DigestCard environmentId={environmentId} />}
         activeConversationId={activeConversationId}

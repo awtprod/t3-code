@@ -175,7 +175,7 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
   ];
 
   return (
-    <SidebarGroup className="px-2 pt-2 pb-1">
+    <SidebarGroup>
       <SidebarMenu>
         {entries.map((entry) => {
           const Icon = entry.icon;
@@ -193,8 +193,10 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
           );
         })}
         {bootstrapQuery.error !== null && environmentId !== null ? (
-          <SidebarMenuItem className="px-2 py-1 text-xs text-muted-foreground">
-            <CircleAlertIcon className="mr-2 inline size-3.5" /> Inbox unavailable
+          <SidebarMenuItem>
+            <div className="px-2 py-1 text-xs text-muted-foreground">
+              <CircleAlertIcon className="mr-2 inline size-3.5" /> Inbox unavailable
+            </div>
           </SidebarMenuItem>
         ) : null}
       </SidebarMenu>

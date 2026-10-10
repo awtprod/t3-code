@@ -2,7 +2,6 @@ import { SymbolView } from "../../components/AppSymbol";
 import { ActivityIndicator, Pressable } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
-import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { WorkspaceState } from "../../state/workspaceModel";
 import { workspaceConnectionStatusLabel } from "./workspace-connection-status";
 
@@ -11,7 +10,6 @@ export function WorkspaceConnectionStatus(props: {
   readonly onPress: () => void;
   readonly variant?: "floating" | "sidebar";
 }) {
-  const iconColor = useUniwindTheme()["--color-icon-muted"];
   const isSynchronizing =
     props.state.networkStatus !== "offline" &&
     props.state.connectionError === null &&
@@ -41,15 +39,25 @@ export function WorkspaceConnectionStatus(props: {
       }
     >
       {isSynchronizing ? (
-        <ActivityIndicator color={iconColor} size="small" />
+        <ActivityIndicator colorClassName="accent-icon-muted" size="small" />
       ) : (
-        <SymbolView name="wifi.slash" size={15} tintColor={iconColor} type="monochrome" />
+        <SymbolView
+          name="wifi.slash"
+          size={15}
+          tintColorClassName="accent-icon-muted"
+          type="monochrome"
+        />
       )}
       <Text className="min-w-0 flex-1 text-sm font-t3-bold text-foreground" numberOfLines={1}>
         {workspaceConnectionStatusLabel(props.state)}
       </Text>
       {variant === "sidebar" ? (
-        <SymbolView name="chevron.right" size={11} tintColor={iconColor} type="monochrome" />
+        <SymbolView
+          name="chevron.right"
+          size={11}
+          tintColorClassName="accent-icon-muted"
+          type="monochrome"
+        />
       ) : null}
     </Pressable>
   );

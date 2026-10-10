@@ -25,7 +25,7 @@ export interface SpaceAgentsSidebarGroupViewProps {
 export function SpaceAgentsSidebarGroupView(props: SpaceAgentsSidebarGroupViewProps) {
   if (props.agents.length === 0) return null;
   return (
-    <SidebarGroup className="px-2 pt-1 pb-1" data-testid="sidebar-space-agents">
+    <SidebarGroup data-testid="sidebar-space-agents">
       <div
         className="flex h-6 shrink-0 items-center px-2 font-medium text-sidebar-muted-foreground text-xs"
         data-slot="sidebar-group-label"
@@ -57,14 +57,14 @@ export function SpaceAgentsSidebarGroupView(props: SpaceAgentsSidebarGroupViewPr
                 <span className="min-w-0 flex-1 truncate">{agent.displayName}</span>
                 {agent.paused ? (
                   <span
-                    className="inline-flex shrink-0 items-center gap-0.5 text-[10px] text-amber-600 dark:text-amber-400"
+                    className="inline-flex shrink-0 items-center gap-0.5 text-3xs text-warning-foreground"
                     aria-label="Paused"
                   >
                     <PauseIcon className="size-3" />
                     Paused
                   </span>
                 ) : null}
-                <span className="shrink-0 text-[11px] text-muted-foreground/70 tabular-nums">
+                <span className="shrink-0 text-2xs text-muted-foreground/70 tabular-nums">
                   {threadId === null
                     ? waking
                       ? "Waking…"

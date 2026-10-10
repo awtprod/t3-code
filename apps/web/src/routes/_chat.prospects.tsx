@@ -109,7 +109,7 @@ function ProspectsRouteView() {
   );
 
   return (
-    <SidebarInset className="h-full min-h-0 overflow-auto bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-auto">
       <ProspectsScreen
         error={actionError ?? bootstrapQuery.error ?? itemsQuery.error}
         bootstrapError={bootstrapQuery.error !== null}

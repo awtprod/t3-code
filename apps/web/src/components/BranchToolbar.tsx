@@ -622,7 +622,7 @@ export const BranchToolbar = memo(function BranchToolbar({
       ref={setStripElement}
       data-compact={labelsOverflow ? "" : undefined}
       className={cn(
-        "chat-composer-context-strip max-w-[calc(var(--chat-column-max-width)-2*var(--chat-composer-drawer-inset))] gap-1 text-xs font-normal text-muted-foreground/70",
+        "gap-1 text-xs font-normal text-muted-foreground/70",
         // A non-Git strip with no visible composer controls should occupy no
         // space, but its host must retain a prospective width so controls can
         // become visible again when the chat view grows.

@@ -220,7 +220,7 @@ function InboxSpaceList({
     <section aria-labelledby={`inbox-space-${space.id}`} className="flex flex-col gap-2">
       <div className="flex items-center justify-between px-1">
         <h2
-          className="text-xs font-semibold tracking-[0.12em] text-muted-foreground uppercase"
+          className="text-xs font-semibold tracking-widest text-muted-foreground uppercase"
           id={`inbox-space-${space.id}`}
         >
           {space.displayName}
@@ -276,8 +276,8 @@ function InboxSpaceList({
               className={cn(
                 "mt-1.5 size-2 shrink-0 rounded-full",
                 summary.item.priority === "urgent" || summary.item.priority === "high"
-                  ? "bg-amber-400"
-                  : "bg-emerald-300",
+                  ? "bg-warning"
+                  : "bg-success",
               )}
             />
             <span className="min-w-0 flex-1">
@@ -1289,7 +1289,7 @@ export function InboxDetailPane({
             </Button>
           </div>
           {pendingReply !== null ? (
-            <div className="mt-3 rounded-lg border border-amber-500/35 bg-amber-500/8 p-3 text-sm">
+            <div className="mt-3 rounded-lg border border-warning/35 bg-warning/8 p-3 text-sm">
               <p>
                 {rejectedReply === null
                   ? "The previous response was not conclusive. Retry sends the exact same request ID, version, intent, and submitted text. Any newer text in the editor stays untouched."
@@ -1797,7 +1797,7 @@ export function InboxDetailPane({
                     <CheckIcon /> Mark request resolved
                   </Button>
                 ) : entry.resolvedAt !== undefined ? (
-                  <p className="mt-2 text-xs text-emerald-400">
+                  <p className="mt-2 text-xs text-success-foreground">
                     Resolved {dateLabel(entry.resolvedAt)}
                   </p>
                 ) : null}

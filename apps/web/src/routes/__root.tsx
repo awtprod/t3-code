@@ -271,7 +271,7 @@ function WindowsLocalOverrideBanner() {
   }, []);
   if (!active) return null;
   return (
-    <div className="fixed inset-x-0 top-0 z-[100] bg-amber-600 px-3 py-1 text-center text-xs font-semibold text-white shadow-md">
+    <div className="fixed inset-x-0 top-0 z-[100] bg-warning px-3 py-1 text-center text-xs font-semibold text-white shadow-md">
       Windows local override — execution is local for this launch only
     </div>
   );

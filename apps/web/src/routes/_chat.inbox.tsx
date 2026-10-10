@@ -79,7 +79,7 @@ function InboxRouteView() {
 
   if (!isReady) {
     return (
-      <SidebarInset className="h-full min-h-0 overflow-hidden bg-background text-foreground">
+      <SidebarInset className="h-full min-h-0 overflow-hidden">
         <div className="flex h-full items-center justify-center p-8 text-sm text-muted-foreground">
           Loading environments…
         </div>
@@ -88,7 +88,7 @@ function InboxRouteView() {
   }
   if (environmentId === null) {
     return (
-      <SidebarInset className="h-full min-h-0 overflow-hidden bg-background text-foreground">
+      <SidebarInset className="h-full min-h-0 overflow-hidden">
         <Empty className="flex-1">
           <EmptyHeader className="max-w-md">
             <PlugZapIcon className="mx-auto mb-3 size-8 text-muted-foreground" />
@@ -109,7 +109,7 @@ function InboxRouteView() {
     const phase = selectedEnvironment?.connection.phase ?? "unavailable";
     const error = selectedEnvironment?.connection.error;
     return (
-      <SidebarInset className="h-full min-h-0 overflow-hidden bg-background text-foreground">
+      <SidebarInset className="h-full min-h-0 overflow-hidden">
         <Empty className="flex-1">
           <EmptyHeader className="max-w-md">
             <PlugZapIcon className="mx-auto mb-3 size-8 text-muted-foreground" />
@@ -133,7 +133,7 @@ function InboxRouteView() {
   }
 
   return (
-    <SidebarInset className="h-full min-h-0 overflow-hidden bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-hidden">
       <InboxEnvironmentRoute
         environmentId={environmentId}
         environmentOptions={environmentOptions}

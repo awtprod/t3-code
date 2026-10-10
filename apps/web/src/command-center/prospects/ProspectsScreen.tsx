@@ -4,7 +4,6 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { Button } from "~/components/ui/button";
-import { cn } from "~/lib/utils";
 
 import {
   prospectActionForStatus,
@@ -68,7 +67,7 @@ export function ProspectsScreen({
         Space
         <select
           aria-label="Prospects Space"
-          className="min-h-11 rounded-[var(--control-radius)] border border-input bg-background px-3 text-base shadow-xs/5 sm:min-h-8 sm:text-sm"
+          className="min-h-11 rounded-md border border-input bg-background px-3 text-base shadow-xs/5 sm:min-h-8 sm:text-sm"
           onChange={(event) => onSpaceChange(event.target.value)}
           value={space?.id ?? ""}
         >
@@ -218,11 +217,13 @@ function ActionButton({
 }) {
   return (
     <Button
-      className={cn("min-h-11 text-sm sm:min-h-8", action === "pass" && "text-destructive")}
+      className="min-h-11 sm:min-h-8"
       disabled={disabled}
       onClick={() => onAction(item, action)}
       size="sm"
-      variant={action === "shortlist" ? "default" : "outline"}
+      variant={
+        action === "shortlist" ? "default" : action === "pass" ? "destructive-outline" : "outline"
+      }
     >
       {prospectActionLabel(action)}
     </Button>

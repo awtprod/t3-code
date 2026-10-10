@@ -57,11 +57,11 @@ function NewThreadRouteView() {
 
 function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
   return (
-    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none">
       <Empty className="flex-1">
         <EmptyHeader className="max-w-md">
-          <EmptyTitle className="text-xl text-foreground">Couldn’t start a new thread</EmptyTitle>
-          <EmptyDescription className="mt-2 text-sm text-muted-foreground/78">
+          <EmptyTitle>Couldn’t start a new thread</EmptyTitle>
+          <EmptyDescription className="mt-2">
             The project is still available. Try opening the draft again.
           </EmptyDescription>
           <div className="mt-5 flex justify-center">
@@ -79,13 +79,13 @@ function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
 function NoProjectsHero() {
   const openAddProject = () => openCommandPalette({ open: "add-project" });
   return (
-    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none">
       <Empty className="flex-1">
         <EmptyHeader className="max-w-md">
-          <EmptyTitle className="text-2xl text-foreground sm:text-3xl">
-            What should we work on?
+          <EmptyTitle>
+            <span className="text-2xl sm:text-3xl">What should we work on?</span>
           </EmptyTitle>
-          <EmptyDescription className="mt-2 text-sm text-muted-foreground/78">
+          <EmptyDescription className="mt-2">
             Add a project to start your first thread.
           </EmptyDescription>
           <div className="mt-6 flex justify-center">

@@ -491,7 +491,6 @@ export function SettingResetButton({
             variant="ghost-muted"
             aria-label={`Reset ${label} to default`}
             disabled={disabled}
-            className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
             onClick={(event) => {
               event.stopPropagation();
               onClick();

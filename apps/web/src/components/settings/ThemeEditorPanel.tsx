@@ -366,7 +366,6 @@ export function ThemeEditorPanel({
     };
     window.addEventListener("resize", clamp);
     return () => window.removeEventListener("resize", clamp);
-    // oxlint-disable-next-line exhaustive-deps -- clampPosition reads live layout only.
   }, [isMinimized, open]);
 
   // The draft only reaches the live app once this open has been seeded;

@@ -158,7 +158,7 @@ export function ContextWindowMeter(props: {
               </span>
             </div>
           ) : null}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] leading-4">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-2xs leading-4">
             <span className="text-muted-foreground/60">Uncached input</span>
             <span className="text-right tabular-nums text-muted-foreground/80">
               {latestInput === null
@@ -202,7 +202,7 @@ export function ContextWindowMeter(props: {
           {adviceThresholdPercent !== null &&
           adviceThresholdPercent !== undefined &&
           normalizedPercentage >= adviceThresholdPercent ? (
-            <div className="mt-1 text-pretty text-[11px] font-medium text-amber-600 dark:text-amber-400">
+            <div className="mt-1 text-pretty text-2xs font-medium text-warning-foreground">
               This task has reached its {adviceThresholdPercent}% context guide. Compact it if the
               provider supports that, or start a new task to keep token use predictable.
             </div>
@@ -211,7 +211,7 @@ export function ContextWindowMeter(props: {
           toolWarningThreshold !== undefined &&
           usage.toolUses != null &&
           usage.toolUses >= toolWarningThreshold ? (
-            <div className="text-pretty text-[11px] font-medium text-amber-600 dark:text-amber-400">
+            <div className="text-pretty text-2xs font-medium text-warning-foreground">
               This turn has used {usage.toolUses} tools. Consider narrowing the next request or
               starting a focused task.
             </div>

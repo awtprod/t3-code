@@ -381,7 +381,7 @@ function ObservationsRouteView() {
   };
 
   return (
-    <SidebarInset className="h-full min-h-0 overflow-auto bg-background text-foreground">
+    <SidebarInset className="h-full min-h-0 overflow-auto">
       <main className="mx-auto w-full max-w-7xl space-y-5 p-4 pb-10 pt-14 sm:p-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div>
@@ -527,12 +527,14 @@ function ObservationsRouteView() {
                         : "Paste an array of imported observations for this Space, up to 100 and 256 KiB. Each entry must have collectionMethod imported."}
                     </p>
                   </div>
-                  <Textarea
-                    aria-label="Observation JSON"
-                    className="min-h-64 font-mono text-xs"
-                    value={editorText}
-                    onChange={(event) => setEditorText(event.target.value)}
-                  />
+                  <div className="font-mono">
+                    <Textarea
+                      aria-label="Observation JSON"
+                      className="min-h-64"
+                      value={editorText}
+                      onChange={(event) => setEditorText(event.target.value)}
+                    />
+                  </div>
                   <div className="flex gap-2">
                     <Button disabled={busy} onClick={submit}>
                       {busy ? "Saving…" : "Save"}
@@ -710,7 +712,7 @@ function ObservationsRouteView() {
                   {detail.data.hasCollectionConflict ? (
                     <p
                       role="status"
-                      className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+                      className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm"
                     >
                       Another collection method reports this metric for the same subject and period.
                       Reconcile before comparing.
@@ -727,12 +729,14 @@ function ObservationsRouteView() {
                         Corrections create a new revision; the source identity and earlier values
                         remain in history.
                       </p>
-                      <Textarea
-                        aria-label="Corrected data JSON"
-                        className="min-h-48 font-mono text-xs"
-                        value={correctionText}
-                        onChange={(event) => setCorrectionText(event.target.value)}
-                      />
+                      <div className="font-mono">
+                        <Textarea
+                          aria-label="Corrected data JSON"
+                          className="min-h-48"
+                          value={correctionText}
+                          onChange={(event) => setCorrectionText(event.target.value)}
+                        />
+                      </div>
                       <label className="block space-y-1 text-sm">
                         Reason
                         <input
