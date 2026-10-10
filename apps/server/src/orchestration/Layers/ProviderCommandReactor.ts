@@ -52,6 +52,10 @@ import {
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { COMMAND_PRODUCED_NO_EVENTS_DETAIL } from "../Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
+import {
+  formatThreadTitleContext,
+  type ThreadTitleMessage,
+} from "../../textGeneration/ThreadTitleContext.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
@@ -176,129 +180,8 @@ const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
 const SANDBOX_PROVISION_WAIT_TIMEOUT = Duration.minutes(10);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
-const MAX_REGENERATION_ATTACHMENTS = 4;
-const MAX_THREAD_TITLE_CONTEXT_CHARS = 8_000;
-const MAX_FIRST_USER_TITLE_CONTEXT_CHARS = 2_000;
-const THREAD_TITLE_CONTEXT_TRUNCATION_MARKER = "[Earlier content truncated]\n\n";
-const FIRST_USER_CONTEXT_TRUNCATION_MARKER = "\n[First user message truncated]";
 const COLD_START_CONTEXT_HEADER = `[Command Center conversation recovery]
 The provider-native conversation could not be resumed. Continue from the persisted transcript below, preserving established work and prior user instructions. The final CURRENT USER MESSAGE is the newest request.`;
-
-type ThreadTitleMessage = {
-  readonly role: "user" | "assistant" | "system" | "reasoning";
-  readonly text: string;
-  readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
-};
-
-function formatThreadTitleSection(message: ThreadTitleMessage): string | undefined {
-  // Thinking traces are working notes, not conversation content (matches
-  // upstream's ThreadTitleContext), so they never seed titles or recovery.
-  if (message.role === "system" || message.role === "reasoning") {
-    return undefined;
-  }
-  const text = message.text.trim();
-  const attachmentSummary = (message.attachments ?? [])
-    .map((attachment) => attachment.name)
-    .join(", ");
-  const contents = [
-    ...(text.length > 0 ? [text] : []),
-    ...(attachmentSummary.length > 0 ? [`[Attachments: ${attachmentSummary}]`] : []),
-  ].join("\n");
-  return contents.length > 0 ? `${message.role.toUpperCase()}:\n${contents}` : undefined;
-}
-
-function limitFirstUserSection(section: string): string {
-  if (section.length <= MAX_FIRST_USER_TITLE_CONTEXT_CHARS) {
-    return section;
-  }
-  return `${section.slice(
-    0,
-    MAX_FIRST_USER_TITLE_CONTEXT_CHARS - FIRST_USER_CONTEXT_TRUNCATION_MARKER.length,
-  )}${FIRST_USER_CONTEXT_TRUNCATION_MARKER}`;
-}
-
-function collectRecentThreadTitleContext(
-  messages: ReadonlyArray<ThreadTitleMessage>,
-  maxChars: number,
-): {
-  readonly context: string;
-  readonly attachments: ReadonlyArray<ChatAttachment>;
-  readonly truncated: boolean;
-} {
-  let context = "";
-  let truncated = false;
-  const retainedAttachments: Array<ChatAttachment> = [];
-
-  for (const message of messages.toReversed()) {
-    const section = formatThreadTitleSection(message);
-    if (section === undefined) {
-      continue;
-    }
-
-    const separator = context.length > 0 ? "\n\n" : "";
-    const available = maxChars - context.length - separator.length;
-    if (section.length > available) {
-      if (available > 0) {
-        context = `${section.slice(-available)}${separator}${context}`;
-        retainedAttachments.unshift(...(message.attachments ?? []));
-      }
-      truncated = true;
-      break;
-    }
-    context = `${section}${separator}${context}`;
-    retainedAttachments.unshift(...(message.attachments ?? []));
-  }
-
-  return { context, attachments: retainedAttachments, truncated };
-}
-
-function formatThreadTitleContext(messages: ReadonlyArray<ThreadTitleMessage>): {
-  readonly message: string;
-  readonly attachments: ReadonlyArray<ChatAttachment>;
-} {
-  const recent = collectRecentThreadTitleContext(messages, MAX_THREAD_TITLE_CONTEXT_CHARS);
-  if (!recent.truncated) {
-    return {
-      message: recent.context,
-      attachments: recent.attachments.slice(-MAX_REGENERATION_ATTACHMENTS),
-    };
-  }
-
-  const firstUserMessage = messages.find(
-    (message) => message.role === "user" && formatThreadTitleSection(message),
-  );
-  const firstUserSection = firstUserMessage
-    ? formatThreadTitleSection(firstUserMessage)
-    : undefined;
-  if (!firstUserMessage || !firstUserSection) {
-    return {
-      message: `${THREAD_TITLE_CONTEXT_TRUNCATION_MARKER}${recent.context}`,
-      attachments: recent.attachments.slice(-MAX_REGENERATION_ATTACHMENTS),
-    };
-  }
-
-  const pinnedSection = limitFirstUserSection(firstUserSection);
-  const recentContextBudget =
-    MAX_THREAD_TITLE_CONTEXT_CHARS -
-    pinnedSection.length -
-    "\n\n".length -
-    THREAD_TITLE_CONTEXT_TRUNCATION_MARKER.length;
-  const retainedRecent = collectRecentThreadTitleContext(messages, recentContextBudget);
-  const pinnedAttachment = firstUserMessage.attachments?.[0];
-  const recentAttachments = retainedRecent.attachments.filter(
-    (attachment) => attachment.id !== pinnedAttachment?.id,
-  );
-
-  return {
-    message: `${pinnedSection}\n\n${THREAD_TITLE_CONTEXT_TRUNCATION_MARKER}${retainedRecent.context}`,
-    attachments: [
-      ...(pinnedAttachment ? [pinnedAttachment] : []),
-      ...recentAttachments.slice(
-        -(MAX_REGENERATION_ATTACHMENTS - (pinnedAttachment === undefined ? 0 : 1)),
-      ),
-    ],
-  };
-}
 
 function recoverProviderInputFromThread(input: {
   readonly messages: ReadonlyArray<
