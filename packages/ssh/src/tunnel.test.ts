@@ -224,6 +224,19 @@ describe("ssh tunnel scripts", () => {
     );
     assert.include(buildRemoteStopScript(target), 'kill "$REMOTE_PID" 2>/dev/null || true');
     assert.include(buildRemoteStopScript(target), 'rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"');
+    // Fork: remote launch state lives under ~/.command-center, not upstream's ~/.t3.
+    assert.include(
+      buildRemoteLaunchScript(),
+      'STATE_DIR="$HOME/.command-center/ssh-launch/$STATE_KEY"',
+    );
+    assert.include(buildRemoteLaunchScript(), 'DEFAULT_SERVER_HOME="$HOME/.command-center"');
+    for (const script of [buildRemotePairingScript(target), buildRemoteStopScript(target)]) {
+      assert.include(script, 'STATE_DIR="$HOME/.command-center/ssh-launch/');
+    }
+    assert.include(
+      buildRemoteStopScript(target),
+      "Remote Command Center server with PID %s did not stop within 2 seconds.",
+    );
     assert.include(
       buildRemoteLaunchScript(),
       'DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"',
