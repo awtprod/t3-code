@@ -1487,12 +1487,16 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           // placeholder keyed by this event's sequence, so a message queued
           // behind an already-sent turn keeps its own row instead of evicting
           // (and being evicted by) its neighbours.
-          const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+          // A queued /compact holds the queue: the reactor keeps later messages
+          // in memory and replays them once compaction restores the session.
+          // The queue can hold several rows, so check all of them, not just
+          // the oldest (upstream keeps a single row and checks only that one).
+          const queuedTurnStarts = yield* projectionTurnRepository.listPendingTurnStartsByThreadId({
             threadId: event.payload.threadId,
           });
-          if (Option.isSome(pendingTurnStart)) {
+          for (const queuedTurnStart of queuedTurnStarts) {
             const pendingMessage = yield* projectionThreadMessageRepository.getByMessageId({
-              messageId: pendingTurnStart.value.messageId,
+              messageId: queuedTurnStart.messageId,
             });
             if (
               Option.isSome(pendingMessage) &&
@@ -1518,32 +1522,29 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.activity-appended": {
-          if (event.payload.activity.kind === "context-compaction") {
-            const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId(
-              event.payload,
-            );
-            if (
-              Option.isNone(pendingTurnStart) ||
-              String(pendingTurnStart.value.messageId) !==
-                extractActivityRequestId(event.payload.activity.payload)
-            ) {
-              return;
-            }
-            yield* projectionTurnRepository.deletePendingTurnStartByThreadId(event.payload);
-            return;
-          }
-          if (event.payload.activity.kind !== "provider.turn.start.failed") return;
-          const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId(
-            event.payload,
-          );
           if (
-            Option.isNone(pendingTurnStart) ||
-            String(pendingTurnStart.value.messageId) !==
-              extractActivityRequestId(event.payload.activity.payload)
+            event.payload.activity.kind !== "context-compaction" &&
+            event.payload.activity.kind !== "provider.turn.start.failed"
           ) {
             return;
           }
-          yield* projectionTurnRepository.deletePendingTurnStartByThreadId(event.payload);
+          // Consume only the placeholder of the request this activity settles.
+          // Other queued messages keep their rows: deleting by thread would drop
+          // turns the provider has not run yet.
+          const settledRequestId = extractActivityRequestId(event.payload.activity.payload);
+          if (settledRequestId === null) return;
+          const queuedTurnStarts = yield* projectionTurnRepository.listPendingTurnStartsByThreadId(
+            event.payload,
+          );
+          yield* Effect.forEach(
+            queuedTurnStarts.filter((row) => String(row.messageId) === settledRequestId),
+            (row) =>
+              projectionTurnRepository.deletePendingTurnStart({
+                threadId: event.payload.threadId,
+                requestSequence: row.requestSequence,
+              }),
+            { concurrency: 1, discard: true },
+          );
           return;
         }
 

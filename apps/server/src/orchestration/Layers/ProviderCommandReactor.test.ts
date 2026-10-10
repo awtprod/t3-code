@@ -797,6 +797,19 @@ describe("ProviderCommandReactor", () => {
             `;
           }),
         ),
+      readPendingTurnStartMessageIds: () =>
+        runtime!.runPromise(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const rows = yield* sql<{ readonly messageId: string }>`
+              SELECT pending_message_id AS "messageId"
+              FROM projection_turns
+              WHERE turn_id IS NULL AND state = 'pending'
+              ORDER BY request_sequence ASC
+            `;
+            return rows.map((row) => row.messageId);
+          }),
+        ),
       tryHandlePromptCommand,
       startSession,
       sendTurn,
@@ -2381,8 +2394,11 @@ describe("ProviderCommandReactor", () => {
             (activity) => activity.kind === "provider.turn.start.failed",
           ),
         ).toEqual([]);
-        expect(yield* Effect.promise(() => harness.readPendingTurnStarts())).toEqual([
-          { threadId: "thread-1" },
+        // Fork: the pending-start queue keeps one row per request (appendPendingTurnStart), so
+        // "hello" stays queued until a provider turn.started adopts it, which this harness never emits.
+        expect(yield* Effect.promise(() => harness.readPendingTurnStartMessageIds())).toEqual([
+          "user-message-before-blocked-compact",
+          "user-message-blocked-compact",
         ]);
 
         yield* Deferred.succeed(releaseReadyDispatch, undefined);
