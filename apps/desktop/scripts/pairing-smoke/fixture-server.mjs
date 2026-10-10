@@ -31,7 +31,7 @@ export function makeServer({
   const environment = {
     environmentId: local && !sameIdentity ? "00000000-0000-4000-8000-000000000002" : remoteId,
     label: local ? "Fixture local" : "Fixture remote",
-    platform: { os: "win32", arch: "x64" },
+    platform: { os: "windows", arch: "x64" },
     serverVersion: process.env.FIXTURE_APP_VERSION,
     capabilities: { repositoryIdentity: true },
   };

@@ -34,6 +34,11 @@ on:
         required: false
         default: false
         type: boolean
+      focused_native_diagnosis:
+        description: "Limit startup diagnosis to original and explicit-profile launches plus native stacks"
+        required: false
+        default: false
+        type: boolean
       verification_runner:
         description: "Windows image for existing-artifact verification or startup diagnostics"
         required: false
@@ -385,6 +390,7 @@ jobs:
           CONTROL_EXECUTABLE: ${{ steps.control.outputs.executable }}
           UPSTREAM_PREPARATION_OUTCOME: ${{ steps.control.outcome }}
           DEBUGGER_PREPARATION_OUTCOME: ${{ steps.debugger.outcome }}
+          FOCUSED_NATIVE_DIAGNOSIS: ${{ inputs.focused_native_diagnosis }}
         run: |
           node apps/desktop/scripts/pairing-smoke/diagnose-startup.mjs windows-startup-diagnosis/artifacts.json windows-startup-diagnosis $env:CDB_PATH $env:CONTROL_EXECUTABLE
           if ($LASTEXITCODE -ne 0) { throw 'Windows startup comparison failed to complete' }

@@ -138,7 +138,7 @@ const server = NodeHttp.createServer((request, response) => {
         ? {
             environmentId: "00000000-0000-4000-8000-000000000001",
             label: "Synthetic startup fixture",
-            platform: { os: "win32", arch: "x64" },
+            platform: { os: "windows", arch: "x64" },
             serverVersion: "0.0.29",
             capabilities: { repositoryIdentity: true },
           }
@@ -238,9 +238,12 @@ async function run(
   applicationCwd = false,
   launchFlags,
   precreateBrowserProfile = false,
+  explicitBrowserProfile = false,
 ) {
   const env = profileEnvironment(extended, precreateBrowserProfile);
-  const actualFlags = launchFlags ?? (plain ? [] : flags);
+  const actualFlags = [...(launchFlags ?? (plain ? [] : flags))];
+  if (explicitBrowserProfile)
+    actualFlags.unshift(`--user-data-dir=${NodePath.join(env.APPDATA, "command-center")}`);
   const cwd = applicationCwd ? NodePath.dirname(artifact.executable) : process.cwd();
   const record = {
     artifactRunId: artifact.runId,
@@ -249,6 +252,7 @@ async function run(
     environmentKeys: Object.keys(env).sort(),
     flags: actualFlags,
     precreatedBrowserProfile: precreateBrowserProfile,
+    explicitBrowserProfile,
     cwd,
     startupLog: "",
     windowOpened: false,
@@ -518,23 +522,41 @@ async function runControl(extended, launchFlags = []) {
   }
 }
 try {
-  for (const artifact of artifacts)
-    await run(artifact, "ordinary-launch-original-environment", false, false, true);
-  for (const artifact of artifacts) await run(artifact, "original-minimal-environment");
-  for (const artifact of artifacts) await run(artifact, "standard-windows-environment", true);
-  for (const artifact of artifacts)
-    await run(artifact, "application-working-directory", false, false, false, true);
-  for (const artifact of artifacts.toReversed())
-    await run(artifact, "ordinary-launch-reversed-order", false, false, true);
-  for (const [mode, isolatedFlags, plain] of [
-    ["renderer-debugger-only", ["--remote-debugging-port=0"], false],
-    ["gpu-disabled-only", ["--disable-gpu"], true],
-    ["verbose-logging-only", ["--enable-logging=stderr", "--v=1"], true],
-  ])
+  const focused = process.env.FOCUSED_NATIVE_DIAGNOSIS === "true";
+  evidence.focusedNativeDiagnosis = focused;
+  if (focused) {
+    for (const artifact of artifacts) await run(artifact, "original-minimal-environment");
     for (const artifact of artifacts)
-      await run(artifact, mode, false, false, plain, false, isolatedFlags);
-  for (const artifact of artifacts)
-    await run(artifact, "precreated-browser-profile", false, false, false, false, flags, true);
+      await run(
+        artifact,
+        "explicit-isolated-browser-profile",
+        false,
+        false,
+        false,
+        false,
+        flags,
+        false,
+        true,
+      );
+  } else {
+    for (const artifact of artifacts)
+      await run(artifact, "ordinary-launch-original-environment", false, false, true);
+    for (const artifact of artifacts) await run(artifact, "original-minimal-environment");
+    for (const artifact of artifacts) await run(artifact, "standard-windows-environment", true);
+    for (const artifact of artifacts)
+      await run(artifact, "application-working-directory", false, false, false, true);
+    for (const artifact of artifacts.toReversed())
+      await run(artifact, "ordinary-launch-reversed-order", false, false, true);
+    for (const [mode, isolatedFlags, plain] of [
+      ["renderer-debugger-only", ["--remote-debugging-port=0"], false],
+      ["gpu-disabled-only", ["--disable-gpu"], true],
+      ["verbose-logging-only", ["--enable-logging=stderr", "--v=1"], true],
+    ])
+      for (const artifact of artifacts)
+        await run(artifact, mode, false, false, plain, false, isolatedFlags);
+    for (const artifact of artifacts)
+      await run(artifact, "precreated-browser-profile", false, false, false, false, flags, true);
+  }
   if (controlExecutable && NodeFS.existsSync(controlExecutable)) {
     await runControl(false);
     await runControl(true);
