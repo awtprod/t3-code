@@ -26,7 +26,7 @@ const VersionRange = TrimmedNonEmptyString.pipe(
 // Command Center keeps its own server release numbering (package.json), but the
 // bundled and remote compatibility policies are keyed on the upstream T3 Code
 // release whose provider integrations this fork carries. Bump on upstream syncs.
-export const T3_CODE_COMPATIBILITY_VERSION = "0.0.44";
+export const T3_CODE_COMPATIBILITY_VERSION = "0.0.45";
 
 const Policy = Schema.Struct({
   driver: TrimmedNonEmptyString,
