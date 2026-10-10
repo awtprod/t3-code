@@ -230,6 +230,12 @@ describe("ssh tunnel scripts", () => {
       'STATE_DIR="$HOME/.command-center/ssh-launch/$STATE_KEY"',
     );
     assert.include(buildRemoteLaunchScript(), 'DEFAULT_SERVER_HOME="$HOME/.command-center"');
+    // Pairing tokens must be minted in the base dir the launched server reads.
+    const serverHome = (script: string) => /^DEFAULT_SERVER_HOME="([^"]*)"$/m.exec(script)?.[1];
+    assert.strictEqual(
+      serverHome(buildRemotePairingScript(target)),
+      serverHome(buildRemoteLaunchScript()),
+    );
     for (const script of [buildRemotePairingScript(target), buildRemoteStopScript(target)]) {
       assert.include(script, 'STATE_DIR="$HOME/.command-center/ssh-launch/');
     }

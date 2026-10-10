@@ -612,7 +612,7 @@ printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGE
 
 const REMOTE_PAIRING_SCRIPT = `set -eu
 STATE_DIR="$HOME/.command-center/ssh-launch/@@T3_STATE_KEY@@"
-DEFAULT_SERVER_HOME="$HOME/.t3"
+DEFAULT_SERVER_HOME="$HOME/.command-center"
 RUNNER_FILE="$STATE_DIR/run-t3.sh"
 mkdir -p "$STATE_DIR"
 cat >"$RUNNER_FILE" <<'SH'
