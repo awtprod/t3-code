@@ -1726,7 +1726,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 : "none",
           "provider.cwd.effective": effectiveCwd ?? "",
         });
-        if (effectiveCwd !== undefined) {
+        // A sandbox target's cwd is a path inside its container, not on this
+        // host, so only a host workspace can be checked here.
+        if (effectiveCwd !== undefined && executionTarget?.kind !== "sandbox") {
           // Fail fast with an actionable error when the workspace folder is
           // gone (e.g. moved, deleted, or replaced by a plain file).
           // Otherwise every adapter surfaces this as a misleading "failed to
