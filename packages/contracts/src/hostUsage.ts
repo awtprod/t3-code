@@ -81,6 +81,7 @@ export const HostDiskReclaimBlocker = Schema.Literals([
   "no-artifacts",
   "live-process",
   "active-thread",
+  "process-check-unavailable",
 ]);
 export type HostDiskReclaimBlocker = typeof HostDiskReclaimBlocker.Type;
 
@@ -160,6 +161,7 @@ export const HostDiskReclaimResult = Schema.Union([
       "no-artifacts",
       "live-process",
       "active-thread",
+      "process-check-unavailable",
     ]),
     message: Schema.String,
   }),

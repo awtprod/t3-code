@@ -129,6 +129,7 @@ describe("labels", () => {
     expect(hoardingReasonLabel("long-running")).toBe("Long-running");
     expect(reclaimBlockerLabel("live-process")).toBe("In use by a running process");
     expect(reclaimBlockerLabel("active-thread")).toBe("Thread is running");
+    expect(reclaimBlockerLabel("process-check-unavailable")).toBe("Can't check running processes");
   });
 });
 

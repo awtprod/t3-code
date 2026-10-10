@@ -838,7 +838,7 @@ export interface ResourcesPaneViewProps {
 }
 
 /** Everything the pane shows for one snapshot. Data and commands stay with the caller. */
-export function ResourcesPaneView({
+function ResourcesPaneView({
   environmentId,
   environmentOptions,
   onEnvironmentChange,

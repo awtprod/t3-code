@@ -150,6 +150,8 @@ export function reclaimBlockerLabel(blocker: HostDiskReclaimBlocker): string {
       return "Thread is running";
     case "no-artifacts":
       return "No build output";
+    case "process-check-unavailable":
+      return "Can't check running processes";
   }
 }
 

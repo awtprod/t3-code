@@ -88,7 +88,7 @@ export interface DiskSample {
   readonly availableBytes: number;
 }
 
-export const FILL_RATE_WINDOW_MS = HOUR_MS;
+const FILL_RATE_WINDOW_MS = HOUR_MS;
 const FILL_RATE_MIN_SPAN_MS = 10 * 60 * 1000;
 const FILL_RATE_MIN_SAMPLES = 3;
 
@@ -191,7 +191,7 @@ export function parsePasswd(text: string): ReadonlyMap<number, string> {
   return users;
 }
 
-export const HOARDING_THRESHOLDS = {
+const HOARDING_THRESHOLDS = {
   /** A process holding this much memory is flagged; capped at a share of RAM on small hosts. */
   memoryBytes: 8 * GIB,
   memoryShareOfHost: 0.15,
@@ -270,7 +270,7 @@ export interface ProcessMetrics extends ProcessReading {
 }
 
 /** Linux reports process times in USER_HZ, which is 100 on every supported architecture. */
-export const CLOCK_TICKS_PER_SECOND = 100;
+const CLOCK_TICKS_PER_SECOND = 100;
 
 /** Rates between two samples. A pid reused between samples counts as a new process. */
 export function processMetrics(

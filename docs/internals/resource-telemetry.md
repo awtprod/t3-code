@@ -67,10 +67,12 @@ is filling the disks and which processes hold an outsized share of the machine.
   receive credentials as arguments.
 - Disk scan: on demand only. One `nice -n 19 du -x -d 2` per scan root, run one at
   a time. Roots are each repository directory under the worktrees directory, the
-  parent of each project workspace (never `/` or a home directory), and the runtime
-  base directory.
+  parent of each project workspace (never `/`, a home directory, or a directory
+  that holds home directories), and the runtime base directory.
 - Reclaim deletes only git-ignored build output, found with the same checks the
   worktree cleanup sweep uses. It refuses anything outside a scan root, anything
-  that is not a checkout, and checkouts with a live process inside or a busy thread.
+  that is not a checkout, home directories, and checkouts with a live process inside
+  or a busy thread. Live processes are only visible on Linux, so reclaim is disabled
+  on other platforms.
   The daily sweep remains the automatic path; reclaim is the manual one for
   checkouts the sweep never sees, such as builds outside thread worktrees.

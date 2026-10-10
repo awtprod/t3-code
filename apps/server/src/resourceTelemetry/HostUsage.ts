@@ -124,8 +124,8 @@ interface FilesystemReading {
 
 interface ReclaimContext {
   readonly owned: ReadonlyArray<OwnedPath>;
-  /** Working directories of every process whose cwd the server may read. */
-  readonly liveCwds: ReadonlyArray<string>;
+  /** Working directories of every process whose cwd the server may read; null where unsupported. */
+  readonly liveCwds: ReadonlyArray<string> | null;
   /** Directories that busy threads work in. */
   readonly busyPaths: ReadonlyArray<string>;
 }
@@ -147,10 +147,17 @@ function isUserHomeDirectory(path: string, home: string): boolean {
   return path === home || path === "/root" || /^\/(?:home|Users)\/[^/]+$/.test(path);
 }
 
+/** Measuring this directory would list home directories among its children. */
+function holdsUserHomes(path: string, home: string): boolean {
+  return path === "/home" || path === "/Users" || isPathWithin(path, home);
+}
+
 function reclaimBlocker(
   candidatePaths: ReadonlyArray<string>,
   context: ReclaimContext,
 ): Exclude<HostDiskReclaimBlocker, "no-artifacts"> | null {
+  // Without a process list, a running dev server could lose its node_modules mid-flight.
+  if (context.liveCwds === null) return "process-check-unavailable";
   const touches = (directory: string) =>
     candidatePaths.some((candidate) => isPathWithin(candidate, directory));
   if (context.liveCwds.some(touches)) return "live-process";
@@ -165,7 +172,7 @@ function reclaimBlocker(
   return null;
 }
 
-export const make = Effect.fn("makeHostUsage")(function* () {
+const make = Effect.fn("makeHostUsage")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const platform = yield* HostProcessPlatform;
@@ -520,7 +527,7 @@ export const make = Effect.fn("makeHostUsage")(function* () {
   // Disk scan
 
   const liveProcessCwds = Effect.gen(function* () {
-    if (platform !== "linux") return [];
+    if (platform !== "linux") return null;
     const entries = yield* fs
       .readDirectory("/proc")
       .pipe(Effect.orElseSucceed((): Array<string> => []));
@@ -563,7 +570,13 @@ export const make = Effect.fn("makeHostUsage")(function* () {
     const home = NodeOS.homedir();
     for (const project of projects) {
       const parent = path.dirname(path.resolve(project.workspaceRoot));
-      if (parent === path.parse(parent).root || isUserHomeDirectory(parent, home)) continue;
+      if (
+        parent === path.parse(parent).root ||
+        isUserHomeDirectory(parent, home) ||
+        holdsUserHomes(parent, home)
+      ) {
+        continue;
+      }
       candidates.push(parent);
     }
     candidates.push(config.baseDir);
@@ -763,6 +776,10 @@ export const make = Effect.fn("makeHostUsage")(function* () {
     const requested = path.resolve(input.path);
     const checkout = yield* fs.realPath(requested).pipe(Effect.orElseSucceed(() => null));
     if (!checkout) return refused("outside-scan-roots", "That directory no longer exists.");
+    const home = NodeOS.homedir();
+    if (isUserHomeDirectory(checkout, home) || holdsUserHomes(checkout, home)) {
+      return refused("outside-scan-roots", "Home directories are never reclaimed.");
+    }
     const shell = yield* shellState({ includeArchived: true });
     const roots = yield* scanRoots(shell.projects);
     if (!roots.includes(path.dirname(checkout))) {
@@ -782,6 +799,12 @@ export const make = Effect.fn("makeHostUsage")(function* () {
     }
     if (blocker === "active-thread") {
       return refused("active-thread", "A thread working in this checkout is still active.");
+    }
+    if (blocker === "process-check-unavailable") {
+      return refused(
+        "process-check-unavailable",
+        "Running processes can't be checked on this platform, so nothing is reclaimed.",
+      );
     }
 
     const artifacts = yield* findIgnoredArtifactDirectories(git, checkout).pipe(
