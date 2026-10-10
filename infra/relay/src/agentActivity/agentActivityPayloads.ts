@@ -6,10 +6,7 @@ import type {
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
-import type {
-  ApnsNotificationPayload,
-  ApnsThreadNotificationPayload,
-} from "./apnsDeliveryJobs.ts";
+import type { ApnsNotificationPayload, ApnsThreadNotificationPayload } from "./apnsDeliveryJobs.ts";
 
 export function isTerminalPhase(state: RelayAgentActivityState): boolean {
   return state.phase === "completed" || state.phase === "failed";

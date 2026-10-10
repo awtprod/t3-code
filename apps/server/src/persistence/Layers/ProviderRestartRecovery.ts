@@ -216,11 +216,10 @@ const makeProviderRestartRecoveryRepository = Effect.gen(function* () {
     );
     return insertReservation({ ...input, commandId }).pipe(
       Effect.flatMap(() => readUsableReservation(input)),
-      Effect.map(
-        (reservation): ProviderRestartRecoveryReservationOutcome =>
-          reservation._tag === "Some"
-            ? { _tag: "reserved", reservation: reservation.value }
-            : { _tag: "ineligible" },
+      Effect.map((reservation): ProviderRestartRecoveryReservationOutcome =>
+        reservation._tag === "Some"
+          ? { _tag: "reserved", reservation: reservation.value }
+          : { _tag: "ineligible" },
       ),
       Effect.mapError(toPersistenceSqlError("ProviderRestartRecoveryRepository.reserve:query")),
     );

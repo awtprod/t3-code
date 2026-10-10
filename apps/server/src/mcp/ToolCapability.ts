@@ -26,9 +26,7 @@ export const capabilitiesAllow = (
   if (required === "cc.connections.google.read") {
     return (
       capabilities.has(required) ||
-      Array.from(capabilities).some((capability) =>
-        capability.startsWith("cc.connections.google."),
-      )
+      Array.from(capabilities).some((capability) => capability.startsWith("cc.connections.google."))
     );
   }
   return capabilities.has(required);

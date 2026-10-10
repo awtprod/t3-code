@@ -142,8 +142,9 @@ export function resolveNewTaskModelSelection(input: {
     input.draftSelection ??
     input.projectDefaultSelection ??
     input.stickySelection ??
-    input.modelOptions.find((option) => option.isDefault && !option.isLegacy && !option.isUnavailable)
-      ?.selection ??
+    input.modelOptions.find(
+      (option) => option.isDefault && !option.isLegacy && !option.isUnavailable,
+    )?.selection ??
     input.modelOptions.find((option) => !option.isLegacy && !option.isUnavailable)?.selection ??
     null
   );

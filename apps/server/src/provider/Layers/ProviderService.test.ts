@@ -317,9 +317,8 @@ function makeFakeCodexAdapter(
   );
 
   const replacementBlockers = new Map<ThreadId, string>();
-  const sessionReplacementBlocker = vi.fn(
-    (threadId: ThreadId): Effect.Effect<string | undefined> =>
-      Effect.sync(() => replacementBlockers.get(threadId)),
+  const sessionReplacementBlocker = vi.fn((threadId: ThreadId): Effect.Effect<string | undefined> =>
+    Effect.sync(() => replacementBlockers.get(threadId)),
   );
 
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {

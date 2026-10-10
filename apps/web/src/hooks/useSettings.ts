@@ -417,7 +417,6 @@ export function usePrimarySettingsAvailable(): boolean {
   return primaryEnvironment !== null || !isHostedStaticApp();
 }
 
-
 /**
  * Returns an updater that routes each key to the correct backing store.
  *

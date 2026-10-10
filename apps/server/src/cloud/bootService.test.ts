@@ -174,8 +174,10 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       const failed = command === control.failCommand;
       if (!failed && command === "loginctl enable-linger --no-ask-password 501")
         control.linger = "yes";
-      if (!failed && command === "systemctl --user enable command-center.service") control.enabled = true;
-      if (!failed && command === "systemctl --user restart command-center.service") control.active = true;
+      if (!failed && command === "systemctl --user enable command-center.service")
+        control.enabled = true;
+      if (!failed && command === "systemctl --user restart command-center.service")
+        control.active = true;
       if (
         control.stateAfterStop !== undefined &&
         (command === "systemctl --user stop command-center.service" ||
@@ -198,11 +200,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
                 : "",
         stderr: failed ? control.failureStderr : "",
         code: ChildProcessSpawner.ExitCode(
-          failed
-            ? control.failureCode
-            : input.args[1] === "is-active" && !control.active
-              ? 1
-              : 0,
+          failed ? control.failureCode : input.args[1] === "is-active" && !control.active ? 1 : 0,
         ),
         timedOut: false,
         stdoutTruncated: false,
@@ -457,7 +455,10 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           ),
         ).toEqual(
           platform === "linux"
-            ? ["systemctl --user stop command-center.service", "systemctl --user restart command-center.service"]
+            ? [
+                "systemctl --user stop command-center.service",
+                "systemctl --user restart command-center.service",
+              ]
             : [
                 "launchctl bootout --wait gui/501/com.t3tools.t3code.service",
                 `launchctl bootstrap gui/501 ${plan.unitPath}`,

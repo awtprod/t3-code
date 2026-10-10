@@ -13,11 +13,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 
-import type {
-  AcpPermissionRequest,
-  AcpPlanUpdate,
-  AcpToolCallState,
-} from "./AcpRuntimeModel.ts";
+import type { AcpPermissionRequest, AcpPlanUpdate, AcpToolCallState } from "./AcpRuntimeModel.ts";
 
 type AcpAdapterRawSource = Extract<
   RuntimeEventRawSource,

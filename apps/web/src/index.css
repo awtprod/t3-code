@@ -732,7 +732,6 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     display: none;
   }
 
-
   /* Each maintainer palette gives the same line art its own material: rose
      vellum, forest drafting paper, marine cyanotype, copper, and violet ink.
      These colors stay deliberately deep at the top edge so the white stage

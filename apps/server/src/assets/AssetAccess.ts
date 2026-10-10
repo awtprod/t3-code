@@ -402,21 +402,21 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
       // their sibling assets, so they get the directory-scoped claim.
       claims:
         isWorkspaceImagePreviewPath(resolved.relativePath) || workspaceVideoMimeType !== null
-        ? {
-            version: 1 as const,
-            kind: "workspace-file-exact" as const,
-            workspaceRoot: canonicalWorkspaceRoot,
-            relativePath: resolved.relativePath,
-            ...(workspaceVideoMimeType !== null ? { mimeType: workspaceVideoMimeType } : {}),
-            expiresAt: input.expiresAt,
-          }
-        : {
-            version: 1 as const,
-            kind: "workspace-file" as const,
-            workspaceRoot: canonicalWorkspaceRoot,
-            baseRelativePath: path.dirname(resolved.relativePath),
-            expiresAt: input.expiresAt,
-          },
+          ? {
+              version: 1 as const,
+              kind: "workspace-file-exact" as const,
+              workspaceRoot: canonicalWorkspaceRoot,
+              relativePath: resolved.relativePath,
+              ...(workspaceVideoMimeType !== null ? { mimeType: workspaceVideoMimeType } : {}),
+              expiresAt: input.expiresAt,
+            }
+          : {
+              version: 1 as const,
+              kind: "workspace-file" as const,
+              workspaceRoot: canonicalWorkspaceRoot,
+              baseRelativePath: path.dirname(resolved.relativePath),
+              expiresAt: input.expiresAt,
+            },
       fileName: path.basename(resolved.relativePath),
       imageDimensions,
     };

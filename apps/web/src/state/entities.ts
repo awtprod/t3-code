@@ -262,4 +262,3 @@ export function readEnvironmentThreadRefs(
 export function readThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
   return appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
 }
-

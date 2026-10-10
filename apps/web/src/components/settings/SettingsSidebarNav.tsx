@@ -347,26 +347,26 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                 {navItems
                   .filter((item) => !remoteOnlyDisconnected || item.to === "/settings/connections")
                   .map((item) => {
-                  const Icon = item.icon;
-                  const isGeneralDetailPage =
-                    item.to === "/settings/general" &&
-                    pathname === "/settings/open-source-licenses";
-                  const isActive =
-                    isGeneralDetailPage ||
-                    pathname === item.to ||
-                    pathname.startsWith(`${item.to}/`);
-                  return (
-                    <SidebarMenuItem key={item.to}>
-                      <SidebarMenuButton
-                        isActive={isActive}
-                        onClick={() => handleSectionClick(item.to)}
-                      >
-                        <Icon />
-                        <span className="truncate">{item.label}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  );
-                })}
+                    const Icon = item.icon;
+                    const isGeneralDetailPage =
+                      item.to === "/settings/general" &&
+                      pathname === "/settings/open-source-licenses";
+                    const isActive =
+                      isGeneralDetailPage ||
+                      pathname === item.to ||
+                      pathname.startsWith(`${item.to}/`);
+                    return (
+                      <SidebarMenuItem key={item.to}>
+                        <SidebarMenuButton
+                          isActive={isActive}
+                          onClick={() => handleSectionClick(item.to)}
+                        >
+                          <Icon />
+                          <span className="truncate">{item.label}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
               </SidebarMenu>
             )}
           </div>

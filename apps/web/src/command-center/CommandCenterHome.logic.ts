@@ -224,13 +224,11 @@ export function buildRouteOptions(
 ): CommandCenterRouteOptions {
   const repositories =
     bootstrap?.spaces.flatMap((space) =>
-      space.repositories.map(
-        (repository): CommandCenterRouteOption => ({
-          id: repository.id,
-          label: repository.displayName,
-          detail: space.displayName,
-        }),
-      ),
+      space.repositories.map((repository): CommandCenterRouteOption => ({
+        id: repository.id,
+        label: repository.displayName,
+        detail: space.displayName,
+      })),
     ) ?? [];
   const routingProviders = providers.filter(supportsCommandCenterRouting);
   const modelProviders =
@@ -238,17 +236,15 @@ export function buildRouteOptions(
       ? routingProviders
       : routingProviders.filter((provider) => provider.instanceId === selectedProviderId);
   const models = modelProviders.flatMap((provider) =>
-    provider.models.map(
-      (model): CommandCenterRouteOption => ({
-        id: model.slug,
-        label: model.shortName ?? model.name,
-        detail: isUsableCommandCenterProvider(provider)
-          ? providerLabel(provider)
-          : `${providerLabel(provider)} · ${provider.message ?? "Unavailable"}`,
-        providerId: provider.instanceId,
-        disabled: !isUsableCommandCenterProvider(provider),
-      }),
-    ),
+    provider.models.map((model): CommandCenterRouteOption => ({
+      id: model.slug,
+      label: model.shortName ?? model.name,
+      detail: isUsableCommandCenterProvider(provider)
+        ? providerLabel(provider)
+        : `${providerLabel(provider)} · ${provider.message ?? "Unavailable"}`,
+      providerId: provider.instanceId,
+      disabled: !isUsableCommandCenterProvider(provider),
+    })),
   );
 
   return {
@@ -331,34 +327,30 @@ export function projectBootstrap(
   bootstrap: CommandCenterBootstrap,
   now = new Date(),
 ): CommandCenterShellProjection {
-  const spaces = bootstrap.spaces.map(
-    (space): CommandCenterSpace => ({
-      id: space.id,
-      name: space.displayName,
-      kind: space.kind,
-      description: space.instructions || undefined,
-      unreadCount: bootstrap.needsYou.filter((item) => item.spaceId === space.id).length,
-    }),
-  );
+  const spaces = bootstrap.spaces.map((space): CommandCenterSpace => ({
+    id: space.id,
+    name: space.displayName,
+    kind: space.kind,
+    description: space.instructions || undefined,
+    unreadCount: bootstrap.needsYou.filter((item) => item.spaceId === space.id).length,
+  }));
 
   const conversations = [...bootstrap.runs]
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
     .slice(0, 12)
-    .map(
-      (run): CommandCenterConversation => ({
-        id: run.id,
-        spaceId: run.spaceId,
-        projectId: run.projectId,
-        threadId: run.threadId,
-        title: `${titleCase(run.kind)} run`,
-        preview:
-          run.modelId === undefined
-            ? titleCase(run.status)
-            : `${run.modelId} · ${titleCase(run.status)}`,
-        updatedAtLabel: formatTime(run.createdAt, now),
-        status: conversationStatus(run.status),
-      }),
-    );
+    .map((run): CommandCenterConversation => ({
+      id: run.id,
+      spaceId: run.spaceId,
+      projectId: run.projectId,
+      threadId: run.threadId,
+      title: `${titleCase(run.kind)} run`,
+      preview:
+        run.modelId === undefined
+          ? titleCase(run.status)
+          : `${run.modelId} · ${titleCase(run.status)}`,
+      updatedAtLabel: formatTime(run.createdAt, now),
+      status: conversationStatus(run.status),
+    }));
 
   const todayKey = localDateKey(now);
   const today = bootstrap.items.flatMap((item) => {

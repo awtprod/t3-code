@@ -45,14 +45,11 @@ const decodeStoredReceipt = Schema.decodeUnknownEffect(
   ),
 );
 
-export class ObservationError extends Schema.TaggedError<ObservationError>()(
-  "ObservationError",
-  {
-    reason: Schema.Literals(["validation", "not-found", "conflict", "persistence"]),
-    message: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {}
+export class ObservationError extends Schema.TaggedError<ObservationError>()("ObservationError", {
+  reason: Schema.Literals(["validation", "not-found", "conflict", "persistence"]),
+  message: Schema.String,
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 
 const failure = (reason: ObservationError["reason"], message: string, cause?: unknown) =>
   new ObservationError({ reason, message, ...(cause === undefined ? {} : { cause }) });

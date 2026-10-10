@@ -281,8 +281,8 @@ export function createComposerImageThumbnail(file: File): Promise<string | null>
         dimension,
       );
       return (
-        (await encodeToDataUrl(surface.canvas, 1, "image/png", Number.POSITIVE_INFINITY))?.dataUrl ??
-        null
+        (await encodeToDataUrl(surface.canvas, 1, "image/png", Number.POSITIVE_INFINITY))
+          ?.dataUrl ?? null
       );
     } catch {
       return null;
@@ -305,7 +305,12 @@ async function encodeWithinBudget(
   maxDimension: number,
   budgetChars: number,
   preferredMimeType?: "image/jpeg",
-): Promise<{ dataUrl: string; dataUrlLength: number; mimeType: string; imageSize: ImageSize } | null> {
+): Promise<{
+  dataUrl: string;
+  dataUrlLength: number;
+  mimeType: string;
+  imageSize: ImageSize;
+} | null> {
   const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
   const width = Math.max(1, Math.round(bitmap.width * scale));
   const height = Math.max(1, Math.round(bitmap.height * scale));

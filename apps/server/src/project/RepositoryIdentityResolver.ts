@@ -223,7 +223,9 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
       Cache.get(remoteFetchUrlCache, cacheKey).pipe(
         Effect.map((remotes) => {
           const remote = remotes === null ? null : pickPrimaryRemote(remotes);
-          return remote === null ? null : buildRepositoryIdentity({ ...remote, rootPath: cacheKey });
+          return remote === null
+            ? null
+            : buildRepositoryIdentity({ ...remote, rootPath: cacheKey });
         }),
         Effect.filterOrElse(
           (identity): identity is null => identity === null,

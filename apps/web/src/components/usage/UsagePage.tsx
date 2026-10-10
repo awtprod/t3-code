@@ -305,7 +305,6 @@ export function UsagePage() {
     if (showingLimits && connectedLimitsEnvironments) autoRefreshLimits();
   }, [showingLimits, connectedLimitsEnvironments]);
 
-
   const windowLabel =
     isPast24Hours && window.sinceTime !== undefined && window.untilTime !== undefined
       ? `${formatDateTimeShort(window.sinceTime, window.timeZone)} to ${formatDateTimeShort(window.untilTime, window.timeZone)}`

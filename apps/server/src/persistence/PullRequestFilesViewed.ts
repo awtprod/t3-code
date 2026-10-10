@@ -80,7 +80,9 @@ export class PullRequestFilesViewedRepository extends Context.Service<
       input: SetPullRequestFilesViewedInput,
     ) => Effect.Effect<void, PullRequestFilesViewedRepositoryError>;
   }
->()("@awtprod/command-center/persistence/PullRequestFilesViewed/PullRequestFilesViewedRepository") {}
+>()(
+  "@awtprod/command-center/persistence/PullRequestFilesViewed/PullRequestFilesViewedRepository",
+) {}
 
 function toSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown): PullRequestFilesViewedRepositoryError =>
