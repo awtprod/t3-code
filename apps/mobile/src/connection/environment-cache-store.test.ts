@@ -118,6 +118,8 @@ describe("mobile SQLite environment cache store", () => {
             activities: [],
             checkpoints: [],
             session: null,
+            // Command Center's thread schema decodes an absent sandbox as null.
+            sandbox: null,
           },
           page: { beforeCursor: null, hasMore: false, snapshotSequence: 2, threadSequence: 2 },
         };

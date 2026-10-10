@@ -16,6 +16,7 @@ describe("SETTINGS_NAV_ITEMS", () => {
 
     expect(SETTINGS_NAV_ITEMS[databasesIndex]?.label).toBe("Databases");
     expect(databasesIndex).toBe(sourceControlIndex + 1);
-    expect(connectionsIndex).toBe(databasesIndex + 1);
+    // Upstream's Storage section sits between Databases and Connections.
+    expect(connectionsIndex).toBeGreaterThan(databasesIndex);
   });
 });

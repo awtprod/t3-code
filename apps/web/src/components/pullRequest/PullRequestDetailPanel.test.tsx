@@ -245,7 +245,9 @@ const actions = [
   "Explain this PR",
   "Fix findings in this thread",
   "Fix check",
-  "Add to agent",
+  // Upstream's "Add to agent" is not listed: Command Center wires the diff selection to Ask
+  // (`onAskAboutSelection`), which takes precedence in PullRequestCodeTab, so the panel never
+  // offers it.
 ];
 
 // The surface ChatView opens for `detail`, and the thread states it can be opened beside. The
