@@ -7,8 +7,8 @@ on:
       - "!v*-nightly.*"
       - "!v*-preview.*"
   schedule:
-    # Avoid minute zero, when GitHub scheduled jobs are busiest.
-    - cron: "8,38 * * * *"
+    # Off minute zero: GitHub delays scheduled runs most at the top of the hour.
+    - cron: "38 */3 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -521,12 +521,6 @@ jobs:
       # plus the web client and apps/desktop/dist-electron the Electron main.
       - name: Build JS bundle
         run: vp run build:desktop
-
-          if command -v magick >/dev/null 2>&1; then
-              magick -version
-          else
-              convert -version
-          fi
 
       - name: Prepare Azure Trusted Signing
         if: matrix.platform == 'win'
