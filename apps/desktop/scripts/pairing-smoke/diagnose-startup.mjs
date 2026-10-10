@@ -37,6 +37,10 @@ const evidence = {
   },
   productionAccess: false,
   realCredentials: false,
+  preparationOutcomes: {
+    upstream: process.env.UPSTREAM_PREPARATION_OUTCOME,
+    nativeDebugger: process.env.DEBUGGER_PREPARATION_OUTCOME,
+  },
   securityFlagsChanged: false,
   artifacts,
   launches: [],
@@ -515,7 +519,7 @@ try {
   if (controlExecutable && NodeFS.existsSync(controlExecutable)) {
     await runControl(false);
     await runControl(true);
-  }
+  } else evidence.upstreamControlUnavailable = true;
   if (debuggerPath && NodeFS.existsSync(debuggerPath)) {
     for (const artifact of artifacts.filter((artifact) =>
       evidence.launches.some(

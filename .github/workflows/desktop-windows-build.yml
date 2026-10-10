@@ -337,6 +337,7 @@ jobs:
 
       - name: Verify upstream Electron runtime control
         id: control
+        continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -345,7 +346,7 @@ jobs:
           $name = 'electron-v43.4.1-win32-x64.zip'
           gh release download v43.4.1 --repo electron/electron --pattern $name --pattern SHASUMS256.txt --dir windows-electron-control
           if ($LASTEXITCODE -ne 0) { throw 'Official Electron download failed' }
-          $rows = @(Get-Content windows-electron-control/SHASUMS256.txt | Where-Object { $_ -match "\s+$([Regex]::Escape($name))$" })
+          $rows = @(Get-Content windows-electron-control/SHASUMS256.txt | Where-Object { $_ -match "\s+\*?$([Regex]::Escape($name))$" })
           if ($rows.Count -ne 1) { throw 'Official Electron checksum row missing' }
           $declared = ($rows[0] -split '\s+')[0]
           $actual = (Get-FileHash "windows-electron-control/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -359,6 +360,7 @@ jobs:
 
       - name: Prepare Microsoft native debugger
         id: debugger
+        continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -381,6 +383,8 @@ jobs:
         env:
           CDB_PATH: ${{ steps.debugger.outputs.path }}
           CONTROL_EXECUTABLE: ${{ steps.control.outputs.executable }}
+          UPSTREAM_PREPARATION_OUTCOME: ${{ steps.control.outcome }}
+          DEBUGGER_PREPARATION_OUTCOME: ${{ steps.debugger.outcome }}
         run: |
           node apps/desktop/scripts/pairing-smoke/diagnose-startup.mjs windows-startup-diagnosis/artifacts.json windows-startup-diagnosis $env:CDB_PATH $env:CONTROL_EXECUTABLE
           if ($LASTEXITCODE -ne 0) { throw 'Windows startup comparison failed to complete' }
