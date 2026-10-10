@@ -20,9 +20,10 @@ describe("relay deployment workflow", () => {
 
   it("retains main pushes and intentional manual runs without PR deployment", () => {
     const triggers = workflow.get("on");
-    expect(isMap(triggers) ? Object.keys(triggers.toJSON()) : []).toEqual([
-      "workflow_dispatch",
+    // Upstream lists push before workflow_dispatch; only the trigger set matters.
+    expect(isMap(triggers) ? Object.keys(triggers.toJSON()).toSorted() : []).toEqual([
       "push",
+      "workflow_dispatch",
     ]);
     const branches = workflow.getIn(["on", "push", "branches"]);
     expect(isSeq(branches) ? branches.toJSON() : []).toEqual(["main"]);
