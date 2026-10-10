@@ -14,7 +14,7 @@ NodeAssert.equal(NodeOS.platform(), "win32");
 const require = NodeModule.createRequire(new URL("../../package.json", import.meta.url));
 const { chromium } = require("playwright-core");
 const asar = NodeModule.createRequire(require.resolve("electron-builder"))("@electron/asar");
-const [metadataPath, output, debuggerPath] = process.argv.slice(2);
+const [metadataPath, output, debuggerPath, controlExecutable] = process.argv.slice(2);
 const root = NodePath.resolve(output);
 NodeFS.mkdirSync(root, { recursive: true });
 const artifacts = JSON.parse(NodeFS.readFileSync(metadataPath, "utf8").replace(/^\uFEFF/, ""));
@@ -27,6 +27,14 @@ const sha256 = (bytes) => NodeCrypto.createHash("sha256").update(bytes).digest("
 const evidence = {
   startedAt: new Date().toISOString(),
   platform: "win32",
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Record the actual isolated CI host kernel.
+  hostKernel: NodeOS.release(),
+  hostImage: {
+    imageOS: process.env.ImageOS,
+    imageVersion: process.env.ImageVersion,
+    runnerOS: process.env.RUNNER_OS,
+    runnerArchitecture: process.env.RUNNER_ARCH,
+  },
   productionAccess: false,
   realCredentials: false,
   securityFlagsChanged: false,
@@ -75,7 +83,9 @@ for (const artifact of artifacts) {
     "icudtl.dat",
     "v8_context_snapshot.bin",
     "resources.pak",
-    "chrome_elf.dll",
+    "ffmpeg.dll",
+    "chrome_100_percent.pak",
+    "locales/en-US.pak",
     "resources/app.asar",
     "resources/server.asar",
   ]) {
@@ -415,6 +425,86 @@ async function run(
     save();
   }
 }
+async function runControl(extended) {
+  const env = profileEnvironment(extended);
+  const directory = NodePath.join(root, "control-app");
+  NodeFS.mkdirSync(directory, { recursive: true });
+  NodeFS.writeFileSync(
+    NodePath.join(directory, "package.json"),
+    JSON.stringify({ name: "synthetic-runtime-control", version: "1.0.0", main: "main.cjs" }),
+  );
+  NodeFS.copyFileSync(
+    NodePath.join(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "electron-control.cjs"),
+    NodePath.join(directory, "main.cjs"),
+  );
+  const record = {
+    mode: extended ? "standard-windows-environment" : "original-minimal-environment",
+    executableSha256: sha256(NodeFS.readFileSync(controlExecutable)),
+    environmentKeys: Object.keys(env).sort(),
+    stages: [],
+  };
+  (evidence.upstreamControls ||= []).push(record);
+  for (const stage of ["write", "read"]) {
+    const receiptPath = NodePath.join(root, `upstream-control-${record.mode}-${stage}.json`);
+    const result = { stage, startedAt: new Date().toISOString(), startupLog: "" };
+    record.stages.push(result);
+    const child = NodeChildProcess.spawn(controlExecutable, [directory], {
+      env: { ...env, CC_DIAGNOSTIC_STAGE: stage, CC_DIAGNOSTIC_RECEIPT: receiptPath },
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+    });
+    result.processId = child.pid;
+    const append = (data) => {
+      result.startupLog = (result.startupLog + data.toString()).slice(-20000);
+      save();
+    };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    let timer;
+    const exited = new Promise((resolve) => {
+      child.once("error", (error) => {
+        result.error = String(error);
+        resolve();
+      });
+      child.once("exit", (code, signal) => {
+        result.exitCode = code;
+        result.exitSignal = signal;
+        resolve();
+      });
+    });
+    await Promise.race([
+      exited,
+      new Promise((resolve) => {
+        timer = setTimeout(() => {
+          result.timeout = true;
+          child.kill();
+          resolve();
+        }, 60000);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (child.exitCode === null) {
+      await Promise.race([
+        exited,
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, 5000);
+        }),
+      ]);
+      clearTimeout(timer);
+    }
+    result.finishedAt = new Date().toISOString();
+    if (NodeFS.existsSync(receiptPath))
+      result.receipt = JSON.parse(NodeFS.readFileSync(receiptPath, "utf8"));
+    save();
+    NodeAssert.notEqual(
+      child.exitCode,
+      null,
+      "Captured upstream control must exit before profile reset",
+    );
+    if (result.receipt?.result !== "passed" || result.exitCode !== 0) break;
+  }
+}
 try {
   for (const artifact of artifacts)
     await run(artifact, "ordinary-launch-original-environment", false, false, true);
@@ -422,8 +512,19 @@ try {
   for (const artifact of artifacts) await run(artifact, "standard-windows-environment", true);
   for (const artifact of artifacts)
     await run(artifact, "application-working-directory", false, false, false, true);
+  if (controlExecutable && NodeFS.existsSync(controlExecutable)) {
+    await runControl(false);
+    await runControl(true);
+  }
   if (debuggerPath && NodeFS.existsSync(debuggerPath)) {
-    for (const artifact of artifacts)
+    for (const artifact of artifacts.filter((artifact) =>
+      evidence.launches.some(
+        (launch) =>
+          launch.artifactRunId === artifact.runId &&
+          launch.mode === "original-minimal-environment" &&
+          !launch.windowOpened,
+      ),
+    ))
       await run(artifact, "native-debugger-original-environment", false, true);
   } else evidence.nativeDebuggerUnavailable = true;
   evidence.result = "comparison-completed";

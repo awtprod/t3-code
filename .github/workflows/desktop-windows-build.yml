@@ -34,6 +34,14 @@ on:
         required: false
         default: false
         type: boolean
+      verification_runner:
+        description: "Windows image for existing-artifact verification or startup diagnostics"
+        required: false
+        default: windows-2025
+        type: choice
+        options:
+          - windows-2025
+          - windows-2022
 
 permissions:
   contents: read
@@ -169,7 +177,7 @@ jobs:
   verify-packaged-pairing:
     if: ${{ inputs.verify_artifact_run_id && !inputs.diagnose_windows_startup }}
     name: Verify packaged Windows pairing
-    runs-on: windows-2025
+    runs-on: ${{ inputs.verification_runner || 'windows-2025' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -279,7 +287,7 @@ jobs:
   diagnose-windows-startup:
     if: ${{ inputs.diagnose_windows_startup }}
     name: Compare shipped Windows startup
-    runs-on: windows-2025
+    runs-on: ${{ inputs.verification_runner || 'windows-2025' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -327,6 +335,28 @@ jobs:
           }
           ConvertTo-Json -InputObject $artifacts -Depth 5 | Set-Content windows-startup-diagnosis/artifacts.json
 
+      - name: Verify upstream Electron runtime control
+        id: control
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = 'electron-v43.4.1-win32-x64.zip'
+          gh release download v43.4.1 --repo electron/electron --pattern $name --pattern SHASUMS256.txt --dir windows-electron-control
+          if ($LASTEXITCODE -ne 0) { throw 'Official Electron download failed' }
+          $rows = @(Get-Content windows-electron-control/SHASUMS256.txt | Where-Object { $_ -match "\s+$([Regex]::Escape($name))$" })
+          if ($rows.Count -ne 1) { throw 'Official Electron checksum row missing' }
+          $declared = ($rows[0] -split '\s+')[0]
+          $actual = (Get-FileHash "windows-electron-control/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $pinned = 'c2ef9a5f65472c34d14bd3e67b7d14e66b0c01f124aba45263d6a4232160e13a'
+          if ($actual -ne $declared -or $actual -ne $pinned) { throw 'Official Electron checksum mismatch' }
+          Expand-Archive "windows-electron-control/$name" windows-electron-control/runtime
+          $exe = (Resolve-Path windows-electron-control/runtime/electron.exe).Path
+          New-NetFirewallRule -DisplayName 'CC upstream runtime control' -Direction Outbound -Action Block -Program $exe -Profile Any -RemoteAddress Any -ErrorAction Stop | Out-Null
+          @{version='43.4.1'; zipSha256=$actual; executableSha256=(Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant(); source='https://github.com/electron/electron/releases/tag/v43.4.1'} | ConvertTo-Json | Set-Content windows-startup-diagnosis/upstream-runtime-provenance.json
+          "executable=$exe" >> $env:GITHUB_OUTPUT
+
       - name: Prepare Microsoft native debugger
         id: debugger
         shell: pwsh
@@ -350,8 +380,9 @@ jobs:
         shell: pwsh
         env:
           CDB_PATH: ${{ steps.debugger.outputs.path }}
+          CONTROL_EXECUTABLE: ${{ steps.control.outputs.executable }}
         run: |
-          node apps/desktop/scripts/pairing-smoke/diagnose-startup.mjs windows-startup-diagnosis/artifacts.json windows-startup-diagnosis $env:CDB_PATH
+          node apps/desktop/scripts/pairing-smoke/diagnose-startup.mjs windows-startup-diagnosis/artifacts.json windows-startup-diagnosis $env:CDB_PATH $env:CONTROL_EXECUTABLE
           if ($LASTEXITCODE -ne 0) { throw 'Windows startup comparison failed to complete' }
 
       - name: Upload safe native startup evidence
