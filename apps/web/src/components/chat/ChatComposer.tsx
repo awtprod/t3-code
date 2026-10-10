@@ -2589,6 +2589,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (!isComposerCollapsedMobile && showPlanFollowUpPrompt && activeProposedPlan !== null);
   const showCollapsedMobilePromptRow =
     isComposerCollapsedMobile && !isComposerApprovalState && pendingUserInputs.length === 0;
+  // A collapsed phone composer answering a question or approval has nothing of
+  // its own to show. Its surface then only bridges the drawer and the strip.
+  const isComposerSurfaceBridgeOnly =
+    isComposerCollapsedMobile &&
+    !showCollapsedMobilePromptRow &&
+    !(providerInputSubmissionError ?? composerSubmissionError);
   const showComposerAttachAction =
     fileStagingLimit !== null &&
     (!activePendingProgress ||
@@ -6358,7 +6364,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     />
                     {!isChoiceOnlyPendingQuestion ||
                     activePendingProgress?.activeQuestion?.multiSelect ? (
-                      <ComposerBanner.Body>
+                      <ComposerBanner.Body className="max-sm:ps-3">
                         <div
                           data-chat-composer-mobile-pending-compact="true"
                           className={cn(
@@ -6451,6 +6457,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       <div className="relative">
         <ComposerSurface.Main
           ref={composerMainSurfaceRef}
+          data-chat-composer-bridge={isComposerSurfaceBridgeOnly ? "true" : undefined}
           className={composerProviderState.composerFrameClassName}
         >
           <div

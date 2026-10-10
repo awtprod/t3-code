@@ -813,13 +813,16 @@ export function BranchToolbarBranchSelector({
             disabled={isInitialBranchesLoadPending || isBranchActionPending}
           >
             <GitBranchIcon className="size-3 shrink-0 opacity-70" />
+            {/* The kept label: a compact strip truncates the branch into
+                whatever room the other labels free before hiding it. */}
             <span
               data-composer-label
-              className="min-w-0 max-w-[240px] group-data-[compact]/composer-context:max-w-0"
+              data-composer-label-keep
+              className="min-w-0 max-w-[240px] group-data-[compact]/composer-context:max-w-[var(--composer-context-kept-label-width,0px)]"
             >
               <span
                 data-composer-label-motion
-                className="flex w-full max-w-[240px] transition-opacity duration-180 ease-drawer group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
+                className="flex w-full max-w-[240px] transition-opacity duration-180 ease-drawer group-data-[compact=all]/composer-context:opacity-0 motion-reduce:transition-none"
               >
                 <MiddleTruncate value={triggerLabel} />
               </span>

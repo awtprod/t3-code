@@ -72,6 +72,9 @@ function Main({ className, ...props }: ComponentProps<"div">) {
         "group-has-data-[composer-banner-surface=attached]/composer-surface:shadow-composer dark:group-has-data-[composer-banner-surface=attached]/composer-surface:shadow-none",
         "not-supports-[((backdrop-filter:blur(1px))_or_(-webkit-backdrop-filter:blur(1px)))]:group-has-data-[composer-banner-surface=attached]/composer-surface:bg-(--chat-composer-glass-surface)",
         "group-has-data-[composer-banner-surface=attached]/composer-surface:**:data-[chat-composer-mobile-collapsed=true]:min-h-[calc(1rem+1px)]",
+        // An empty bridge matches the drawers' width so the drawer above and the
+        // strip below read as one card, not a full-width bar between them.
+        "data-[chat-composer-bridge=true]:mx-(--chat-composer-drawer-inset) data-[chat-composer-bridge=true]:rounded-none data-[chat-composer-bridge=true]:after:border-y-0",
         className,
       )}
       {...props}

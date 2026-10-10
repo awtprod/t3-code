@@ -172,7 +172,10 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   const customAnswerActive = progress.customAnswer.trim().length > 0;
 
   return (
+    // Phones narrow the empty icon column to a gutter so the options get the
+    // width instead of wrapping into tall rows behind the scroll fade.
     <Collapsible
+      className="max-sm:[--composer-banner-icon-column:--spacing(2)]"
       open={!isCollapsed}
       onOpenChange={(open) => {
         setCollapsedQuestionId(open ? null : activeQuestion.id);
@@ -180,6 +183,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     >
       <CollapsibleTrigger
         render={<ComposerBanner.Row render={<button type="button" />} />}
+        className="max-sm:min-h-8"
         title={
           isCollapsed ? "Show the question and its options" : "Hide the question and its options"
         }
@@ -228,8 +232,9 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
         </ComposerBanner.Actions>
       </CollapsibleTrigger>
       <CollapsiblePanel>
-        <ComposerBanner.Scroll>
-          <ComposerBanner.Body className="pe-1 pb-1 wrap-anywhere">
+        {/* A collapsed phone composer leaves the question most of the screen. */}
+        <ComposerBanner.Scroll className="in-data-[chat-composer-collapsed-controls=true]:max-h-[min(32rem,55dvh)]">
+          <ComposerBanner.Body className="pe-1 pb-1 wrap-anywhere max-sm:ps-3">
             <p className="text-sm text-foreground/85">{activeQuestion.question}</p>
             {activeQuestion.multiSelect ? (
               <p className="mt-1 text-secondary-label text-xs">Select one or more options.</p>
@@ -263,9 +268,10 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
                     {isSelected ? (
                       <CheckIcon className="size-3.5 shrink-0 text-primary" />
                     ) : shortcutKey !== null ? (
+                      // Number-key hints mean nothing on touch screens.
                       <kbd
                         className={cn(
-                          "flex size-5 shrink-0 items-center justify-center text-3xs font-medium text-muted-foreground tabular-nums",
+                          "flex size-5 shrink-0 items-center justify-center text-3xs font-medium text-muted-foreground tabular-nums pointer-coarse:hidden",
                         )}
                       >
                         {shortcutKey}
