@@ -3531,13 +3531,18 @@ export const make = Effect.gen(function* () {
     const wasCompacting = compactingThreadIds.has(thread.id);
     stoppingThreadIds.add(thread.id);
     const clearStopping = Effect.sync(() => void stoppingThreadIds.delete(thread.id));
-    yield* cancelTurnsAfterCompaction(
+    const stopped = yield* cancelTurnsAfterCompaction(
       thread.id,
       "The session was stopped during context compaction. Send this message again to continue.",
     ).pipe(
       Effect.andThen(
         thread.session && thread.session.status !== "stopped"
-          ? providerService.stopSession({ threadId: thread.id })
+          ? Effect.suspend(() => providerService.stopSession({ threadId: thread.id })).pipe(
+              // Match the turn-interrupt ladder: one bounded exponential retry. A
+              // duplicate session stop is safe, while a transient transport failure
+              // must not leave a provider running behind a generic warning.
+              Effect.retry({ times: 1, schedule: Schedule.exponential(100) }),
+            )
           : Effect.void,
       ),
       Effect.matchCauseEffect({
@@ -3561,8 +3566,20 @@ export const make = Effect.gen(function* () {
                 detail,
                 turnId: null,
                 createdAt: now,
-              }),
+              }).pipe(
+                Effect.catchCause((appendCause) =>
+                  Effect.logError(
+                    "provider command reactor failed to report a session stop failure",
+                    {
+                      threadId: thread.id,
+                      cause: Cause.pretty(appendCause),
+                      originalStopCause: detail,
+                    },
+                  ),
+                ),
+              ),
             ),
+            Effect.as(false),
           );
         },
         onSuccess: () =>
@@ -3575,16 +3592,34 @@ export const make = Effect.gen(function* () {
               ...(thread.session?.providerInstanceId !== undefined
                 ? { providerInstanceId: thread.session.providerInstanceId }
                 : {}),
+              // Preserved for the same reason as the instance id: this write ends the
+              // session, it does not re-identify it. A stopped binding that has
+              // forgotten its generation cannot recognize the stopped runtime's own
+              // late events as stale.
+              ...(thread.session?.sessionGeneration !== undefined
+                ? { sessionGeneration: thread.session.sessionGeneration }
+                : {}),
               runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
               activeTurnId: null,
               lastError: thread.session?.lastError ?? null,
               updatedAt: now,
             },
             createdAt: now,
-          }),
+          }).pipe(Effect.as(true)),
       }),
       Effect.ensuring(clearStopping),
     );
+
+    // A failed provider stop leaves the runtime and projection live. Marking
+    // the projection stopped would lie to the user; redriving requests spared
+    // by the cutoff would then send still more work into the session that
+    // failed to stop. The visible failure activity above is the terminal
+    // result for this attempt.
+    if (!stopped) {
+      return;
+    }
+
+    yield* redriveTurnStartsSparedByStop(event);
   });
 
   /**
