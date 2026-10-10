@@ -5,6 +5,7 @@ import {
   CircleAlertIcon,
   CommandIcon,
   ContactRoundIcon,
+  HardDriveIcon,
   InboxIcon,
   ListChecksIcon,
   ListFilterIcon,
@@ -171,6 +172,12 @@ export const SidebarCommandCenterNavigation = memo(function SidebarCommandCenter
       label: "Lessons",
       icon: LightbulbIcon,
       active: pathname.startsWith("/lessons"),
+    },
+    {
+      to: "/resources" as const,
+      label: "Resources",
+      icon: HardDriveIcon,
+      active: pathname.startsWith("/resources"),
     },
   ];
 
