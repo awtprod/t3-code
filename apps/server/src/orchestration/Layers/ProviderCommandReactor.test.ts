@@ -2958,6 +2958,8 @@ describe("ProviderCommandReactor", () => {
               lastError: null,
               updatedAt: createdAt,
             },
+            // Fork: a session write settles a turn only when it names it (contracts settledTurnId).
+            settledTurnId: turnId,
           });
         yield* ready("title-ready");
         if (timing === "after completion") yield* generate;
