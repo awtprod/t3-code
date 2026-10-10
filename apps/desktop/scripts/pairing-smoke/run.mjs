@@ -5,9 +5,10 @@ import * as NodePath from "node:path";
 import * as NodeModule from "node:module";
 import * as NodeEvents from "node:events";
 import * as NodeOS from "node:os";
+import * as NodeChildProcess from "node:child_process";
 
 const require = NodeModule.createRequire(new URL("../../package.json", import.meta.url));
-const { _electron } = require("playwright-core");
+const { chromium } = require("playwright-core");
 const asar = NodeModule.createRequire(require.resolve("electron-builder"))("@electron/asar");
 const [executable, output, expectedCommit, expectedVersion, expectedSource] = process.argv.slice(2);
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone CI verifier measures the real host without an Effect runtime.
@@ -143,25 +144,27 @@ const evidence = {
   syntheticProfile: true,
 };
 let electron;
-let encryptedProbe;
 const saveEvidence = () =>
   NodeFS.writeFileSync(
     NodePath.join(root, "windows-pairing-evidence.json"),
     `${JSON.stringify(evidence, null, 2)}\n`,
   );
 async function closeElectron(app) {
+  if (app.child.exitCode !== null) return false;
   let timer;
   let forced = false;
-  const closing = app.close().catch((error) => {
-    if (!forced) throw error;
-  });
+  const exited = NodeEvents.once(app.child, "exit");
+  app.browser
+    ?.newBrowserCDPSession()
+    .then((session) => session.send("Browser.close"))
+    .catch(() => {});
   try {
     await Promise.race([
-      closing,
+      exited,
       new Promise((resolve) => {
         timer = setTimeout(() => {
           forced = true;
-          app.process().kill("SIGKILL");
+          app.child.kill("SIGKILL");
           resolve();
         }, 8000);
       }),
@@ -169,19 +172,77 @@ async function closeElectron(app) {
   } finally {
     clearTimeout(timer);
   }
+  await app.browser?.close().catch(() => {});
   return forced;
+}
+async function launchPackaged(mode) {
+  const child = NodeChildProcess.spawn(
+    NodePath.resolve(executable),
+    ["--remote-debugging-port=0", "--disable-gpu", "--enable-logging=stderr", "--v=1"],
+    { env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const launch = {
+    mode,
+    pid: child.pid,
+    startedAt: new Date().toISOString(),
+    launcher: "direct packaged executable; renderer CDP only; no Node debugger",
+    startupLog: "",
+  };
+  evidence.launches.push(launch);
+  const app = {
+    child,
+    browser: null,
+    process: () => child,
+    windows: () => app.browser?.contexts()[0]?.pages() || [],
+  };
+  electron = app;
+  const redact = (text) =>
+    [staleToken, syntheticToken, pairingCode].reduce(
+      (value, secret) => value.replaceAll(secret, "[synthetic value redacted]"),
+      text,
+    );
+  const endpoint = await new Promise((resolve, reject) => {
+    let stderr = "";
+    const timer = setTimeout(
+      () => reject(new Error("Packaged app did not start renderer debugging within60seconds")),
+      60000,
+    );
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("exit", (code, signal) => {
+      launch.exitCode = code;
+      launch.exitSignal = signal;
+      clearTimeout(timer);
+      reject(new Error(`Packaged app exited before renderer attachment: ${code}/${signal}`));
+    });
+    child.stdout.on("data", (data) => {
+      launch.startupLog = (launch.startupLog + redact(data.toString())).slice(-20000);
+      saveEvidence();
+    });
+    child.stderr.on("data", (data) => {
+      const text = data.toString();
+      stderr += text;
+      launch.startupLog = (launch.startupLog + redact(text)).slice(-20000);
+      saveEvidence();
+      const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+      if (match) {
+        clearTimeout(timer);
+        resolve(match[1]);
+      }
+    });
+  });
+  app.browser = await chromium.connectOverCDP(endpoint, { timeout: 30000 });
+  return { app, launch };
 }
 try {
   for (const mode of ["seed", "repair-active-primary", "cold-reconnect", "cold-reopen"]) {
     if (mode === "cold-reconnect") control.rejectBearer = true;
-    electron = await _electron.launch({
-      executablePath: NodePath.resolve(executable),
-      args: ["--disable-gpu", "--enable-logging=stderr", "--v=1"],
-      env,
-      timeout: 60000,
-    });
+    const { app, launch } = await launchPackaged(mode);
+    const context = app.browser.contexts()[0];
     const page = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(
+      const timer = setTimeout(
         () => reject(new Error("Packaged application window did not open")),
         60000,
       );
@@ -189,35 +250,27 @@ try {
         window
           .waitForURL("commandcenter://app/**", { timeout: 60000 })
           .then(() => {
-            clearTimeout(timeout);
+            clearTimeout(timer);
             resolve(window);
           })
           .catch(() => {});
-      electron.on("window", check);
-      electron.windows().forEach(check);
+      context.on("page", check);
+      context.pages().forEach(check);
     });
     await page.waitForFunction(() => !!window.desktopBridge, { timeout: 60000 });
     page.setDefaultTimeout(30000);
-    const launch = { mode, pid: electron.process().pid, startedAt: new Date().toISOString() };
-    evidence.launches.push(launch);
-    launch.storage = await electron.evaluate(({ app, safeStorage }) => ({
-      // oxlint-disable-next-line t3code/no-global-process-runtime -- This callback executes inside the real packaged Electron process.
-      platform: process.platform,
-      isPackaged: app.isPackaged,
-      version: app.getVersion(),
-      userData: app.getPath("userData"),
-      encryptionAvailable: safeStorage.isEncryptionAvailable(),
-    }));
-    NodeAssert.equal(launch.storage.platform, "win32");
-    NodeAssert.equal(launch.storage.isPackaged, true);
-    NodeAssert.equal(launch.storage.encryptionAvailable, true);
-    NodeAssert.ok(launch.storage.userData.startsWith(profile));
-    NodeAssert.equal(launch.storage.userData, evidence.launches[0].storage.userData);
+    launch.platform = await page.evaluate(() => window.desktopBridge.getClientPlatform());
+    NodeAssert.equal(launch.platform, "win32");
+    launch.syntheticChromeProfileDirectories = NodeFS.readdirSync(env.APPDATA, {
+      withFileTypes: true,
+    })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    NodeAssert.deepEqual(
+      launch.syntheticChromeProfileDirectories,
+      evidence.launches[0].syntheticChromeProfileDirectories,
+    );
     if (mode === "seed") {
-      encryptedProbe = await electron.evaluate(
-        ({ safeStorage }, text) => safeStorage.encryptString(text).toString("base64"),
-        "synthetic-dpapi-roundtrip",
-      );
       NodeAssert.equal(
         await page.evaluate(
           (data) => window.desktopBridge.setConnectionCatalog(JSON.stringify(data)),
@@ -226,10 +279,15 @@ try {
         true,
       );
     } else {
-      launch.crossProcessSecureStorageRoundTrip = await electron.evaluate(
-        ({ safeStorage }, cipher) =>
-          safeStorage.decryptString(Buffer.from(cipher, "base64")) === "synthetic-dpapi-roundtrip",
-        encryptedProbe,
+      launch.crossProcessSecureStorageRoundTrip = await page.evaluate(
+        async ({ token, connectionId }) => {
+          const catalog = JSON.parse(await window.desktopBridge.getConnectionCatalog());
+          return (
+            catalog.credentials.find((entry) => entry.connectionId === connectionId)?.credential
+              .token === token
+          );
+        },
+        { token: mode === "repair-active-primary" ? staleToken : syntheticToken, connectionId },
       );
       NodeAssert.equal(launch.crossProcessSecureStorageRoundTrip, true);
       if (mode === "repair-active-primary") {

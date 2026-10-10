@@ -241,6 +241,25 @@ jobs:
           node apps/desktop/scripts/pairing-smoke/run.mjs $env:APP_EXECUTABLE windows-pairing-evidence $env:ARTIFACT_COMMIT $env:EXPECTED_VERSION expected-registry.ts
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows pairing verification failed" }
 
+      - name: Capture tested application crash metadata
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        env:
+          APP_EXECUTABLE: ${{ steps.payload.outputs.executable }}
+        run: |
+          if (!$env:APP_EXECUTABLE) { exit 0 }
+          $name = Split-Path -Leaf $env:APP_EXECUTABLE
+          $records = @(Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000; StartTime=(Get-Date).AddMinutes(-10)} -ErrorAction SilentlyContinue | ForEach-Object {
+            $xml = [xml]$_.ToXml()
+            $fields = @{}
+            foreach ($item in $xml.Event.EventData.Data) { $fields[$item.Name] = $item.'#text' }
+            if ($fields.AppName -eq $name) {
+              @{ createdAt=$_.TimeCreated.ToUniversalTime().ToString('o'); application=$fields.AppName; module=$fields.ModuleName; exceptionCode=$fields.ExceptionCode; processId=$fields.ProcessId; moduleOffset=$fields.FaultingOffset }
+            }
+          })
+          ConvertTo-Json -InputObject $records | Set-Content windows-pairing-evidence/windows-crash-metadata.json
+
       - name: Upload redacted Windows verification evidence
         if: always()
         uses: actions/upload-artifact@v7
