@@ -180,6 +180,21 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --text-4xs--line-height: 1;
   --text-5xs: 0.4375rem;
   --text-5xs--line-height: 1;
+  /* Command Center shell (fork-only). cc-chip is the 9px route source chip and
+     cc-body the 15px narrow-screen message text; both keep the body's 1.5
+     ratio. leading-cc-sm / leading-cc-xs carry the text-sm and text-xs ratios
+     onto smaller type nested inside those rows. */
+  --text-cc-chip: 0.5625rem;
+  --text-cc-chip--line-height: 1.5;
+  --text-cc-body: 0.9375rem;
+  --text-cc-body--line-height: 1.5;
+  --leading-cc-sm: calc(1.25 / 0.875);
+  --leading-cc-xs: calc(1 / 0.75);
+  --tracking-cc-heading: 0.08em;
+  /* The Command Center composer's drop shadow, and its blue-tinted lift while
+     focused. */
+  --shadow-cc-composer: 0 18px 52px -28px rgb(0 0 0 / 34%);
+  --shadow-cc-composer-focus: 0 18px 58px -26px rgb(37 99 235 / 20%);
   /* Motion. drawer is the decelerating curve for surfaces that slide or pop in
      (composer context, pills). */
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);

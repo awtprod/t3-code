@@ -21,10 +21,11 @@ import {
 } from "lucide-react";
 import { useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 
+import { ComposerControl, ComposerSelectControl } from "~/components/chat/ComposerControl";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
-import { Select, SelectItem, SelectPopup, SelectTrigger } from "~/components/ui/select";
+import { Select, SelectItem, SelectPopup } from "~/components/ui/select";
 import { Textarea } from "~/components/ui/textarea";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
@@ -96,10 +97,10 @@ function RouteFact({
   return (
     <div className="min-w-0 rounded-lg border border-border/70 bg-background/65 px-2.5 py-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[0.625rem] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+        <span className="text-3xs leading-normal font-semibold uppercase tracking-widest text-muted-foreground">
           {label}
         </span>
-        <span className="rounded-sm bg-muted px-1.5 py-0.5 text-[0.5625rem] font-medium text-muted-foreground">
+        <span className="rounded-sm bg-muted px-1.5 py-0.5 text-cc-chip font-medium text-muted-foreground">
           {ROUTE_SOURCE_LABEL[source]}
         </span>
       </div>
@@ -140,7 +141,7 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
           {receipt.repositoryName ? ` / ${receipt.repositoryName}` : ""} · {receipt.providerName} ·{" "}
           {receipt.modelName}
         </span>
-        <span className="hidden shrink-0 items-center gap-1 text-[0.6875rem] text-muted-foreground min-[26rem]:inline-flex">
+        <span className="hidden shrink-0 items-center gap-1 text-2xs leading-cc-sm text-muted-foreground min-[26rem]:inline-flex">
           <span
             className={cn(
               "size-1.5 rounded-full",
@@ -197,11 +198,11 @@ function RouteReceipt({ receipt }: { readonly receipt: CommandCenterRouteReceipt
           <RouteFact label="Model" source={receipt.sources.model} value={receipt.modelName} />
         </div>
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-          <span className="mr-0.5 text-[0.625rem] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+          <span className="mr-0.5 text-3xs leading-normal font-semibold uppercase tracking-widest text-muted-foreground">
             Capabilities
           </span>
           {receipt.capabilities.length === 0 ? (
-            <span className="text-[0.6875rem] text-muted-foreground">None selected</span>
+            <span className="text-2xs leading-normal text-muted-foreground">None selected</span>
           ) : (
             receipt.capabilities.map((capability) => (
               <Badge key={capability} size="sm" variant="secondary">
@@ -296,7 +297,7 @@ export function Messages({
         if (message.author === "user") {
           return (
             <article className="mb-8 flex justify-end" key={message.id}>
-              <div className="max-w-[min(42rem,82%)] rounded-3xl border border-border/70 bg-muted/65 px-5 py-3 text-[0.9375rem] leading-6 shadow-xs sm:px-6 sm:py-3.5 sm:text-base">
+              <div className="max-w-[min(42rem,82%)] rounded-3xl border border-border/70 bg-muted/65 px-5 py-3 text-cc-body leading-6 shadow-xs sm:px-6 sm:py-3.5 sm:text-base">
                 <p className="whitespace-pre-wrap">{message.body}</p>
               </div>
             </article>
@@ -326,7 +327,7 @@ export function Messages({
 
         return (
           <article className="group/assistant mb-10 min-w-0" key={message.id}>
-            <p className="whitespace-pre-wrap text-[0.9375rem] leading-7 text-foreground/90 sm:text-base">
+            <p className="whitespace-pre-wrap text-cc-body leading-7 text-foreground/90 sm:text-base">
               {message.body}
             </p>
             <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground/70 opacity-0 transition-opacity focus-within:opacity-100 group-hover/assistant:opacity-100">
@@ -449,7 +450,7 @@ function OverviewList({
 }) {
   return (
     <section className="min-w-0 rounded-2xl border border-border/70 bg-card/45 p-4">
-      <h3 className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+      <h3 className="text-xs font-semibold uppercase tracking-cc-heading text-muted-foreground">
         {title}
       </h3>
       {items.length === 0 ? (
@@ -640,7 +641,7 @@ function Composer({
     <div className="min-w-0 shrink-0 bg-gradient-to-t from-background via-background via-80% to-transparent px-5 pb-5 pt-6 sm:px-8 sm:pb-6">
       {configNotice ? (
         <div
-          className="mx-auto mb-3 flex w-full min-w-0 max-w-5xl items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+          className="mx-auto mb-3 flex w-full min-w-0 max-w-5xl items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground"
           data-slot="command-center-config-notice"
           role="status"
         >
@@ -656,45 +657,48 @@ function Composer({
       ) : null}
       <form
         aria-label="Command composer"
-        className="chat-composer-glass mx-auto w-full min-w-0 max-w-5xl rounded-3xl border border-border/80 p-2 shadow-[0_18px_52px_-28px_rgba(0,0,0,0.34)] transition-[border-color,box-shadow] focus-within:border-ring/65 focus-within:shadow-[0_18px_58px_-26px_rgba(37,99,235,0.2)]"
+        className="chat-composer-glass mx-auto w-full min-w-0 max-w-5xl rounded-3xl border border-border/80 p-2 shadow-cc-composer transition-[border-color,box-shadow] focus-within:border-ring/65 focus-within:shadow-cc-composer-focus"
         onSubmit={submit}
       >
-        <Textarea
-          aria-label="Ask Command Center"
-          className="w-full min-w-0 border-0 bg-transparent px-3 pt-2 text-base shadow-none before:hidden focus-within:ring-0 sm:min-h-20 sm:px-4 sm:pt-2.5 dark:bg-transparent"
-          disabled={isSubmitting}
-          onChange={(event) => onDraftChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (
-              !shouldSubmitCommandComposerOnKeyDown({
-                key: event.key,
-                shiftKey: event.shiftKey,
-                isComposing: event.nativeEvent.isComposing,
-              })
-            ) {
-              return;
-            }
-            event.preventDefault();
-            event.currentTarget.form?.requestSubmit();
-          }}
-          placeholder="Ask anything, @tag files/folders, $use skills, or / for commands"
-          ref={inputRef}
-          rows={2}
-          unstyled
-          value={draft}
-        />
+        {/* The unstyled Textarea renders a bare inline wrapper, so the plain span frame
+            supplies the inset and type size the old className actually applied. */}
+        <span className="px-3 text-base sm:px-4">
+          <Textarea
+            aria-label="Ask Command Center"
+            disabled={isSubmitting}
+            onChange={(event) => onDraftChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (
+                !shouldSubmitCommandComposerOnKeyDown({
+                  key: event.key,
+                  shiftKey: event.shiftKey,
+                  isComposing: event.nativeEvent.isComposing,
+                })
+              ) {
+                return;
+              }
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }}
+            placeholder="Ask anything, @tag files/folders, $use skills, or / for commands"
+            ref={inputRef}
+            rows={2}
+            unstyled
+            value={draft}
+          />
+        </span>
         <div className="flex items-end justify-between gap-3 px-2 pb-2 sm:px-3 sm:pb-3">
           <div className="flex min-w-0 flex-1 items-center gap-2 overflow-visible">
             {routeOptions.models.length === 0 ? (
-              <Button
+              <ComposerControl
                 aria-label="Set up Codex provider"
-                className="h-8 min-h-8 rounded-lg px-2.5 text-xs font-medium"
+                className="shrink-0"
                 onClick={onOpenProviderSettings}
                 type="button"
-                variant="outline"
               >
+                <AlertCircleIcon className="size-4" />
                 Codex unavailable
-              </Button>
+              </ComposerControl>
             ) : (
               <Select
                 disabled={onModelSelectionChange === undefined}
@@ -707,13 +711,9 @@ function Composer({
                 }}
                 value={modelValue}
               >
-                <SelectTrigger
-                  aria-label="Model selection"
-                  className="h-8 min-h-8 w-auto max-w-64 gap-1.5 rounded-lg px-2.5 text-xs font-medium"
-                  size="xs"
-                >
+                <ComposerSelectControl aria-label="Model selection" className="min-w-0 max-w-64">
                   <span className="truncate">{selectedModel?.label ?? "Choose model"}</span>
-                </SelectTrigger>
+                </ComposerSelectControl>
                 <SelectPopup align="start" alignItemWithTrigger={false} className="min-w-64">
                   {routeOptions.models.map((model) => {
                     const providerId = model.providerId ?? routeSelection.providerId;
@@ -727,7 +727,7 @@ function Composer({
                         <span className="flex min-w-0 flex-col">
                           <span className="truncate">{model.label}</span>
                           {model.detail !== undefined ? (
-                            <span className="truncate text-[0.6875rem] text-muted-foreground">
+                            <span className="truncate text-2xs leading-normal sm:leading-cc-sm text-muted-foreground">
                               {model.detail}
                             </span>
                           ) : null}
@@ -739,15 +739,14 @@ function Composer({
               </Select>
             )}
           </div>
-          <Button
+          <button
             aria-label={isSubmitting ? "Sending command" : "Send command"}
+            className="flex size-10 shrink-0 items-center justify-center rounded-full bg-message-action text-message-action-foreground shadow-xs outline-none transition-all duration-150 hover:bg-message-action-hover focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background enabled:cursor-pointer enabled:shadow-message-action/24 enabled:hover:scale-105 disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none sm:size-9"
             disabled={!draft.trim() || isSubmitting || commandUnavailable}
-            className="rounded-full"
-            size="icon-lg"
             type="submit"
           >
-            <ArrowUpIcon />
-          </Button>
+            <ArrowUpIcon aria-hidden="true" className="size-4.5 sm:size-4" />
+          </button>
         </div>
       </form>
     </div>
@@ -826,7 +825,7 @@ function CommandCenterShortcuts({
             type="button"
           >
             <span className="block text-xs font-semibold">All Spaces</span>
-            <span className="mt-0.5 block text-[0.6875rem] text-muted-foreground">
+            <span className="mt-0.5 block text-2xs leading-normal text-muted-foreground">
               {context.needsYou.length} need you · {context.activeRuns.length} active
             </span>
           </button>
@@ -846,7 +845,7 @@ function CommandCenterShortcuts({
                 type="button"
               >
                 <span className="block truncate text-xs font-semibold">{space.name}</span>
-                <span className="mt-0.5 block text-[0.6875rem] text-muted-foreground">
+                <span className="mt-0.5 block text-2xs leading-normal text-muted-foreground">
                   {space.unreadCount ?? 0} need you · {activeCount} active
                 </span>
               </button>
@@ -953,7 +952,7 @@ export function NeedsYouRows({
           <span className="line-clamp-2 block text-xs font-medium leading-relaxed">
             {item.title}
           </span>
-          <span className="mt-0.5 block truncate text-[0.6875rem] text-muted-foreground">
+          <span className="mt-0.5 block truncate text-2xs leading-normal text-muted-foreground">
             {item.spaceName} · {item.detail ?? item.reason}
           </span>
         </span>
@@ -999,13 +998,13 @@ export function NeedsYouRows({
         <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2.5 pl-11">
           {action.kind === "approval" ? (
             <>
-              <p className="mb-1 w-full whitespace-pre-wrap break-words rounded-lg bg-background/70 p-2 text-[0.6875rem] leading-relaxed text-foreground">
+              <p className="mb-1 w-full whitespace-pre-wrap break-words rounded-lg bg-background/70 p-2 text-2xs leading-relaxed text-foreground">
                 {action.proposal}
               </p>
               <Tooltip>
                 <TooltipTrigger
                   render={
-                    <span className="mr-auto max-w-full truncate font-mono text-[0.625rem] text-muted-foreground">
+                    <span className="mr-auto max-w-full truncate font-mono text-3xs leading-normal text-muted-foreground">
                       Digest {action.payloadDigest.slice(0, 12)}…
                     </span>
                   }
@@ -1034,7 +1033,7 @@ export function NeedsYouRows({
             </>
           ) : (
             <>
-              <span className="mr-auto text-[0.625rem] text-muted-foreground">
+              <span className="mr-auto text-3xs leading-normal text-muted-foreground">
                 {Math.round(action.confidence * 100)}% confidence
               </span>
               <Button
@@ -1080,7 +1079,7 @@ function ActiveRunRows({
       </span>
       <span className="min-w-0 flex-1">
         <span className="line-clamp-2 block text-xs font-medium leading-relaxed">{run.title}</span>
-        <span className="mt-0.5 block truncate text-[0.6875rem] text-muted-foreground">
+        <span className="mt-0.5 block truncate text-2xs leading-normal text-muted-foreground">
           {run.spaceName} · {run.detail ?? run.status}
         </span>
       </span>
@@ -1110,7 +1109,7 @@ function TodayRows({
       </span>
       <span className="min-w-0 flex-1">
         <span className="line-clamp-2 block text-xs font-medium leading-relaxed">{item.title}</span>
-        <span className="mt-0.5 block text-[0.6875rem] text-muted-foreground">
+        <span className="mt-0.5 block text-2xs leading-normal text-muted-foreground">
           {item.timeLabel}
         </span>
       </span>
@@ -1145,7 +1144,7 @@ function ConnectionRows({
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-xs font-medium">{connection.name}</span>
-        <span className="mt-0.5 block truncate text-[0.6875rem] capitalize text-muted-foreground">
+        <span className="mt-0.5 block truncate text-2xs leading-normal capitalize text-muted-foreground">
           {connection.detail ?? connection.status}
         </span>
       </span>
@@ -1239,7 +1238,7 @@ export function ContextRail({
             >
               {label}
               {count > 0 ? (
-                <span className="rounded-full bg-muted px-1.5 text-[0.625rem]">{count}</span>
+                <span className="rounded-full bg-muted px-1.5 text-3xs leading-cc-xs">{count}</span>
               ) : null}
             </button>
           ))}
@@ -1266,7 +1265,7 @@ export function ContextRail({
           >
             {dismissibleNeedsYouIds.length > 1 ? (
               <div className="mb-1 flex items-center justify-between px-3 py-2">
-                <span className="text-[0.6875rem] text-muted-foreground">
+                <span className="text-2xs leading-normal text-muted-foreground">
                   {dismissibleNeedsYouIds.length} dismissible items
                 </span>
                 <Button
@@ -1346,19 +1345,18 @@ export function CommandCenterShell(props: CommandCenterShellProps) {
             {props.conversationTitle}. Command is ready.{" "}
             {hasExplicitRoute ? "Explicit route" : "Auto route"}
           </span>
-          <Button
+          <button
             aria-expanded={contextOpen}
             aria-label={contextOpen ? "Close live context" : "Open live context"}
-            className="pointer-events-auto rounded-full bg-background/70 backdrop-blur-md"
+            className="pointer-events-auto relative inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full border border-transparent bg-background/70 text-muted-foreground outline-none backdrop-blur-md transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background sm:size-7"
             onClick={() => setContextOpen((open) => !open)}
-            size="icon-sm"
-            variant="ghost"
+            type="button"
           >
-            <PanelRightIcon />
+            <PanelRightIcon aria-hidden="true" className="size-4.5 sm:size-4" />
             {props.context.needsYou.length > 0 && (
               <span className="absolute right-0.5 top-0.5 size-2 rounded-full border border-background bg-warning" />
             )}
-          </Button>
+          </button>
         </header>
 
         <CommandCenterShortcuts
