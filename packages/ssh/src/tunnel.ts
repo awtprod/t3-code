@@ -428,11 +428,15 @@ fi
 # never becomes ready. Resolve the CLI once up front so that install failure is
 # reported here, with npm's own output on stderr.
 require_installed_t3_cli() {
-  if ! T3_CLI_PATH="$("$@" -- sh -c 'command -v t3')"; then
+  if ! T3_CLI_OUTPUT="$("$@" -- sh -c 'command -v t3')"; then
     printf 'Remote host could not install %s. See npm output above for the cause.\\n' @@T3_PACKAGE_SPEC@@ >&2
     return 1
   fi
-  if [ -n "$T3_CLI_PATH" ]; then
+  # npm can print dependency install output (foreground-scripts, node-gyp) to
+  # stdout ahead of the path, so keep only the last line.
+  T3_CLI_PATH="\${T3_CLI_OUTPUT##*
+}"
+  if [ -x "$T3_CLI_PATH" ]; then
     return 0
   fi
   printf 'Remote host installed %s but npm produced no t3 executable, which usually means a native dependency (node-pty) failed to build. Install a C toolchain on the remote host (Debian/Ubuntu: build-essential, Fedora/RHEL: gcc-c++ make, macOS: xcode-select --install) and try again.\\n' @@T3_PACKAGE_SPEC@@ >&2

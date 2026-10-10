@@ -302,6 +302,8 @@ describe.skipIf(HostProcessPlatform.defaultValue() === "win32")(
           "network",
           "empty-success",
           "success",
+          "noisy-success",
+          "noise-only",
           "failed-with-path",
           "existing-cli",
           "node-override",
@@ -336,7 +338,11 @@ process.stdout.write(JSON.stringify(process.argv.slice(2)) + "\\n");
 const fs = require("node:fs");
 fs.appendFileSync(process.env.T3_TEST_CALLS, JSON.stringify(process.argv.slice(2)) + "\\n");
 const mode = process.env.T3_TEST_MODE;
-if (mode === "success" || mode === "failed-with-path") {
+if (mode === "noisy-success" || mode === "noise-only") {
+  // npm foreground-scripts sends dependency lifecycle and node-gyp output to stdout.
+  process.stdout.write("\\n> node-pty@1.0.0 install\\n> node-gyp rebuild\\n\\ngyp info ok\\n");
+}
+if (mode === "success" || mode === "noisy-success" || mode === "failed-with-path") {
   process.stdout.write(process.env.T3_TEST_CLI + "\\n");
 }
 if (mode === "etarget" || mode === "failed-with-path") {
@@ -381,7 +387,7 @@ if (mode === "etarget" || mode === "failed-with-path") {
         );
         const installFailed =
           mode === "etarget" || mode === "network" || mode === "failed-with-path";
-        const missingExecutable = mode === "empty-success";
+        const missingExecutable = mode === "empty-success" || mode === "noise-only";
         assert.equal(exitCode, installFailed || missingExecutable ? 1 : 0);
         if (installFailed || missingExecutable) {
           assert.equal(stdout, "");
