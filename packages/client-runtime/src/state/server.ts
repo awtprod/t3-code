@@ -1060,6 +1060,13 @@ export function createServerEnvironmentAtoms<R, E>(
       execute: (input: EnvironmentRpcInput<typeof WS_METHODS.serverGetHostResources>) =>
         request(WS_METHODS.serverGetHostResources, input).pipe(Effect.timeout("5 seconds")),
     }),
+    hostUsage: createEnvironmentQueryAtomFamily(runtime, {
+      label: "environment-data:server:host-usage",
+      idleTtlMs: 0,
+      staleTimeMs: 5_000,
+      execute: (input: EnvironmentRpcInput<typeof WS_METHODS.serverGetHostUsage>) =>
+        request(WS_METHODS.serverGetHostUsage, input).pipe(Effect.timeout("15 seconds")),
+    }),
     processResourceHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,
@@ -1143,6 +1150,22 @@ export function createServerEnvironmentAtoms<R, E>(
       concurrency: {
         mode: "singleFlight",
         key: ({ environmentId }) => environmentId,
+      },
+    }),
+    scanHostDiskUsage: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:scan-host-disk-usage",
+      tag: WS_METHODS.serverScanHostDiskUsage,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId }) => environmentId,
+      },
+    }),
+    reclaimHostDiskArtifacts: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:reclaim-host-disk-artifacts",
+      tag: WS_METHODS.serverReclaimHostDiskArtifacts,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input]),
       },
     }),
     retryResourceTelemetry: createEnvironmentRpcCommand(runtime, {

@@ -108,6 +108,71 @@ export function artifactDirectoryNamesForEntries(entries: Iterable<string>): Rea
   ).map((rule) => rule.directory);
 }
 
+/**
+ * Generated artifact directories anywhere inside `root` that both match an
+ * ARTIFACT_RULES marker and are ignored by git. The caller confines `root` to
+ * a directory it may delete from; every candidate must still resolve inside it.
+ */
+export const findIgnoredArtifactDirectories = Effect.fn("findIgnoredArtifactDirectories")(
+  function* (git: GitVcsDriver["Service"], root: string) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const realRoot = yield* fileSystem.realPath(root);
+    const queue = [root];
+    const visitedDirectories = new Set<string>();
+    const artifacts: string[] = [];
+
+    while (queue.length > 0) {
+      const directory = queue.pop();
+      if (!directory) continue;
+      const realDirectory = yield* fileSystem
+        .realPath(directory)
+        .pipe(Effect.orElseSucceed(() => null));
+      if (!realDirectory || visitedDirectories.has(realDirectory)) continue;
+      visitedDirectories.add(realDirectory);
+      const entries = yield* fileSystem
+        .readDirectory(directory)
+        .pipe(Effect.orElseSucceed((): Array<string> => []));
+      const entryNames = new Set(entries);
+
+      for (const artifactDirectory of artifactDirectoryNamesForEntries(entryNames)) {
+        const candidate = path.join(directory, artifactDirectory);
+        // Belt and suspenders on top of the marker-file check: only delete
+        // something git itself already considers disposable.
+        const ignored = yield* git
+          .execute({
+            operation: "WorktreeCleanup.checkIgnoredArtifact",
+            cwd: root,
+            args: ["check-ignore", "-q", "--", path.relative(root, candidate)],
+            allowNonZeroExit: true,
+          })
+          .pipe(
+            Effect.map((result) => result.exitCode === 0),
+            Effect.orElseSucceed(() => false),
+          );
+        if (!ignored) continue;
+        const realCandidate = yield* fileSystem
+          .realPath(candidate)
+          .pipe(Effect.orElseSucceed(() => null));
+        if (!realCandidate || !isPathWithinRoot(path, realRoot, realCandidate)) continue;
+        artifacts.push(candidate);
+      }
+
+      for (const entry of entries) {
+        if (WALK_SKIP_NAMES.has(entry)) continue;
+        const child = path.join(directory, entry);
+        const info = yield* fileSystem.stat(child).pipe(Effect.orElseSucceed(() => null));
+        if (info?.type !== "Directory") continue;
+        const realChild = yield* fileSystem.realPath(child).pipe(Effect.orElseSucceed(() => null));
+        if (!realChild || !isPathWithinRoot(path, realRoot, realChild)) continue;
+        queue.push(child);
+      }
+    }
+
+    return [...new Set(artifacts)].toSorted();
+  },
+);
+
 interface WorktreeGroup {
   readonly path: string;
   readonly project: OrchestrationProjectShell;
@@ -183,13 +248,19 @@ function noticeId(worktreePath: string, reason: WorktreeCleanupNoticeReason): st
   return `${reason}:${worktreePath}`;
 }
 
-function worktreeIsBusy(group: WorktreeGroup, runningTerminalThreadIds: ReadonlySet<string>) {
-  return group.threads.some(
-    (thread) =>
-      runningTerminalThreadIds.has(thread.id) ||
-      (thread.backgroundLiveness ?? null) != null ||
-      (thread.session !== null && thread.session.status !== "stopped"),
+export function threadIsBusy(
+  thread: OrchestrationThreadShell,
+  runningTerminalThreadIds: ReadonlySet<string>,
+) {
+  return (
+    runningTerminalThreadIds.has(thread.id) ||
+    (thread.backgroundLiveness ?? null) != null ||
+    (thread.session !== null && thread.session.status !== "stopped")
   );
+}
+
+function worktreeIsBusy(group: WorktreeGroup, runningTerminalThreadIds: ReadonlySet<string>) {
+  return group.threads.some((thread) => threadIsBusy(thread, runningTerminalThreadIds));
 }
 
 export class WorktreePreparationError extends Schema.TaggedError<WorktreePreparationError>()(
@@ -296,63 +367,9 @@ const make = Effect.gen(function* () {
   const findArtifactDirectories = Effect.fn("WorktreeCleanup.findArtifactDirectories")(function* (
     worktreePath: string,
   ) {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
     const root = yield* managedExistingPath(worktreePath);
     if (!root) return [];
-    const realRoot = yield* fileSystem.realPath(root);
-    const queue = [root];
-    const visitedDirectories = new Set<string>();
-    const artifacts: string[] = [];
-
-    while (queue.length > 0) {
-      const directory = queue.pop();
-      if (!directory) continue;
-      const realDirectory = yield* fileSystem
-        .realPath(directory)
-        .pipe(Effect.orElseSucceed(() => null));
-      if (!realDirectory || visitedDirectories.has(realDirectory)) continue;
-      visitedDirectories.add(realDirectory);
-      const entries = yield* fileSystem
-        .readDirectory(directory)
-        .pipe(Effect.orElseSucceed((): Array<string> => []));
-      const entryNames = new Set(entries);
-
-      for (const artifactDirectory of artifactDirectoryNamesForEntries(entryNames)) {
-        const candidate = path.join(directory, artifactDirectory);
-        // Belt and suspenders on top of the marker-file check: only delete
-        // something git itself already considers disposable.
-        const ignored = yield* git
-          .execute({
-            operation: "WorktreeCleanup.checkIgnoredArtifact",
-            cwd: root,
-            args: ["check-ignore", "-q", "--", path.relative(root, candidate)],
-            allowNonZeroExit: true,
-          })
-          .pipe(
-            Effect.map((result) => result.exitCode === 0),
-            Effect.orElseSucceed(() => false),
-          );
-        if (!ignored) continue;
-        const realCandidate = yield* fileSystem
-          .realPath(candidate)
-          .pipe(Effect.orElseSucceed(() => null));
-        if (!realCandidate || !isPathWithinRoot(path, realRoot, realCandidate)) continue;
-        artifacts.push(candidate);
-      }
-
-      for (const entry of entries) {
-        if (WALK_SKIP_NAMES.has(entry)) continue;
-        const child = path.join(directory, entry);
-        const info = yield* fileSystem.stat(child).pipe(Effect.orElseSucceed(() => null));
-        if (info?.type !== "Directory") continue;
-        const realChild = yield* fileSystem.realPath(child).pipe(Effect.orElseSucceed(() => null));
-        if (!realChild || !isPathWithinRoot(path, realRoot, realChild)) continue;
-        queue.push(child);
-      }
-    }
-
-    return [...new Set(artifacts)].toSorted();
+    return yield* findIgnoredArtifactDirectories(git, root);
   });
 
   const pruneArtifacts = Effect.fn("WorktreeCleanup.pruneArtifacts")(function* (

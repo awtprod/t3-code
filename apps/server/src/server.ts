@@ -180,6 +180,7 @@ import * as DesktopAppUpdate from "./desktopUpdate/DesktopAppUpdate.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
+import * as HostUsage from "./resourceTelemetry/HostUsage.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as DesktopTelemetryReceiver from "./resourceTelemetry/DesktopTelemetryReceiver.ts";
@@ -891,11 +892,20 @@ const WorktreeCleanupLayerLive = WorktreeCleanupLive.pipe(
   Layer.provide(TerminalLayerLive),
 );
 
+// Reclaims build output with the same git checks as the worktree cleanup sweep.
+const HostUsageLayerLive = HostUsage.layer.pipe(
+  Layer.provide(GitLayerLive),
+  Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(HostResources.layer),
+);
+
 const ProviderRuntimeLayerLive = Layer.mergeAll(
   ProviderSessionReaperLive,
   ProviderUsageLimitsIngestionLive,
   StalledTurnWatchdogLive,
   WorktreeCleanupLayerLive,
+  HostUsageLayerLive,
 ).pipe(Layer.provideMerge(ProviderLayerLive), Layer.provideMerge(OrchestrationLayerLive));
 
 const ProviderInstallationRefreshLive = Layer.effectDiscard(

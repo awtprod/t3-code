@@ -287,6 +287,12 @@ import {
   ResourceTelemetrySnapshot,
 } from "./resourceTelemetry.ts";
 import {
+  HostDiskReclaimInput,
+  HostDiskReclaimResult,
+  HostDiskScan,
+  HostUsageSnapshot,
+} from "./hostUsage.ts";
+import {
   UsageLimitSourceError,
   ProviderConsumeResetCreditInput,
   ProviderConsumeResetCreditResult,
@@ -562,6 +568,9 @@ export const WS_METHODS = {
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
   serverGetHostResources: "server.getHostResources",
+  serverGetHostUsage: "server.getHostUsage",
+  serverScanHostDiskUsage: "server.scanHostDiskUsage",
+  serverReclaimHostDiskArtifacts: "server.reclaimHostDiskArtifacts",
   serverGetProcessResourceHistory: "server.getProcessResourceHistory",
   serverGetResourceTelemetryHistory: "server.getResourceTelemetryHistory",
   serverRetryResourceTelemetry: "server.retryResourceTelemetry",
@@ -1501,6 +1510,24 @@ const WsServerGetHostResourcesRpc = Rpc.make(WS_METHODS.serverGetHostResources, 
   error: EnvironmentAuthorizationError,
 });
 
+const WsServerGetHostUsageRpc = Rpc.make(WS_METHODS.serverGetHostUsage, {
+  payload: Schema.Struct({}),
+  success: HostUsageSnapshot,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsServerScanHostDiskUsageRpc = Rpc.make(WS_METHODS.serverScanHostDiskUsage, {
+  payload: Schema.Struct({}),
+  success: HostDiskScan,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsServerReclaimHostDiskArtifactsRpc = Rpc.make(WS_METHODS.serverReclaimHostDiskArtifacts, {
+  payload: HostDiskReclaimInput,
+  success: HostDiskReclaimResult,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsServerGetProcessResourceHistoryRpc = Rpc.make(WS_METHODS.serverGetProcessResourceHistory, {
   payload: ServerProcessResourceHistoryInput,
   success: ServerProcessResourceHistoryResult,
@@ -2422,6 +2449,9 @@ export const WsCoreRpcGroup = RpcGroup.make(
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,
   WsServerGetHostResourcesRpc,
+  WsServerGetHostUsageRpc,
+  WsServerScanHostDiskUsageRpc,
+  WsServerReclaimHostDiskArtifactsRpc,
   WsServerGetProcessResourceHistoryRpc,
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,

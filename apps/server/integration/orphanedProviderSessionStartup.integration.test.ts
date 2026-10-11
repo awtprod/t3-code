@@ -44,6 +44,7 @@ import * as ServerLifecycleEvents from "../src/serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "../src/serverRuntimeStartup.ts";
 import * as StalledTurnWatchdog from "../src/orchestration/Services/StalledTurnWatchdog.ts";
 import * as WorktreeCleanup from "../src/worktreeCleanup.ts";
+import * as HostUsage from "../src/resourceTelemetry/HostUsage.ts";
 import * as AutomationScheduleRunner from "../src/command-center/automation/ScheduleRunner.ts";
 import * as SpaceAgentWaker from "../src/command-center/SpaceAgentWaker.ts";
 import * as AutomationRecoveryCoordinator from "../src/command-center/automation/RecoveryCoordinator.ts";
@@ -97,6 +98,7 @@ const startupDependencies = Layer.mergeAll(
   // without booting automations, recovery, or Google connectors.
   Layer.mock(StalledTurnWatchdog.StalledTurnWatchdog)({ start: () => Effect.void }),
   Layer.mock(WorktreeCleanup.WorktreeCleanup)({ start: () => Effect.void }),
+  Layer.mock(HostUsage.HostUsage)({ start: () => Effect.void }),
   Layer.mock(AutomationScheduleRunner.AutomationScheduleRunner)({ start: () => Effect.void }),
   Layer.mock(SpaceAgentWaker.SpaceAgentWaker)({ start: () => Effect.void }),
   Layer.mock(AutomationRecoveryCoordinator.AutomationRecoveryCoordinator)({}),
