@@ -182,6 +182,8 @@ function recoveryHarness(
     sessionStatus?: number;
     sessionForToken?: (token: string) => { readonly session: unknown; readonly status?: number };
     beforeSessionResponse?: () => void;
+    /** Runs as an effect when the session endpoint is called, before it answers. */
+    onSessionRequest?: Effect.Effect<void>;
   } = {},
 ) {
   const requests: Array<{ method: string; url: string; authorization: string | undefined }> = [];
@@ -199,39 +201,46 @@ function recoveryHarness(
   const httpClientLayer = Layer.succeed(
     HttpClient.HttpClient,
     HttpClient.make((request) =>
-      Effect.sync(() => {
-        requests.push({
-          method: request.method,
-          url: request.url,
-          authorization: request.headers.authorization,
-        });
-        const pathname = new URL(request.url).pathname;
-        if (request.method !== "GET")
-          throw new Error("Recovery must not create sessions or grants");
-        if (pathname === "/.well-known/t3/environment") {
-          return HttpClientResponse.fromWeb(
-            request,
-            Response.json({
-              environmentId: options.environmentId ?? "remote",
-              label: "Remote",
-              platform: { os: "linux", arch: "x64" },
-              serverVersion: "0.0.0-test",
-              capabilities: { repositoryIdentity: true },
-            }),
-          );
-        }
-        if (pathname !== "/api/auth/session") throw new Error("Unexpected recovery endpoint");
-        options.beforeSessionResponse?.();
-        const bearer = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
-        const response = options.sessionForToken?.(bearer) ?? {
-          session: options.session ?? validRecoverySession,
-          status: options.sessionStatus ?? 200,
-        };
-        return HttpClientResponse.fromWeb(
-          request,
-          Response.json(response.session, { status: response.status ?? 200 }),
-        );
-      }),
+      (new URL(request.url).pathname === "/api/auth/session"
+        ? (options.onSessionRequest ?? Effect.void)
+        : Effect.void
+      ).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            requests.push({
+              method: request.method,
+              url: request.url,
+              authorization: request.headers.authorization,
+            });
+            const pathname = new URL(request.url).pathname;
+            if (request.method !== "GET")
+              throw new Error("Recovery must not create sessions or grants");
+            if (pathname === "/.well-known/t3/environment") {
+              return HttpClientResponse.fromWeb(
+                request,
+                Response.json({
+                  environmentId: options.environmentId ?? "remote",
+                  label: "Remote",
+                  platform: { os: "linux", arch: "x64" },
+                  serverVersion: "0.0.0-test",
+                  capabilities: { repositoryIdentity: true },
+                }),
+              );
+            }
+            if (pathname !== "/api/auth/session") throw new Error("Unexpected recovery endpoint");
+            options.beforeSessionResponse?.();
+            const bearer = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
+            const response = options.sessionForToken?.(bearer) ?? {
+              session: options.session ?? validRecoverySession,
+              status: options.sessionStatus ?? 200,
+            };
+            return HttpClientResponse.fromWeb(
+              request,
+              Response.json(response.session, { status: response.status ?? 200 }),
+            );
+          }),
+        ),
+      ),
     ),
   );
   const layer = DesktopLocalEnvironmentAuth.layer.pipe(
@@ -687,4 +696,112 @@ describe("saved remote primary credential selection", () => {
       assert.deepEqual(sessionAuthorizations(harness.requests), [`Bearer ${current}`]);
     }).pipe(Effect.provide(harness.layer));
   });
+});
+
+describe("saved remote primary bearer renewal", () => {
+  it.effect("re-reads the saved bearer after the renderer writes a renewed one", () => {
+    const current = sessionToken("current", NOW + 5 * DAY);
+    const renewed = sessionToken("renewed", NOW + 30 * DAY);
+    let catalog = savedBearerCatalog([
+      { connectionId: "bearer:remote", token: current, targeted: true },
+    ]);
+    const harness = recoveryHarness({ catalog: () => Option.some(catalog) });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      assert.equal(yield* auth.getBearerToken, current);
+
+      catalog = savedBearerCatalog([
+        { connectionId: "bearer:remote", token: renewed, targeted: true },
+      ]);
+      // Without a catalog write notification the cached token stays pinned.
+      assert.equal(yield* auth.getBearerToken, current);
+
+      yield* auth.invalidateSavedRemoteToken;
+      assert.equal(yield* auth.getBearerToken, renewed);
+      assert.deepEqual(harness.requests, []);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("does not pin a recovered bearer when the catalog changed during recovery", () => {
+    const current = sessionToken("current", NOW + 5 * DAY);
+    const renewed = sessionToken("renewed", NOW + 30 * DAY);
+    let catalog = savedBearerCatalog([
+      { connectionId: "bearer:remote", token: current, targeted: true },
+    ]);
+    let invalidate: Effect.Effect<void> = Effect.void;
+    const harness = recoveryHarness({
+      catalog: () => Option.some(catalog),
+      // The renderer saves a renewed bearer while recovery is verifying.
+      onSessionRequest: Effect.suspend(() => {
+        catalog = savedBearerCatalog([
+          { connectionId: "bearer:remote", token: renewed, targeted: true },
+        ]);
+        return invalidate;
+      }),
+    });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      invalidate = auth.invalidateSavedRemoteToken;
+      const session = yield* auth.recoverRemotePrimarySession(remoteSettings.remoteBackendUrl);
+      assert.isTrue(session.authenticated);
+      assert.equal(yield* auth.getBearerToken, renewed);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("keeps the local bootstrap bearer when the catalog changes", () =>
+    Effect.gen(function* () {
+      const requestCount = yield* Ref.make(0);
+      const httpClientLayer = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Ref.updateAndGet(requestCount, (count) => count + 1).pipe(
+            Effect.map((count) =>
+              HttpClientResponse.fromWeb(
+                request,
+                Response.json({
+                  access_token: `desktop-bearer-token-${count}`,
+                  issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+                  token_type: "Bearer",
+                  expires_in: 3600,
+                  scope: "orchestration:read",
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+      const poolLayer = Layer.succeed(DesktopBackendPool.DesktopBackendPool, {
+        list: Effect.succeed([
+          {
+            id: PRIMARY_LOCAL_ENVIRONMENT_ID,
+            label: Effect.succeed("Windows"),
+            currentConfig: Effect.succeedSome(config),
+          },
+        ]),
+      } as unknown as DesktopBackendPool.DesktopBackendPool["Service"]);
+      const settingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
+        get: Effect.succeed(DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS),
+      } as unknown as DesktopAppSettings.DesktopAppSettings["Service"]);
+      const catalogLayer = Layer.succeed(
+        DesktopConnectionCatalogStore.DesktopConnectionCatalogStore,
+        {
+          get: Effect.succeed(Option.none()),
+        } as unknown as DesktopConnectionCatalogStore.DesktopConnectionCatalogStore["Service"],
+      );
+      const testLayer = DesktopLocalEnvironmentAuth.layer.pipe(
+        Layer.provide(Layer.mergeAll(poolLayer, httpClientLayer, settingsLayer, catalogLayer)),
+      );
+
+      const [first, second] = yield* Effect.gen(function* () {
+        const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+        const before = yield* auth.getBearerToken;
+        yield* auth.invalidateSavedRemoteToken;
+        return [before, yield* auth.getBearerToken] as const;
+      }).pipe(Effect.provide(testLayer));
+
+      assert.strictEqual(first, "desktop-bearer-token-1");
+      assert.strictEqual(second, "desktop-bearer-token-1");
+      assert.strictEqual(yield* Ref.get(requestCount), 1);
+    }),
+  );
 });

@@ -55,6 +55,8 @@ export interface VerifiedSession {
   readonly method: ServerAuthSessionMethod;
   readonly client: AuthClientMetadata;
   readonly expiresAt?: DateTime.DateTime;
+  /** When the stored session was issued. Renewal keeps the original lifetime. */
+  readonly issuedAt?: DateTime.DateTime;
   readonly subject: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
@@ -419,7 +421,7 @@ export class SessionStore extends Context.Service<
 >()("@awtprod/command-center/auth/SessionStore") {}
 
 const SIGNING_SECRET_NAME = "server-signing-key";
-const DEFAULT_SESSION_TTL = Duration.days(30);
+export const DEFAULT_SESSION_TTL = Duration.days(30);
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
 const SessionClaims = Schema.Struct({
   v: Schema.Literal(1),
@@ -766,6 +768,7 @@ export const make = Effect.gen(function* () {
           method: row.value.method,
           client: toClientMetadata(row.value.client),
           expiresAt: row.value.expiresAt,
+          issuedAt: row.value.issuedAt,
           subject: row.value.subject,
           scopes: row.value.scopes,
         } satisfies VerifiedSession;
@@ -823,6 +826,7 @@ export const make = Effect.gen(function* () {
         method: claims.method,
         client: toClientMetadata(row.value.client),
         expiresAt: expiresAt.value,
+        issuedAt: row.value.issuedAt,
         subject: claims.sub,
         scopes: claims.scopes,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),

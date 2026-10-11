@@ -1,5 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentHttpApi } from "@t3tools/contracts";
+import {
+  AuthAccessTokenType,
+  AuthEnvironmentBootstrapTokenType,
+  AuthTokenExchangeGrantType,
+  EnvironmentHttpApi,
+} from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -131,6 +136,95 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
         }),
       ([environmentA, environmentB]) =>
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("renews only bearer sessions through the HTTP route", () =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const unusedSecretStore = ServerSecretStore.ServerSecretStore.of({
+      get: () => Effect.succeedNone,
+      set: () => Effect.void,
+      create: () => Effect.void,
+      getOrCreateRandom: () => Effect.die("Not used by these routes."),
+      remove: () => Effect.void,
+    });
+    const requestContext = Context.make(Crypto.Crypto, crypto).pipe(
+      Context.add(ServerSecretStore.ServerSecretStore, unusedSecretStore),
+    );
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => HttpRouter.toWebHandler(routesLayer, { disableLogger: true })),
+      (environment) =>
+        Effect.tryPromise(async () => {
+          const devResponse = await environment.handler(
+            postJson("/api/auth/browser-session", { credential: DEV_TOKEN }),
+            requestContext,
+          );
+          const devCookie =
+            devResponse.headers
+              .getSetCookie()
+              .find((cookie) => cookie.startsWith("t3_dev_session_"))
+              ?.split(";", 1)[0] ?? "";
+          const pairingResponse = await environment.handler(
+            postJson("/api/auth/pairing-token", {}, { cookie: devCookie }),
+            requestContext,
+          );
+          const pairing = (await pairingResponse.json()) as { credential: string };
+          const tokenResponse = await environment.handler(
+            new Request("http://127.0.0.1/oauth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: AuthTokenExchangeGrantType,
+                subject_token: pairing.credential,
+                subject_token_type: AuthEnvironmentBootstrapTokenType,
+                requested_token_type: AuthAccessTokenType,
+              }).toString(),
+            }),
+            requestContext,
+          );
+          expect(tokenResponse.status).toBe(200);
+          const token = (await tokenResponse.json()) as { access_token: string };
+
+          const bearerResponse = await environment.handler(
+            new Request("http://127.0.0.1/api/auth/session/renew", {
+              method: "POST",
+              headers: { authorization: `Bearer ${token.access_token}` },
+            }),
+            requestContext,
+          );
+          expect(bearerResponse.status).toBe(200);
+          expect(bearerResponse.headers.get("cache-control")).toBe("no-store");
+          const bearerBody = (await bearerResponse.json()) as Record<string, unknown>;
+          expect(bearerBody.renewed).toBe(false);
+          expect(typeof bearerBody.expiresAt).toBe("string");
+          expect(bearerBody).not.toHaveProperty("access_token");
+
+          const cookieResponse = await environment.handler(
+            new Request("http://127.0.0.1/api/auth/session/renew", {
+              method: "POST",
+              headers: { cookie: devCookie },
+            }),
+            requestContext,
+          );
+          expect(cookieResponse.status).toBe(403);
+          expect(await cookieResponse.json()).toMatchObject({
+            code: "operation_forbidden",
+            reason: "bearer_session_required",
+          });
+
+          const anonymousResponse = await environment.handler(
+            new Request("http://127.0.0.1/api/auth/session/renew", { method: "POST" }),
+            requestContext,
+          );
+          expect(anonymousResponse.status).toBe(401);
+          expect(await anonymousResponse.json()).toMatchObject({
+            code: "auth_invalid",
+            reason: "missing_credential",
+          });
+        }),
+      (environment) => Effect.promise(() => environment.dispose()),
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );

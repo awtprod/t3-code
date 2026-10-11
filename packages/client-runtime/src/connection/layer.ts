@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 
+import * as BearerSessionRenewal from "./bearerRenewal.ts";
 import * as ConnectionResolver from "./resolver.ts";
 import * as ConnectionDriver from "./driver.ts";
 import * as EnvironmentRegistry from "./registry.ts";
@@ -82,6 +83,7 @@ export function layerWithOptions(options: RpcSession.RpcSessionOptions) {
       const platformSource = yield* PlatformConnectionSource.PlatformConnectionSource;
       yield* watchDiscoveredCompatibility().pipe(Effect.forkScoped);
       yield* registry.start;
+      yield* BearerSessionRenewal.run().pipe(Effect.forkScoped);
       yield* platformSource.registrations.pipe(
         Stream.runForEach(registry.reconcilePlatform),
         Effect.forkScoped,
