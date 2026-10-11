@@ -5,6 +5,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
@@ -82,9 +83,10 @@ export const make = Effect.gen(function* () {
     logCleanupCauseUnlessInterrupted({
       effect: Effect.gen(function* () {
         // The detail query excludes deleted threads, so the sandbox has to be
-        // read from the full snapshot, which retains them.
-        const snapshot = yield* snapshots.getSnapshot();
-        const sandbox = snapshot.threads.find((thread) => thread.id === threadId)?.sandbox;
+        // read with the sandbox-row query, which retains them.
+        const sandbox = Option.getOrUndefined(
+          yield* snapshots.getSandboxThreadById(threadId),
+        )?.sandbox;
         if (sandbox == null || TERMINAL_SANDBOX_LIFECYCLES.has(sandbox.lifecycle)) return;
         const id = yield* crypto.randomUUIDv4;
         yield* orchestrationEngine.dispatch({

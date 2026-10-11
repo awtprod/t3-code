@@ -265,6 +265,19 @@ const ProjectionThreadCheckpointContextThreadRowSchema = Schema.Struct({
   worktreePath: Schema.NullOr(Schema.String),
   sandbox: Schema.NullOr(Schema.fromJsonString(SandboxState)),
 });
+// Sandbox sweeps only need a thread's sandbox projection; selecting just these
+// columns keeps them off the message and activity tables entirely.
+const ProjectionSandboxThreadRowSchema = Schema.Struct({
+  id: ThreadId,
+  projectId: ProjectId,
+  deletedAt: Schema.NullOr(IsoDateTime),
+  sandbox: Schema.fromJsonString(SandboxState),
+});
+const ProjectionProjectWorkspaceRowSchema = Schema.Struct({
+  id: ProjectId,
+  workspaceRoot: Schema.String,
+  deletedAt: Schema.NullOr(IsoDateTime),
+});
 const FullThreadDiffContextLookupInput = Schema.Struct({
   threadId: ThreadId,
   checkpointTurnCount: NonNegativeInt,
@@ -1215,6 +1228,56 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE workspace_root = ${workspaceRoot}
           AND deleted_at IS NULL
         ORDER BY created_at ASC, project_id ASC
+        LIMIT 1
+      `,
+  });
+
+  // Deleted threads are included, matching `getSnapshot().threads`.
+  const listSandboxThreadRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionSandboxThreadRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          thread_id AS "id",
+          project_id AS "projectId",
+          deleted_at AS "deletedAt",
+          sandbox_json AS "sandbox"
+        FROM projection_threads
+        WHERE sandbox_json IS NOT NULL
+        ORDER BY created_at ASC, thread_id ASC
+      `,
+  });
+
+  const getSandboxThreadRowById = SqlSchema.findOneOption({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionSandboxThreadRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          thread_id AS "id",
+          project_id AS "projectId",
+          deleted_at AS "deletedAt",
+          sandbox_json AS "sandbox"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+          AND sandbox_json IS NOT NULL
+        LIMIT 1
+      `,
+  });
+
+  // Deleted projects are included, matching `getSnapshot().projects`.
+  const getProjectWorkspaceRowById = SqlSchema.findOneOption({
+    Request: ProjectIdLookupInput,
+    Result: ProjectionProjectWorkspaceRowSchema,
+    execute: ({ projectId }) =>
+      sql`
+        SELECT
+          project_id AS "id",
+          workspace_root AS "workspaceRoot",
+          deleted_at AS "deletedAt"
+        FROM projection_projects
+        WHERE project_id = ${projectId}
         LIMIT 1
       `,
   });
@@ -2463,6 +2526,38 @@ pending_approval_requests AS (
           return toPersistenceSqlError("ProjectionSnapshotQuery.getSnapshot:query")(error);
         }),
       );
+
+  const listSandboxThreads: ProjectionSnapshotQueryShape["listSandboxThreads"] = () =>
+    listSandboxThreadRows(undefined).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listSandboxThreads:query",
+          "ProjectionSnapshotQuery.listSandboxThreads:decodeRows",
+        ),
+      ),
+    );
+
+  const getSandboxThreadById: ProjectionSnapshotQueryShape["getSandboxThreadById"] = (threadId) =>
+    getSandboxThreadRowById({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getSandboxThreadById:query",
+          "ProjectionSnapshotQuery.getSandboxThreadById:decodeRow",
+        ),
+      ),
+    );
+
+  const getProjectWorkspaceById: ProjectionSnapshotQueryShape["getProjectWorkspaceById"] = (
+    projectId,
+  ) =>
+    getProjectWorkspaceRowById({ projectId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getProjectWorkspaceById:query",
+          "ProjectionSnapshotQuery.getProjectWorkspaceById:decodeRow",
+        ),
+      ),
+    );
 
   const getCommandReadModel: ProjectionSnapshotQueryShape["getCommandReadModel"] = () =>
     sql
@@ -3904,6 +3999,9 @@ pending_approval_requests AS (
     getUserInputActivity,
     listActivitiesByKind,
     getSnapshot,
+    listSandboxThreads,
+    getSandboxThreadById,
+    getProjectWorkspaceById,
     getShellSnapshot,
     listThreadsWithPullRequests,
     getArchivedShellSnapshot,
