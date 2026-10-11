@@ -1,6 +1,7 @@
 import { vi } from "vite-plus/test";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -36,7 +37,9 @@ const config = {
   captureOutput: true,
 };
 
-const encodedRemoteCatalog = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))({
+const encodeCatalogJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+const encodedRemoteCatalog = encodeCatalogJson({
   schemaVersion: 1,
   targets: [],
   profiles: [
@@ -177,6 +180,7 @@ function recoveryHarness(
     environmentId?: string;
     session?: unknown;
     sessionStatus?: number;
+    sessionForToken?: (token: string) => { readonly session: unknown; readonly status?: number };
     beforeSessionResponse?: () => void;
   } = {},
 ) {
@@ -218,11 +222,14 @@ function recoveryHarness(
         }
         if (pathname !== "/api/auth/session") throw new Error("Unexpected recovery endpoint");
         options.beforeSessionResponse?.();
+        const bearer = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
+        const response = options.sessionForToken?.(bearer) ?? {
+          session: options.session ?? validRecoverySession,
+          status: options.sessionStatus ?? 200,
+        };
         return HttpClientResponse.fromWeb(
           request,
-          Response.json(options.session ?? validRecoverySession, {
-            status: options.sessionStatus ?? 200,
-          }),
+          Response.json(response.session, { status: response.status ?? 200 }),
         );
       }),
     ),
@@ -412,6 +419,272 @@ describe("saved remote primary recovery", () => {
         .pipe(Effect.flip);
       assert.include(error.message, "changed during verification");
       assert.equal(harness.requests.length, 2);
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
+/** A server-shaped session token: `base64url(JSON claims).signature`, `exp` in epoch ms. */
+function sessionToken(label: string, exp: number): string {
+  return `${Encoding.encodeBase64Url(JSON.stringify({ v: 1, kind: "session", sid: label, exp }))}.sig-${label}`;
+}
+
+const NOW = Date.parse("2026-10-11T12:00:00.000Z");
+const DAY = 24 * 60 * 60 * 1000;
+
+interface SavedBearer {
+  readonly connectionId: string;
+  readonly token: string;
+  readonly environmentId?: string;
+  readonly httpBaseUrl?: string;
+  readonly targeted?: boolean;
+}
+
+function savedBearerCatalog(saved: ReadonlyArray<SavedBearer>): string {
+  return encodeCatalogJson({
+    schemaVersion: 1,
+    targets: saved
+      .filter((entry) => entry.targeted === true)
+      .map((entry) => ({
+        _tag: "BearerConnectionTarget",
+        environmentId: entry.environmentId ?? "remote",
+        label: "Remote",
+        connectionId: entry.connectionId,
+      })),
+    profiles: saved.map((entry) => {
+      const httpBaseUrl = entry.httpBaseUrl ?? "https://remote.example.test";
+      return {
+        _tag: "BearerConnectionProfile",
+        connectionId: entry.connectionId,
+        environmentId: entry.environmentId ?? "remote",
+        label: "Remote",
+        httpBaseUrl,
+        wsBaseUrl: httpBaseUrl.replace(/^http/, "ws"),
+      };
+    }),
+    credentials: saved.map((entry) => ({
+      connectionId: entry.connectionId,
+      credential: { _tag: "BearerConnectionCredential", token: entry.token },
+    })),
+    remoteDpopTokens: [],
+  });
+}
+
+/** Accepts only `accepted`; every other bearer reads as expired or revoked. */
+function acceptOnly(...accepted: ReadonlyArray<string>) {
+  return (token: string) =>
+    accepted.includes(token)
+      ? { session: validRecoverySession }
+      : { session: { authenticated: false, auth: recoveryAuth } };
+}
+
+const sessionAuthorizations = (
+  requests: ReadonlyArray<{ url: string; authorization?: string | undefined }>,
+) =>
+  requests
+    .filter((request) => request.url.endsWith("/api/auth/session"))
+    .map((request) => request.authorization);
+
+describe("saved remote primary credential selection", () => {
+  it.effect("prefers the bearer the saved target references over an orphan listed first", () => {
+    const orphan = sessionToken("orphan", NOW - 3 * DAY);
+    const repaired = sessionToken("repaired", NOW + 27 * DAY);
+    const catalog = savedBearerCatalog([
+      { connectionId: "bearer:orphaned", token: orphan },
+      { connectionId: "bearer:remote", token: repaired, targeted: true },
+    ]);
+    const harness = recoveryHarness({
+      catalog: () => Option.some(catalog),
+      sessionForToken: acceptOnly(repaired),
+    });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      assert.equal(yield* auth.getBearerToken, repaired);
+      const session = yield* auth.recoverRemotePrimarySession(remoteSettings.remoteBackendUrl);
+      assert.isTrue(session.authenticated);
+      assert.equal(session.sessionMethod, "bearer-access-token");
+      assert.equal(yield* auth.getBearerToken, repaired);
+      assert.deepEqual(sessionAuthorizations(harness.requests), [`Bearer ${repaired}`]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("keeps the target-referenced bearer first even when an orphan expires later", () => {
+    const orphan = sessionToken("orphan", NOW + 29 * DAY);
+    const current = sessionToken("current", NOW + 2 * DAY);
+    const catalog = savedBearerCatalog([
+      { connectionId: "bearer:orphaned", token: orphan },
+      { connectionId: "bearer:remote", token: current, targeted: true },
+    ]);
+    const harness = recoveryHarness({ catalog: () => Option.some(catalog) });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      assert.equal(yield* auth.getBearerToken, current);
+      assert.deepEqual(harness.requests, []);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("tries the latest-expiring bearer first and falls through a rejected one", () => {
+    const opaque = "legacy-opaque-token";
+    const expired = sessionToken("expired", NOW - DAY);
+    const revoked = sessionToken("revoked", NOW + 20 * DAY);
+    const valid = sessionToken("valid", NOW + 10 * DAY);
+    const catalog = savedBearerCatalog([
+      { connectionId: "bearer:opaque", token: opaque },
+      { connectionId: "bearer:expired", token: expired },
+      { connectionId: "bearer:valid", token: valid },
+      { connectionId: "bearer:revoked", token: revoked },
+    ]);
+    const harness = recoveryHarness({
+      catalog: () => Option.some(catalog),
+      sessionForToken: acceptOnly(valid),
+    });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      assert.equal(yield* auth.getBearerToken, revoked);
+      const session = yield* auth.recoverRemotePrimarySession(remoteSettings.remoteBackendUrl);
+      assert.isTrue(session.authenticated);
+      assert.equal(yield* auth.getBearerToken, valid);
+      assert.deepEqual(sessionAuthorizations(harness.requests), [
+        `Bearer ${revoked}`,
+        `Bearer ${valid}`,
+      ]);
+      assert.equal(
+        harness.requests.filter((request) => request.url.endsWith("/.well-known/t3/environment"))
+          .length,
+        1,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect(
+    "ranks expired and unreadable tokens last and reaches them when nothing else works",
+    () => {
+      const opaque = "legacy-opaque-token";
+      const expired = sessionToken("expired", NOW - DAY);
+      const unexpired = sessionToken("unexpired", NOW + DAY);
+      const catalog = savedBearerCatalog([
+        { connectionId: "bearer:opaque", token: opaque },
+        { connectionId: "bearer:expired", token: expired },
+        { connectionId: "bearer:unexpired", token: unexpired },
+      ]);
+      const harness = recoveryHarness({
+        catalog: () => Option.some(catalog),
+        sessionForToken: acceptOnly(opaque),
+      });
+      return Effect.gen(function* () {
+        const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+        yield* auth.recoverRemotePrimarySession(remoteSettings.remoteBackendUrl);
+        assert.equal(yield* auth.getBearerToken, opaque);
+        assert.deepEqual(sessionAuthorizations(harness.requests), [
+          `Bearer ${unexpired}`,
+          `Bearer ${expired}`,
+          `Bearer ${opaque}`,
+        ]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("reports the rejected saved credential when every candidate is rejected", () => {
+    const orphan = sessionToken("orphan", NOW - 3 * DAY);
+    const current = sessionToken("current", NOW - DAY);
+    const catalog = savedBearerCatalog([
+      { connectionId: "bearer:orphaned", token: orphan },
+      { connectionId: "bearer:remote", token: current, targeted: true },
+    ]);
+    const harness = recoveryHarness({
+      catalog: () => Option.some(catalog),
+      sessionForToken: acceptOnly(),
+    });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      const error = yield* auth
+        .recoverRemotePrimarySession(remoteSettings.remoteBackendUrl)
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "DesktopSavedEnvironmentRecoveryError");
+      assert.equal(
+        error.message,
+        "The selected server rejected the saved credential. It may have expired or been revoked.",
+      );
+      assert.deepEqual(sessionAuthorizations(harness.requests), [
+        `Bearer ${current}`,
+        `Bearer ${orphan}`,
+      ]);
+      assert.deepEqual(
+        harness.requests.map((request) => request.method),
+        ["GET", "GET", "GET"],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("never sends a bearer saved for a different server URL", () => {
+    const otherServer = sessionToken("other-server", NOW + 29 * DAY);
+    const remote = sessionToken("remote", NOW + DAY);
+    const catalog = savedBearerCatalog([
+      {
+        connectionId: "bearer:other",
+        token: otherServer,
+        httpBaseUrl: "https://other.example.test",
+        targeted: true,
+      },
+      { connectionId: "bearer:remote", token: remote },
+    ]);
+    const harness = recoveryHarness({
+      catalog: () => Option.some(catalog),
+      sessionForToken: acceptOnly(otherServer, remote),
+    });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      assert.equal(yield* auth.getBearerToken, remote);
+      yield* auth.recoverRemotePrimarySession(remoteSettings.remoteBackendUrl);
+      assert.deepEqual(sessionAuthorizations(harness.requests), [`Bearer ${remote}`]);
+      assert.isTrue(
+        harness.requests.every((request) => request.url.startsWith("https://remote.example.test/")),
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("finds nothing to send when only a different server URL has a saved bearer", () => {
+    const otherServer = sessionToken("other-server", NOW + 29 * DAY);
+    const catalog = savedBearerCatalog([
+      {
+        connectionId: "bearer:other",
+        token: otherServer,
+        httpBaseUrl: "https://other.example.test",
+        targeted: true,
+      },
+    ]);
+    const harness = recoveryHarness({ catalog: () => Option.some(catalog) });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      assert.isNull(yield* auth.getBearerToken);
+      const error = yield* auth
+        .recoverRemotePrimarySession(remoteSettings.remoteBackendUrl)
+        .pipe(Effect.flip);
+      assert.include(error.message, "No credential is saved");
+      assert.deepEqual(harness.requests, []);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("only sends bearers saved for the environment the server reports", () => {
+    const previousEnvironment = sessionToken("previous-environment", NOW + 29 * DAY);
+    const current = sessionToken("current", NOW + DAY);
+    const catalog = savedBearerCatalog([
+      {
+        connectionId: "bearer:previous",
+        token: previousEnvironment,
+        environmentId: "previous-environment",
+        targeted: true,
+      },
+      { connectionId: "bearer:remote", token: current },
+    ]);
+    const harness = recoveryHarness({
+      catalog: () => Option.some(catalog),
+      sessionForToken: acceptOnly(previousEnvironment, current),
+    });
+    return Effect.gen(function* () {
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      yield* auth.recoverRemotePrimarySession(remoteSettings.remoteBackendUrl);
+      assert.equal(yield* auth.getBearerToken, current);
+      assert.deepEqual(sessionAuthorizations(harness.requests), [`Bearer ${current}`]);
     }).pipe(Effect.provide(harness.layer));
   });
 });
