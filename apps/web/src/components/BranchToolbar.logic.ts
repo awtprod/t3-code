@@ -90,6 +90,34 @@ export function resolveContextStripLabelsCompact(input: {
     : input.neededWidth > input.availableWidth;
 }
 
+// Compact strips still give the branch label whatever room the other labels
+// free, truncated, so phones show which branch a thread is on. Below this
+// width a truncated name says too little to be worth the space.
+const CONTEXT_STRIP_KEPT_LABEL_MIN_WIDTH_PX = 56;
+
+/**
+ * Width for the label a compact strip keeps visible, or 0 to collapse it too.
+ *
+ * Every input describes the strip with all labels expanded, so the result
+ * does not depend on the kept label's current width and cannot feed back.
+ */
+export function resolveContextStripKeptLabelWidth(input: {
+  compact: boolean;
+  /** The strip's content width with every label expanded. */
+  neededWidth: number;
+  availableWidth: number;
+  /** The text width of every label, the kept one included. */
+  labelsTextWidth: number;
+  /** The kept label's text width, or null when the strip has no such label. */
+  keptLabelTextWidth: number | null;
+}): number {
+  if (!input.compact || input.keptLabelTextWidth === null) return 0;
+  const textWidth = Math.ceil(input.keptLabelTextWidth);
+  const room = Math.floor(input.availableWidth - (input.neededWidth - input.labelsTextWidth));
+  if (room < Math.min(CONTEXT_STRIP_KEPT_LABEL_MIN_WIDTH_PX, textWidth)) return 0;
+  return Math.min(room, textWidth);
+}
+
 export function resolveEnvModeLabel(mode: EnvMode): string {
   return mode === "worktree" ? "New worktree" : "Current checkout";
 }

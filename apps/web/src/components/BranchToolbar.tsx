@@ -8,6 +8,7 @@ import {
   ScaleIcon,
 } from "lucide-react";
 import {
+  type CSSProperties,
   type Ref,
   memo,
   useImperativeHandle,
@@ -25,6 +26,7 @@ import { useProject, useThreadShell, useThreadShellsForProjectRefs } from "../st
 import {
   type EnvMode,
   type EnvironmentOption,
+  resolveContextStripKeptLabelWidth,
   resolveContextStripLabelsCompact,
   resolveCurrentWorkspaceLabel,
   resolveEnvModeLabel,
@@ -315,6 +317,8 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
 const COMPOSER_CONTEXT_MOTION_DURATION_MS = 180;
 const COMPOSER_CONTEXT_MOTION_EASING = "cubic-bezier(0.32, 0.72, 0, 1)";
 const COMPOSER_CONTEXT_LABEL_SELECTOR = "[data-composer-label]";
+// The one label a compact strip keeps, truncated, when it has room.
+const COMPOSER_CONTEXT_KEPT_LABEL_ATTRIBUTE = "data-composer-label-keep";
 
 /**
  * The width a label takes when shown, clipped parts included.
@@ -347,9 +351,16 @@ function labelTextWidth(label: HTMLElement, range: Range): number {
  * width while the outer layout box collapses. This lets every pass recompute
  * the expanded width without remembered values that could go stale or latch
  * the strip compact. A small hysteresis keeps the boundary from flapping.
+ *
+ * A compact strip still hands the room its collapsed labels free to the
+ * label marked to keep, so the branch survives on phones.
  */
-function useLabelsOverflow(element: HTMLDivElement | null): boolean {
+function useLabelsOverflow(element: HTMLDivElement | null): {
+  compact: boolean;
+  keptLabelWidth: number;
+} {
   const [overflows, setOverflows] = useState(false);
+  const [keptLabelWidth, setKeptLabelWidth] = useState(0);
   const pendingLabelRectsRef = useRef<Map<HTMLElement, DOMRect> | null>(null);
   const labelAnimationsRef = useRef(new Map<HTMLElement, Animation>());
   // A render-synced mirror instead of useEffectEvent: the compiler memoizes
@@ -409,16 +420,40 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     }
     needed += stripGap * Math.max(0, groups - 1);
     const range = document.createRange();
+    let labelsTextWidth = 0;
+    let keptLabelTextWidth: number | null = null;
     for (const label of current.querySelectorAll<HTMLElement>("[data-composer-label]")) {
+      const textWidth = labelTextWidth(label, range);
+      labelsTextWidth += textWidth;
+      if (
+        keptLabelTextWidth === null &&
+        label.hasAttribute(COMPOSER_CONTEXT_KEPT_LABEL_ATTRIBUTE)
+      ) {
+        keptLabelTextWidth = textWidth;
+      }
       // Subtract the visible width even during an animation. The content
       // sum already includes it; only the hidden text needs reserving.
-      needed += Math.max(0, labelTextWidth(label, range) - label.getBoundingClientRect().width);
+      needed += Math.max(0, textWidth - label.getBoundingClientRect().width);
     }
     const nextOverflows = resolveContextStripLabelsCompact({
       compact,
       neededWidth: needed,
       availableWidth: available,
     });
+    const nextKeptLabelWidth = resolveContextStripKeptLabelWidth({
+      compact: nextOverflows,
+      neededWidth: needed,
+      availableWidth: available,
+      labelsTextWidth,
+      keptLabelTextWidth,
+    });
+    // Sub-pixel rounding in the content sum can move the result by a pixel
+    // between passes; ignore that so the strip settles instead of looping.
+    setKeptLabelWidth((previous) =>
+      previous > 0 && nextKeptLabelWidth > 0 && Math.abs(previous - nextKeptLabelWidth) <= 1
+        ? previous
+        : nextKeptLabelWidth,
+    );
     if (nextOverflows !== compact) {
       pendingLabelRectsRef.current = new Map(
         Array.from(current.querySelectorAll<HTMLElement>(COMPOSER_CONTEXT_LABEL_SELECTOR)).map(
@@ -500,7 +535,7 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
     };
   }, [element, measure]);
 
-  return overflows;
+  return { compact: overflows, keptLabelWidth };
 }
 
 export const BranchToolbar = memo(function BranchToolbar({
@@ -613,14 +648,20 @@ export const BranchToolbar = memo(function BranchToolbar({
     canPickEnvironment: showEnvironmentPicker,
   });
   const [stripElement, setStripElement] = useState<HTMLDivElement | null>(null);
-  const labelsOverflow = useLabelsOverflow(stripElement);
+  const { compact: labelsOverflow, keptLabelWidth } = useLabelsOverflow(stripElement);
 
   if (!hasActiveThread || !activeProject) return null;
 
   return (
     <ComposerSurface.ContextStrip
       ref={setStripElement}
-      data-compact={labelsOverflow ? "" : undefined}
+      // "keep": the branch label stays, truncated to the kept width; "all": every label hides.
+      data-compact={labelsOverflow ? (keptLabelWidth > 0 ? "keep" : "all") : undefined}
+      style={
+        keptLabelWidth > 0
+          ? ({ "--composer-context-kept-label-width": `${keptLabelWidth}px` } as CSSProperties)
+          : undefined
+      }
       className={cn(
         "gap-1 text-xs font-normal text-muted-foreground/70",
         // A non-Git strip with no visible composer controls should occupy no

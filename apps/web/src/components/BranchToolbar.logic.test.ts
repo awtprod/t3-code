@@ -12,6 +12,7 @@ import {
   resolveBranchTriggerLabel,
   resolveBranchToolbarPrBranch,
   resolveBranchToolbarValue,
+  resolveContextStripKeptLabelWidth,
   resolveLockedWorkspaceLabel,
   resolveLocalCheckoutBranchMismatch,
   resolvePreviousWorktreeLabel,
@@ -856,5 +857,57 @@ describe("sanitizeNewRefName", () => {
   it("does not collapse dashes the user typed", () => {
     expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
     expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
+  });
+});
+
+describe("resolveContextStripKeptLabelWidth", () => {
+  // Icons and controls take 180px; the labels' text adds 110 + 170.
+  const strip = { neededWidth: 460, labelsTextWidth: 280, keptLabelTextWidth: 170 };
+
+  it("keeps nothing while the strip is expanded", () => {
+    expect(
+      resolveContextStripKeptLabelWidth({ ...strip, compact: false, availableWidth: 480 }),
+    ).toBe(0);
+  });
+
+  it("gives the kept label the room the collapsed labels free", () => {
+    expect(
+      resolveContextStripKeptLabelWidth({ ...strip, compact: true, availableWidth: 305.5 }),
+    ).toBe(125);
+  });
+
+  it("caps the kept label at its own text width", () => {
+    expect(
+      resolveContextStripKeptLabelWidth({ ...strip, compact: true, availableWidth: 420 }),
+    ).toBe(170);
+  });
+
+  it("collapses the kept label when too little of it would show", () => {
+    expect(
+      resolveContextStripKeptLabelWidth({ ...strip, compact: true, availableWidth: 230 }),
+    ).toBe(0);
+  });
+
+  it("keeps a short label that fits whole under the minimum", () => {
+    expect(
+      resolveContextStripKeptLabelWidth({
+        compact: true,
+        neededWidth: 400,
+        availableWidth: 300,
+        labelsTextWidth: 140,
+        keptLabelTextWidth: 30,
+      }),
+    ).toBe(30);
+  });
+
+  it("keeps nothing when the strip has no kept label", () => {
+    expect(
+      resolveContextStripKeptLabelWidth({
+        ...strip,
+        compact: true,
+        availableWidth: 305,
+        keptLabelTextWidth: null,
+      }),
+    ).toBe(0);
   });
 });
