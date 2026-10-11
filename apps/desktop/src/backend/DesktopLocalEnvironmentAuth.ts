@@ -10,9 +10,11 @@ import {
 import { PRIMARY_LOCAL_ENVIRONMENT_ID, type AuthSessionState } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as HttpClient from "effect/unstable/http/HttpClient";
@@ -65,6 +67,89 @@ const decodeConnectionCatalog = Schema.decodeEffect(
   Schema.fromJsonString(ConnectionCatalogDocument),
 );
 
+/** Bounds recovery round-trips when one server has accumulated stale saved entries. */
+const MAX_RECOVERY_CANDIDATES = 5;
+
+const decodeSessionTokenExpiry = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ exp: Schema.Finite })),
+);
+
+/**
+ * Reads the `exp` claim (epoch milliseconds) of a server session token shaped
+ * `base64url(JSON claims).signature`. The signature is not checked: the value
+ * only orders saved credentials, and the server validates whichever one is sent.
+ */
+function readSessionTokenExpiry(token: string): number | null {
+  const separator = token.indexOf(".");
+  if (separator <= 0) {
+    return null;
+  }
+  const claims = Encoding.decodeBase64UrlString(token.slice(0, separator));
+  if (Result.isFailure(claims)) {
+    return null;
+  }
+  return Option.match(decodeSessionTokenExpiry(claims.success), {
+    onNone: () => null,
+    onSome: (decoded) => decoded.exp,
+  });
+}
+
+interface SavedRemoteCredential {
+  readonly token: string;
+  readonly environmentId: string;
+}
+
+/**
+ * Every bearer credential saved for exactly `remoteHttpBaseUrl`, best first.
+ *
+ * Orphaned profiles for the same server can outlive a re-pairing, so the first
+ * URL match is not necessarily the current credential. Profiles referenced by a
+ * saved bearer target come first, as that is the connection the renderer
+ * resolves; the rest follow by token expiry, latest first, which also places
+ * expired tokens after unexpired ones. Unreadable expiry claims go last.
+ */
+function savedRemoteCredentialsFor(
+  catalog: ConnectionCatalogDocumentType,
+  remoteHttpBaseUrl: string,
+): ReadonlyArray<SavedRemoteCredential> {
+  const candidates = catalog.profiles.flatMap((profile, catalogIndex) => {
+    if (
+      profile._tag !== "BearerConnectionProfile" ||
+      DesktopAppSettings.normalizeRemoteBackendUrl(profile.httpBaseUrl) !== remoteHttpBaseUrl
+    ) {
+      return [];
+    }
+    const stored = catalog.credentials.find(
+      (candidate) => candidate.connectionId === profile.connectionId,
+    );
+    if (stored === undefined || stored.credential._tag !== "BearerConnectionCredential") {
+      return [];
+    }
+    const token = stored.credential.token;
+    return [
+      {
+        token,
+        environmentId: profile.environmentId,
+        targetReferenced: catalog.targets.some(
+          (target) =>
+            target._tag === "BearerConnectionTarget" &&
+            target.connectionId === profile.connectionId &&
+            target.environmentId === profile.environmentId,
+        ),
+        expiresAt: readSessionTokenExpiry(token) ?? Number.NEGATIVE_INFINITY,
+        catalogIndex,
+      },
+    ];
+  });
+  candidates.sort(
+    (left, right) =>
+      Number(right.targetReferenced) - Number(left.targetReferenced) ||
+      (left.expiresAt === right.expiresAt ? 0 : left.expiresAt > right.expiresAt ? -1 : 1) ||
+      left.catalogIndex - right.catalogIndex,
+  );
+  return candidates.map(({ token, environmentId }) => ({ token, environmentId }));
+}
+
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
@@ -74,41 +159,20 @@ export const make = Effect.gen(function* () {
   const tokenRef = yield* Ref.make(Option.none<string>());
   const mutex = yield* Semaphore.make(1);
 
-  const readSavedRemoteCredential = Effect.fn(
-    "desktop.localEnvironmentAuth.readSavedRemoteCredential",
+  const readSavedRemoteCredentials = Effect.fn(
+    "desktop.localEnvironmentAuth.readSavedRemoteCredentials",
   )(
     function* (remoteHttpBaseUrl: string, existingOnly = false) {
       const encodedCatalog = yield* existingOnly
         ? connectionCatalogStore.getExisting
         : connectionCatalogStore.get;
       if (Option.isNone(encodedCatalog)) {
-        return Option.none();
+        return [];
       }
       const catalog: ConnectionCatalogDocumentType = yield* decodeConnectionCatalog(
         encodedCatalog.value,
       );
-      const profile = catalog.profiles.find(
-        (candidate: ConnectionCatalogDocumentType["profiles"][number]) =>
-          candidate._tag === "BearerConnectionProfile" &&
-          DesktopAppSettings.normalizeRemoteBackendUrl(candidate.httpBaseUrl) === remoteHttpBaseUrl,
-      );
-      if (profile === undefined) {
-        return Option.none();
-      }
-      const storedCredential = catalog.credentials.find(
-        (candidate: ConnectionCatalogDocumentType["credentials"][number]) =>
-          candidate.connectionId === profile.connectionId,
-      );
-      if (
-        storedCredential === undefined ||
-        storedCredential.credential._tag !== "BearerConnectionCredential"
-      ) {
-        return Option.none();
-      }
-      return Option.some({
-        token: storedCredential.credential.token,
-        environmentId: profile.environmentId,
-      });
+      return savedRemoteCredentialsFor(catalog, remoteHttpBaseUrl);
     },
     Effect.mapError((cause) => new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause })),
   );
@@ -129,10 +193,10 @@ export const make = Effect.gen(function* () {
           if (remoteHttpBaseUrl === null) {
             return null;
           }
-          const saved = yield* readSavedRemoteCredential(remoteHttpBaseUrl);
-          if (Option.isNone(saved)) return null;
-          yield* Ref.set(tokenRef, Option.some(saved.value.token));
-          return saved.value.token;
+          const [best] = yield* readSavedRemoteCredentials(remoteHttpBaseUrl);
+          if (best === undefined) return null;
+          yield* Ref.set(tokenRef, Option.some(best.token));
+          return best.token;
         }
 
         const instances = yield* pool.list;
@@ -191,7 +255,7 @@ export const make = Effect.gen(function* () {
               "The selected server changed. Recovery stopped without changing the primary environment.",
           });
         }
-        const saved = yield* readSavedRemoteCredential(endpoint, true).pipe(
+        const saved = yield* readSavedRemoteCredentials(endpoint, true).pipe(
           Effect.mapError(
             () =>
               new DesktopSavedEnvironmentRecoveryError({
@@ -199,7 +263,7 @@ export const make = Effect.gen(function* () {
               }),
           ),
         );
-        if (Option.isNone(saved)) {
+        if (saved.length === 0) {
           return yield* new DesktopSavedEnvironmentRecoveryError({
             message: "No credential is saved on this device for the selected server.",
           });
@@ -214,41 +278,48 @@ export const make = Effect.gen(function* () {
               }),
           ),
         );
-        if (descriptor.environmentId !== saved.value.environmentId) {
+        const candidates = saved
+          .filter((candidate) => candidate.environmentId === descriptor.environmentId)
+          .slice(0, MAX_RECOVERY_CANDIDATES);
+        if (candidates.length === 0) {
           return yield* new DesktopSavedEnvironmentRecoveryError({
             message: "This server does not match the saved environment. Recovery stopped.",
           });
         }
-        const session = yield* fetchRemoteSessionState({
-          httpBaseUrl: endpoint,
-          bearerToken: saved.value.token,
-        }).pipe(
-          Effect.provideService(HttpClient.HttpClient, httpClient),
-          Effect.mapError(
-            () =>
-              new DesktopSavedEnvironmentRecoveryError({
-                message: "The saved credential could not be validated by the selected server.",
-              }),
-          ),
-        );
-        if (!session.authenticated || session.sessionMethod !== "bearer-access-token") {
-          return yield* new DesktopSavedEnvironmentRecoveryError({
-            message:
-              "The selected server rejected the saved credential. It may have expired or been revoked.",
-          });
+        let validationFailed = false;
+        for (const candidate of candidates) {
+          const session = yield* fetchRemoteSessionState({
+            httpBaseUrl: endpoint,
+            bearerToken: candidate.token,
+          }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.option);
+          if (Option.isNone(session)) {
+            validationFailed = true;
+            continue;
+          }
+          if (
+            !session.value.authenticated ||
+            session.value.sessionMethod !== "bearer-access-token"
+          ) {
+            continue;
+          }
+          const current = yield* appSettings.get;
+          if (
+            current.primaryBackendMode !== "remote" ||
+            isLocalExecutionOverride() ||
+            DesktopAppSettings.normalizeRemoteBackendUrl(current.remoteBackendUrl) !== endpoint
+          ) {
+            return yield* new DesktopSavedEnvironmentRecoveryError({
+              message: "The selected server changed during verification. Recovery stopped.",
+            });
+          }
+          yield* Ref.set(tokenRef, Option.some(candidate.token));
+          return session.value;
         }
-        const current = yield* appSettings.get;
-        if (
-          current.primaryBackendMode !== "remote" ||
-          isLocalExecutionOverride() ||
-          DesktopAppSettings.normalizeRemoteBackendUrl(current.remoteBackendUrl) !== endpoint
-        ) {
-          return yield* new DesktopSavedEnvironmentRecoveryError({
-            message: "The selected server changed during verification. Recovery stopped.",
-          });
-        }
-        yield* Ref.set(tokenRef, Option.some(saved.value.token));
-        return session;
+        return yield* new DesktopSavedEnvironmentRecoveryError({
+          message: validationFailed
+            ? "The saved credential could not be validated by the selected server."
+            : "The selected server rejected the saved credential. It may have expired or been revoked.",
+        });
       }),
     );
   });
